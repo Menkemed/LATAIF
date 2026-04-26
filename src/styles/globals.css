@@ -1,0 +1,215 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════
+   LATAIF — Light Theme (Cryptech-inspired)
+   Design System CSS Foundation — Tailwind v4
+   ═══════════════════════════════════════════════════════════ */
+
+@theme {
+  /* Core surfaces */
+  --color-void: #EFECE2;        /* main page bg (cream/off-white) */
+  --color-deep: #FFFFFF;        /* card bg */
+  --color-soft: #FFFFFF;        /* card bg */
+  --color-graphite: #E5E1D6;    /* subtle border */
+  --color-elevated: #EFEBE0;    /* slightly darker cream */
+  --color-subtle: #D5D1C4;      /* stronger border */
+
+  /* Brand / accent — Gold replaced with black + lime + mint */
+  --color-gold-deep: #0F0F10;
+  --color-gold: #0F0F10;
+  --color-gold-champagne: #1F1F22;
+  --color-gold-light: #F2E4C9;
+
+  --color-accent-lime: #E9FF5E;
+  --color-accent-mint: #C4E3EC;
+
+  /* Text (inverted) */
+  --color-txt: #0F0F10;
+  --color-txt2: #4B5563;
+  --color-txt3: #6B7280;
+  --color-txt4: #9CA3AF;
+
+  /* Semantic */
+  --color-profit: #16A34A;
+  --color-loss: #DC2626;
+  --color-pending: #D97706;
+  --color-info: #2563EB;
+
+  --font-display: 'Playfair Display', 'Cormorant Garamond', Georgia, serif;
+  --font-sans: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* ── BASE ── */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-txt);
+  background: var(--color-void);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body { min-height: 100vh; overflow: hidden; background: var(--color-void); }
+#root { min-height: 100vh; display: flex; width: 100vw; overflow: hidden; }
+
+.app-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background: var(--color-void);
+}
+.app-sidebar {
+  flex-shrink: 0;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.app-sidebar::-webkit-scrollbar { width: 0; }
+.app-content {
+  flex: 1;
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--color-void);
+}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-subtle); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-txt3); }
+
+::selection {
+  background: rgba(15, 15, 16, 0.12);
+  color: var(--color-txt);
+}
+
+/* ── TYPOGRAPHY UTILITIES ── */
+.font-display { font-family: var(--font-display); }
+.font-mono { font-family: var(--font-mono); }
+
+.text-overline {
+  font-size: 11px;
+  line-height: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--color-txt3);
+  display: block;
+}
+
+.text-display-xl { font-family: var(--font-display); font-size: 48px; line-height: 56px; letter-spacing: -0.02em; font-weight: 400; }
+.text-display-l  { font-family: var(--font-display); font-size: 36px; line-height: 44px; letter-spacing: -0.02em; font-weight: 500; }
+.text-display-m  { font-family: var(--font-display); font-size: 28px; line-height: 36px; letter-spacing: -0.01em; font-weight: 500; }
+.text-display-s  { font-family: var(--font-display); font-size: 22px; line-height: 28px; letter-spacing: -0.01em; font-weight: 500; }
+
+.gold-gradient {
+  color: var(--color-txt);
+  background: none;
+  -webkit-background-clip: initial;
+  -webkit-text-fill-color: currentColor;
+  background-clip: initial;
+}
+
+/* ── CRYPTECH-STYLE CARDS ── */
+.cx-card {
+  background: #FFFFFF;
+  border-radius: 28px;
+  padding: 24px;
+  border: 1px solid var(--color-graphite);
+}
+.cx-card-lime { background: var(--color-accent-lime); }
+.cx-card-mint { background: var(--color-accent-mint); }
+.cx-pill {
+  border-radius: 999px;
+  padding: 10px 22px;
+  font-size: 14px;
+  font-weight: 500;
+  background: transparent;
+  color: var(--color-txt);
+}
+.cx-pill-active {
+  background: #0F0F10;
+  color: #FFFFFF;
+}
+.cx-icon-wrap {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: #FFFFFF;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-graphite);
+}
+
+/* ── ANIMATIONS ── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-fade-in { animation: fadeIn 0.5s cubic-bezier(0.25,0.1,0.25,1) forwards; }
+.animate-stagger-1 { animation-delay: 0ms; }
+.animate-stagger-2 { animation-delay: 80ms; opacity: 0; }
+.animate-stagger-3 { animation-delay: 160ms; opacity: 0; }
+.animate-stagger-4 { animation-delay: 240ms; opacity: 0; }
+.animate-shimmer {
+  background: linear-gradient(90deg, #EFECE2 25%, #E5E1D6 50%, #EFECE2 75%);
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+/* ── DATE INPUT ── */
+input[type="date"] {
+  color-scheme: light;
+  cursor: pointer;
+}
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+
+/* ── PRINT STYLES ── */
+@media print {
+  * { color: #000 !important; background: #fff !important; border-color: #ddd !important; }
+  body { overflow: visible !important; }
+  .app-layout { display: block !important; height: auto !important; overflow: visible !important; }
+  .app-sidebar, .no-print { display: none !important; }
+  .app-content { height: auto !important; overflow: visible !important; }
+
+  .print-receipt {
+    width: 80mm;
+    margin: 0 auto;
+    padding: 8mm 4mm;
+    font-family: 'Inter', Arial, sans-serif;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #000;
+  }
+  .print-receipt .receipt-header { text-align: center; margin-bottom: 6mm; border-bottom: 1px dashed #000; padding-bottom: 4mm; }
+  .print-receipt .receipt-header h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.15em; margin-bottom: 2mm; }
+  .print-receipt .receipt-header p { font-size: 9px; color: #555; }
+  .print-receipt .receipt-meta { margin-bottom: 4mm; font-size: 10px; }
+  .print-receipt .receipt-meta div { display: flex; justify-content: space-between; padding: 1mm 0; }
+  .print-receipt .receipt-lines { border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 3mm 0; margin-bottom: 3mm; }
+  .print-receipt .receipt-line { display: flex; justify-content: space-between; padding: 1.5mm 0; font-size: 11px; }
+  .print-receipt .receipt-line-name { max-width: 55%; }
+  .print-receipt .receipt-totals { padding: 2mm 0; }
+  .print-receipt .receipt-totals div { display: flex; justify-content: space-between; padding: 1mm 0; font-size: 11px; }
+  .print-receipt .receipt-totals .receipt-grand-total { font-size: 14px; font-weight: 700; border-top: 1px solid #000; padding-top: 2mm; margin-top: 2mm; }
+  .print-receipt .receipt-footer { text-align: center; margin-top: 6mm; border-top: 1px dashed #000; padding-top: 4mm; font-size: 9px; color: #555; }
+}
