@@ -196,7 +196,7 @@ export function MetalList() {
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 24,
           padding: '20px 24px', marginBottom: 28,
-          background: '#FFFFFF', border: '1px solid #E5E1D6',
+          background: '#FFFFFF', border: '1px solid #E5E9EE',
         }}
       >
         {METAL_TYPES.map(type => (
@@ -217,12 +217,12 @@ export function MetalList() {
               className="outline-none"
               style={{
                 background: 'transparent', border: 'none',
-                borderBottom: '1px solid #D5D1C4',
+                borderBottom: '1px solid #D5D9DE',
                 padding: '4px 0', fontSize: 14, color: '#0F0F10',
                 width: 100, fontFamily: 'inherit',
               }}
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
-              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D1C4')}
+              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D9DE')}
             />
             <span style={{ fontSize: 11, color: '#6B7280' }}>BHD</span>
           </div>
@@ -246,7 +246,7 @@ export function MetalList() {
         <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
       </div>
 
-      <div style={{ borderTop: '1px solid #E5E1D6' }} />
+      <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
       {filtered.length === 0 && (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
@@ -343,16 +343,16 @@ export function MetalList() {
                   <button
                     onClick={() => setMeltTarget(metal)}
                     className="cursor-pointer transition-all duration-200"
-                    style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D1C4', color: '#4B5563', background: 'transparent' }}
+                    style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#4B5563', background: 'transparent' }}
                   >Melt</button>
                 </>
               )}
               <button
                 onClick={() => { if (confirm('Delete this item?')) deleteMetal(metal.id); }}
                 className="cursor-pointer transition-all duration-200"
-                style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D1C4', color: '#6B7280', background: 'transparent' }}
+                style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = '#AA6E6E'; e.currentTarget.style.color = '#AA6E6E'; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = '#D5D1C4'; e.currentTarget.style.color = '#6B7280'; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = '#D5D9DE'; e.currentTarget.style.color = '#6B7280'; }}
               >Delete</button>
             </div>
           </div>
@@ -372,7 +372,7 @@ export function MetalList() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '8px 20px', fontSize: 13, textTransform: 'capitalize',
-                    border: `1px solid ${form.metalType === type ? metalColor(type) : '#D5D1C4'}`,
+                    border: `1px solid ${form.metalType === type ? metalColor(type) : '#D5D9DE'}`,
                     color: form.metalType === type ? metalColor(type) : '#6B7280',
                     background: form.metalType === type ? `${metalColor(type)}10` : 'transparent',
                   }}>
@@ -391,7 +391,7 @@ export function MetalList() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '6px 14px', fontSize: 12,
-                    border: `1px solid ${form.karat === k ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${form.karat === k ? '#0F0F10' : '#D5D9DE'}`,
                     color: form.karat === k ? '#0F0F10' : '#6B7280',
                     background: form.karat === k ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
@@ -402,7 +402,7 @@ export function MetalList() {
           </div>
 
           {/* Weight & Price */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <Input
               label="WEIGHT (GRAMS)"
               type="number"
@@ -433,7 +433,7 @@ export function MetalList() {
           {/* Melt Value Preview */}
           {formMeltValue > 0 && (
             <div className="rounded font-mono" style={{
-              padding: 14, background: '#EFECE2', border: '1px solid #E5E1D6',
+              padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE',
               fontSize: 13, display: 'flex', justifyContent: 'space-between',
             }}>
               <span style={{ color: '#6B7280' }}>Melt Value (at current spot)</span>
@@ -442,7 +442,7 @@ export function MetalList() {
           )}
 
           {/* Supplier & Description */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
               <Input
                 label="SUPPLIER"
@@ -465,7 +465,7 @@ export function MetalList() {
             <textarea
               style={{
                 width: '100%', marginTop: 8, background: 'transparent',
-                border: 'none', borderBottomStyle: 'solid', borderBottomWidth: 1, borderBottomColor: '#D5D1C4',
+                border: 'none', borderBottomStyle: 'solid', borderBottomWidth: 1, borderBottomColor: '#D5D9DE',
                 padding: '10px 0', fontSize: 14, color: '#0F0F10',
                 resize: 'vertical', minHeight: 48, outline: 'none',
                 fontFamily: 'inherit',
@@ -474,11 +474,11 @@ export function MetalList() {
               value={form.notes || ''}
               onChange={e => setForm({ ...form, notes: e.target.value })}
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
-              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D1C4')}
+              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D9DE')}
             />
           </div>
 
-          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} disabled={!form.weightGrams}>Add Item</Button>
           </div>
@@ -489,7 +489,7 @@ export function MetalList() {
       <Modal open={!!sellTarget} onClose={() => setSellTarget(null)} title="Sell Item" width={440}>
         {sellTarget && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ padding: 12, background: '#EFECE2', borderRadius: 6, border: '1px solid #E5E1D6' }}>
+            <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 6, border: '1px solid #E5E9EE' }}>
               <div style={{ fontSize: 13, color: '#0F0F10', textTransform: 'capitalize' }}>
                 {sellTarget.metalType} {sellTarget.karat || ''} · {fmtWeight(sellTarget.weightGrams)}g
               </div>
@@ -511,7 +511,7 @@ export function MetalList() {
                 Margin: {fmt(parseFloat(sellPrice) - sellTarget.purchaseTotal)} BHD
               </div>
             )}
-            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setSellTarget(null)}>Cancel</Button>
               <Button variant="primary" onClick={confirmSell} disabled={!sellPrice}>Mark Sold</Button>
             </div>
@@ -523,7 +523,7 @@ export function MetalList() {
       <Modal open={!!meltTarget} onClose={() => setMeltTarget(null)} title="Mark as Melted" width={440}>
         {meltTarget && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ padding: 12, background: '#EFECE2', borderRadius: 6, border: '1px solid #E5E1D6' }}>
+            <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 6, border: '1px solid #E5E9EE' }}>
               <div style={{ fontSize: 13, color: '#0F0F10', textTransform: 'capitalize' }}>
                 {meltTarget.metalType} {meltTarget.karat || ''} · {fmtWeight(meltTarget.weightGrams)}g
               </div>
@@ -534,7 +534,7 @@ export function MetalList() {
             <p style={{ fontSize: 13, color: '#4B5563' }}>
               This will mark the item as melted. Use this when you've sent it for smelting or refining. The current spot price will be frozen on the record.
             </p>
-            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setMeltTarget(null)}>Cancel</Button>
               <Button variant="primary" onClick={confirmMelt}>Confirm Melt</Button>
             </div>

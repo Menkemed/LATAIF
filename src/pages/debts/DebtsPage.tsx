@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { ArrowUpRight, ArrowDownLeft, HandCoins, Plus, Wallet, Building2, Trash2 } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -40,8 +41,27 @@ export function DebtsPage() {
           paymentsByDebt, loadPaymentsForDebt, recordDebtPayment } = useDebtStore();
   const { customers, loadCustomers } = useCustomerStore();
 
-  const [filter, setFilter] = useState<Filter>('all');
+  // Plan §Filter — Dashboard-Klick übergibt ?direction=MONEY_GIVEN/MONEY_RECEIVED → in lokalen Filter mappen.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialFilter: Filter = (() => {
+    const dir = searchParams.get('direction');
+    if (dir === 'MONEY_GIVEN') return 'we_lend';
+    if (dir === 'MONEY_RECEIVED') return 'we_borrow';
+    const f = searchParams.get('filter') as Filter;
+    if (f && ['all', 'open', 'settled', 'partial', 'we_lend', 'we_borrow'].includes(f)) return f;
+    return 'all';
+  })();
+  const [filter, setFilter] = useState<Filter>(initialFilter);
   const [search, setSearch] = useState('');
+
+  useEffect(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('direction');
+    if (filter && filter !== 'all') next.set('filter', filter); else next.delete('filter');
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+  }, [filter, searchParams, setSearchParams]);
 
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState({
@@ -153,14 +173,14 @@ export function DebtsPage() {
     >
       {/* KPI Row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
-        <div style={{ padding: '16px 20px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12 }}>
+        <div style={{ padding: '16px 20px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
           <div className="flex items-center gap-2" style={{ marginBottom: 6 }}>
             <ArrowUpRight size={14} style={{ color: '#AA956E' }} />
             <span className="text-overline">OWED TO US</span>
           </div>
           <div className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}>{fmt(openLent)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span></div>
         </div>
-        <div style={{ padding: '16px 20px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12 }}>
+        <div style={{ padding: '16px 20px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
           <div className="flex items-center gap-2" style={{ marginBottom: 6 }}>
             <ArrowDownLeft size={14} style={{ color: '#AA6E6E' }} />
             <span className="text-overline">WE OWE</span>
@@ -194,7 +214,7 @@ export function DebtsPage() {
           <span key={h} className="text-overline">{h}</span>
         ))}
       </div>
-      <div style={{ borderTop: '1px solid #E5E1D6' }} />
+      <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
       {filtered.length === 0 && (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
@@ -217,7 +237,7 @@ export function DebtsPage() {
             style={{
               display: 'grid', gridTemplateColumns: '36px 1.6fr 0.8fr 1fr 1fr 1fr 0.8fr 80px',
               gap: 12, padding: '14px 12px', alignItems: 'center',
-              borderBottom: '1px solid #E5E1D6',
+              borderBottom: '1px solid #E5E9EE',
             }}>
             <div className="flex items-center justify-center" title={isWeLend ? 'We lend' : 'We borrow'}
               style={{ width: 28, height: 28, borderRadius: 8,
@@ -232,7 +252,7 @@ export function DebtsPage() {
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 2 }}>
                 {d.loanNumber && (
-                  <span className="font-mono" style={{ fontSize: 10, color: '#6B7280', padding: '1px 6px', border: '1px solid #D5D1C4', borderRadius: 4 }}>
+                  <span className="font-mono" style={{ fontSize: 10, color: '#6B7280', padding: '1px 6px', border: '1px solid #D5D9DE', borderRadius: 4 }}>
                     {d.loanNumber}
                   </span>
                 )}
@@ -272,7 +292,7 @@ export function DebtsPage() {
                 <button key={opt.id} onClick={() => setForm(f => ({ ...f, direction: opt.id }))}
                   className="cursor-pointer rounded flex-1 flex items-center gap-2 justify-center" style={{
                     padding: '10px 14px', fontSize: 12,
-                    border: `1px solid ${form.direction === opt.id ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${form.direction === opt.id ? '#0F0F10' : '#D5D9DE'}`,
                     color: form.direction === opt.id ? '#0F0F10' : '#4B5563',
                     background: form.direction === opt.id ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
@@ -311,7 +331,7 @@ export function DebtsPage() {
                 <button key={s} onClick={() => setForm(f => ({ ...f, source: s }))}
                   className="cursor-pointer rounded flex items-center gap-2" style={{
                     padding: '8px 18px', fontSize: 12,
-                    border: `1px solid ${form.source === s ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${form.source === s ? '#0F0F10' : '#D5D9DE'}`,
                     color: form.source === s ? '#0F0F10' : '#6B7280',
                     background: form.source === s ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
@@ -326,7 +346,7 @@ export function DebtsPage() {
             value={form.notes}
             onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
 
-          <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setShowNew(false); resetForm(); }}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}>Create Debt</Button>
           </div>
@@ -338,7 +358,7 @@ export function DebtsPage() {
         {detail && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: '70vh', overflowY: 'auto' }}>
             {/* Summary */}
-            <div style={{ padding: '14px 18px', background: '#EFECE2', borderRadius: 10, border: '1px solid #E5E1D6' }}>
+            <div style={{ padding: '14px 18px', background: '#F2F7FA', borderRadius: 10, border: '1px solid #E5E9EE' }}>
               <div className="flex justify-between" style={{ fontSize: 12, marginBottom: 4 }}>
                 <span style={{ color: '#6B7280' }}>Original amount</span>
                 <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(detail.amount)} BHD</span>
@@ -347,7 +367,7 @@ export function DebtsPage() {
                 <span style={{ color: '#6B7280' }}>Paid so far</span>
                 <span className="font-mono" style={{ color: '#7EAA6E' }}>{fmt(detail.paidAmount)} BHD</span>
               </div>
-              <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 6, borderTop: '1px solid #E5E1D6', marginTop: 6 }}>
+              <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 6, borderTop: '1px solid #E5E9EE', marginTop: 6 }}>
                 <span style={{ color: '#0F0F10' }}>Remaining</span>
                 <span className="font-mono" style={{ color: isSettled(detail) ? '#7EAA6E' : '#AA6E6E' }}>{fmt(detailRemaining)} BHD</span>
               </div>
@@ -369,7 +389,7 @@ export function DebtsPage() {
                 <p style={{ fontSize: 12, color: '#6B7280', marginTop: 8 }}>No repayments yet.</p>
               )}
               {detailPayments.map(p => (
-                <div key={p.id} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6', fontSize: 12 }}>
+                <div key={p.id} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
                   <div className="flex items-center gap-2">
                     {p.source === 'cash' ? <Wallet size={12} style={{ color: '#4B5563' }} /> : <Building2 size={12} style={{ color: '#4B5563' }} />}
                     <span style={{ color: '#4B5563' }}>{fmtDate(p.paidAt)}</span>
@@ -382,7 +402,7 @@ export function DebtsPage() {
 
             {/* Record payment form */}
             {!isSettled(detail) && (
-              <div style={{ padding: '14px 18px', border: '1px solid #D5D1C4', borderRadius: 10 }}>
+              <div style={{ padding: '14px 18px', border: '1px solid #D5D9DE', borderRadius: 10 }}>
                 <span className="text-overline" style={{ marginBottom: 10 }}>RECORD REPAYMENT</span>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
                   <Input label="AMOUNT (BHD)" type="number" step="0.001"
@@ -399,7 +419,7 @@ export function DebtsPage() {
                       <button key={s} onClick={() => setPaySource(s)}
                         className="cursor-pointer rounded flex items-center gap-2" style={{
                           padding: '6px 14px', fontSize: 12,
-                          border: `1px solid ${paySource === s ? '#0F0F10' : '#D5D1C4'}`,
+                          border: `1px solid ${paySource === s ? '#0F0F10' : '#D5D9DE'}`,
                           color: paySource === s ? '#0F0F10' : '#6B7280',
                           background: paySource === s ? 'rgba(15,15,16,0.06)' : 'transparent',
                         }}>
@@ -416,7 +436,7 @@ export function DebtsPage() {
               </div>
             )}
 
-            <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="danger" onClick={() => setConfirmDelete(detail.id)}><Trash2 size={14} /> Delete</Button>
               <div className="flex gap-2">
                 <Button variant="ghost" onClick={() => {
@@ -436,7 +456,7 @@ export function DebtsPage() {
 
             {/* Inline Edit Form */}
             {editDebt && (
-              <div style={{ padding: '14px 18px', border: '1px solid #D5D1C4', borderRadius: 10, marginTop: 12 }}>
+              <div style={{ padding: '14px 18px', border: '1px solid #D5D9DE', borderRadius: 10, marginTop: 12 }}>
                 <span className="text-overline" style={{ marginBottom: 10 }}>EDIT DEBT</span>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
                   <Input label="COUNTERPARTY" value={editForm.counterparty}
@@ -454,7 +474,7 @@ export function DebtsPage() {
                         <button key={s} onClick={() => setEditForm({ ...editForm, source: s })}
                           className="cursor-pointer rounded"
                           style={{ padding: '6px 14px', fontSize: 12,
-                            border: `1px solid ${editForm.source === s ? '#0F0F10' : '#D5D1C4'}`,
+                            border: `1px solid ${editForm.source === s ? '#0F0F10' : '#D5D9DE'}`,
                             color: editForm.source === s ? '#0F0F10' : '#6B7280',
                             background: editForm.source === s ? 'rgba(15,15,16,0.06)' : 'transparent',
                           }}>{s === 'cash' ? 'Cash' : 'Bank'}</button>

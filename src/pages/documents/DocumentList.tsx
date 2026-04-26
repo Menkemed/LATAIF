@@ -130,7 +130,7 @@ export function DocumentList() {
           <button
             onClick={() => setViewMode(viewMode === 'grid' ? 'list' : 'grid')}
             className="cursor-pointer"
-            style={{ padding: 6, background: 'none', border: '1px solid #D5D1C4', borderRadius: 6, color: '#6B7280' }}
+            style={{ padding: 6, background: 'none', border: '1px solid #D5D9DE', borderRadius: 6, color: '#6B7280' }}
           >
             {viewMode === 'grid' ? <List size={16} /> : <Grid size={16} />}
           </button>
@@ -153,7 +153,7 @@ export function DocumentList() {
               {/* Thumbnail / Icon area */}
               <div
                 className="flex items-center justify-center rounded-md"
-                style={{ height: 120, background: '#EFECE2', marginBottom: 12, overflow: 'hidden' }}
+                style={{ height: 120, background: '#F2F7FA', marginBottom: 12, overflow: 'hidden' }}
               >
                 {isImage(doc.fileType) && doc.filePath ? (
                   <img
@@ -200,7 +200,7 @@ export function DocumentList() {
             <div
               key={doc.id}
               className="transition-all duration-200 rounded-md cursor-pointer"
-              style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto', gap: 12, padding: '14px 12px', borderBottom: '1px solid #E5E1D6' }}
+              style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto', gap: 12, padding: '14px 12px', borderBottom: '1px solid #E5E9EE' }}
               onClick={() => setShowPreview(doc)}
               onMouseEnter={e => (e.currentTarget.style.background = 'rgba(198,163,109,0.02)')}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -261,12 +261,12 @@ export function DocumentList() {
             <div
               className="flex items-center justify-center rounded-md cursor-pointer transition-colors"
               style={{
-                height: 100, border: '1px dashed #D5D1C4', background: '#EFECE2',
+                height: 100, border: '1px dashed #D5D9DE', background: '#F2F7FA',
                 color: uploadFile ? '#0F0F10' : '#6B7280', fontSize: 13,
               }}
               onClick={() => fileInputRef.current?.click()}
               onMouseEnter={e => (e.currentTarget.style.borderColor = '#0F0F10')}
-              onMouseLeave={e => (e.currentTarget.style.borderColor = '#D5D1C4')}
+              onMouseLeave={e => (e.currentTarget.style.borderColor = '#D5D9DE')}
             >
               {uploadFile ? (
                 <div className="text-center">
@@ -293,7 +293,7 @@ export function DocumentList() {
                   className="cursor-pointer transition-all"
                   style={{
                     padding: '6px 14px', fontSize: 12, borderRadius: 6,
-                    border: uploadClass === c ? `1px solid ${classColors[c]}` : '1px solid #D5D1C4',
+                    border: uploadClass === c ? `1px solid ${classColors[c]}` : '1px solid #D5D9DE',
                     background: uploadClass === c ? `${classColors[c]}10` : 'transparent',
                     color: uploadClass === c ? classColors[c] : '#6B7280',
                     textTransform: 'capitalize',
@@ -326,11 +326,11 @@ export function DocumentList() {
                     onChange={e => setUploadEntityId(e.target.value)}
                     className="w-full outline-none transition-colors"
                     style={{
-                      background: '#EFECE2', border: '1px solid #E5E1D6', borderRadius: 8,
+                      background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8,
                       padding: '10px 14px', fontSize: 13, color: '#0F0F10',
                     }}
-                    onFocus={e => (e.currentTarget.style.borderColor = '#D5D1C4')}
-                    onBlur={e => (e.currentTarget.style.borderColor = '#E5E1D6')}
+                    onFocus={e => (e.currentTarget.style.borderColor = '#D5D9DE')}
+                    onBlur={e => (e.currentTarget.style.borderColor = '#E5E9EE')}
                   />
                 </div>
               )}
@@ -354,7 +354,7 @@ export function DocumentList() {
             {/* Preview area */}
             <div
               className="flex items-center justify-center rounded-md"
-              style={{ minHeight: 300, maxHeight: 500, background: '#EFECE2', marginBottom: 16, overflow: 'hidden' }}
+              style={{ minHeight: 300, maxHeight: 500, background: '#F2F7FA', marginBottom: 16, overflow: 'hidden' }}
             >
               {isImage(showPreview.fileType) && showPreview.filePath ? (
                 <img
@@ -407,7 +407,7 @@ export function DocumentList() {
 
             {/* OCR Section */}
             {showPreview.fileType?.startsWith('image/') && (
-              <div style={{ marginTop: 20, padding: 14, background: '#EFECE2', border: '1px solid #E5E1D6', borderRadius: 8 }}>
+              <div style={{ marginTop: 20, padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8 }}>
                 <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
                   <span className="text-overline">EXTRACTED TEXT {showPreview.ocrConfidence ? `(${Math.round(showPreview.ocrConfidence)}% confidence)` : ''}</span>
                   <Button
@@ -441,7 +441,7 @@ export function DocumentList() {
             )}
 
             {/* Actions */}
-            <div className="flex justify-end gap-3" style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-end gap-3" style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="danger" onClick={() => { setShowDeleteConfirm(showPreview.id); setShowPreview(null); }}>
                 Delete
               </Button>

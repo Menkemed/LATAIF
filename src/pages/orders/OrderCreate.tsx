@@ -218,7 +218,7 @@ export function OrderCreate() {
               </button>
             </div>
             {customer && (
-              <div style={{ padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 8 }}>
+              <div style={{ padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8 }}>
                 <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>SELECTED</span>
                 <div style={{ fontSize: 14, color: '#0F0F10' }}>{customer.firstName} {customer.lastName}</div>
                 {customer.phone && (
@@ -238,10 +238,11 @@ export function OrderCreate() {
               <span className="text-overline">2 · ORDER ITEMS</span>
               <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Item</Button>
             </div>
-            <div style={{ border: '1px solid #E5E1D6', borderRadius: 8, overflow: 'visible' }}>
+            <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
               <div style={{
-                display: 'grid', gridTemplateColumns: '2.4fr 1fr 0.7fr 1fr 1fr 0.5fr',
-                gap: 10, padding: '10px 12px', background: '#EFECE2', borderBottom: '1px solid #E5E1D6',
+                display: 'grid',
+                gridTemplateColumns: 'minmax(0,2.2fr) minmax(0,1.1fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
                 fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
               }}>
                 <span>Product / Description</span>
@@ -255,10 +256,11 @@ export function OrderCreate() {
                 const c = computed[idx];
                 return (
                   <div key={idx} style={{
-                    display: 'grid', gridTemplateColumns: '2.4fr 1fr 0.7fr 1fr 1fr 0.5fr',
-                    gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E1D6', alignItems: 'center',
+                    display: 'grid',
+                    gridTemplateColumns: 'minmax(0,2.2fr) minmax(0,1.1fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                    gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
                   }}>
-                    <div>
+                    <div style={{ minWidth: 0 }}>
                       <SearchSelect
                         placeholder="Pick product or type free text"
                         options={productOptions}
@@ -269,11 +271,11 @@ export function OrderCreate() {
                         placeholder="Description"
                         value={l.description}
                         onChange={e => updateLine(idx, { description: e.target.value })}
-                        style={{ marginTop: 6, width: '100%', padding: '6px 8px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                        style={{ marginTop: 6, width: '100%', padding: '6px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0 }} />
                     </div>
                     <select value={l.scheme}
                       onChange={e => updateLine(idx, { scheme: e.target.value as Scheme })}
-                      style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4, background: '#FFFFFF' }}>
+                      style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, background: '#FFFFFF', minWidth: 0, width: '100%' }}>
                       <option value="auto">Auto ({c.product?.taxScheme || 'MARGIN'})</option>
                       <option value="VAT_10">VAT 10%</option>
                       <option value="ZERO">Zero</option>
@@ -282,18 +284,30 @@ export function OrderCreate() {
                     <input type="number" min={1} step="1" value={l.quantity}
                       onChange={e => updateLine(idx, { quantity: Math.max(1, parseInt(e.target.value) || 1) })}
                       className="font-mono"
-                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D1C4', borderRadius: 4, textAlign: 'right' }} />
+                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
                     <input type="number" min={0} step="0.001" value={l.unitPrice}
                       onChange={e => updateLine(idx, { unitPrice: parseFloat(e.target.value) || 0 })}
                       className="font-mono"
-                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D1C4', borderRadius: 4, textAlign: 'right' }} />
-                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right' }}>
+                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
+                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {fmt(c.gross)}
                     </span>
                     <button onClick={() => removeLine(idx)}
-                      className="cursor-pointer"
-                      style={{ padding: '6px 8px', background: 'none', border: '1px solid #D5D1C4', borderRadius: 4, color: '#AA6E6E' }}>
-                      <Trash2 size={12} />
+                      disabled={lines.length === 1}
+                      title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}
+                      className="cursor-pointer transition-all"
+                      style={{
+                        width: 36, height: 36, borderRadius: 10,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: lines.length === 1 ? 'rgba(220,38,38,0.05)' : 'rgba(220,38,38,0.10)',
+                        border: '1px solid ' + (lines.length === 1 ? 'rgba(220,38,38,0.15)' : 'rgba(220,38,38,0.30)'),
+                        color: '#DC2626',
+                        opacity: lines.length === 1 ? 0.4 : 1,
+                        cursor: lines.length === 1 ? 'not-allowed' : 'pointer',
+                      }}
+                      onMouseEnter={e => { if (lines.length > 1) { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; } }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
+                      <Trash2 size={16} strokeWidth={2} />
                     </button>
                   </div>
                 );
@@ -350,7 +364,7 @@ export function OrderCreate() {
                       <button key={m} type="button" onClick={() => setPaymentMethod(m)}
                         className="cursor-pointer rounded"
                         style={{ padding: '8px 16px', fontSize: 13,
-                          border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                          border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                           color: active ? '#0F0F10' : '#6B7280',
                           background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                         }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Card'}</button>
@@ -395,7 +409,7 @@ export function OrderCreate() {
                   <button key={s} type="button" onClick={() => setStatus(s)}
                     className="cursor-pointer rounded"
                     style={{ padding: '8px 16px', fontSize: 12,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{STATUS_LABELS[s]}</button>
@@ -411,7 +425,7 @@ export function OrderCreate() {
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>NOTES (OPTIONAL)</span>
             <textarea value={notes} onChange={e => setNotes(e.target.value)}
               rows={3} placeholder="z.B. Spezial-Wünsche, Termine, Lieferdetails…"
-              style={{ width: '100%', padding: '10px 12px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
+              style={{ width: '100%', padding: '10px 12px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
           </Card>
         </div>
 
@@ -446,7 +460,7 @@ export function OrderCreate() {
         )}
 
         {/* 8. ACTION BUTTONS */}
-        <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E1D6' }}>
+        <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate('/orders')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => handleSave(true)}>Save &amp; New</Button>

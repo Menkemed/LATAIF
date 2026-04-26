@@ -118,7 +118,7 @@ export function OnboardingPage({ onComplete }: OnboardingProps) {
   ];
 
   return (
-    <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#EFECE2' }}>
+    <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#F2F7FA' }}>
       <div className="animate-fade-in" style={{ width: 480 }}>
 
         {/* Logo */}
@@ -127,14 +127,14 @@ export function OnboardingPage({ onComplete }: OnboardingProps) {
           <p style={{ fontSize: 12, color: '#6B7280', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Setup Your Business</p>
         </div>
 
-        <div className="rounded-xl" style={{ background: '#FFFFFF', border: '1px solid #E5E1D6', padding: '36px 32px' }}>
+        <div className="rounded-xl" style={{ background: '#FFFFFF', border: '1px solid #E5E9EE', padding: '36px 32px' }}>
 
           {/* Step indicator */}
           <div className="flex items-center justify-center gap-2" style={{ marginBottom: 32 }}>
             {[1, 2, 3].map(s => (
               <div key={s} className="rounded-full" style={{
                 width: s === step ? 24 : 8, height: 8, transition: 'all 0.3s',
-                background: s <= step ? '#0F0F10' : '#D5D1C4',
+                background: s <= step ? '#0F0F10' : '#D5D9DE',
               }} />
             ))}
           </div>
@@ -151,7 +151,7 @@ export function OnboardingPage({ onComplete }: OnboardingProps) {
                     <button key={c.code} onClick={() => { setCountry(c.code); setCurrency(c.currency); }}
                       className="cursor-pointer rounded transition-all" style={{
                         padding: '6px 12px', fontSize: 12,
-                        border: `1px solid ${country === c.code ? '#0F0F10' : '#D5D1C4'}`,
+                        border: `1px solid ${country === c.code ? '#0F0F10' : '#D5D9DE'}`,
                         color: country === c.code ? '#0F0F10' : '#6B7280',
                         background: country === c.code ? 'rgba(15,15,16,0.06)' : 'transparent',
                       }}>{c.name}</button>
@@ -181,14 +181,14 @@ export function OnboardingPage({ onComplete }: OnboardingProps) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
               <h2 style={{ fontSize: 18, color: '#0F0F10', fontWeight: 500 }}>Tax Settings</h2>
               <Input label="VAT RATE (%)" type="number" value={vatRate} onChange={e => setVatRate(e.target.value)} placeholder="10" />
-              <div style={{ padding: '12px 14px', background: '#EFECE2', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+              <div style={{ padding: '12px 14px', background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                 <p style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.6 }}>
                   Default tax scheme is Margin Scheme (VAT on profit only). You can change this anytime in Settings.
                 </p>
               </div>
 
               {/* Summary */}
-              <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 16 }}>
+              <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
                 <span className="text-overline" style={{ marginBottom: 12 }}>SUMMARY</span>
                 <div style={{ marginTop: 12, fontSize: 13, color: '#4B5563' }}>
                   <div style={{ marginBottom: 4 }}><strong style={{ color: '#0F0F10' }}>{companyName}</strong> — {branchName}</div>

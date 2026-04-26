@@ -23,7 +23,7 @@ export function PageLayout({
         style={{
           background: 'rgba(255,255,255,0.92)',
           backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid #E5E1D6',
+          borderBottom: '1px solid #E5E9EE',
         }}
       >
         <div style={{ padding: '24px 48px' }}>
@@ -41,15 +41,15 @@ export function PageLayout({
                   onChange={(e) => onSearch?.(e.target.value)}
                   className="w-full outline-none transition-colors duration-300"
                   style={{
-                    background: '#EFECE2',
-                    border: '1px solid #E5E1D6',
+                    background: '#F2F7FA',
+                    border: '1px solid #E5E9EE',
                     borderRadius: 8,
                     padding: '10px 14px 10px 40px',
                     fontSize: 13,
                     color: '#0F0F10',
                   }}
-                  onFocus={e => (e.currentTarget.style.borderColor = '#D5D1C4')}
-                  onBlur={e => (e.currentTarget.style.borderColor = '#E5E1D6')}
+                  onFocus={e => (e.currentTarget.style.borderColor = '#D5D9DE')}
+                  onBlur={e => (e.currentTarget.style.borderColor = '#E5E9EE')}
                 />
               </div>
             </div>

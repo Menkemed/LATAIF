@@ -81,7 +81,7 @@ export function ProductDetail() {
 
   function renderField(label: string, value: React.ReactNode, editField?: React.ReactNode) {
     return (
-      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
         <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
         {editing && editField ? editField : <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>}
       </div>
@@ -159,7 +159,7 @@ export function ProductDetail() {
         {/* Hero */}
         <div className="animate-fade-in" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>
           {/* Image */}
-          <div className="rounded-xl" style={{ minHeight: 400, background: '#EFECE2', border: '1px solid #E5E1D6', overflow: 'hidden' }}>
+          <div className="rounded-xl" style={{ minHeight: 400, background: '#F2F7FA', border: '1px solid #E5E9EE', overflow: 'hidden' }}>
             {editing ? (
               <div style={{ padding: 20 }}>
                 <span className="text-overline" style={{ marginBottom: 12 }}>PHOTOS</span>
@@ -167,7 +167,7 @@ export function ProductDetail() {
                   <ImageUpload images={form.images || []} onChange={imgs => setForm({ ...form, images: imgs })} maxImages={8} />
                 </div>
                 {/* Plan §Product §4: AI-Identify auch im Edit-Mode (z.B. für mobile-erfasste Produkte ohne KI). */}
-                <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+                <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
                   <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
                     <div>
                       <span className="text-overline">AI IDENTIFY &amp; RESEARCH</span>
@@ -241,14 +241,14 @@ export function ProductDetail() {
               </div>
             )}
             {!editing && product.images.length > 1 && (
-              <div className="flex gap-2" style={{ padding: '8px 12px', borderTop: '1px solid #E5E1D6' }}>
+              <div className="flex gap-2" style={{ padding: '8px 12px', borderTop: '1px solid #E5E9EE' }}>
                 {product.images.slice(1, 5).map((img, i) => (
-                  <div key={i} className="rounded" style={{ width: 56, height: 56, overflow: 'hidden', border: '1px solid #E5E1D6' }}>
+                  <div key={i} className="rounded" style={{ width: 56, height: 56, overflow: 'hidden', border: '1px solid #E5E9EE' }}>
                     <img src={img} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   </div>
                 ))}
                 {product.images.length > 5 && (
-                  <div className="rounded flex items-center justify-center" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E5E1D6', fontSize: 11, color: '#6B7280' }}>
+                  <div className="rounded flex items-center justify-center" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E5E9EE', fontSize: 11, color: '#6B7280' }}>
                     +{product.images.length - 5}
                   </div>
                 )}
@@ -283,7 +283,7 @@ export function ProductDetail() {
                           className="cursor-pointer rounded-lg transition-all"
                           style={{
                             padding: '8px 14px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6,
-                            border: `1px solid ${active ? cat.color : '#D5D1C4'}`,
+                            border: `1px solid ${active ? cat.color : '#D5D9DE'}`,
                             color: active ? cat.color : '#6B7280',
                             background: active ? cat.color + '08' : 'transparent',
                           }}>
@@ -336,7 +336,7 @@ export function ProductDetail() {
             )}
 
             {/* Prices */}
-            <div style={{ marginTop: 28, borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+            <div style={{ marginTop: 28, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <Input label="PURCHASE PRICE (BHD)" type="number" value={form.purchasePrice || ''} onChange={e => setForm({ ...form, purchasePrice: Number(e.target.value) })} />
@@ -373,7 +373,7 @@ export function ProductDetail() {
             </div>
 
             {/* Tax */}
-            <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <div className="flex justify-between items-center" style={{ marginBottom: 4 }}>
                 <span style={{ fontSize: 12, color: '#6B7280' }}>Tax Scheme</span>
                 {editing ? (
@@ -417,7 +417,7 @@ export function ProductDetail() {
                     // Editable
                     if (attr.type === 'select' && attr.options) {
                       return (
-                        <div key={attr.key} style={{ padding: '8px 0', borderBottom: '1px solid #E5E1D6' }}>
+                        <div key={attr.key} style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
                           <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>{attr.label}</span>
                           <div className="flex flex-wrap gap-1">
                             {attr.options.map(opt => (
@@ -433,7 +433,7 @@ export function ProductDetail() {
                       );
                     }
                     return (
-                      <div key={attr.key} style={{ padding: '6px 0', borderBottom: '1px solid #E5E1D6' }}>
+                      <div key={attr.key} style={{ padding: '6px 0', borderBottom: '1px solid #E5E9EE' }}>
                         <Input
                           label={attr.label + (attr.unit ? ` (${attr.unit})` : '')}
                           type={attr.type === 'number' ? 'number' : 'text'}
@@ -447,7 +447,7 @@ export function ProductDetail() {
                   // Read-only
                   if (!val && val !== 0) return null;
                   return (
-                    <div key={attr.key} className="flex justify-between" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+                    <div key={attr.key} className="flex justify-between" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                       <span style={{ fontSize: 13, color: '#6B7280' }}>{attr.label}</span>
                       <span style={{ fontSize: 13, color: '#0F0F10' }}>{String(val)}{attr.unit ? ` ${attr.unit}` : ''}</span>
                     </div>
@@ -492,7 +492,7 @@ export function ProductDetail() {
                               setForm({ ...form, scopeOfDelivery: sel ? arr.filter(x => x !== s) : [...arr, s] });
                             }} className="cursor-pointer" style={{
                               padding: '3px 8px', fontSize: 11, borderRadius: 999,
-                              border: `1px solid ${sel ? '#0F0F10' : '#D5D1C4'}`,
+                              border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
                               color: sel ? '#0F0F10' : '#6B7280',
                               background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
                             }}>{s}</button>
@@ -515,7 +515,7 @@ export function ProductDetail() {
                             className="cursor-pointer rounded transition-all duration-200"
                             style={{
                               padding: '7px 14px', fontSize: 12,
-                              border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                              border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                               color: active ? '#0F0F10' : '#6B7280',
                               background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                             }}>{label}</button>
@@ -531,7 +531,7 @@ export function ProductDetail() {
                       onChange={e => setForm({ ...form, notes: e.target.value })}
                       className="w-full outline-none transition-colors duration-300"
                       rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
+                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
                     />
                   </div>
                 </div>
@@ -542,7 +542,7 @@ export function ProductDetail() {
                       <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 8 }}>Scope of Delivery</span>
                       <div className="flex flex-wrap gap-2">
                         {product.scopeOfDelivery.map(item => (
-                          <span key={item} style={{ padding: '4px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D1C4', color: '#4B5563' }}>{item}</span>
+                          <span key={item} style={{ padding: '4px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#4B5563' }}>{item}</span>
                         ))}
                       </div>
                     </div>

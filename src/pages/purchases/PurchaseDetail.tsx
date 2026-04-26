@@ -159,7 +159,7 @@ export function PurchaseDetail() {
               <span style={{ color: '#6B7280' }}>Paid</span>
               <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(purchase.paidAmount)} BHD</span>
             </div>
-            <div className="flex justify-between" style={{ fontSize: 15, paddingTop: 10, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-between" style={{ fontSize: 15, paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
               <span style={{ color: '#0F0F10' }}>Outstanding (Payable)</span>
               <span className="font-mono" style={{ color: purchase.remainingAmount > 0 ? '#DC2626' : '#6B7280', fontWeight: 500 }}>
                 {fmt(purchase.remainingAmount)} BHD
@@ -181,7 +181,7 @@ export function PurchaseDetail() {
         <div style={{ marginTop: 20 }}><Card>
           <span className="text-overline">LINE ITEMS</span>
           <div style={{ marginTop: 12 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.6fr 1fr 1fr', gap: 12, padding: '8px 0', borderBottom: '1px solid #E5E1D6' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.6fr 1fr 1fr', gap: 12, padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
               {['PRODUCT', 'DESCRIPTION', 'QTY', 'UNIT PRICE', 'LINE TOTAL'].map(h => (
                 <span key={h} className="text-overline" style={{ fontSize: 10 }}>{h}</span>
               ))}
@@ -266,8 +266,8 @@ export function PurchaseDetail() {
                   <button key={m} onClick={() => !disabled && setPayMethod(m)} className="cursor-pointer rounded"
                     disabled={disabled}
                     style={{ padding: '8px 16px', fontSize: 13,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
-                      color: disabled ? '#D5D1C4' : (active ? '#0F0F10' : '#6B7280'),
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                      color: disabled ? '#D5D9DE' : (active ? '#0F0F10' : '#6B7280'),
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                       opacity: disabled ? 0.5 : 1,
                       cursor: disabled ? 'not-allowed' : 'pointer',
@@ -282,7 +282,7 @@ export function PurchaseDetail() {
             )}
           </div>
           <Input label="REFERENCE (optional)" placeholder="Transaction ID / check no" value={payRef} onChange={e => setPayRef(e.target.value)} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowPayment(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleAddPayment} disabled={!payAmount || parseFloat(payAmount) <= 0}>Record Payment</Button>
           </div>
@@ -295,8 +295,8 @@ export function PurchaseDetail() {
           <p style={{ fontSize: 12, color: '#6B7280' }}>
             Plan §Purchase Returns: select items to return. Payable is reduced first; any surplus becomes a refund.
           </p>
-          <div style={{ border: '1px solid #E5E1D6', borderRadius: 8, overflow: 'hidden' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr', gap: 10, padding: '10px 12px', background: '#EFECE2', borderBottom: '1px solid #E5E1D6' }}>
+          <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr', gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE' }}>
               {['', 'PRODUCT', 'QTY', 'UNIT PRICE', 'LINE TOTAL'].map(h => (
                 <span key={h} className="text-overline" style={{ fontSize: 10 }}>{h}</span>
               ))}
@@ -304,13 +304,13 @@ export function PurchaseDetail() {
             {purchase.lines.map(l => {
               const r = returnLines[l.id] || { include: false, quantity: l.quantity, unitPrice: l.unitPrice };
               return (
-                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E1D6', alignItems: 'center' }}>
+                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center' }}>
                   <input type="checkbox" checked={r.include} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, include: e.target.checked } })} />
                   <span style={{ fontSize: 12, color: '#0F0F10' }}>{getProductName(l.productId)}</span>
                   <input type="number" value={r.quantity} min={0} max={l.quantity} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, quantity: parseFloat(e.target.value) || 0 } })}
-                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
+                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   <input type="number" step="0.01" value={r.unitPrice} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
-                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
+                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{fmt(r.quantity * r.unitPrice)}</span>
                 </div>
               );
@@ -325,7 +325,7 @@ export function PurchaseDetail() {
                 return (
                   <button key={m} onClick={() => setReturnMethod(m)} className="cursor-pointer rounded"
                     style={{ padding: '7px 14px', fontSize: 12,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Supplier Credit'}</button>
@@ -336,7 +336,7 @@ export function PurchaseDetail() {
 
           <Input label="NOTES" placeholder="e.g. damaged goods" value={returnNotes} onChange={e => setReturnNotes(e.target.value)} />
 
-          <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <span style={{ fontSize: 14, color: '#6B7280' }}>Return Total</span>
             <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}>{fmt(returnTotal)} BHD</span>
           </div>

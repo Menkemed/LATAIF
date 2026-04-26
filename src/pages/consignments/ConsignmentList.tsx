@@ -217,7 +217,7 @@ export function ConsignmentList() {
         <Card noPadding>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
-              <tr style={{ borderBottom: '1px solid #E5E1D6' }}>
+              <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
                 {['Number', 'Consignor', 'Product', 'Agreed Price', 'Commission', 'Status', 'Actions'].map(h => (
                   <th key={h} style={{
                     padding: '14px 18px', textAlign: 'left', fontSize: 11,
@@ -237,7 +237,7 @@ export function ConsignmentList() {
                 return (
                   <tr key={con.id}
                     className="cursor-pointer transition-colors duration-200"
-                    style={{ borderBottom: '1px solid #E5E1D6' }}
+                    style={{ borderBottom: '1px solid #E5E9EE' }}
                     onClick={() => navigate(`/consignments/${con.id}`)}
                     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.015)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -280,22 +280,22 @@ export function ConsignmentList() {
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 6,
-                                border: '1px solid #D5D1C4', color: '#7EAA6E',
+                                border: '1px solid #D5D9DE', color: '#7EAA6E',
                                 background: 'transparent',
                               }}
                               onMouseEnter={e => { e.currentTarget.style.background = 'rgba(126,170,110,0.08)'; e.currentTarget.style.borderColor = '#7EAA6E'; }}
-                              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D1C4'; }}
+                              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D9DE'; }}
                             >Sold</button>
                             <button
                               onClick={() => markReturned(con.id)}
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 6,
-                                border: '1px solid #D5D1C4', color: '#6B7280',
+                                border: '1px solid #D5D9DE', color: '#6B7280',
                                 background: 'transparent',
                               }}
                               onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; e.currentTarget.style.borderColor = '#6B7280'; }}
-                              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D1C4'; }}
+                              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D9DE'; }}
                             >Return</button>
                           </>
                         )}
@@ -305,11 +305,11 @@ export function ConsignmentList() {
                             className="cursor-pointer transition-all duration-200"
                             style={{
                               padding: '4px 10px', fontSize: 11, borderRadius: 6,
-                              border: '1px solid #D5D1C4', color: '#0F0F10',
+                              border: '1px solid #D5D9DE', color: '#0F0F10',
                               background: 'transparent',
                             }}
                             onMouseEnter={e => { e.currentTarget.style.background = 'rgba(15,15,16,0.08)'; e.currentTarget.style.borderColor = '#0F0F10'; }}
-                            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D1C4'; }}
+                            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D9DE'; }}
                           >Pay Out</button>
                         )}
                       </div>
@@ -353,7 +353,7 @@ export function ConsignmentList() {
           />
 
           {/* Pricing */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>PRICING</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
               <Input label="AGREED PRICE (BHD)" type="number" placeholder="Optional \u2014 set at sale"
@@ -371,7 +371,7 @@ export function ConsignmentList() {
                     className="cursor-pointer rounded transition-all duration-200"
                     style={{
                       padding: '7px 12px', fontSize: 12,
-                      border: `1px solid ${commissionType === t ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${commissionType === t ? '#0F0F10' : '#D5D9DE'}`,
                       color: commissionType === t ? '#0F0F10' : '#6B7280',
                       background: commissionType === t ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>
@@ -405,8 +405,8 @@ export function ConsignmentList() {
             {/* Live Calculation */}
             {agreedNum > 0 && rateNum > 0 && (
               <div className="rounded font-mono" style={{
-                marginTop: 16, padding: 16, background: '#EFECE2',
-                border: '1px solid #E5E1D6', fontSize: 13,
+                marginTop: 16, padding: 16, background: '#F2F7FA',
+                border: '1px solid #E5E9EE', fontSize: 13,
               }}>
                 <div style={{ marginBottom: 4, color: '#6B7280', fontSize: 11, letterSpacing: '0.04em' }}>
                   IF SOLD AT AGREED PRICE
@@ -424,7 +424,7 @@ export function ConsignmentList() {
           </div>
 
           {/* Expiry & Notes */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <Input label="EXPIRY DATE" type="date"
               value={form.expiryDate}
               onChange={e => setForm({ ...form, expiryDate: e.target.value })} />
@@ -438,17 +438,17 @@ export function ConsignmentList() {
               className="w-full outline-none transition-colors duration-300"
               style={{
                 marginTop: 6, background: 'transparent',
-                borderBottom: '1px solid #D5D1C4', border: 'none',
-                borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: '#D5D1C4',
+                borderBottom: '1px solid #D5D9DE', border: 'none',
+                borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: '#D5D9DE',
                 padding: '10px 0', fontSize: 14, color: '#0F0F10',
                 resize: 'vertical', minHeight: 60,
               }}
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
-              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D1C4')}
+              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D9DE')}
             />
           </div>
 
-          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}
               disabled={!form.consignorId || !form.productId}
@@ -489,7 +489,7 @@ export function ConsignmentList() {
               : `Commission (${fmtPct(con.commissionRate)}%)`;
             return (
               <div className="rounded font-mono" style={{
-                padding: 14, background: '#EFECE2', border: '1px solid #E5E1D6', fontSize: 13,
+                padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
               }}>
                 <div className="flex justify-between" style={{ marginBottom: 8 }}>
                   <span style={{ color: '#6B7280' }}>{modelLabel}</span>
@@ -509,14 +509,14 @@ export function ConsignmentList() {
                 <button key={m} onClick={() => setSoldSaleMethod(m)}
                   className="cursor-pointer rounded transition-all"
                   style={{ padding: '8px 16px', fontSize: 13,
-                    border: `1px solid ${soldSaleMethod === m ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${soldSaleMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: soldSaleMethod === m ? '#0F0F10' : '#6B7280',
                     background: soldSaleMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
               ))}
             </div>
           </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={handleMarkSold} disabled={!soldPrice}>Confirm Sale</Button>
           </div>
@@ -532,7 +532,7 @@ export function ConsignmentList() {
             const cust = getCustomer(con.consignorId);
             return (
               <div className="rounded font-mono" style={{
-                padding: 14, background: '#EFECE2', border: '1px solid #E5E1D6', fontSize: 13,
+                padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
               }}>
                 <div className="flex justify-between" style={{ marginBottom: 8 }}>
                   <span style={{ color: '#6B7280' }}>Consignor</span>
@@ -553,7 +553,7 @@ export function ConsignmentList() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${paidMethod === m ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${paidMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: paidMethod === m ? '#0F0F10' : '#6B7280',
                     background: paidMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{m === 'bank_transfer' ? 'Bank Transfer' : m === 'cash' ? 'Cash' : 'Card'}</button>
@@ -563,7 +563,7 @@ export function ConsignmentList() {
           <Input label="REFERENCE" placeholder="Optional reference..."
             value={paidRef}
             onChange={e => setPaidRef(e.target.value)} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setPaidModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={handleMarkPaid}>Confirm Payout</Button>
           </div>

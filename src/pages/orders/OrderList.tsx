@@ -115,7 +115,7 @@ export function OrderList() {
         <Card noPadding>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
-              <tr style={{ borderBottom: '1px solid #E5E1D6' }}>
+              <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
                 {['Order #', 'Customer', 'Requested Item', 'Agreed Price', 'Deposit', 'Remaining', 'Status', ''].map(h => (
                   <th key={h} style={{
                     padding: '14px 18px', fontSize: 11, fontWeight: 500, letterSpacing: '0.06em',
@@ -130,7 +130,7 @@ export function OrderList() {
                 return (
                   <tr key={order.id}
                     className="cursor-pointer"
-                    style={{ borderBottom: '1px solid #E5E1D6' }}
+                    style={{ borderBottom: '1px solid #E5E9EE' }}
                     onClick={() => navigate(`/orders/${order.id}`)}
                     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.015)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
@@ -208,7 +208,7 @@ export function OrderList() {
                           className="cursor-pointer transition-all duration-200"
                           style={{
                             padding: '5px 14px', fontSize: 11, borderRadius: 999,
-                            border: '1px solid #D5D1C4', color: '#4B5563',
+                            border: '1px solid #D5D9DE', color: '#4B5563',
                             background: 'transparent', whiteSpace: 'nowrap',
                           }}
                           onMouseEnter={e => {
@@ -216,7 +216,7 @@ export function OrderList() {
                             e.currentTarget.style.color = '#0F0F10';
                           }}
                           onMouseLeave={e => {
-                            e.currentTarget.style.borderColor = '#D5D1C4';
+                            e.currentTarget.style.borderColor = '#D5D9DE';
                             e.currentTarget.style.color = '#4B5563';
                           }}
                         >

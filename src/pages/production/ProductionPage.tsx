@@ -86,7 +86,7 @@ export function ProductionPage() {
         </div>
       ) : (
         <Card noPadding>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 0.6fr 0.6fr 1fr 2fr 0.4fr', gap: 12, padding: '12px 16px', borderBottom: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 0.6fr 0.6fr 1fr 2fr 0.4fr', gap: 12, padding: '12px 16px', borderBottom: '1px solid #E5E9EE' }}>
             {['NUMBER', 'DATE', 'INPUTS', 'OUTPUTS', 'TOTAL', 'NOTES', ''].map(h => (
               <span key={h} className="text-overline">{h}</span>
             ))}
@@ -140,26 +140,26 @@ export function ProductionPage() {
               <button onClick={() => setOutputs([...outputs, { key: uid(), brand: '', name: '', sku: '', categoryId: 'cat-watch', value: 0 }])}
                 className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12 }}>+ Add output</button>
             </div>
-            <div style={{ border: '1px solid #E5E1D6', borderRadius: 8, overflow: 'hidden' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.6fr 1fr 1.5fr 1fr 0.3fr', gap: 8, padding: '8px 10px', background: '#EFECE2', borderBottom: '1px solid #E5E1D6' }}>
+            <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.6fr 1fr 1.5fr 1fr 0.3fr', gap: 8, padding: '8px 10px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE' }}>
                 {['BRAND', 'NAME', 'SKU', 'CATEGORY', 'VALUE (BHD)', ''].map(h => (
                   <span key={h} className="text-overline" style={{ fontSize: 10 }}>{h}</span>
                 ))}
               </div>
               {outputs.map((o, idx) => (
-                <div key={o.key} style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.6fr 1fr 1.5fr 1fr 0.3fr', gap: 8, padding: '8px 10px', borderBottom: idx < outputs.length - 1 ? '1px solid #E5E1D6' : 'none', alignItems: 'center' }}>
+                <div key={o.key} style={{ display: 'grid', gridTemplateColumns: '1.4fr 1.6fr 1fr 1.5fr 1fr 0.3fr', gap: 8, padding: '8px 10px', borderBottom: idx < outputs.length - 1 ? '1px solid #E5E9EE' : 'none', alignItems: 'center' }}>
                   <input placeholder="Brand" value={o.brand} onChange={e => setOutputs(os => os.map(x => x.key === o.key ? { ...x, brand: e.target.value } : x))}
-                    className="outline-none" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
+                    className="outline-none" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   <input placeholder="Name" value={o.name} onChange={e => setOutputs(os => os.map(x => x.key === o.key ? { ...x, name: e.target.value } : x))}
-                    className="outline-none" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
+                    className="outline-none" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   <input placeholder="SKU" value={o.sku} onChange={e => setOutputs(os => os.map(x => x.key === o.key ? { ...x, sku: e.target.value } : x))}
-                    className="outline-none" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
+                    className="outline-none" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   <select value={o.categoryId} onChange={e => setOutputs(os => os.map(x => x.key === o.key ? { ...x, categoryId: e.target.value } : x))}
-                    style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }}>
+                    style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }}>
                     {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                   <input type="number" step="0.01" placeholder="0" value={o.value || ''} onChange={e => setOutputs(os => os.map(x => x.key === o.key ? { ...x, value: parseFloat(e.target.value) || 0 } : x))}
-                    className="outline-none font-mono" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
+                    className="outline-none font-mono" style={{ padding: '6px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   {outputs.length > 1 && (
                     <button onClick={() => setOutputs(os => os.filter(x => x.key !== o.key))} className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#DC2626', fontSize: 14 }}>×</button>
                   )}
@@ -185,7 +185,7 @@ export function ProductionPage() {
               <span style={{ color: '#6B7280' }}>Output Value</span>
               <span className="font-mono" style={{ color: '#16A34A' }}>+ {fmt(outputTotal)} BHD</span>
             </div>
-            <div className="flex justify-between" style={{ fontSize: 14, marginTop: 8, paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-between" style={{ fontSize: 14, marginTop: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <span style={{ color: balanced ? '#16A34A' : '#DC2626', fontWeight: 500 }}>
                 {balanced ? 'Balanced ✓' : 'Out of balance'}
               </span>
@@ -199,7 +199,7 @@ export function ProductionPage() {
             <div style={{ padding: '8px 12px', background: 'rgba(220,38,38,0.08)', borderRadius: 6, fontSize: 12, color: '#DC2626' }}>{error}</div>
           )}
 
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setShowNew(false); resetForm(); }}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} disabled={!balanced || inputTotal <= 0}>Confirm Production</Button>
           </div>

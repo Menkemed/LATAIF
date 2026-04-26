@@ -116,13 +116,13 @@ export function BankingPage() {
           {(['all', 'cash', 'bank'] as const).map(a => (
             <button key={a} onClick={() => setAccountFilter(a)} style={{
               fontSize: 11, padding: '4px 10px', borderRadius: 999, cursor: 'pointer',
-              border: '1px solid ' + (accountFilter === a ? '#0F0F10' : '#D5D1C4'),
+              border: '1px solid ' + (accountFilter === a ? '#0F0F10' : '#D5D9DE'),
               background: accountFilter === a ? '#0F0F10' : 'transparent',
               color: accountFilter === a ? '#FFFFFF' : '#4B5563',
             }}>{a === 'all' ? 'All accounts' : a[0].toUpperCase() + a.slice(1)}</button>
           ))}
           <select value={typeFilter} onChange={e => setTypeFilter(e.target.value as BankTransactionType | 'all')}
-            style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6, border: '1px solid #D5D1C4', background: '#FFFFFF' }}>
+            style={{ fontSize: 11, padding: '4px 10px', borderRadius: 6, border: '1px solid #D5D9DE', background: '#FFFFFF' }}>
             <option value="all">All types</option>
             {uniqueTypes.map(t => <option key={t} value={t}>{TYPE_LABELS[t]}</option>)}
           </select>
@@ -135,7 +135,7 @@ export function BankingPage() {
         </div>
       ) : (
         <Card noPadding>
-          <div style={{ display: 'grid', gridTemplateColumns: '100px 120px 80px 1fr 110px 40px', gap: 12, padding: '12px 16px', borderBottom: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '100px 120px 80px 1fr 110px 40px', gap: 12, padding: '12px 16px', borderBottom: '1px solid #E5E9EE' }}>
             {['DATE', 'TYPE', 'ACCOUNT', 'DESCRIPTION', 'AMOUNT', ''].map(h => (
               <span key={h} className="text-overline">{h}</span>
             ))}
@@ -210,7 +210,7 @@ export function BankingPage() {
                 return (
                   <button key={d} onClick={() => setDirection(d)} className="cursor-pointer rounded"
                     style={{ padding: '8px 16px', fontSize: 13,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{d === 'CASH_TO_BANK' ? 'Cash → Bank' : 'Bank → Cash'}</button>
@@ -223,7 +223,7 @@ export function BankingPage() {
             <Input label="DATE" type="date" value={date} onChange={e => setDate(e.target.value)} />
           </div>
           <Input label="NOTES" placeholder="Optional" value={notes} onChange={e => setNotes(e.target.value)} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} disabled={!amount || parseFloat(amount) <= 0}>Create Transfer</Button>
           </div>

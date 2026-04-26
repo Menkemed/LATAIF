@@ -374,8 +374,8 @@ export function GlobalSearch() {
   return (
     <div className="fixed inset-0 z-[100] flex items-start justify-center" style={{ paddingTop: 80 }}>
       <div className="absolute inset-0" style={{ background: 'rgba(15,15,16,0.35)', backdropFilter: 'blur(4px)' }} onClick={() => setOpen(false)} />
-      <div className="relative animate-fade-in" style={{ width: 640, background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12, overflow: 'hidden' }}>
-        <div className="flex items-center gap-3" style={{ padding: '16px 20px', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="relative animate-fade-in" style={{ width: 640, background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12, overflow: 'hidden' }}>
+        <div className="flex items-center gap-3" style={{ padding: '16px 20px', borderBottom: '1px solid #E5E9EE' }}>
           <Search size={18} style={{ color: '#6B7280' }} />
           <input
             autoFocus
@@ -389,22 +389,22 @@ export function GlobalSearch() {
             onClick={() => setShowAdvanced(v => !v)}
             style={{
               fontSize: 11, padding: '3px 8px', borderRadius: 4, cursor: 'pointer',
-              border: '1px solid ' + (showAdvanced || hasFilters ? '#0F0F10' : '#D5D1C4'),
+              border: '1px solid ' + (showAdvanced || hasFilters ? '#0F0F10' : '#D5D9DE'),
               background: showAdvanced || hasFilters ? '#0F0F10' : 'transparent',
               color: showAdvanced || hasFilters ? '#FFFFFF' : '#6B7280',
             }}
           >Filters</button>
-          <span style={{ fontSize: 11, color: '#6B7280', padding: '2px 6px', border: '1px solid #D5D1C4', borderRadius: 4 }}>ESC</span>
+          <span style={{ fontSize: 11, color: '#6B7280', padding: '2px 6px', border: '1px solid #D5D9DE', borderRadius: 4 }}>ESC</span>
         </div>
 
-        <div className="flex items-center gap-2" style={{ padding: '10px 20px', borderBottom: '1px solid #E5E1D6', flexWrap: 'wrap' }}>
+        <div className="flex items-center gap-2" style={{ padding: '10px 20px', borderBottom: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
           {FILTER_CHIPS.map(chip => (
             <button
               key={chip.key}
               onClick={() => setFilter(chip.key)}
               style={{
                 fontSize: 12, padding: '4px 10px', borderRadius: 999, cursor: 'pointer',
-                border: '1px solid ' + (filter === chip.key ? '#0F0F10' : '#D5D1C4'),
+                border: '1px solid ' + (filter === chip.key ? '#0F0F10' : '#D5D9DE'),
                 background: filter === chip.key ? '#0F0F10' : 'transparent',
                 color: filter === chip.key ? '#FFFFFF' : '#4B5563',
               }}
@@ -418,41 +418,41 @@ export function GlobalSearch() {
         </div>
 
         {showAdvanced && (
-          <div style={{ padding: '12px 20px', borderBottom: '1px solid #E5E1D6', background: '#F7F5EE', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 12 }}>
+          <div style={{ padding: '12px 20px', borderBottom: '1px solid #E5E9EE', background: '#F7F5EE', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 12 }}>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: '#6B7280' }}>Date from</span>
               <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-                style={{ padding: '6px 8px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 12 }} />
+                style={{ padding: '6px 8px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 12 }} />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: '#6B7280' }}>Date to</span>
               <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-                style={{ padding: '6px 8px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 12 }} />
+                style={{ padding: '6px 8px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 12 }} />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: '#6B7280' }}><CircleDollarSign size={11} style={{ display: 'inline', marginRight: 3 }} />Min amount (BHD)</span>
               <input type="number" step="0.001" value={amountMin} onChange={e => setAmountMin(e.target.value)}
-                style={{ padding: '6px 8px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 12 }} />
+                style={{ padding: '6px 8px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 12 }} />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: '#6B7280' }}><CircleDollarSign size={11} style={{ display: 'inline', marginRight: 3 }} />Max amount (BHD)</span>
               <input type="number" step="0.001" value={amountMax} onChange={e => setAmountMax(e.target.value)}
-                style={{ padding: '6px 8px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 12 }} />
+                style={{ padding: '6px 8px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 12 }} />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: '#6B7280' }}>Min weight (g)</span>
               <input type="number" step="0.01" value={weightMin} onChange={e => setWeightMin(e.target.value)}
-                style={{ padding: '6px 8px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 12 }} />
+                style={{ padding: '6px 8px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 12 }} />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <span style={{ color: '#6B7280' }}>Max weight (g)</span>
               <input type="number" step="0.01" value={weightMax} onChange={e => setWeightMax(e.target.value)}
-                style={{ padding: '6px 8px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 12 }} />
+                style={{ padding: '6px 8px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 12 }} />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4, gridColumn: 'span 2' }}>
               <span style={{ color: '#6B7280' }}>Product status</span>
               <select value={productStatus} onChange={e => setProductStatus(e.target.value)}
-                style={{ padding: '6px 8px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 12, background: '#FFFFFF' }}>
+                style={{ padding: '6px 8px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 12, background: '#FFFFFF' }}>
                 <option value="">Any</option>
                 <option value="in_stock">IN_STOCK</option>
                 <option value="reserved">RESERVED</option>
@@ -474,7 +474,7 @@ export function GlobalSearch() {
                   className="flex items-center gap-3 cursor-pointer rounded-lg transition-colors"
                   style={{ padding: '10px 12px' }}
                   onClick={() => handleSelect(r)}
-                  onMouseEnter={e => (e.currentTarget.style.background = '#E5E1D6')}
+                  onMouseEnter={e => (e.currentTarget.style.background = '#E5E9EE')}
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                 >
                   <Icon size={16} style={{ color: typeColors[r.type], flexShrink: 0 }} />

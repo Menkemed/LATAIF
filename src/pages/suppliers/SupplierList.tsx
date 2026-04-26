@@ -57,7 +57,7 @@ export function SupplierList() {
         <Card noPadding>
           <div style={{
             display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 0.9fr 0.9fr',
-            gap: 16, padding: '14px 18px', borderBottom: '1px solid #E5E1D6',
+            gap: 16, padding: '14px 18px', borderBottom: '1px solid #E5E9EE',
           }}>
             {['NAME', 'CONTACT', 'TOTAL PURCHASES', 'PAID', 'OUTSTANDING', 'CREDIT', 'STATUS'].map(h => (
               <span key={h} className="text-overline">{h}</span>
@@ -116,10 +116,10 @@ export function SupplierList() {
               onChange={e => setForm({ ...form, notes: e.target.value })}
               className="w-full outline-none"
               rows={3}
-              style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }}
+              style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }}
             />
           </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} disabled={!form.name}>Create Supplier</Button>
           </div>

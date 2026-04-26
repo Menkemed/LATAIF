@@ -1,6 +1,6 @@
 // Plan §Purchases — List with status filter + New Purchase button (navigiert zu Full-Page).
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ShoppingCart } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -21,8 +21,18 @@ export function PurchaseList() {
   const { purchases, loadPurchases } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<StatusFilter>('');
+  const [filter, setFilter] = useState<StatusFilter>((searchParams.get('filter') as StatusFilter) || '');
+
+  useEffect(() => {
+    const current = (searchParams.get('filter') as StatusFilter) || '';
+    if (current !== filter) {
+      const next = new URLSearchParams(searchParams);
+      if (filter) next.set('filter', filter); else next.delete('filter');
+      setSearchParams(next, { replace: true });
+    }
+  }, [filter, searchParams, setSearchParams]);
 
   useEffect(() => { loadPurchases(); loadSuppliers(); }, [loadPurchases, loadSuppliers]);
 
@@ -81,7 +91,7 @@ export function PurchaseList() {
         <Card noPadding>
           <div style={{
             display: 'grid', gridTemplateColumns: '1fr 1.3fr 1.5fr 1fr 1fr 1fr 1fr',
-            gap: 14, padding: '12px 16px', borderBottom: '1px solid #E5E1D6',
+            gap: 14, padding: '12px 16px', borderBottom: '1px solid #E5E9EE',
           }}>
             {['NUMBER', 'DATE', 'SUPPLIER', 'TOTAL', 'PAID', 'REMAINING', 'STATUS'].map(h => (
               <span key={h} className="text-overline">{h}</span>

@@ -97,8 +97,8 @@ function Select({ value, onChange, options, style }: {
       value={value}
       onChange={e => onChange(e.target.value)}
       style={{
-        background: '#EFECE2',
-        border: '1px solid #E5E1D6',
+        background: '#F2F7FA',
+        border: '1px solid #E5E9EE',
         borderRadius: 8,
         padding: '8px 12px',
         fontSize: 13,
@@ -144,7 +144,7 @@ function Textarea({ label, value, onChange, rows = 3 }: {
         style={{
           width: '100%',
           background: 'transparent',
-          borderBottom: `1px solid ${focused ? '#0F0F10' : '#D5D1C4'}`,
+          borderBottom: `1px solid ${focused ? '#0F0F10' : '#D5D9DE'}`,
           padding: '10px 0',
           fontSize: 14,
           color: '#0F0F10',
@@ -454,7 +454,7 @@ export function TaskList() {
             display: 'grid',
             gridTemplateColumns: '1fr 100px 100px 120px 120px 120px',
             padding: '12px 24px',
-            borderBottom: '1px solid #E5E1D6',
+            borderBottom: '1px solid #E5E9EE',
             fontSize: 11,
             color: '#6B7280',
             letterSpacing: '0.08em',
@@ -524,7 +524,7 @@ function TaskRow({ task, overdue, onEdit, onComplete, onDelete }: {
         display: 'grid',
         gridTemplateColumns: '1fr 100px 100px 120px 120px 120px',
         padding: '14px 24px',
-        borderBottom: '1px solid #E5E1D6',
+        borderBottom: '1px solid #E5E9EE',
         alignItems: 'center',
         background: hovered ? 'rgba(255,255,255,0.015)' : overdue ? 'rgba(170,110,110,0.04)' : 'transparent',
         transition: 'background 0.2s',

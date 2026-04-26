@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Edit3, Save, FileText, XCircle, CreditCard, Printer, Download, Table, Plus } from 'lucide-react';
+import { ArrowLeft, Edit3, Save, FileText, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2 } from 'lucide-react';
 
 // Butterfly icon as inline SVG — renders reliably in all webviews (no emoji font dependency).
 const Butterfly = ({ size = 14, style }: { size?: number; style?: React.CSSProperties }) => (
@@ -414,7 +414,7 @@ export function InvoiceDetail() {
 
   function renderField(label: string, value: React.ReactNode) {
     return (
-      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
         <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
         <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>
       </div>
@@ -492,7 +492,7 @@ export function InvoiceDetail() {
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CUSTOMER</span>
                 <select value={editCustomerId}
                   onChange={e => setEditCustomerId(e.target.value)}
-                  style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid #D5D1C4', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }}>
+                  style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }}>
                   {customers.map(c => (
                     <option key={c.id} value={c.id}>
                       {c.firstName} {c.lastName}{c.company ? ` — ${c.company}` : ''}
@@ -517,7 +517,7 @@ export function InvoiceDetail() {
                       className="cursor-pointer rounded"
                       style={{
                         padding: '6px 14px', fontSize: 12,
-                        border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                         color: active ? '#0F0F10' : '#6B7280',
                         background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                       }}>{s}</button>
@@ -528,7 +528,7 @@ export function InvoiceDetail() {
                 </span>
               </div>
             </div>
-            <div className="flex gap-2" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #E5E1D6', flexWrap: 'wrap' }}>
+            <div className="flex gap-2" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
               <Button variant="secondary" onClick={openLinesEdit}>Edit Lines ({invoice.lines.length})</Button>
               <Button variant="secondary" onClick={() => setPaymentsModal(true)}>Manage Payments</Button>
             </div>
@@ -539,7 +539,7 @@ export function InvoiceDetail() {
         <div className="animate-fade-in" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>
           {/* Icon */}
           <div className="rounded-xl flex items-center justify-center"
-            style={{ height: 400, background: '#EFECE2', border: '1px solid #E5E1D6' }}>
+            style={{ height: 400, background: '#F2F7FA', border: '1px solid #E5E9EE' }}>
             <FileText size={64} strokeWidth={0.8} style={{ color: '#6B7280' }} />
           </div>
 
@@ -590,7 +590,7 @@ export function InvoiceDetail() {
             </div>
 
             {/* Financial Summary */}
-            <div style={{ marginTop: 28, borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+            <div style={{ marginTop: 28, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">NET AMOUNT</span>
                 <span className="font-display" style={{ fontSize: 20, color: '#4B5563' }}>{fmt(invoice.netAmount)} BHD</span>
@@ -639,7 +639,7 @@ export function InvoiceDetail() {
                 <span className="text-overline">GROSS TOTAL</span>
                 <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(invoice.grossAmount)} BHD</span>
               </div>
-              <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 10, marginTop: 4 }}>
+              <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 10, marginTop: 4 }}>
                 <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
                   <span className="text-overline">PAID</span>
                   <span className="font-mono" style={{ fontSize: 16, color: '#7EAA6E' }}>{fmt(invoice.paidAmount)} BHD</span>
@@ -658,7 +658,7 @@ export function InvoiceDetail() {
             </div>
 
             {/* Tax Scheme */}
-            <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <div className="flex justify-between items-center" style={{ marginBottom: invoice.taxSchemeSnapshot === 'mixed' ? 8 : 0 }}>
                 <span style={{ fontSize: 12, color: '#6B7280' }}>Tax Scheme</span>
                 <span style={{ fontSize: 12, color: invoice.taxSchemeSnapshot === 'mixed' ? '#AA956E' : '#0F0F10' }}>
@@ -709,7 +709,7 @@ export function InvoiceDetail() {
                 return (
                 <div key={line.id} style={{
                   padding: '12px 0',
-                  borderBottom: idx < invoice.lines.length - 1 ? '1px solid #E5E1D6' : 'none',
+                  borderBottom: idx < invoice.lines.length - 1 ? '1px solid #E5E9EE' : 'none',
                   background: fullyReturned ? 'rgba(220,38,38,0.04)' : partiallyReturned ? 'rgba(217,119,6,0.04)' : 'transparent',
                   marginLeft: -8, marginRight: -8, paddingLeft: 8, paddingRight: 8, borderRadius: 6,
                 }}>
@@ -772,7 +772,7 @@ export function InvoiceDetail() {
                 {renderField('Status', <StatusDot status={invoice.status} />)}
                 {renderField('Issued', fmtDate(invoice.issuedAt))}
                 {editing ? (
-                  <div style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+                  <div style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                     <Input label="DUE DATE" type="date" value={editDueAt} onChange={e => setEditDueAt(e.target.value)} />
                   </div>
                 ) : (
@@ -789,7 +789,7 @@ export function InvoiceDetail() {
                       onChange={e => setEditNotes(e.target.value)}
                       className="w-full outline-none transition-colors duration-300"
                       rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
+                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
                     />
                   </div>
                 ) : invoice.notes ? (
@@ -805,13 +805,13 @@ export function InvoiceDetail() {
             <Card>
               <span className="text-overline" style={{ marginBottom: 16 }}>MARGIN ANALYSIS</span>
               <div style={{ marginTop: 16 }}>
-                <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+                <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                   <span style={{ fontSize: 13, color: '#6B7280' }}>Purchase Snapshot</span>
                   <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}>
                     {invoice.purchasePriceSnapshot != null ? `${fmt(invoice.purchasePriceSnapshot)} BHD` : '\u2014'}
                   </span>
                 </div>
-                <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+                <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                   <span style={{ fontSize: 13, color: '#6B7280' }}>Sale Snapshot</span>
                   <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>
                     {invoice.salePriceSnapshot != null ? `${fmt(invoice.salePriceSnapshot)} BHD` : '\u2014'}
@@ -877,7 +877,7 @@ export function InvoiceDetail() {
                       return p ? `${l.quantity}× ${p.brand} ${p.name}` : `${l.quantity}× —`;
                     }).join(', ');
                     return (
-                      <div key={r.id} style={{ padding: '12px 14px', border: '1px solid #E5E1D6', borderRadius: 8 }}>
+                      <div key={r.id} style={{ padding: '12px 14px', border: '1px solid #E5E9EE', borderRadius: 8 }}>
                         <div className="flex justify-between items-start" style={{ marginBottom: 8 }}>
                           <div>
                             <div className="flex items-center gap-2">
@@ -940,8 +940,8 @@ export function InvoiceDetail() {
           <p style={{ fontSize: 12, color: '#6B7280' }}>
             Klick auf den Produktnamen → anderes Produkt auswählen. Quantity nur sichtbar bei Produkten mit Lager &gt; 1. Tax + Total werden live nach Schema neu berechnet. Alle Änderungen werden geloggt.
           </p>
-          <div style={{ border: '1px solid #E5E1D6', borderRadius: 8, overflow: 'visible', position: 'relative' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.4fr 0.6fr 0.9fr 0.9fr 0.6fr 0.8fr 0.9fr 0.4fr', gap: 8, padding: '8px 10px', background: '#EFECE2', borderBottom: '1px solid #E5E1D6', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
+          <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'visible', position: 'relative' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.8fr) minmax(0,1.2fr) 50px minmax(0,0.9fr) minmax(0,0.9fr) 55px minmax(0,0.9fr) minmax(0,0.9fr) 44px', gap: 8, padding: '8px 10px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
               <span>Product</span>
               <span>Description</span>
               <span>Qty</span>
@@ -957,12 +957,13 @@ export function InvoiceDetail() {
               const stock = product?.quantity || 1;
               const showQty = stock > 1; // Per User-Regel: Qty nur wenn Lager > 1
               return (
-                <div key={idx} style={{ display: 'grid', gridTemplateColumns: '2fr 1.4fr 0.6fr 0.9fr 0.9fr 0.6fr 0.8fr 0.9fr 0.4fr', gap: 8, padding: '8px 10px', borderBottom: '1px solid #E5E1D6', alignItems: 'center', position: 'relative' }}>
+                <div key={idx} style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.8fr) minmax(0,1.2fr) 50px minmax(0,0.9fr) minmax(0,0.9fr) 55px minmax(0,0.9fr) minmax(0,0.9fr) 44px', gap: 8, padding: '8px 10px', borderBottom: '1px solid #E5E9EE', alignItems: 'center', position: 'relative' }}>
                   {/* Product picker — Klick öffnet Suche */}
                   <button onClick={() => { setProductPickerIdx(productPickerIdx === idx ? null : idx); setProductPickerQuery(''); }}
                     className="cursor-pointer text-left" style={{
-                      padding: '6px 8px', fontSize: 12, background: '#FFFFFF', border: '1px solid #D5D1C4', borderRadius: 4,
+                      padding: '6px 8px', fontSize: 12, background: '#FFFFFF', border: '1px solid #D5D9DE', borderRadius: 4,
                       color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      minWidth: 0, width: '100%',
                     }} title="Klick zum Wechseln">
                     {product ? `${product.brand} ${product.name}` : '— pick product —'}
                   </button>
@@ -976,7 +977,7 @@ export function InvoiceDetail() {
                       <input autoFocus value={productPickerQuery}
                         onChange={e => setProductPickerQuery(e.target.value)}
                         placeholder="Search by brand, name, SKU…"
-                        style={{ width: '100%', padding: '6px 8px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4, marginBottom: 6 }} />
+                        style={{ width: '100%', padding: '6px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, marginBottom: 6 }} />
                       {products
                         .filter(p => {
                           if (!productPickerQuery) return true;
@@ -988,7 +989,7 @@ export function InvoiceDetail() {
                           <button key={p.id} onClick={() => pickProductForLine(idx, p.id)}
                             className="cursor-pointer flex justify-between" style={{
                               width: '100%', padding: '6px 8px', fontSize: 12, background: 'transparent', border: 'none',
-                              borderBottom: '1px solid #E5E1D6', textAlign: 'left', color: '#0F0F10',
+                              borderBottom: '1px solid #E5E9EE', textAlign: 'left', color: '#0F0F10',
                             }}
                             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.04)')}
                             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
@@ -1000,34 +1001,46 @@ export function InvoiceDetail() {
                   )}
                   <input value={l.description}
                     onChange={e => recalcLine(idx, { description: e.target.value })}
-                    placeholder="Description" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                    placeholder="Description" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
                   {showQty ? (
                     <input type="number" min={1} max={stock} value={l.quantity}
                       onChange={e => recalcLine(idx, { quantity: Math.max(1, Math.min(stock, parseInt(e.target.value) || 1)) })}
                       title={`Stock: ${stock}`}
-                      className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: '#FFF8E5', border: '1px solid #C6A36D', borderRadius: 4 }} />
+                      className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: '#FFF8E5', border: '1px solid #C6A36D', borderRadius: 4, minWidth: 0, width: '100%' }} />
                   ) : (
-                    <span style={{ fontSize: 11, color: '#6B7280', textAlign: 'center' }}>1</span>
+                    <span style={{ fontSize: 11, color: '#6B7280', textAlign: 'center', minWidth: 0 }}>1</span>
                   )}
                   <input type="number" step="0.001" value={l.unitPrice}
                     onChange={e => recalcLine(idx, { unitPrice: parseFloat(e.target.value) || 0 })}
-                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
                   <input type="number" step="0.001" value={l.purchasePrice}
                     onChange={e => recalcLine(idx, { purchasePrice: parseFloat(e.target.value) || 0 })}
-                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
                   <input type="number" value={l.vatRate}
                     onChange={e => recalcLine(idx, { vatRate: parseFloat(e.target.value) || 0 })}
-                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
                   <select value={l.taxScheme}
                     onChange={e => recalcLine(idx, { taxScheme: e.target.value })}
-                    style={{ padding: '4px 6px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 4 }}>
+                    style={{ padding: '4px 6px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }}>
                     <option value="MARGIN">Margin</option>
                     <option value="VAT_10">VAT 10%</option>
                     <option value="ZERO">Zero</option>
                   </select>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right' }}>{fmt(l.lineTotal)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(l.lineTotal)}</span>
                   <button onClick={() => setLineDraft(d => d.filter((_, i) => i !== idx))}
-                    className="cursor-pointer" style={{ padding: '4px 8px', fontSize: 11, background: 'none', border: '1px solid #D5D1C4', borderRadius: 4, color: '#AA6E6E' }}>×</button>
+                    title="Diese Zeile entfernen"
+                    className="cursor-pointer transition-all"
+                    style={{
+                      width: 32, height: 32, borderRadius: 8,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: 'rgba(220,38,38,0.10)',
+                      border: '1px solid rgba(220,38,38,0.30)',
+                      color: '#DC2626',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
+                    <Trash2 size={14} strokeWidth={2} />
+                  </button>
                 </div>
               );
             })}
@@ -1035,7 +1048,7 @@ export function InvoiceDetail() {
           <div className="flex items-center" style={{ marginTop: 4 }}>
             <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Line</Button>
           </div>
-          <div className="flex justify-between items-center" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-between items-center" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <span style={{ fontSize: 12, color: '#6B7280' }}>
               Net: <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(lineDraft.reduce((s, l) => s + (Number(l.unitPrice) || 0) * Math.max(1, Number(l.quantity) || 1), 0))}</span>
               {' · '}VAT: <span className="font-mono" style={{ color: '#AA956E' }}>{fmt(lineDraft.reduce((s, l) => s + (Number(l.vatAmount) || 0) * Math.max(1, Number(l.quantity) || 1), 0))}</span>
@@ -1061,21 +1074,21 @@ export function InvoiceDetail() {
               <p style={{ fontSize: 12, color: '#6B7280' }}>
                 Methode oder Betrag editieren: in Felder klicken und mit Enter bestätigen. Löschen rechts.
               </p>
-              <div style={{ border: '1px solid #E5E1D6', borderRadius: 8, overflow: 'hidden' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', background: '#EFECE2', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
+              <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', background: '#F2F7FA', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
                   <span>Date</span><span>Amount (BHD)</span><span>Method</span><span>Notes</span><span></span>
                 </div>
                 {list.map(p => (
-                  <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', borderTop: '1px solid #E5E1D6', alignItems: 'center' }}>
+                  <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', borderTop: '1px solid #E5E9EE', alignItems: 'center' }}>
                     <input type="date" defaultValue={(p.receivedAt || '').split('T')[0]}
                       onBlur={e => { if (e.target.value && id) updatePayment(p.id, id, { receivedAt: new Date(e.target.value).toISOString() }); }}
-                      style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                      style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }} />
                     <input type="number" step="0.001" defaultValue={p.amount}
                       onBlur={e => { if (id) updatePayment(p.id, id, { amount: parseFloat(e.target.value) || 0 }); }}
-                      className="font-mono" style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                      className="font-mono" style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }} />
                     <select defaultValue={p.method}
                       onChange={e => { if (id) updatePayment(p.id, id, { method: e.target.value }); }}
-                      style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4 }}>
+                      style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }}>
                       <option value="cash">Cash</option>
                       <option value="bank">Bank</option>
                       <option value="bank_transfer">Bank Transfer</option>
@@ -1085,13 +1098,13 @@ export function InvoiceDetail() {
                     </select>
                     <input defaultValue={p.notes || ''}
                       onBlur={e => { if (id) updatePayment(p.id, id, { notes: e.target.value }); }}
-                      placeholder="Notes" style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4 }} />
+                      placeholder="Notes" style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }} />
                     <button onClick={() => { if (window.confirm('Delete this payment? Status wird neu berechnet.')) { if (id) deletePayment(p.id, id); } }}
-                      className="cursor-pointer" style={{ padding: '4px 8px', fontSize: 12, background: 'none', border: '1px solid #D5D1C4', borderRadius: 4, color: '#AA6E6E' }}>×</button>
+                      className="cursor-pointer" style={{ padding: '4px 8px', fontSize: 12, background: 'none', border: '1px solid #D5D9DE', borderRadius: 4, color: '#AA6E6E' }}>×</button>
                   </div>
                 ))}
               </div>
-              <div className="flex justify-end" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+              <div className="flex justify-end" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
                 <Button variant="primary" onClick={() => setPaymentsModal(false)}>Close</Button>
               </div>
             </div>
@@ -1124,7 +1137,7 @@ export function InvoiceDetail() {
                   className="cursor-pointer"
                   style={{
                     padding: '6px 14px', fontSize: 12, borderRadius: 6,
-                    border: paymentMethod === m.value ? '1px solid #0F0F10' : '1px solid #D5D1C4',
+                    border: paymentMethod === m.value ? '1px solid #0F0F10' : '1px solid #D5D9DE',
                     background: paymentMethod === m.value ? 'rgba(15,15,16,0.08)' : 'transparent',
                     color: paymentMethod === m.value ? '#0F0F10' : '#6B7280',
                   }}
@@ -1160,7 +1173,7 @@ export function InvoiceDetail() {
                 <button key={m} onClick={() => setCancelRefundMethod(m)}
                   className="cursor-pointer rounded" style={{
                     padding: '6px 14px', fontSize: 12,
-                    border: `1px solid ${cancelRefundMethod === m ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${cancelRefundMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: cancelRefundMethod === m ? '#0F0F10' : '#6B7280',
                     background: cancelRefundMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
@@ -1267,7 +1280,7 @@ export function InvoiceDetail() {
       <Modal open={!!refundPayModal} onClose={() => setRefundPayModal(null)} title="Record Refund Payment" width={420}>
         {refundPayModal && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div style={{ padding: 12, background: '#EFECE2', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>OUTSTANDING</span>
               <div className="font-mono" style={{ fontSize: 18, color: '#DC2626' }}>
                 {fmt(refundPayModal.outstanding)} BHD
@@ -1286,7 +1299,7 @@ export function InvoiceDetail() {
                     <button key={m} type="button" onClick={() => setRefundPayMethod(m)}
                       className="cursor-pointer rounded"
                       style={{ padding: '8px 14px', fontSize: 12,
-                        border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                         color: active ? '#0F0F10' : '#6B7280',
                         background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                       }}>{label}</button>
@@ -1294,7 +1307,7 @@ export function InvoiceDetail() {
                 })}
               </div>
             </div>
-            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setRefundPayModal(null)}>Cancel</Button>
               <Button variant="primary" onClick={() => {
                 const amt = parseFloat(refundPayAmount);
@@ -1318,7 +1331,7 @@ export function InvoiceDetail() {
 
           {/* Linked existing returns */}
           {salesReturns.filter(r => r.invoiceId === invoice.id).length > 0 && (
-            <div style={{ padding: '10px 14px', background: '#EFECE2', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ padding: '10px 14px', background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>PREVIOUS RETURNS</span>
               {salesReturns.filter(r => r.invoiceId === invoice.id).map(r => (
                 <div key={r.id} className="flex justify-between" style={{ fontSize: 12, padding: '4px 0' }}>
@@ -1330,8 +1343,8 @@ export function InvoiceDetail() {
             </div>
           )}
 
-          <div style={{ border: '1px solid #E5E1D6', borderRadius: 8, overflow: 'hidden' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.7fr 1fr 1fr', gap: 10, padding: '10px 12px', background: '#EFECE2', borderBottom: '1px solid #E5E1D6' }}>
+          <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '32px minmax(0,2fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr)', gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE' }}>
               {['', 'PRODUCT', 'QTY', 'UNIT PRICE', 'TOTAL'].map(h => (
                 <span key={h} className="text-overline" style={{ fontSize: 10 }}>{h}</span>
               ))}
@@ -1339,14 +1352,14 @@ export function InvoiceDetail() {
             {invoice.lines.map(l => {
               const r = returnLines[l.id] || { include: false, quantity: 1, unitPrice: l.unitPrice, vatAmount: l.vatAmount };
               return (
-                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.7fr 1fr 1fr', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E1D6', alignItems: 'center' }}>
+                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '32px minmax(0,2fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr)', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center' }}>
                   <input type="checkbox" checked={r.include} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, include: e.target.checked } })} />
-                  <span style={{ fontSize: 12, color: '#0F0F10' }}>{getProductName(l.productId)}</span>
+                  <span style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getProductName(l.productId)}</span>
                   <input type="number" value={r.quantity} min={0} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, quantity: parseFloat(e.target.value) || 0 } })}
-                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
+                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10', minWidth: 0, width: '100%' }} />
                   <input type="number" step="0.01" value={r.unitPrice} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
-                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }} />
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{fmt(r.quantity * r.unitPrice)}</span>
+                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10', minWidth: 0, width: '100%' }} />
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(r.quantity * r.unitPrice)}</span>
                 </div>
               );
             })}
@@ -1362,7 +1375,7 @@ export function InvoiceDetail() {
                   return (
                     <button key={m} onClick={() => setReturnRefundMethod(m)} className="cursor-pointer rounded"
                       style={{ padding: '7px 14px', fontSize: 12,
-                        border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                         color: active ? '#0F0F10' : '#6B7280',
                         background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                       }}>{label}</button>
@@ -1395,7 +1408,7 @@ export function InvoiceDetail() {
                         <button key={d.id} onClick={() => setReturnDisposition(d.id)} className="cursor-pointer rounded"
                           title={d.hint}
                           style={{ padding: '7px 12px', fontSize: 11,
-                            border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                            border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                             color: active ? '#0F0F10' : '#6B7280',
                             background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                           }}>{d.label}</button>
@@ -1420,7 +1433,7 @@ export function InvoiceDetail() {
                 <button key={String(o.id)} onClick={() => setReturnRefundNow(o.id)}
                   className="cursor-pointer rounded"
                   style={{ padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${returnRefundNow === o.id ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${returnRefundNow === o.id ? '#0F0F10' : '#D5D9DE'}`,
                     color: returnRefundNow === o.id ? '#0F0F10' : '#6B7280',
                     background: returnRefundNow === o.id ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{o.label}</button>
@@ -1428,7 +1441,7 @@ export function InvoiceDetail() {
             </div>
           </div>
 
-          <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <span style={{ fontSize: 14, color: '#6B7280' }}>Refund Total</span>
             <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}>
               {fmt(invoice.lines.reduce((s, l) => {

@@ -17,7 +17,7 @@ import type { Category, CategoryAttribute, AttributeType, UserRole } from '@/cor
 
 // ── Constants ──
 
-type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'ai' | 'sync' | 'danger';
+type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'ai' | 'sync' | 'updates' | 'danger';
 
 interface TabDef {
   key: TabKey;
@@ -36,6 +36,7 @@ const TABS: TabDef[] = [
   { key: 'language', label: 'Language', icon: <Globe size={16} /> },
   { key: 'ai', label: 'AI / OpenAI', icon: <Sparkles size={16} /> },
   { key: 'sync', label: 'Sync / Server', icon: <Cloud size={16} /> },
+  { key: 'updates', label: 'Updates', icon: <Cloud size={16} /> },
   { key: 'danger', label: 'Danger Zone', icon: <AlertTriangle size={16} /> },
 ];
 
@@ -185,6 +186,7 @@ function TaxTab() {
   const [fyStartMonth, setFyStartMonth] = useState('');
   const [openingCash, setOpeningCash] = useState('');
   const [openingBank, setOpeningBank] = useState('');
+  const [monthlyTarget, setMonthlyTarget] = useState('');
   // Plan §Settings §3.D Payment + §3.H Partner
   const [defaultInflowAccount, setDefaultInflowAccount] = useState('bank');
   const [defaultOutflowAccount, setDefaultOutflowAccount] = useState('bank');
@@ -205,6 +207,7 @@ function TaxTab() {
     setFyStartMonth(getSetting(branchId, 'finance.fiscal_year_start_month') || '1');
     setOpeningCash(getSetting(branchId, 'finance.opening_cash') || '0');
     setOpeningBank(getSetting(branchId, 'finance.opening_bank') || '0');
+    setMonthlyTarget(getSetting(branchId, 'finance.monthly_target') || '');
     setDefaultInflowAccount(getSetting(branchId, 'payment.default_inflow_account') || 'bank');
     setDefaultOutflowAccount(getSetting(branchId, 'payment.default_outflow_account') || 'bank');
     setMethodCashEnabled((getSetting(branchId, 'payment.method_cash_enabled') || '1') !== '0');
@@ -234,6 +237,7 @@ function TaxTab() {
       setSetting(branchId, 'finance.opening_cash', openingCash || '0', 'finance');
       setSetting(branchId, 'finance.opening_bank', openingBank || '0', 'finance');
     }
+    setSetting(branchId, 'finance.monthly_target', (monthlyTarget || '').trim(), 'finance');
     setSaved('Tax, payment & partner settings saved.');
   }
 
@@ -276,7 +280,7 @@ function TaxTab() {
                   className="cursor-pointer rounded-lg transition-all duration-200"
                   style={{
                     padding: '12px 18px', textAlign: 'left',
-                    border: `1px solid ${defaultScheme === s.value ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${defaultScheme === s.value ? '#0F0F10' : '#D5D9DE'}`,
                     color: defaultScheme === s.value ? '#0F0F10' : '#4B5563',
                     background: defaultScheme === s.value ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}
@@ -301,7 +305,7 @@ function TaxTab() {
               value={fyStartMonth}
               onChange={e => setFyStartMonth(e.target.value)}
               style={{
-                background: '#EFECE2', border: '1px solid #D5D1C4', borderRadius: 8,
+                background: '#F2F7FA', border: '1px solid #D5D9DE', borderRadius: 8,
                 color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160,
               }}
             >
@@ -311,7 +315,7 @@ function TaxTab() {
             </select>
           </FieldRow>
 
-          <div style={{ borderTop: '1px solid #E5E1D6', margin: '16px 0 8px', paddingTop: 14 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', margin: '16px 0 8px', paddingTop: 14 }}>
             <span className="text-overline">OPENING BALANCES (STATUS QUO)</span>
             <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>
               {isOwner
@@ -338,8 +342,20 @@ function TaxTab() {
             </div>
           </FieldRow>
 
+          {/* Sales Overview gauge target — overrides auto-logic when set. */}
+          <div style={{ borderTop: '1px solid #E5E9EE', margin: '16px 0 8px', paddingTop: 14 }}>
+            <span className="text-overline">DASHBOARD TARGETS</span>
+          </div>
+          <FieldRow label="Monthly Sales Target">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Input type="number" step="100" value={monthlyTarget} onChange={e => setMonthlyTarget(e.target.value)}
+                placeholder="Auto" style={{ maxWidth: 160 }} />
+              <span style={{ fontSize: 13, color: '#6B7280' }}>BHD — leave empty for auto (best month / last year +10%)</span>
+            </div>
+          </FieldRow>
+
           {/* Plan §Tax §3 Margin toggle */}
-          <div style={{ borderTop: '1px solid #E5E1D6', margin: '16px 0 8px', paddingTop: 14 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', margin: '16px 0 8px', paddingTop: 14 }}>
             <span className="text-overline">MARGIN SCHEME (Plan §Tax §3.C)</span>
           </div>
           <FieldRow label="Enable Margin Scheme">
@@ -350,7 +366,7 @@ function TaxTab() {
           </FieldRow>
 
           {/* Plan §Settings §3.D Payment Settings */}
-          <div style={{ borderTop: '1px solid #E5E1D6', margin: '16px 0 8px', paddingTop: 14 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', margin: '16px 0 8px', paddingTop: 14 }}>
             <span className="text-overline">PAYMENT METHODS (Plan §Settings §3.D)</span>
           </div>
           <FieldRow label="Enabled methods">
@@ -368,21 +384,21 @@ function TaxTab() {
           </FieldRow>
           <FieldRow label="Default inflow account">
             <select value={defaultInflowAccount} onChange={e => setDefaultInflowAccount(e.target.value)}
-              style={{ background: '#EFECE2', border: '1px solid #D5D1C4', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
+              style={{ background: '#F2F7FA', border: '1px solid #D5D9DE', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
               <option value="cash">Cash</option>
               <option value="bank">Bank</option>
             </select>
           </FieldRow>
           <FieldRow label="Default outflow account">
             <select value={defaultOutflowAccount} onChange={e => setDefaultOutflowAccount(e.target.value)}
-              style={{ background: '#EFECE2', border: '1px solid #D5D1C4', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
+              style={{ background: '#F2F7FA', border: '1px solid #D5D9DE', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
               <option value="cash">Cash</option>
               <option value="bank">Bank</option>
             </select>
           </FieldRow>
 
           {/* Plan §Settings §3.H Partner Settings */}
-          <div style={{ borderTop: '1px solid #E5E1D6', margin: '16px 0 8px', paddingTop: 14 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', margin: '16px 0 8px', paddingTop: 14 }}>
             <span className="text-overline">PARTNER SETTINGS (Plan §Settings §3.H)</span>
           </div>
           <FieldRow label="Default profit share">
@@ -394,7 +410,7 @@ function TaxTab() {
           </FieldRow>
           <FieldRow label="Reporting period">
             <select value={partnerReportPeriod} onChange={e => setPartnerReportPeriod(e.target.value)}
-              style={{ background: '#EFECE2', border: '1px solid #D5D1C4', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
+              style={{ background: '#F2F7FA', border: '1px solid #D5D9DE', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
               <option value="monthly">Monthly</option>
               <option value="quarterly">Quarterly</option>
               <option value="yearly">Yearly</option>
@@ -574,7 +590,7 @@ function CategoriesTab() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: 15, fontWeight: 500, color: '#0F0F10' }}>{cat.name}</span>
                       {!cat.active && (
-                        <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, background: 'rgba(107,107,115,0.1)', color: '#6B7280', border: '1px solid #D5D1C4' }}>
+                        <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, background: 'rgba(107,107,115,0.1)', color: '#6B7280', border: '1px solid #D5D9DE' }}>
                           Inactive
                         </span>
                       )}
@@ -622,7 +638,7 @@ function CategoriesTab() {
                   className="cursor-pointer transition-all duration-200"
                   style={{
                     padding: '6px 12px', fontSize: 11, borderRadius: 6,
-                    border: `1px solid ${newIcon === ic ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${newIcon === ic ? '#0F0F10' : '#D5D9DE'}`,
                     color: newIcon === ic ? '#0F0F10' : '#6B7280',
                     background: newIcon === ic ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{ic}</button>
@@ -649,7 +665,7 @@ function CategoriesTab() {
           </div>
 
           {/* Custom Attributes */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: '#6B7280' }}>CUSTOM ATTRIBUTES</span>
               <button onClick={addNewAttribute}
@@ -670,7 +686,7 @@ function CategoriesTab() {
                   value={attr.type}
                   onChange={e => updateNewAttribute(idx, 'type', e.target.value)}
                   style={{
-                    background: 'transparent', border: 'none', borderBottom: '1px solid #D5D1C4',
+                    background: 'transparent', border: 'none', borderBottom: '1px solid #D5D9DE',
                     color: '#0F0F10', fontSize: 14, padding: '10px 0', outline: 'none',
                   }}
                 >
@@ -699,7 +715,7 @@ function CategoriesTab() {
             ))}
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewModal(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateCategory}>Create Category</Button>
           </div>
@@ -774,7 +790,7 @@ function BranchTab() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '7px 16px', fontSize: 12,
-                    border: `1px solid ${currency === c ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${currency === c ? '#0F0F10' : '#D5D9DE'}`,
                     color: currency === c ? '#0F0F10' : '#6B7280',
                     background: currency === c ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{c}</button>
@@ -898,7 +914,7 @@ function BranchesTab() {
                 <div style={{
                   width: 38, height: 38, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center',
                   background: branch.active ? 'rgba(15,15,16,0.08)' : 'rgba(107,107,115,0.08)',
-                  border: `1px solid ${branch.active ? 'rgba(15,15,16,0.15)' : '#D5D1C4'}`,
+                  border: `1px solid ${branch.active ? 'rgba(15,15,16,0.15)' : '#D5D9DE'}`,
                 }}>
                   <GitBranch size={16} style={{ color: branch.active ? '#0F0F10' : '#6B7280' }} />
                 </div>
@@ -959,7 +975,7 @@ function BranchesTab() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '7px 16px', fontSize: 12,
-                    border: `1px solid ${newCurrency === c ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${newCurrency === c ? '#0F0F10' : '#D5D9DE'}`,
                     color: newCurrency === c ? '#0F0F10' : '#6B7280',
                     background: newCurrency === c ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{c}</button>
@@ -967,7 +983,7 @@ function BranchesTab() {
             </div>
           </div>
           <Input label="ADDRESS" value={newAddress} onChange={e => setNewAddress(e.target.value)} placeholder="Branch address" />
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setShowNewModal(false); setFormError(''); }}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateBranch}>Create Branch</Button>
           </div>
@@ -1119,7 +1135,7 @@ function UsersTab() {
                 <div style={{
                   width: 38, height: 38, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
                   background: user.active ? 'rgba(15,15,16,0.08)' : 'rgba(107,107,115,0.08)',
-                  border: `1px solid ${user.active ? 'rgba(15,15,16,0.15)' : '#D5D1C4'}`,
+                  border: `1px solid ${user.active ? 'rgba(15,15,16,0.15)' : '#D5D9DE'}`,
                   fontSize: 14, fontWeight: 600, color: user.active ? '#0F0F10' : '#6B7280',
                 }}>
                   {user.name.charAt(0).toUpperCase()}
@@ -1144,7 +1160,7 @@ function UsersTab() {
                       value={editRole}
                       onChange={e => setEditRole(e.target.value as UserRole)}
                       style={{
-                        background: '#FFFFFF', border: '1px solid #D5D1C4', borderRadius: 6,
+                        background: '#FFFFFF', border: '1px solid #D5D9DE', borderRadius: 6,
                         color: '#0F0F10', fontSize: 12, padding: '6px 10px', outline: 'none',
                       }}
                     >
@@ -1216,14 +1232,14 @@ function UsersTab() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${newRole === r ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${newRole === r ? '#0F0F10' : '#D5D9DE'}`,
                     color: newRole === r ? '#0F0F10' : '#6B7280',
                     background: newRole === r ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{ROLE_LABELS[r]}</button>
               ))}
             </div>
           </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setShowNewModal(false); setFormError(''); }}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateUser}>Create User</Button>
           </div>
@@ -1334,7 +1350,7 @@ function NumberRangesTab() {
             <div key={r.docType} style={{
               display: 'grid', gridTemplateColumns: '1.4fr 1fr 0.8fr 0.7fr 0.7fr 1.6fr',
               gap: 10, alignItems: 'center',
-              padding: '10px 8px', borderBottom: '1px solid #E5E1D6',
+              padding: '10px 8px', borderBottom: '1px solid #E5E9EE',
             }}>
               <div>
                 <span style={{ fontSize: 13, color: '#0F0F10' }}>{r.label}</span>
@@ -1391,7 +1407,7 @@ function LanguageTab() {
               className="cursor-pointer rounded-xl transition-all flex-1"
               style={{
                 padding: '24px 20px', textAlign: 'center',
-                border: `2px solid ${lang === 'en' ? '#0F0F10' : '#E5E1D6'}`,
+                border: `2px solid ${lang === 'en' ? '#0F0F10' : '#E5E9EE'}`,
                 background: lang === 'en' ? 'rgba(15,15,16,0.06)' : 'transparent',
               }}>
               <span style={{ fontSize: 28, display: 'block', marginBottom: 8 }}>EN</span>
@@ -1401,7 +1417,7 @@ function LanguageTab() {
               className="cursor-pointer rounded-xl transition-all flex-1"
               style={{
                 padding: '24px 20px', textAlign: 'center',
-                border: `2px solid ${lang === 'ar' ? '#0F0F10' : '#E5E1D6'}`,
+                border: `2px solid ${lang === 'ar' ? '#0F0F10' : '#E5E9EE'}`,
                 background: lang === 'ar' ? 'rgba(15,15,16,0.06)' : 'transparent',
               }}>
               <span style={{ fontSize: 28, display: 'block', marginBottom: 8, fontFamily: 'Arial' }}>عر</span>
@@ -1496,7 +1512,7 @@ function AiTab() {
                   className="cursor-pointer rounded-lg transition-all duration-200"
                   style={{
                     padding: '8px 14px', fontSize: 12, textAlign: 'left',
-                    border: `1px solid ${model === m.value ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${model === m.value ? '#0F0F10' : '#D5D9DE'}`,
                     color: model === m.value ? '#0F0F10' : '#6B7280',
                     background: model === m.value ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
@@ -1535,7 +1551,7 @@ function AiTab() {
               { label: 'Offer Text Generation', desc: 'Generate professional offer messages for customers' },
               { label: 'Customer Messages', desc: 'Generate follow-up, repair-ready, and thank-you messages' },
             ].map((f, i) => (
-              <div key={i} style={{ padding: '10px 0', borderBottom: i < 3 ? '1px solid #E5E1D6' : 'none' }}>
+              <div key={i} style={{ padding: '10px 0', borderBottom: i < 3 ? '1px solid #E5E9EE' : 'none' }}>
                 <span style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>{f.label}</span>
                 <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginTop: 2 }}>{f.desc}</span>
               </div>
@@ -1664,7 +1680,7 @@ function SyncTab() {
                 ? `Other LATAIF installations in your network can sync to this machine. Share this URL with other devices: `
                 : `Start this machine as a sync server if you want other LATAIF installations in the same network (same Wi-Fi or LAN) to sync against it. First installation to start usually becomes the server.`}
               {serverStatus.running && (
-                <code style={{ color: '#0F0F10', background: '#EFECE2', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>{serverStatus.url}</code>
+                <code style={{ color: '#0F0F10', background: '#F2F7FA', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>{serverStatus.url}</code>
               )}
             </p>
             <div className="flex items-center gap-2">
@@ -1676,7 +1692,7 @@ function SyncTab() {
               </Button>
             </div>
             {discovered.length > 0 && (
-              <div style={{ marginTop: 12, padding: '10px 12px', background: '#EFECE2', borderRadius: 6, border: '1px solid #E5E1D6' }}>
+              <div style={{ marginTop: 12, padding: '10px 12px', background: '#F2F7FA', borderRadius: 6, border: '1px solid #E5E9EE' }}>
                 <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Discovered servers</span>
                 {discovered.map(u => (
                   <div key={u} className="flex items-center justify-between" style={{ marginTop: 8 }}>
@@ -1749,7 +1765,7 @@ function SyncTab() {
       </div>
 
       {/* Info */}
-      <div style={{ marginTop: 16, padding: '14px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+      <div style={{ marginTop: 16, padding: '14px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
         <p style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.6 }}>
           Connect to a LATAIF sync server to synchronize data between multiple devices.
           Changes are synced automatically every 30 seconds. The app works offline — changes are queued and synced when the server is reachable again.
@@ -1880,12 +1896,12 @@ function DangerZoneTab() {
             <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }}>Download the entire database as a file. Keep it safe.</p>
             <Button variant="secondary" onClick={handleBackup}>Download Backup</Button>
           </div>
-          <div style={{ width: 1, background: '#E5E1D6' }} />
+          <div style={{ width: 1, background: '#E5E9EE' }} />
           <div style={{ flex: 1 }}>
             <h4 style={{ fontSize: 14, fontWeight: 500, color: '#0F0F10', marginBottom: 4 }}>Restore from Backup</h4>
             <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }}>Upload a .db backup file. Current data will be replaced.</p>
             <label className="cursor-pointer">
-              <span style={{ display: 'inline-block', padding: '8px 16px', fontSize: 13, borderRadius: 6, border: '1px solid #D5D1C4', color: '#4B5563', background: 'transparent' }}>Upload Backup File</span>
+              <span style={{ display: 'inline-block', padding: '8px 16px', fontSize: 13, borderRadius: 6, border: '1px solid #D5D9DE', color: '#4B5563', background: 'transparent' }}>Upload Backup File</span>
               <input type="file" accept=".db" style={{ display: 'none' }} onChange={handleRestore} />
             </label>
           </div>
@@ -1957,7 +1973,7 @@ function DangerZoneTab() {
             Type <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }}>DELETE</span> to confirm:
           </p>
           <Input value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder="Type DELETE" />
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setPurgeTarget(null)}>Cancel</Button>
             <Button variant="danger" onClick={handlePurge} disabled={confirmText !== 'DELETE'}>Delete</Button>
           </div>
@@ -1976,7 +1992,7 @@ function DangerZoneTab() {
             Type <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }}>RESET</span> to confirm:
           </p>
           <Input value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder="Type RESET" />
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setConfirmOpen(false); setConfirmText(''); }}>Cancel</Button>
             <Button variant="danger" onClick={handleReset} disabled={confirmText !== 'RESET'}>Factory Reset</Button>
           </div>
@@ -2006,6 +2022,7 @@ export function SettingsPage() {
       case 'language': return <LanguageTab />;
       case 'ai': return <AiTab />;
       case 'sync': return <SyncTab />;
+      case 'updates': return <UpdatesTab />;
       case 'danger': return <DangerZoneTab />;
     }
   };
@@ -2018,7 +2035,7 @@ export function SettingsPage() {
         style={{
           background: 'rgba(255,255,255,0.92)',
           backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid #E5E1D6',
+          borderBottom: '1px solid #E5E9EE',
         }}
       >
         <div style={{ padding: '24px 48px' }}>
@@ -2032,7 +2049,7 @@ export function SettingsPage() {
         {/* Left Sidebar Tabs */}
         <nav style={{
           width: 220, flexShrink: 0, paddingTop: 32, paddingRight: 32,
-          borderRight: '1px solid #E5E1D6',
+          borderRight: '1px solid #E5E9EE',
         }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, position: 'sticky', top: 100 }}>
             {TABS.map(tab => {
@@ -2073,6 +2090,73 @@ export function SettingsPage() {
         <main style={{ flex: 1, padding: '32px 0 0 40px', maxWidth: 800 }}>
           {renderTab()}
         </main>
+      </div>
+    </div>
+  );
+}
+
+// ── Plan §Auto-Update — installierte Version anzeigen + manuell prüfen ──
+function UpdatesTab() {
+  const [installedVersion, setInstalledVersion] = useState<string>('—');
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<string>('');
+
+  useEffect(() => {
+    if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+      setInstalledVersion('Browser-Modus (kein Auto-Update)');
+      return;
+    }
+    import('@tauri-apps/api/app').then(({ getVersion }) =>
+      getVersion().then(v => setInstalledVersion(v)).catch(() => setInstalledVersion('?'))
+    );
+  }, []);
+
+  async function manualCheck() {
+    setChecking(true); setResult('');
+    try {
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const update = await check();
+      if (update) setResult(`✔ Update verfügbar: v${update.version} — Banner erscheint unten rechts.`);
+      else setResult('✔ Du hast bereits die neueste Version installiert.');
+    } catch (err) {
+      setResult('✘ Fehler: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="font-display" style={{ fontSize: 22, color: '#0F0F10', marginBottom: 4 }}>Updates</h2>
+      <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 24 }}>
+        LATAIF prüft beim App-Start automatisch ob ein neues Update verfügbar ist. Du kannst auch manuell suchen.
+      </p>
+
+      <div style={{ padding: '20px 24px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12, marginBottom: 16 }}>
+        <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>INSTALLIERTE VERSION</span>
+        <div className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>
+          v{installedVersion}
+        </div>
+      </div>
+
+      <div style={{ padding: '20px 24px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
+        <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>UPDATE-CHECK</span>
+        <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }}>
+          Manuell jetzt prüfen ob ein neueres Release auf GitHub verfügbar ist.
+        </p>
+        <button onClick={manualCheck} disabled={checking}
+          className="cursor-pointer"
+          style={{
+            padding: '10px 20px', background: '#0F0F10', color: '#FFFFFF',
+            border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 500,
+          }}>
+          {checking ? 'Prüfe…' : 'Jetzt nach Update suchen'}
+        </button>
+        {result && (
+          <div style={{ marginTop: 14, padding: 12, background: '#F2F7FA', borderRadius: 8, fontSize: 13, color: '#0F0F10' }}>
+            {result}
+          </div>
+        )}
       </div>
     </div>
   );

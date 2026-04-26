@@ -167,7 +167,7 @@ export function OfferDetail() {
 
   function renderField(label: string, value: React.ReactNode, editField?: React.ReactNode) {
     return (
-      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
         <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
         {editing && editField ? editField : <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>}
       </div>
@@ -265,7 +265,7 @@ export function OfferDetail() {
             </div>
 
             {/* Line header */}
-            <div style={{ display: 'grid', gridTemplateColumns: canEdit ? '3fr 1fr 1fr 32px' : '3fr 1fr 1fr', gap: 12, padding: '8px 0', borderBottom: '1px solid #E5E1D6' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: canEdit ? 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) 32px' : 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr)', gap: 12, padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
               <span style={{ fontSize: 11, color: '#6B7280' }}>PRODUCT</span>
               <span style={{ fontSize: 11, color: '#6B7280', textAlign: 'right' }}>UNIT PRICE</span>
               <span style={{ fontSize: 11, color: '#6B7280', textAlign: 'right' }}>TOTAL</span>
@@ -285,7 +285,7 @@ export function OfferDetail() {
                 (product.maxSalePrice && line.unitPrice > product.maxSalePrice)
               );
               return (
-                <div key={line.id} style={{ display: 'grid', gridTemplateColumns: canEdit ? '3fr 1fr 1fr 32px' : '3fr 1fr 1fr', gap: 12, padding: '12px 0', borderBottom: '1px solid rgba(229,225,214,0.6)', alignItems: 'center' }}>
+                <div key={line.id} style={{ display: 'grid', gridTemplateColumns: canEdit ? 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) 32px' : 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr)', gap: 12, padding: '12px 0', borderBottom: '1px solid rgba(229,225,214,0.6)', alignItems: 'center' }}>
                   <div>
                     <span style={{ fontSize: 13, color: '#0F0F10', display: 'block' }}>
                       {product ? `${product.brand} ${product.name}` : 'Unknown Product'}
@@ -315,12 +315,12 @@ export function OfferDetail() {
                         updateOfferLine(offer.id, line.id, { unitPrice: newPrice, lineTotal: newPrice });
                       }}
                       className="font-mono outline-none"
-                      style={{ width: 80, textAlign: 'right', padding: '2px 6px', fontSize: 13, background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 4, color: '#0F0F10' }}
+                      style={{ minWidth: 0, width: '100%', textAlign: 'right', padding: '2px 6px', fontSize: 13, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }}
                     />
                   ) : (
-                    <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', textAlign: 'right' }}>{fmt(line.unitPrice)}</span>
+                    <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(line.unitPrice)}</span>
                   )}
-                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right' }}>{fmt(line.lineTotal)}</span>
+                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(line.lineTotal)}</span>
                   {canEdit && (
                     <button onClick={() => handleRemoveLine(line.id)}
                       className="cursor-pointer transition-colors flex items-center justify-center"
@@ -337,7 +337,7 @@ export function OfferDetail() {
 
             {/* Total (brutto; VAT is embedded per business rule) */}
             {offer.lines.length > 0 && (
-              <div style={{ marginTop: 16, padding: '16px 0 0', borderTop: '1px solid #E5E1D6' }}>
+              <div style={{ marginTop: 16, padding: '16px 0 0', borderTop: '1px solid #E5E9EE' }}>
                 <div className="flex justify-between" style={{ fontSize: 16, paddingTop: 10 }}>
                   <span style={{ color: '#0F0F10', fontWeight: 500 }}>Total</span>
                   <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}>{fmt(offer.total)} BHD</span>
@@ -365,7 +365,7 @@ export function OfferDetail() {
                         value={customerSearch}
                         onChange={e => setCustomerSearch(e.target.value)}
                         className="w-full outline-none"
-                        style={{ background: '#EFECE2', border: '1px solid #E5E1D6', borderRadius: 4, padding: '4px 8px', fontSize: 12, color: '#0F0F10', marginBottom: 4 }}
+                        style={{ background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, padding: '4px 8px', fontSize: 12, color: '#0F0F10', marginBottom: 4 }}
                       />
                       <div style={{ maxHeight: 100, overflowY: 'auto' }}>
                         {filteredCustomers.map(c => (
@@ -428,7 +428,7 @@ export function OfferDetail() {
                     onChange={e => setFormNotes(e.target.value)}
                     className="w-full outline-none transition-colors duration-300"
                     rows={4}
-                    style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }}
+                    style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }}
                   />
                 ) : (
                   <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6 }}>{offer.notes || 'No notes.'}</p>

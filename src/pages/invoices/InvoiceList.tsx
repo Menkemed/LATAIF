@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Receipt, Download, Table } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -25,8 +25,20 @@ export function InvoiceList() {
   const { loadReturns: loadSalesReturns, getInvoiceReturnSummary } = useSalesReturnStore();
   const { offers, loadOffers } = useOfferStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const [filterStatus, setFilterStatus] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Plan §Filter — Dashboard-Klick → ?filter=PARTIAL etc. übernimmt initialen Filter.
+  const [filterStatus, setFilterStatus] = useState(searchParams.get('filter') || '');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Bei Filter-Änderung URL syncen (für Browser-Back/Forward + bookmarkable)
+  useEffect(() => {
+    const current = searchParams.get('filter') || '';
+    if (current !== filterStatus) {
+      const next = new URLSearchParams(searchParams);
+      if (filterStatus) next.set('filter', filterStatus); else next.delete('filter');
+      setSearchParams(next, { replace: true });
+    }
+  }, [filterStatus, searchParams, setSearchParams]);
   const [showFromOffer, setShowFromOffer] = useState(false);
   const { products, loadProducts } = useProductStore();
   const [showPayment, setShowPayment] = useState<string | null>(null);
@@ -59,7 +71,15 @@ export function InvoiceList() {
 
   const filtered = useMemo(() => {
     let r = invoices;
-    if (filterStatus) r = r.filter(i => i.status === filterStatus);
+    // Special filter "returns": Invoices mit offenem Refund-Payable
+    if (filterStatus === 'returns') {
+      r = r.filter(inv => {
+        const sum = getInvoiceReturnSummary(inv.id, inv.grossAmount);
+        return sum.outstandingRefund > 0.001;
+      });
+    } else if (filterStatus) {
+      r = r.filter(i => i.status === filterStatus);
+    }
     if (searchQuery) {
       r = r.filter(inv => {
         const customer = customers.find(c => c.id === inv.customerId);
@@ -156,7 +176,7 @@ export function InvoiceList() {
           <span key={h} className="text-overline">{h}</span>
         ))}
       </div>
-      <div style={{ borderTop: '1px solid #E5E1D6' }} />
+      <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
       {filtered.length === 0 && (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
@@ -242,10 +262,10 @@ export function InvoiceList() {
                 return (
                   <div key={offer.id}
                     className="cursor-pointer rounded transition-colors"
-                    style={{ padding: '12px', marginBottom: 4, border: '1px solid #E5E1D6' }}
+                    style={{ padding: '12px', marginBottom: 4, border: '1px solid #E5E9EE' }}
                     onClick={() => handleCreateFromOffer(offer.id)}
                     onMouseEnter={e => (e.currentTarget.style.borderColor = '#0F0F10')}
-                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E1D6')}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E9EE')}
                   >
                     <div className="flex justify-between" style={{ marginBottom: 4 }}>
                       <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{offer.offerNumber}</span>
@@ -276,14 +296,14 @@ export function InvoiceList() {
                 <button key={m} onClick={() => setPayMethod(m)}
                   className="cursor-pointer rounded" style={{
                     padding: '6px 14px', fontSize: 12,
-                    border: `1px solid ${payMethod === m ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${payMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: payMethod === m ? '#0F0F10' : '#6B7280',
                     background: payMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{m.replace('_', ' ')}</button>
               ))}
             </div>
           </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowPayment(null)}>Cancel</Button>
             <Button variant="primary" onClick={handlePayment}>Record Payment</Button>
           </div>
@@ -321,7 +341,7 @@ export function InvoiceList() {
                   className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 11 }}>Clear</button>
               </div>
             </div>
-            <div style={{ maxHeight: 280, overflowY: 'auto', border: '1px solid #E5E1D6', borderRadius: 8 }}>
+            <div style={{ maxHeight: 280, overflowY: 'auto', border: '1px solid #E5E9EE', borderRadius: 8 }}>
               {nbrCandidates.length === 0 && (
                 <p style={{ padding: 16, fontSize: 12, color: '#6B7280', textAlign: 'center' }}>No issued invoices for {nbrYear}.</p>
               )}
@@ -330,7 +350,7 @@ export function InvoiceList() {
                 const checked = nbrSelected.has(inv.id);
                 return (
                   <label key={inv.id} className="flex items-center gap-3 cursor-pointer"
-                    style={{ padding: '8px 12px', borderBottom: '1px solid #E5E1D6', fontSize: 12 }}>
+                    style={{ padding: '8px 12px', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
                     <input type="checkbox" checked={checked} onChange={() => toggleNbrInvoice(inv.id)} style={{ accentColor: '#0F0F10' }} />
                     <span className="font-mono" style={{ color: '#0F0F10', minWidth: 110 }}>{inv.invoiceNumber}</span>
                     <span style={{ color: '#6B7280', minWidth: 72 }}>{(inv.issuedAt || inv.createdAt).split('T')[0]}</span>
@@ -359,7 +379,7 @@ export function InvoiceList() {
             </div>
           )}
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNbrExport(false)}>Close</Button>
             <Button variant="primary" onClick={handleNbrExport} disabled={nbrSelected.size === 0}>Generate Excel ({nbrSelected.size})</Button>
           </div>

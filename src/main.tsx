@@ -13,6 +13,9 @@ import '@fontsource/jetbrains-mono/500.css'
 import '@/styles/globals.css'
 import App from './App.tsx'
 
+// Auto-Update Test: minor change to trigger new release v0.1.2
+console.log('LATAIF starting…');
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

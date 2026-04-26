@@ -55,7 +55,7 @@ const tabStyle = (active: boolean): React.CSSProperties => ({
   letterSpacing: '0.04em',
   color: active ? '#0F0F10' : '#6B7280',
   background: active ? 'rgba(15,15,16,0.08)' : 'transparent',
-  border: `1px solid ${active ? 'rgba(15,15,16,0.15)' : '#E5E1D6'}`,
+  border: `1px solid ${active ? 'rgba(15,15,16,0.15)' : '#E5E9EE'}`,
   borderRadius: 8,
   cursor: 'pointer',
   transition: 'all 0.2s',
@@ -96,7 +96,7 @@ function TableRow({
       className="flex items-center justify-between"
       style={{
         padding: '14px 0',
-        borderBottom: borderBottom ? '1px solid #E5E1D6' : 'none',
+        borderBottom: borderBottom ? '1px solid #E5E9EE' : 'none',
       }}
     >
       <span style={{ fontSize: 14, color: '#4B5563', fontWeight: bold ? 600 : 400 }}>
@@ -135,7 +135,7 @@ function RankedItem({
   return (
     <div
       className="flex items-center justify-between"
-      style={{ padding: '12px 0', borderBottom: '1px solid #E5E1D6' }}
+      style={{ padding: '12px 0', borderBottom: '1px solid #E5E9EE' }}
     >
       <div className="flex items-center gap-3">
         <span
@@ -143,7 +143,7 @@ function RankedItem({
           style={{
             width: 28,
             height: 28,
-            background: '#E5E1D6',
+            background: '#E5E9EE',
             fontSize: 11,
             color: '#4B5563',
             flexShrink: 0,
@@ -918,7 +918,7 @@ export function AnalyticsPage() {
         style={{
           background: 'rgba(255,255,255,0.92)',
           backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid #E5E1D6',
+          borderBottom: '1px solid #E5E9EE',
         }}
       >
         <div style={{ padding: '24px 48px' }}>
@@ -948,13 +948,13 @@ export function AnalyticsPage() {
                 onMouseEnter={e => {
                   if (activeTab !== tab.key) {
                     e.currentTarget.style.color = '#0F0F10';
-                    e.currentTarget.style.borderColor = '#D5D1C4';
+                    e.currentTarget.style.borderColor = '#D5D9DE';
                   }
                 }}
                 onMouseLeave={e => {
                   if (activeTab !== tab.key) {
                     e.currentTarget.style.color = '#6B7280';
-                    e.currentTarget.style.borderColor = '#E5E1D6';
+                    e.currentTarget.style.borderColor = '#E5E9EE';
                   }
                 }}
               >
@@ -1039,7 +1039,7 @@ export function AnalyticsPage() {
                     className="flex items-center justify-between"
                     style={{
                       padding: '14px 0',
-                      borderBottom: i < sales.revByCat.length - 1 ? '1px solid #E5E1D6' : 'none',
+                      borderBottom: i < sales.revByCat.length - 1 ? '1px solid #E5E9EE' : 'none',
                     }}
                   >
                     <div className="flex items-center gap-3">
@@ -1154,7 +1154,7 @@ export function AnalyticsPage() {
                     className="flex items-center justify-between"
                     style={{
                       padding: '14px 0',
-                      borderBottom: i < stock.byCat.length - 1 ? '1px solid #E5E1D6' : 'none',
+                      borderBottom: i < stock.byCat.length - 1 ? '1px solid #E5E9EE' : 'none',
                     }}
                   >
                     <div className="flex items-center gap-3">
@@ -1193,7 +1193,7 @@ export function AnalyticsPage() {
                       className="flex items-center justify-between"
                       style={{
                         padding: '14px 0',
-                        borderBottom: i < stock.byStatus.length - 1 ? '1px solid #E5E1D6' : 'none',
+                        borderBottom: i < stock.byStatus.length - 1 ? '1px solid #E5E9EE' : 'none',
                       }}
                     >
                       <div className="flex items-center gap-3">
@@ -1381,7 +1381,7 @@ export function AnalyticsPage() {
                   return (
                     <div key={`${q.year}-${q.quarter}`}
                       className="flex items-center justify-between"
-                      style={{ padding: '14px 0', borderBottom: '1px solid #E5E1D6', gap: 16 }}>
+                      style={{ padding: '14px 0', borderBottom: '1px solid #E5E9EE', gap: 16 }}>
                       <div className="flex items-center gap-3" style={{ flex: 1 }}>
                         {isSettled ? <CheckCircle2 size={16} style={{ color: '#7EAA6E' }} /> : <Clock size={16} style={{ color: '#AA956E' }} />}
                         <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{q.year} · Q{q.quarter}</span>
@@ -1460,9 +1460,9 @@ export function AnalyticsPage() {
                   exportCsv(`LATAIF_VAT_Report_${new Date().toISOString().split('T')[0]}.csv`, csv);
                 }}
                 className="cursor-pointer flex items-center gap-2 transition-colors"
-                style={{ padding: '12px 20px', fontSize: 13, background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 8, color: '#4B5563' }}
+                style={{ padding: '12px 20px', fontSize: 13, background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8, color: '#4B5563' }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = '#0F0F10'; e.currentTarget.style.color = '#0F0F10'; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = '#E5E1D6'; e.currentTarget.style.color = '#4B5563'; }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = '#E5E9EE'; e.currentTarget.style.color = '#4B5563'; }}
               >
                 <FileText size={14} />
                 Export VAT Report (CSV) — All Invoices with Line Details
@@ -1527,7 +1527,7 @@ export function AnalyticsPage() {
                       className="flex items-center justify-between"
                       style={{
                         padding: '10px 0',
-                        borderBottom: i < clients.vipDist.length - 1 ? '1px solid #E5E1D6' : 'none',
+                        borderBottom: i < clients.vipDist.length - 1 ? '1px solid #E5E9EE' : 'none',
                       }}
                     >
                       <div className="flex items-center gap-3">
@@ -1594,7 +1594,7 @@ export function AnalyticsPage() {
       <Modal open={!!taxPayQuarter} onClose={() => setTaxPayQuarter(null)} title={taxPayQuarter ? `Record VAT Payment — ${taxPayQuarter.year} Q${taxPayQuarter.quarter}` : ''} width={460}>
         {taxPayQuarter && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ padding: '12px 14px', background: '#EFECE2', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ padding: '12px 14px', background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <div className="flex justify-between" style={{ fontSize: 12, marginBottom: 4 }}>
                 <span style={{ color: '#6B7280' }}>VAT owed</span>
                 <span className="font-mono" style={{ color: '#4B5563' }}>{fmtDec(taxPayQuarter.vat, 2)} BHD</span>
@@ -1603,7 +1603,7 @@ export function AnalyticsPage() {
                 <span style={{ color: '#6B7280' }}>Already paid</span>
                 <span className="font-mono" style={{ color: '#7EAA6E' }}>{fmtDec(taxPayQuarter.paid, 2)} BHD</span>
               </div>
-              <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 6, borderTop: '1px solid #E5E1D6', marginTop: 6 }}>
+              <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 6, borderTop: '1px solid #E5E9EE', marginTop: 6 }}>
                 <span style={{ color: '#0F0F10' }}>Remaining</span>
                 <span className="font-mono" style={{ color: '#AA6E6E' }}>{fmtDec(Math.max(0, taxPayQuarter.vat - taxPayQuarter.paid), 2)} BHD</span>
               </div>
@@ -1617,7 +1617,7 @@ export function AnalyticsPage() {
                   <button key={s} onClick={() => setTaxPaySource(s)}
                     className="cursor-pointer rounded" style={{
                       padding: '6px 16px', fontSize: 12,
-                      border: `1px solid ${taxPaySource === s ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${taxPaySource === s ? '#0F0F10' : '#D5D9DE'}`,
                       color: taxPaySource === s ? '#0F0F10' : '#6B7280',
                       background: taxPaySource === s ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{s === 'bank' ? 'Bank' : 'Cash'}</button>
@@ -1625,7 +1625,7 @@ export function AnalyticsPage() {
               </div>
             </div>
             <Input label="REFERENCE / NOTE (optional)" value={taxPayNote} onChange={e => setTaxPayNote(e.target.value)} placeholder="NBR confirmation #, etc." />
-            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setTaxPayQuarter(null)}>Cancel</Button>
               <Button variant="primary" onClick={confirmTaxPayment}>Record Payment</Button>
             </div>

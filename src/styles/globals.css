@@ -1,29 +1,35 @@
 @import "tailwindcss";
 
 /* ═══════════════════════════════════════════════════════════
-   LATAIF — Light Theme (Cryptech-inspired)
-   Design System CSS Foundation — Tailwind v4
+   LATAIF — Modern SaaS Theme (Inter + bunte Akzente)
+   Design Tokens v2 — 2026-04
    ═══════════════════════════════════════════════════════════ */
 
 @theme {
-  /* Core surfaces */
-  --color-void: #EFECE2;        /* main page bg (cream/off-white) */
+  /* Core surfaces — Weiß / Light Gray */
+  --color-void: #F2F7FA;        /* main page bg (light blue-gray) */
   --color-deep: #FFFFFF;        /* card bg */
   --color-soft: #FFFFFF;        /* card bg */
-  --color-graphite: #E5E1D6;    /* subtle border */
-  --color-elevated: #EFEBE0;    /* slightly darker cream */
-  --color-subtle: #D5D1C4;      /* stronger border */
+  --color-graphite: #E5E9EE;    /* subtle border */
+  --color-elevated: #FAFBFC;    /* alt card bg */
+  --color-subtle: #D5D9DE;      /* stronger border */
 
-  /* Brand / accent — Gold replaced with black + lime + mint */
-  --color-gold-deep: #0F0F10;
-  --color-gold: #0F0F10;
-  --color-gold-champagne: #1F1F22;
-  --color-gold-light: #F2E4C9;
+  /* Brand accent — modernes SaaS-Lila statt Gold */
+  --color-gold-deep: #5B3DCC;
+  --color-gold: #715DE3;
+  --color-gold-champagne: #8B7AE8;
+  --color-gold-light: #E5E0FA;
 
-  --color-accent-lime: #E9FF5E;
-  --color-accent-mint: #C4E3EC;
+  /* Akzent-Farben (vom Vorbild Image #17) */
+  --color-accent-blue: #3D7FFF;       /* primary chart blue */
+  --color-accent-blue-light: #73D9ED; /* secondary blue */
+  --color-accent-purple: #715DE3;
+  --color-accent-green: #B7EB76;
+  --color-accent-orange: #FF8730;
+  --color-accent-lime: #B7EB76;
+  --color-accent-mint: #73D9ED;
 
-  /* Text (inverted) */
+  /* Text */
   --color-txt: #0F0F10;
   --color-txt2: #4B5563;
   --color-txt3: #6B7280;
@@ -35,7 +41,8 @@
   --color-pending: #D97706;
   --color-info: #2563EB;
 
-  --font-display: 'Playfair Display', 'Cormorant Garamond', Georgia, serif;
+  /* Inter überall — kein Playfair mehr (modern SaaS look) */
+  --font-display: 'Inter', 'Helvetica Neue', Arial, sans-serif;
   --font-sans: 'Inter', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 }
@@ -85,28 +92,43 @@ body { min-height: 100vh; overflow: hidden; background: var(--color-void); }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-txt3); }
 
 ::selection {
-  background: rgba(15, 15, 16, 0.12);
+  background: rgba(113, 93, 227, 0.18);
   color: var(--color-txt);
 }
 
 /* ── TYPOGRAPHY UTILITIES ── */
-.font-display { font-family: var(--font-display); }
+.font-display { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.02em; }
 .font-mono { font-family: var(--font-mono); }
 
 .text-overline {
   font-size: 11px;
   line-height: 14px;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   font-weight: 500;
   color: var(--color-txt3);
   display: block;
 }
 
-.text-display-xl { font-family: var(--font-display); font-size: 48px; line-height: 56px; letter-spacing: -0.02em; font-weight: 400; }
-.text-display-l  { font-family: var(--font-display); font-size: 36px; line-height: 44px; letter-spacing: -0.02em; font-weight: 500; }
-.text-display-m  { font-family: var(--font-display); font-size: 28px; line-height: 36px; letter-spacing: -0.01em; font-weight: 500; }
-.text-display-s  { font-family: var(--font-display); font-size: 22px; line-height: 28px; letter-spacing: -0.01em; font-weight: 500; }
+.text-display-xl { font-family: var(--font-display); font-size: 48px; line-height: 56px; letter-spacing: -0.025em; font-weight: 600; }
+.text-display-l  { font-family: var(--font-display); font-size: 36px; line-height: 44px; letter-spacing: -0.025em; font-weight: 600; }
+.text-display-m  { font-family: var(--font-display); font-size: 28px; line-height: 36px; letter-spacing: -0.02em; font-weight: 600; }
+.text-display-s  { font-family: var(--font-display); font-size: 22px; line-height: 28px; letter-spacing: -0.015em; font-weight: 600; }
+
+/* Großzahlen-Style mit Decimal-Differenzierung (vom Vorbild Revenue Insights) */
+.big-number {
+  font-family: var(--font-sans);
+  font-size: 38px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  color: var(--color-txt);
+  line-height: 1;
+}
+.big-number-decimal {
+  font-size: 0.6em;
+  color: var(--color-txt3);
+  font-weight: 500;
+}
 
 .gold-gradient {
   color: var(--color-txt);
@@ -116,19 +138,22 @@ body { min-height: 100vh; overflow: hidden; background: var(--color-void); }
   background-clip: initial;
 }
 
-/* ── CRYPTECH-STYLE CARDS ── */
+/* ── MODERN CARDS ── */
 .cx-card {
   background: #FFFFFF;
-  border-radius: 28px;
+  border-radius: 20px;
   padding: 24px;
   border: 1px solid var(--color-graphite);
+  transition: box-shadow 0.2s, transform 0.2s;
 }
-.cx-card-lime { background: var(--color-accent-lime); }
+.cx-card:hover { box-shadow: 0 4px 16px rgba(15,15,16,0.04); }
+.cx-card-lime { background: var(--color-accent-green); }
 .cx-card-mint { background: var(--color-accent-mint); }
+
 .cx-pill {
   border-radius: 999px;
-  padding: 10px 22px;
-  font-size: 14px;
+  padding: 8px 18px;
+  font-size: 13px;
   font-weight: 500;
   background: transparent;
   color: var(--color-txt);
@@ -137,15 +162,40 @@ body { min-height: 100vh; overflow: hidden; background: var(--color-void); }
   background: #0F0F10;
   color: #FFFFFF;
 }
+
 .cx-icon-wrap {
   width: 40px;
   height: 40px;
-  border-radius: 999px;
-  background: #FFFFFF;
+  border-radius: 12px;
+  background: var(--color-elevated);
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--color-graphite);
+  border: none;
+}
+
+/* Trend-Pills — grün rauf, rot runter */
+.trend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.trend-pill-up {
+  background: rgba(22,163,74,0.10);
+  color: #16A34A;
+}
+.trend-pill-down {
+  background: rgba(220,38,38,0.10);
+  color: #DC2626;
+}
+.trend-pill-neutral {
+  background: rgba(107,114,128,0.10);
+  color: #6B7280;
 }
 
 /* ── ANIMATIONS ── */
@@ -164,7 +214,7 @@ body { min-height: 100vh; overflow: hidden; background: var(--color-void); }
 .animate-stagger-3 { animation-delay: 160ms; opacity: 0; }
 .animate-stagger-4 { animation-delay: 240ms; opacity: 0; }
 .animate-shimmer {
-  background: linear-gradient(90deg, #EFECE2 25%, #E5E1D6 50%, #EFECE2 75%);
+  background: linear-gradient(90deg, #F2F7FA 25%, #E5E9EE 50%, #F2F7FA 75%);
   background-size: 200% 100%;
   animation: shimmer 2s ease-in-out infinite;
 }

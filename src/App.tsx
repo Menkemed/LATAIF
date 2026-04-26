@@ -24,7 +24,7 @@ import { DocumentList } from '@/pages/documents/DocumentList';
 import { TaskList } from '@/pages/tasks/TaskList';
 import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
 import { DebtsPage } from '@/pages/debts/DebtsPage';
-import { ReportsPage } from '@/pages/reports/ReportsPage';
+import { AIPage } from '@/pages/ai/AIPage';
 import { SupplierList } from '@/pages/suppliers/SupplierList';
 import { SupplierDetail } from '@/pages/suppliers/SupplierDetail';
 import { ExpenseList } from '@/pages/expenses/ExpenseList';
@@ -85,7 +85,7 @@ export default function App() {
 
   if (!dbReady) {
     return (
-      <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#EFECE2' }}>
+      <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#F2F7FA' }}>
         <div className="text-center">
           <h1 className="font-display gold-gradient" style={{ fontSize: 28, letterSpacing: '0.25em', marginBottom: 16 }}>LATAIF</h1>
           {dbError ? (
@@ -103,7 +103,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="app-layout" style={{ background: '#EFECE2' }}>
+      <div className="app-layout" style={{ background: '#F2F7FA' }}>
         <GlobalSearch />
         <UpdateBanner />
         <Sidebar />
@@ -142,7 +142,7 @@ export default function App() {
           <Route path="/partners" element={<PartnersPage />} />
           <Route path="/production" element={<ProductionPage />} />
           <Route path="/business-reports" element={<BusinessReportsPage />} />
-          <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/ai" element={<AIPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/import" element={<ImportPage />} />
         </Routes>

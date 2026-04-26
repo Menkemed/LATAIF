@@ -137,7 +137,7 @@ export function RepairList() {
         <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
       </div>
 
-      <div style={{ borderTop: '1px solid #E5E1D6' }} />
+      <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
       {filtered.length === 0 && (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
@@ -180,7 +180,7 @@ export function RepairList() {
             <div className="flex items-center gap-3">
               <div
                 className="flex items-center justify-center rounded-full shrink-0"
-                style={{ width: 32, height: 32, background: '#E5E1D6', border: '1px solid #D5D1C4', fontSize: 10, color: '#4B5563', fontWeight: 500 }}
+                style={{ width: 32, height: 32, background: '#E5E9EE', border: '1px solid #D5D9DE', fontSize: 10, color: '#4B5563', fontWeight: 500 }}
               >
                 {(() => {
                   const c = customers.find(c => c.id === rep.customerId);
@@ -239,7 +239,7 @@ export function RepairList() {
                   className="cursor-pointer transition-all duration-200"
                   style={{
                     padding: '5px 12px', fontSize: 11, borderRadius: 999,
-                    border: '1px solid #D5D1C4', color: '#4B5563',
+                    border: '1px solid #D5D9DE', color: '#4B5563',
                     background: 'transparent',
                   }}
                   onMouseEnter={e => {
@@ -248,7 +248,7 @@ export function RepairList() {
                     e.currentTarget.style.background = 'rgba(15,15,16,0.06)';
                   }}
                   onMouseLeave={e => {
-                    e.currentTarget.style.borderColor = '#D5D1C4';
+                    e.currentTarget.style.borderColor = '#D5D9DE';
                     e.currentTarget.style.color = '#4B5563';
                     e.currentTarget.style.background = 'transparent';
                   }}
@@ -279,7 +279,7 @@ export function RepairList() {
           </div>
 
           {/* Item Details */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>ITEM DETAILS</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
               <Input label="BRAND" placeholder="e.g. Rolex, Cartier" value={form.itemBrand || ''} onChange={e => setForm({ ...form, itemBrand: e.target.value })} />
@@ -295,12 +295,12 @@ export function RepairList() {
           </div>
 
           {/* Issue Description */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 8 }}>ISSUE</span>
             <textarea
               style={{
                 width: '100%', marginTop: 8, background: 'transparent',
-                borderBottom: '1px solid #D5D1C4', border: 'none', borderBottomStyle: 'solid', borderBottomWidth: 1, borderBottomColor: '#D5D1C4',
+                borderBottom: '1px solid #D5D9DE', border: 'none', borderBottomStyle: 'solid', borderBottomWidth: 1, borderBottomColor: '#D5D9DE',
                 padding: '10px 0', fontSize: 14, color: '#0F0F10',
                 resize: 'vertical', minHeight: 60, outline: 'none',
                 fontFamily: 'inherit',
@@ -309,7 +309,7 @@ export function RepairList() {
               value={form.issueDescription || ''}
               onChange={e => setForm({ ...form, issueDescription: e.target.value })}
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
-              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D1C4')}
+              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D9DE')}
             />
           </div>
 
@@ -322,7 +322,7 @@ export function RepairList() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${form.repairType === type ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${form.repairType === type ? '#0F0F10' : '#D5D9DE'}`,
                     color: form.repairType === type ? '#0F0F10' : '#6B7280',
                     background: form.repairType === type ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
@@ -333,7 +333,7 @@ export function RepairList() {
           </div>
 
           {/* Costs */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>COSTS</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
               <Input label="ESTIMATED COST (BHD)" type="number" placeholder="0" value={form.estimatedCost || ''} onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
@@ -341,7 +341,7 @@ export function RepairList() {
             </div>
             {form.estimatedCost && form.chargeToCustomer && (
               <div className="rounded font-mono" style={{
-                marginTop: 12, padding: 12, background: '#EFECE2', border: '1px solid #E5E1D6',
+                marginTop: 12, padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
                 fontSize: 13, display: 'flex', justifyContent: 'space-between',
               }}>
                 <span style={{ color: '#6B7280' }}>Estimated Margin</span>
@@ -361,7 +361,7 @@ export function RepairList() {
             <textarea
               style={{
                 width: '100%', marginTop: 8, background: 'transparent',
-                border: 'none', borderBottomStyle: 'solid', borderBottomWidth: 1, borderBottomColor: '#D5D1C4',
+                border: 'none', borderBottomStyle: 'solid', borderBottomWidth: 1, borderBottomColor: '#D5D9DE',
                 padding: '10px 0', fontSize: 14, color: '#0F0F10',
                 resize: 'vertical', minHeight: 48, outline: 'none',
                 fontFamily: 'inherit',
@@ -370,11 +370,11 @@ export function RepairList() {
               value={form.notes || ''}
               onChange={e => setForm({ ...form, notes: e.target.value })}
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
-              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D1C4')}
+              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D9DE')}
             />
           </div>
 
-          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}>Create Repair</Button>
           </div>

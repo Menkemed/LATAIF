@@ -11,16 +11,16 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const baseStyles: Record<ButtonVariant, { bg: string; border: string; color: string; hoverBg: string; hoverBorder: string; hoverColor: string }> = {
   primary: {
-    bg: '#0F0F10', border: '1px solid #0F0F10', color: '#FFFFFF',
-    hoverBg: '#1F1F22', hoverBorder: '1px solid #1F1F22', hoverColor: '#FFFFFF',
+    bg: '#715DE3', border: '1px solid #715DE3', color: '#FFFFFF',
+    hoverBg: '#5B3DCC', hoverBorder: '1px solid #5B3DCC', hoverColor: '#FFFFFF',
   },
   secondary: {
-    bg: '#FFFFFF', border: '1px solid #D5D1C4', color: '#0F0F10',
-    hoverBg: '#F6F3EA', hoverBorder: '1px solid #0F0F10', hoverColor: '#0F0F10',
+    bg: '#FFFFFF', border: '1px solid #E5E9EE', color: '#0F0F10',
+    hoverBg: '#F2F7FA', hoverBorder: '1px solid #715DE3', hoverColor: '#715DE3',
   },
   ghost: {
-    bg: 'transparent', border: '1px solid transparent', color: '#4B5563',
-    hoverBg: 'rgba(15,15,16,0.05)', hoverBorder: '1px solid transparent', hoverColor: '#0F0F10',
+    bg: 'transparent', border: '1px solid transparent', color: '#6B7280',
+    hoverBg: 'rgba(113,93,227,0.06)', hoverBorder: '1px solid transparent', hoverColor: '#715DE3',
   },
   danger: {
     bg: '#FFFFFF', border: '1px solid #DC2626', color: '#DC2626',

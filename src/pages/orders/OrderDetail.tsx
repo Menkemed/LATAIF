@@ -257,7 +257,7 @@ export function OrderDetail() {
 
   function renderField(label: string, value: React.ReactNode, editField?: React.ReactNode) {
     return (
-      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
         <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
         {editing && editField ? editField : <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>}
       </div>
@@ -307,7 +307,7 @@ export function OrderDetail() {
         <div className="animate-fade-in" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>
           {/* Icon / Order Visual */}
           <div className="rounded-xl flex items-center justify-center"
-            style={{ height: 400, background: '#EFECE2', border: '1px solid #E5E1D6' }}>
+            style={{ height: 400, background: '#F2F7FA', border: '1px solid #E5E9EE' }}>
             <ShoppingBag size={64} strokeWidth={0.8} style={{ color: '#6B7280' }} />
           </div>
 
@@ -339,7 +339,7 @@ export function OrderDetail() {
                 );
               })()}
               {order.condition && (
-                <span style={{ fontSize: 11, padding: '3px 10px', borderRadius: 999, background: 'rgba(15,15,16,0.06)', color: '#0F0F10', border: '1px solid #D5D1C4' }}>
+                <span style={{ fontSize: 11, padding: '3px 10px', borderRadius: 999, background: 'rgba(15,15,16,0.06)', color: '#0F0F10', border: '1px solid #D5D9DE' }}>
                   {order.condition}
                 </span>
               )}
@@ -358,7 +358,7 @@ export function OrderDetail() {
               const visible = cat.attributes.filter(a => attrs[a.key] !== undefined && attrs[a.key] !== '' && attrs[a.key] !== null);
               if (visible.length === 0) return null;
               return (
-                <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+                <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                   <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>{cat.name.toUpperCase()} DETAILS</span>
                   {visible.map(attr => {
                     const val = attrs[attr.key];
@@ -377,7 +377,7 @@ export function OrderDetail() {
             })()}
 
             {customer && (
-              <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+              <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                 <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>Customer</span>
                 <span style={{ fontSize: 14, color: '#0F0F10' }}>{customer.firstName} {customer.lastName}</span>
                 {customer.company && (
@@ -387,7 +387,7 @@ export function OrderDetail() {
             )}
 
             {/* Pricing Summary */}
-            <div style={{ marginTop: 28, borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+            <div style={{ marginTop: 28, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">AGREED PRICE</span>
                 <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(order.agreedPrice)} BHD</span>
@@ -437,7 +437,7 @@ export function OrderDetail() {
                         className="cursor-pointer rounded-lg"
                         style={{
                           padding: '8px 14px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6,
-                          border: `1px solid ${active ? cat.color : '#D5D1C4'}`,
+                          border: `1px solid ${active ? cat.color : '#D5D9DE'}`,
                           color: active ? cat.color : '#6B7280',
                           background: active ? cat.color + '08' : 'transparent',
                         }}>
@@ -469,7 +469,7 @@ export function OrderDetail() {
                   setForm({ ...form, attributes: { ...attrs, [k]: v } });
                 }
                 return (
-                  <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid #E5E1D6' }}>
+                  <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid #E5E9EE' }}>
                     <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>{cat.name.toUpperCase()} DETAILS</span>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 8 }}>
                       {cat.attributes.map(attr => {
@@ -483,7 +483,7 @@ export function OrderDetail() {
                                     className="cursor-pointer"
                                     style={{
                                       padding: '4px 10px', fontSize: 11, borderRadius: 999,
-                                      border: `1px solid ${attrs[attr.key] === opt ? '#0F0F10' : '#D5D1C4'}`,
+                                      border: `1px solid ${attrs[attr.key] === opt ? '#0F0F10' : '#D5D9DE'}`,
                                       color: attrs[attr.key] === opt ? '#0F0F10' : '#6B7280',
                                       background: attrs[attr.key] === opt ? 'rgba(15,15,16,0.06)' : 'transparent',
                                     }}>{opt}</button>
@@ -501,7 +501,7 @@ export function OrderDetail() {
                                   <button key={String(v)} type="button" onClick={() => setAttr(attr.key, v)}
                                     className="cursor-pointer rounded"
                                     style={{ padding: '6px 14px', fontSize: 12,
-                                      border: `1px solid ${attrs[attr.key] === v ? '#0F0F10' : '#D5D1C4'}`,
+                                      border: `1px solid ${attrs[attr.key] === v ? '#0F0F10' : '#D5D9DE'}`,
                                       color: attrs[attr.key] === v ? '#0F0F10' : '#6B7280',
                                       background: attrs[attr.key] === v ? 'rgba(15,15,16,0.06)' : 'transparent',
                                     }}>{v ? 'Yes' : 'No'}</button>
@@ -527,7 +527,7 @@ export function OrderDetail() {
                             <button key={c} type="button" onClick={() => setForm({ ...form, condition: c })}
                               className="cursor-pointer rounded"
                               style={{ padding: '7px 14px', fontSize: 12,
-                                border: `1px solid ${form.condition === c ? '#0F0F10' : '#D5D1C4'}`,
+                                border: `1px solid ${form.condition === c ? '#0F0F10' : '#D5D9DE'}`,
                                 color: form.condition === c ? '#0F0F10' : '#6B7280',
                                 background: form.condition === c ? 'rgba(15,15,16,0.06)' : 'transparent',
                               }}>{c}</button>
@@ -581,7 +581,7 @@ export function OrderDetail() {
                       onChange={e => setForm({ ...form, notes: e.target.value })}
                       className="w-full outline-none transition-colors duration-300"
                       rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
+                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
                     />
                   </div>
                 </div>
@@ -625,7 +625,7 @@ export function OrderDetail() {
               {payments.length === 0 ? (
                 <p style={{ fontSize: 13, color: '#6B7280', padding: '12px 0' }}>No payments recorded yet.</p>
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr auto auto', gap: 10, alignItems: 'center' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.2fr) auto auto', gap: 10, alignItems: 'center' }}>
                   <span style={{ fontSize: 11, color: '#6B7280' }}>DATE</span>
                   <span style={{ fontSize: 11, color: '#6B7280' }}>AMOUNT</span>
                   <span style={{ fontSize: 11, color: '#6B7280' }}>METHOD</span>
@@ -634,15 +634,15 @@ export function OrderDetail() {
                   <span />
                   {payments.map(p => (
                     <div key={p.id} style={{ display: 'contents' }}>
-                      <span style={{ fontSize: 13, color: '#0F0F10', paddingTop: 10, borderTop: '1px solid #E5E1D6' }}>{p.paidAt}</span>
-                      <span className="font-mono" style={{ fontSize: 13, color: '#7EAA6E', paddingTop: 10, borderTop: '1px solid #E5E1D6' }}>{fmt(p.amount)} BHD</span>
-                      <span style={{ fontSize: 13, color: '#4B5563', paddingTop: 10, borderTop: '1px solid #E5E1D6' }}>{p.method?.replace('_', ' ') || '\u2014'}</span>
-                      <span style={{ fontSize: 12, color: '#6B7280', paddingTop: 10, borderTop: '1px solid #E5E1D6' }}>{p.note || '\u2014'}</span>
+                      <span style={{ fontSize: 13, color: '#0F0F10', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{p.paidAt}</span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#7EAA6E', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{fmt(p.amount)} BHD</span>
+                      <span style={{ fontSize: 13, color: '#4B5563', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{p.method?.replace('_', ' ') || '\u2014'}</span>
+                      <span style={{ fontSize: 12, color: '#6B7280', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{p.note || '\u2014'}</span>
                       <button onClick={() => handleDownloadReceipt(p)}
-                        className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12, paddingTop: 10, borderTop: '1px solid #E5E1D6', display: 'flex', alignItems: 'center', gap: 4 }}
+                        className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12, paddingTop: 10, borderTop: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', gap: 4 }}
                       ><Download size={12} /> PDF</button>
                       <button onClick={() => id && deletePayment(p.id, id)}
-                        className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 11, paddingTop: 10, borderTop: '1px solid #E5E1D6' }}
+                        className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 11, paddingTop: 10, borderTop: '1px solid #E5E9EE' }}
                       >Delete</button>
                     </div>
                   ))}
@@ -661,7 +661,7 @@ export function OrderDetail() {
                 </div>
               )}
               {order.invoiceId && (
-                <div style={{ marginTop: 16, padding: '10px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ marginTop: 16, padding: '10px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span style={{ fontSize: 13, color: '#4B5563' }}>Final invoice generated.</span>
                   <Button variant="secondary" onClick={() => navigate(`/invoices/${order.invoiceId}`)}>View Invoice</Button>
                 </div>
@@ -688,8 +688,8 @@ export function OrderDetail() {
                           style={{
                             width: isCurrent ? 28 : 20,
                             height: isCurrent ? 28 : 20,
-                            background: isPast ? (isCurrent ? '#0F0F10' : 'rgba(15,15,16,0.15)') : '#E5E1D6',
-                            border: `2px solid ${isPast ? '#0F0F10' : '#D5D1C4'}`,
+                            background: isPast ? (isCurrent ? '#0F0F10' : 'rgba(15,15,16,0.15)') : '#E5E9EE',
+                            border: `2px solid ${isPast ? '#0F0F10' : '#D5D9DE'}`,
                             transition: 'all 0.3s ease',
                           }}
                         >
@@ -713,7 +713,7 @@ export function OrderDetail() {
                           height: 2,
                           flex: 1,
                           minWidth: 24,
-                          background: i < currentIdx ? '#0F0F10' : '#E5E1D6',
+                          background: i < currentIdx ? '#0F0F10' : '#E5E9EE',
                           marginTop: -16,
                         }} />
                       )}
@@ -747,7 +747,7 @@ export function OrderDetail() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '6px 12px', fontSize: 12,
-                    border: `1px solid ${payMethod === m ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${payMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: payMethod === m ? '#0F0F10' : '#6B7280',
                     background: payMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{m.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}</button>
@@ -755,7 +755,7 @@ export function OrderDetail() {
             </div>
           </div>
           <Input label="NOTE (optional)" value={payNote} onChange={e => setPayNote(e.target.value)} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowPayment(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleAddPayment} disabled={!payAmount}>Save Payment</Button>
           </div>

@@ -117,7 +117,7 @@ export function PartnersPage() {
                 </div>
               </div>
 
-              <div className="flex gap-2" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6', flexWrap: 'wrap' }}>
+              <div className="flex gap-2" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
                 <Button variant="secondary" onClick={() => openTx(p.id, 'INVESTMENT')}><TrendingUp size={12} /> Invest</Button>
                 <Button variant="secondary" onClick={() => openTx(p.id, 'WITHDRAWAL')}><TrendingDown size={12} /> Withdraw</Button>
                 <Button variant="ghost" onClick={() => openTx(p.id, 'PROFIT_DISTRIBUTION')}><Gift size={12} /> Profit Share</Button>
@@ -127,7 +127,7 @@ export function PartnersPage() {
 
               {/* Recent transactions for this partner */}
               {transactions.filter(t => t.partnerId === p.id).slice(0, 4).length > 0 && (
-                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
                   <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>RECENT</span>
                   {transactions.filter(t => t.partnerId === p.id).slice(0, 4).map(t => (
                     <div key={t.id} className="flex justify-between items-center" style={{ padding: '4px 0', fontSize: 11 }}>
@@ -159,7 +159,7 @@ export function PartnersPage() {
             <Input label="EMAIL" value={partnerForm.email || ''} onChange={e => setPartnerForm({ ...partnerForm, email: e.target.value })} />
           </div>
           <Input label="PROFIT SHARE (%)" type="number" step="0.01" placeholder="0" value={partnerForm.sharePercentage ?? ''} onChange={e => setPartnerForm({ ...partnerForm, sharePercentage: parseFloat(e.target.value) || 0 })} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewPartner(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreatePartner} disabled={!partnerForm.name}>Create Partner</Button>
           </div>
@@ -183,7 +183,7 @@ export function PartnersPage() {
                 return (
                   <button key={m} onClick={() => setTxMethod(m)} className="cursor-pointer rounded"
                     style={{ padding: '8px 16px', fontSize: 13,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
@@ -192,7 +192,7 @@ export function PartnersPage() {
             </div>
           </div>
           <Input label="NOTES" placeholder="Optional" value={txNotes} onChange={e => setTxNotes(e.target.value)} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setTxModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={handleTx} disabled={!txAmount || parseFloat(txAmount) <= 0}>Confirm</Button>
           </div>
@@ -224,7 +224,7 @@ export function PartnersPage() {
                 <button key={String(v)} onClick={() => setEditForm({ ...editForm, active: v })}
                   className="cursor-pointer rounded"
                   style={{ padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${(editForm.active ?? true) === v ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${(editForm.active ?? true) === v ? '#0F0F10' : '#D5D9DE'}`,
                     color: (editForm.active ?? true) === v ? '#0F0F10' : '#6B7280',
                     background: (editForm.active ?? true) === v ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{v ? 'Active' : 'Inactive'}</button>
@@ -236,9 +236,9 @@ export function PartnersPage() {
             <textarea value={editForm.notes || ''}
               onChange={e => setEditForm({ ...editForm, notes: e.target.value })}
               rows={3}
-              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
+              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
-          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="danger" onClick={() => {
               if (editPartner && window.confirm(`Delete partner "${editPartner.name}"?`)) {
                 deletePartner(editPartner.id);

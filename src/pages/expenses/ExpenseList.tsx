@@ -102,7 +102,7 @@ export function ExpenseList() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 12, marginBottom: 24 }}>
         {CATEGORIES.map(c => (
           <div key={c.value} style={{
-            padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12,
+            padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12,
           }}>
             <span className="text-overline">{c.label}</span>
             <div className="font-display" style={{ fontSize: 18, color: '#0F0F10', marginTop: 4 }}>
@@ -124,7 +124,7 @@ export function ExpenseList() {
         <Card noPadding>
           <div style={{
             display: 'grid', gridTemplateColumns: '1fr 1.2fr 1fr 2fr 1fr 0.7fr 0.6fr',
-            gap: 14, padding: '12px 16px', borderBottom: '1px solid #E5E1D6',
+            gap: 14, padding: '12px 16px', borderBottom: '1px solid #E5E9EE',
           }}>
             {['NUMBER', 'DATE', 'CATEGORY', 'DESCRIPTION', 'AMOUNT', 'METHOD', ''].map(h => (
               <span key={h} className="text-overline">{h}</span>
@@ -165,7 +165,7 @@ export function ExpenseList() {
                   className="cursor-pointer rounded"
                   style={{
                     padding: '6px 12px', fontSize: 12,
-                    border: `1px solid ${form.category === c.value ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${form.category === c.value ? '#0F0F10' : '#D5D9DE'}`,
                     color: form.category === c.value ? '#0F0F10' : '#6B7280',
                     background: form.category === c.value ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{c.label}</button>
@@ -187,7 +187,7 @@ export function ExpenseList() {
                     className="cursor-pointer rounded"
                     style={{
                       padding: '8px 16px', fontSize: 13,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
@@ -197,7 +197,7 @@ export function ExpenseList() {
           </div>
           <Input label="DESCRIPTION" placeholder="e.g. April office rent"
             value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} disabled={!form.amount || form.amount <= 0}>Create Expense</Button>
           </div>
@@ -215,7 +215,7 @@ export function ExpenseList() {
                   className="cursor-pointer rounded"
                   style={{
                     padding: '6px 12px', fontSize: 12,
-                    border: `1px solid ${editForm.category === c.value ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${editForm.category === c.value ? '#0F0F10' : '#D5D9DE'}`,
                     color: editForm.category === c.value ? '#0F0F10' : '#6B7280',
                     background: editForm.category === c.value ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{c.label}</button>
@@ -237,7 +237,7 @@ export function ExpenseList() {
                     className="cursor-pointer rounded"
                     style={{
                       padding: '8px 16px', fontSize: 13,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
@@ -247,7 +247,7 @@ export function ExpenseList() {
           </div>
           <Input label="DESCRIPTION"
             value={editForm.description || ''} onChange={e => setEditForm({ ...editForm, description: e.target.value })} />
-          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="danger" onClick={() => {
               if (editId && window.confirm('Delete this expense?')) {
                 deleteExpense(editId);

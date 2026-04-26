@@ -253,10 +253,10 @@ export function CustomerDetail() {
         </div>
 
         {/* Profile Card */}
-        <div className="animate-fade-in" style={{ background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12, padding: '36px 40px', marginBottom: 32 }}>
+        <div className="animate-fade-in" style={{ background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12, padding: '36px 40px', marginBottom: 32 }}>
           <div className="flex items-start gap-6">
             <div className="flex items-center justify-center rounded-full shrink-0"
-              style={{ width: 72, height: 72, background: '#E5E1D6', border: customer.vipLevel >= 2 ? '2px solid #0F0F10' : '1px solid #D5D1C4', fontSize: 22, color: '#4B5563', fontFamily: 'var(--font-display)' }}>
+              style={{ width: 72, height: 72, background: '#E5E9EE', border: customer.vipLevel >= 2 ? '2px solid #0F0F10' : '1px solid #D5D9DE', fontSize: 22, color: '#4B5563', fontFamily: 'var(--font-display)' }}>
               {initials}
             </div>
             <div className="flex-1">
@@ -326,7 +326,7 @@ export function CustomerDetail() {
             return editing ? (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16, marginTop: 32 }}>
                 <Input label="LAST PURCHASE DATE" type="date" value={form.lastPurchaseAt || ''} onChange={e => setForm({ ...form, lastPurchaseAt: e.target.value })} />
-                <div style={{ padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 8 }}>
+                <div style={{ padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8 }}>
                   <span className="text-overline" style={{ display: 'block', marginBottom: 4 }}>LIVE STATS (READ-ONLY)</span>
                   <div style={{ fontSize: 12, color: '#4B5563', lineHeight: 1.6 }}>
                     Revenue {fmt(stats.revenue)} · Profit {fmt(stats.profit)} · Outstanding {fmt(stats.outstanding)} · Refund Payable {fmt(refundPayable)} BHD
@@ -339,7 +339,7 @@ export function CustomerDetail() {
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: refundPayable > 0 ? 'repeat(4, 1fr)' : 'repeat(3, 1fr)', gap: 16, marginTop: 32 }}>
                 {/* REVENUE — vertikal: Label oben, Wert mitte, Erklärung unten */}
-                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12 }}>
+                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
                   <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>REVENUE</span>
                   <div className="font-display" style={{ fontSize: 28, color: '#0F0F10', lineHeight: 1.1 }}>
                     {fmt(stats.revenue)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span>
@@ -351,7 +351,7 @@ export function CustomerDetail() {
                 </div>
 
                 {/* PROFIT — vertikal */}
-                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12 }}>
+                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
                   <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>PROFIT</span>
                   <div className="font-display" style={{ fontSize: 28, color: stats.profit >= 0 ? '#7EAA6E' : '#AA6E6E', lineHeight: 1.1 }}>
                     {fmt(stats.profit)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span>
@@ -363,7 +363,7 @@ export function CustomerDetail() {
                 </div>
 
                 {/* OUTSTANDING — vertikal */}
-                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 12 }}>
+                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
                   <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>OUTSTANDING</span>
                   <div className="font-display" style={{ fontSize: 28, color: stats.outstanding > 0 ? '#AA6E6E' : '#6B7280', lineHeight: 1.1 }}>
                     {fmt(stats.outstanding)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span>
@@ -463,7 +463,7 @@ export function CustomerDetail() {
                             }}
                             className="cursor-pointer" style={{
                               padding: '3px 8px', fontSize: 11, borderRadius: 999,
-                              border: `1px solid ${sel ? '#0F0F10' : '#D5D1C4'}`,
+                              border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
                               color: sel ? '#0F0F10' : '#6B7280',
                               background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
                             }}>{brand}</button>
@@ -476,7 +476,7 @@ export function CustomerDetail() {
                     <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
                     <textarea value={form.notes || ''} onChange={e => setForm({ ...form, notes: e.target.value })}
                       className="w-full outline-none" rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }} />
+                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }} />
                   </div>
                   {perm.canDeleteCustomers && (
                     <Button variant="danger" onClick={() => setConfirmDelete(true)} style={{ marginTop: 8 }}>
@@ -495,7 +495,7 @@ export function CustomerDetail() {
                     { label: 'Last Contact', value: customer.lastContactAt },
                     { label: 'Last Purchase', value: customer.lastPurchaseAt },
                   ].filter(i => i.value).map(item => (
-                    <div key={item.label} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+                    <div key={item.label} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                       <span style={{ fontSize: 13, color: '#6B7280' }}>{item.label}</span>
                       <span style={{ fontSize: 13, color: '#0F0F10' }}>{item.value}</span>
                     </div>
@@ -505,7 +505,7 @@ export function CustomerDetail() {
                       <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 8 }}>Preferences</span>
                       <div className="flex flex-wrap gap-2">
                         {customer.preferences.map(p => (
-                          <span key={p} style={{ padding: '4px 12px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D1C4', color: '#0F0F10' }}>{p}</span>
+                          <span key={p} style={{ padding: '4px 12px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#0F0F10' }}>{p}</span>
                         ))}
                       </div>
                     </div>

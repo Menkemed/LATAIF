@@ -13,14 +13,15 @@ export function Card({ children, className = '', hoverable = false, onClick, noP
 
   return (
     <div
-      className={`rounded-lg transition-all duration-300 ${className}`}
+      className={`transition-all duration-200 ${className}`}
       style={{
         background: '#FFFFFF',
-        border: `1px solid ${hovered && hoverable ? '#D5D1C4' : '#E5E1D6'}`,
-        padding: noPadding ? 0 : 24,
+        border: '1px solid #E5E9EE',
+        borderRadius: 16,
+        padding: noPadding ? 0 : 22,
         cursor: hoverable ? 'pointer' : undefined,
-        transform: hovered && hoverable ? 'translateY(-1px)' : 'translateY(0)',
-        boxShadow: hovered && hoverable ? '0 0 20px rgba(198,163,109,0.04)' : 'none',
+        transform: hovered && hoverable ? 'translateY(-2px)' : 'translateY(0)',
+        boxShadow: hovered && hoverable ? '0 8px 24px rgba(15,15,16,0.06)' : 'none',
         overflow: 'hidden',
       }}
       onClick={onClick}

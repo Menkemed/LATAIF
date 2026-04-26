@@ -6,59 +6,92 @@ interface KPICardProps {
   unit?: string;
   trend?: number;
   icon?: ReactNode;
-  accent?: 'lime' | 'mint' | 'none' | 'urgent';
+  accent?: 'blue' | 'purple' | 'green' | 'orange' | 'urgent' | 'none';
   onClick?: () => void;
 }
 
+// Plan §Design v2 — moderner SaaS-Look:
+// - Weiß-Card mit dezentem Border
+// - Icon links oben in farbiger Box
+// - Große Zahl mit kleiner Decimal/Unit
+// - Trend-Pill (grün hoch / rot runter) wenn trend gegeben
 export function KPICard({ label, value, unit, trend, icon, accent = 'none', onClick }: KPICardProps) {
-  const formatted = typeof value === 'number'
-    ? value.toLocaleString('en-US', { maximumFractionDigits: 0 })
-    : value;
+  // Zahl formatieren mit Decimal-Differenzierung (5,567.00 → 5,567 + .00)
+  const numString = typeof value === 'number'
+    ? value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+    : String(value);
 
-  const bg = accent === 'lime' ? '#E9FF5E'
-    : accent === 'mint' ? '#C4E3EC'
-    : accent === 'urgent' ? 'rgba(220,38,38,0.06)'
-    : '#FFFFFF';
-  const border = accent === 'urgent' ? '1px solid rgba(220,38,38,0.3)'
-    : accent === 'none' ? '1px solid #E5E1D6'
-    : 'none';
+  const accentColors: Record<string, { bg: string; fg: string }> = {
+    blue:    { bg: 'rgba(61,127,255,0.10)',  fg: '#3D7FFF' },
+    purple:  { bg: 'rgba(113,93,227,0.10)',  fg: '#715DE3' },
+    green:   { bg: 'rgba(22,163,74,0.10)',   fg: '#16A34A' },
+    orange:  { bg: 'rgba(255,135,48,0.10)',  fg: '#FF8730' },
+    urgent:  { bg: 'rgba(220,38,38,0.10)',   fg: '#DC2626' },
+    none:    { bg: '#F2F7FA',                fg: '#6B7280' },
+  };
+  const ac = accentColors[accent];
+
+  const trendDisplay = trend !== undefined && (
+    <span
+      className={trend >= 0 ? 'trend-pill trend-pill-up' : 'trend-pill trend-pill-down'}
+    >
+      {trend >= 0 ? '↑' : '↓'} {Math.abs(trend).toFixed(1)}%
+    </span>
+  );
 
   return (
     <div
-      className={`rounded-[28px] transition-all duration-300 ${onClick ? 'cursor-pointer' : ''}`}
+      className={`cx-card ${onClick ? 'cursor-pointer' : ''}`}
       style={{
-        background: bg,
-        border,
-        padding: '28px 28px 24px',
+        background: '#FFFFFF',
+        border: accent === 'urgent' ? '1px solid rgba(220,38,38,0.25)' : '1px solid #E5E9EE',
+        borderRadius: 20,
+        padding: '20px 22px',
+        transition: 'all 0.2s',
       }}
       onClick={onClick}
       onMouseEnter={e => {
-        if (accent === 'none') e.currentTarget.style.borderColor = '#D5D1C4';
-        e.currentTarget.style.transform = 'translateY(-1px)';
+        if (onClick) {
+          e.currentTarget.style.transform = 'translateY(-2px)';
+          e.currentTarget.style.boxShadow = '0 6px 20px rgba(15,15,16,0.06)';
+        }
       }}
       onMouseLeave={e => {
-        if (accent === 'none') e.currentTarget.style.borderColor = '#E5E1D6';
         e.currentTarget.style.transform = 'translateY(0)';
+        e.currentTarget.style.boxShadow = 'none';
       }}
     >
-      <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
-        <span className="text-overline">{label}</span>
-        {icon && <span style={{ color: '#6B7280' }}>{icon}</span>}
+      {/* Icon + Label-Reihe */}
+      <div className="flex items-center gap-2" style={{ marginBottom: 14 }}>
+        {icon && (
+          <div style={{
+            width: 32, height: 32, borderRadius: 10,
+            background: ac.bg, color: ac.fg,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            {icon}
+          </div>
+        )}
+        <span style={{
+          fontSize: 12, fontWeight: 500, color: '#6B7280',
+          letterSpacing: '0.02em',
+        }}>{label}</span>
       </div>
 
-      <div className="font-display" style={{ fontSize: 38, lineHeight: '44px', letterSpacing: '-0.02em', color: '#0F0F10' }}>
-        {formatted}
+      {/* Große Zahl + Trend */}
+      <div className="flex items-end justify-between" style={{ marginBottom: unit ? 4 : 0, gap: 8 }}>
+        <div style={{
+          fontFamily: 'Inter, sans-serif',
+          fontSize: 32, fontWeight: 600, letterSpacing: '-0.025em',
+          color: '#0F0F10', lineHeight: 1.1,
+        }}>
+          {numString}
+        </div>
+        {trendDisplay}
       </div>
 
       {unit && (
-        <span style={{ fontSize: 12, color: '#4B5563', display: 'block', marginTop: 4 }}>{unit}</span>
-      )}
-
-      {trend !== undefined && (
-        <div className="flex items-center gap-1" style={{ marginTop: 14, fontSize: 13, color: trend >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-          <span>{trend >= 0 ? '\u2191' : '\u2193'}</span>
-          <span>{Math.abs(trend)}%</span>
-        </div>
+        <span style={{ fontSize: 12, color: '#6B7280', display: 'block' }}>{unit}</span>
       )}
     </div>
   );

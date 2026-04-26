@@ -365,8 +365,8 @@ export function ImportPage() {
               className="rounded-xl flex flex-col items-center justify-center cursor-pointer transition-all duration-300"
               style={{
                 height: 300,
-                border: `2px dashed ${dragOver ? '#0F0F10' : '#D5D1C4'}`,
-                background: dragOver ? 'rgba(198,163,109,0.04)' : '#EFECE2',
+                border: `2px dashed ${dragOver ? '#0F0F10' : '#D5D9DE'}`,
+                background: dragOver ? 'rgba(198,163,109,0.04)' : '#F2F7FA',
               }}
               onDragOver={e => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
@@ -383,7 +383,7 @@ export function ImportPage() {
             </div>
             <input id="file-input" type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleFileInput} />
 
-            <div style={{ marginTop: 24, padding: '16px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ marginTop: 24, padding: '16px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <span className="text-overline" style={{ marginBottom: 8 }}>EXPECTED COLUMNS</span>
               <p style={{ fontSize: 12, color: '#6B7280', marginTop: 8, lineHeight: 1.8 }}>
                 Category, Serial Tag / SKU, Brand, Model / Reference, Serial, Description 1, Description 2, Description 3, Size, Metal / Material, Cost / Purchase Price, Tag Price / Sale Price, <strong style={{ color: '#AA956E' }}>Qty / Quantity</strong>, Sold / Status
@@ -429,7 +429,7 @@ export function ImportPage() {
             </div>
 
             {/* Default Category (fallback when not in Excel) */}
-            <div style={{ marginBottom: 12, padding: '14px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ marginBottom: 12, padding: '14px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
                 <span className="text-overline">DEFAULT CATEGORY (for rows without category)</span>
                 {rawRows.length > 0 && (
@@ -452,7 +452,7 @@ export function ImportPage() {
                     className="cursor-pointer rounded-lg transition-all duration-200"
                     style={{
                       padding: '6px 14px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6,
-                      border: `1px solid ${defaultCategoryId === cat.id ? cat.color : '#D5D1C4'}`,
+                      border: `1px solid ${defaultCategoryId === cat.id ? cat.color : '#D5D9DE'}`,
                       color: defaultCategoryId === cat.id ? cat.color : '#6B7280',
                       background: defaultCategoryId === cat.id ? cat.color + '08' : 'transparent',
                     }}>
@@ -465,7 +465,7 @@ export function ImportPage() {
 
             {/* Detected categories breakdown */}
             {rawRows.length > 0 && (
-              <div style={{ marginBottom: 16, padding: '10px 14px', background: '#EFECE2', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+              <div style={{ marginBottom: 16, padding: '10px 14px', background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                 <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 6 }}>Detected categories in this file</span>
                 <div className="flex flex-wrap gap-2">
                   {Object.entries(
@@ -504,7 +504,7 @@ export function ImportPage() {
             <div style={{ overflowX: 'auto', marginBottom: 24 }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
-                  <tr style={{ borderBottom: '1px solid #E5E1D6' }}>
+                  <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
                     {['', 'Category', 'SKU', 'Brand', 'Name', 'Desc 2/3', 'Ref', 'Serial', 'Metal', 'Size', 'Qty', 'Cost', 'Tag Price', 'Status'].map(h => (
                       <th key={h} className="text-overline" style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>{h}</th>
                     ))}
@@ -538,7 +538,7 @@ export function ImportPage() {
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#4B5563' }}>{fmt(m.purchasePrice)}</td>
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#0F0F10' }}>{fmt(m.plannedSalePrice)}</td>
                       <td style={{ padding: '8px 10px' }}>
-                        {m.isSold && <span style={{ fontSize: 10, color: '#6B7280', background: '#E5E1D6', padding: '1px 6px', borderRadius: 3 }}>Sold</span>}
+                        {m.isSold && <span style={{ fontSize: 10, color: '#6B7280', background: '#E5E9EE', padding: '1px 6px', borderRadius: 3 }}>Sold</span>}
                       </td>
                     </tr>
                   ))}
@@ -550,7 +550,7 @@ export function ImportPage() {
             </div>
 
             {/* Actions */}
-            <div className="flex items-center justify-between" style={{ padding: '20px 0', borderTop: '1px solid #E5E1D6' }}>
+            <div className="flex items-center justify-between" style={{ padding: '20px 0', borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => { setStep('upload'); setRawRows([]); }}>Cancel</Button>
               <div className="flex items-center gap-3">
                 <span style={{ fontSize: 13, color: '#6B7280' }}>
@@ -596,7 +596,7 @@ export function ImportPage() {
         <Modal open={showErrors} onClose={() => setShowErrors(false)} title="Import Issues" width={600}>
           <div style={{ maxHeight: 400, overflowY: 'auto' }}>
             {mapped.filter(m => !m.valid).map((m, i) => (
-              <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid #E5E1D6', fontSize: 12 }}>
+              <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
                 <span style={{ color: '#0F0F10' }}>{m.sku || m.brand || `Row ${i + 1}`}</span>
                 <span style={{ color: '#AA6E6E', marginLeft: 12 }}>{m.error}</span>
               </div>

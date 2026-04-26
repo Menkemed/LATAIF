@@ -73,9 +73,9 @@ function exportProductsToExcel(items: Product[], categories: Category[]) {
       h2 { color: #0F0F10; margin: 0 0 4px; font-family: Georgia, serif; }
       .meta { color: #6B7280; font-size: 11px; margin-bottom: 16px; }
       table { border-collapse: collapse; width: 100%; }
-      th { background: #EFECE2; color: #0F0F10; font-weight: 600; padding: 8px 10px; text-align: left;
+      th { background: #F2F7FA; color: #0F0F10; font-weight: 600; padding: 8px 10px; text-align: left;
            border: 1px solid #C6A36D; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
-      td { border: 1px solid #D5D1C4; padding: 6px 10px; font-size: 12px; }
+      td { border: 1px solid #D5D9DE; padding: 6px 10px; font-size: 12px; }
       tr:nth-child(even) td { background: #FAF8F1; }
       .num { text-align: right; mso-number-format: "#,##0.000"; }
       .total td { background: #0F0F10; color: #FFFFFF; font-weight: 600; }
@@ -240,7 +240,7 @@ export function WatchList() {
             return (
               <Card key={p.id} hoverable noPadding onClick={() => navigate(`/collection/${p.id}`)}>
                 <div className="flex items-center justify-center relative"
-                  style={{ height: 180, background: '#EFECE2', borderBottom: '1px solid #E5E1D6', overflow: 'hidden' }}>
+                  style={{ height: 180, background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', overflow: 'hidden' }}>
                   {p.images.length > 0 ? (
                     <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   ) : (
@@ -254,7 +254,7 @@ export function WatchList() {
                   )}
                   <span className="absolute" style={{
                     top: 12, right: 12, fontSize: 10, color: '#6B7280',
-                    border: '1px solid #D5D1C4', padding: '2px 8px', borderRadius: 999,
+                    border: '1px solid #D5D9DE', padding: '2px 8px', borderRadius: 999,
                   }}>{p.taxScheme === 'MARGIN' ? 'Margin' : p.taxScheme === 'VAT_10' ? 'Standard VAT' : 'Exempt'}</span>
                 </div>
                 <div style={{ padding: '18px 22px 22px' }}>
@@ -306,7 +306,7 @@ export function WatchList() {
                   className="cursor-pointer rounded-lg transition-all duration-200"
                   style={{
                     padding: '10px 18px', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8,
-                    border: `1px solid ${form.categoryId === cat.id ? cat.color : '#D5D1C4'}`,
+                    border: `1px solid ${form.categoryId === cat.id ? cat.color : '#D5D9DE'}`,
                     color: form.categoryId === cat.id ? cat.color : '#6B7280',
                     background: form.categoryId === cat.id ? cat.color + '08' : 'transparent',
                   }}>
@@ -330,7 +330,7 @@ export function WatchList() {
 
           {/* Dynamic Attributes from Category */}
           {selectedCat && selectedCat.attributes.length > 0 && (
-            <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+            <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
                 {selectedCat.attributes.map(attr => {
@@ -344,7 +344,7 @@ export function WatchList() {
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 999,
-                                border: `1px solid ${form.attributes?.[attr.key] === opt ? '#0F0F10' : '#D5D1C4'}`,
+                                border: `1px solid ${form.attributes?.[attr.key] === opt ? '#0F0F10' : '#D5D9DE'}`,
                                 color: form.attributes?.[attr.key] === opt ? '#0F0F10' : '#6B7280',
                                 background: form.attributes?.[attr.key] === opt ? 'rgba(15,15,16,0.06)' : 'transparent',
                               }}>{opt}</button>
@@ -378,7 +378,7 @@ export function WatchList() {
                     className="cursor-pointer rounded transition-all duration-200"
                     style={{
                       padding: '7px 14px', fontSize: 12,
-                      border: `1px solid ${form.condition === cond ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${form.condition === cond ? '#0F0F10' : '#D5D9DE'}`,
                       color: form.condition === cond ? '#0F0F10' : '#6B7280',
                       background: form.condition === cond ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{cond}</button>
@@ -403,7 +403,7 @@ export function WatchList() {
                       className="cursor-pointer transition-all duration-200"
                       style={{
                         padding: '5px 12px', fontSize: 11, borderRadius: 999,
-                        border: `1px solid ${sel ? '#0F0F10' : '#D5D1C4'}`,
+                        border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
                         color: sel ? '#0F0F10' : '#6B7280',
                         background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
                       }}>{item}</button>
@@ -415,7 +415,7 @@ export function WatchList() {
 
           {/* Plan §Product §4: AI-Identify füllt alle Kategorie-Felder für ALLE Kategorien aus. */}
           {form.categoryId && (
-            <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+            <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
                 <div>
                   <span className="text-overline">AI IDENTIFY &amp; RESEARCH</span>
@@ -481,7 +481,7 @@ export function WatchList() {
           )}
 
           {/* Images */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
               <span className="text-overline">PHOTOS</span>
               <span style={{ fontSize: 11, color: '#6B7280' }}>Add at least one photo for best AI results</span>
@@ -492,7 +492,7 @@ export function WatchList() {
           </div>
 
           {/* Pricing */}
-          <div style={{ borderTop: '1px solid #E5E1D6', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>PRICING</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
               <Input label="PURCHASE PRICE (BHD)" type="number" placeholder="0" value={form.purchasePrice || ''} onChange={e => setForm({ ...form, purchasePrice: Number(e.target.value) || 0 })} />
@@ -502,7 +502,7 @@ export function WatchList() {
             </div>
             {form.purchasePrice && form.plannedSalePrice && (
               <div className="rounded font-mono" style={{
-                marginTop: 12, padding: 12, background: '#EFECE2', border: '1px solid #E5E1D6',
+                marginTop: 12, padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
                 fontSize: 13, display: 'flex', justifyContent: 'space-between',
               }}>
                 <span style={{ color: '#6B7280' }}>Expected Margin</span>
@@ -522,7 +522,7 @@ export function WatchList() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${form.taxScheme === scheme ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${form.taxScheme === scheme ? '#0F0F10' : '#D5D9DE'}`,
                     color: form.taxScheme === scheme ? '#0F0F10' : '#6B7280',
                     background: form.taxScheme === scheme ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{scheme === 'MARGIN' ? 'Margin' : scheme === 'VAT_10' ? 'VAT 10%' : 'Zero'}</button>
@@ -548,7 +548,7 @@ export function WatchList() {
                       className="cursor-pointer rounded transition-all duration-200"
                       style={{
                         padding: '7px 14px', fontSize: 12,
-                        border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                         color: active ? '#0F0F10' : '#6B7280',
                         background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                       }}>{label}</button>
@@ -559,7 +559,7 @@ export function WatchList() {
           </div>
           {form.paidFrom && form.purchasePrice ? (
             <div className="rounded font-mono" style={{
-              padding: 12, background: '#EFECE2', border: '1px solid #E5E1D6',
+              padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
               fontSize: 12, color: '#6B7280', display: 'flex', justifyContent: 'space-between',
             }}>
               <span>Will deduct from {form.paidFrom === 'cash' ? 'Cash' : 'Bank'}</span>
@@ -567,7 +567,7 @@ export function WatchList() {
             </div>
           ) : null}
 
-          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}>Add to Collection</Button>
           </div>

@@ -192,7 +192,7 @@ export function RepairDetail() {
 
   function renderField(label: string, value: React.ReactNode, editField?: React.ReactNode) {
     return (
-      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
         <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
         {editing && editField ? editField : <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>}
       </div>
@@ -259,7 +259,7 @@ export function RepairDetail() {
           <div>
             {/* Voucher Code - prominent display */}
             <div className="rounded-xl flex flex-col items-center justify-center"
-              style={{ height: 220, background: '#EFECE2', border: '1px solid #E5E1D6', marginBottom: 24 }}>
+              style={{ height: 220, background: '#F2F7FA', border: '1px solid #E5E9EE', marginBottom: 24 }}>
               <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 12 }}>Pickup Voucher Code</span>
               <span className="font-mono" style={{ fontSize: 48, color: '#0F0F10', letterSpacing: '0.15em', fontWeight: 600 }}>
                 {repair.voucherCode}
@@ -268,7 +268,7 @@ export function RepairDetail() {
             </div>
 
             {/* Status Timeline */}
-            <div style={{ padding: '16px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ padding: '16px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>STATUS FLOW</span>
               <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
                 {(() => {
@@ -291,7 +291,7 @@ export function RepairDetail() {
                           {STATUS_LABELS[s] || s}
                         </span>
                         {i < flow.length - 1 && (
-                          <span style={{ color: isActive ? '#6B7280' : '#D5D1C4', fontSize: 10 }}>&#8250;</span>
+                          <span style={{ color: isActive ? '#6B7280' : '#D5D9DE', fontSize: 10 }}>&#8250;</span>
                         )}
                       </div>
                     );
@@ -320,7 +320,7 @@ export function RepairDetail() {
             </div>
 
             {/* Customer */}
-            <div style={{ marginTop: 20, borderTop: '1px solid #E5E1D6', paddingTop: 16 }}>
+            <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
               <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>CUSTOMER</span>
               <span style={{ fontSize: 15, color: '#0F0F10' }}>
                 {customer ? `${customer.firstName} ${customer.lastName}` : repair.customerId}
@@ -331,7 +331,7 @@ export function RepairDetail() {
             </div>
 
             {/* Costs */}
-            <div style={{ marginTop: 20, borderTop: '1px solid #E5E1D6', paddingTop: 16 }}>
+            <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <Input label="ESTIMATED COST (BHD)" type="number" value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
@@ -347,7 +347,7 @@ export function RepairDetail() {
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, internalPaidFrom: o })}
                             className="cursor-pointer rounded transition-all"
                             style={{ padding: '7px 14px', fontSize: 12,
-                              border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                              border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                               color: active ? '#0F0F10' : '#6B7280',
                               background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                             }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : 'Bank'}</button>
@@ -364,7 +364,7 @@ export function RepairDetail() {
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, customerPaidFrom: o })}
                             className="cursor-pointer rounded transition-all"
                             style={{ padding: '7px 14px', fontSize: 12,
-                              border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                              border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                               color: active ? '#0F0F10' : '#6B7280',
                               background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                             }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : 'Bank'}</button>
@@ -455,7 +455,7 @@ export function RepairDetail() {
                       onChange={e => setForm({ ...form, diagnosis: e.target.value || undefined })}
                       className="w-full outline-none transition-colors duration-300"
                       rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
+                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
                     />
                   </div>
                   <div>
@@ -465,7 +465,7 @@ export function RepairDetail() {
                       onChange={e => setForm({ ...form, notes: e.target.value || undefined })}
                       className="w-full outline-none transition-colors duration-300"
                       rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
+                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
                     />
                   </div>
                 </div>
@@ -519,7 +519,7 @@ export function RepairDetail() {
 
               {/* Linked Product */}
               {product && (
-                <div style={{ marginTop: 20, padding: '12px 14px', background: '#EFECE2', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+                <div style={{ marginTop: 20, padding: '12px 14px', background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                   <div className="flex items-center justify-between">
                     <div>
                       <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>Linked Product</span>

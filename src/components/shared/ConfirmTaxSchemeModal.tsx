@@ -56,7 +56,7 @@ export function ConfirmTaxSchemeModal({
       padding: '6px 12px',
       fontSize: 12,
       borderRadius: 6,
-      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
       color: active ? '#0F0F10' : '#6B7280',
       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
       cursor: 'pointer',
@@ -70,7 +70,7 @@ export function ConfirmTaxSchemeModal({
       </p>
 
       {/* Bulk apply */}
-      <div style={{ marginBottom: 16, padding: '10px 12px', background: '#EFECE2', border: '1px solid #E5E1D6', borderRadius: 8 }}>
+      <div style={{ marginBottom: 16, padding: '10px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8 }}>
         <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>APPLY TO ALL LINES</span>
         <div className="flex gap-2" style={{ marginTop: 8, flexWrap: 'wrap' }}>
           {SCHEMES.map(s => (
@@ -85,11 +85,11 @@ export function ConfirmTaxSchemeModal({
       </div>
 
       {/* Per-line */}
-      <div style={{ maxHeight: '45vh', overflowY: 'auto', border: '1px solid #E5E1D6', borderRadius: 8 }}>
+      <div style={{ maxHeight: '45vh', overflowY: 'auto', border: '1px solid #E5E9EE', borderRadius: 8 }}>
         {lines.map((line, idx) => (
           <div key={line.id} style={{
             padding: '12px 14px',
-            borderBottom: idx < lines.length - 1 ? '1px solid #E5E1D6' : 'none',
+            borderBottom: idx < lines.length - 1 ? '1px solid #E5E9EE' : 'none',
             display: 'flex', alignItems: 'center', gap: 12,
           }}>
             <span style={{ flex: 1, fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -112,7 +112,7 @@ export function ConfirmTaxSchemeModal({
         )}
       </div>
 
-      <div className="flex justify-end gap-3" style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+      <div className="flex justify-end gap-3" style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
         <Button variant="primary" onClick={() => onConfirm(schemes)} disabled={lines.length === 0}>{confirmLabel}</Button>
       </div>

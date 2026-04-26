@@ -19,7 +19,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
           className="w-full outline-none transition-colors duration-300"
           style={{
             background: 'transparent',
-            borderBottom: `1px solid ${error ? '#AA6E6E' : focused ? '#0F0F10' : '#D5D1C4'}`,
+            borderBottom: `1px solid ${error ? '#AA6E6E' : focused ? '#0F0F10' : '#D5D9DE'}`,
             padding: '10px 0',
             fontSize: 14,
             color: '#0F0F10',

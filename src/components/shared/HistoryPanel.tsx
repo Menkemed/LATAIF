@@ -48,10 +48,10 @@ export function HistoryPanel({ entityType, entityId, title = 'History', onClose 
   return (
     <div style={{
       position: 'fixed', right: 0, top: 0, bottom: 0, width: 480, zIndex: 9998,
-      background: '#FFFFFF', borderLeft: '1px solid #E5E1D6',
+      background: '#FFFFFF', borderLeft: '1px solid #E5E9EE',
       display: 'flex', flexDirection: 'column',
     }}>
-      <div className="flex items-center justify-between" style={{ padding: '20px 24px', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="flex items-center justify-between" style={{ padding: '20px 24px', borderBottom: '1px solid #E5E9EE' }}>
         <div className="flex items-center gap-2">
           <HistoryIcon size={16} style={{ color: '#0F0F10' }} />
           <h3 style={{ fontSize: 16, color: '#0F0F10', fontWeight: 500 }}>{title}</h3>
@@ -73,7 +73,7 @@ export function HistoryPanel({ entityType, entityId, title = 'History', onClose 
           entries.map(e => (
             <div key={e.id} style={{
               padding: '12px 14px', marginBottom: 10,
-              background: '#EFECE2', border: '1px solid #E5E1D6', borderRadius: 8,
+              background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8,
             }}>
               <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
                 <span style={{

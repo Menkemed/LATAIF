@@ -37,7 +37,7 @@ export function Modal({ open, onClose, title, children, width = 520 }: ModalProp
           maxWidth: 'calc(100vw - 48px)',
           maxHeight: 'calc(100vh - 80px)',
           background: '#FFFFFF',
-          border: '1px solid #E5E1D6',
+          border: '1px solid #E5E9EE',
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
@@ -46,7 +46,7 @@ export function Modal({ open, onClose, title, children, width = 520 }: ModalProp
         {title && (
           <div
             className="flex items-center justify-between shrink-0"
-            style={{ padding: '20px 24px', borderBottom: '1px solid #E5E1D6' }}
+            style={{ padding: '20px 24px', borderBottom: '1px solid #E5E9EE' }}
           >
             <h2 style={{ fontSize: 17, fontWeight: 500, color: '#0F0F10' }}>{title}</h2>
             <button

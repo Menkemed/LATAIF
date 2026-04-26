@@ -63,7 +63,7 @@ export function CustomerList() {
         <span className="text-overline" style={{ textAlign: 'right' }}>OUTSTANDING</span>
       </div>
 
-      <div style={{ borderTop: '1px solid #E5E1D6' }} />
+      <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
       {filtered.length === 0 && (
         <div style={{ padding: '64px 0', textAlign: 'center', fontSize: 14, color: '#6B7280' }}>
@@ -92,7 +92,7 @@ export function CustomerList() {
             <div className="flex items-center gap-3">
               <div
                 className="flex items-center justify-center rounded-full shrink-0"
-                style={{ width: 36, height: 36, background: '#E5E1D6', border: '1px solid #D5D1C4', fontSize: 11, color: '#4B5563', fontWeight: 500 }}
+                style={{ width: 36, height: 36, background: '#E5E9EE', border: '1px solid #D5D9DE', fontSize: 11, color: '#4B5563', fontWeight: 500 }}
               >
                 {c.firstName[0]}{c.lastName[0]}
               </div>
@@ -159,7 +159,7 @@ export function CustomerList() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '8px 16px', fontSize: 13,
-                    border: `1px solid ${form.vipLevel === level ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${form.vipLevel === level ? '#0F0F10' : '#D5D9DE'}`,
                     color: form.vipLevel === level ? '#0F0F10' : '#6B7280',
                     background: form.vipLevel === level ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}
@@ -186,7 +186,7 @@ export function CustomerList() {
                     className="cursor-pointer transition-all duration-200"
                     style={{
                       padding: '6px 14px', fontSize: 12, borderRadius: 999,
-                      border: `1px solid ${selected ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${selected ? '#0F0F10' : '#D5D9DE'}`,
                       color: selected ? '#0F0F10' : '#6B7280',
                       background: selected ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}
@@ -198,7 +198,7 @@ export function CustomerList() {
             </div>
           </div>
 
-          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}>Create Client</Button>
           </div>

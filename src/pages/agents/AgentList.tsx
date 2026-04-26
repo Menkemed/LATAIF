@@ -79,7 +79,7 @@ export function AgentList() {
             className="cursor-pointer transition-all duration-200"
             style={{
               padding: '8px 20px', fontSize: 13, borderRadius: 6,
-              border: 'none', background: tab === t ? '#E5E1D6' : 'transparent',
+              border: 'none', background: tab === t ? '#E5E9EE' : 'transparent',
               color: tab === t ? '#0F0F10' : '#6B7280',
             }}>{t === 'agents' ? 'Approvals' : 'Transfers'}</button>
         ))}
@@ -125,7 +125,7 @@ export function AgentList() {
                 </div>
                 {agent.company && <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>{agent.company}</p>}
                 {agent.phone && <p style={{ fontSize: 12, color: '#4B5563', marginBottom: 4 }}>{agent.phone}</p>}
-                <div style={{ borderTop: '1px solid #E5E1D6', marginTop: 12, paddingTop: 12 }}>
+                <div style={{ borderTop: '1px solid #E5E9EE', marginTop: 12, paddingTop: 12 }}>
                   <div className="flex justify-between" style={{ fontSize: 12, marginBottom: 4 }}>
                     <span style={{ color: '#6B7280' }}>Commission Rate</span>
                     <span style={{ color: '#0F0F10' }}>{agent.commissionRate}%</span>
@@ -135,7 +135,7 @@ export function AgentList() {
                     <span style={{ color: '#0F0F10' }}>{activeTransfers.length}</span>
                   </div>
                 </div>
-                <div style={{ borderTop: '1px solid #E5E1D6', marginTop: 10, paddingTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <div style={{ borderTop: '1px solid #E5E9EE', marginTop: 10, paddingTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                   <div>
                     <div style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Total Given</div>
                     <div className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(totalGiven)} BHD</div>
@@ -177,7 +177,7 @@ export function AgentList() {
               <span key={h} className="text-overline">{h}</span>
             ))}
           </div>
-          <div style={{ borderTop: '1px solid #E5E1D6' }} />
+          <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
           {filteredTransfers.length === 0 && (
             <div style={{ padding: '48px 0', textAlign: 'center', fontSize: 13, color: '#6B7280' }}>No transfers found.</div>
@@ -226,11 +226,11 @@ export function AgentList() {
                     </button>
                   )}
                   <button onClick={() => { setEditTransfer(t); setEditTransferForm({ ...t }); }}
-                    className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D1C4', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
+                    className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
                     Edit
                   </button>
                   <button onClick={() => setHistoryTransferId(t.id)}
-                    className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D1C4', color: '#6B7280', borderRadius: 4, background: 'none' }}>
+                    className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', borderRadius: 4, background: 'none' }}>
                     History
                   </button>
                 </div>
@@ -250,7 +250,7 @@ export function AgentList() {
             <Input label="COMMISSION %" type="number" value={agentForm.commissionRate || ''} onChange={e => setAgentForm({ ...agentForm, commissionRate: Number(e.target.value) })} />
           </div>
           <Input label="EMAIL" placeholder="email" value={agentForm.email || ''} onChange={e => setAgentForm({ ...agentForm, email: e.target.value })} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewAgent(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateAgent}>Create Approval</Button>
           </div>
@@ -268,7 +268,7 @@ export function AgentList() {
                 <button key={a.id} onClick={() => setTransferForm({ ...transferForm, agentId: a.id, commissionRate: a.commissionRate })}
                   className="cursor-pointer rounded transition-all" style={{
                     padding: '6px 14px', fontSize: 12,
-                    border: `1px solid ${transferForm.agentId === a.id ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${transferForm.agentId === a.id ? '#0F0F10' : '#D5D9DE'}`,
                     color: transferForm.agentId === a.id ? '#0F0F10' : '#6B7280',
                     background: transferForm.agentId === a.id ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{a.name}</button>
@@ -303,7 +303,7 @@ export function AgentList() {
                   <button key={t} type="button" onClick={() => setTransferForm({ ...transferForm, commissionType: t })}
                     className="cursor-pointer rounded transition-all"
                     style={{ padding: '7px 14px', fontSize: 12,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{t === 'percent' ? 'Percent of sale' : 'Fixed per item'}</button>
@@ -320,7 +320,7 @@ export function AgentList() {
             )}
           </div>
           <Input label="RETURN BY (DATE)" type="date" value={transferForm.returnBy || ''} onChange={e => setTransferForm({ ...transferForm, returnBy: e.target.value })} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewTransfer(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateTransfer}>Transfer Item</Button>
           </div>
@@ -362,7 +362,7 @@ export function AgentList() {
                 <button key={String(o.id)} onClick={() => setSettlePartial(o.id)}
                   className="cursor-pointer rounded"
                   style={{ padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${settlePartial === o.id ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${settlePartial === o.id ? '#0F0F10' : '#D5D9DE'}`,
                     color: settlePartial === o.id ? '#0F0F10' : '#6B7280',
                     background: settlePartial === o.id ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{o.label}</button>
@@ -380,14 +380,14 @@ export function AgentList() {
                 <button key={m} onClick={() => setSettleMethod(m)}
                   className="cursor-pointer rounded transition-all"
                   style={{ padding: '8px 16px', fontSize: 13,
-                    border: `1px solid ${settleMethod === m ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${settleMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: settleMethod === m ? '#0F0F10' : '#6B7280',
                     background: settleMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
               ))}
             </div>
           </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSettleModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={() => {
               if (!settleModal) return;
@@ -420,7 +420,7 @@ export function AgentList() {
                   <button key={String(v)} onClick={() => setEditAgentForm({ ...editAgentForm, active: v })}
                     className="cursor-pointer rounded"
                     style={{ padding: '7px 14px', fontSize: 12,
-                      border: `1px solid ${(editAgentForm.active ?? true) === v ? '#0F0F10' : '#D5D1C4'}`,
+                      border: `1px solid ${(editAgentForm.active ?? true) === v ? '#0F0F10' : '#D5D9DE'}`,
                       color: (editAgentForm.active ?? true) === v ? '#0F0F10' : '#6B7280',
                       background: (editAgentForm.active ?? true) === v ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>{v ? 'Active' : 'Inactive'}</button>
@@ -433,9 +433,9 @@ export function AgentList() {
             <textarea value={editAgentForm.notes || ''}
               onChange={e => setEditAgentForm({ ...editAgentForm, notes: e.target.value })}
               rows={3}
-              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
+              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
-          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="danger" onClick={() => {
               if (editAgent && window.confirm(`Delete approval "${editAgent.name}"?`)) {
                 deleteAgent(editAgent.id);
@@ -468,7 +468,7 @@ export function AgentList() {
                 <button key={t} onClick={() => setEditTransferForm({ ...editTransferForm, commissionType: t })}
                   className="cursor-pointer rounded"
                   style={{ padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${(editTransferForm.commissionType ?? 'percent') === t ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${(editTransferForm.commissionType ?? 'percent') === t ? '#0F0F10' : '#D5D9DE'}`,
                     color: (editTransferForm.commissionType ?? 'percent') === t ? '#0F0F10' : '#6B7280',
                     background: (editTransferForm.commissionType ?? 'percent') === t ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{t === 'percent' ? 'Percent' : 'Fixed'}</button>
@@ -489,9 +489,9 @@ export function AgentList() {
             <textarea value={editTransferForm.notes || ''}
               onChange={e => setEditTransferForm({ ...editTransferForm, notes: e.target.value })}
               rows={3}
-              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D1C4', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
+              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
-          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="danger" onClick={() => {
               if (editTransfer && window.confirm(`Delete transfer ${editTransfer.transferNumber}?`)) {
                 deleteTransfer(editTransfer.id);
@@ -531,7 +531,7 @@ export function AgentList() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Input label="SALE PRICE (BHD)" type="number" value={soldPrice || ''} onChange={e => setSoldPrice(Number(e.target.value))} />
           <Input label="BUYER INFO" placeholder="Buyer name or reference" value={soldBuyerInfo} onChange={e => setSoldBuyerInfo(e.target.value)} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={() => { if (soldModal && soldPrice > 0) { markTransferSold(soldModal, soldPrice, soldBuyerInfo || undefined); setSoldModal(null); } }} disabled={soldPrice <= 0}>Confirm Sale</Button>
           </div>

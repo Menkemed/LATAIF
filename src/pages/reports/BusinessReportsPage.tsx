@@ -52,7 +52,7 @@ function downloadCsv(filename: string, rows: string[][]) {
 function downloadExcel(filename: string, title: string, rows: string[][]) {
   const [header, ...body] = rows;
   const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="UTF-8">
-<style>table{border-collapse:collapse;font-family:Arial,sans-serif}th,td{border:1px solid #ccc;padding:6px 10px;font-size:12px}th{background:#EFECE2}</style>
+<style>table{border-collapse:collapse;font-family:Arial,sans-serif}th,td{border:1px solid #ccc;padding:6px 10px;font-size:12px}th{background:#F2F7FA}</style>
 </head><body><h3>${escapeHtml(title)}</h3><table>
 <thead><tr>${(header || []).map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
 <tbody>${body.map(r => `<tr>${r.map(c => `<td>${escapeHtml(c)}</td>`).join('')}</tr>`).join('')}</tbody>
@@ -73,10 +73,10 @@ function printPdf(title: string, rows: string[][]) {
   h1{font-size:22px;font-weight:400;margin:0 0 4px}
   .sub{font-size:11px;color:#6B7280;margin-bottom:24px;letter-spacing:0.06em;text-transform:uppercase}
   table{width:100%;border-collapse:collapse;margin-top:8px}
-  th,td{padding:8px 12px;font-size:12px;border-bottom:1px solid #E5E1D6;text-align:left}
+  th,td{padding:8px 12px;font-size:12px;border-bottom:1px solid #E5E9EE;text-align:left}
   th{background:#F7F5EE;font-weight:500;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#6B7280}
   tbody tr:last-child{font-weight:500}
-  .footer{margin-top:32px;font-size:10px;color:#6B7280;border-top:1px solid #E5E1D6;padding-top:12px}
+  .footer{margin-top:32px;font-size:10px;color:#6B7280;border-top:1px solid #E5E9EE;padding-top:12px}
   @media print{body{padding:20px}.no-print{display:none}}
 </style></head><body>
 <h1>${escapeHtml(title)}</h1>
@@ -359,7 +359,7 @@ export function BusinessReportsPage() {
         {(['live', 'period'] as const).map(m => (
           <button key={m} onClick={() => setMode(m)} style={{
             padding: '5px 12px', fontSize: 12, borderRadius: 999, cursor: 'pointer',
-            border: '1px solid ' + (mode === m ? '#0F0F10' : '#D5D1C4'),
+            border: '1px solid ' + (mode === m ? '#0F0F10' : '#D5D9DE'),
             background: mode === m ? '#0F0F10' : 'transparent',
             color: mode === m ? '#FFFFFF' : '#6B7280',
           }}>{m === 'live' ? 'Live (all time)' : 'Period'}</button>
@@ -373,7 +373,7 @@ export function BusinessReportsPage() {
           {(['today', 'week', 'month', 'year', 'all', 'custom'] as const).map(p => (
             <button key={p} onClick={() => setPeriod(p)} style={{
               padding: '5px 10px', fontSize: 12, borderRadius: 999, cursor: 'pointer',
-              border: '1px solid ' + (period === p ? '#0F0F10' : '#D5D1C4'),
+              border: '1px solid ' + (period === p ? '#0F0F10' : '#D5D9DE'),
               background: period === p ? '#0F0F10' : 'transparent',
               color: period === p ? '#FFFFFF' : '#6B7280',
             }}>{p === 'today' ? 'Today' : p === 'week' ? 'Week' : p === 'month' ? 'Month' : p === 'year' ? 'Year' : p === 'all' ? 'All' : 'Custom'}</button>
@@ -381,10 +381,10 @@ export function BusinessReportsPage() {
           {period === 'custom' && (
             <>
               <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
-                style={{ padding: '4px 8px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 6 }} />
+                style={{ padding: '4px 8px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 6 }} />
               <span style={{ fontSize: 11, color: '#6B7280' }}>→</span>
               <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)}
-                style={{ padding: '4px 8px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 6 }} />
+                style={{ padding: '4px 8px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 6 }} />
             </>
           )}
         </div>
@@ -392,22 +392,22 @@ export function BusinessReportsPage() {
 
       <div style={{ display: 'flex', gap: 10, marginBottom: 24, flexWrap: 'wrap', alignItems: 'center' }}>
         <select value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}
-          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 6, background: '#FFFFFF' }}>
+          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF' }}>
           <option value="">All categories</option>
           {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
         <select value={customerFilter} onChange={e => setCustomerFilter(e.target.value)}
-          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 6, background: '#FFFFFF' }}>
+          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF' }}>
           <option value="">All customers</option>
           {customers.map(c => <option key={c.id} value={c.id}>{c.firstName} {c.lastName}</option>)}
         </select>
         <select value={supplierFilter} onChange={e => setSupplierFilter(e.target.value)}
-          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 6, background: '#FFFFFF' }}>
+          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF' }}>
           <option value="">All suppliers</option>
           {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
         <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 6, background: '#FFFFFF' }}>
+          style={{ padding: '5px 10px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF' }}>
           <option value="">Any invoice status</option>
           <option value="FINAL">FINAL</option>
           <option value="PARTIAL">PARTIAL</option>
@@ -427,7 +427,7 @@ export function BusinessReportsPage() {
             className="cursor-pointer rounded-full transition-all"
             style={{
               padding: '8px 16px', fontSize: 13, flexShrink: 0,
-              border: `1px solid ${active === r.key ? '#0F0F10' : '#E5E1D6'}`,
+              border: `1px solid ${active === r.key ? '#0F0F10' : '#E5E9EE'}`,
               background: active === r.key ? '#0F0F10' : '#FFFFFF',
               color: active === r.key ? '#FFFFFF' : '#0F0F10',
               display: 'flex', alignItems: 'center', gap: 6,
@@ -449,7 +449,7 @@ export function BusinessReportsPage() {
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>REVENUE BY MONTH</span>
             {Object.entries(salesReport.byMonth).sort().map(([m, v]) => (
-              <div key={m} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E1D6', fontSize: 13 }}>
+              <div key={m} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                 <span style={{ color: '#0F0F10' }}>{m}</span>
                 <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(v)} BHD</span>
               </div>
@@ -469,7 +469,7 @@ export function BusinessReportsPage() {
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>FINAL INVOICES (Profit per Invoice)</span>
             {invoices.filter(i => i.status === 'FINAL').slice(0, 20).map(i => (
-              <div key={i.id} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E1D6', fontSize: 12 }}>
+              <div key={i.id} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
                 <span className="font-mono" style={{ color: '#0F0F10' }}>{i.invoiceNumber}</span>
                 <span style={{ color: '#6B7280' }}>Cost: {fmt(i.purchasePriceSnapshot || 0)}</span>
                 <span className="font-mono" style={{ color: '#16A34A' }}>+{fmt(i.marginSnapshot || 0)} BHD</span>
@@ -501,7 +501,7 @@ export function BusinessReportsPage() {
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>STOCK BY CATEGORY</span>
             {inventoryReport.byCat.map(c => (
-              <div key={c.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6', fontSize: 13 }}>
+              <div key={c.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                 <span style={{ color: '#0F0F10' }}>{c.name}</span>
                 <div className="flex gap-6">
                   <span style={{ color: '#6B7280' }}>{c.count} items</span>
@@ -519,7 +519,7 @@ export function BusinessReportsPage() {
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>BY CATEGORY</span>
             {Object.entries(expenseReport.totals).map(([k, v]) => (
-              <div key={k} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E1D6', fontSize: 13 }}>
+              <div key={k} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                 <span style={{ color: '#0F0F10' }}>{k}</span>
                 <span className="font-mono" style={{ color: '#DC2626' }}>{fmt(v)} BHD</span>
               </div>
@@ -535,7 +535,7 @@ export function BusinessReportsPage() {
             {payablesReport.bySupplier.length === 0
               ? <p style={{ fontSize: 13, color: '#6B7280' }}>No outstanding supplier balances.</p>
               : payablesReport.bySupplier.map(s => (
-                <div key={s.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6', fontSize: 13 }}>
+                <div key={s.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                   <span style={{ color: '#0F0F10' }}>{s.name}</span>
                   <div className="flex gap-6">
                     <span style={{ color: '#6B7280' }}>of {fmt(s.totalPurchases)} total</span>
@@ -554,7 +554,7 @@ export function BusinessReportsPage() {
             {receivablesReport.byCustomer.length === 0
               ? <p style={{ fontSize: 13, color: '#6B7280' }}>No open receivables.</p>
               : receivablesReport.byCustomer.map(c => (
-                <div key={c.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6', fontSize: 13 }}>
+                <div key={c.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                   <span style={{ color: '#0F0F10' }}>{c.name}</span>
                   <div className="flex gap-6">
                     <span style={{ color: '#6B7280' }}>{c.count} partial inv.</span>
@@ -574,7 +574,7 @@ export function BusinessReportsPage() {
             {partnerReport.rows.length === 0
               ? <p style={{ fontSize: 13, color: '#6B7280' }}>No partners yet.</p>
               : partnerReport.rows.map(r => (
-                <div key={r.name} style={{ padding: '12px 0', borderBottom: '1px solid #E5E1D6' }}>
+                <div key={r.name} style={{ padding: '12px 0', borderBottom: '1px solid #E5E9EE' }}>
                   <div className="flex justify-between items-center" style={{ marginBottom: 4 }}>
                     <span style={{ fontSize: 14, color: '#0F0F10' }}>{r.name}</span>
                     <span style={{ fontSize: 12, color: '#6B7280' }}>{r.share}% share</span>

@@ -107,8 +107,8 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
         className="flex items-center justify-between cursor-pointer transition-colors"
         style={{
           padding: '9px 12px',
-          background: '#EFECE2',
-          border: `1px solid ${open ? '#0F0F10' : '#E5E1D6'}`,
+          background: '#F2F7FA',
+          border: `1px solid ${open ? '#0F0F10' : '#E5E9EE'}`,
           borderRadius: 6,
           fontSize: 13,
           color: selected ? '#0F0F10' : '#6B7280',
@@ -142,12 +142,12 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
           left: Math.min(pos.left, window.innerWidth - Math.max(pos.width, 360) - 16),
           width: Math.max(pos.width, 360),
           maxWidth: 'calc(100vw - 32px)',
-          background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 8,
+          background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8,
           zIndex: 99999, overflow: 'hidden',
           boxShadow: '0 8px 32px rgba(15,15,16,0.18)',
         }}>
           {/* Search Input */}
-          <div className="flex items-center gap-2" style={{ padding: '8px 12px', borderBottom: '1px solid #E5E1D6' }}>
+          <div className="flex items-center gap-2" style={{ padding: '8px 12px', borderBottom: '1px solid #E5E9EE' }}>
             <Search size={14} style={{ color: '#6B7280', flexShrink: 0 }} />
             <input
               ref={inputRef}
@@ -248,8 +248,8 @@ export function SearchMultiSelect({ label, placeholder = 'Search and select...',
         className="cursor-pointer transition-colors"
         style={{
           padding: '9px 12px',
-          background: '#EFECE2',
-          border: `1px solid ${open ? '#0F0F10' : '#E5E1D6'}`,
+          background: '#F2F7FA',
+          border: `1px solid ${open ? '#0F0F10' : '#E5E9EE'}`,
           borderRadius: 6,
           fontSize: 13,
           minHeight: 40,
@@ -284,11 +284,11 @@ export function SearchMultiSelect({ label, placeholder = 'Search and select...',
           left: Math.min(pos.left, window.innerWidth - Math.max(pos.width, 360) - 16),
           width: Math.max(pos.width, 360),
           maxWidth: 'calc(100vw - 32px)',
-          background: '#FFFFFF', border: '1px solid #E5E1D6', borderRadius: 8,
+          background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8,
           zIndex: 99999, overflow: 'hidden',
           boxShadow: '0 8px 32px rgba(15,15,16,0.18)',
         }}>
-          <div className="flex items-center gap-2" style={{ padding: '8px 12px', borderBottom: '1px solid #E5E1D6' }}>
+          <div className="flex items-center gap-2" style={{ padding: '8px 12px', borderBottom: '1px solid #E5E9EE' }}>
             <Search size={14} style={{ color: '#6B7280', flexShrink: 0 }} />
             <input
               ref={inputRef}
@@ -321,10 +321,10 @@ export function SearchMultiSelect({ label, placeholder = 'Search and select...',
                 >
                   <span style={{
                     width: 16, height: 16, borderRadius: 3, flexShrink: 0,
-                    border: sel ? '1px solid #0F0F10' : '1px solid #D5D1C4',
+                    border: sel ? '1px solid #0F0F10' : '1px solid #D5D9DE',
                     background: sel ? '#0F0F10' : 'transparent',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 10, color: '#EFECE2',
+                    fontSize: 10, color: '#F2F7FA',
                   }}>{sel ? '\u2713' : ''}</span>
                   <div className="flex-1">
                     <div style={{ fontSize: 13, color: '#0F0F10' }}>{opt.label}</div>

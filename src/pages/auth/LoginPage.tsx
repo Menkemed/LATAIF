@@ -15,7 +15,7 @@ export function LoginPage() {
   }
 
   return (
-    <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#EFECE2' }}>
+    <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#F2F7FA' }}>
       <div className="animate-fade-in" style={{ width: 400 }}>
         {/* Logo */}
         <div className="text-center" style={{ marginBottom: 56 }}>
@@ -31,7 +31,7 @@ export function LoginPage() {
         <form onSubmit={handleLogin}>
           <div
             className="rounded-xl"
-            style={{ background: '#FFFFFF', border: '1px solid #E5E1D6', padding: '36px 32px' }}
+            style={{ background: '#FFFFFF', border: '1px solid #E5E9EE', padding: '36px 32px' }}
           >
             <div style={{ marginBottom: 28 }}>
               <label className="text-overline" style={{ marginBottom: 8 }}>EMAIL</label>
@@ -41,8 +41,8 @@ export function LoginPage() {
                 onChange={e => setEmail(e.target.value)}
                 className="w-full outline-none transition-colors duration-300"
                 style={{
-                  background: '#EFECE2',
-                  border: '1px solid #E5E1D6',
+                  background: '#F2F7FA',
+                  border: '1px solid #E5E9EE',
                   borderRadius: 6,
                   padding: '12px 14px',
                   marginTop: 8,
@@ -50,7 +50,7 @@ export function LoginPage() {
                   color: '#0F0F10',
                 }}
                 onFocus={e => (e.currentTarget.style.borderColor = '#0F0F10')}
-                onBlur={e => (e.currentTarget.style.borderColor = '#E5E1D6')}
+                onBlur={e => (e.currentTarget.style.borderColor = '#E5E9EE')}
                 autoFocus
               />
             </div>
@@ -63,8 +63,8 @@ export function LoginPage() {
                 onChange={e => setPassword(e.target.value)}
                 className="w-full outline-none transition-colors duration-300"
                 style={{
-                  background: '#EFECE2',
-                  border: '1px solid #E5E1D6',
+                  background: '#F2F7FA',
+                  border: '1px solid #E5E9EE',
                   borderRadius: 6,
                   padding: '12px 14px',
                   marginTop: 8,
@@ -72,7 +72,7 @@ export function LoginPage() {
                   color: '#0F0F10',
                 }}
                 onFocus={e => (e.currentTarget.style.borderColor = '#0F0F10')}
-                onBlur={e => (e.currentTarget.style.borderColor = '#E5E1D6')}
+                onBlur={e => (e.currentTarget.style.borderColor = '#E5E9EE')}
               />
             </div>
 

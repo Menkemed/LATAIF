@@ -171,7 +171,7 @@ export function ConsignmentDetail() {
 
   function renderField(label: string, value: React.ReactNode) {
     return (
-      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E1D6' }}>
+      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
         <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
         <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>
       </div>
@@ -266,7 +266,7 @@ export function ConsignmentDetail() {
             )}
 
             {/* Consignor */}
-            <div style={{ marginTop: 24, padding: '14px 16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ marginTop: 24, padding: '14px 16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Consignor</span>
               <span style={{ fontSize: 15, color: '#0F0F10', display: 'block', marginTop: 4 }}>{consignorName}</span>
               {consignor?.company && (
@@ -275,7 +275,7 @@ export function ConsignmentDetail() {
             </div>
 
             {/* Dates */}
-            <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6' }}>
+            <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <div className="flex justify-between" style={{ fontSize: 12 }}>
                 <span style={{ color: '#6B7280' }}>Agreement Date</span>
                 <span style={{ color: '#0F0F10' }}>{consignment.agreementDate}</span>
@@ -307,8 +307,8 @@ export function ConsignmentDetail() {
                 {/* Live calculation */}
                 {editAgreed > 0 && editRate > 0 && (
                   <div className="rounded font-mono" style={{
-                    marginTop: 8, padding: 16, background: '#EFECE2',
-                    border: '1px solid #E5E1D6', fontSize: 13,
+                    marginTop: 8, padding: 16, background: '#F2F7FA',
+                    border: '1px solid #E5E9EE', fontSize: 13,
                   }}>
                     <div style={{ marginBottom: 4, color: '#6B7280', fontSize: 11, letterSpacing: '0.04em' }}>
                       IF SOLD AT AGREED PRICE
@@ -331,7 +331,7 @@ export function ConsignmentDetail() {
                     onChange={e => setForm({ ...form, notes: e.target.value })}
                     className="w-full outline-none transition-colors duration-300"
                     rows={3}
-                    style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
+                    style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
                   />
                 </div>
               </div>
@@ -357,7 +357,7 @@ export function ConsignmentDetail() {
 
                 {/* If sold: sale breakdown */}
                 {(consignment.status === 'sold' || consignment.status === 'paid_out') && consignment.salePrice != null && (
-                  <div style={{ padding: '16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6', marginBottom: 20 }}>
+                  <div style={{ padding: '16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE', marginBottom: 20 }}>
                     <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 12 }}>Sale Breakdown</span>
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span style={{ fontSize: 13, color: '#6B7280' }}>Sale Price</span>
@@ -367,7 +367,7 @@ export function ConsignmentDetail() {
                       <span style={{ color: '#6B7280' }}>Commission ({fmtPct(consignment.commissionRate)}%)</span>
                       <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(consignment.commissionAmount || 0)} BHD</span>
                     </div>
-                    <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+                    <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
                       <span style={{ color: '#6B7280' }}>Payout Amount</span>
                       <span className="font-mono" style={{ color: '#7EAA6E', fontSize: 16 }}>{fmt(consignment.payoutAmount || 0)} BHD</span>
                     </div>
@@ -382,7 +382,7 @@ export function ConsignmentDetail() {
 
                 {/* Payout info (if paid out) */}
                 {consignment.status === 'paid_out' && (
-                  <div style={{ padding: '16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E1D6', marginBottom: 20 }}>
+                  <div style={{ padding: '16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE', marginBottom: 20 }}>
                     <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 12 }}>Payout Details</span>
                     <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
                       <span style={{ color: '#6B7280' }}>Status</span>
@@ -412,7 +412,7 @@ export function ConsignmentDetail() {
                 {/* Expected payout (active) */}
                 {consignment.status === 'active' && (
                   <div className="rounded font-mono" style={{
-                    padding: 16, background: '#EFECE2', border: '1px solid #E5E1D6', fontSize: 13,
+                    padding: 16, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
                   }}>
                     <div style={{ marginBottom: 4, color: '#6B7280', fontSize: 11, letterSpacing: '0.04em' }}>
                       IF SOLD AT AGREED PRICE
@@ -487,7 +487,7 @@ export function ConsignmentDetail() {
             onChange={e => setSoldBuyer(e.target.value)} />
           {salePriceNum > 0 && (
             <div className="rounded font-mono" style={{
-              padding: 14, background: '#EFECE2', border: '1px solid #E5E1D6', fontSize: 13,
+              padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
             }}>
               <div className="flex justify-between" style={{ marginBottom: 8 }}>
                 <span style={{ color: '#6B7280' }}>Commission ({fmtPct(consignment.commissionRate)}%)</span>
@@ -498,14 +498,14 @@ export function ConsignmentDetail() {
                 <span style={{ color: '#7EAA6E' }}>{fmt(salePayout)} BHD</span>
               </div>
               {consignment.minimumPrice != null && salePriceNum < consignment.minimumPrice && (
-                <div className="flex items-center gap-2" style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+                <div className="flex items-center gap-2" style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
                   <AlertTriangle size={12} style={{ color: '#AA6E6E' }} />
                   <span style={{ fontSize: 11, color: '#AA6E6E' }}>Below minimum price of {fmt(consignment.minimumPrice)} BHD</span>
                 </div>
               )}
             </div>
           )}
-          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleMarkSold} disabled={!soldPrice}>Confirm Sale</Button>
           </div>
@@ -516,7 +516,7 @@ export function ConsignmentDetail() {
       <Modal open={paidModal} onClose={() => setPaidModal(false)} title="Pay Out Consignor" width={440}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <div className="rounded font-mono" style={{
-            padding: 14, background: '#EFECE2', border: '1px solid #E5E1D6', fontSize: 13,
+            padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
           }}>
             <div className="flex justify-between" style={{ marginBottom: 8 }}>
               <span style={{ color: '#6B7280' }}>Consignor</span>
@@ -535,7 +535,7 @@ export function ConsignmentDetail() {
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${paidMethod === m ? '#0F0F10' : '#D5D1C4'}`,
+                    border: `1px solid ${paidMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: paidMethod === m ? '#0F0F10' : '#6B7280',
                     background: paidMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>{m === 'bank_transfer' ? 'Bank Transfer' : m === 'cash' ? 'Cash' : 'Card'}</button>
@@ -545,7 +545,7 @@ export function ConsignmentDetail() {
           <Input label="REFERENCE" placeholder="Optional reference..."
             value={paidRef}
             onChange={e => setPaidRef(e.target.value)} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setPaidModal(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleMarkPaid}>Confirm Payout</Button>
           </div>
@@ -574,7 +574,7 @@ export function ConsignmentDetail() {
             className="cursor-pointer text-left"
             style={{
               padding: '14px 16px', borderRadius: 8,
-              border: `1px solid ${postSaleDisposition === 'RETURN_TO_OWNER' ? '#0F0F10' : '#D5D1C4'}`,
+              border: `1px solid ${postSaleDisposition === 'RETURN_TO_OWNER' ? '#0F0F10' : '#D5D9DE'}`,
               background: postSaleDisposition === 'RETURN_TO_OWNER' ? 'rgba(15,15,16,0.06)' : 'transparent',
             }}>
             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>A · Return to Owner</div>
@@ -584,7 +584,7 @@ export function ConsignmentDetail() {
             className="cursor-pointer text-left"
             style={{
               padding: '14px 16px', borderRadius: 8,
-              border: `1px solid ${postSaleDisposition === 'KEEP_AS_OWN' ? '#0F0F10' : '#D5D1C4'}`,
+              border: `1px solid ${postSaleDisposition === 'KEEP_AS_OWN' ? '#0F0F10' : '#D5D9DE'}`,
               background: postSaleDisposition === 'KEEP_AS_OWN' ? 'rgba(15,15,16,0.06)' : 'transparent',
             }}>
             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>B · Keep as Own</div>

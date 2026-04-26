@@ -127,8 +127,8 @@ export function MessagePreviewModal({
             <div
               style={{
                 width: '100%', aspectRatio: '1 / 1', borderRadius: 8,
-                background: `#EFECE2 center/cover no-repeat url(${productImage})`,
-                border: '1px solid #E5E1D6',
+                background: `#F2F7FA center/cover no-repeat url(${productImage})`,
+                border: '1px solid #E5E9EE',
               }}
             />
             {productLabel && (
@@ -141,7 +141,7 @@ export function MessagePreviewModal({
               className="cursor-pointer flex items-center justify-center gap-2 w-full transition-colors"
               style={{
                 marginTop: 10, padding: '8px 10px', fontSize: 11,
-                background: 'transparent', border: '1px solid #D5D1C4',
+                background: 'transparent', border: '1px solid #D5D9DE',
                 borderRadius: 6, color: '#4B5563',
               }}
             >
@@ -206,7 +206,7 @@ export function MessagePreviewModal({
               rows={8}
               className="w-full outline-none"
               style={{
-                background: '#EFECE2', border: '1px solid #E5E1D6', borderRadius: 6,
+                background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 6,
                 padding: 12, fontSize: 13, color: '#0F0F10', resize: 'vertical',
                 lineHeight: 1.6, fontFamily: 'inherit',
               }}

@@ -142,7 +142,7 @@ export function OfferList() {
           <span key={h} className="text-overline">{h}</span>
         ))}
       </div>
-      <div style={{ borderTop: '1px solid #E5E1D6' }} />
+      <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
       {filtered.length === 0 && (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
@@ -232,14 +232,14 @@ export function OfferList() {
           {selectedProductIds.length > 0 && (
             <div>
               <span className="text-overline" style={{ marginBottom: 8 }}>PRICING</span>
-              <div style={{ marginTop: 8, background: '#EFECE2', borderRadius: 8, border: '1px solid #E5E1D6', padding: '8px 14px' }}>
+              <div style={{ marginTop: 8, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE', padding: '8px 14px' }}>
                 {selectedProductIds.map(id => {
                   const p = products.find(pr => pr.id === id);
                   if (!p) return null;
                   const price = linePrices[id] ?? p.plannedSalePrice ?? p.purchasePrice;
                   const outOfRange = (p.minSalePrice && price < p.minSalePrice) || (p.maxSalePrice && price > p.maxSalePrice);
                   return (
-                    <div key={id} className="flex items-center justify-between gap-3" style={{ padding: '8px 0', borderBottom: '1px solid #E5E1D6' }}>
+                    <div key={id} className="flex items-center justify-between gap-3" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
                       <div className="flex-1" style={{ minWidth: 0 }}>
                         <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.brand} {p.name}</span>
                         {(p.minSalePrice || p.maxSalePrice) && (
@@ -259,7 +259,7 @@ export function OfferList() {
                           className="outline-none font-mono"
                           style={{
                             width: 100, textAlign: 'right', padding: '4px 8px', fontSize: 13,
-                            background: 'transparent', border: `1px solid ${outOfRange ? '#AA6E6E' : '#D5D1C4'}`,
+                            background: 'transparent', border: `1px solid ${outOfRange ? '#AA6E6E' : '#D5D9DE'}`,
                             borderRadius: 4, color: '#0F0F10',
                           }}
                         />
@@ -270,7 +270,7 @@ export function OfferList() {
                 })}
                 {/* Total (brutto; VAT is embedded per business rule) */}
                 <div style={{ paddingTop: 8, marginTop: 4 }}>
-                  <div className="flex justify-between" style={{ fontSize: 15, paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+                  <div className="flex justify-between" style={{ fontSize: 15, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
                     <span style={{ color: '#0F0F10' }}>Total</span>
                     <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}>{fmt(total.total)} BHD</span>
                   </div>
@@ -283,10 +283,10 @@ export function OfferList() {
           <div>
             <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
             <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
-              className="w-full outline-none" style={{ background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }} />
+              className="w-full outline-none" style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }} />
           </div>
 
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E1D6' }}>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate} disabled={!selectedCustomerId || selectedProductIds.length === 0}>Create Offer</Button>
           </div>

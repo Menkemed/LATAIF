@@ -185,7 +185,7 @@ export function PurchaseCreate() {
               value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} />
           </div>
           {supplier && (
-            <div style={{ padding: '10px 14px', background: '#EFECE2', border: '1px solid #E5E1D6', borderRadius: 8, marginTop: 12, fontSize: 12, color: '#4B5563' }}>
+            <div style={{ padding: '10px 14px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8, marginTop: 12, fontSize: 12, color: '#4B5563' }}>
               {supplier.name}{supplier.phone ? ` · ${supplier.phone}` : ''}{supplier.email ? ` · ${supplier.email}` : ''}
             </div>
           )}
@@ -198,10 +198,11 @@ export function PurchaseCreate() {
               <span className="text-overline">2 · ITEMS</span>
               <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Item</Button>
             </div>
-            <div style={{ border: '1px solid #E5E1D6', borderRadius: 8 }}>
+            <div style={{ border: '1px solid #E5E9EE', borderRadius: 8 }}>
               <div style={{
-                display: 'grid', gridTemplateColumns: '0.7fr 2.4fr 0.9fr 0.7fr 1fr 1fr 0.4fr',
-                gap: 10, padding: '10px 12px', background: '#EFECE2', borderBottom: '1px solid #E5E1D6',
+                display: 'grid',
+                gridTemplateColumns: '110px minmax(0,2.2fr) minmax(0,0.9fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
                 fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
               }}>
                 <span>Source</span>
@@ -214,33 +215,36 @@ export function PurchaseCreate() {
               </div>
               {lines.map((l, idx) => (
                 <div key={idx} style={{
-                  display: 'grid', gridTemplateColumns: '0.7fr 2.4fr 0.9fr 0.7fr 1fr 1fr 0.4fr',
-                  gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E1D6', alignItems: 'center',
+                  display: 'grid',
+                  gridTemplateColumns: '110px minmax(0,2.2fr) minmax(0,0.9fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                  gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
                 }}>
-                  {/* Source toggle: new item (Ware geht ins Lager) oder existing */}
+                  {/* Source toggle */}
                   <select value={l.mode}
                     onChange={e => updateLine(idx, { mode: e.target.value as 'existing' | 'new', productId: undefined })}
-                    style={{ padding: '7px 8px', fontSize: 11, border: '1px solid #D5D1C4', borderRadius: 4, background: '#FFFFFF' }}>
+                    style={{ padding: '7px 8px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 4, background: '#FFFFFF', minWidth: 0, width: '100%' }}>
                     <option value="new">New Item</option>
                     <option value="existing">Existing</option>
                   </select>
 
                   {/* Product picker or brand+name inputs */}
                   {l.mode === 'existing' ? (
-                    <SearchSelect
-                      placeholder="Pick product..."
-                      options={productOptions}
-                      value={l.productId || ''}
-                      onChange={pid => pickProductForLine(idx, pid)}
-                    />
+                    <div style={{ minWidth: 0 }}>
+                      <SearchSelect
+                        placeholder="Pick product..."
+                        options={productOptions}
+                        value={l.productId || ''}
+                        onChange={pid => pickProductForLine(idx, pid)}
+                      />
+                    </div>
                   ) : (
-                    <div className="flex gap-2">
+                    <div className="flex gap-2" style={{ minWidth: 0 }}>
                       <input placeholder="Brand" value={l.brand}
                         onChange={e => updateLine(idx, { brand: e.target.value })}
-                        style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4, flex: 1 }} />
+                        style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, flex: 1, minWidth: 0, width: '100%' }} />
                       <input placeholder="Name / Model" value={l.name}
                         onChange={e => updateLine(idx, { name: e.target.value })}
-                        style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4, flex: 2 }} />
+                        style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, flex: 2, minWidth: 0, width: '100%' }} />
                     </div>
                   )}
 
@@ -248,27 +252,36 @@ export function PurchaseCreate() {
                     onChange={e => updateLine(idx, { sku: e.target.value })}
                     disabled={l.mode === 'existing'}
                     className="font-mono"
-                    style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D1C4', borderRadius: 4,
-                      opacity: l.mode === 'existing' ? 0.5 : 1 }} />
+                    style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4,
+                      opacity: l.mode === 'existing' ? 0.5 : 1, minWidth: 0, width: '100%' }} />
 
                   <input type="number" min={1} step="1" value={l.quantity}
                     onChange={e => updateLine(idx, { quantity: Math.max(1, parseInt(e.target.value) || 1) })}
                     className="font-mono"
-                    style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D1C4', borderRadius: 4, textAlign: 'right' }} />
+                    style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
                   <input type="number" min={0} step="0.001" value={l.unitPrice}
                     onChange={e => updateLine(idx, { unitPrice: parseFloat(e.target.value) || 0 })}
                     className="font-mono"
-                    style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D1C4', borderRadius: 4, textAlign: 'right' }} />
-                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right' }}>
+                    style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
+                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {fmt((l.quantity || 0) * (l.unitPrice || 0))}
                   </span>
                   <button onClick={() => removeLine(idx)}
                     disabled={lines.length === 1}
-                    className="cursor-pointer"
-                    style={{ padding: '6px 8px', background: 'none', border: '1px solid #D5D1C4', borderRadius: 4,
-                      color: lines.length === 1 ? '#D5D1C4' : '#AA6E6E',
-                      opacity: lines.length === 1 ? 0.4 : 1 }}>
-                    <Trash2 size={12} />
+                    title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}
+                    className="cursor-pointer transition-all"
+                    style={{
+                      width: 36, height: 36, borderRadius: 10,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: lines.length === 1 ? 'rgba(220,38,38,0.05)' : 'rgba(220,38,38,0.10)',
+                      border: '1px solid ' + (lines.length === 1 ? 'rgba(220,38,38,0.15)' : 'rgba(220,38,38,0.30)'),
+                      color: '#DC2626',
+                      opacity: lines.length === 1 ? 0.4 : 1,
+                      cursor: lines.length === 1 ? 'not-allowed' : 'pointer',
+                    }}
+                    onMouseEnter={e => { if (lines.length > 1) { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; } }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
+                    <Trash2 size={16} strokeWidth={2} />
                   </button>
                 </div>
               ))}
@@ -316,7 +329,7 @@ export function PurchaseCreate() {
                       <button key={m} type="button" onClick={() => setPaymentMethod(m)}
                         className="cursor-pointer rounded"
                         style={{ padding: '8px 16px', fontSize: 13,
-                          border: `1px solid ${active ? '#0F0F10' : '#D5D1C4'}`,
+                          border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                           color: active ? '#0F0F10' : '#6B7280',
                           background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                         }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
@@ -328,12 +341,12 @@ export function PurchaseCreate() {
             <div className="flex gap-2" style={{ marginTop: 14 }}>
               <button onClick={() => setPaymentAmount(total)}
                 className="cursor-pointer rounded"
-                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D1C4', color: '#6B7280', background: 'transparent' }}>
+                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
                 Pay Full
               </button>
               <button onClick={() => setPaymentAmount(0)}
                 className="cursor-pointer rounded"
-                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D1C4', color: '#6B7280', background: 'transparent' }}>
+                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
                 Credit (later)
               </button>
             </div>
@@ -346,7 +359,7 @@ export function PurchaseCreate() {
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>NOTES (OPTIONAL)</span>
             <textarea value={notes} onChange={e => setNotes(e.target.value)}
               rows={3} placeholder="z.B. Lieferscheinnummer, Zahlungsziel, interne Vermerke…"
-              style={{ width: '100%', padding: '10px 12px', border: '1px solid #D5D1C4', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
+              style={{ width: '100%', padding: '10px 12px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
           </Card>
         </div>
 
@@ -381,7 +394,7 @@ export function PurchaseCreate() {
         )}
 
         {/* Actions */}
-        <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E1D6' }}>
+        <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate('/purchases')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => handleSave(true)}>Save &amp; New</Button>

@@ -144,7 +144,7 @@ export function SupplierDetail() {
         {/* Hero */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>
           <div className="rounded-xl flex items-center justify-center"
-            style={{ height: 180, background: '#EFECE2', border: '1px solid #E5E1D6' }}>
+            style={{ height: 180, background: '#F2F7FA', border: '1px solid #E5E9EE' }}>
             <Building2 size={48} strokeWidth={0.8} style={{ color: '#6B7280' }} />
           </div>
           <div>
@@ -167,7 +167,7 @@ export function SupplierDetail() {
                       onChange={e => setForm({ ...form, notes: e.target.value })}
                       className="w-full outline-none"
                       rows={3}
-                      style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D1C4', padding: '8px 0', fontSize: 14, color: '#0F0F10' }} />
+                      style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10' }} />
                   </div>
                 </div>
               ) : (
@@ -208,12 +208,12 @@ export function SupplierDetail() {
               {supplierPurchases.map(p => (
                 <div key={p.id} style={{ display: 'contents', cursor: 'pointer' }}
                   onClick={() => navigate(`/purchases/${p.id}`)}>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{p.purchaseNumber}</span>
-                  <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmtDate(p.purchaseDate)}</span>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmt(p.totalAmount)}</span>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmt(p.paidAmount)}</span>
-                  <span className="font-mono" style={{ fontSize: 12, color: p.remainingAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmt(p.remainingAmount)}</span>
-                  <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E1D6', color: '#4B5563' }}>{p.status}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{p.purchaseNumber}</span>
+                  <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(p.purchaseDate)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.totalAmount)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.paidAmount)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: p.remainingAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.remainingAmount)}</span>
+                  <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{p.status}</span>
                 </div>
               ))}
             </div>
@@ -235,11 +235,11 @@ export function SupplierDetail() {
                 <span className="text-overline">REFERENCE</span>
                 {payments.map(p => (
                   <div key={p.id} style={{ display: 'contents' }}>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{p.purchaseNumber}</span>
-                    <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmtDate(p.paidAt)}</span>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmt(p.amount)}</span>
-                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E1D6', color: '#4B5563' }}>{p.method}</span>
-                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E1D6', color: '#6B7280' }}>{p.reference || '\u2014'}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{p.purchaseNumber}</span>
+                    <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(p.paidAt)}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.amount)}</span>
+                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{p.method}</span>
+                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#6B7280' }}>{p.reference || '\u2014'}</span>
                   </div>
                 ))}
               </div>
@@ -262,11 +262,11 @@ export function SupplierDetail() {
                 <span className="text-overline">STATUS</span>
                 {returns.map(r => (
                   <div key={r.id} style={{ display: 'contents' }}>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{r.returnNumber}</span>
-                    <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmtDate(r.returnDate)}</span>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#DC2626', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E1D6' }}>{fmt(r.totalAmount)}</span>
-                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E1D6', color: '#4B5563' }}>{r.refundMethod || '\u2014'}</span>
-                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E1D6', color: '#4B5563' }}>{r.status}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{r.returnNumber}</span>
+                    <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(r.returnDate)}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#DC2626', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(r.totalAmount)}</span>
+                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{r.refundMethod || '\u2014'}</span>
+                    <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{r.status}</span>
                   </div>
                 ))}
               </div>

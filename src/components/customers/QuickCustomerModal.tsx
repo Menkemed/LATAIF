@@ -64,7 +64,7 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
         <Input label="WHATSAPP" placeholder="+973..." value={whatsapp} onChange={e => setWhatsapp(e.target.value)} />
         <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={personalId} onChange={e => setPersonalId(e.target.value)} />
         <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={vatAccountNumber} onChange={e => setVatAccountNumber(e.target.value)} />
-        <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E1D6' }}>
+        <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => { reset(); onClose(); }}>Cancel</Button>
           <Button variant="primary" onClick={handleSave} disabled={saving}>Create & Select</Button>
         </div>
