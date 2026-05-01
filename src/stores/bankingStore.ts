@@ -420,7 +420,10 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       });
     }
 
-    // Plan §8 #9 — Agent Settlement Payments (Abrechnung gegen Agenten).
+    // Plan §8 #9 — Agent Settlement Payments: Der Agent verkauft unsere Ware
+    // und zahlt uns den Erlös abzüglich Kommission aus → Geld kommt REIN.
+    // Nicht raus (das war ein historischer Buchungsfehler — ein Agent-Settle ist
+    // kein Outflow von uns an den Agent, sondern ein Inflow vom Agent an uns).
     const agentPay = query(
       `SELECT asp.id, asp.amount, asp.method, asp.paid_at, asp.transfer_id, at.agent_id, a.name AS agent_name
          FROM agent_settlement_payments asp
@@ -433,13 +436,13 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       txs.push({
         id: `apay-${p.id}`,
         date: (p.paid_at as string) || '',
-        type: 'EXPENSE_OUT',
+        type: 'SALES_IN',
         account: accountFor(p.method as string),
         amount: (p.amount as number) || 0,
-        flow: 'out',
+        flow: 'in',
         relatedModule: 'agent_transfer',
         relatedEntityId: p.transfer_id as string,
-        description: `Agent settlement · ${p.agent_name || p.transfer_id}`,
+        description: `Agent settlement received · ${p.agent_name || p.transfer_id}`,
       });
     }
 

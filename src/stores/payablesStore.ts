@@ -161,32 +161,10 @@ export const usePayablesStore = create<PayablesStore>((set) => ({
         }, today, gracePeriodDays));
       }
 
-      // 3) Agent Settlement Payables — verkaufte Transfers, Provision noch nicht voll bezahlt
-      const agentRows = query(
-        `SELECT t.id, t.transfer_number, t.agent_id, a.name AS agent_name,
-                t.settlement_amount, t.settlement_paid_amount, t.sold_at, t.created_at
-         FROM agent_transfers t
-         LEFT JOIN agents a ON a.id = t.agent_id
-         WHERE t.status = 'sold'
-           AND COALESCE(t.settlement_amount, 0) > COALESCE(t.settlement_paid_amount, 0)`,
-        []
-      );
-      for (const r of agentRows) {
-        rows.push(build({
-          type: 'agent',
-          sourceTable: 'agent_transfers',
-          sourceId: r.id as string,
-          counterpartyId: r.agent_id as string | undefined,
-          counterpartyName: (r.agent_name as string) || 'Unknown agent',
-          counterpartyHref: '/agents',
-          referenceNumber: (r.transfer_number as string) || ((r.id as string) || '').slice(0, 8),
-          issuedAt: (r.sold_at as string) || (r.created_at as string),
-          totalAmount: Number(r.settlement_amount || 0),
-          paidAmount: Number(r.settlement_paid_amount || 0),
-          navigateTo: '/agents',
-          detailLabel: 'Agent settlement',
-        }, today, gracePeriodDays));
-      }
+      // 3) Agent Settlements gehören NICHT zu Payables — der Agent schuldet UNS
+      //    den Verkaufserlös abzüglich Kommission, nicht umgekehrt. Sichtbarkeit
+      //    der offenen Settlements erfolgt direkt auf /agents (AgentList) und
+      //    künftig per Convert-to-Invoice (dann als Receivable im Customer-Modul).
 
       // 4) Consignor Payouts — verkauft, Eigentümer noch nicht voll ausgezahlt
       const consignmentRows = query(
