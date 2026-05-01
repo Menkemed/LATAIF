@@ -90,10 +90,13 @@ export function runDailySweep(): void {
     }
 
     // 3. Overdue Debts — due_date < heute + status OPEN/PARTIAL → Reminder-Task
+    // debts hat keine paid_amount-Spalte; Summe der Raten via debt_payments.
     const overdueDebts = query(
-      `SELECT id, counterparty, customer_id, amount, paid_amount, direction FROM debts
-         WHERE branch_id = ? AND due_date IS NOT NULL AND due_date < ?
-           AND status IN ('OPEN', 'PARTIALLY_REPAID')`,
+      `SELECT d.id, d.counterparty, d.customer_id, d.amount, d.direction,
+              COALESCE((SELECT SUM(amount) FROM debt_payments WHERE debt_id = d.id), 0) AS paid_amount
+         FROM debts d
+         WHERE d.branch_id = ? AND d.due_date IS NOT NULL AND d.due_date < ?
+           AND d.status IN ('OPEN', 'PARTIALLY_REPAID')`,
       [branchId, tday]
     );
     for (const row of overdueDebts) {

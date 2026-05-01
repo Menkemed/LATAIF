@@ -49,7 +49,7 @@ export function CustomerList() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '2.5fr 1fr 1fr 1.5fr 1fr 1fr 1fr',
+          gridTemplateColumns: 'minmax(0,2.4fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)',
           gap: 16,
           padding: '0 16px 12px',
         }}
@@ -58,9 +58,9 @@ export function CustomerList() {
         <span className="text-overline">STATUS</span>
         <span className="text-overline">VIP</span>
         <span className="text-overline">PREFERENCES</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>REVENUE</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>PROFIT</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>OUTSTANDING</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>REVENUE</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>PROFIT</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>OUTSTANDING</span>
       </div>
 
       <div style={{ borderTop: '1px solid #E5E9EE' }} />
@@ -79,7 +79,7 @@ export function CustomerList() {
             className="cursor-pointer transition-colors"
             style={{
               display: 'grid',
-              gridTemplateColumns: '2.5fr 1fr 1fr 1.5fr 1fr 1fr 1fr',
+              gridTemplateColumns: 'minmax(0,2.4fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)',
               gap: 16,
               padding: '14px 16px',
               alignItems: 'center',
@@ -89,39 +89,39 @@ export function CustomerList() {
             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3" style={{ minWidth: 0 }}>
               <div
                 className="flex items-center justify-center rounded-full shrink-0"
                 style={{ width: 36, height: 36, background: '#E5E9EE', border: '1px solid #D5D9DE', fontSize: 11, color: '#4B5563', fontWeight: 500 }}
               >
-                {c.firstName[0]}{c.lastName[0]}
+                {`${(c.firstName || '').charAt(0)}${(c.lastName || '').charAt(0)}`.toUpperCase() || '?'}
               </div>
-              <div>
-                <div style={{ fontSize: 14, color: '#0F0F10' }}>{c.firstName} {c.lastName}</div>
-                {c.company && <div style={{ fontSize: 11, color: '#6B7280' }}>{c.company}</div>}
+              <div style={{ minWidth: 0, overflow: 'hidden' }}>
+                <div style={{ fontSize: 14, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.firstName} {c.lastName}</div>
+                {c.company && <div style={{ fontSize: 11, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.company}</div>}
               </div>
             </div>
-            <StatusDot status={c.salesStage} />
-            <VIPBadge level={c.vipLevel} />
-            <div style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {c.preferences.join(', ') || '\u2014'}
+            <div style={{ minWidth: 0 }}><StatusDot status={c.salesStage} /></div>
+            <div style={{ minWidth: 0 }}><VIPBadge level={c.vipLevel} /></div>
+            <div style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+              {(c.preferences || []).join(', ') || '\u2014'}
             </div>
-            <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: '#0F0F10' }}>
-              {fmt(stats.revenue)}
-              <div style={{ fontSize: 10, color: '#6B7280' }}>
+            <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: '#0F0F10', minWidth: 0, overflow: 'hidden' }}>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(stats.revenue)}</div>
+              <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {stats.invoiceCount} invoice{stats.invoiceCount !== 1 ? 's' : ''}
               </div>
             </div>
-            <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.profit >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-              {fmt(stats.profit)}
-              <div style={{ fontSize: 10, color: '#6B7280' }}>
+            <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.profit >= 0 ? '#7EAA6E' : '#AA6E6E', minWidth: 0, overflow: 'hidden' }}>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(stats.profit)}</div>
+              <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {stats.revenue > 0 ? `${((stats.profit / stats.revenue) * 100).toFixed(1)}% margin` : '—'}
               </div>
             </div>
-            <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.outstanding > 0 ? '#AA6E6E' : '#6B7280' }}>
-              {stats.outstanding > 0 ? fmt(stats.outstanding) : '\u2014'}
+            <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.outstanding > 0 ? '#AA6E6E' : '#6B7280', minWidth: 0, overflow: 'hidden' }}>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.outstanding > 0 ? fmt(stats.outstanding) : '\u2014'}</div>
               {stats.openInvoiceCount > 0 && (
-                <div style={{ fontSize: 10, color: '#6B7280' }}>{stats.openInvoiceCount} open</div>
+                <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.openInvoiceCount} open</div>
               )}
             </div>
           </div>
@@ -132,8 +132,8 @@ export function CustomerList() {
       <Modal open={showNew} onClose={() => setShowNew(false)} title="New Client" width={560}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-            <Input label="FIRST NAME" placeholder="Ahmed" value={form.firstName || ''} onChange={e => setForm({ ...form, firstName: e.target.value })} />
-            <Input label="LAST NAME" placeholder="Al-Khalifa" value={form.lastName || ''} onChange={e => setForm({ ...form, lastName: e.target.value })} />
+            <Input required label="FIRST NAME" placeholder="Ahmed" value={form.firstName || ''} onChange={e => setForm({ ...form, firstName: e.target.value })} />
+            <Input required label="LAST NAME" placeholder="Al-Khalifa" value={form.lastName || ''} onChange={e => setForm({ ...form, lastName: e.target.value })} />
           </div>
           <Input label="COMPANY" placeholder="Company name" value={form.company || ''} onChange={e => setForm({ ...form, company: e.target.value })} />
           <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />

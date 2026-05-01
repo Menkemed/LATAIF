@@ -466,7 +466,7 @@ export function ConsignmentList() {
       {/* ── Mark Sold Modal ── */}
       <Modal open={!!soldModal} onClose={() => setSoldModal(null)} title="Mark as Sold" width={440}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          <Input label="SALE PRICE (BHD)" type="number" placeholder="0"
+          <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
             value={soldPrice}
             onChange={e => setSoldPrice(e.target.value)} />
           {Number(soldPrice) > 0 && soldModal && (() => {

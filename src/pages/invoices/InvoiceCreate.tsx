@@ -33,6 +33,16 @@ function calcLine(unitPrice: number, qty: number, purchasePrice: number, scheme:
   return calc;
 }
 
+// Inverse: vom Gesamt-Brutto auf Netto-pro-Einheit zurückrechnen.
+// VAT_10  → net = gross / 1.10
+// ZERO    → net = gross
+// MARGIN  → net = gross (VAT ist auf Marge eingebettet, kundenseitig nicht extra)
+function unitNetFromGross(gross: number, qty: number, scheme: 'VAT_10' | 'ZERO' | 'MARGIN', vatRate: number): number {
+  if (qty <= 0) return 0;
+  const totalNet = scheme === 'VAT_10' ? gross / (1 + vatRate / 100) : gross;
+  return totalNet / qty;
+}
+
 export function InvoiceCreate() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -48,9 +58,12 @@ export function InvoiceCreate() {
 
   const [customerId, setCustomerId] = useState(searchParams.get('customer') || '');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
+  const [issuedDate, setIssuedDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [lines, setLines] = useState<DraftLine[]>([
     { productId: '', scheme: 'auto', quantity: 1, unitPrice: 0 },
   ]);
+  // Local string state per line for editable Total — preserves trailing zeros while typing.
+  const [lineTotalDrafts, setLineTotalDrafts] = useState<Record<number, string>>({});
   const [paymentMethod, setPaymentMethod] = useState<Method>('cash');
   const [paidAmount, setPaidAmount] = useState<number>(0);
   const [notes, setNotes] = useState('');
@@ -63,6 +76,7 @@ export function InvoiceCreate() {
     if (!isEditMode || !editInvoice || hydrated) return;
     setCustomerId(editInvoice.customerId);
     setNotes(editInvoice.notes || '');
+    if (editInvoice.issuedAt) setIssuedDate(editInvoice.issuedAt.slice(0, 10));
     const invLines = (editInvoice.lines || []).map(l => {
       const p = products.find(pp => pp.id === l.productId);
       const stored = (l.taxScheme as Scheme | undefined);
@@ -106,12 +120,17 @@ export function InvoiceCreate() {
   const computed = lines.map(l => {
     const product = products.find(p => p.id === l.productId);
     if (!product) {
-      return { product: undefined, scheme: 'VAT_10' as const, vatRate: 10, net: 0, vat: 0, gross: 0 };
+      return { product: undefined, scheme: 'VAT_10' as const, vatRate: 10, net: 0, vat: 0, internalVat: 0, gross: 0 };
     }
     const resolved = (l.scheme === 'auto' ? (product.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') : l.scheme);
     const vatRate = resolved === 'ZERO' ? 0 : 10;
     const calc = calcLine(l.unitPrice, l.quantity, product.purchasePrice || 0, resolved, vatRate);
-    return { product, scheme: resolved, vatRate, net: calc.netAmount, vat: calc.vatAmount, gross: calc.grossAmount };
+    return {
+      product, scheme: resolved, vatRate,
+      net: calc.netAmount, vat: calc.vatAmount,
+      internalVat: calc.internalVatAmount || 0, // MARGIN: VAT auf Profit (intern, nicht customer-sichtbar)
+      gross: calc.grossAmount,
+    };
   });
 
   const subtotal = computed.reduce((s, c) => s + c.net, 0);
@@ -171,9 +190,10 @@ export function InvoiceCreate() {
     });
 
     if (isEditMode && editInvoice) {
-      // Edit-Modus: Customer/Notes updaten, Lines neu schreiben (recomputed totals),
+      // Edit-Modus: Customer/Notes/Datum updaten, Lines neu schreiben (recomputed totals),
       // Delta-Payment buchen falls paidAmount erhöht wurde.
-      updateInvoice(editInvoice.id, { customerId, notes: notes || undefined });
+      const issuedIso = `${issuedDate}T00:00:00.000Z`;
+      updateInvoice(editInvoice.id, { customerId, notes: notes || undefined, issuedAt: issuedIso });
       rewriteInvoiceLines(editInvoice.id, payload);
       const delta = paidAmount - originalPaid;
       if (delta > 0.001) {
@@ -187,7 +207,7 @@ export function InvoiceCreate() {
       return;
     }
 
-    const inv = createDirectInvoice(customerId, payload, notes || undefined);
+    const inv = createDirectInvoice(customerId, payload, notes || undefined, issuedDate);
     if (!inv) { setError('Failed to create invoice'); return; }
 
     if (paidAmount > 0) {
@@ -231,7 +251,18 @@ export function InvoiceCreate() {
 
         {/* 1. CUSTOMER */}
         <Card>
-          <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>1 · CUSTOMER</span>
+          <div className="flex items-start justify-between" style={{ marginBottom: 12, gap: 16 }}>
+            <span className="text-overline" style={{ display: 'block' }}>1 · CUSTOMER</span>
+            <div style={{ minWidth: 160 }}>
+              <span className="text-overline" style={{ display: 'block', marginBottom: 4 }}>INVOICE DATE</span>
+              <input type="date" value={issuedDate} onChange={e => setIssuedDate(e.target.value)}
+                style={{
+                  padding: '6px 10px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 6,
+                  background: '#FFFFFF', color: '#0F0F10', width: '100%',
+                }}
+                title="Default = today. Change for back-dated invoices." />
+            </div>
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginTop: 12 }}>
             <div>
               <SearchSelect
@@ -271,16 +302,17 @@ export function InvoiceCreate() {
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'minmax(0,2.2fr) minmax(0,1fr) minmax(0,1.1fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                gridTemplateColumns: 'minmax(0,2fr) minmax(0,0.9fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
                 gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
                 fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
               }}>
                 <span>Product</span>
                 <span>Category</span>
                 <span>Tax Scheme</span>
-                <span>Qty</span>
-                <span>Net / Unit (BHD)</span>
-                <span style={{ textAlign: 'right' }}>Line Total</span>
+                <span style={{ textAlign: 'center' }}>Qty</span>
+                <span style={{ textAlign: 'right' }}>Net / Unit (BHD)<br/><span style={{ fontSize: 9, color: '#9CA3AF', textTransform: 'none', letterSpacing: 0 }}>auto</span></span>
+                <span style={{ textAlign: 'right' }}>VAT (BHD)<br/><span style={{ fontSize: 9, color: '#9CA3AF', textTransform: 'none', letterSpacing: 0 }}>auto</span></span>
+                <span style={{ textAlign: 'right' }}>Total Price incl. VAT (BHD)<br/><span style={{ fontSize: 9, color: '#9CA3AF', textTransform: 'none', letterSpacing: 0 }}>enter total</span></span>
                 <span></span>
               </div>
               {lines.map((l, idx) => {
@@ -289,7 +321,7 @@ export function InvoiceCreate() {
                 return (
                   <div key={idx} style={{
                     display: 'grid',
-                    gridTemplateColumns: 'minmax(0,2.2fr) minmax(0,1fr) minmax(0,1.1fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                    gridTemplateColumns: 'minmax(0,2fr) minmax(0,0.9fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
                     gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
                   }}>
                     <div style={{ minWidth: 0 }}>
@@ -315,13 +347,32 @@ export function InvoiceCreate() {
                       onChange={e => updateLine(idx, { quantity: Math.max(1, parseInt(e.target.value) || 1) })}
                       className="font-mono"
                       style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
-                    <input type="number" min={0} step="0.001" value={l.unitPrice}
-                      onChange={e => updateLine(idx, { unitPrice: parseFloat(e.target.value) || 0 })}
-                      className="font-mono"
-                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
-                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {fmt(c.gross)}
+                    <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {fmt(c.net / Math.max(1, l.quantity))}
                     </span>
+                    {c.scheme === 'MARGIN' ? (
+                      <span className="font-mono" title="Internal VAT liability on margin (not shown to customer)"
+                        style={{ padding: '8px 10px', fontSize: 13, color: '#FF8730', background: 'rgba(255,135,48,0.06)', border: '1px solid rgba(255,135,48,0.25)', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {fmt(c.internalVat)}
+                        <span style={{ fontSize: 9, color: '#FF8730', marginLeft: 4, opacity: 0.7 }}>int</span>
+                      </span>
+                    ) : (
+                      <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {fmt(c.vat)}
+                      </span>
+                    )}
+                    <input type="text" inputMode="decimal"
+                      value={lineTotalDrafts[idx] !== undefined ? lineTotalDrafts[idx] : (Number.isFinite(c.gross) ? c.gross.toFixed(2) : '0')}
+                      onChange={e => {
+                        const sanitized = e.target.value.replace(/,/g, '.').replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+                        setLineTotalDrafts(d => ({ ...d, [idx]: sanitized }));
+                        const newGross = parseFloat(sanitized) || 0;
+                        const unit = unitNetFromGross(newGross, l.quantity, c.scheme, c.vatRate);
+                        updateLine(idx, { unitPrice: unit });
+                      }}
+                      onBlur={() => setLineTotalDrafts(d => { const next = { ...d }; delete next[idx]; return next; })}
+                      className="font-mono"
+                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #0F0F10', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%', fontWeight: 600 }} />
                     <button onClick={() => removeLine(idx)}
                       disabled={lines.length === 1}
                       title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}

@@ -36,7 +36,7 @@ interface PdfOptions {
   customer?: { name: string; company?: string; phone?: string };
   sections: PdfSection[];
   footer?: string;
-  type: 'offer' | 'invoice' | 'voucher' | 'receipt';
+  type: 'offer' | 'invoice' | 'voucher' | 'receipt' | 'credit_note';
 }
 
 function escapeHtml(text: string): string {
@@ -47,8 +47,10 @@ export function generatePdfHtml(opts: PdfOptions): string {
   const typeLabel = opts.type === 'offer' ? 'OFFER'
     : opts.type === 'invoice' ? 'INVOICE'
     : opts.type === 'voucher' ? 'REPAIR VOUCHER'
+    : opts.type === 'credit_note' ? 'CREDIT NOTE'
     : 'PAYMENT RECEIPT';
-  const accentColor = opts.type === 'voucher' || opts.type === 'receipt' ? '#0F0F10' : '#1a1a1a';
+  const accentColor = opts.type === 'credit_note' ? '#FF8730'
+    : opts.type === 'voucher' || opts.type === 'receipt' ? '#0F0F10' : '#1a1a1a';
 
   let sectionsHtml = '';
   for (const section of opts.sections) {
@@ -57,14 +59,29 @@ export function generatePdfHtml(opts: PdfOptions): string {
     }
     for (const line of section.lines) {
       const weight = line.bold ? 'font-weight:700;font-size:14px' : 'font-size:12px';
-      // Mehrzeilige Labels (Brand+Name + Specs) — \n → <br>, erste Zeile fett.
+      // Mehrzeilige Labels: erste Zeile = Produkt-Name (fett), Rest = "Label: Value"-Specs
+      // → kompaktes 2-Spalten-Mini-Grid statt vertikaler Liste.
       const parts = line.label.split('\n');
-      const labelHtml = parts.length > 1
-        ? `<span><strong>${escapeHtml(parts[0])}</strong><br><span style="font-size:10px;color:#666">${parts.slice(1).map(escapeHtml).join('<br>')}</span></span>`
-        : `<span>${escapeHtml(line.label)}</span>`;
+      let labelHtml: string;
+      if (parts.length > 1) {
+        const specCells = parts.slice(1).map(spec => {
+          const colonIdx = spec.indexOf(':');
+          if (colonIdx > 0) {
+            const lbl = spec.slice(0, colonIdx).trim();
+            const val = spec.slice(colonIdx + 1).trim();
+            return `<div style="display:flex;gap:4px;line-height:1.35;break-inside:avoid"><span style="color:#999">${escapeHtml(lbl)}:</span><span style="color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(val)}</span></div>`;
+          }
+          return `<div style="line-height:1.35;color:#666">${escapeHtml(spec)}</div>`;
+        }).join('');
+        labelHtml = `<span style="display:block;max-width:65%"><strong>${escapeHtml(parts[0])}</strong>
+          <div style="display:grid;grid-template-columns:1fr 1fr;column-gap:16px;row-gap:1px;margin-top:4px;font-size:10px;color:#444">${specCells}</div>
+        </span>`;
+      } else {
+        labelHtml = `<span>${escapeHtml(line.label)}</span>`;
+      }
       sectionsHtml += `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:8px 0;border-bottom:1px solid #eee;${weight}">
         ${labelHtml}
-        <span style="font-family:monospace;white-space:nowrap;margin-left:12px">${escapeHtml(line.value)}</span>
+        <span style="font-family:monospace;white-space:nowrap;margin-left:12px">${escapeHtml(line.value === undefined || line.value === null ? '—' : String(line.value))}</span>
       </div>`;
     }
   }

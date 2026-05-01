@@ -137,7 +137,7 @@ export function OfferList() {
       }
     >
       {/* Table */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr 1fr 1fr 1fr 1fr', gap: 12, padding: '0 12px 10px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', gap: 12, padding: '0 12px 10px' }}>
         {['OFFER #', 'CLIENT', 'ITEMS', 'TOTAL', 'STATUS', 'DATE'].map(h => (
           <span key={h} className="text-overline">{h}</span>
         ))}
@@ -157,7 +157,7 @@ export function OfferList() {
           <div key={offer.id}
             className="cursor-pointer transition-colors"
             style={{
-              display: 'grid', gridTemplateColumns: '1fr 2fr 1fr 1fr 1fr 1fr',
+              display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)',
               gap: 12, padding: '14px 12px', alignItems: 'center',
               borderBottom: '1px solid rgba(229,225,214,0.6)',
             }}
@@ -237,14 +237,16 @@ export function OfferList() {
                   const p = products.find(pr => pr.id === id);
                   if (!p) return null;
                   const price = linePrices[id] ?? p.plannedSalePrice ?? p.purchasePrice;
-                  const outOfRange = (p.minSalePrice && price < p.minSalePrice) || (p.maxSalePrice && price > p.maxSalePrice);
+                  // Sale-Price ist die Obergrenze (Listenpreis); Min ist die Verhandlungsuntergrenze.
+                  const upperLimit = p.plannedSalePrice;
+                  const outOfRange = (p.minSalePrice && price < p.minSalePrice) || (upperLimit && price > upperLimit);
                   return (
                     <div key={id} className="flex items-center justify-between gap-3" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
                       <div className="flex-1" style={{ minWidth: 0 }}>
                         <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.brand} {p.name}</span>
-                        {(p.minSalePrice || p.maxSalePrice) && (
+                        {p.minSalePrice && p.minSalePrice > 0 && (
                           <span style={{ fontSize: 10, color: '#6B7280', display: 'block' }}>
-                            Range: {fmt(p.minSalePrice || 0)} — {fmt(p.maxSalePrice || 0)}
+                            Min: {fmt(p.minSalePrice)} BHD{upperLimit ? ` · List: ${fmt(upperLimit)} BHD` : ''}
                           </span>
                         )}
                         {outOfRange && (

@@ -197,16 +197,20 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
             const expenseId = uuid();
             const expenseNumber = getNextDocumentNumber('EXP');
             const method = repair.internalPaidFrom || 'bank';
+            // Default-Status PENDING — Workshop-Rechnung wurde erfasst aber noch nicht bezahlt.
+            // User muss explizit „Mark as Paid" wählen → erscheint sonst in /payables-Liste.
+            // Wenn `internalPaidFrom` explizit gesetzt ist (cash/bank), gilt das als Sofort-Zahlung.
+            const status = repair.internalPaidFrom ? 'PAID' : 'PENDING';
             db.run(
               `INSERT INTO expenses (id, branch_id, expense_number, category, amount, payment_method,
-                expense_date, description, related_module, related_entity_id, created_at, created_by)
-               VALUES (?, ?, ?, 'RepairCosts', ?, ?, ?, ?, 'repair', ?, ?, ?)`,
+                expense_date, description, related_module, related_entity_id, status, created_at, created_by)
+               VALUES (?, ?, ?, 'RepairCosts', ?, ?, ?, ?, 'repair', ?, ?, ?, ?)`,
               [expenseId, branchId, expenseNumber, repair.internalCost, method,
                now.split('T')[0],
                `External repair ${repair.repairNumber}${repair.externalVendor ? ' · ' + repair.externalVendor : ''}`,
-               id, now, userId]
+               id, status, now, userId]
             );
-            trackInsert('expenses', expenseId, { category: 'RepairCosts', amount: repair.internalCost, repairId: id });
+            trackInsert('expenses', expenseId, { category: 'RepairCosts', amount: repair.internalCost, repairId: id, status });
           }
         }
         break;
@@ -250,6 +254,12 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
         [new Date().toISOString(), repair.productId]);
     }
+    // Auto-erzeugte Repair-Cost-Expenses cancellen (Cashflow-Bereinigung).
+    db.run(
+      `UPDATE expenses SET status = 'CANCELLED'
+       WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`,
+      [id]
+    );
     db.run(`DELETE FROM repairs WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('repairs', id);
@@ -258,13 +268,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
   // Plan §8 #1 — Customer-Charge Payment-Tracking. Akkumuliert Zahlungen, leitet Status ab.
   recordCustomerPayment: (id, amount, method, date) => {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('Repair payment amount must be a positive number.');
+    }
     const db = getDatabase();
     const r = get().getRepair(id);
-    if (!r || amount <= 0) return;
+    if (!r) return;
     const charge = r.chargeToCustomer || 0;
     const newPaid = Math.min(charge > 0 ? charge : Number.MAX_SAFE_INTEGER, (r.customerPaidAmount || 0) + amount);
     const newStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' =
-      charge > 0 && newPaid >= charge - 0.001 ? 'PAID'
+      charge > 0 && newPaid >= charge - 0.005 ? 'PAID'
       : newPaid > 0 ? 'PARTIALLY_PAID'
       : 'UNPAID';
     const now = new Date().toISOString();

@@ -150,7 +150,7 @@ export function SupplierDetail() {
           <div>
             <span className="text-overline">SUPPLIER</span>
             {editing ? (
-              <Input label="" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} />
+              <Input required label="" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} />
             ) : (
               <h1 className="font-display" style={{ fontSize: 28, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>{supplier.name}</h1>
             )}
@@ -201,9 +201,9 @@ export function SupplierDetail() {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12 }}>
               <span className="text-overline">NUMBER</span>
               <span className="text-overline">DATE</span>
-              <span className="text-overline" style={{ textAlign: 'right' }}>TOTAL</span>
-              <span className="text-overline" style={{ textAlign: 'right' }}>PAID</span>
-              <span className="text-overline" style={{ textAlign: 'right' }}>REMAINING</span>
+              <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>TOTAL</span>
+              <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>PAID</span>
+              <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>REMAINING</span>
               <span className="text-overline">STATUS</span>
               {supplierPurchases.map(p => (
                 <div key={p.id} style={{ display: 'contents', cursor: 'pointer' }}
@@ -230,7 +230,7 @@ export function SupplierDetail() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12 }}>
                 <span className="text-overline">PURCHASE</span>
                 <span className="text-overline">DATE</span>
-                <span className="text-overline" style={{ textAlign: 'right' }}>AMOUNT</span>
+                <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
                 <span className="text-overline">METHOD</span>
                 <span className="text-overline">REFERENCE</span>
                 {payments.map(p => (
@@ -257,7 +257,7 @@ export function SupplierDetail() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12 }}>
                 <span className="text-overline">NUMBER</span>
                 <span className="text-overline">DATE</span>
-                <span className="text-overline" style={{ textAlign: 'right' }}>AMOUNT</span>
+                <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
                 <span className="text-overline">REFUND METHOD</span>
                 <span className="text-overline">STATUS</span>
                 {returns.map(r => (

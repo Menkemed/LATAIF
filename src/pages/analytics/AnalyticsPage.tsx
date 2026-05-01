@@ -345,19 +345,37 @@ export function AnalyticsPage() {
   const finance = useMemo(() => {
     if (!branchId) return null;
 
-    // Revenue totals from non-cancelled invoices
+    // Revenue totals from final invoices.
+    // Total VAT muss BEIDE Steuern erfassen — auch in mixed-Scheme-Invoices (typisch: Watch via MARGIN
+    // + Strap/Box via VAT_10 in derselben Rechnung). Lösung: per-Line aggregieren.
+    //  - Stored vat_amount (Invoice-Level): erfasst nur VAT_10/ZERO-Anteile (MARGIN-Lines speichern 0)
+    //  - Margin-VAT muss live aus invoice_lines berechnet werden:
+    //    qty × max(0, unit_price − purchase_price) × vat_rate / (100 + vat_rate)
     const rev = qry(
       `SELECT COALESCE(SUM(net_amount),0) as net,
               COALESCE(SUM(gross_amount),0) as gross,
-              COALESCE(SUM(vat_amount),0) as vat,
+              COALESCE(SUM(vat_amount),0) as stored_vat,
               COALESCE(SUM(margin_snapshot),0) as profit
        FROM invoices WHERE branch_id = ? AND status = 'FINAL'`,
+      [branchId]
+    );
+    // Per-Line MARGIN-VAT — über alle FINAL-Invoices, alle Lines mit tax_scheme='MARGIN'.
+    const marginVatRow = qry(
+      `SELECT COALESCE(SUM(
+         CASE WHEN il.tax_scheme = 'MARGIN' AND il.unit_price > il.purchase_price_snapshot
+           THEN COALESCE(il.quantity, 1) * (il.unit_price - il.purchase_price_snapshot)
+                * il.vat_rate / (100 + il.vat_rate)
+         ELSE 0 END
+       ),0) AS margin_vat
+       FROM invoice_lines il
+       JOIN invoices i ON i.id = il.invoice_id
+       WHERE i.branch_id = ? AND i.status = 'FINAL'`,
       [branchId]
     );
     const r = rev[0] || {};
     const netRevenue = num(r, 'net');
     const grossRevenue = num(r, 'gross');
-    const totalVat = num(r, 'vat');
+    const totalVat = num(r, 'stored_vat') + num(marginVatRow[0] || {}, 'margin_vat');
     const profitAfterVat = num(r, 'profit');
 
     // Open invoices (issued or partially_paid)
@@ -718,10 +736,23 @@ export function AnalyticsPage() {
     );
     const fyStartMonth = parseInt((fyStartRow[0]?.value as string) || '1') || 1; // 1-12
 
+    // Quarterly VAT: per-invoice effective VAT = stored vat_amount (VAT_10/ZERO-Anteile)
+    // PLUS per-line MARGIN-VAT-Subselect (für mixed-Scheme-Invoices ist das essentiell —
+    // dort enthält der invoice-level vat_amount nur den VAT_10-Anteil, MARGIN-Anteil fehlt).
     const vatByInv = qry(
-      `SELECT COALESCE(issued_at, created_at) as d, vat_amount FROM invoices
-       WHERE branch_id = ? AND status != 'CANCELLED' AND status != 'DRAFT'
-         AND COALESCE(butterfly,0) = 0`,
+      `SELECT COALESCE(i.issued_at, i.created_at) as d,
+              i.vat_amount + COALESCE((
+                SELECT SUM(
+                  CASE WHEN il.tax_scheme = 'MARGIN' AND il.unit_price > il.purchase_price_snapshot
+                    THEN COALESCE(il.quantity, 1) * (il.unit_price - il.purchase_price_snapshot)
+                         * il.vat_rate / (100 + il.vat_rate)
+                  ELSE 0 END
+                )
+                FROM invoice_lines il WHERE il.invoice_id = i.id
+              ), 0) AS effective_vat
+         FROM invoices i
+        WHERE i.branch_id = ? AND i.status != 'CANCELLED' AND i.status != 'DRAFT'
+          AND COALESCE(i.butterfly,0) = 0`,
       [branchId]
     );
     const quarterlyVatOwed: Record<string, number> = {};
@@ -734,7 +765,7 @@ export function AnalyticsPage() {
       const q = Math.floor(fyOffset / 3) + 1;
       // Fiscal year label: the calendar year of the quarter's start month
       const key = `${year}-Q${q}`;
-      quarterlyVatOwed[key] = (quarterlyVatOwed[key] || 0) + ((row.vat_amount as number) || 0);
+      quarterlyVatOwed[key] = (quarterlyVatOwed[key] || 0) + ((row.effective_vat as number) || 0);
     }
     const quarterlyVatPaid: Record<string, number> = {};
     for (const t of taxPaidRows) {

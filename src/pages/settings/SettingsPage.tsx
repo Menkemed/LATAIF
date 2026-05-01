@@ -13,6 +13,7 @@ import { exportFile } from '@/core/utils/export-file';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { useProductStore } from '@/stores/productStore';
 import { useAuthStore } from '@/stores/authStore';
+import { usePermission } from '@/hooks/usePermission';
 import type { Category, CategoryAttribute, AttributeType, UserRole } from '@/core/models/types';
 
 // ── Constants ──
@@ -69,6 +70,14 @@ function getSetting(branchId: string, key: string): string {
 }
 
 function setSetting(branchId: string, key: string, value: string, category: string): void {
+  // Permission-Guard: nur ADMIN darf Settings ändern. State.role wird aus authStore live gelesen,
+  // damit auch direkter Aufruf aus DevTools/Console abgewiesen wird.
+  const { role } = useAuthStore.getState();
+  // canonicalRole: 'owner' (legacy) und 'ADMIN' (canonical) zählen als Admin.
+  const r = role();
+  if (r !== 'ADMIN' && r !== 'owner') {
+    throw new Error('Only admin can modify settings.');
+  }
   const db = getDatabase();
   const now = new Date().toISOString();
   db.run(
@@ -2007,8 +2016,21 @@ function DangerZoneTab() {
 // ═══════════════════════════════════════════════════════════
 
 export function SettingsPage() {
+  const perm = usePermission();
   const [activeTab, setActiveTab] = useState<TabKey>('company');
   const [hoveredTab, setHoveredTab] = useState<TabKey | null>(null);
+
+  // Route-Guard: ohne ADMIN keine Settings-Seite. Verhindert auch UI-basierte Manipulation.
+  if (!perm.canManageSettings) {
+    return (
+      <div className="app-content" style={{ background: '#FFFFFF', padding: 48 }}>
+        <h1 className="text-display-s" style={{ color: '#0F0F10', marginBottom: 12 }}>Settings</h1>
+        <p style={{ fontSize: 14, color: '#6B7280' }}>
+          You don't have permission to access settings. Contact your administrator.
+        </p>
+      </div>
+    );
+  }
 
   const renderTab = () => {
     switch (activeTab) {

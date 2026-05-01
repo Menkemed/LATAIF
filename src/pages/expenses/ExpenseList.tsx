@@ -1,6 +1,6 @@
-// Plan §Expenses — List + inline create modal + monthly totals
+// Plan §Expenses + §Pay-Later — List + create modal mit Pay-Now/Later/Partial + Record-Payment
 import { useEffect, useMemo, useState } from 'react';
-import { Wallet, Trash2 } from 'lucide-react';
+import { Wallet, Trash2, CreditCard } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -24,8 +24,26 @@ const CATEGORIES: { value: ExpenseCategory; label: string }[] = [
   { value: 'Miscellaneous', label: 'Miscellaneous' },
 ];
 
+type PayTiming = 'now' | 'later' | 'partial';
+type DisplayStatus = 'Paid' | 'Partially Paid' | 'Unpaid' | 'Cancelled';
+
+function deriveDisplayStatus(e: Expense): DisplayStatus {
+  if (e.status === 'CANCELLED') return 'Cancelled';
+  const paid = e.paidAmount || 0;
+  if (paid >= e.amount - 0.005) return 'Paid';
+  if (paid > 0.005) return 'Partially Paid';
+  return 'Unpaid';
+}
+
+const STATUS_STYLE: Record<DisplayStatus, { fg: string; bg: string }> = {
+  'Paid':            { fg: '#16A34A', bg: 'rgba(22,163,74,0.10)' },
+  'Partially Paid':  { fg: '#FF8730', bg: 'rgba(255,135,48,0.10)' },
+  'Unpaid':          { fg: '#DC2626', bg: 'rgba(220,38,38,0.08)' },
+  'Cancelled':       { fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' },
+};
+
 export function ExpenseList() {
-  const { expenses, loadExpenses, createExpense, updateExpense, deleteExpense, getTotalsByCategory } = useExpenseStore();
+  const { expenses, loadExpenses, createExpense, updateExpense, deleteExpense, recordExpensePayment, getTotalsByCategory } = useExpenseStore();
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<ExpenseCategory | ''>('');
   const [showNew, setShowNew] = useState(false);
@@ -37,6 +55,13 @@ export function ExpenseList() {
     paymentMethod: 'bank',
     expenseDate: new Date().toISOString().split('T')[0],
   });
+  const [payTiming, setPayTiming] = useState<PayTiming>('now');
+  const [partialAmount, setPartialAmount] = useState<number>(0);
+
+  // Record-Payment-Modal-State
+  const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
+  const [payAmount, setPayAmount] = useState<number>(0);
+  const [payMethod, setPayMethod] = useState<'cash' | 'bank'>('bank');
 
   useEffect(() => { loadExpenses(); }, [loadExpenses]);
 
@@ -49,28 +74,61 @@ export function ExpenseList() {
 
   const totals = getTotalsByCategory();
   const grandTotal = Object.values(totals).reduce((s, v) => s + v, 0);
+  const totalPaid = expenses.filter(e => e.status !== 'CANCELLED').reduce((s, e) => s + (e.paidAmount || 0), 0);
+  const totalUnpaid = expenses.filter(e => e.status !== 'CANCELLED')
+    .reduce((s, e) => s + Math.max(0, e.amount - (e.paidAmount || 0)), 0);
 
   function handleCreate() {
     if (!form.amount || form.amount <= 0) return;
-    createExpense({
-      category: form.category,
-      amount: form.amount,
-      paymentMethod: form.paymentMethod || 'bank',
-      expenseDate: form.expenseDate || new Date().toISOString().split('T')[0],
-      description: form.description,
-    });
-    setForm({
-      category: 'Rent',
-      paymentMethod: 'bank',
-      expenseDate: new Date().toISOString().split('T')[0],
-    });
-    setShowNew(false);
+    const initial = payTiming === 'now' ? form.amount
+      : payTiming === 'partial' ? Math.max(0, Math.min(form.amount, partialAmount))
+      : 0;
+    try {
+      createExpense({
+        category: form.category,
+        amount: form.amount,
+        paymentMethod: form.paymentMethod || 'bank',
+        expenseDate: form.expenseDate || new Date().toISOString().split('T')[0],
+        description: form.description,
+        payNow: payTiming === 'now',
+        initialPaid: initial,
+      });
+      setForm({
+        category: 'Rent',
+        paymentMethod: 'bank',
+        expenseDate: new Date().toISOString().split('T')[0],
+      });
+      setPayTiming('now');
+      setPartialAmount(0);
+      setShowNew(false);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function openPaymentModal(expenseId: string) {
+    const exp = expenses.find(e => e.id === expenseId);
+    if (!exp) return;
+    setPayExpenseId(expenseId);
+    setPayAmount(Math.max(0, exp.amount - (exp.paidAmount || 0)));
+    setPayMethod(exp.paymentMethod || 'bank');
+  }
+
+  function handleRecordPayment() {
+    if (!payExpenseId || payAmount <= 0) return;
+    try {
+      recordExpensePayment(payExpenseId, payAmount, payMethod);
+      setPayExpenseId(null);
+      setPayAmount(0);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
   }
 
   return (
     <PageLayout
       title="Expenses"
-      subtitle={`${expenses.length} records · ${fmt(grandTotal)} BHD total`}
+      subtitle={`${expenses.length} records · ${fmt(grandTotal)} total · ${fmt(totalPaid)} paid · ${fmt(totalUnpaid)} open`}
       showSearch onSearch={setSearch} searchPlaceholder="Search description, number, reference..."
       actions={
         <div className="flex gap-2 items-center">
@@ -123,39 +181,63 @@ export function ExpenseList() {
       ) : (
         <Card noPadding>
           <div style={{
-            display: 'grid', gridTemplateColumns: '1fr 1.2fr 1fr 2fr 1fr 0.7fr 0.6fr',
-            gap: 14, padding: '12px 16px', borderBottom: '1px solid #E5E9EE',
+            display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.6fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,0.5fr)',
+            gap: 12, padding: '12px 16px', borderBottom: '1px solid #E5E9EE',
           }}>
-            {['NUMBER', 'DATE', 'CATEGORY', 'DESCRIPTION', 'AMOUNT', 'METHOD', ''].map(h => (
+            {['NUMBER', 'DATE', 'CATEGORY', 'DESCRIPTION', 'AMOUNT', 'PAID', 'REMAINING', 'STATUS', ''].map(h => (
               <span key={h} className="text-overline">{h}</span>
             ))}
           </div>
-          {filtered.map(e => (
-            <div key={e.id} className="cursor-pointer transition-colors" style={{
-              display: 'grid', gridTemplateColumns: '1fr 1.2fr 1fr 2fr 1fr 0.7fr 0.6fr',
-              gap: 14, padding: '12px 16px', alignItems: 'center',
-              borderBottom: '1px solid rgba(229,225,214,0.6)',
-            }}
-            onClick={() => { setEditId(e.id); setEditForm({ ...e }); }}
-            onMouseEnter={ev => (ev.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
-            onMouseLeave={ev => (ev.currentTarget.style.background = 'transparent')}>
-              <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{e.expenseNumber}</span>
-              <span style={{ fontSize: 12, color: '#4B5563' }}>{e.expenseDate}</span>
-              <span style={{ fontSize: 12, color: '#0F0F10' }}>{CATEGORIES.find(c => c.value === e.category)?.label || e.category}</span>
-              <span style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description || '—'}</span>
-              <span className="font-mono" style={{ fontSize: 13, color: '#DC2626' }}>{fmt(e.amount)}</span>
-              <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'capitalize' }}>{e.paymentMethod}</span>
-              <button onClick={(ev) => { ev.stopPropagation(); setConfirmDelete(e.id); }} className="cursor-pointer"
-                style={{ background: 'none', border: 'none', color: '#6B7280' }}>
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
+          {filtered.map(e => {
+            const remaining = Math.max(0, e.amount - (e.paidAmount || 0));
+            const displayStatus = deriveDisplayStatus(e);
+            const statusStyle = STATUS_STYLE[displayStatus];
+            const canPay = displayStatus === 'Unpaid' || displayStatus === 'Partially Paid';
+            return (
+              <div key={e.id} className="cursor-pointer transition-colors" style={{
+                display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.6fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,0.5fr)',
+                gap: 12, padding: '12px 16px', alignItems: 'center',
+                borderBottom: '1px solid rgba(229,225,214,0.6)',
+              }}
+              onClick={() => { setEditId(e.id); setEditForm({ ...e }); }}
+              onMouseEnter={ev => (ev.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
+              onMouseLeave={ev => (ev.currentTarget.style.background = 'transparent')}>
+                <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.expenseNumber}</span>
+                <span style={{ fontSize: 12, color: '#4B5563' }}>{e.expenseDate}</span>
+                <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{CATEGORIES.find(c => c.value === e.category)?.label || e.category}</span>
+                <span style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description || '—'}</span>
+                <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(e.amount)}</span>
+                <span className="font-mono" style={{ fontSize: 13, color: e.paidAmount > 0 ? '#16A34A' : '#9CA3AF' }}>{fmt(e.paidAmount || 0)}</span>
+                <span className="font-mono" style={{ fontSize: 13, color: remaining > 0.005 ? '#DC2626' : '#9CA3AF' }}>
+                  {remaining > 0.005 ? fmt(remaining) : '—'}
+                </span>
+                <div className="flex items-center gap-1" style={{ minWidth: 0 }}>
+                  <span style={{
+                    padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
+                    color: statusStyle.fg, background: statusStyle.bg,
+                    border: `1px solid ${statusStyle.fg}33`, whiteSpace: 'nowrap',
+                  }}>{displayStatus}</span>
+                  {canPay && (
+                    <button onClick={(ev) => { ev.stopPropagation(); openPaymentModal(e.id); }}
+                      title="Record payment"
+                      className="cursor-pointer" style={{
+                        padding: '3px 6px', fontSize: 10, border: '1px solid #16A34A',
+                        color: '#16A34A', borderRadius: 4, background: 'none',
+                      }}><CreditCard size={11} /></button>
+                  )}
+                </div>
+                <button onClick={(ev) => { ev.stopPropagation(); setConfirmDelete(e.id); }} className="cursor-pointer"
+                  style={{ background: 'none', border: 'none', color: '#6B7280' }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            );
+          })}
         </Card>
       )}
 
       {/* New Expense Modal */}
-      <Modal open={showNew} onClose={() => setShowNew(false)} title="New Expense" width={500}>
+      <Modal open={showNew} onClose={() => setShowNew(false)} title="New Expense" width={520}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CATEGORY</span>
@@ -173,28 +255,67 @@ export function ExpenseList() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <Input label="AMOUNT (BHD)" type="number" step="0.01" placeholder="0.00"
+            <Input required label="AMOUNT (BHD)" type="number" step="0.01" placeholder="0.00"
               value={form.amount ?? ''} onChange={e => setForm({ ...form, amount: parseFloat(e.target.value) || 0 })} />
-            <Input label="DATE" type="date" value={form.expenseDate || ''} onChange={e => setForm({ ...form, expenseDate: e.target.value })} />
+            <Input required label="DATE" type="date" value={form.expenseDate || ''} onChange={e => setForm({ ...form, expenseDate: e.target.value })} />
           </div>
+
+          {/* Pay-Timing */}
           <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAID FROM</span>
-            <div className="flex gap-2" style={{ marginTop: 6 }}>
-              {(['cash', 'bank'] as const).map(m => {
-                const active = form.paymentMethod === m;
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAYMENT TIMING</span>
+            <div className="flex gap-2" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+              {(['now', 'later', 'partial'] as const).map(t => {
+                const active = payTiming === t;
+                const label = t === 'now' ? 'Pay now (full)' : t === 'later' ? 'Pay later' : 'Partial payment';
                 return (
-                  <button key={m} onClick={() => setForm({ ...form, paymentMethod: m })}
+                  <button key={t} onClick={() => setPayTiming(t)}
                     className="cursor-pointer rounded"
                     style={{
-                      padding: '8px 16px', fontSize: 13,
+                      padding: '7px 14px', fontSize: 12,
                       border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                    }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
+                    }}>{label}</button>
                 );
               })}
             </div>
+            {payTiming === 'partial' && (
+              <div style={{ marginTop: 10 }}>
+                <Input label="PAID NOW (BHD)" type="number" step="0.01" placeholder="0.00"
+                  value={partialAmount || ''} onChange={e => setPartialAmount(parseFloat(e.target.value) || 0)} />
+                <span style={{ fontSize: 11, color: '#6B7280', marginTop: 4, display: 'block' }}>
+                  Remaining will be tracked as open in /payables until fully paid.
+                </span>
+              </div>
+            )}
+            {payTiming === 'later' && (
+              <span style={{ fontSize: 11, color: '#FF8730', marginTop: 6, display: 'block' }}>
+                ⚠ Wird als Unpaid in /payables erscheinen bis bezahlt.
+              </span>
+            )}
           </div>
+
+          {payTiming !== 'later' && (
+            <div>
+              <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAID FROM</span>
+              <div className="flex gap-2" style={{ marginTop: 6 }}>
+                {(['cash', 'bank'] as const).map(m => {
+                  const active = form.paymentMethod === m;
+                  return (
+                    <button key={m} onClick={() => setForm({ ...form, paymentMethod: m })}
+                      className="cursor-pointer rounded"
+                      style={{
+                        padding: '8px 16px', fontSize: 13,
+                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                        color: active ? '#0F0F10' : '#6B7280',
+                        background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <Input label="DESCRIPTION" placeholder="e.g. April office rent"
             value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
@@ -223,10 +344,16 @@ export function ExpenseList() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <Input label="AMOUNT (BHD)" type="number" step="0.01"
+            <Input required label="AMOUNT (BHD)" type="number" step="0.01"
               value={editForm.amount ?? ''} onChange={e => setEditForm({ ...editForm, amount: parseFloat(e.target.value) || 0 })} />
-            <Input label="DATE" type="date" value={editForm.expenseDate || ''} onChange={e => setEditForm({ ...editForm, expenseDate: e.target.value })} />
+            <Input required label="DATE" type="date" value={editForm.expenseDate || ''} onChange={e => setEditForm({ ...editForm, expenseDate: e.target.value })} />
           </div>
+          {editForm.id && (
+            <div style={{ padding: '10px 12px', background: '#F2F7FA', borderRadius: 8, fontSize: 12, color: '#4B5563' }}>
+              <div className="flex justify-between"><span>Paid:</span><span className="font-mono" style={{ color: '#16A34A' }}>{fmt(editForm.paidAmount || 0)} BHD</span></div>
+              <div className="flex justify-between" style={{ marginTop: 4 }}><span>Remaining:</span><span className="font-mono" style={{ color: '#DC2626' }}>{fmt(Math.max(0, (editForm.amount || 0) - (editForm.paidAmount || 0)))} BHD</span></div>
+            </div>
+          )}
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAID FROM</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>
@@ -258,10 +385,57 @@ export function ExpenseList() {
               <Button variant="ghost" onClick={() => setEditId(null)}>Cancel</Button>
               <Button variant="primary" onClick={() => {
                 if (!editId) return;
-                updateExpense(editId, editForm);
-                setEditId(null);
+                try {
+                  updateExpense(editId, editForm);
+                  setEditId(null);
+                } catch (e) {
+                  alert(e instanceof Error ? e.message : String(e));
+                }
               }}>Save</Button>
             </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Record Payment Modal */}
+      <Modal open={!!payExpenseId} onClose={() => setPayExpenseId(null)} title="Record Expense Payment" width={420}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {(() => {
+            const exp = expenses.find(e => e.id === payExpenseId);
+            if (!exp) return null;
+            const remaining = Math.max(0, exp.amount - (exp.paidAmount || 0));
+            return (
+              <div style={{ padding: '10px 12px', background: '#F2F7FA', borderRadius: 8, fontSize: 12, color: '#4B5563' }}>
+                <div className="flex justify-between"><span>Expense:</span><span className="font-mono" style={{ color: '#0F0F10' }}>{exp.expenseNumber}</span></div>
+                <div className="flex justify-between" style={{ marginTop: 4 }}><span>Total:</span><span className="font-mono">{fmt(exp.amount)} BHD</span></div>
+                <div className="flex justify-between" style={{ marginTop: 4 }}><span>Already paid:</span><span className="font-mono" style={{ color: '#16A34A' }}>{fmt(exp.paidAmount || 0)} BHD</span></div>
+                <div className="flex justify-between" style={{ marginTop: 4 }}><span>Remaining:</span><span className="font-mono" style={{ color: '#DC2626' }}>{fmt(remaining)} BHD</span></div>
+              </div>
+            );
+          })()}
+          <Input required label="PAYMENT AMOUNT (BHD)" type="number" step="0.01"
+            value={payAmount || ''} onChange={e => setPayAmount(parseFloat(e.target.value) || 0)} />
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
+            <div className="flex gap-2" style={{ marginTop: 6 }}>
+              {(['cash', 'bank'] as const).map(m => {
+                const active = payMethod === m;
+                return (
+                  <button key={m} onClick={() => setPayMethod(m)}
+                    className="cursor-pointer rounded"
+                    style={{
+                      padding: '8px 16px', fontSize: 13,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                      color: active ? '#0F0F10' : '#6B7280',
+                      background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                    }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => setPayExpenseId(null)}>Cancel</Button>
+            <Button variant="primary" onClick={handleRecordPayment} disabled={payAmount <= 0}>Record Payment</Button>
           </div>
         </div>
       </Modal>

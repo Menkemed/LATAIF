@@ -106,17 +106,22 @@ async function main() {
   writeJson(latestPath, latest);
   log(`latest.json geschrieben: ${latestPath}`);
 
-  // 5. GitHub Release als DRAFT erstellen — du musst manuell „Publish" drücken damit
-  // andere Rechner das Update sehen. Sicherheitsnetz: keine versehentliche Auslieferung.
+  // 5. GitHub Release direkt publishen — keine Draft-Bestaetigung mehr noetig.
+  //    Updater sieht das Update sofort. Wenn man das Sicherheitsnetz zurueck will:
+  //    `RELEASE_DRAFT=1 npm run release:patch` → erstellt wieder als Draft.
+  const asDraft = process.env.RELEASE_DRAFT === '1';
+  const draftFlag = asDraft ? '--draft' : '--latest';
   if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
-    log(`GitHub Draft-Release v${newVersion} erstellen + Bundles hochladen…`);
+    log(`GitHub-Release v${newVersion} ${asDraft ? 'als DRAFT' : 'LIVE'} hochladen…`);
     try {
-      sh(`gh release create v${newVersion} "${nsisExe}" "${nsisSig}" "${latestPath}" --title "LATAIF v${newVersion}" --notes "Release v${newVersion}" --draft`);
-      log(`✔ Draft-Release erstellt: https://github.com/${repo}/releases`);
-      console.log(`\n  → Teste den Build erst lokal.`);
-      console.log(`  → Wenn alles passt: Gehe auf https://github.com/${repo}/releases`);
-      console.log(`  → Klicke auf "v${newVersion}" → "Edit" → "Publish release"`);
-      console.log(`  → ERST DANN sehen andere Rechner das Update.`);
+      sh(`gh release create v${newVersion} "${nsisExe}" "${nsisSig}" "${latestPath}" --title "LATAIF v${newVersion}" --notes "Release v${newVersion}" ${draftFlag}`);
+      if (asDraft) {
+        log(`✔ Draft-Release: https://github.com/${repo}/releases`);
+        console.log(`  → Manuell publishen wenn bereit.`);
+      } else {
+        log(`✔ Release LIVE: https://github.com/${repo}/releases/tag/v${newVersion}`);
+        console.log(`  → Auto-Updater greift bei allen Usern beim naechsten App-Start.`);
+      }
     } catch {
       console.error('GH-Release fehlgeschlagen. Lade die Dateien manuell hoch:');
       console.error('  ' + nsisExe);
@@ -128,13 +133,11 @@ async function main() {
     console.log('  Datei 1:', nsisExe);
     console.log('  Datei 2:', nsisSig);
     console.log('  Datei 3:', latestPath);
-    console.log(`\n  → Erstelle ein neues DRAFT-Release auf https://github.com/${repo}/releases/new`);
-    console.log(`  → Tag: v${newVersion}`);
-    console.log('  → Hänge die 3 Dateien als Assets an');
-    console.log('  → "Save draft" (NICHT "Publish") bis du getestet hast');
+    console.log(`\n  → Erstelle ein Release auf https://github.com/${repo}/releases/new`);
+    console.log(`  → Tag: v${newVersion}, alle 3 Dateien als Assets, „Publish".`);
   }
 
-  log(`✔ Release ${newVersion} als Draft fertig — Publish via GitHub-Web-UI wenn bereit.`);
+  log(`✔ Release ${newVersion} ${asDraft ? 'als Draft' : 'LIVE'} fertig.`);
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

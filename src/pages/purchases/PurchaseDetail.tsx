@@ -254,7 +254,7 @@ export function PurchaseDetail() {
       {/* Payment Modal */}
       <Modal open={showPayment} onClose={() => setShowPayment(false)} title="Add Payment" width={420}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input label={`AMOUNT (max ${fmt(purchase.remainingAmount)} BHD outstanding)`} type="number" step="0.01"
+          <Input required label={`AMOUNT (max ${fmt(purchase.remainingAmount)} BHD outstanding)`} type="number" step="0.01"
             value={payAmount} onChange={e => setPayAmount(e.target.value)} autoFocus />
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>

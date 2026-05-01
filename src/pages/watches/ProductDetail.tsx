@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles } from 'lucide-react';
+import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -31,6 +31,7 @@ export function ProductDetail() {
   const [aiBusy, setAiBusy] = useState(false);
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const perm = usePermission();
 
   useEffect(() => { loadCategories(); loadProducts(); }, [loadCategories, loadProducts]);
@@ -62,15 +63,66 @@ export function ProductDetail() {
     ? vatEngine.calculateProfit(product.plannedSalePrice, product.purchasePrice, product.taxScheme, 10)
     : null;
 
+  // Required-field labels for the error banner.
+  const REQ_LABELS: Record<string, string> = {
+    brand: 'Brand',
+    name: 'Name / Model',
+    categoryId: 'Category',
+    condition: 'Condition',
+    purchasePrice: 'Purchase Price',
+  };
+
+  function validate(): Record<string, string> {
+    const e: Record<string, string> = {};
+    if (!form.brand?.trim()) e.brand = 'Required';
+    if (!form.name?.trim()) e.name = 'Required';
+    if (!form.categoryId) e.categoryId = 'Pick a category';
+    if (!form.condition?.trim()) e.condition = 'Required';
+    if (form.purchasePrice == null || isNaN(form.purchasePrice) || form.purchasePrice <= 0) {
+      e.purchasePrice = 'Must be > 0';
+    }
+    if (category) {
+      for (const attr of category.attributes) {
+        if (!attr.required) continue;
+        const v = formAttrs[attr.key];
+        const empty = v == null || v === '' || (Array.isArray(v) && v.length === 0);
+        if (empty) e[`attr_${attr.key}`] = 'Required';
+      }
+    }
+    return e;
+  }
+
   function handleSave() {
     if (!id) return;
+    const errs = validate();
+    setErrors(errs);
+    if (Object.keys(errs).length > 0) {
+      // Scroll to the first invalid field; small delay so the banner renders first.
+      setTimeout(() => {
+        const firstKey = Object.keys(errs)[0];
+        const el = document.getElementById(`field-${firstKey}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      return;
+    }
     const margin = form.plannedSalePrice ? form.plannedSalePrice - (form.purchasePrice || 0) : undefined;
     updateProduct(id, {
       ...form,
       attributes: formAttrs,
       expectedMargin: margin,
     });
+    setErrors({});
     setEditing(false);
+  }
+
+  function labelFor(key: string): string {
+    if (REQ_LABELS[key]) return REQ_LABELS[key];
+    if (key.startsWith('attr_') && category) {
+      const attrKey = key.slice(5);
+      const a = category.attributes.find(x => x.key === attrKey);
+      return a?.label || attrKey;
+    }
+    return key;
   }
 
   function handleDelete() {
@@ -105,7 +157,7 @@ export function ProductDetail() {
           <div className="flex gap-2">
             {editing ? (
               <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...product }); setFormAttrs({ ...product.attributes }); }}>Cancel</Button>
+                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...product }); setFormAttrs({ ...product.attributes }); setErrors({}); }}>Cancel</Button>
                 <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
               </>
             ) : (
@@ -144,6 +196,40 @@ export function ProductDetail() {
             )}
           </div>
         </div>
+
+        {/* Validation banner — appears when Save was clicked with missing required fields. */}
+        {editing && Object.keys(errors).length > 0 && (
+          <div style={{
+            marginBottom: 16, padding: '12px 16px', borderRadius: 8,
+            background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
+            color: '#DC2626', fontSize: 13,
+            display: 'flex', gap: 10, alignItems: 'flex-start',
+          }}>
+            <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                Please fill in {Object.keys(errors).length} required field{Object.keys(errors).length === 1 ? '' : 's'} before saving:
+              </div>
+              <ul style={{ margin: '4px 0 0 18px', listStyle: 'disc' }}>
+                {Object.entries(errors).map(([key, msg]) => (
+                  <li key={key}>
+                    <button
+                      onClick={() => {
+                        const el = document.getElementById(`field-${key}`);
+                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      }}
+                      className="cursor-pointer"
+                      style={{ background: 'none', border: 'none', color: '#DC2626', textDecoration: 'underline', padding: 0, fontSize: 13 }}
+                    >
+                      {labelFor(key)}
+                    </button>
+                    {' — '}{msg}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
 
         {/* AI Result */}
         {aiResult && (
@@ -265,8 +351,8 @@ export function ProductDetail() {
             {editing ? (
               <>
                 {/* Category Selector — wechseln bewirkt dass sich die "Specifications"-Karte unten anpasst. */}
-                <div style={{ marginBottom: 16 }}>
-                  <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>CATEGORY</span>
+                <div id="field-categoryId" style={{ marginBottom: 16, padding: errors.categoryId ? 8 : 0, border: errors.categoryId ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+                  <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>CATEGORY *</span>
                   <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
                     {categories.map(cat => {
                       const active = form.categoryId === cat.id;
@@ -279,6 +365,7 @@ export function ProductDetail() {
                             condition: active ? form.condition : (cat.conditionOptions?.[0] || ''),
                           });
                           if (!active) setFormAttrs({});
+                          if (errors.categoryId) setErrors({ ...errors, categoryId: '' });
                         }}
                           className="cursor-pointer rounded-lg transition-all"
                           style={{
@@ -295,8 +382,12 @@ export function ProductDetail() {
                   </div>
                 </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                <Input label="BRAND" value={form.brand || ''} onChange={e => setForm({ ...form, brand: e.target.value })} />
-                <Input label="NAME / MODEL" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} />
+                <div id="field-brand">
+                  <Input label="BRAND *" value={form.brand || ''} error={errors.brand} onChange={e => { setForm({ ...form, brand: e.target.value }); if (errors.brand) setErrors({ ...errors, brand: '' }); }} />
+                </div>
+                <div id="field-name">
+                  <Input label="NAME / MODEL *" value={form.name || ''} error={errors.name} onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
+                </div>
                 <Input label="SKU / REFERENCE" value={form.sku || ''} onChange={e => setForm({ ...form, sku: e.target.value })} />
                 <Input label="QUANTITY (STÜCKZAHL)" type="number" min="0"
                   value={form.quantity ?? 1}
@@ -339,10 +430,12 @@ export function ProductDetail() {
             <div style={{ marginTop: 28, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <Input label="PURCHASE PRICE (BHD)" type="number" value={form.purchasePrice || ''} onChange={e => setForm({ ...form, purchasePrice: Number(e.target.value) })} />
+                  <div id="field-purchasePrice">
+                    <Input label="PURCHASE PRICE (BHD) *" type="number" value={form.purchasePrice || ''} error={errors.purchasePrice}
+                      onChange={e => { setForm({ ...form, purchasePrice: Number(e.target.value) }); if (errors.purchasePrice) setErrors({ ...errors, purchasePrice: '' }); }} />
+                  </div>
                   <Input label="SALE PRICE (BHD)" type="number" value={form.plannedSalePrice || ''} onChange={e => setForm({ ...form, plannedSalePrice: Number(e.target.value) || undefined })} />
                   <Input label="MIN SALE PRICE (BHD)" type="number" value={form.minSalePrice || ''} onChange={e => setForm({ ...form, minSalePrice: Number(e.target.value) || undefined })} />
-                  <Input label="MAX SALE PRICE (BHD)" type="number" value={form.maxSalePrice || ''} onChange={e => setForm({ ...form, maxSalePrice: Number(e.target.value) || undefined })} />
                 </div>
               ) : (
                 <>
@@ -354,11 +447,11 @@ export function ProductDetail() {
                     <span className="text-overline">ASKING PRICE</span>
                     <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(product.plannedSalePrice || 0)} BHD</span>
                   </div>
-                  {(product.minSalePrice || product.maxSalePrice) && (
+                  {product.minSalePrice && product.minSalePrice > 0 && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
-                      <span className="text-overline">SALES RANGE</span>
+                      <span className="text-overline">MIN SALE PRICE</span>
                       <span className="font-mono" style={{ fontSize: 14, color: '#AA956E' }}>
-                        {fmt(product.minSalePrice || 0)} — {fmt(product.maxSalePrice || product.plannedSalePrice || 0)} BHD
+                        {fmt(product.minSalePrice)} BHD
                       </span>
                     </div>
                   )}
@@ -414,14 +507,17 @@ export function ProductDetail() {
                   const val = editing ? formAttrs[attr.key] : product.attributes[attr.key];
 
                   if (editing) {
+                    const errKey = `attr_${attr.key}`;
+                    const hasErr = !!errors[errKey];
+                    const reqMark = attr.required ? ' *' : '';
                     // Editable
                     if (attr.type === 'select' && attr.options) {
                       return (
-                        <div key={attr.key} style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
-                          <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>{attr.label}</span>
+                        <div key={attr.key} id={`field-${errKey}`} style={{ padding: hasErr ? 8 : '8px 0', border: hasErr ? '1px solid #DC2626' : undefined, borderBottom: hasErr ? '1px solid #DC2626' : '1px solid #E5E9EE', borderRadius: hasErr ? 8 : 0 }}>
+                          <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>{attr.label}{reqMark}</span>
                           <div className="flex flex-wrap gap-1">
                             {attr.options.map(opt => (
-                              <button key={opt} onClick={() => setFormAttrs({ ...formAttrs, [attr.key]: opt })}
+                              <button key={opt} onClick={() => { setFormAttrs({ ...formAttrs, [attr.key]: opt }); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                                 className="cursor-pointer" style={{
                                   padding: '3px 8px', fontSize: 11, borderRadius: 4, border: 'none',
                                   background: formAttrs[attr.key] === opt ? 'rgba(15,15,16,0.1)' : 'transparent',
@@ -429,16 +525,18 @@ export function ProductDetail() {
                                 }}>{opt}</button>
                             ))}
                           </div>
+                          {hasErr && <span style={{ fontSize: 12, color: '#DC2626', display: 'block', marginTop: 4 }}>{errors[errKey]}</span>}
                         </div>
                       );
                     }
                     return (
-                      <div key={attr.key} style={{ padding: '6px 0', borderBottom: '1px solid #E5E9EE' }}>
+                      <div key={attr.key} id={`field-${errKey}`} style={{ padding: '6px 0', borderBottom: '1px solid #E5E9EE' }}>
                         <Input
-                          label={attr.label + (attr.unit ? ` (${attr.unit})` : '')}
+                          label={attr.label + (attr.unit ? ` (${attr.unit})` : '') + reqMark}
                           type={attr.type === 'number' ? 'number' : 'text'}
                           value={String(formAttrs[attr.key] || '')}
-                          onChange={e => setFormAttrs({ ...formAttrs, [attr.key]: attr.type === 'number' ? Number(e.target.value) : e.target.value })}
+                          error={errors[errKey]}
+                          onChange={e => { setFormAttrs({ ...formAttrs, [attr.key]: attr.type === 'number' ? Number(e.target.value) : e.target.value }); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                         />
                       </div>
                     );
@@ -465,11 +563,11 @@ export function ProductDetail() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   {/* Condition */}
                   {category && category.conditionOptions.length > 0 && (
-                    <div>
-                      <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Condition</span>
+                    <div id="field-condition" style={{ padding: errors.condition ? 8 : 0, border: errors.condition ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+                      <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Condition *</span>
                       <div className="flex flex-wrap gap-1">
                         {category.conditionOptions.map(c => (
-                          <button key={c} onClick={() => setForm({ ...form, condition: c })}
+                          <button key={c} onClick={() => { setForm({ ...form, condition: c }); if (errors.condition) setErrors({ ...errors, condition: '' }); }}
                             className="cursor-pointer" style={{
                               padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
                               background: form.condition === c ? 'rgba(15,15,16,0.1)' : 'transparent',
@@ -477,6 +575,7 @@ export function ProductDetail() {
                             }}>{c}</button>
                         ))}
                       </div>
+                      {errors.condition && <span style={{ fontSize: 12, color: '#DC2626', display: 'block', marginTop: 4 }}>{errors.condition}</span>}
                     </div>
                   )}
                   {/* Scope */}

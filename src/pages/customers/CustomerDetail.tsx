@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, Phone, MessageCircle, Mail, Save, Trash2, Sparkles } from 'lucide-react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import {
+  ArrowLeft, Edit3, Phone, MessageCircle, Mail, Save, Trash2, Sparkles,
+  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, AlertTriangle,
+} from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { VIPBadge } from '@/components/ui/VIPBadge';
-import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
+import { useDebtStore } from '@/stores/debtStore';
+import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
 import { query } from '@/core/db/helpers';
@@ -18,132 +22,9 @@ import type { Customer, VIPLevel, SalesStage, CustomerType } from '@/core/models
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
-
-function CustomerActivity({ customerId, navigate }: { customerId: string; navigate: (path: string) => void }) {
-  const activities = useMemo(() => {
-    const items: { type: string; label: string; detail: string; date: string; amount?: number; status: string; link: string }[] = [];
-    const dateOf = (iso: string | null | undefined) => (iso || '').split('T')[0];
-    try {
-      // Offers — create + sent events
-      const offers = query(`SELECT id, offer_number, status, total, created_at, sent_at FROM offers WHERE customer_id = ? ORDER BY created_at DESC`, [customerId]);
-      for (const o of offers) {
-        items.push({ type: 'Offer', label: `${o.offer_number} created`, detail: `${fmt(o.total as number)} BHD`, date: dateOf(o.created_at as string), amount: o.total as number, status: o.status as string, link: `/offers/${o.id}` });
-        if (o.sent_at) {
-          items.push({ type: 'Offer', label: `${o.offer_number} sent`, detail: `${fmt(o.total as number)} BHD`, date: dateOf(o.sent_at as string), status: 'sent', link: `/offers/${o.id}` });
-        }
-      }
-      // Invoices — issue event
-      const invoices = query(`SELECT id, invoice_number, status, gross_amount, created_at, issued_at, paid_amount FROM invoices WHERE customer_id = ? ORDER BY created_at DESC`, [customerId]);
-      for (const i of invoices) {
-        items.push({ type: 'Invoice', label: `${i.invoice_number} issued`, detail: `${fmt(i.gross_amount as number)} BHD`, date: dateOf((i.issued_at as string) || (i.created_at as string)), amount: i.gross_amount as number, status: i.status as string, link: `/invoices/${i.id}` });
-      }
-      // Repairs — received, diagnosed, completed, picked_up
-      const repairs = query(`SELECT id, repair_number, status, charge_to_customer, received_at, diagnosed_at, started_at, completed_at, picked_up_at FROM repairs WHERE customer_id = ? ORDER BY received_at DESC`, [customerId]);
-      for (const r of repairs) {
-        const priceDetail = r.charge_to_customer ? `${fmt(r.charge_to_customer as number)} BHD` : '';
-        const num = r.repair_number as string;
-        const link = `/repairs/${r.id}`;
-        items.push({ type: 'Repair', label: `${num} received`, detail: priceDetail, date: dateOf(r.received_at as string), status: 'received', link });
-        if (r.diagnosed_at) items.push({ type: 'Repair', label: `${num} diagnosed`, detail: priceDetail, date: dateOf(r.diagnosed_at as string), status: 'diagnosed', link });
-        if (r.started_at) items.push({ type: 'Repair', label: `${num} started`, detail: priceDetail, date: dateOf(r.started_at as string), status: 'in_progress', link });
-        if (r.completed_at) items.push({ type: 'Repair', label: `${num} ready`, detail: priceDetail, date: dateOf(r.completed_at as string), status: 'ready', link });
-        if (r.picked_up_at) items.push({ type: 'Repair', label: `${num} picked up`, detail: priceDetail, date: dateOf(r.picked_up_at as string), status: 'picked_up', link });
-      }
-      // Consignments
-      const consignments = query(`SELECT id, consignment_number, status, agreed_price, sale_price, created_at FROM consignments WHERE consignor_id = ? ORDER BY created_at DESC`, [customerId]);
-      for (const c of consignments) {
-        items.push({ type: 'Consignment', label: c.consignment_number as string, detail: `${fmt(c.agreed_price as number)} BHD`, date: dateOf(c.created_at as string), status: c.status as string, link: `/consignments/${c.id}` });
-      }
-      // Orders — created, deposit, arrived
-      const orders = query(`SELECT id, order_number, status, agreed_price, created_at, deposit_date, actual_delivery FROM orders WHERE customer_id = ? ORDER BY created_at DESC`, [customerId]);
-      for (const o of orders) {
-        const priceDetail = o.agreed_price ? `${fmt(o.agreed_price as number)} BHD` : '';
-        const num = o.order_number as string;
-        const link = `/orders/${o.id}`;
-        items.push({ type: 'Order', label: `${num} created`, detail: priceDetail, date: dateOf(o.created_at as string), status: 'pending', link });
-        if (o.deposit_date) items.push({ type: 'Order', label: `${num} deposit received`, detail: priceDetail, date: o.deposit_date as string, status: 'deposit_received', link });
-        if (o.actual_delivery) items.push({ type: 'Order', label: `${num} arrived`, detail: priceDetail, date: o.actual_delivery as string, status: 'arrived', link });
-      }
-      // Order payments — one entry per partial payment
-      const payments = query(
-        `SELECT op.id, op.amount, op.paid_at, op.method, op.note, o.order_number, o.id as order_id
-         FROM order_payments op JOIN orders o ON o.id = op.order_id
-         WHERE o.customer_id = ? ORDER BY op.paid_at DESC`,
-        [customerId]
-      );
-      for (const p of payments) {
-        const method = (p.method as string | null)?.replace('_', ' ') || '';
-        const detail = `${fmt(p.amount as number)} BHD${method ? ` \u00b7 ${method}` : ''}`;
-        items.push({
-          type: 'Payment',
-          label: `${p.order_number} \u2014 payment`,
-          detail,
-          date: p.paid_at as string,
-          status: 'paid',
-          link: `/orders/${p.order_id}`,
-        });
-      }
-      // Tasks
-      const tasks = query(`SELECT id, title, status, priority, due_at, created_at FROM tasks WHERE linked_entity_type = 'customer' AND linked_entity_id = ? AND status != 'completed' AND status != 'cancelled' ORDER BY due_at ASC LIMIT 5`, [customerId]);
-      for (const t of tasks) {
-        items.push({ type: 'Task', label: t.title as string, detail: t.priority as string, date: dateOf((t.due_at as string) || (t.created_at as string)), status: t.status as string, link: `/tasks` });
-      }
-      // Messages (AI/WhatsApp/other outbound)
-      try {
-        const messages = query(`SELECT id, channel, kind, body, sent_at FROM customer_messages WHERE customer_id = ? ORDER BY sent_at DESC LIMIT 20`, [customerId]);
-        for (const m of messages) {
-          const channel = (m.channel as string)?.replace('_', ' ') || 'message';
-          const kind = (m.kind as string | null)?.replace('_', ' ') || 'message';
-          const body = (m.body as string) || '';
-          items.push({
-            type: 'Message',
-            label: `${kind} via ${channel}`,
-            detail: body.length > 60 ? `${body.slice(0, 60)}\u2026` : body,
-            date: dateOf(m.sent_at as string),
-            status: 'sent',
-            link: `/customers/${customerId}`,
-          });
-        }
-      } catch { /* table missing on old DB */ }
-    } catch { /* not authenticated yet */ }
-    return items.sort((a, b) => b.date.localeCompare(a.date));
-  }, [customerId]);
-
-  if (activities.length === 0) {
-    return <p style={{ fontSize: 13, color: '#6B7280', marginTop: 16 }}>No activity yet.</p>;
-  }
-
-  const typeColors: Record<string, string> = {
-    Offer: '#6E8AAA', Invoice: '#0F0F10', Repair: '#AA956E', Consignment: '#A76ECF', Order: '#7EAA6E', Task: '#AA956E', Payment: '#7EAA6E', Message: '#6E8AAA',
-  };
-
-  return (
-    <div style={{ marginTop: 16 }}>
-      {activities.map((a, i) => (
-        <div key={`${a.type}-${a.label}-${i}`}
-          className="flex items-center justify-between cursor-pointer rounded transition-colors"
-          style={{ padding: '10px 8px', margin: '0 -8px', borderBottom: '1px solid rgba(15,15,16,0.03)' }}
-          onClick={() => navigate(a.link)}
-          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(229,225,214,0.6)')}
-          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-        >
-          <div className="flex items-center gap-3">
-            <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, background: (typeColors[a.type] || '#6B7280') + '15', color: typeColors[a.type] || '#6B7280', border: `1px solid ${(typeColors[a.type] || '#6B7280')}30` }}>
-              {a.type}
-            </span>
-            <div>
-              <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }}>{a.label}</span>
-              <StatusDot status={a.status} />
-            </div>
-          </div>
-          <div className="text-right">
-            {a.detail && <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{a.detail}</span>}
-            <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>{a.date}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+function fmtDate(iso?: string | null): string {
+  if (!iso) return '\u2014';
+  return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', 'Cartier', 'Hermes', 'Chanel', 'Van Cleef & Arpels', 'Louis Vuitton', 'Chrome Hearts', 'Vacheron Constantin', 'A. Lange & Sohne'];
@@ -156,25 +37,72 @@ const TYPES: { value: CustomerType; label: string }[] = [
   { value: 'investor', label: 'Investor' }, { value: 'gift_buyer', label: 'Gift Buyer' },
 ];
 
+// Customer-scope payments helper — fetches all payments across all invoices of this customer.
+function useCustomerPayments(customerId: string | undefined) {
+  return useMemo(() => {
+    if (!customerId) return [] as Array<{ id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceId: string }>;
+    try {
+      const rows = query(
+        `SELECT p.id, p.amount, p.method, p.received_at, p.notes, i.invoice_number, i.id AS invoice_id
+         FROM payments p JOIN invoices i ON i.id = p.invoice_id
+         WHERE i.customer_id = ?
+         ORDER BY p.received_at DESC`,
+        [customerId]
+      );
+      return rows.map(r => ({
+        id: r.id as string,
+        amount: r.amount as number,
+        method: (r.method as string) || '',
+        receivedAt: (r.received_at as string) || '',
+        notes: (r.notes as string | null) || undefined,
+        invoiceNumber: r.invoice_number as string,
+        invoiceId: r.invoice_id as string,
+      }));
+    } catch { return []; }
+  }, [customerId]);
+}
+
+function MethodIcon({ method }: { method: string }) {
+  const m = method.toLowerCase();
+  if (m.includes('cash')) return <Banknote size={14} style={{ color: '#16A34A' }} />;
+  if (m.includes('bank')) return <Building2 size={14} style={{ color: '#3D7FFF' }} />;
+  if (m.includes('card')) return <CreditCard size={14} style={{ color: '#715DE3' }} />;
+  return <Wallet size={14} style={{ color: '#6B7280' }} />;
+}
+
 export function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { customers, loadCustomers, updateCustomer, deleteCustomer, getCustomerStats } = useCustomerStore();
   const { loadReturns: loadSalesReturns, getCustomerRefundPayable } = useSalesReturnStore();
   const { products, loadProducts } = useProductStore();
+  const { debts, loadDebts } = useDebtStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Customer>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
+  const [noteModal, setNoteModal] = useState(false);
+  const [noteDraft, setNoteDraft] = useState('');
+  const [editErrors, setEditErrors] = useState<Record<string, string>>({});
   const perm = usePermission();
 
-  useEffect(() => { loadCustomers(); loadProducts(); loadSalesReturns(); }, [loadCustomers, loadProducts, loadSalesReturns]);
+  useEffect(() => {
+    loadCustomers(); loadProducts(); loadSalesReturns(); loadDebts(); loadInvoices();
+  }, [loadCustomers, loadProducts, loadSalesReturns, loadDebts, loadInvoices]);
 
   const customer = useMemo(() => customers.find(c => c.id === id), [customers, id]);
 
   useEffect(() => {
     if (customer) setForm({ ...customer });
   }, [customer]);
+
+  const customerInvoices = useMemo(
+    () => id ? invoices.filter(i => i.customerId === id).sort((a, b) => (b.issuedAt || b.createdAt).localeCompare(a.issuedAt || a.createdAt)) : [],
+    [invoices, id]
+  );
+  const customerLoans = useMemo(() => id ? debts.filter(d => d.customerId === id) : [], [debts, id]);
+  const customerPayments = useCustomerPayments(id);
 
   const matchingProducts = useMemo(() => {
     if (!customer) return [];
@@ -198,7 +126,20 @@ export function CustomerDetail() {
 
   function handleSave() {
     if (!id) return;
+    const errs: Record<string, string> = {};
+    if (!form.firstName?.trim()) errs.firstName = 'Required';
+    if (!form.lastName?.trim()) errs.lastName = 'Required';
+    setEditErrors(errs);
+    if (Object.keys(errs).length > 0) {
+      setTimeout(() => {
+        const firstKey = Object.keys(errs)[0];
+        const el = document.getElementById(`field-${firstKey}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      return;
+    }
     updateCustomer(id, form);
+    setEditErrors({});
     setEditing(false);
   }
 
@@ -208,35 +149,82 @@ export function CustomerDetail() {
     navigate('/clients');
   }
 
-  const initials = `${customer.firstName[0]}${customer.lastName[0]}`;
+  const initials = `${(customer.firstName || '').charAt(0)}${(customer.lastName || '').charAt(0)}`.toUpperCase() || '?';
+  const stats = id ? getCustomerStats(id) : { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0 };
+  const refundPayable = id ? getCustomerRefundPayable(id) : 0;
+  const marginPct = stats.revenue > 0 ? (stats.profit / stats.revenue) * 100 : 0;
+  const lastOrderInvoice = customerInvoices[0];
+
+  // Status pill color for sales stage
+  const stageColors: Record<string, { fg: string; bg: string }> = {
+    active:    { fg: '#16A34A', bg: 'rgba(22,163,74,0.10)' },
+    qualified: { fg: '#3D7FFF', bg: 'rgba(61,127,255,0.10)' },
+    lead:      { fg: '#FF8730', bg: 'rgba(255,135,48,0.10)' },
+    dormant:   { fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' },
+    lost:      { fg: '#DC2626', bg: 'rgba(220,38,38,0.08)' },
+  };
+  const stageColor = stageColors[customer.salesStage] || stageColors.dormant;
+
+  // Invoice status pill (Paid/Unpaid/Partially Paid)
+  function invoiceStatusPill(inv: typeof customerInvoices[number]) {
+    const remaining = inv.grossAmount - inv.paidAmount;
+    let label: string, fg: string, bg: string;
+    if (inv.status === 'CANCELLED') { label = 'Cancelled'; fg = '#6B7280'; bg = 'rgba(107,114,128,0.10)'; }
+    else if (inv.status === 'DRAFT') { label = 'Draft'; fg = '#6B7280'; bg = 'rgba(107,114,128,0.10)'; }
+    else if (remaining <= 0.01) { label = 'Paid'; fg = '#16A34A'; bg = 'rgba(22,163,74,0.10)'; }
+    else if (inv.paidAmount > 0) { label = 'Partial'; fg = '#FF8730'; bg = 'rgba(255,135,48,0.10)'; }
+    else { label = 'Unpaid'; fg = '#DC2626'; bg = 'rgba(220,38,38,0.08)'; }
+    return (
+      <span style={{
+        padding: '3px 10px', fontSize: 11, borderRadius: 999, fontWeight: 500,
+        color: fg, background: bg, border: `1px solid ${fg}30`,
+      }}>{label}</span>
+    );
+  }
+
+  // —— Helper: KPI Card with right-side icon
+  function KpiCard({ label, value, hint, icon, iconBg, valueColor }:
+    { label: string; value: string; hint?: string; icon: React.ReactNode; iconBg: string; valueColor?: string }) {
+    return (
+      <Card>
+        <div className="flex items-start justify-between" style={{ marginBottom: 4 }}>
+          <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
+          <div className="flex items-center justify-center" style={{ width: 36, height: 36, borderRadius: 8, background: iconBg }}>
+            {icon}
+          </div>
+        </div>
+        <div className="font-display" style={{ fontSize: 26, color: valueColor || '#0F0F10', lineHeight: 1.1, marginTop: 4 }}>
+          {value} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+        </div>
+        {hint && <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>{hint}</div>}
+      </Card>
+    );
+  }
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
       <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
 
-        {/* Header */}
-        <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
+        {/* Header — Back + Action Buttons */}
+        <div className="flex items-center justify-between" style={{ marginBottom: 24 }}>
           <button onClick={() => navigate('/clients')}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
-            onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
-          >
+            onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}>
             <ArrowLeft size={16} /> Clients
           </button>
           <div className="flex gap-2">
             {editing ? (
               <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...customer }); }}>Cancel</Button>
+                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...customer }); setEditErrors({}); }}>Cancel</Button>
                 <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
               </>
             ) : (
               <>
-                {perm.canEditCustomers && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>}
+                {perm.canEditCustomers && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit Client</Button>}
                 {(customer.whatsapp || customer.phone) && (
-                  <Button variant="secondary" onClick={() => setShowMessage(true)}>
-                    <Sparkles size={14} /> AI Message
-                  </Button>
+                  <Button variant="secondary" onClick={() => setShowMessage(true)}><Sparkles size={14} /> AI Message</Button>
                 )}
                 {(customer.whatsapp || customer.phone) && (
                   <Button variant="ghost" onClick={() => {
@@ -252,314 +240,542 @@ export function CustomerDetail() {
           </div>
         </div>
 
-        {/* Profile Card */}
-        <div className="animate-fade-in" style={{ background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12, padding: '36px 40px', marginBottom: 32 }}>
-          <div className="flex items-start gap-6">
-            <div className="flex items-center justify-center rounded-full shrink-0"
-              style={{ width: 72, height: 72, background: '#E5E9EE', border: customer.vipLevel >= 2 ? '2px solid #0F0F10' : '1px solid #D5D9DE', fontSize: 22, color: '#4B5563', fontFamily: 'var(--font-display)' }}>
-              {initials}
-            </div>
-            <div className="flex-1">
-              {editing ? (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
-                  <Input label="FIRST NAME" value={form.firstName || ''} onChange={e => setForm({ ...form, firstName: e.target.value })} />
-                  <Input label="LAST NAME" value={form.lastName || ''} onChange={e => setForm({ ...form, lastName: e.target.value })} />
-                  <Input label="COMPANY" value={form.company || ''} onChange={e => setForm({ ...form, company: e.target.value })} />
+        {/* TOP PROFILE CARD */}
+        {!editing ? (
+          <Card>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 240px', gap: 32, alignItems: 'center' }}>
+              {/* Left: avatar + name + status + contact */}
+              <div className="flex items-start gap-5" style={{ minWidth: 0 }}>
+                <div className="flex items-center justify-center rounded-full shrink-0"
+                  style={{ width: 88, height: 88, background: 'rgba(22,163,74,0.10)', border: customer.vipLevel >= 2 ? '2px solid #0F0F10' : '1px solid #D5D9DE', fontSize: 28, color: '#16A34A', fontFamily: 'var(--font-display)' }}>
+                  {initials}
                 </div>
-              ) : (
-                <>
-                  <div className="flex items-center gap-3">
-                    <h1 className="font-display" style={{ fontSize: 28, color: '#0F0F10' }}>{customer.firstName} {customer.lastName}</h1>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="flex items-center gap-3" style={{ flexWrap: 'wrap' }}>
+                    <h1 className="font-display" style={{ fontSize: 26, color: '#0F0F10', lineHeight: 1.1 }}>{customer.firstName} {customer.lastName}</h1>
                     <VIPBadge level={customer.vipLevel} />
                   </div>
-                  {customer.company && <p style={{ fontSize: 14, color: '#4B5563', marginTop: 4 }}>{customer.company}</p>}
-                </>
+                  <div style={{ marginTop: 6 }}>
+                    <span style={{ padding: '2px 10px', fontSize: 11, borderRadius: 999, color: stageColor.fg, background: stageColor.bg }}>
+                      \u25CF {customer.salesStage.charAt(0).toUpperCase() + customer.salesStage.slice(1)}
+                    </span>
+                  </div>
+                  <div className="flex flex-col" style={{ marginTop: 14, gap: 6 }}>
+                    {customer.phone && (
+                      <a href={`tel:${customer.phone}`} className="flex items-center gap-2" style={{ fontSize: 13, color: '#4B5563', textDecoration: 'none' }}>
+                        <Phone size={14} style={{ color: '#6B7280' }} /> {customer.phone}
+                      </a>
+                    )}
+                    {customer.email && (
+                      <a href={`mailto:${customer.email}`} className="flex items-center gap-2" style={{ fontSize: 13, color: '#4B5563', textDecoration: 'none' }}>
+                        <Mail size={14} style={{ color: '#6B7280' }} /> {customer.email}
+                      </a>
+                    )}
+                    {customer.notes ? (
+                      <div className="flex items-start gap-2" style={{ fontSize: 12, color: '#6B7280', marginTop: 2 }}>
+                        <Edit3 size={12} style={{ color: '#9CA3AF', marginTop: 2 }} />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>{customer.notes}</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2" style={{ fontSize: 12, color: '#9CA3AF', marginTop: 2 }}>
+                        <Edit3 size={12} /> No notes
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {/* Right: meta panel */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
+                <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Client Since</span><span style={{ color: '#0F0F10' }}>{fmtDate(customer.createdAt)}</span></div>
+                <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Client Type</span><span style={{ color: '#0F0F10', textTransform: 'capitalize' }}>{customer.customerType.replace('_', ' ')}</span></div>
+                <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Total Orders</span><span style={{ color: '#0F0F10' }}>{stats.invoiceCount}</span></div>
+                <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Last Order</span><span style={{ color: '#0F0F10' }}>{fmtDate(lastOrderInvoice?.issuedAt || lastOrderInvoice?.createdAt) || '\u2014'}</span></div>
+              </div>
+            </div>
+          </Card>
+        ) : (
+          /* Edit Mode — full edit form */
+          <Card>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {Object.keys(editErrors).length > 0 && (
+                <div style={{
+                  padding: '12px 16px', borderRadius: 8,
+                  background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
+                  color: '#DC2626', fontSize: 13,
+                  display: 'flex', gap: 10, alignItems: 'flex-start',
+                }}>
+                  <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                      Please fill in {Object.keys(editErrors).length} required field{Object.keys(editErrors).length === 1 ? '' : 's'}:
+                    </div>
+                    <ul style={{ margin: '4px 0 0 18px', listStyle: 'disc' }}>
+                      {Object.entries(editErrors).map(([key, msg]) => (
+                        <li key={key}>
+                          <button onClick={() => {
+                            const el = document.getElementById(`field-${key}`);
+                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          }} className="cursor-pointer"
+                            style={{ background: 'none', border: 'none', color: '#DC2626', textDecoration: 'underline', padding: 0, fontSize: 13 }}>
+                            {key === 'firstName' ? 'First Name' : key === 'lastName' ? 'Last Name' : key}
+                          </button>
+                          {' \u2014 '}{msg}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
               )}
-
-              {/* Contact */}
-              {editing ? (
-                <>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginTop: 8 }}>
-                    <Input label="PHONE" value={form.phone || ''} onChange={e => setForm({ ...form, phone: e.target.value })} />
-                    <Input label="WHATSAPP" value={form.whatsapp || ''} onChange={e => setForm({ ...form, whatsapp: e.target.value })} />
-                    <Input label="EMAIL" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
-                    <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />
-                    <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={form.vatAccountNumber || ''} onChange={e => setForm({ ...form, vatAccountNumber: e.target.value })} />
-                  </div>
-                </>
-              ) : (
-                <div className="flex items-center gap-4 flex-wrap" style={{ marginTop: 12 }}>
-                  {customer.phone && (
-                    <a href={`tel:${customer.phone}`} className="flex items-center gap-2" style={{ fontSize: 13, color: '#6B7280', textDecoration: 'none' }}>
-                      <Phone size={14} /> {customer.phone}
-                    </a>
-                  )}
-                  {customer.whatsapp && (
-                    <a href={`https://wa.me/${customer.whatsapp.replace(/[^0-9]/g, '')}`} target="_blank" className="flex items-center gap-2" style={{ fontSize: 13, color: '#6B7280', textDecoration: 'none' }}>
-                      <MessageCircle size={14} /> WhatsApp
-                    </a>
-                  )}
-                  {customer.email && (
-                    <a href={`mailto:${customer.email}`} className="flex items-center gap-2" style={{ fontSize: 13, color: '#6B7280', textDecoration: 'none' }}>
-                      <Mail size={14} /> {customer.email}
-                    </a>
-                  )}
-                  {customer.personalId && (
-                    <span style={{ fontSize: 13, color: '#6B7280' }}>ID: {customer.personalId}</span>
-                  )}
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
+                <div id="field-firstName">
+                  <Input required label="FIRST NAME" value={form.firstName || ''} error={editErrors.firstName}
+                    onChange={e => { setForm({ ...form, firstName: e.target.value }); if (editErrors.firstName) setEditErrors({ ...editErrors, firstName: '' }); }} />
+                </div>
+                <div id="field-lastName">
+                  <Input required label="LAST NAME" value={form.lastName || ''} error={editErrors.lastName}
+                    onChange={e => { setForm({ ...form, lastName: e.target.value }); if (editErrors.lastName) setEditErrors({ ...editErrors, lastName: '' }); }} />
+                </div>
+                <Input label="COMPANY" value={form.company || ''} onChange={e => setForm({ ...form, company: e.target.value })} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
+                <Input label="PHONE" value={form.phone || ''} onChange={e => setForm({ ...form, phone: e.target.value })} />
+                <Input label="WHATSAPP" value={form.whatsapp || ''} onChange={e => setForm({ ...form, whatsapp: e.target.value })} />
+                <Input label="EMAIL" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
+                <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />
+                <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={form.vatAccountNumber || ''} onChange={e => setForm({ ...form, vatAccountNumber: e.target.value })} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
+                <Input label="COUNTRY" value={form.country || ''} onChange={e => setForm({ ...form, country: e.target.value })} />
+                <Input label="LANGUAGE" value={form.language || ''} onChange={e => setForm({ ...form, language: e.target.value })} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
+                <Input label="BUDGET MIN (BHD)" type="number" value={form.budgetMin || ''} onChange={e => setForm({ ...form, budgetMin: Number(e.target.value) || undefined })} />
+                <Input label="BUDGET MAX (BHD)" type="number" value={form.budgetMax || ''} onChange={e => setForm({ ...form, budgetMax: Number(e.target.value) || undefined })} />
+              </div>
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SALES STAGE</span>
+                <div className="flex flex-wrap gap-1">
+                  {STAGES.map(s => (
+                    <button key={s.value} onClick={() => setForm({ ...form, salesStage: s.value })}
+                      className="cursor-pointer" style={{
+                        padding: '6px 12px', fontSize: 12, borderRadius: 6, border: 'none',
+                        background: form.salesStage === s.value ? 'rgba(15,15,16,0.1)' : 'transparent',
+                        color: form.salesStage === s.value ? '#0F0F10' : '#6B7280',
+                      }}>{s.label}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>VIP LEVEL</span>
+                <div className="flex gap-2">
+                  {([0, 1, 2, 3] as VIPLevel[]).map(l => (
+                    <button key={l} onClick={() => setForm({ ...form, vipLevel: l })}
+                      className="cursor-pointer rounded transition-all" style={{
+                        padding: '7px 14px', fontSize: 12,
+                        border: `1px solid ${form.vipLevel === l ? '#0F0F10' : '#D5D9DE'}`,
+                        color: form.vipLevel === l ? '#0F0F10' : '#6B7280',
+                        background: form.vipLevel === l ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      }}>{l === 0 ? 'Standard' : l === 1 ? 'VIP' : l === 2 ? 'VVIP' : 'Ultra'}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CUSTOMER TYPE</span>
+                <div className="flex gap-2">
+                  {TYPES.map(t => (
+                    <button key={t.value} onClick={() => setForm({ ...form, customerType: t.value })}
+                      className="cursor-pointer rounded" style={{
+                        padding: '6px 12px', fontSize: 12,
+                        border: `1px solid ${form.customerType === t.value ? '#0F0F10' : '#D5D9DE'}`,
+                        color: form.customerType === t.value ? '#0F0F10' : '#6B7280',
+                        background: form.customerType === t.value ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      }}>{t.label}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PREFERRED BRANDS</span>
+                <div className="flex flex-wrap gap-1" style={{ marginTop: 4 }}>
+                  {BRANDS.map(b => {
+                    const active = (form.preferences || []).includes(b);
+                    return (
+                      <button key={b} onClick={() => {
+                        const cur = form.preferences || [];
+                        setForm({ ...form, preferences: active ? cur.filter(x => x !== b) : [...cur, b] });
+                      }} className="cursor-pointer rounded" style={{
+                        padding: '4px 10px', fontSize: 11,
+                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                        color: active ? '#0F0F10' : '#6B7280',
+                        background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      }}>{b}</button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES</span>
+                <textarea
+                  value={form.notes || ''}
+                  onChange={e => setForm({ ...form, notes: e.target.value })}
+                  rows={4}
+                  className="w-full"
+                  style={{ background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10', resize: 'vertical' }} />
+              </div>
+              {perm.canDeleteCustomers && (
+                <div className="flex justify-start" style={{ marginTop: 12 }}>
+                  <Button variant="danger" onClick={() => setConfirmDelete(true)}><Trash2 size={14} /> Delete Client</Button>
                 </div>
               )}
             </div>
-          </div>
+          </Card>
+        )}
 
-          {/* KPIs — Live aus invoices berechnet (Definitionen vom Chef):
-              Revenue = SUM(gross) ohne CANCELLED/DRAFT
-              Profit  = SUM(margin_snapshot)
-              Outstanding = SUM(gross − paid) bei PARTIAL/DRAFT */}
-          {(() => {
-            const stats = id ? getCustomerStats(id) : { revenue: 0, profit: 0, outstanding: 0, invoiceCount: 0, openInvoiceCount: 0 };
-            const marginPct = stats.revenue > 0 ? (stats.profit / stats.revenue) * 100 : 0;
-            const avgPerPurchase = stats.invoiceCount > 0 ? stats.revenue / stats.invoiceCount : 0;
-            const refundPayable = id ? getCustomerRefundPayable(id) : 0;
-            return editing ? (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16, marginTop: 32 }}>
-                <Input label="LAST PURCHASE DATE" type="date" value={form.lastPurchaseAt || ''} onChange={e => setForm({ ...form, lastPurchaseAt: e.target.value })} />
-                <div style={{ padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8 }}>
-                  <span className="text-overline" style={{ display: 'block', marginBottom: 4 }}>LIVE STATS (READ-ONLY)</span>
-                  <div style={{ fontSize: 12, color: '#4B5563', lineHeight: 1.6 }}>
-                    Revenue {fmt(stats.revenue)} · Profit {fmt(stats.profit)} · Outstanding {fmt(stats.outstanding)} · Refund Payable {fmt(refundPayable)} BHD
-                  </div>
-                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-                    Werden automatisch aus Invoices + Returns berechnet — nicht editierbar.
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: refundPayable > 0 ? 'repeat(4, 1fr)' : 'repeat(3, 1fr)', gap: 16, marginTop: 32 }}>
-                {/* REVENUE — vertikal: Label oben, Wert mitte, Erklärung unten */}
-                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
-                  <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>REVENUE</span>
-                  <div className="font-display" style={{ fontSize: 28, color: '#0F0F10', lineHeight: 1.1 }}>
-                    {fmt(stats.revenue)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span>
-                  </div>
-                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-                    Gesamtumsatz aus allen Rechnungen<br />
-                    {stats.invoiceCount} invoice{stats.invoiceCount !== 1 ? 's' : ''} · Ø {fmt(avgPerPurchase)} BHD
-                  </div>
-                </div>
+        {!editing && (
+          <>
+            {/* RECEIVABLE ROW — 3 (or 4 with refund) cards */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: refundPayable > 0 ? 'repeat(4, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))',
+              gap: 16, marginTop: 24,
+            }}>
+              <KpiCard label="Outstanding Invoices" value={fmt(stats.invoiceOutstanding)}
+                hint={`${stats.openInvoiceCount} ${stats.openInvoiceCount === 1 ? 'Invoice' : 'Invoices'}`}
+                icon={<Receipt size={18} style={{ color: '#DC2626' }} />} iconBg="rgba(220,38,38,0.10)"
+                valueColor={stats.invoiceOutstanding > 0 ? '#DC2626' : '#0F0F10'} />
+              <KpiCard label="Loans / Other Receivable" value={fmt(stats.loanOutstanding)}
+                hint={`${stats.openLoanCount} ${stats.openLoanCount === 1 ? 'Loan' : 'Loans'}`}
+                icon={<FileMinus size={18} style={{ color: '#FF8730' }} />} iconBg="rgba(255,135,48,0.10)"
+                valueColor={stats.loanOutstanding > 0 ? '#FF8730' : '#0F0F10'} />
+              <KpiCard label="Total Receivable" value={fmt(stats.outstanding)}
+                hint="Total Outstanding"
+                icon={<Wallet size={18} style={{ color: '#3D7FFF' }} />} iconBg="rgba(61,127,255,0.10)"
+                valueColor={stats.outstanding > 0 ? '#3D7FFF' : '#0F0F10'} />
+              {refundPayable > 0 && (
+                <KpiCard label="Refund Payable" value={fmt(refundPayable)}
+                  hint="We owe customer"
+                  icon={<Wallet size={18} style={{ color: '#DC2626' }} />} iconBg="rgba(220,38,38,0.10)"
+                  valueColor="#DC2626" />
+              )}
+            </div>
 
-                {/* PROFIT — vertikal */}
-                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
-                  <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>PROFIT</span>
-                  <div className="font-display" style={{ fontSize: 28, color: stats.profit >= 0 ? '#7EAA6E' : '#AA6E6E', lineHeight: 1.1 }}>
-                    {fmt(stats.profit)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span>
-                  </div>
-                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-                    Gesamtgewinn (Verkaufspreis − Kosten)<br />
-                    {marginPct.toFixed(1)}% Marge
-                  </div>
-                </div>
+            {/* REVENUE / PROFIT ROW */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
+              <KpiCard label="Total Revenue" value={fmt(stats.revenue)}
+                hint="All time"
+                icon={<BarChart3 size={18} style={{ color: '#16A34A' }} />} iconBg="rgba(22,163,74,0.10)" />
+              <KpiCard label="Total Profit" value={fmt(stats.profit)}
+                hint={`${marginPct.toFixed(1)}% Margin`}
+                icon={<TrendingUp size={18} style={{ color: '#16A34A' }} />} iconBg="rgba(22,163,74,0.10)"
+                valueColor={stats.profit >= 0 ? '#0F0F10' : '#DC2626'} />
+            </div>
 
-                {/* OUTSTANDING — vertikal */}
-                <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
-                  <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>OUTSTANDING</span>
-                  <div className="font-display" style={{ fontSize: 28, color: stats.outstanding > 0 ? '#AA6E6E' : '#6B7280', lineHeight: 1.1 }}>
-                    {fmt(stats.outstanding)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span>
-                  </div>
-                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-                    Offener Betrag (Outstanding Balance)<br />
-                    {stats.openInvoiceCount} open invoice{stats.openInvoiceCount !== 1 ? 's' : ''}
-                  </div>
+            {/* INVOICES TABLE */}
+            <div style={{ marginTop: 24 }}>
+              <Card>
+                <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+                  <h3 style={{ fontSize: 17, fontWeight: 600, color: '#0F0F10' }}>Invoices</h3>
+                  <button onClick={() => navigate(`/invoices?customer=${id}`)}
+                    className="cursor-pointer transition-colors"
+                    style={{ background: 'none', border: '1px solid #E5E9EE', borderRadius: 8, padding: '6px 14px', fontSize: 12, color: '#0F0F10' }}
+                    onMouseEnter={e => (e.currentTarget.style.borderColor = '#0F0F10')}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E9EE')}>
+                    View All Invoices
+                  </button>
                 </div>
-
-                {/* REFUND PAYABLE — nur wenn > 0 */}
-                {refundPayable > 0 && (
-                  <div style={{ padding: '20px 22px', background: 'rgba(220,38,38,0.04)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 12 }}>
-                    <span className="text-overline" style={{ display: 'block', marginBottom: 8, color: '#DC2626' }}>REFUND PAYABLE</span>
-                    <div className="font-display" style={{ fontSize: 28, color: '#DC2626', lineHeight: 1.1 }}>
-                      {fmt(refundPayable)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span>
+                {customerInvoices.length === 0 ? (
+                  <p style={{ fontSize: 13, color: '#6B7280' }}>No invoices yet.</p>
+                ) : (
+                  <>
+                    <div style={{
+                      display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)',
+                      gap: 12, padding: '0 0 10px', borderBottom: '1px solid #E5E9EE',
+                      fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
+                    }}>
+                      <span>Date</span><span>Invoice #</span><span>Total Amount</span><span>Paid</span><span>Status</span><span style={{ textAlign: 'right' }}>Remaining</span>
                     </div>
-                    <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-                      Wir schulden dem Kunden noch (aus Returns).<br />
-                      Customer Refund Payable
+                    {customerInvoices.slice(0, 5).map(inv => {
+                      const remaining = Math.max(0, inv.grossAmount - inv.paidAmount);
+                      return (
+                        <div key={inv.id} className="cursor-pointer transition-colors"
+                          onClick={() => navigate(`/invoices/${inv.id}`)}
+                          style={{
+                            display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)',
+                            gap: 12, padding: '14px 0', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)', fontSize: 13,
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.02)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                          <span style={{ color: '#4B5563' }}>{fmtDate(inv.issuedAt || inv.createdAt)}</span>
+                          <span className="font-mono" style={{ color: '#3D7FFF' }}>{inv.invoiceNumber}</span>
+                          <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(inv.grossAmount)} BHD</span>
+                          <span className="font-mono" style={{ color: '#4B5563' }}>{fmt(inv.paidAmount)} BHD</span>
+                          <span>{invoiceStatusPill(inv)}</span>
+                          <span className="font-mono" style={{ textAlign: 'right', color: remaining > 0 ? '#DC2626' : '#16A34A' }}>{fmt(remaining)} BHD</span>
+                        </div>
+                      );
+                    })}
+                    <div style={{ fontSize: 11, color: '#6B7280', marginTop: 12 }}>
+                      Showing {Math.min(5, customerInvoices.length)} of {customerInvoices.length} invoice{customerInvoices.length === 1 ? '' : 's'}
                     </div>
-                  </div>
+                  </>
                 )}
-              </div>
-            );
-          })()}
-        </div>
+              </Card>
+            </div>
 
-        {/* Details */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 32 }}>
-          <Card>
-            <span className="text-overline" style={{ marginBottom: 16 }}>PROFILE</span>
-            <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: editing ? 12 : 0 }}>
-              {editing ? (
+            {/* LOANS / CASH GIVEN TABLE — split nach direction (we_lend = unsere Forderung, we_borrow = unsere Schuld) */}
+            {customerLoans.length > 0 && (() => {
+              const lent = customerLoans.filter(d => d.direction === 'we_lend');
+              const borrowed = customerLoans.filter(d => d.direction === 'we_borrow');
+              const renderRow = (d: typeof customerLoans[number], variant: 'lent' | 'borrowed') => {
+                const open = Math.max(0, d.amount - d.paidAmount);
+                const colors = variant === 'lent'
+                  ? { open: { fg: '#FF8730', bg: 'rgba(255,135,48,0.10)' } }
+                  : { open: { fg: '#3D7FFF', bg: 'rgba(61,127,255,0.10)' } };
+                let label: string, fg: string, bg: string;
+                if (open <= 0.01) { label = variant === 'lent' ? 'Repaid' : 'Settled'; fg = '#16A34A'; bg = 'rgba(22,163,74,0.10)'; }
+                else if (d.paidAmount > 0) { label = 'Partial'; fg = colors.open.fg; bg = colors.open.bg; }
+                else { label = 'Open'; fg = colors.open.fg; bg = colors.open.bg; }
+                const defaultNote = variant === 'lent' ? 'Cash given to client' : 'Borrowed from client';
+                return (
+                  <div key={d.id} style={{
+                    display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)',
+                    gap: 12, padding: '14px 0', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)', fontSize: 13,
+                  }}>
+                    <span style={{ color: '#4B5563' }}>{fmtDate(d.createdAt)}</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(d.amount)} BHD</span>
+                    <span style={{ color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.notes || defaultNote}</span>
+                    <span><span style={{ padding: '3px 12px', fontSize: 11, borderRadius: 999, color: fg, background: bg, border: `1px solid ${fg}30` }}>{label}</span></span>
+                    <span style={{ color: '#6B7280' }}>{d.dueDate ? fmtDate(d.dueDate) : '\u2014'}</span>
+                  </div>
+                );
+              };
+              const renderHeader = () => (
+                <div style={{
+                  display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)',
+                  gap: 12, padding: '0 0 10px', borderBottom: '1px solid #E5E9EE',
+                  fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
+                }}>
+                  <span>Date</span><span>Amount</span><span>Note</span><span>Status</span><span>Due Date (Optional)</span>
+                </div>
+              );
+              return (
                 <>
-                  {/* Sales Stage */}
-                  <div>
-                    <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Sales Stage</span>
-                    <div className="flex flex-wrap gap-1">
-                      {STAGES.map(s => (
-                        <button key={s.value} onClick={() => setForm({ ...form, salesStage: s.value })}
-                          className="cursor-pointer" style={{
-                            padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
-                            background: form.salesStage === s.value ? 'rgba(15,15,16,0.1)' : 'transparent',
-                            color: form.salesStage === s.value ? '#0F0F10' : '#6B7280',
-                          }}>{s.label}</button>
-                      ))}
+                  {lent.length > 0 && (
+                    <div style={{ marginTop: 24 }}>
+                      <Card>
+                        <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+                          <div className="flex items-center gap-3">
+                            <h3 style={{ fontSize: 17, fontWeight: 600, color: '#0F0F10' }}>Loans / Cash Given</h3>
+                            <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 999, color: '#FF8730', background: 'rgba(255,135,48,0.10)', border: '1px solid rgba(255,135,48,0.30)' }}>
+                              We Lent
+                            </span>
+                          </div>
+                          <button onClick={() => navigate(`/debts?customer=${id}`)}
+                            className="cursor-pointer transition-colors"
+                            style={{ background: 'none', border: '1px solid #E5E9EE', borderRadius: 8, padding: '6px 14px', fontSize: 12, color: '#0F0F10' }}
+                            onMouseEnter={e => (e.currentTarget.style.borderColor = '#0F0F10')}
+                            onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E9EE')}>
+                            View All Loans
+                          </button>
+                        </div>
+                        {renderHeader()}
+                        {lent.slice(0, 5).map(d => renderRow(d, 'lent'))}
+                        <div style={{ fontSize: 11, color: '#6B7280', marginTop: 12 }}>
+                          Showing {Math.min(5, lent.length)} of {lent.length} loan{lent.length === 1 ? '' : 's'} given
+                        </div>
+                      </Card>
                     </div>
-                  </div>
-                  {/* Customer Type */}
-                  <div>
-                    <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Customer Type</span>
-                    <div className="flex flex-wrap gap-1">
-                      {TYPES.map(t => (
-                        <button key={t.value} onClick={() => setForm({ ...form, customerType: t.value })}
-                          className="cursor-pointer" style={{
-                            padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
-                            background: form.customerType === t.value ? 'rgba(15,15,16,0.1)' : 'transparent',
-                            color: form.customerType === t.value ? '#0F0F10' : '#6B7280',
-                          }}>{t.label}</button>
-                      ))}
+                  )}
+                  {borrowed.length > 0 && (
+                    <div style={{ marginTop: 24 }}>
+                      <Card>
+                        <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+                          <div className="flex items-center gap-3">
+                            <h3 style={{ fontSize: 17, fontWeight: 600, color: '#0F0F10' }}>Borrowings / Cash Received</h3>
+                            <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 999, color: '#3D7FFF', background: 'rgba(61,127,255,0.10)', border: '1px solid rgba(61,127,255,0.30)' }}>
+                              We Borrowed
+                            </span>
+                          </div>
+                          <button onClick={() => navigate(`/debts?customer=${id}`)}
+                            className="cursor-pointer transition-colors"
+                            style={{ background: 'none', border: '1px solid #E5E9EE', borderRadius: 8, padding: '6px 14px', fontSize: 12, color: '#0F0F10' }}
+                            onMouseEnter={e => (e.currentTarget.style.borderColor = '#0F0F10')}
+                            onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E9EE')}>
+                            View All
+                          </button>
+                        </div>
+                        {renderHeader()}
+                        {borrowed.slice(0, 5).map(d => renderRow(d, 'borrowed'))}
+                        <div style={{ fontSize: 11, color: '#6B7280', marginTop: 12 }}>
+                          Showing {Math.min(5, borrowed.length)} of {borrowed.length} entr{borrowed.length === 1 ? 'y' : 'ies'}
+                        </div>
+                      </Card>
                     </div>
-                  </div>
-                  {/* VIP */}
-                  <div>
-                    <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>VIP Level</span>
-                    <div className="flex gap-1">
-                      {([0, 1, 2, 3] as VIPLevel[]).map(l => (
-                        <button key={l} onClick={() => setForm({ ...form, vipLevel: l })}
-                          className="cursor-pointer" style={{
-                            padding: '4px 12px', fontSize: 11, borderRadius: 4, border: 'none',
-                            background: form.vipLevel === l ? 'rgba(15,15,16,0.1)' : 'transparent',
-                            color: form.vipLevel === l ? '#0F0F10' : '#6B7280',
-                          }}>{l === 0 ? 'Standard' : l === 1 ? 'VIP' : l === 2 ? 'VVIP' : 'Ultra'}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                    <Input label="COUNTRY" value={form.country || ''} onChange={e => setForm({ ...form, country: e.target.value })} />
-                    <Input label="LANGUAGE" value={form.language || ''} onChange={e => setForm({ ...form, language: e.target.value })} />
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                    <Input label="BUDGET MIN (BHD)" type="number" value={form.budgetMin || ''} onChange={e => setForm({ ...form, budgetMin: Number(e.target.value) || undefined })} />
-                    <Input label="BUDGET MAX (BHD)" type="number" value={form.budgetMax || ''} onChange={e => setForm({ ...form, budgetMax: Number(e.target.value) || undefined })} />
-                  </div>
-                  {/* Preferences */}
-                  <div>
-                    <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Brand Preferences</span>
-                    <div className="flex flex-wrap gap-1">
-                      {BRANDS.map(brand => {
-                        const sel = (form.preferences || []).includes(brand);
-                        return (
-                          <button key={brand}
-                            onClick={() => {
-                              const prefs = form.preferences || [];
-                              setForm({ ...form, preferences: sel ? prefs.filter(p => p !== brand) : [...prefs, brand] });
-                            }}
-                            className="cursor-pointer" style={{
-                              padding: '3px 8px', fontSize: 11, borderRadius: 999,
-                              border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
-                              color: sel ? '#0F0F10' : '#6B7280',
-                              background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
-                            }}>{brand}</button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                  <Input label="LAST CONTACT" type="date" value={form.lastContactAt || ''} onChange={e => setForm({ ...form, lastContactAt: e.target.value })} />
-                  <div>
-                    <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
-                    <textarea value={form.notes || ''} onChange={e => setForm({ ...form, notes: e.target.value })}
-                      className="w-full outline-none" rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }} />
-                  </div>
-                  {perm.canDeleteCustomers && (
-                    <Button variant="danger" onClick={() => setConfirmDelete(true)} style={{ marginTop: 8 }}>
-                      <Trash2 size={14} /> Delete Client
-                    </Button>
                   )}
                 </>
-              ) : (
-                <>
-                  {[
-                    { label: 'Status', value: <StatusDot status={customer.salesStage} /> },
-                    { label: 'Type', value: customer.customerType.replace('_', ' ') },
-                    { label: 'Country', value: customer.country },
-                    { label: 'Language', value: customer.language },
-                    { label: 'Budget', value: customer.budgetMin || customer.budgetMax ? `${fmt(customer.budgetMin || 0)} \u2013 ${fmt(customer.budgetMax || 0)} BHD` : null },
-                    { label: 'Last Contact', value: customer.lastContactAt },
-                    { label: 'Last Purchase', value: customer.lastPurchaseAt },
-                  ].filter(i => i.value).map(item => (
-                    <div key={item.label} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
-                      <span style={{ fontSize: 13, color: '#6B7280' }}>{item.label}</span>
-                      <span style={{ fontSize: 13, color: '#0F0F10' }}>{item.value}</span>
+              );
+            })()}
+
+            {/* PAYMENTS HISTORY TABLE */}
+            {customerPayments.length > 0 && (
+              <div style={{ marginTop: 24 }}>
+                <Card>
+                  <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+                    <h3 style={{ fontSize: 17, fontWeight: 600, color: '#0F0F10' }}>Payments History</h3>
+                    <button onClick={() => navigate(`/invoices?customer=${id}`)}
+                      className="cursor-pointer transition-colors"
+                      style={{ background: 'none', border: '1px solid #E5E9EE', borderRadius: 8, padding: '6px 14px', fontSize: 12, color: '#0F0F10' }}
+                      onMouseEnter={e => (e.currentTarget.style.borderColor = '#0F0F10')}
+                      onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E9EE')}>
+                      View All Payments
+                    </button>
+                  </div>
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1.2fr)',
+                    gap: 12, padding: '0 0 10px', borderBottom: '1px solid #E5E9EE',
+                    fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
+                  }}>
+                    <span>Date</span><span>Amount</span><span>Method</span><span>For</span><span>Reference / Note</span>
+                  </div>
+                  {customerPayments.slice(0, 5).map(p => (
+                    <div key={p.id} style={{
+                      display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1.2fr)',
+                      gap: 12, padding: '14px 0', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)', fontSize: 13,
+                    }}>
+                      <span style={{ color: '#4B5563' }}>{fmtDate(p.receivedAt)}</span>
+                      <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(p.amount)} BHD</span>
+                      <span className="flex items-center gap-2" style={{ color: '#4B5563', textTransform: 'capitalize' }}>
+                        <MethodIcon method={p.method} /> {p.method.replace('_', ' ')}
+                      </span>
+                      <Link to={`/invoices/${p.invoiceId}`} className="cursor-pointer" style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>
+                        Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{p.invoiceNumber}</span>
+                      </Link>
+                      <span style={{ color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.notes || '\u2014'}</span>
                     </div>
                   ))}
-                  {customer.preferences.length > 0 && (
-                    <div style={{ marginTop: 16 }}>
-                      <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 8 }}>Preferences</span>
-                      <div className="flex flex-wrap gap-2">
-                        {customer.preferences.map(p => (
-                          <span key={p} style={{ padding: '4px 12px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#0F0F10' }}>{p}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {customer.notes && (
-                    <div style={{ marginTop: 16 }}>
-                      <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Notes</span>
-                      <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6 }}>{customer.notes}</p>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </Card>
-
-          {/* Activity: Offers, Invoices, Repairs, Consignments, Orders */}
-          <Card>
-            <span className="text-overline" style={{ marginBottom: 16 }}>ACTIVITY</span>
-            <CustomerActivity customerId={id!} navigate={navigate} />
-          </Card>
-        </div>
-
-        {/* Second Row: Matching Products */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 32 }}>
-          <Card>
-            <span className="text-overline" style={{ marginBottom: 16 }}>MATCHING ITEMS</span>
-            {matchingProducts.length === 0 ? (
-              <p style={{ fontSize: 13, color: '#6B7280', marginTop: 16 }}>No matching items found.</p>
-            ) : (
-              <div style={{ marginTop: 16 }}>
-                {matchingProducts.map(p => (
-                  <div key={p.id} className="flex items-center justify-between cursor-pointer rounded-md transition-colors"
-                    style={{ padding: '10px 8px', margin: '0 -8px' }}
-                    onClick={() => navigate(`/collection/${p.id}`)}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(26,26,31,0.6)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                    <div>
-                      <span className="text-overline" style={{ fontSize: 10 }}>{p.brand}</span>
-                      <div style={{ fontSize: 14, color: '#0F0F10', marginTop: 2 }}>{p.name}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(p.plannedSalePrice || p.purchasePrice)}</div>
-                      <div style={{ fontSize: 11, color: '#6B7280' }}>BHD</div>
-                    </div>
+                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 12 }}>
+                    Showing {Math.min(5, customerPayments.length)} of {customerPayments.length} payment{customerPayments.length === 1 ? '' : 's'}
                   </div>
-                ))}
+                </Card>
               </div>
             )}
-          </Card>
 
-          {/* empty second column for grid balance */}
-          <div />
-        </div>
+            {/* INTERNAL NOTES + PREFERENCES + MATCHING — bottom row */}
+            <div style={{ marginTop: 24 }}>
+              <Card>
+                <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+                  <h3 style={{ fontSize: 17, fontWeight: 600, color: '#0F0F10' }}>Internal Notes</h3>
+                  <button onClick={() => { setNoteDraft(customer.notes || ''); setNoteModal(true); }}
+                    className="cursor-pointer transition-colors flex items-center gap-1"
+                    style={{ background: 'none', border: '1px solid #E5E9EE', borderRadius: 8, padding: '6px 14px', fontSize: 12, color: '#0F0F10' }}
+                    onMouseEnter={e => (e.currentTarget.style.borderColor = '#0F0F10')}
+                    onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E9EE')}>
+                    <Plus size={12} /> {customer.notes ? 'Edit Note' : 'Add Note'}
+                  </button>
+                </div>
+                {customer.notes ? (
+                  <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6, margin: 0, whiteSpace: 'pre-wrap' }}>{customer.notes}</p>
+                ) : (
+                  <p style={{ fontSize: 13, color: '#9CA3AF', margin: 0 }}>No internal notes yet.</p>
+                )}
+              </Card>
+            </div>
+
+            {(customer.preferences.length > 0 || matchingProducts.length > 0) && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 24, marginTop: 24 }}>
+                <Card>
+                  <h3 style={{ fontSize: 15, fontWeight: 600, color: '#0F0F10', marginBottom: 12 }}>Preferences</h3>
+                  {customer.preferences.length === 0 ? (
+                    <p style={{ fontSize: 13, color: '#9CA3AF' }}>No preferences set.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {customer.preferences.map(p => (
+                        <span key={p} style={{ padding: '4px 12px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#0F0F10' }}>{p}</span>
+                      ))}
+                    </div>
+                  )}
+                  {(customer.budgetMin || customer.budgetMax) && (
+                    <div style={{ marginTop: 12, fontSize: 12, color: '#6B7280' }}>
+                      Budget: {fmt(customer.budgetMin || 0)} \u2013 {fmt(customer.budgetMax || 0)} BHD
+                    </div>
+                  )}
+                </Card>
+                <Card>
+                  <h3 style={{ fontSize: 15, fontWeight: 600, color: '#0F0F10', marginBottom: 12 }}>Matching Items</h3>
+                  {matchingProducts.length === 0 ? (
+                    <p style={{ fontSize: 13, color: '#9CA3AF' }}>No matching items.</p>
+                  ) : (
+                    <div>
+                      {matchingProducts.map(p => (
+                        <div key={p.id} className="flex items-center justify-between cursor-pointer rounded transition-colors"
+                          onClick={() => navigate(`/collection/${p.id}`)}
+                          style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}
+                          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.02)')}
+                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                          <div>
+                            <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{p.brand}</span>
+                            <div style={{ fontSize: 13, color: '#0F0F10' }}>{p.name}</div>
+                          </div>
+                          <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(p.plannedSalePrice || p.purchasePrice)} BHD</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </Card>
+              </div>
+            )}
+          </>
+        )}
       </div>
+
+      <Modal open={noteModal} onClose={() => setNoteModal(false)} title={customer.notes ? 'Edit Internal Note' : 'Add Internal Note'} width={520}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTE</span>
+            <textarea
+              value={noteDraft}
+              onChange={e => setNoteDraft(e.target.value)}
+              placeholder="Internal note (only visible to staff)..."
+              autoFocus
+              rows={6}
+              className="w-full"
+              style={{ background: '#FFFFFF', border: '1px solid #D5D9DE', borderRadius: 8, padding: '10px 12px', fontSize: 13, color: '#0F0F10', resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
+              onKeyDown={e => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  if (!id) return;
+                  updateCustomer(id, { notes: noteDraft.trim() || undefined });
+                  setNoteModal(false);
+                }
+              }} />
+            <span style={{ fontSize: 11, color: '#9CA3AF', marginTop: 4, display: 'block' }}>
+              Tip: \u2318 / Ctrl + Enter to save
+            </span>
+          </div>
+          <div className="flex justify-between" style={{ alignItems: 'center' }}>
+            {customer.notes ? (
+              <button onClick={() => {
+                if (!id) return;
+                updateCustomer(id, { notes: undefined });
+                setNoteModal(false);
+              }} className="cursor-pointer"
+                style={{ background: 'none', border: 'none', color: '#DC2626', fontSize: 12 }}>
+                <Trash2 size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} /> Delete note
+              </button>
+            ) : <span />}
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => setNoteModal(false)}>Cancel</Button>
+              <Button variant="primary" onClick={() => {
+                if (!id) return;
+                updateCustomer(id, { notes: noteDraft.trim() || undefined });
+                setNoteModal(false);
+              }}>
+                <Save size={12} /> Save Note
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Modal>
 
       <MessagePreviewModal
         open={showMessage}

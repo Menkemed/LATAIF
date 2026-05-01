@@ -230,6 +230,25 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   },
 
   deleteProduct: (id) => {
+    // Referenz-Check — Produkt darf nicht gelöscht werden wenn in Invoice/Order/Repair etc. verwendet.
+    const refs = query(
+      `SELECT
+         (SELECT COUNT(*) FROM invoice_lines       WHERE product_id = ?) AS invoice_lines,
+         (SELECT COUNT(*) FROM consignments        WHERE product_id = ?) AS consignments,
+         (SELECT COUNT(*) FROM agent_transfers     WHERE product_id = ?) AS agent_transfers,
+         (SELECT COUNT(*) FROM repairs             WHERE product_id = ?) AS repairs,
+         (SELECT COUNT(*) FROM sales_return_lines  WHERE product_id = ?) AS return_lines,
+         (SELECT COUNT(*) FROM orders              WHERE product_id = ?) AS orders`,
+      [id, id, id, id, id, id]
+    );
+    const r = refs[0] || {};
+    const linked = ['invoice_lines', 'consignments', 'agent_transfers', 'repairs', 'return_lines', 'orders']
+      .map(k => ({ k, n: Number((r as Record<string, unknown>)[k] || 0) }))
+      .filter(x => x.n > 0);
+    if (linked.length > 0) {
+      const detail = linked.map(x => `${x.n} ${x.k}`).join(', ');
+      throw new Error(`Cannot delete product with linked records: ${detail}.`);
+    }
     const db = getDatabase();
     db.run('DELETE FROM products WHERE id = ?', [id]);
     saveDatabase();

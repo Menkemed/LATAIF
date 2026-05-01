@@ -219,8 +219,8 @@ export function BankingPage() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Input label="AMOUNT (BHD)" type="number" step="0.001" placeholder="0.000" value={amount} onChange={e => setAmount(e.target.value)} autoFocus />
-            <Input label="DATE" type="date" value={date} onChange={e => setDate(e.target.value)} />
+            <Input required label="AMOUNT (BHD)" type="number" step="0.001" placeholder="0.000" value={amount} onChange={e => setAmount(e.target.value)} autoFocus />
+            <Input required label="DATE" type="date" value={date} onChange={e => setDate(e.target.value)} />
           </div>
           <Input label="NOTES" placeholder="Optional" value={notes} onChange={e => setNotes(e.target.value)} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>

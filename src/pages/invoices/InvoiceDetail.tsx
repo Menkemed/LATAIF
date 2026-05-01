@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Edit3, Save, FileText, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2 } from 'lucide-react';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { ArrowLeft, Edit3, Save, FileText, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2, ExternalLink } from 'lucide-react';
 
 // Butterfly icon as inline SVG — renders reliably in all webviews (no emoji font dependency).
 const Butterfly = ({ size = 14, style }: { size?: number; style?: React.CSSProperties }) => (
@@ -23,6 +23,7 @@ import { usePermission } from '@/hooks/usePermission';
 import logoUrl from '@/assets/logo.png';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
+import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
@@ -71,8 +72,9 @@ export function InvoiceDetail() {
   // Sales Return state
   const { returns: salesReturns, loadReturns: loadSalesReturns, createReturn: createSalesReturn, refundReturn: refundSalesReturn,
     getInvoiceReturnSummary, recordRefundPayment, getReturnedQtyForLine } = useSalesReturnStore();
+  const { creditNotes, loadCreditNotes } = useCreditNoteStore();
   const [showReturn, setShowReturn] = useState(false);
-  const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number; vatAmount: number }>>({});
+  const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number }>>({});
   const [returnRefundMethod, setReturnRefundMethod] = useState<'cash' | 'bank' | 'card' | 'credit' | 'other'>('bank');
   const [returnDisposition, setReturnDisposition] = useState<ProductDisposition>('IN_STOCK');
   const [returnNotes, setReturnNotes] = useState('');
@@ -94,7 +96,25 @@ export function InvoiceDetail() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelRefundMethod, setCancelRefundMethod] = useState<'cash' | 'bank'>('bank');
 
-  useEffect(() => { loadInvoices(); loadCustomers(); loadProducts(); loadCategories(); loadSalesReturns(); }, [loadInvoices, loadCustomers, loadProducts, loadCategories, loadSalesReturns]);
+  useEffect(() => { loadInvoices(); loadCustomers(); loadProducts(); loadCategories(); loadSalesReturns(); loadCreditNotes(); }, [loadInvoices, loadCustomers, loadProducts, loadCategories, loadSalesReturns, loadCreditNotes]);
+
+  // Derived status label — industry-standard naming (SAP/Xero/QuickBooks):
+  // CANCELLED → Cancelled
+  // DRAFT → Pending
+  // gross-credits = 0 → Cancelled (fully credited)
+  // paid >= gross-credits → Paid
+  // paid > 0 → Partially Paid
+  // paid = 0 → Unpaid
+  function derivedInvoiceLabel(inv: { status: string; grossAmount: number; paidAmount: number; id: string }): string {
+    if (inv.status === 'CANCELLED') return 'Cancelled';
+    if (inv.status === 'DRAFT') return 'Pending';
+    const credited = (creditNotes || []).filter(cn => cn.invoiceId === inv.id).reduce((s, cn) => s + (cn.totalAmount || 0), 0);
+    const effGross = Math.max(0, inv.grossAmount - credited);
+    if (effGross < 0.01 && credited > 0) return 'Credited';
+    if (inv.paidAmount >= effGross - 0.01) return 'Paid';
+    if (inv.paidAmount > 0) return 'Partially Paid';
+    return 'Unpaid';
+  }
 
   const invoice = useMemo(() => invoices.find(i => i.id === id), [invoices, id]);
 
@@ -125,7 +145,11 @@ export function InvoiceDetail() {
     );
   }
 
-  const remaining = invoice.grossAmount - invoice.paidAmount;
+  // Industry-Standard: Outstanding berücksichtigt Credit Notes — was per CN storniert wurde
+  // ist keine Forderung mehr.
+  const creditedTotal = (creditNotes || []).filter(cn => cn.invoiceId === invoice.id).reduce((s, cn) => s + (cn.totalAmount || 0), 0);
+  const effectiveGross = Math.max(0, invoice.grossAmount - creditedTotal);
+  const remaining = Math.max(0, effectiveGross - invoice.paidAmount);
   const isDraft = invoice.status === 'DRAFT';
   const isCancelled = invoice.status === 'CANCELLED';
   const isPaid = invoice.status === 'FINAL';
@@ -278,9 +302,14 @@ export function InvoiceDetail() {
 
   function openReturnModal() {
     if (!invoice) return;
-    const init: Record<string, { include: boolean; quantity: number; unitPrice: number; vatAmount: number }> = {};
+    const init: Record<string, { include: boolean; quantity: number; unitPrice: number }> = {};
     for (const l of invoice.lines) {
-      init[l.id] = { include: false, quantity: 1, unitPrice: l.unitPrice, vatAmount: l.vatAmount };
+      // Gross-Unit-Preis (inkl. VAT) als Default — was der Kunde tatsächlich pro Stück gezahlt hat.
+      const grossUnit = l.lineTotal / Math.max(1, l.quantity);
+      // Default-Qty = noch verbleibende returnfähige Menge nach Abzug bereits zurückgegebener.
+      const alreadyReturned = getReturnedQtyForLine(l.id);
+      const remainingQty = Math.max(0, l.quantity - alreadyReturned);
+      init[l.id] = { include: false, quantity: remainingQty, unitPrice: grossUnit };
     }
     setReturnLines(init);
     setReturnDisposition('IN_STOCK');
@@ -295,27 +324,46 @@ export function InvoiceDetail() {
     if (!id || !invoice) return;
     const included = invoice.lines
       .filter(l => returnLines[l.id]?.include)
-      .map(l => ({
-        invoiceLineId: l.id,
-        productId: l.productId,
-        quantity: returnLines[l.id].quantity,
-        unitPrice: returnLines[l.id].unitPrice,
-        vatAmount: returnLines[l.id].vatAmount,
-      }));
-    if (included.length === 0) return;
-    const ret = createSalesReturn({
-      invoiceId: id,
-      refundMethod: returnRefundMethod,
-      productDisposition: returnDisposition,
-      reason: returnReason || undefined,
-      notes: returnNotes || undefined,
-      lines: included,
-    });
-    // Plan §Returns: Refund optional sofort durchführen oder offen lassen.
-    if (returnRefundNow) {
-      refundSalesReturn(ret.id);
+      .map(l => {
+        const rl = returnLines[l.id];
+        // unitPrice ist jetzt GROSS (inkl. VAT). VAT-Anteil proportional zum zurückgegebenen
+        // Wert berechnen — funktioniert für VAT_10 + MARGIN identisch.
+        const returnedTotal = rl.quantity * rl.unitPrice;
+        const origTotal = l.lineTotal || 0;
+        const vatAmount = origTotal > 0 ? (l.vatAmount * returnedTotal) / origTotal : 0;
+        return {
+          invoiceLineId: l.id,
+          productId: l.productId,
+          quantity: rl.quantity,
+          unitPrice: rl.unitPrice,
+          vatAmount,
+        };
+      });
+    if (included.length === 0) {
+      alert('Bitte mindestens eine Position über die Checkbox auswählen.');
+      return;
     }
-    setShowReturn(false);
+    try {
+      const ret = createSalesReturn({
+        invoiceId: id,
+        refundMethod: returnRefundMethod,
+        productDisposition: returnDisposition,
+        reason: returnReason || undefined,
+        notes: returnNotes || undefined,
+        lines: included,
+      });
+      // Plan §Returns: Refund optional sofort durchführen oder offen lassen.
+      if (returnRefundNow) {
+        refundSalesReturn(ret.id);
+      }
+      // Invoice-Store reloaden damit paid_amount/Status nach Refund frisch sind.
+      loadInvoices();
+      setShowReturn(false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[Return] failed:', e);
+      alert(`Return konnte nicht angelegt werden:\n\n${msg}`);
+    }
   }
 
   function handleRecordPayment() {
@@ -461,7 +509,7 @@ export function InvoiceDetail() {
                 {(() => {
                   // Plan §Returns Fix: Create Return erlauben auch bei PARTIAL (nicht nur FINAL).
                   // Blockieren wenn bereits voll zurückgegeben UND voll erstattet, oder wenn CANCELLED.
-                  const sum = getInvoiceReturnSummary(invoice.id, invoice.grossAmount);
+                  const sum = getInvoiceReturnSummary(invoice.id, invoice.grossAmount, invoice.paidAmount);
                   const fullyDone = sum.returnState === 'RETURNED' && sum.refundState === 'REFUNDED';
                   const canCreate = !isCancelled && !fullyDone && (invoice.status === 'FINAL' || invoice.status === 'PARTIAL');
                   if (!canCreate) return null;
@@ -500,9 +548,9 @@ export function InvoiceDetail() {
                   ))}
                 </select>
               </div>
-              <Input label="ISSUED DATE" type="date" value={editIssuedAt}
+              <Input required label="ISSUED DATE" type="date" value={editIssuedAt}
                 onChange={e => setEditIssuedAt(e.target.value)} />
-              <Input label="DUE DATE" type="date" value={editDueAt}
+              <Input required label="DUE DATE" type="date" value={editDueAt}
                 onChange={e => setEditDueAt(e.target.value)} />
             </div>
             {/* Manueller Status-Override (Plan §Sales §13) */}
@@ -513,7 +561,33 @@ export function InvoiceDetail() {
                   const active = invoice.status === s;
                   return (
                     <button key={s}
-                      onClick={() => { if (id && window.confirm(`Status manuell auf ${s} setzen? Wird normalerweise aus paid_amount berechnet.`)) updateInvoice(id, { status: s }); }}
+                      onClick={() => {
+                        if (!id) return;
+                        // FINAL ist nur erlaubt wenn paid >= gross — sonst Revenue-Verfälschung.
+                        if (s === 'FINAL' && invoice.paidAmount < invoice.grossAmount - 0.005) {
+                          alert(`Status FINAL nicht möglich: Outstanding ${(invoice.grossAmount - invoice.paidAmount).toFixed(3)} BHD. Zuerst Zahlung erfassen.`);
+                          return;
+                        }
+                        // PARTIAL braucht zumindest paid > 0.
+                        if (s === 'PARTIAL' && invoice.paidAmount <= 0) {
+                          alert('Status PARTIAL nicht möglich: keine Zahlung erfasst. Wähle DRAFT oder erfasse eine Zahlung.');
+                          return;
+                        }
+                        // CANCELLED auf bezahlter Invoice → paid_amount > 0 + CANCELLED ist Cashflow-Inkonsistenz.
+                        // Erst Refund/Return durchführen damit paid wieder 0 ist.
+                        if (s === 'CANCELLED' && invoice.paidAmount > 0.005) {
+                          alert(`Status CANCELLED nicht möglich: ${invoice.paidAmount.toFixed(3)} BHD wurden bereits gezahlt. Zuerst Return + Refund durchführen.`);
+                          return;
+                        }
+                        // DRAFT auf bezahlter Invoice → versteckt die Payment-Sichtbarkeit.
+                        if (s === 'DRAFT' && invoice.paidAmount > 0.005) {
+                          alert(`Status DRAFT nicht möglich: ${invoice.paidAmount.toFixed(3)} BHD wurden bereits gezahlt. Zuerst Zahlung stornieren.`);
+                          return;
+                        }
+                        if (window.confirm(`Status manuell auf ${s} setzen? Wird normalerweise aus paid_amount berechnet.`)) {
+                          updateInvoice(id, { status: s });
+                        }
+                      }}
                       className="cursor-pointer rounded"
                       style={{
                         padding: '6px 14px', fontSize: 12,
@@ -553,10 +627,10 @@ export function InvoiceDetail() {
               </span>
             )}
             <div className="flex items-center gap-4" style={{ marginTop: 12, flexWrap: 'wrap' }}>
-              <StatusDot status={invoice.status} />
+              <StatusDot status={invoice.status} label={derivedInvoiceLabel(invoice)} />
               {/* Return-Status Badge — Final/Partial Return/Returned */}
               {(() => {
-                const sum = getInvoiceReturnSummary(invoice.id, invoice.grossAmount);
+                const sum = getInvoiceReturnSummary(invoice.id, invoice.grossAmount, invoice.paidAmount);
                 if (sum.returnState === 'RETURNED') {
                   return (
                     <span style={{ padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
@@ -640,6 +714,12 @@ export function InvoiceDetail() {
                 <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(invoice.grossAmount)} BHD</span>
               </div>
               <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 10, marginTop: 4 }}>
+                {creditedTotal > 0 && (
+                  <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
+                    <span className="text-overline" style={{ color: '#FF8730' }}>CREDITED (CN)</span>
+                    <span className="font-mono" style={{ fontSize: 14, color: '#FF8730' }}>−{fmt(creditedTotal)} BHD</span>
+                  </div>
+                )}
                 <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
                   <span className="text-overline">PAID</span>
                   <span className="font-mono" style={{ fontSize: 16, color: '#7EAA6E' }}>{fmt(invoice.paidAmount)} BHD</span>
@@ -769,11 +849,11 @@ export function InvoiceDetail() {
               <span className="text-overline" style={{ marginBottom: 16 }}>DETAILS</span>
               <div style={{ marginTop: 16 }}>
                 {renderField('Invoice Number', invoice.invoiceNumber)}
-                {renderField('Status', <StatusDot status={invoice.status} />)}
+                {renderField('Status', <StatusDot status={invoice.status} label={derivedInvoiceLabel(invoice)} />)}
                 {renderField('Issued', fmtDate(invoice.issuedAt))}
                 {editing ? (
                   <div style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
-                    <Input label="DUE DATE" type="date" value={editDueAt} onChange={e => setEditDueAt(e.target.value)} />
+                    <Input required label="DUE DATE" type="date" value={editDueAt} onChange={e => setEditDueAt(e.target.value)} />
                   </div>
                 ) : (
                   renderField('Due', fmtDate(invoice.dueAt))
@@ -830,7 +910,7 @@ export function InvoiceDetail() {
 
         {/* Returns + Refund Section — sichtbar wenn Returns existieren */}
         {(() => {
-          const sum = getInvoiceReturnSummary(invoice.id, invoice.grossAmount);
+          const sum = getInvoiceReturnSummary(invoice.id, invoice.grossAmount, invoice.paidAmount);
           if (sum.returns.length === 0) return null;
           return (
             <div style={{ marginTop: 24 }}>
@@ -871,22 +951,48 @@ export function InvoiceDetail() {
                 {/* Per-Return Details */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {sum.returns.map(r => {
-                    const outstanding = Math.max(0, r.totalAmount - (r.refundPaidAmount || 0));
+                    // Cash-Outstanding pro Return: max das was Customer überzahlt hat,
+                    // proportional auf diesen Return runtergebrochen, minus bereits gezahlt.
+                    // Vereinfachung: wenn invoice-weite outstanding=0 ist, ist auch pro Return 0.
+                    const ownedTotal = Math.max(0, r.totalAmount - (r.refundPaidAmount || 0));
+                    const outstanding = sum.outstandingRefund <= 0.01 ? 0 : ownedTotal;
                     const lineProductNames = r.lines.map(l => {
                       const p = products.find(pp => pp.id === l.productId);
                       return p ? `${l.quantity}× ${p.brand} ${p.name}` : `${l.quantity}× —`;
                     }).join(', ');
+                    const linkedCN = creditNotes.find(cn => cn.salesReturnId === r.id);
                     return (
                       <div key={r.id} style={{ padding: '12px 14px', border: '1px solid #E5E9EE', borderRadius: 8 }}>
                         <div className="flex justify-between items-start" style={{ marginBottom: 8 }}>
                           <div>
                             <div className="flex items-center gap-2">
                               <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>{r.returnNumber}</span>
-                              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999,
-                                color: r.refundStatus === 'REFUNDED' ? '#7EAA6E' : r.refundStatus === 'PARTIALLY_REFUNDED' ? '#D97706' : '#DC2626',
-                                background: r.refundStatus === 'REFUNDED' ? 'rgba(126,170,110,0.1)' : r.refundStatus === 'PARTIALLY_REFUNDED' ? 'rgba(217,119,6,0.1)' : 'rgba(220,38,38,0.1)',
-                                border: `1px solid ${r.refundStatus === 'REFUNDED' ? 'rgba(126,170,110,0.3)' : r.refundStatus === 'PARTIALLY_REFUNDED' ? 'rgba(217,119,6,0.3)' : 'rgba(220,38,38,0.3)'}`,
-                              }}>{r.refundStatus.replace(/_/g, ' ')}</span>
+                              {linkedCN && (
+                                <Link to={`/credit-notes/${linkedCN.id}`} className="cursor-pointer flex items-center gap-1"
+                                  style={{ fontSize: 11, color: '#FF8730', textDecoration: 'none', padding: '2px 8px', borderRadius: 999, border: '1px solid rgba(255,135,48,0.3)', background: 'rgba(255,135,48,0.06)' }}
+                                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,135,48,0.12)')}
+                                  onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,135,48,0.06)')}>
+                                  {linkedCN.creditNoteNumber}
+                                  <ExternalLink size={9} style={{ opacity: 0.7 }} />
+                                </Link>
+                              )}
+                              {(() => {
+                                // Wenn nichts auszuzahlen ist (Customer hat nicht gezahlt), aber Return existiert → SETTLED.
+                                const effectiveStatus = outstanding <= 0.01 && r.refundStatus !== 'PARTIALLY_REFUNDED' ? 'SETTLED' : r.refundStatus;
+                                const colorMap: Record<string, { fg: string; bg: string }> = {
+                                  REFUNDED: { fg: '#7EAA6E', bg: 'rgba(126,170,110,0.1)' },
+                                  SETTLED:  { fg: '#7EAA6E', bg: 'rgba(126,170,110,0.1)' },
+                                  PARTIALLY_REFUNDED: { fg: '#D97706', bg: 'rgba(217,119,6,0.1)' },
+                                  NOT_REFUNDED: { fg: '#DC2626', bg: 'rgba(220,38,38,0.1)' },
+                                };
+                                const { fg, bg } = colorMap[effectiveStatus] || colorMap.NOT_REFUNDED;
+                                return (
+                                  <span title={effectiveStatus === 'SETTLED' ? 'No cash refund needed — customer never paid' : undefined}
+                                    style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, color: fg, background: bg, border: `1px solid ${fg}30` }}>
+                                    {effectiveStatus.replace(/_/g, ' ')}
+                                  </span>
+                                );
+                              })()}
                             </div>
                             <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 2 }}>
                               Return Date: {r.returnDate} {r.refundPaidDate ? ` · Refund Date: ${r.refundPaidDate}` : ''}
@@ -915,8 +1021,11 @@ export function InvoiceDetail() {
                           <div className="flex gap-2 items-center" style={{ marginTop: 8 }}>
                             <span style={{ fontSize: 11, color: '#DC2626' }}>Outstanding: <span className="font-mono">{fmt(outstanding)} BHD</span></span>
                             <button onClick={() => {
-                              setRefundPayModal({ returnId: r.id, outstanding });
-                              setRefundPayAmount(outstanding.toFixed(3));
+                              // Industry-Standard: Cash-Refund max = was Customer tatsächlich gezahlt hat.
+                              const customerPaid = invoice.paidAmount || 0;
+                              const cappedDefault = Math.min(outstanding, customerPaid);
+                              setRefundPayModal({ returnId: r.id, outstanding: cappedDefault });
+                              setRefundPayAmount(cappedDefault.toFixed(3));
                               setRefundPayMethod((r.refundMethod as 'cash' | 'bank' | 'card' | 'credit' | 'other') || 'bank');
                             }}
                               className="cursor-pointer" style={{ padding: '4px 10px', fontSize: 11, border: '1px solid #7EAA6E', color: '#7EAA6E', borderRadius: 4, background: 'none' }}>
@@ -1213,9 +1322,26 @@ export function InvoiceDetail() {
         </div>
         <div className="receipt-lines">
           {invoice.lines.map(line => {
-            // Plan §Print — Volle Specs unter dem Produktnamen.
+            // Plan §Print — Specs als 2-Spalten-Mini-Grid (kompakt + ästhetisch).
             const product = products.find(p => p.id === line.productId);
             const specs = getProductSpecs(product, categories);
+            const SpecsGrid = specs.length > 0 ? (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                columnGap: 16, rowGap: 1,
+                marginTop: 4, fontSize: '9px',
+                color: '#444',
+              }}>
+                {specs.map((s, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 4, lineHeight: 1.35, breakInside: 'avoid' }}>
+                    <span style={{ color: '#999', minWidth: 0 }}>{s.label}:</span>
+                    <span style={{ color: '#222', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.value}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null;
+
             if (line.taxScheme === 'MARGIN') {
               return (
                 <div key={line.id} className="receipt-line" style={{ flexDirection: 'column' }}>
@@ -1223,11 +1349,7 @@ export function InvoiceDetail() {
                     <span className="receipt-line-name">{getProductName(line.productId)}</span>
                     <span>{fmt(line.lineTotal)} BHD</span>
                   </div>
-                  {specs.length > 0 && (
-                    <div style={{ fontSize: '9px', color: '#888', marginTop: 2, lineHeight: 1.4 }}>
-                      {specs.map(s => `${s.label}: ${s.value}`).join(' · ')}
-                    </div>
-                  )}
+                  {SpecsGrid}
                 </div>
               );
             }
@@ -1237,12 +1359,8 @@ export function InvoiceDetail() {
                   <span className="receipt-line-name">{getProductName(line.productId)}</span>
                   <span>{fmt(line.lineTotal)} BHD</span>
                 </div>
-                {specs.length > 0 && (
-                  <div style={{ fontSize: '9px', color: '#888', marginTop: 2, lineHeight: 1.4 }}>
-                    {specs.map(s => `${s.label}: ${s.value}`).join(' · ')}
-                  </div>
-                )}
-                <div style={{ fontSize: '9px', color: '#888', display: 'flex', justifyContent: 'space-between', marginTop: 2 }}>
+                {SpecsGrid}
+                <div style={{ fontSize: '9px', color: '#888', display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
                   <span>Net: {fmt(line.unitPrice)}</span>
                   <span>VAT 10%: {fmt(line.vatAmount)}</span>
                 </div>
@@ -1286,7 +1404,7 @@ export function InvoiceDetail() {
                 {fmt(refundPayModal.outstanding)} BHD
               </div>
             </div>
-            <Input label="AMOUNT (BHD)" type="number" step="0.001"
+            <Input required label="AMOUNT (BHD)" type="number" step="0.001"
               value={refundPayAmount}
               onChange={e => setRefundPayAmount(e.target.value)} />
             <div>
@@ -1345,17 +1463,48 @@ export function InvoiceDetail() {
 
           <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '32px minmax(0,2fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr)', gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE' }}>
-              {['', 'PRODUCT', 'QTY', 'UNIT PRICE', 'TOTAL'].map(h => (
+              {['', 'PRODUCT', 'QTY', 'UNIT PRICE (incl. VAT)', 'TOTAL (incl. VAT)'].map(h => (
                 <span key={h} className="text-overline" style={{ fontSize: 10 }}>{h}</span>
               ))}
             </div>
             {invoice.lines.map(l => {
-              const r = returnLines[l.id] || { include: false, quantity: 1, unitPrice: l.unitPrice, vatAmount: l.vatAmount };
+              // Gross-Unit-Preis = das was der Kunde pro Stück gezahlt hat (inkl. VAT).
+              const grossUnit = l.lineTotal / Math.max(1, l.quantity);
+              // Restliche Return-Quantity nach Abzug bereits zurückgegebener — keine Doppel-Returns.
+              const alreadyReturned = getReturnedQtyForLine(l.id);
+              const remainingQty = Math.max(0, l.quantity - alreadyReturned);
+              const fullyReturned = remainingQty <= 0.005;
+              const r = returnLines[l.id] || { include: false, quantity: Math.min(1, remainingQty), unitPrice: grossUnit };
+              if (fullyReturned) {
+                // Vollständig zurückgegebene Lines werden als "✓ already returned" angezeigt — disabled.
+                return (
+                  <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '32px minmax(0,2fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr)', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center', background: '#F8FAFC', opacity: 0.6 }}>
+                    <input type="checkbox" checked={false} disabled style={{ cursor: 'not-allowed' }} />
+                    <span style={{ fontSize: 12, color: '#6B7280', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {getProductName(l.productId)}
+                      <span style={{ marginLeft: 8, fontSize: 10, color: '#16A34A', fontWeight: 500 }}>✓ already returned</span>
+                    </span>
+                    <span className="font-mono" style={{ fontSize: 11, color: '#9CA3AF' }}>{alreadyReturned} / {l.quantity}</span>
+                    <span className="font-mono" style={{ fontSize: 11, color: '#9CA3AF' }}>—</span>
+                    <span className="font-mono" style={{ fontSize: 11, color: '#9CA3AF' }}>—</span>
+                  </div>
+                );
+              }
               return (
                 <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '32px minmax(0,2fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr)', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center' }}>
                   <input type="checkbox" checked={r.include} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, include: e.target.checked } })} />
-                  <span style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{getProductName(l.productId)}</span>
-                  <input type="number" value={r.quantity} min={0} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, quantity: parseFloat(e.target.value) || 0 } })}
+                  <span style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {getProductName(l.productId)}
+                    {alreadyReturned > 0 && (
+                      <span style={{ marginLeft: 8, fontSize: 10, color: '#FF8730' }}>({alreadyReturned} of {l.quantity} returned)</span>
+                    )}
+                  </span>
+                  <input type="number" value={r.quantity} min={0} max={remainingQty} step="0.01"
+                    onChange={e => {
+                      const v = Math.max(0, Math.min(remainingQty, parseFloat(e.target.value) || 0));
+                      setReturnLines({ ...returnLines, [l.id]: { ...r, quantity: v } });
+                    }}
+                    title={`Max ${remainingQty} (already returned: ${alreadyReturned})`}
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10', minWidth: 0, width: '100%' }} />
                   <input type="number" step="0.01" value={r.unitPrice} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10', minWidth: 0, width: '100%' }} />
@@ -1441,16 +1590,48 @@ export function InvoiceDetail() {
             </div>
           </div>
 
-          <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <span style={{ fontSize: 14, color: '#6B7280' }}>Refund Total</span>
-            <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}>
-              {fmt(invoice.lines.reduce((s, l) => {
-                const r = returnLines[l.id];
-                if (r?.include) return s + r.quantity * r.unitPrice;
-                return s;
-              }, 0))} BHD
-            </span>
-          </div>
+          {(() => {
+            const returnTotal = invoice.lines.reduce((s, l) => {
+              const r = returnLines[l.id];
+              if (r?.include) return s + r.quantity * r.unitPrice;
+              return s;
+            }, 0);
+            const customerPaid = invoice.paidAmount || 0;
+            const grossAmount = invoice.grossAmount || 0;
+            // Industriestandard: Cash zurück nur wenn Customer NACH Return mehr gezahlt hat als er noch schuldet.
+            const owedAfterReturn = Math.max(0, grossAmount - returnTotal);
+            const cashRefund = Math.max(0, customerPaid - owedAfterReturn);
+            const receivableCancel = Math.max(0, returnTotal - cashRefund);
+            return (
+              <div style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                <div className="flex justify-between" style={{ marginBottom: 6 }}>
+                  <span style={{ fontSize: 14, color: '#6B7280' }}>Return Total</span>
+                  <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}>{fmt(returnTotal)} BHD</span>
+                </div>
+                {returnTotal > 0 && (
+                  <div style={{ fontSize: 11, color: '#6B7280', lineHeight: 1.6, padding: '8px 10px', background: '#F2F7FA', borderRadius: 6, marginTop: 8 }}>
+                    <div className="flex justify-between"><span>Cash refund (back to customer)</span><span className="font-mono" style={{ color: cashRefund > 0 ? '#DC2626' : '#0F0F10' }}>{fmt(cashRefund)} BHD</span></div>
+                    <div className="flex justify-between" style={{ marginTop: 2 }}><span>Receivable cancellation (Credit Note)</span><span className="font-mono" style={{ color: receivableCancel > 0 ? '#FF8730' : '#0F0F10' }}>{fmt(receivableCancel)} BHD</span></div>
+                    {customerPaid === 0 && returnTotal > 0 && (
+                      <div style={{ marginTop: 6, color: '#FF8730', fontStyle: 'italic' }}>
+                        ℹ Customer hasn't paid yet — no cash flows back, only the receivable is cancelled via Credit Note.
+                      </div>
+                    )}
+                    {customerPaid > 0 && cashRefund === 0 && returnTotal > 0 && (
+                      <div style={{ marginTop: 6, color: '#FF8730', fontStyle: 'italic' }}>
+                        ℹ Customer still owes {fmt(owedAfterReturn - customerPaid)} BHD after the return — no cash refund, only Credit Note offsets the receivable.
+                      </div>
+                    )}
+                    {cashRefund > 0 && cashRefund < returnTotal && (
+                      <div style={{ marginTop: 6, color: '#FF8730', fontStyle: 'italic' }}>
+                        ℹ Cash refund = surplus customer paid above remaining debt; rest is Credit Note.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           <div className="flex justify-end gap-3">
             <Button variant="ghost" onClick={() => setShowReturn(false)}>Cancel</Button>

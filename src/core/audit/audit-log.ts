@@ -115,11 +115,16 @@ export function logUpdateDiff(
 
 // ── Read-only API ──
 
+// Alle Read-Queries scopen auf die aktuelle Branch — Audit-Log darf keine
+// Cross-Tenant-Aktivität leaken (Plan §Audit + §Multi-Branch §Isolation).
 export function getAuditForEntity(entityType: string, entityId: string): AuditEntry[] {
   try {
+    const branchId = currentBranchId();
     const rows = query(
-      `SELECT * FROM audit_log WHERE entity_type = ? AND entity_id = ? ORDER BY changed_at DESC`,
-      [entityType, entityId]
+      `SELECT * FROM audit_log
+        WHERE entity_type = ? AND entity_id = ? AND branch_id = ?
+        ORDER BY changed_at DESC`,
+      [entityType, entityId, branchId]
     );
     return rows.map(rowToEntry);
   } catch {
@@ -129,9 +134,12 @@ export function getAuditForEntity(entityType: string, entityId: string): AuditEn
 
 export function getAuditByModule(module: string, limit = 500): AuditEntry[] {
   try {
+    const branchId = currentBranchId();
     const rows = query(
-      `SELECT * FROM audit_log WHERE module = ? ORDER BY changed_at DESC LIMIT ?`,
-      [module, limit]
+      `SELECT * FROM audit_log
+        WHERE module = ? AND branch_id = ?
+        ORDER BY changed_at DESC LIMIT ?`,
+      [module, branchId, limit]
     );
     return rows.map(rowToEntry);
   } catch {
@@ -141,9 +149,12 @@ export function getAuditByModule(module: string, limit = 500): AuditEntry[] {
 
 export function getRecentAudit(limit = 200): AuditEntry[] {
   try {
+    const branchId = currentBranchId();
     const rows = query(
-      `SELECT * FROM audit_log ORDER BY changed_at DESC LIMIT ?`,
-      [limit]
+      `SELECT * FROM audit_log
+        WHERE branch_id = ?
+        ORDER BY changed_at DESC LIMIT ?`,
+      [branchId, limit]
     );
     return rows.map(rowToEntry);
   } catch {

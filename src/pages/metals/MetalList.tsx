@@ -233,17 +233,17 @@ export function MetalList() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 0.8fr 1fr 1.2fr 1.2fr 0.8fr 0.6fr',
+          gridTemplateColumns: 'minmax(0,1fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,0.8fr) minmax(0,0.6fr)',
           gap: 16, padding: '0 16px 12px',
         }}
       >
         <span className="text-overline">METAL</span>
         <span className="text-overline">KARAT</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>WEIGHT (g)</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>PURCHASE</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>MELT VALUE</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>WEIGHT (g)</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>PURCHASE</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>MELT VALUE</span>
         <span className="text-overline">STATUS</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>ACTION</span>
       </div>
 
       <div style={{ borderTop: '1px solid #E5E9EE' }} />
@@ -268,7 +268,7 @@ export function MetalList() {
             className="transition-colors"
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 0.8fr 1fr 1.2fr 1.2fr 0.8fr 0.6fr',
+              gridTemplateColumns: 'minmax(0,1fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,0.8fr) minmax(0,0.6fr)',
               gap: 16, padding: '14px 16px', alignItems: 'center',
               borderBottom: '1px solid rgba(229,225,214,0.6)',
             }}

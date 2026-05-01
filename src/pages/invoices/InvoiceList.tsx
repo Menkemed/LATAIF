@@ -18,6 +18,37 @@ import { matchesDeep } from '@/core/utils/deep-search';
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
+function fmtDate(iso?: string): string {
+  if (!iso) return '\u2014';
+  return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
+}
+
+// Display-Status: leitet aus invoice.status + paid + returnState einen User-friendly Label ab.
+// Reihenfolge: CANCELLED > Returned > Partially Returned > Draft > Paid > Partially Paid > Unpaid.
+type DisplayStatus = 'Cancelled' | 'Returned' | 'Partially Returned' | 'Draft' | 'Paid' | 'Partially Paid' | 'Unpaid';
+
+function deriveDisplayStatus(
+  inv: { status: string; grossAmount: number; paidAmount: number },
+  returnState: 'NONE' | 'PARTIAL_RETURN' | 'RETURNED'
+): DisplayStatus {
+  if (inv.status === 'CANCELLED') return 'Cancelled';
+  if (returnState === 'RETURNED') return 'Returned';
+  if (returnState === 'PARTIAL_RETURN') return 'Partially Returned';
+  if (inv.status === 'DRAFT') return 'Draft';
+  if (inv.paidAmount >= inv.grossAmount - 0.005) return 'Paid';
+  if (inv.paidAmount > 0.005) return 'Partially Paid';
+  return 'Unpaid';
+}
+
+const STATUS_STYLE: Record<DisplayStatus, { fg: string; bg: string }> = {
+  'Paid':                { fg: '#16A34A', bg: 'rgba(22,163,74,0.10)' },
+  'Partially Paid':      { fg: '#FF8730', bg: 'rgba(255,135,48,0.10)' },
+  'Unpaid':              { fg: '#DC2626', bg: 'rgba(220,38,38,0.08)' },
+  'Returned':            { fg: '#DC2626', bg: 'rgba(220,38,38,0.08)' },
+  'Partially Returned':  { fg: '#D97706', bg: 'rgba(217,119,6,0.10)' },
+  'Cancelled':           { fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' },
+  'Draft':               { fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' },
+};
 
 export function InvoiceList() {
   const navigate = useNavigate();
@@ -69,12 +100,21 @@ export function InvoiceList() {
 
   useEffect(() => { loadInvoices(); loadOffers(); loadCustomers(); loadProducts(); loadSalesReturns(); }, [loadInvoices, loadOffers, loadCustomers, loadProducts, loadSalesReturns]);
 
+  // URL-Param: /invoices?customer=:id → nur Invoices dieses Kunden anzeigen.
+  const customerFilter = searchParams.get('customer') || '';
+  const customerFilterName = useMemo(() => {
+    if (!customerFilter) return '';
+    const c = customers.find(cc => cc.id === customerFilter);
+    return c ? `${c.firstName} ${c.lastName}`.trim() || c.company || '' : '';
+  }, [customerFilter, customers]);
+
   const filtered = useMemo(() => {
     let r = invoices;
+    if (customerFilter) r = r.filter(i => i.customerId === customerFilter);
     // Special filter "returns": Invoices mit offenem Refund-Payable
     if (filterStatus === 'returns') {
       r = r.filter(inv => {
-        const sum = getInvoiceReturnSummary(inv.id, inv.grossAmount);
+        const sum = getInvoiceReturnSummary(inv.id, inv.grossAmount, inv.paidAmount);
         return sum.outstandingRefund > 0.001;
       });
     } else if (filterStatus) {
@@ -88,7 +128,7 @@ export function InvoiceList() {
       });
     }
     return r;
-  }, [invoices, filterStatus, searchQuery, customers, products]);
+  }, [invoices, filterStatus, searchQuery, customers, products, customerFilter]);
 
   const acceptedOffers = useMemo(() => offers.filter(o => o.status === 'accepted'), [offers]);
 
@@ -149,10 +189,22 @@ export function InvoiceList() {
   return (
     <PageLayout
       title="Invoices"
-      subtitle={`${invoices.length} invoices \u00b7 ${invoices.filter(i => i.status === 'PARTIAL').length} open`}
+      subtitle={customerFilter
+        ? `Filtered by client: ${customerFilterName || customerFilter} \u00b7 ${filtered.length} invoice${filtered.length === 1 ? '' : 's'}`
+        : `${invoices.length} invoices \u00b7 ${invoices.filter(i => i.status !== 'CANCELLED' && i.paidAmount < i.grossAmount - 0.005).length} open`}
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by invoice #, client, product..."
       actions={
         <div className="flex gap-2">
+          {customerFilter && (
+            <button onClick={() => {
+              const next = new URLSearchParams(searchParams);
+              next.delete('customer');
+              setSearchParams(next, { replace: true });
+            }} className="cursor-pointer transition-colors flex items-center gap-1"
+              style={{ padding: '6px 12px', fontSize: 12, borderRadius: 999, border: '1px solid #DC2626', background: 'rgba(220,38,38,0.06)', color: '#DC2626' }}>
+              \u2715 Clear client filter
+            </button>
+          )}
           <div className="flex gap-1" style={{ marginRight: 8 }}>
             {['', 'DRAFT', 'PARTIAL', 'FINAL', 'CANCELLED'].map(s => (
               <button key={s} onClick={() => setFilterStatus(s)}
@@ -170,9 +222,9 @@ export function InvoiceList() {
         </div>
       }
     >
-      {/* Table */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr 1fr 1fr 1fr 1fr 1fr', gap: 12, padding: '0 12px 10px' }}>
-        {['INVOICE #', 'CLIENT', 'NET', 'VAT', 'TOTAL', 'PAID', 'STATUS'].map(h => (
+      {/* Table — Plan §Sales Übersicht: Net/VAT entfernt, Remaining + granulare Status. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.4fr)', gap: 12, padding: '0 12px 10px' }}>
+        {['DATE', 'INVOICE #', 'CLIENT', 'PHONE', 'TOTAL', 'PAID', 'REMAINING', 'STATUS'].map(h => (
           <span key={h} className="text-overline">{h}</span>
         ))}
       </div>
@@ -187,12 +239,16 @@ export function InvoiceList() {
 
       {filtered.map(inv => {
         const customer = customers.find(c => c.id === inv.customerId);
-        const remaining = inv.grossAmount - inv.paidAmount;
+        const remaining = Math.max(0, inv.grossAmount - inv.paidAmount);
+        const sum = getInvoiceReturnSummary(inv.id, inv.grossAmount, inv.paidAmount);
+        const displayStatus = deriveDisplayStatus(inv, sum.returnState);
+        const statusStyle = STATUS_STYLE[displayStatus];
+        const isOpenPayment = displayStatus === 'Partially Paid' || displayStatus === 'Unpaid';
         return (
           <div key={inv.id}
             className="cursor-pointer transition-colors"
             style={{
-              display: 'grid', gridTemplateColumns: '1fr 2fr 1fr 1fr 1fr 1fr 1fr',
+              display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.4fr)',
               gap: 12, padding: '14px 12px', alignItems: 'center',
               borderBottom: '1px solid rgba(229,225,214,0.6)',
             }}
@@ -200,49 +256,43 @@ export function InvoiceList() {
             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
-            <span className="font-mono flex items-center gap-1" style={{ fontSize: 12, color: '#0F0F10' }}>
+            <span style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {fmtDate(inv.issuedAt || inv.createdAt)}
+            </span>
+            <span className="font-mono flex items-center gap-1" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {inv.invoiceNumber}
               {inv.butterfly && <span title="Butterfly (excluded from NBR export)" style={{ fontSize: 12 }}>&#x1F98B;</span>}
             </span>
-            <span style={{ fontSize: 13, color: '#0F0F10' }}>
-              {customer ? `${customer.firstName} ${customer.lastName}` : '—'}
+            <span style={{ fontSize: 13, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {customer ? `${customer.firstName} ${customer.lastName}`.trim() || customer.company || '—' : '—'}
             </span>
-            <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}>{fmt(inv.netAmount)}</span>
-            <span className="font-mono" style={{ fontSize: 13, color: '#AA956E' }}>{fmt(inv.vatAmount)}</span>
+            <span className="font-mono" style={{ fontSize: 12, color: '#4B5563', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {customer?.phone || customer?.whatsapp || '\u2014'}
+            </span>
             <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(inv.grossAmount)}</span>
-            <span className="font-mono" style={{ fontSize: 13, color: inv.paidAmount >= inv.grossAmount ? '#7EAA6E' : '#AA956E' }}>
+            <span className="font-mono" style={{ fontSize: 13, color: inv.paidAmount >= inv.grossAmount - 0.005 ? '#16A34A' : '#4B5563' }}>
               {fmt(inv.paidAmount)}
             </span>
-            <div className="flex items-center gap-2">
-              {(() => {
-                const sum = getInvoiceReturnSummary(inv.id, inv.grossAmount);
-                if (sum.returnState === 'RETURNED') {
-                  return (
-                    <span title={`Refund: ${sum.refundState.replace(/_/g, ' ').toLowerCase()}`}
-                      style={{ padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
-                        color: '#DC2626', background: 'rgba(220,38,38,0.08)',
-                        border: '1px solid rgba(220,38,38,0.3)' }}>
-                      RETURNED
-                    </span>
-                  );
-                }
-                if (sum.returnState === 'PARTIAL_RETURN') {
-                  return (
-                    <span title={`Returned ${sum.totalReturned.toFixed(2)} of ${inv.grossAmount.toFixed(2)} BHD`}
-                      style={{ padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
-                        color: '#D97706', background: 'rgba(217,119,6,0.08)',
-                        border: '1px solid rgba(217,119,6,0.3)' }}>
-                      PARTIAL RETURN
-                    </span>
-                  );
-                }
-                return <StatusDot status={inv.status} />;
-              })()}
-              {inv.status === 'PARTIAL' && (
-                <button onClick={() => { setShowPayment(inv.id); setPayAmount(remaining); }}
+            <span className="font-mono" style={{ fontSize: 13, color: remaining > 0.005 ? '#DC2626' : '#9CA3AF' }}>
+              {remaining > 0.005 ? fmt(remaining) : '—'}
+            </span>
+            <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+              <span
+                title={displayStatus === 'Partially Returned'
+                  ? `Returned ${sum.totalReturned.toFixed(2)} of ${inv.grossAmount.toFixed(2)} BHD`
+                  : displayStatus}
+                style={{
+                  padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
+                  color: statusStyle.fg, background: statusStyle.bg,
+                  border: `1px solid ${statusStyle.fg}33`, whiteSpace: 'nowrap',
+                }}>
+                {displayStatus}
+              </span>
+              {isOpenPayment && (
+                <button onClick={(e) => { e.stopPropagation(); setShowPayment(inv.id); setPayAmount(remaining); }}
                   className="cursor-pointer" style={{
-                    padding: '3px 8px', fontSize: 10, border: '1px solid #7EAA6E',
-                    color: '#7EAA6E', borderRadius: 4, background: 'none',
+                    padding: '3px 8px', fontSize: 10, border: '1px solid #16A34A',
+                    color: '#16A34A', borderRadius: 4, background: 'none',
                   }}>Pay</button>
               )}
             </div>

@@ -181,7 +181,7 @@ export function PurchaseCreate() {
               value={supplierId}
               onChange={setSupplierId}
             />
-            <Input label="PURCHASE DATE" type="date"
+            <Input required label="PURCHASE DATE" type="date"
               value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} />
           </div>
           {supplier && (

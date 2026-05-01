@@ -20,16 +20,19 @@ interface CustomerStore {
   deleteCustomer: (id: string) => void;
   // Plan §Customer §4: pro Kunde offene Beträge aggregieren.
   getOutstanding: (customerId: string) => { outstanding: number; invoiceCount: number; totalPaid: number; totalGross: number };
-  // Live-Berechnung aller drei Kern-KPIs aus den Invoices (Definition vom User):
-  //  Revenue     = SUM(gross_amount)         über alle Invoices außer DRAFT/CANCELLED
-  //  Profit      = SUM(margin_snapshot)      über dieselben Invoices
-  //  Outstanding = SUM(gross - paid)         über PARTIAL/DRAFT Invoices
+  // Live-Cashflow-Berechnung (User-Vorgabe):
+  //  Revenue     = Σ payments.amount − Σ sales_returns.refund_paid_amount   (was reinkam minus was raus ging)
+  //  Profit      = Σ payment·margin/gross − Σ refund·margin/gross           (anteilig zum Cash-Anteil)
+  //  Outstanding = Σ (gross − paid) PARTIAL/DRAFT Invoices + offene we_lend Loans
   getCustomerStats: (customerId: string) => {
     revenue: number;
     profit: number;
-    outstanding: number;
+    outstanding: number;            // total receivable = invoices + open loans
+    invoiceOutstanding: number;     // only from invoices
+    loanOutstanding: number;        // only from we_lend debts
     invoiceCount: number;
     openInvoiceCount: number;
+    openLoanCount: number;
   };
 }
 
@@ -186,6 +189,25 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   },
 
   deleteCustomer: (id) => {
+    // Referenz-Check vor Hard-Delete — sonst Orphan-Records in invoices/debts/returns/etc.
+    const refs = query(
+      `SELECT
+         (SELECT COUNT(*) FROM invoices       WHERE customer_id = ?) AS invoices,
+         (SELECT COUNT(*) FROM debts          WHERE customer_id = ?) AS debts,
+         (SELECT COUNT(*) FROM sales_returns  WHERE customer_id = ?) AS returns,
+         (SELECT COUNT(*) FROM consignments   WHERE consignor_id = ?) AS consignments,
+         (SELECT COUNT(*) FROM orders         WHERE customer_id = ?) AS orders,
+         (SELECT COUNT(*) FROM repairs        WHERE customer_id = ?) AS repairs`,
+      [id, id, id, id, id, id]
+    );
+    const r = refs[0] || {};
+    const linked = ['invoices', 'debts', 'returns', 'consignments', 'orders', 'repairs']
+      .map(k => ({ k, n: Number((r as Record<string, unknown>)[k] || 0) }))
+      .filter(x => x.n > 0);
+    if (linked.length > 0) {
+      const detail = linked.map(x => `${x.n} ${x.k}`).join(', ');
+      throw new Error(`Cannot delete customer with linked records: ${detail}. Cancel or reassign these first.`);
+    }
     const db = getDatabase();
     db.run('DELETE FROM customers WHERE id = ?', [id]);
     saveDatabase();
@@ -197,13 +219,14 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   // Berücksichtigt NICHT stornierte/gelöschte Invoices.
   getOutstanding: (customerId) => {
     try {
+      const branchId = currentBranchId();
       const rows = query(
         `SELECT COALESCE(SUM(gross_amount), 0) AS gross,
                 COALESCE(SUM(paid_amount), 0) AS paid,
                 COUNT(*) AS cnt
          FROM invoices
-         WHERE customer_id = ? AND status IN ('PARTIAL', 'DRAFT')`,
-        [customerId]
+         WHERE customer_id = ? AND branch_id = ? AND status IN ('PARTIAL', 'DRAFT')`,
+        [customerId, branchId]
       );
       const r = rows[0] || {};
       const gross = Number(r.gross || 0);
@@ -219,21 +242,42 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
     }
   },
 
-  // Live-Berechnung Revenue/Profit/Outstanding direkt aus invoices.
-  // Definitionen (User-Vorgabe):
-  //  Revenue     = Sales Total = SUM(gross_amount) der nicht-stornierten Invoices
-  //  Profit      = (Verkaufspreis − Kosten) summiert = SUM(margin_snapshot)
-  //  Outstanding = offene Beträge = SUM(gross − paid) über PARTIAL/DRAFT-Invoices
+  // Live-Cashflow:
+  //  Revenue = Σ Customer-Zahlungen − Σ tatsächlich geleistete Refund-Zahlungen.
+  //  Profit  = anteilig: pro Zahlung margin/gross-Quote, ebenso pro Refund-Zahlung abgezogen.
+  //  Outstanding = (gross − paid) der offenen Invoices + offene we_lend-Loans.
+  // User-Vorgabe (2026-04-29): Revenue/Profit zählen NUR bei status='FINAL' (voll bezahlt).
+  // PARTIAL/DRAFT/CANCELLED-Invoices tragen NICHT bei — Teilzahlung wird in der UI separat
+  // als „Paid"/„Remaining" angezeigt, aber erst bei voller Settle-ung wird Umsatz realisiert.
   getCustomerStats: (customerId) => {
     try {
-      const allRow = query(
-        `SELECT COALESCE(SUM(gross_amount), 0) AS revenue,
-                COALESCE(SUM(margin_snapshot), 0) AS profit,
-                COUNT(*) AS cnt
-         FROM invoices
-         WHERE customer_id = ? AND status NOT IN ('CANCELLED', 'DRAFT')`,
+      // Cash-Inflow: nur Zahlungen auf FINAL-Invoices zählen als Revenue.
+      const inflowRow = query(
+        `SELECT COALESCE(SUM(p.amount), 0) AS paid_in,
+                COALESCE(SUM(p.amount * (i.margin_snapshot / NULLIF(i.gross_amount, 0))), 0) AS profit_in
+         FROM payments p
+         JOIN invoices i ON i.id = p.invoice_id
+         WHERE i.customer_id = ? AND i.status = 'FINAL'`,
         [customerId]
       );
+
+      // Cash-Outflow: Refunds nur abziehen wenn die zugehörige Invoice FINAL war
+      // (sonst wurde sie nie als Revenue gezählt → Refund würde Revenue ins Negative drücken).
+      const outflowRow = query(
+        `SELECT COALESCE(SUM(r.refund_paid_amount), 0) AS paid_out,
+                COALESCE(SUM(r.refund_paid_amount * (i.margin_snapshot / NULLIF(i.gross_amount, 0))), 0) AS profit_out
+         FROM sales_returns r
+         JOIN invoices i ON i.id = r.invoice_id
+         WHERE r.customer_id = ? AND i.status = 'FINAL'`,
+        [customerId]
+      );
+
+      const paidIn   = Number(inflowRow[0]?.paid_in   || 0);
+      const profitIn = Number(inflowRow[0]?.profit_in || 0);
+      const paidOut  = Number(outflowRow[0]?.paid_out  || 0);
+      const profitOut= Number(outflowRow[0]?.profit_out || 0);
+
+      // Outstanding aus Invoices (PARTIAL/DRAFT mit gross > paid).
       const openRow = query(
         `SELECT COALESCE(SUM(gross_amount - paid_amount), 0) AS outstanding,
                 COUNT(*) AS open_cnt
@@ -241,17 +285,47 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
          WHERE customer_id = ? AND status IN ('PARTIAL', 'DRAFT')`,
         [customerId]
       );
-      const a = allRow[0] || {};
+
+      // Anzahl aktiver Invoices (für UI "X invoices"-Hinweis) — ohne stornierte/draft.
+      const cntRow = query(
+        `SELECT COUNT(*) AS cnt
+         FROM invoices
+         WHERE customer_id = ? AND status NOT IN ('CANCELLED', 'DRAFT')`,
+        [customerId]
+      );
+
+      // Loans: offene we_lend-Beträge — Raten leben in debt_payments (Subselect).
+      const loanRow = query(
+        `SELECT COALESCE(SUM(d.amount - COALESCE(p.total_paid, 0)), 0) AS open_lent,
+                COUNT(*) AS cnt
+         FROM debts d
+         LEFT JOIN (
+           SELECT debt_id, SUM(amount) AS total_paid
+           FROM debt_payments
+           GROUP BY debt_id
+         ) p ON p.debt_id = d.id
+         WHERE d.customer_id = ? AND d.direction = 'we_lend'
+           AND d.status NOT IN ('CANCELLED', 'REPAID', 'settled')`,
+        [customerId]
+      );
+
       const o = openRow[0] || {};
+      const invoiceOutstanding = Math.max(0, Number(o.outstanding || 0));
+      const loanOpen = Math.max(0, Number(loanRow[0]?.open_lent || 0));
+      const loanCount = Number(loanRow[0]?.cnt || 0);
+
       return {
-        revenue: Number(a.revenue || 0),
-        profit: Number(a.profit || 0),
-        outstanding: Math.max(0, Number(o.outstanding || 0)),
-        invoiceCount: Number(a.cnt || 0),
+        revenue: Math.max(0, paidIn - paidOut),
+        profit: profitIn - profitOut,
+        outstanding: invoiceOutstanding + loanOpen,
+        invoiceOutstanding,
+        loanOutstanding: loanOpen,
+        invoiceCount: Number(cntRow[0]?.cnt || 0),
         openInvoiceCount: Number(o.open_cnt || 0),
+        openLoanCount: loanCount,
       };
     } catch {
-      return { revenue: 0, profit: 0, outstanding: 0, invoiceCount: 0, openInvoiceCount: 0 };
+      return { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0 };
     }
   },
 }));

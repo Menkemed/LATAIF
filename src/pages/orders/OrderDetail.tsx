@@ -16,7 +16,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
-import type { Order, OrderStatus, TaxScheme } from '@/core/models/types';
+import type { Order, OrderStatus, Product, TaxScheme } from '@/core/models/types';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 
@@ -25,15 +25,7 @@ function fmt(v: number | undefined | null): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
-const STATUS_FLOW: OrderStatus[] = [
-  'pending',
-  'deposit_received',
-  'sourcing',
-  'sourced',
-  'arrived',
-  'notified',
-  'completed',
-];
+const STATUS_FLOW: OrderStatus[] = ['pending', 'arrived', 'notified', 'completed'];
 
 function getNextStatus(current: OrderStatus): OrderStatus | null {
   const idx = STATUS_FLOW.indexOf(current);
@@ -51,7 +43,11 @@ export function OrderDetail() {
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts } = useProductStore();
+  const { products, loadProducts, createProduct } = useProductStore();
+  // Plan §Order §Convert: Wenn die Order kein verlinktes Produkt hat (manuell beschrieben),
+  // wird beim Convert eines automatisch erzeugt und hier gehalten — wird vom VAT-Modal +
+  // handleConfirmFinalInvoice anstelle von linkedProduct verwendet.
+  const [pendingProduct, setPendingProduct] = useState<Product | null>(null);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Order>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -66,10 +62,10 @@ export function OrderDetail() {
   const [showInvoiceVatConfirm, setShowInvoiceVatConfirm] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const { paymentsByOrder, loadPayments, addPayment, deletePayment } = useOrderPaymentStore();
-  const { createDirectInvoice } = useInvoiceStore();
+  const { createDirectInvoice, invoices, loadInvoices } = useInvoiceStore();
   const perm = usePermission();
 
-  useEffect(() => { loadOrders(); loadCustomers(); loadProducts(); loadCategories(); }, [loadOrders, loadCustomers, loadProducts, loadCategories]);
+  useEffect(() => { loadOrders(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); }, [loadOrders, loadCustomers, loadProducts, loadCategories, loadInvoices]);
   useEffect(() => { if (id) loadPayments(id); }, [id, loadPayments]);
 
   const payments = useMemo(() => (id ? paymentsByOrder[id] || [] : []), [id, paymentsByOrder]);
@@ -80,10 +76,16 @@ export function OrderDetail() {
     () => order ? customers.find(c => c.id === order.customerId) : undefined,
     [order, customers],
   );
-  const linkedProduct = useMemo(
-    () => order?.productId ? products.find(p => p.id === order.productId) : undefined,
-    [order, products],
-  );
+  // Plan §Order: Produkt-Link kann via productId (Standard-Sourcing-Flow, item arrived in stock)
+  // ODER via existingProductId (Existing-Item-Flow, Order referenziert direkt vorhandenes Produkt) sein.
+  // Convert-to-Invoice braucht beides — sonst zeigt es bei Existing-Item-Orders faelschlich
+  // "no product linked".
+  const linkedProduct = useMemo(() => {
+    if (!order) return undefined;
+    const pid = order.productId || order.existingProductId;
+    return pid ? products.find(p => p.id === pid) : undefined;
+  }, [order, products]);
+  const productForConvert = linkedProduct ?? pendingProduct;
 
   useEffect(() => {
     if (order) setForm({ ...order });
@@ -208,27 +210,51 @@ export function OrderDetail() {
   }
 
   function handleCreateFinalInvoice() {
-    if (!id || !order || !linkedProduct) return;
+    if (!id || !order) return;
     const gross = order.agreedPrice || totalPaid;
     if (gross <= 0) { alert('Agreed price required.'); return; }
+
+    // Wenn kein Produkt verlinkt (manuell beschriebene Order) → eines auto-erzeugen.
+    // Daten kommen aus den Order-Feldern (Brand/Model/Kategorie/Attribute).
+    if (!linkedProduct) {
+      const newProduct = createProduct({
+        categoryId: order.categoryId || '',
+        brand: order.requestedBrand || '',
+        name: order.requestedModel || order.requestedBrand || 'Custom Item',
+        condition: order.condition || '',
+        attributes: order.attributes || {},
+        purchasePrice: order.supplierPrice || 0,
+        plannedSalePrice: order.agreedPrice,
+        stockStatus: 'sold',
+        taxScheme: 'MARGIN',
+        sourceType: 'OWN',
+        supplierName: order.supplierName,
+        notes: order.requestedDetails ? `From order ${order.orderNumber}: ${order.requestedDetails}` : `From order ${order.orderNumber}`,
+      });
+      setPendingProduct(newProduct);
+      // Order an das neue Produkt binden — sorgt fuer Konsistenz beim naechsten Reload.
+      updateOrder(id, { productId: newProduct.id });
+    }
+
     setShowInvoiceVatConfirm(true);
   }
 
   async function handleConfirmFinalInvoice(perLine: Record<string, TaxScheme>) {
     setShowInvoiceVatConfirm(false);
-    if (!id || !order || !linkedProduct) return;
+    const prod = productForConvert;
+    if (!id || !order || !prod) return;
     // `agreedPrice` ist der Netto-Verkaufspreis (Plan §Tax §7: System rechnet Gross auto).
     const agreedNet = order.agreedPrice || totalPaid;
     if (agreedNet <= 0) { alert('Agreed price required.'); return; }
-    const taxScheme = (perLine[linkedProduct.id] || linkedProduct.taxScheme || 'MARGIN') as TaxScheme;
+    const taxScheme = (perLine[prod.id] || prod.taxScheme || 'MARGIN') as TaxScheme;
     const vatRate = 10;
-    const calc = vatEngine.calculateNet(agreedNet, linkedProduct.purchasePrice || 0, taxScheme, vatRate);
+    const calc = vatEngine.calculateNet(agreedNet, prod.purchasePrice || 0, taxScheme, vatRate);
     const invoice = createDirectInvoice(
       order.customerId,
       [{
-        productId: linkedProduct.id,
+        productId: prod.id,
         unitPrice: calc.netAmount,
-        purchasePrice: linkedProduct.purchasePrice || 0,
+        purchasePrice: prod.purchasePrice || 0,
         taxScheme,
         vatRate,
         vatAmount: calc.vatAmount,
@@ -237,6 +263,7 @@ export function OrderDetail() {
       `Final invoice for order ${order.orderNumber}`,
     );
     updateOrder(id, { invoiceId: invoice.id });
+    setPendingProduct(null);
     // Carry over each order payment as a real invoice payment, preserving method
     const orderPayments = paymentsByOrder[id] || [];
     if (orderPayments.length > 0) {
@@ -286,7 +313,7 @@ export function OrderDetail() {
               </>
             ) : (
               <>
-                {(order.status === 'arrived' || order.status === 'sourced') && customer && (
+                {order.status === 'arrived' && customer && (
                   <Button variant="secondary" onClick={() => setShowMessage(true)}>
                     <MessageCircle size={14} /> AI Notify Arrival
                   </Button>
@@ -450,9 +477,9 @@ export function OrderDetail() {
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
-                <Input label="BRAND" value={form.requestedBrand || ''}
+                <Input required label="BRAND" value={form.requestedBrand || ''}
                   onChange={e => setForm({ ...form, requestedBrand: e.target.value })} />
-                <Input label="NAME / MODEL" value={form.requestedModel || ''}
+                <Input required label="NAME / MODEL" value={form.requestedModel || ''}
                   onChange={e => setForm({ ...form, requestedModel: e.target.value })} />
               </div>
               <div style={{ marginTop: 12 }}>
@@ -552,7 +579,7 @@ export function OrderDetail() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <Input label="SUPPLIER NAME" value={form.supplierName || ''} onChange={e => setForm({ ...form, supplierName: e.target.value })} />
                   <Input label="SUPPLIER PRICE (BHD)" type="number" value={form.supplierPrice ?? ''} onChange={e => setForm({ ...form, supplierPrice: Number(e.target.value) || undefined })} />
-                  <Input label="AGREED PRICE (BHD)" type="number" value={form.agreedPrice ?? ''} onChange={e => setForm({ ...form, agreedPrice: Number(e.target.value) || undefined })} />
+                  <Input required label="AGREED PRICE (BHD)" type="number" value={form.agreedPrice ?? ''} onChange={e => setForm({ ...form, agreedPrice: Number(e.target.value) || undefined })} />
                   <Input label="DEPOSIT AMOUNT (BHD)" type="number" value={form.depositAmount ?? ''} onChange={e => setForm({ ...form, depositAmount: Number(e.target.value) || 0 })} />
                 </div>
               ) : (
@@ -648,22 +675,28 @@ export function OrderDetail() {
                   ))}
                 </div>
               )}
-              {fullyPaid && !order.invoiceId && (
+              {/* Plan §Order §Convert-to-Invoice:
+                  - Convert nur bei Status=COMPLETED.
+                  - Once-only: wenn invoiceId schon gesetzt → "Already converted" mit Link.
+                  - linkedProduct ist Pflicht (createDirectInvoice braucht Produkt-Daten). */}
+              {order.invoiceId ? (() => {
+                const linkedInvoice = invoices.find(i => i.id === order.invoiceId);
+                return (
+                  <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(110,138,170,0.06)', borderRadius: 8, border: '1px solid rgba(110,138,170,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                    <span style={{ fontSize: 13, color: '#4B5563' }}>
+                      Already converted &mdash; <span className="font-mono" style={{ color: '#0F0F10' }}>{linkedInvoice?.invoiceNumber || 'Invoice'}</span>
+                    </span>
+                    <Button variant="secondary" onClick={() => navigate(`/invoices/${order.invoiceId}`)}>See Invoice</Button>
+                  </div>
+                );
+              })() : isCompleted && perm.canManageOrders && (
                 <div style={{ marginTop: 16, padding: '12px 14px', background: 'rgba(126,170,110,0.06)', borderRadius: 8, border: '1px solid rgba(126,170,110,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                   <span style={{ fontSize: 13, color: '#7EAA6E' }}>
                     {linkedProduct
-                      ? 'Fully paid. Ready to finalize with an invoice.'
-                      : 'Fully paid, but no product linked to this order. Link a product (Edit) to generate the final invoice.'}
+                      ? 'Order completed. Convert to a final invoice.'
+                      : 'Order completed. A product entry will be created automatically when you convert.'}
                   </span>
-                  {linkedProduct && perm.canManageOrders && (
-                    <Button variant="primary" onClick={handleCreateFinalInvoice}>Create Final Invoice</Button>
-                  )}
-                </div>
-              )}
-              {order.invoiceId && (
-                <div style={{ marginTop: 16, padding: '10px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: 13, color: '#4B5563' }}>Final invoice generated.</span>
-                  <Button variant="secondary" onClick={() => navigate(`/invoices/${order.invoiceId}`)}>View Invoice</Button>
+                  <Button variant="primary" onClick={handleCreateFinalInvoice}>Convert to Invoice</Button>
                 </div>
               )}
             </Card>
@@ -736,8 +769,8 @@ export function OrderDetail() {
       <Modal open={showPayment} onClose={() => setShowPayment(false)} title="Add Payment" width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Input label="AMOUNT (BHD)" type="number" value={payAmount} onChange={e => setPayAmount(e.target.value)} autoFocus />
-            <Input label="PAYMENT DATE" type="date" value={payDate} onChange={e => setPayDate(e.target.value)} />
+            <Input required label="AMOUNT (BHD)" type="number" value={payAmount} onChange={e => setPayAmount(e.target.value)} autoFocus />
+            <Input required label="PAYMENT DATE" type="date" value={payDate} onChange={e => setPayDate(e.target.value)} />
           </div>
           <div>
             <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>METHOD</span>
@@ -801,13 +834,13 @@ export function OrderDetail() {
         </div>
       </Modal>
 
-      {/* Confirm Delete Modal */}
+      {/* Convert-to-Invoice VAT-Scheme Picker */}
       <ConfirmTaxSchemeModal
         open={showInvoiceVatConfirm}
-        lines={linkedProduct ? [{
-          id: linkedProduct.id,
-          label: `${linkedProduct.brand} ${linkedProduct.name}`,
-          currentScheme: (linkedProduct.taxScheme as TaxScheme) || 'MARGIN',
+        lines={productForConvert ? [{
+          id: productForConvert.id,
+          label: `${productForConvert.brand || ''} ${productForConvert.name || ''}`.trim() || 'Custom Item',
+          currentScheme: (productForConvert.taxScheme as TaxScheme) || 'MARGIN',
         }] : []}
         onCancel={() => setShowInvoiceVatConfirm(false)}
         onConfirm={handleConfirmFinalInvoice}

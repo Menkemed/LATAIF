@@ -196,7 +196,7 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     if (apply <= 0) return;
 
     const newUsed = used + apply;
-    const newStatus = newUsed >= total - 0.001 ? 'USED' : 'OPEN';
+    const newStatus = newUsed >= total - 0.005 ? 'USED' : 'OPEN';
     db.run(
       `UPDATE supplier_credits SET used_amount = ?, status = ? WHERE id = ?`,
       [newUsed, newStatus, creditId]

@@ -25,9 +25,12 @@ import { TaskList } from '@/pages/tasks/TaskList';
 import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
 import { DebtsPage } from '@/pages/debts/DebtsPage';
 import { AIPage } from '@/pages/ai/AIPage';
+import { CreditNoteList } from '@/pages/credit-notes/CreditNoteList';
+import { CreditNoteDetail } from '@/pages/credit-notes/CreditNoteDetail';
 import { SupplierList } from '@/pages/suppliers/SupplierList';
 import { SupplierDetail } from '@/pages/suppliers/SupplierDetail';
 import { ExpenseList } from '@/pages/expenses/ExpenseList';
+import { PayablesPage } from '@/pages/payables/PayablesPage';
 import { PurchaseList } from '@/pages/purchases/PurchaseList';
 import { PurchaseCreate } from '@/pages/purchases/PurchaseCreate';
 import { PurchaseDetail } from '@/pages/purchases/PurchaseDetail';
@@ -138,10 +141,13 @@ export default function App() {
           <Route path="/purchases/new" element={<PurchaseCreate />} />
           <Route path="/purchases/:id" element={<PurchaseDetail />} />
           <Route path="/expenses" element={<ExpenseList />} />
+          <Route path="/payables" element={<PayablesPage />} />
           <Route path="/banking" element={<BankingPage />} />
           <Route path="/partners" element={<PartnersPage />} />
           <Route path="/production" element={<ProductionPage />} />
           <Route path="/business-reports" element={<BusinessReportsPage />} />
+          <Route path="/credit-notes" element={<CreditNoteList />} />
+          <Route path="/credit-notes/:id" element={<CreditNoteDetail />} />
           <Route path="/ai" element={<AIPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/import" element={<ImportPage />} />

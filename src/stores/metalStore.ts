@@ -180,7 +180,9 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
 
   // Plan §8 #4 — Metal-Zahlungen. Akkumuliert, leitet paymentStatus + bei voll+status=in_stock auf 'sold' ab.
   recordMetalPayment: (metalId, amount, method, date, note) => {
-    if (amount <= 0) return;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('Metal payment amount must be a positive number.');
+    }
     const db = getDatabase();
     const now = new Date().toISOString();
     const m = get().getMetal(metalId);
@@ -196,7 +198,7 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
     const target = m.salePrice || 0;
     const newPaid = target > 0 ? Math.min(target, (m.paidAmount || 0) + amount) : (m.paidAmount || 0) + amount;
     const newStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' =
-      target > 0 && newPaid >= target - 0.001 ? 'PAID'
+      target > 0 && newPaid >= target - 0.005 ? 'PAID'
       : newPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
     const newMetalStatus: MetalStatus = newStatus === 'PAID' && m.status === 'in_stock' ? 'sold' : m.status;
 

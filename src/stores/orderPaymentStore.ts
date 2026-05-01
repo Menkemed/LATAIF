@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
-import { trackInsert, trackDelete, trackPayment, trackStatusChange } from '@/core/sync/track';
+import { trackInsert, trackDelete, trackPayment } from '@/core/sync/track';
 import { useOrderStore } from '@/stores/orderStore';
 
 // Plan §Order §Payment-Sync: Order-Summary (depositAmount/remaining/fullyPaid/status) immer
@@ -13,26 +13,16 @@ function reconcileOrderFromPayments(orderId: string): void {
   const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE order_id = ?`, [orderId]);
   const totalPaid = Number(sumRow[0]?.t || 0);
 
-  const orderRow = query(`SELECT agreed_price, status FROM orders WHERE id = ?`, [orderId]);
+  const orderRow = query(`SELECT agreed_price FROM orders WHERE id = ?`, [orderId]);
   if (orderRow.length === 0) return;
   const agreedPrice = (orderRow[0].agreed_price as number) || 0;
-  const currentStatus = orderRow[0].status as string;
 
   const remaining = Math.max(0, agreedPrice - totalPaid);
-  const fullyPaid = agreedPrice > 0 && totalPaid >= agreedPrice - 0.001;
+  const fullyPaid = agreedPrice > 0 && totalPaid >= agreedPrice - 0.005;
   const depositPaid = totalPaid > 0;
 
-  // Auto-Status: fully_paid → completed; erste Zahlung → deposit_received (nur aus pending).
-  // sourcing/sourced/arrived/notified/cancelled bleiben unberührt.
-  let newStatus = currentStatus;
-  if (currentStatus !== 'cancelled') {
-    if (fullyPaid && currentStatus !== 'completed') {
-      newStatus = 'completed';
-    } else if (depositPaid && currentStatus === 'pending') {
-      newStatus = 'deposit_received';
-    }
-  }
-
+  // Plan §Order: Order-Status ist orthogonal zum Zahlungsstand. Hier nur amounts/flags syncen.
+  // Status-Wechsel (PENDING → ARRIVED → NOTIFIED → COMPLETED) erfolgt nur explizit per User.
   db.run(
     `UPDATE orders SET
        deposit_amount = ?,
@@ -40,16 +30,11 @@ function reconcileOrderFromPayments(orderId: string): void {
        remaining_amount = ?,
        fully_paid = ?,
        deposit_date = COALESCE(deposit_date, CASE WHEN ? > 0 THEN ? ELSE NULL END),
-       status = ?,
        updated_at = ?
      WHERE id = ?`,
     [totalPaid, depositPaid ? 1 : 0, remaining, fullyPaid ? 1 : 0,
-     totalPaid, now.split('T')[0], newStatus, now, orderId]
+     totalPaid, now.split('T')[0], now, orderId]
   );
-
-  if (newStatus !== currentStatus) {
-    trackStatusChange('orders', orderId, currentStatus, newStatus);
-  }
 }
 
 export interface OrderPayment {
@@ -100,6 +85,9 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
   },
 
   addPayment: (p) => {
+    if (!Number.isFinite(p.amount) || p.amount <= 0) {
+      throw new Error('Order payment amount must be a positive number.');
+    }
     const db = getDatabase();
     const id = uuid();
     const now = new Date().toISOString();

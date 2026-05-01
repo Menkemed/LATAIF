@@ -180,11 +180,14 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
 
   // Plan §8 #2 — Teilausgleich. Mehrfach aufrufbar bis payoutAmount erreicht.
   recordPartialPayout: (id, amount, method, reference) => {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('Consignment payout amount must be a positive number.');
+    }
     const con = get().getConsignment(id);
-    if (!con || amount <= 0) return;
+    if (!con) return;
     const target = con.payoutAmount || 0;
     const newPaid = target > 0 ? Math.min(target, (con.payoutPaidAmount || 0) + amount) : (con.payoutPaidAmount || 0) + amount;
-    const fully = target > 0 && newPaid >= target - 0.001;
+    const fully = target > 0 && newPaid >= target - 0.005;
     const newPayoutStatus: Consignment['payoutStatus'] = fully ? 'paid' : (newPaid > 0 ? 'partial' : 'pending');
     const newStatus = fully ? 'paid_out' : con.status;
     get().updateConsignment(id, {

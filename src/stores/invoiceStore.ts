@@ -13,7 +13,7 @@ interface InvoiceStore {
   loadInvoices: () => void;
   getInvoice: (id: string) => Invoice | undefined;
   createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>) => Invoice;
-  createDirectInvoice: (customerId: string, lines: { productId: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string) => Invoice;
+  createDirectInvoice: (customerId: string, lines: { productId: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   rewriteInvoiceLines: (id: string, lines: { productId: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[]) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string) => void;
@@ -186,7 +186,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     return get().getInvoice(id)!;
   },
 
-  createDirectInvoice: (customerId, lines, notes) => {
+  createDirectInvoice: (customerId, lines, notes, issuedAtOverride) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -195,7 +195,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
     const invoiceNumber = get().getNextInvoiceNumber();
-    const dueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    // Issued-At Override (z.B. nachträgliche Rechnung mit Datum aus Vergangenheit).
+    // Akzeptiert "YYYY-MM-DD" oder volles ISO. Default = jetzt.
+    const issuedAt = issuedAtOverride
+      ? (issuedAtOverride.includes('T') ? issuedAtOverride : `${issuedAtOverride}T00:00:00.000Z`)
+      : now;
+    const issuedDate = new Date(issuedAt);
+    const dueDate = new Date(issuedDate.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0;
     for (const l of lines) {
@@ -219,7 +225,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
        VALUES (?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, invoiceNumber, customerId,
        netAmount, lines[0]?.vatRate || 10, totalVat, grossAmount,
-       taxScheme, totalPurchase, netAmount, margin, now, dueDate, notes || null, now, now, userId]
+       taxScheme, totalPurchase, netAmount, margin, issuedAt, dueDate, notes || null, now, now, userId]
     );
 
     const lineStmt = db.prepare(
@@ -294,6 +300,22 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const db = getDatabase();
     const now = new Date().toISOString();
 
+    // Vorab-Berechnung um zu prüfen ob neuer Brutto die bereits geleisteten Zahlungen
+    // unterläuft — sonst entstünde paid > gross und negative outstanding.
+    let preNet = 0, preVat = 0;
+    for (const l of lines) {
+      const qty = Math.max(1, l.quantity || 1);
+      preNet += l.unitPrice * qty;
+      preVat += l.vatAmount * qty;
+    }
+    const newGross = preNet + preVat;
+    const inv0 = get().getInvoice(id);
+    if (inv0 && inv0.paidAmount > newGross + 0.005) {
+      throw new Error(
+        `Cannot reduce invoice gross to ${newGross.toFixed(3)} BHD — already paid ${inv0.paidAmount.toFixed(3)} BHD. Refund the excess first.`
+      );
+    }
+
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0;
@@ -336,6 +358,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   },
 
   recordPayment: (invoiceId, amount, method, notes) => {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('Payment amount must be a positive number.');
+    }
     const db = getDatabase();
     const now = new Date().toISOString();
     const paymentId = uuid();
@@ -378,7 +403,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (inv) {
       const newPaid = inv.paidAmount + amount;
       const tip = Math.max(0, newPaid - inv.grossAmount);
-      const wasFullyPaid = newPaid >= inv.grossAmount;
+      // Float-Tolerance: BHD hat 3 Dezimalen → unter 0.005 BHD = ein Halb-Fil = effektiv null.
+      const wasFullyPaid = newPaid >= inv.grossAmount - 0.005;
       const prevStatus = inv.status;
       const newStatus: InvoiceStatus = wasFullyPaid ? 'FINAL' : 'PARTIAL';
 
@@ -413,6 +439,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
   deleteInvoice: (id) => {
     const db = getDatabase();
+    // Auto-erzeugte Expenses (Card-Fees etc.) cancellen, damit Cashflow konsistent bleibt.
+    db.run(
+      `UPDATE expenses SET status = 'CANCELLED'
+       WHERE related_module = 'invoice' AND related_entity_id = ? AND status != 'CANCELLED'`,
+      [id]
+    );
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
     db.run(`DELETE FROM payments WHERE invoice_id = ?`, [id]);
     db.run(`DELETE FROM invoices WHERE id = ?`, [id]);
@@ -458,7 +490,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const inv = get().getInvoice(invoiceId);
     if (inv) {
       const tip = Math.max(0, newPaid - inv.grossAmount);
-      const newStatus: InvoiceStatus = newPaid >= inv.grossAmount ? 'FINAL'
+      const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
         : newPaid > 0 ? 'PARTIAL'
         : (inv.status === 'CANCELLED' ? 'CANCELLED' : 'DRAFT');
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
@@ -481,7 +513,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const inv = get().getInvoice(invoiceId);
     if (inv) {
       const tip = Math.max(0, newPaid - inv.grossAmount);
-      const newStatus: InvoiceStatus = newPaid >= inv.grossAmount ? 'FINAL'
+      const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
         : newPaid > 0 ? 'PARTIAL'
         : (inv.status === 'CANCELLED' ? 'CANCELLED' : 'DRAFT');
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,

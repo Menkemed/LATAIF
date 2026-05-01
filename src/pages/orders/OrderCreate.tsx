@@ -33,12 +33,16 @@ function calcLine(unitPrice: number, qty: number, purchasePrice: number, scheme:
   return vatEngine.calculateNet(unitPrice * qty, purchasePrice * qty, scheme, vatRate);
 }
 
-const ALLOWED_STATUSES: OrderStatus[] = ['pending', 'deposit_received', 'arrived', 'notified', 'completed'];
+// Inverse: vom Gesamt-Brutto auf Netto-pro-Einheit zurückrechnen.
+function unitNetFromGross(gross: number, qty: number, scheme: 'VAT_10' | 'ZERO' | 'MARGIN', vatRate: number): number {
+  if (qty <= 0) return 0;
+  const totalNet = scheme === 'VAT_10' ? gross / (1 + vatRate / 100) : gross;
+  return totalNet / qty;
+}
+
+const ALLOWED_STATUSES: OrderStatus[] = ['pending', 'arrived', 'notified', 'completed'];
 const STATUS_LABELS: Record<OrderStatus, string> = {
   pending: 'Pending',
-  deposit_received: 'Deposit Received',
-  sourcing: 'Sourcing',
-  sourced: 'Sourced',
   arrived: 'Arrived',
   notified: 'Notified',
   completed: 'Completed',
@@ -59,6 +63,9 @@ export function OrderCreate() {
   const [lines, setLines] = useState<DraftLine[]>([
     { description: '', scheme: 'auto', quantity: 1, unitPrice: 0 },
   ]);
+  // Locale string state per line for the editable Total input — preserves trailing zeros
+  // and decimal points while user types (e.g. "5500.50" stays as typed).
+  const [lineTotalDrafts, setLineTotalDrafts] = useState<Record<number, string>>({});
   const [depositAmount, setDepositAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'card'>('cash');
   const [fullyPaid, setFullyPaid] = useState(false);
@@ -87,7 +94,12 @@ export function OrderCreate() {
     const vatRate = resolved === 'ZERO' ? 0 : 10;
     const purchase = product?.purchasePrice || 0;
     const calc = calcLine(l.unitPrice, l.quantity, purchase, resolved, vatRate);
-    return { product, scheme: resolved, vatRate, net: calc.netAmount, vat: calc.vatAmount, gross: calc.grossAmount };
+    return {
+      product, scheme: resolved, vatRate,
+      net: calc.netAmount, vat: calc.vatAmount,
+      internalVat: calc.internalVatAmount || 0, // MARGIN: VAT auf Profit (intern)
+      gross: calc.grossAmount,
+    };
   });
 
   const subtotal = computed.reduce((s, c) => s + c.net, 0);
@@ -241,15 +253,16 @@ export function OrderCreate() {
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'minmax(0,2.2fr) minmax(0,1.1fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
                 gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
                 fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
               }}>
                 <span>Product / Description</span>
                 <span>Tax Scheme</span>
-                <span>Qty</span>
-                <span>Net / Unit (BHD)</span>
-                <span style={{ textAlign: 'right' }}>Line Total</span>
+                <span style={{ textAlign: 'center' }}>Qty</span>
+                <span style={{ textAlign: 'right' }}>Net / Unit (BHD)<br/><span style={{ fontSize: 9, color: '#9CA3AF', textTransform: 'none', letterSpacing: 0 }}>auto</span></span>
+                <span style={{ textAlign: 'right' }}>VAT (BHD)<br/><span style={{ fontSize: 9, color: '#9CA3AF', textTransform: 'none', letterSpacing: 0 }}>auto</span></span>
+                <span style={{ textAlign: 'right' }}>Total Price incl. VAT (BHD)<br/><span style={{ fontSize: 9, color: '#9CA3AF', textTransform: 'none', letterSpacing: 0 }}>enter total</span></span>
                 <span></span>
               </div>
               {lines.map((l, idx) => {
@@ -257,7 +270,7 @@ export function OrderCreate() {
                 return (
                   <div key={idx} style={{
                     display: 'grid',
-                    gridTemplateColumns: 'minmax(0,2.2fr) minmax(0,1.1fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                    gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
                     gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
                   }}>
                     <div style={{ minWidth: 0 }}>
@@ -285,13 +298,37 @@ export function OrderCreate() {
                       onChange={e => updateLine(idx, { quantity: Math.max(1, parseInt(e.target.value) || 1) })}
                       className="font-mono"
                       style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
-                    <input type="number" min={0} step="0.001" value={l.unitPrice}
-                      onChange={e => updateLine(idx, { unitPrice: parseFloat(e.target.value) || 0 })}
-                      className="font-mono"
-                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
-                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {fmt(c.gross)}
+                    <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {fmt(c.net / Math.max(1, l.quantity))}
                     </span>
+                    {c.scheme === 'MARGIN' ? (
+                      <span className="font-mono" title="Internal VAT liability on margin (not shown to customer)"
+                        style={{ padding: '8px 10px', fontSize: 13, color: '#FF8730', background: 'rgba(255,135,48,0.06)', border: '1px solid rgba(255,135,48,0.25)', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {fmt(c.internalVat)}
+                        <span style={{ fontSize: 9, color: '#FF8730', marginLeft: 4, opacity: 0.7 }}>int</span>
+                      </span>
+                    ) : (
+                      <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {fmt(c.vat)}
+                      </span>
+                    )}
+                    <input type="text" inputMode="decimal"
+                      value={lineTotalDrafts[idx] !== undefined ? lineTotalDrafts[idx] : (Number.isFinite(c.gross) ? c.gross.toFixed(2) : '0')}
+                      onChange={e => {
+                        const raw = e.target.value;
+                        // Erlaubt nur Ziffern + ein Punkt (oder Komma → ersetzt)
+                        const sanitized = raw.replace(/,/g, '.').replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+                        setLineTotalDrafts(d => ({ ...d, [idx]: sanitized }));
+                        const newGross = parseFloat(sanitized) || 0;
+                        const unit = unitNetFromGross(newGross, l.quantity, c.scheme, c.vatRate);
+                        updateLine(idx, { unitPrice: unit });
+                      }}
+                      onBlur={() => {
+                        // On blur: clean up draft, let memo-rendered value take over
+                        setLineTotalDrafts(d => { const next = { ...d }; delete next[idx]; return next; });
+                      }}
+                      className="font-mono"
+                      style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #0F0F10', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%', fontWeight: 600 }} />
                     <button onClick={() => removeLine(idx)}
                       disabled={lines.length === 1}
                       title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}

@@ -133,8 +133,8 @@ export function RepairList() {
         <span className="text-overline">ITEM</span>
         <span className="text-overline">VOUCHER</span>
         <span className="text-overline">STATUS</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>COST</span>
-        <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>COST</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>ACTION</span>
       </div>
 
       <div style={{ borderTop: '1px solid #E5E9EE' }} />
@@ -184,7 +184,7 @@ export function RepairList() {
               >
                 {(() => {
                   const c = customers.find(c => c.id === rep.customerId);
-                  return c ? `${c.firstName[0]}${c.lastName[0]}` : '??';
+                  return c ? (`${(c.firstName || '').charAt(0)}${(c.lastName || '').charAt(0)}`.toUpperCase() || '?') : '??';
                 })()}
               </div>
               <span style={{ fontSize: 14, color: '#0F0F10' }}>{getCustomerName(rep.customerId)}</span>

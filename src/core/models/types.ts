@@ -591,7 +591,22 @@ export interface PreciousMetal {
 
 // ── Order (Pre-Order / Sourcing) ──
 
-export type OrderStatus = 'pending' | 'deposit_received' | 'sourcing' | 'sourced' | 'arrived' | 'notified' | 'completed' | 'cancelled';
+// Plan §Order: Order-Status getrennt von Payment-Status.
+// Order-Status beschreibt den Prozess (wo ist die Ware?), Payment-Status die Zahlung.
+export type OrderStatus = 'pending' | 'arrived' | 'notified' | 'completed' | 'cancelled';
+// Payment-Status wird aus agreedPrice + totalPaid abgeleitet (siehe deriveOrderPaymentStatus).
+export type OrderPaymentStatus = 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
+
+/**
+ * Leitet den Payment-Status aus Auftragspreis + Summe der Zahlungen ab.
+ * Tolerance 0.005 BHD fuer Float-Vergleiche (Konsistenz mit Invoice-Logik).
+ */
+export function deriveOrderPaymentStatus(agreedPrice: number | null | undefined, totalPaid: number): OrderPaymentStatus {
+  const gross = Math.max(0, agreedPrice || 0);
+  if (gross > 0 && totalPaid >= gross - 0.005) return 'PAID';
+  if (totalPaid > 0.005) return 'PARTIALLY_PAID';
+  return 'UNPAID';
+}
 
 export interface OrderLine {
   id: UUID;
@@ -848,6 +863,28 @@ export interface SalesReturn {
   createdBy?: UUID;
 }
 
+// Credit Note (Storno-Rechnung) — eigenständige Steuerurkunde, 1:1 zu SalesReturn.
+// Industry Standard (SAP/DATEV/Xero/QuickBooks/Lexware): jeder bestätigte Sales Return
+// erzeugt automatisch ein Credit Note mit eigener Nummer.
+export interface CreditNote {
+  id: UUID;
+  creditNoteNumber: string;        // CN-2026-000001
+  branchId: UUID;
+  invoiceId: UUID;                 // Original-Invoice
+  salesReturnId?: UUID;            // 1:1 zur Return-Buchung (optional → manuell anlegbar)
+  customerId: UUID;
+  issuedAt: string;
+  totalAmount: number;             // Brutto der Gutschrift
+  vatAmount: number;               // VAT-Korrektur
+  cashRefundAmount: number;        // Cash zurück (nur was Customer wirklich gezahlt hat)
+  receivableCancelAmount: number;  // Forderungsstornierung (kein Cash)
+  refundMethod?: 'cash' | 'bank' | 'card' | 'credit' | 'other';
+  reason?: string;
+  notes?: string;
+  createdAt: string;
+  createdBy?: UUID;
+}
+
 // Phase 5: Production & Consumption (Plan §Production)
 export interface ProductionInput {
   id: UUID;
@@ -945,13 +982,27 @@ export interface Expense {
   branchId: UUID;
   category: ExpenseCategory;
   amount: number;
+  paidAmount: number;          // Plan §Expenses §Pay-Later — Teilzahlungen
   paymentMethod: 'cash' | 'bank';
   expenseDate: string;
   description?: string;
   relatedModule?: string;
   relatedEntityId?: UUID;
-  // Plan §8 #6 — Expense-Status (PENDING für zukünftige Zahlungen, PAID für direkt bezahlte, CANCELLED bei Storno).
+  // Status-Semantik:
+  //  - PAID:      paid_amount >= amount (voll bezahlt)
+  //  - PENDING:   paid_amount < amount  (Unpaid + Partially Paid)
+  //  - CANCELLED: storniert, zählt nicht in Cashflow/Payables
   status?: 'PENDING' | 'PAID' | 'CANCELLED';
   createdAt: string;
   createdBy?: UUID;
+}
+
+export interface ExpensePayment {
+  id: UUID;
+  expenseId: UUID;
+  amount: number;
+  method: 'cash' | 'bank';
+  paidAt: string;
+  note?: string;
+  createdAt: string;
 }

@@ -153,12 +153,12 @@ export function PartnersPage() {
       {/* New Partner */}
       <Modal open={showNewPartner} onClose={() => setShowNewPartner(false)} title="New Partner" width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input label="NAME" placeholder="Partner full name" value={partnerForm.name || ''} onChange={e => setPartnerForm({ ...partnerForm, name: e.target.value })} autoFocus />
+          <Input required label="NAME" placeholder="Partner full name" value={partnerForm.name || ''} onChange={e => setPartnerForm({ ...partnerForm, name: e.target.value })} autoFocus />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
             <Input label="PHONE" value={partnerForm.phone || ''} onChange={e => setPartnerForm({ ...partnerForm, phone: e.target.value })} />
             <Input label="EMAIL" value={partnerForm.email || ''} onChange={e => setPartnerForm({ ...partnerForm, email: e.target.value })} />
           </div>
-          <Input label="PROFIT SHARE (%)" type="number" step="0.01" placeholder="0" value={partnerForm.sharePercentage ?? ''} onChange={e => setPartnerForm({ ...partnerForm, sharePercentage: parseFloat(e.target.value) || 0 })} />
+          <Input required label="PROFIT SHARE (%)" type="number" step="0.01" placeholder="0" value={partnerForm.sharePercentage ?? ''} onChange={e => setPartnerForm({ ...partnerForm, sharePercentage: parseFloat(e.target.value) || 0 })} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewPartner(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreatePartner} disabled={!partnerForm.name}>Create Partner</Button>
@@ -172,8 +172,8 @@ export function PartnersPage() {
         width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Input label="AMOUNT (BHD)" type="number" step="0.01" placeholder="0.00" value={txAmount} onChange={e => setTxAmount(e.target.value)} autoFocus />
-            <Input label="DATE" type="date" value={txDate} onChange={e => setTxDate(e.target.value)} />
+            <Input required label="AMOUNT (BHD)" type="number" step="0.01" placeholder="0.00" value={txAmount} onChange={e => setTxAmount(e.target.value)} autoFocus />
+            <Input required label="DATE" type="date" value={txDate} onChange={e => setTxDate(e.target.value)} />
           </div>
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
@@ -210,12 +210,12 @@ export function PartnersPage() {
       {/* Edit Partner Modal */}
       <Modal open={!!editPartner} onClose={() => setEditPartner(null)} title={`Edit Partner — ${editPartner?.name || ''}`} width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Input label="NAME" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
+          <Input required label="NAME" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Input label="PHONE" value={editForm.phone || ''} onChange={e => setEditForm({ ...editForm, phone: e.target.value })} />
             <Input label="EMAIL" value={editForm.email || ''} onChange={e => setEditForm({ ...editForm, email: e.target.value })} />
           </div>
-          <Input label="SHARE %" type="number" value={editForm.sharePercentage ?? ''}
+          <Input required label="SHARE %" type="number" value={editForm.sharePercentage ?? ''}
             onChange={e => setEditForm({ ...editForm, sharePercentage: Number(e.target.value) || 0 })} />
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>STATUS</span>

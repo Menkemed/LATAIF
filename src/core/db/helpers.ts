@@ -102,29 +102,38 @@ export function getNextDocumentNumber(docType: string): string {
   const db = getDatabase();
   const year = new Date().getFullYear();
 
-  // Read current sequence config
+  // Sicherheitsgurt: Sequence-Row anlegen falls noch nicht existiert (idempotent).
+  db.run(
+    `INSERT OR IGNORE INTO document_sequences (doc_type, prefix, next_number, include_year, padding, updated_at)
+     VALUES (?, ?, 1, 1, 6, datetime('now'))`,
+    [docType, docType]
+  );
+
+  // Atomarer Increment: UPDATE ZUERST, dann SELECT. So bekommt jeder Aufrufer
+  // garantiert eine eindeutige Nummer auch bei Quasi-Concurrent-Calls aus mehreren
+  // Tabs/Sync-Replikation. Reihenfolge UPDATE→SELECT (statt SELECT→UPDATE) eliminiert
+  // die TOCTOU-Race der bisherigen Implementierung.
+  db.run(
+    `UPDATE document_sequences
+       SET next_number = next_number + 1,
+           updated_at  = datetime('now')
+     WHERE doc_type = ?`,
+    [docType]
+  );
+
   const r = db.exec(
-    `SELECT prefix, next_number, include_year, padding FROM document_sequences WHERE doc_type = ?`,
+    `SELECT prefix, next_number, include_year, padding
+       FROM document_sequences WHERE doc_type = ?`,
     [docType]
   );
   if (r.length === 0 || r[0].values.length === 0) {
-    // Fallback — treat docType itself as prefix, start at 1
-    db.run(
-      `INSERT OR IGNORE INTO document_sequences (doc_type, prefix, next_number, include_year, padding, updated_at)
-       VALUES (?, ?, 1, 1, 6, datetime('now'))`,
-      [docType, docType]
-    );
+    // Defensiv — sollte nach INSERT OR IGNORE niemals passieren.
     return `${docType}-${year}-${'1'.padStart(6, '0')}`;
   }
-
-  const [prefix, nextNumber, includeYear, padding] = r[0].values[0] as [string, number, number, number];
-
-  // Increment atomically
-  db.run(
-    `UPDATE document_sequences SET next_number = next_number + 1, updated_at = datetime('now') WHERE doc_type = ?`,
-    [docType]
-  );
-
-  const seq = String(nextNumber).padStart(padding || 6, '0');
+  const [prefix, newNextNumber, includeYear, padding] =
+    r[0].values[0] as [string, number, number, number];
+  // Dem Aufrufer gehört die alte (vor-Increment) Nummer.
+  const claimedNumber = (newNextNumber || 1) - 1;
+  const seq = String(claimedNumber).padStart(padding || 6, '0');
   return includeYear ? `${prefix}-${year}-${seq}` : `${prefix}-${seq}`;
 }

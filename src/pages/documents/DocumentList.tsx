@@ -191,7 +191,7 @@ export function DocumentList() {
       ) : (
         /* List view */
         <div>
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto', gap: 12, padding: '0 12px 10px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) auto', gap: 12, padding: '0 12px 10px' }}>
             {['FILE NAME', 'TYPE', 'CLASS', 'SIZE', 'DATE', ''].map(h => (
               <span key={h} className="text-overline">{h}</span>
             ))}
@@ -200,7 +200,7 @@ export function DocumentList() {
             <div
               key={doc.id}
               className="transition-all duration-200 rounded-md cursor-pointer"
-              style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto', gap: 12, padding: '14px 12px', borderBottom: '1px solid #E5E9EE' }}
+              style={{ display: 'grid', gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) auto', gap: 12, padding: '14px 12px', borderBottom: '1px solid #E5E9EE' }}
               onClick={() => setShowPreview(doc)}
               onMouseEnter={e => (e.currentTarget.style.background = 'rgba(198,163,109,0.02)')}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}

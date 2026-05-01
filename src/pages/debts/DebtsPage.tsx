@@ -100,8 +100,12 @@ export function DebtsPage() {
 
   const getCustomer = (id?: string) => id ? customers.find(c => c.id === id) : undefined;
 
+  // URL-Param: /debts?customer=:id → nur Loans dieses Kunden anzeigen.
+  const customerFilter = searchParams.get('customer') || '';
+
   const filtered = useMemo(() => {
     let r = debts;
+    if (customerFilter) r = r.filter(d => d.customerId === customerFilter);
     if (filter === 'open') r = r.filter(isOpen);
     else if (filter === 'settled') r = r.filter(isSettled);
     else if (filter === 'partial') r = r.filter(isPartial);
@@ -109,7 +113,7 @@ export function DebtsPage() {
     else if (filter === 'we_borrow') r = r.filter(d => d.direction === 'we_borrow');
     if (search) r = r.filter(d => matchesDeep(d, search, [getCustomer(d.customerId)]));
     return r;
-  }, [debts, filter, search, customers]);
+  }, [debts, filter, search, customers, customerFilter]);
 
   // KPIs
   const openLent = debts.filter(d => d.direction === 'we_lend' && isOpen(d))
@@ -126,19 +130,21 @@ export function DebtsPage() {
 
   function handleCreate() {
     const amt = parseFloat(form.amount);
-    if (!form.counterparty.trim() && !form.customerId) {
-      alert('Please provide a counterparty name or select a customer.');
+    // Industry-Standard: Jeder Loan/Debt MUSS einem Client zugeordnet sein,
+    // damit er korrekt in der Customer-Receivables-Übersicht erscheint.
+    if (!form.customerId) {
+      alert('Please select a client. Every loan must be linked to a customer.');
       return;
     }
     if (!amt || amt <= 0) {
       alert('Amount must be greater than zero.');
       return;
     }
+    const cust = getCustomer(form.customerId);
     createDebt({
       direction: form.direction,
-      counterparty: form.counterparty.trim() || (getCustomer(form.customerId)
-        ? `${getCustomer(form.customerId)!.firstName} ${getCustomer(form.customerId)!.lastName}` : ''),
-      customerId: form.customerId || undefined,
+      counterparty: cust ? `${cust.firstName} ${cust.lastName}`.trim() : (form.counterparty.trim() || ''),
+      customerId: form.customerId,
       amount: amt,
       source: form.source,
       dueDate: form.dueDate || undefined,
@@ -209,7 +215,7 @@ export function DebtsPage() {
       </div>
 
       {/* Table Header */}
-      <div style={{ display: 'grid', gridTemplateColumns: '36px 1.6fr 0.8fr 1fr 1fr 1fr 0.8fr 80px', gap: 12, padding: '0 12px 10px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '36px minmax(0,1.6fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,0.8fr) 80px', gap: 12, padding: '0 12px 10px' }}>
         {['', 'COUNTERPARTY', 'SOURCE', 'AMOUNT', 'PAID', 'REMAINING', 'DUE', 'STATUS'].map(h => (
           <span key={h} className="text-overline">{h}</span>
         ))}
@@ -235,7 +241,7 @@ export function DebtsPage() {
             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             style={{
-              display: 'grid', gridTemplateColumns: '36px 1.6fr 0.8fr 1fr 1fr 1fr 0.8fr 80px',
+              display: 'grid', gridTemplateColumns: '36px minmax(0,1.6fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,0.8fr) 80px',
               gap: 12, padding: '14px 12px', alignItems: 'center',
               borderBottom: '1px solid #E5E9EE',
             }}>
@@ -302,21 +308,24 @@ export function DebtsPage() {
             </div>
           </div>
 
-          <SearchSelect
-            label="LINK CUSTOMER (optional)"
-            placeholder="Search customers..."
-            options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
-            value={form.customerId}
-            onChange={id => setForm(f => ({ ...f, customerId: id }))}
-          />
-
-          <Input label="COUNTERPARTY NAME"
-            placeholder="If not a customer, type a name here"
-            value={form.counterparty}
-            onChange={e => setForm(f => ({ ...f, counterparty: e.target.value }))} />
+          <div>
+            <SearchSelect
+              label="CLIENT *"
+              placeholder="Search and select a client (required)"
+              options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
+              value={form.customerId}
+              onChange={id => {
+                const c = customers.find(cc => cc.id === id);
+                setForm(f => ({ ...f, customerId: id, counterparty: c ? `${c.firstName} ${c.lastName}`.trim() : f.counterparty }));
+              }}
+            />
+            <span style={{ fontSize: 11, color: '#6B7280', marginTop: 4, display: 'block' }}>
+              Every loan must be linked to a client so it shows up in their account.
+            </span>
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Input label="AMOUNT (BHD)" type="number" step="0.001"
+            <Input required label="AMOUNT (BHD)" type="number" step="0.001"
               value={form.amount}
               onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
             <Input label="DUE DATE (optional)" type="date"
@@ -405,10 +414,10 @@ export function DebtsPage() {
               <div style={{ padding: '14px 18px', border: '1px solid #D5D9DE', borderRadius: 10 }}>
                 <span className="text-overline" style={{ marginBottom: 10 }}>RECORD REPAYMENT</span>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
-                  <Input label="AMOUNT (BHD)" type="number" step="0.001"
+                  <Input required label="AMOUNT (BHD)" type="number" step="0.001"
                     value={payAmount}
                     onChange={e => setPayAmount(e.target.value)} />
-                  <Input label="DATE" type="date"
+                  <Input required label="DATE" type="date"
                     value={payDate}
                     onChange={e => setPayDate(e.target.value)} />
                 </div>
@@ -459,10 +468,10 @@ export function DebtsPage() {
               <div style={{ padding: '14px 18px', border: '1px solid #D5D9DE', borderRadius: 10, marginTop: 12 }}>
                 <span className="text-overline" style={{ marginBottom: 10 }}>EDIT DEBT</span>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-                  <Input label="COUNTERPARTY" value={editForm.counterparty}
+                  <Input required label="COUNTERPARTY" value={editForm.counterparty}
                     onChange={e => setEditForm({ ...editForm, counterparty: e.target.value })} />
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                    <Input label="AMOUNT (BHD)" type="number" step="0.001" value={editForm.amount}
+                    <Input required label="AMOUNT (BHD)" type="number" step="0.001" value={editForm.amount}
                       onChange={e => setEditForm({ ...editForm, amount: e.target.value })} />
                     <Input label="DUE DATE" type="date" value={editForm.dueDate}
                       onChange={e => setEditForm({ ...editForm, dueDate: e.target.value })} />

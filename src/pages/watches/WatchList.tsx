@@ -106,6 +106,33 @@ function exportProductsToExcel(items: Product[], categories: Category[]) {
   exportExcel(`LATAIF_Collection_${today}.xls`, html);
 }
 
+// Per-card price toggle: each product card holds its own Cost/Asking state.
+function CardPrice({ product }: { product: Product }) {
+  const [mode, setMode] = useState<'cost' | 'asking'>('cost');
+  const value = mode === 'cost' ? product.purchasePrice : (product.plannedSalePrice || product.purchasePrice);
+  return (
+    <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+      <span className="font-display" style={{ fontSize: 18, color: '#0F0F10' }}>{fmt(value)}</span>
+      <span style={{ fontSize: 10, color: '#6B7280' }}>BHD</span>
+      <div className="flex" onClick={(e) => { e.stopPropagation(); }}
+        style={{ border: '1px solid #E5E9EE', borderRadius: 999, padding: 1 }}>
+        {(['cost', 'asking'] as const).map(m => (
+          <button key={m} onClick={(e) => { e.stopPropagation(); setMode(m); }}
+            className="cursor-pointer transition-all"
+            style={{
+              padding: '2px 8px', borderRadius: 999, fontSize: 9, border: 'none',
+              background: mode === m ? '#0F0F10' : 'transparent',
+              color: mode === m ? '#FFFFFF' : '#6B7280',
+              textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 500,
+            }}>
+            {m === 'cost' ? 'Cost' : 'Asking'}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function WatchList() {
   const navigate = useNavigate();
   const {
@@ -116,6 +143,7 @@ export function WatchList() {
   const [showNew, setShowNew] = useState(false);
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [form, setForm] = useState<Partial<Product>>({
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
   });
@@ -147,8 +175,11 @@ export function WatchList() {
   }
 
   function handleCreate() {
-    if (!form.brand || !form.name || !form.purchasePrice || !form.categoryId) return;
+    // Quick-Capture-Mode: keine harte Validierung beim Anlegen.
+    // Per User-Regel: vom Handy soll ein Foto-only-Save möglich sein, Details kommen später im Edit-Modus.
+    // Die `*`-Marker bleiben als visueller Hinweis; sie BLOCKIEREN aber nicht.
     createProduct(form);
+    setErrors({});
     setShowNew(false);
   }
 
@@ -262,18 +293,17 @@ export function WatchList() {
                   <h3 className="font-display" style={{ fontSize: 18, color: '#0F0F10', marginTop: 4, lineHeight: 1.25 }}>{p.name}</h3>
                   {p.sku && <span className="font-mono" style={{ fontSize: 11, color: '#4B5563', display: 'block', marginTop: 3 }}>{p.sku}</span>}
                   {attrText && <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 4 }}>{attrText}</span>}
-                  <div className="flex items-center justify-between" style={{ marginTop: 16 }}>
-                    <span>
-                      <span className="font-display" style={{ fontSize: 18, color: '#0F0F10' }}>{fmt(p.plannedSalePrice || p.purchasePrice)}</span>
-                      <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>BHD</span>
+                  <div className="flex items-center justify-between" style={{ marginTop: 16, gap: 8 }}>
+                    <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+                      <CardPrice product={p} />
                       {(p.quantity || 1) > 1 && (
                         <span className="font-mono" style={{
-                          marginLeft: 10, fontSize: 11, color: '#AA956E',
+                          fontSize: 11, color: '#AA956E',
                           padding: '2px 8px', border: '1px solid rgba(170,149,110,0.4)',
                           borderRadius: 999,
                         }}>x {p.quantity}</span>
                       )}
-                    </span>
+                    </div>
                     <StatusDot status={p.stockStatus} />
                   </div>
                   {p.expectedMargin !== undefined && p.expectedMargin > 0 && (
@@ -290,18 +320,32 @@ export function WatchList() {
       )}
 
       {/* New Product Modal */}
-      <Modal open={showNew} onClose={() => setShowNew(false)} title="New Item" width={660}>
+      <Modal open={showNew} onClose={() => { setShowNew(false); setErrors({}); }} title="New Item" width={660}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxHeight: '65vh', overflowY: 'auto', paddingRight: 4 }}>
 
+          {/* Quick-Capture hint */}
+          <div style={{
+            padding: '8px 12px', borderRadius: 8,
+            background: '#F2F7FA', border: '1px solid #E5E9EE',
+            color: '#6B7280', fontSize: 12, lineHeight: 1.5,
+          }}>
+            <strong style={{ color: '#0F0F10' }}>Quick capture:</strong> Save with just a photo — you can complete details in Edit mode later.
+            Fields marked with <span style={{ color: '#DC2626' }}>*</span> are recommended.
+          </div>
+
           {/* Category Selector */}
-          <div>
-            <span className="text-overline" style={{ marginBottom: 8 }}>CATEGORY</span>
+          <div id="new-field-categoryId" style={{ padding: errors.categoryId ? 8 : 0, border: errors.categoryId ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
+              CATEGORY
+              <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
+            </span>
             <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
               {categories.map(cat => (
                 <button key={cat.id}
                   onClick={() => {
                     setSelectedCat(cat);
                     setForm({ ...form, categoryId: cat.id, condition: cat.conditionOptions?.[0] || '', attributes: {} });
+                    if (errors.categoryId) setErrors({ ...errors, categoryId: '' });
                   }}
                   className="cursor-pointer rounded-lg transition-all duration-200"
                   style={{
@@ -319,8 +363,14 @@ export function WatchList() {
 
           {/* Universal Fields */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-            <Input label="BRAND" placeholder="e.g. Rolex, Hermes, Cartier" value={form.brand || ''} onChange={e => setForm({ ...form, brand: e.target.value })} />
-            <Input label="NAME / MODEL" placeholder="e.g. Submariner, Birkin 30" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} />
+            <div id="new-field-brand">
+              <Input required label="BRAND" placeholder="e.g. Rolex, Hermes, Cartier" value={form.brand || ''} error={errors.brand}
+                onChange={e => { setForm({ ...form, brand: e.target.value }); if (errors.brand) setErrors({ ...errors, brand: '' }); }} />
+            </div>
+            <div id="new-field-name">
+              <Input required label="NAME / MODEL" placeholder="e.g. Submariner, Birkin 30" value={form.name || ''} error={errors.name}
+                onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
+            </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20 }}>
             <Input label="SKU / REFERENCE" placeholder="Internal reference" value={form.sku || ''} onChange={e => setForm({ ...form, sku: e.target.value })} />
@@ -334,13 +384,18 @@ export function WatchList() {
               <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
                 {selectedCat.attributes.map(attr => {
+                  const errKey = `attr_${attr.key}`;
+                  const hasErr = !!errors[errKey];
                   if (attr.type === 'select' && attr.options) {
                     return (
-                      <div key={attr.key}>
-                        <span className="text-overline" style={{ marginBottom: 6 }}>{attr.label.toUpperCase()}</span>
+                      <div key={attr.key} id={`new-field-${errKey}`} style={{ padding: hasErr ? 8 : 0, border: hasErr ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+                        <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                          {attr.label.toUpperCase()}
+                          {attr.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                        </span>
                         <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
                           {attr.options.map(opt => (
-                            <button key={opt} onClick={() => updateAttr(attr.key, opt)}
+                            <button key={opt} onClick={() => { updateAttr(attr.key, opt); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 999,
@@ -350,18 +405,22 @@ export function WatchList() {
                               }}>{opt}</button>
                           ))}
                         </div>
+                        {hasErr && <span style={{ fontSize: 12, color: '#DC2626', display: 'block', marginTop: 4 }}>{errors[errKey]}</span>}
                       </div>
                     );
                   }
                   return (
-                    <Input
-                      key={attr.key}
-                      label={attr.label.toUpperCase() + (attr.unit ? ` (${attr.unit})` : '')}
-                      type={attr.type === 'number' ? 'number' : 'text'}
-                      placeholder={attr.label}
-                      value={(form.attributes?.[attr.key] as string) || ''}
-                      onChange={e => updateAttr(attr.key, attr.type === 'number' ? Number(e.target.value) : e.target.value)}
-                    />
+                    <div key={attr.key} id={`new-field-${errKey}`}>
+                      <Input
+                        required={attr.required}
+                        label={attr.label.toUpperCase() + (attr.unit ? ` (${attr.unit})` : '')}
+                        type={attr.type === 'number' ? 'number' : 'text'}
+                        placeholder={attr.label}
+                        value={(form.attributes?.[attr.key] as string) || ''}
+                        error={errors[errKey]}
+                        onChange={e => { updateAttr(attr.key, attr.type === 'number' ? Number(e.target.value) : e.target.value); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
+                      />
+                    </div>
                   );
                 })}
               </div>
@@ -370,11 +429,14 @@ export function WatchList() {
 
           {/* Condition */}
           {selectedCat && selectedCat.conditionOptions.length > 0 && (
-            <div>
-              <span className="text-overline" style={{ marginBottom: 8 }}>CONDITION</span>
+            <div id="new-field-condition" style={{ padding: errors.condition ? 8 : 0, border: errors.condition ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+              <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
+                CONDITION
+                <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
+              </span>
               <div className="flex gap-2" style={{ marginTop: 8 }}>
                 {selectedCat.conditionOptions.map(cond => (
-                  <button key={cond} onClick={() => setForm({ ...form, condition: cond })}
+                  <button key={cond} onClick={() => { setForm({ ...form, condition: cond }); if (errors.condition) setErrors({ ...errors, condition: '' }); }}
                     className="cursor-pointer rounded transition-all duration-200"
                     style={{
                       padding: '7px 14px', fontSize: 12,
@@ -384,6 +446,7 @@ export function WatchList() {
                     }}>{cond}</button>
                 ))}
               </div>
+              {errors.condition && <span style={{ fontSize: 12, color: '#DC2626', display: 'block', marginTop: 4 }}>{errors.condition}</span>}
             </div>
           )}
 
@@ -495,10 +558,12 @@ export function WatchList() {
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>PRICING</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
-              <Input label="PURCHASE PRICE (BHD)" type="number" placeholder="0" value={form.purchasePrice || ''} onChange={e => setForm({ ...form, purchasePrice: Number(e.target.value) || 0 })} />
-              <Input label="SALE PRICE (BHD)" type="number" placeholder="0" value={form.plannedSalePrice || ''} onChange={e => setForm({ ...form, plannedSalePrice: Number(e.target.value) || undefined })} />
-              <Input label="MIN SALE PRICE (BHD)" type="number" placeholder="Sales floor" value={form.minSalePrice || ''} onChange={e => setForm({ ...form, minSalePrice: Number(e.target.value) || undefined })} />
-              <Input label="MAX SALE PRICE (BHD)" type="number" placeholder="Sales ceiling" value={form.maxSalePrice || ''} onChange={e => setForm({ ...form, maxSalePrice: Number(e.target.value) || undefined })} />
+              <div id="new-field-purchasePrice">
+                <Input required label="PURCHASE PRICE (BHD)" type="number" placeholder="0" value={form.purchasePrice || ''} error={errors.purchasePrice}
+                  onChange={e => { setForm({ ...form, purchasePrice: Number(e.target.value) || 0 }); if (errors.purchasePrice) setErrors({ ...errors, purchasePrice: '' }); }} />
+              </div>
+              <Input label="SALE PRICE (BHD)" type="number" placeholder="Listing / target price" value={form.plannedSalePrice || ''} onChange={e => setForm({ ...form, plannedSalePrice: Number(e.target.value) || undefined })} />
+              <Input label="MIN SALE PRICE (BHD)" type="number" placeholder="Negotiation floor" value={form.minSalePrice || ''} onChange={e => setForm({ ...form, minSalePrice: Number(e.target.value) || undefined })} />
             </div>
             {form.purchasePrice && form.plannedSalePrice && (
               <div className="rounded font-mono" style={{

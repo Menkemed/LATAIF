@@ -103,7 +103,7 @@ export function SupplierList() {
 
       <Modal open={showNew} onClose={() => setShowNew(false)} title="New Supplier" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input label="NAME" placeholder="e.g. Gold Dealer LLC" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} autoFocus />
+          <Input required label="NAME" placeholder="e.g. Gold Dealer LLC" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} autoFocus />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input label="PHONE" placeholder="+973 3xxx xxxx" value={form.phone || ''} onChange={e => setForm({ ...form, phone: e.target.value })} />
             <Input label="EMAIL" placeholder="contact@supplier.com" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />

@@ -6,12 +6,102 @@
 const STORAGE_KEY = 'lataif_openai_key';
 const MODEL_KEY = 'lataif_openai_model';
 
+// Security-Hardening (Plan §QA #11):
+// 1) In Tauri persistieren wir den Key in `%APPDATA%/lataif/openai.key` (User-level permission)
+//    statt in localStorage (von DOM-Code lesbar via XSS).
+// 2) Light-Obfuscation (XOR + base64) damit der Key nicht als plaintext im Disk-Dump erscheint.
+//    Dies ist KEIN echter Schutz gegen lokale Angreifer — Roadmap: Tauri-Stronghold-Plugin.
+// 3) Cache nur in-memory; nicht synchron aus localStorage lesen.
+const OBF_SEED = 'lataif-2026-key-obf';
+
+function isTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+function obfuscate(plain: string): string {
+  if (!plain) return '';
+  let out = '';
+  for (let i = 0; i < plain.length; i++) {
+    out += String.fromCharCode(plain.charCodeAt(i) ^ OBF_SEED.charCodeAt(i % OBF_SEED.length));
+  }
+  return btoa(out);
+}
+function deobfuscate(blob: string): string {
+  if (!blob) return '';
+  try {
+    const raw = atob(blob);
+    let out = '';
+    for (let i = 0; i < raw.length; i++) {
+      out += String.fromCharCode(raw.charCodeAt(i) ^ OBF_SEED.charCodeAt(i % OBF_SEED.length));
+    }
+    return out;
+  } catch { return ''; }
+}
+
+let _apiKeyCache: string | null = null;
+
+async function readKeyFromTauri(): Promise<string> {
+  try {
+    const { appDataDir, join } = await import('@tauri-apps/api/path');
+    const { readTextFile, exists } = await import('@tauri-apps/plugin-fs');
+    const dir = await appDataDir();
+    const path = await join(dir, 'openai.key');
+    if (!(await exists(path))) return '';
+    const blob = await readTextFile(path);
+    return deobfuscate(blob.trim());
+  } catch { return ''; }
+}
+
+async function writeKeyToTauri(key: string): Promise<void> {
+  try {
+    const { appDataDir, join } = await import('@tauri-apps/api/path');
+    const { writeTextFile, mkdir, exists } = await import('@tauri-apps/plugin-fs');
+    const dir = await appDataDir();
+    if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+    const path = await join(dir, 'openai.key');
+    await writeTextFile(path, obfuscate(key));
+  } catch (e) { console.warn('[ai] failed to persist key to Tauri:', e); }
+}
+
 export function getApiKey(): string {
-  return localStorage.getItem(STORAGE_KEY) || '';
+  if (_apiKeyCache !== null) return _apiKeyCache;
+  // Browser-Fallback: obfuscated in localStorage (besser als plain).
+  const blob = localStorage.getItem(STORAGE_KEY) || '';
+  _apiKeyCache = blob.startsWith('sk-') ? blob /* legacy plaintext */ : deobfuscate(blob);
+  // Migration: wenn legacy plaintext gefunden, sofort obfuskiert ablegen.
+  if (blob.startsWith('sk-')) {
+    localStorage.setItem(STORAGE_KEY, obfuscate(blob));
+    if (isTauri()) writeKeyToTauri(blob);
+  }
+  // Async Re-Load aus Tauri (überschreibt Cache wenn Tauri-File existiert und neuer ist).
+  if (isTauri() && !_apiKeyCache) {
+    readKeyFromTauri().then(k => { if (k) _apiKeyCache = k; });
+  }
+  return _apiKeyCache || '';
 }
 
 export function setApiKey(key: string) {
-  localStorage.setItem(STORAGE_KEY, key);
+  _apiKeyCache = key;
+  // Browser-Storage immer obfuskiert.
+  localStorage.setItem(STORAGE_KEY, obfuscate(key));
+  // Tauri zusätzlich in app-data dir (OS-User-Permission).
+  if (isTauri()) writeKeyToTauri(key);
+}
+
+export function clearApiKey() {
+  _apiKeyCache = null;
+  localStorage.removeItem(STORAGE_KEY);
+  if (isTauri()) {
+    (async () => {
+      try {
+        const { appDataDir, join } = await import('@tauri-apps/api/path');
+        const { remove, exists } = await import('@tauri-apps/plugin-fs');
+        const dir = await appDataDir();
+        const path = await join(dir, 'openai.key');
+        if (await exists(path)) await remove(path);
+      } catch { /* */ }
+    })();
+  }
 }
 
 export function getModel(): string {

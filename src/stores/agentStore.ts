@@ -243,6 +243,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   markTransferSettled: (id, amount, method) => {
+    if (typeof amount === 'number' && (!Number.isFinite(amount) || amount < 0)) {
+      throw new Error('Settlement amount must be non-negative.');
+    }
     const t = get().getTransfer(id);
     if (!t) return;
     const db = getDatabase();
@@ -252,7 +255,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // Plan §Agent §4: wenn amount nicht angegeben → voll ausbuchen
     const paidNow = typeof amount === 'number' && amount > 0 ? amount : Math.max(0, total - prevPaid);
     const newPaid = Math.min(total, prevPaid + paidNow);
-    const isFull = newPaid >= total - 0.001;
+    const isFull = newPaid >= total - 0.005;
 
     // Plan §8 #5 — Audit-Trail: jede Teilzahlung als eigene Zeile in agent_settlement_payments.
     if (paidNow > 0) {

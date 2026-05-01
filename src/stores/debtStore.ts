@@ -113,6 +113,10 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   getDebt: (id) => get().debts.find(d => d.id === id),
 
   createDebt: (data) => {
+    const amount = Number(data.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('Loan amount must be a positive number.');
+    }
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -161,6 +165,18 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   },
 
   updateDebt: (id, data) => {
+    // Validation BEVOR DB-Mutation, damit kein partieller State entsteht.
+    if (data.amount !== undefined) {
+      const newAmount = Number(data.amount);
+      if (!Number.isFinite(newAmount) || newAmount <= 0) {
+        throw new Error('Loan amount must be a positive number.');
+      }
+      const paid = sumPaymentsFor(id);
+      if (newAmount < paid) {
+        throw new Error(`Cannot reduce loan amount below already paid (${paid}). Reverse payments first.`);
+      }
+    }
+
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -194,10 +210,9 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
 
     db.run(`UPDATE debts SET ${fields.join(', ')} WHERE id = ?`, values);
 
-    // If amount changed, re-evaluate status
     if (data.amount !== undefined) {
       const paid = sumPaymentsFor(id);
-      reconcileStatus(db, id, data.amount, paid);
+      reconcileStatus(db, id, Number(data.amount), paid);
     }
 
     saveDatabase();
@@ -234,6 +249,9 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   },
 
   recordDebtPayment: (debtId, amount, source, paidAt, notes) => {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('Debt payment amount must be a positive number.');
+    }
     const db = getDatabase();
     const id = uuid();
     const now = new Date().toISOString();

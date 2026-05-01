@@ -172,7 +172,7 @@ export function AgentList() {
           </div>
 
           {/* Plan §Agent Ledger §10: Datum / Dokument (AGD/INV) / Betrag / Zahlung / Restbetrag */}
-          <div style={{ display: 'grid', gridTemplateColumns: '90px 1fr 1fr 1.3fr 0.9fr 0.9fr 0.9fr 0.8fr 1.2fr', gap: 12, padding: '0 12px 10px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '90px minmax(0,1fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.2fr)', gap: 12, padding: '0 12px 10px' }}>
             {['DATE', 'DOCUMENT', 'AGENT', 'ITEM', 'AMOUNT', 'PAID', 'OUTSTANDING', 'STATUS', 'ACTIONS'].map(h => (
               <span key={h} className="text-overline">{h}</span>
             ))}
@@ -195,7 +195,7 @@ export function AgentList() {
             const docLabel = t.invoiceId ? `${t.transferNumber} → INV` : t.transferNumber;
             return (
               <div key={t.id} style={{
-                display: 'grid', gridTemplateColumns: '90px 1fr 1fr 1.3fr 0.9fr 0.9fr 0.9fr 0.8fr 1.2fr',
+                display: 'grid', gridTemplateColumns: '90px minmax(0,1fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.2fr)',
                 gap: 12, padding: '12px', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)',
               }}>
                 <span style={{ fontSize: 11, color: '#6B7280' }}>{date || '—'}</span>
@@ -243,11 +243,11 @@ export function AgentList() {
       {/* New Approval Modal */}
       <Modal open={showNewAgent} onClose={() => setShowNewAgent(false)} title="New Approval" width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input label="NAME" placeholder="Approval name" value={agentForm.name || ''} onChange={e => setAgentForm({ ...agentForm, name: e.target.value })} />
+          <Input required label="NAME" placeholder="Approval name" value={agentForm.name || ''} onChange={e => setAgentForm({ ...agentForm, name: e.target.value })} />
           <Input label="COMPANY" placeholder="Company" value={agentForm.company || ''} onChange={e => setAgentForm({ ...agentForm, company: e.target.value })} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Input label="PHONE" placeholder="+973..." value={agentForm.phone || ''} onChange={e => setAgentForm({ ...agentForm, phone: e.target.value })} />
-            <Input label="COMMISSION %" type="number" value={agentForm.commissionRate || ''} onChange={e => setAgentForm({ ...agentForm, commissionRate: Number(e.target.value) })} />
+            <Input required label="COMMISSION %" type="number" value={agentForm.commissionRate || ''} onChange={e => setAgentForm({ ...agentForm, commissionRate: Number(e.target.value) })} />
           </div>
           <Input label="EMAIL" placeholder="email" value={agentForm.email || ''} onChange={e => setAgentForm({ ...agentForm, email: e.target.value })} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
@@ -312,11 +312,11 @@ export function AgentList() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Input label="AGENT PRICE (BHD)" type="number" value={transferForm.agentPrice || ''} onChange={e => setTransferForm({ ...transferForm, agentPrice: Number(e.target.value) })} />
+            <Input required label="AGENT PRICE (BHD)" type="number" value={transferForm.agentPrice || ''} onChange={e => setTransferForm({ ...transferForm, agentPrice: Number(e.target.value) })} />
             {(transferForm.commissionType ?? 'percent') === 'percent' ? (
-              <Input label="COMMISSION %" type="number" value={transferForm.commissionRate || ''} onChange={e => setTransferForm({ ...transferForm, commissionRate: Number(e.target.value) })} />
+              <Input required label="COMMISSION %" type="number" value={transferForm.commissionRate || ''} onChange={e => setTransferForm({ ...transferForm, commissionRate: Number(e.target.value) })} />
             ) : (
-              <Input label="COMMISSION FIXED (BHD)" type="number" value={transferForm.commissionValue || ''} onChange={e => setTransferForm({ ...transferForm, commissionValue: Number(e.target.value) })} />
+              <Input required label="COMMISSION FIXED (BHD)" type="number" value={transferForm.commissionValue || ''} onChange={e => setTransferForm({ ...transferForm, commissionValue: Number(e.target.value) })} />
             )}
           </div>
           <Input label="RETURN BY (DATE)" type="date" value={transferForm.returnBy || ''} onChange={e => setTransferForm({ ...transferForm, returnBy: e.target.value })} />
@@ -370,7 +370,7 @@ export function AgentList() {
             </div>
           </div>
           {settlePartial && (
-            <Input label="AMOUNT (BHD)" type="number" value={settleAmount}
+            <Input required label="AMOUNT (BHD)" type="number" value={settleAmount}
               onChange={e => setSettleAmount(e.target.value)} />
           )}
           <div>
@@ -403,7 +403,7 @@ export function AgentList() {
       {/* Edit Agent Modal */}
       <Modal open={!!editAgent} onClose={() => setEditAgent(null)} title={`Edit Approval — ${editAgent?.name || ''}`} width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Input label="NAME" value={editAgentForm.name || ''} onChange={e => setEditAgentForm({ ...editAgentForm, name: e.target.value })} />
+          <Input required label="NAME" value={editAgentForm.name || ''} onChange={e => setEditAgentForm({ ...editAgentForm, name: e.target.value })} />
           <Input label="COMPANY" value={editAgentForm.company || ''} onChange={e => setEditAgentForm({ ...editAgentForm, company: e.target.value })} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Input label="PHONE" value={editAgentForm.phone || ''} onChange={e => setEditAgentForm({ ...editAgentForm, phone: e.target.value })} />
@@ -411,7 +411,7 @@ export function AgentList() {
           </div>
           <Input label="EMAIL" value={editAgentForm.email || ''} onChange={e => setEditAgentForm({ ...editAgentForm, email: e.target.value })} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Input label="COMMISSION %" type="number" value={editAgentForm.commissionRate ?? ''}
+            <Input required label="COMMISSION %" type="number" value={editAgentForm.commissionRate ?? ''}
               onChange={e => setEditAgentForm({ ...editAgentForm, commissionRate: Number(e.target.value) || 0 })} />
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>STATUS</span>
@@ -457,7 +457,7 @@ export function AgentList() {
       {/* Edit Transfer Modal */}
       <Modal open={!!editTransfer} onClose={() => setEditTransfer(null)} title={`Edit Transfer — ${editTransfer?.transferNumber || ''}`} width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Input label="AGENT PRICE (BHD)" type="number" value={editTransferForm.agentPrice ?? ''}
+          <Input required label="AGENT PRICE (BHD)" type="number" value={editTransferForm.agentPrice ?? ''}
             onChange={e => setEditTransferForm({ ...editTransferForm, agentPrice: Number(e.target.value) || 0 })} />
           <Input label="MINIMUM PRICE (BHD)" type="number" value={editTransferForm.minimumPrice ?? ''}
             onChange={e => setEditTransferForm({ ...editTransferForm, minimumPrice: Number(e.target.value) || undefined })} />
@@ -476,10 +476,10 @@ export function AgentList() {
             </div>
           </div>
           {(editTransferForm.commissionType ?? 'percent') === 'percent' ? (
-            <Input label="COMMISSION %" type="number" value={editTransferForm.commissionRate ?? ''}
+            <Input required label="COMMISSION %" type="number" value={editTransferForm.commissionRate ?? ''}
               onChange={e => setEditTransferForm({ ...editTransferForm, commissionRate: Number(e.target.value) || 0 })} />
           ) : (
-            <Input label="COMMISSION FIXED (BHD)" type="number" value={editTransferForm.commissionValue ?? ''}
+            <Input required label="COMMISSION FIXED (BHD)" type="number" value={editTransferForm.commissionValue ?? ''}
               onChange={e => setEditTransferForm({ ...editTransferForm, commissionValue: Number(e.target.value) || 0 })} />
           )}
           <Input label="RETURN BY (DATE)" type="date" value={(editTransferForm.returnBy || '').split('T')[0]}
@@ -529,7 +529,7 @@ export function AgentList() {
       {/* Mark as Sold Modal */}
       <Modal open={!!soldModal} onClose={() => setSoldModal(null)} title="Record Sale" width={400}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input label="SALE PRICE (BHD)" type="number" value={soldPrice || ''} onChange={e => setSoldPrice(Number(e.target.value))} />
+          <Input required label="SALE PRICE (BHD)" type="number" value={soldPrice || ''} onChange={e => setSoldPrice(Number(e.target.value))} />
           <Input label="BUYER INFO" placeholder="Buyer name or reference" value={soldBuyerInfo} onChange={e => setSoldBuyerInfo(e.target.value)} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>

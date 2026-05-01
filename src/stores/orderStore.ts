@@ -85,9 +85,12 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
 
     const remaining = (data.agreedPrice || 0) - (data.depositAmount || 0);
 
-    const initialStatus: OrderStatus = data.fullyPaid ? 'completed'
-      : (data.depositPaid || (data.depositAmount && data.depositAmount > 0)) ? 'deposit_received'
-      : 'pending';
+    // Plan §Order: Order-Status ist orthogonal zum Zahlungsstand.
+    // Default ist immer 'pending', auch bei direkt-bezahlten Auftraegen — der Payment-Status
+    // (UNPAID/PARTIALLY_PAID/PAID) wird live aus den order_payments abgeleitet.
+    // Ausnahme: fullyPaid + bereits arrived/notified ist hier nicht der Fall — neue Auftraege
+    // koennen nur 'pending' starten oder per Caller explizit gesetzt sein.
+    const initialStatus: OrderStatus = (data.status as OrderStatus) || 'pending';
     db.run(
       `INSERT INTO orders (id, branch_id, order_number, customer_id,
         category_id, attributes, condition, serial_number, existing_product_id,
@@ -122,6 +125,26 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         stmt.run([uuid(), id, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1, now]);
       });
       stmt.free();
+    }
+
+    // Plan §Order: Wenn beim Anlegen ein Deposit eingegeben wurde, gleich als order_payments-Eintrag
+    // persistieren — sonst zeigt OrderDetail Total Paid = 0 (summiert aus order_payments), waehrend
+    // OrderList den deposit_amount aus der orders-Tabelle nimmt → Inkonsistenz.
+    const initialPaid = data.fullyPaid ? (data.agreedPrice || 0) : (data.depositAmount || 0);
+    if (initialPaid > 0) {
+      db.run(
+        `INSERT INTO order_payments (id, order_id, amount, paid_at, method, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuid(),
+          id,
+          initialPaid,
+          data.depositDate || now.split('T')[0],
+          data.paymentMethod || 'cash',
+          data.fullyPaid ? 'Initial full payment' : 'Initial deposit',
+          now,
+        ]
+      );
     }
 
     saveDatabase();
@@ -164,49 +187,23 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     trackUpdate('orders', id, data);
     get().loadOrders();
 
-    // Auto-Status (Plan §Order §Auto): Zahlungsstatus impliziert Workflow-Stufe.
-    // Nur anwenden wenn User nicht explizit 'status' gesetzt hat — sonst respektieren.
-    if (data.status === undefined) {
-      const fresh = get().getOrder(id);
-      if (fresh && fresh.status !== 'cancelled') {
-        const paidEnough = !!fresh.agreedPrice && (fresh.depositAmount || 0) >= fresh.agreedPrice;
-        const hasDeposit = !!fresh.depositPaid || (fresh.depositAmount || 0) > 0;
-        let nextStatus: OrderStatus | null = null;
-        if (fresh.fullyPaid || paidEnough) {
-          if (fresh.status !== 'completed') nextStatus = 'completed';
-        } else if (hasDeposit && fresh.status === 'pending') {
-          nextStatus = 'deposit_received';
-        }
-        if (nextStatus) {
-          const nowTs = new Date().toISOString();
-          db.run(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`, [nextStatus, nowTs, id]);
-          saveDatabase();
-          trackUpdate('orders', id, { status: nextStatus, autoDerived: true });
-          get().loadOrders();
-        }
-      }
-    }
+    // Plan §Order: KEINE Auto-Status-Promotion. Order-Status (PENDING/ARRIVED/NOTIFIED/COMPLETED)
+    // ist explizit vom User gesetzt — Zahlung != Prozessfortschritt.
+    // Beispiel: Kunde zahlt voll, Ware noch nicht da → Payment=PAID, Order=PENDING.
   },
 
   updateStatus: (id, status) => {
     const now = new Date().toISOString();
     const updates: Partial<Order> = { status };
 
-    switch (status) {
-      case 'deposit_received':
-        updates.depositPaid = true;
-        updates.depositDate = now.split('T')[0];
-        break;
-      case 'arrived':
-        updates.actualDelivery = now.split('T')[0];
-        break;
+    if (status === 'arrived') {
+      updates.actualDelivery = now.split('T')[0];
     }
 
     get().updateOrder(id, updates);
 
-    const eventMap: Record<string, string> = {
-      deposit_received: 'order.deposit_received',
-      sourced: 'order.sourced',
+    const eventMap: Record<OrderStatus, string> = {
+      pending: 'order.created',
       arrived: 'order.arrived',
       notified: 'order.notified',
       completed: 'order.completed',

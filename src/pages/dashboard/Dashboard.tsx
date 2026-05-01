@@ -16,6 +16,7 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useDebtStore } from '@/stores/debtStore';
+import { usePayablesStore, payablesTotal, overdueCount } from '@/stores/payablesStore';
 import { GaugeChart } from '@/components/charts/GaugeChart';
 import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
@@ -45,6 +46,7 @@ export function Dashboard() {
   const { loadTransfers, getBalances } = useBankingStore();
   const { returns: salesReturns, loadReturns: loadSalesReturns } = useSalesReturnStore();
   const { debts, loadDebts } = useDebtStore();
+  const { payables, loadPayables } = usePayablesStore();
   const userName = useAuthStore(s => s.session?.user.name || '');
   const firstName = userName.split(' ')[0] || userName;
 
@@ -94,8 +96,8 @@ export function Dashboard() {
   useEffect(() => {
     loadCategories(); loadProducts(); loadCustomers();
     loadSuppliers(); loadPartners(); loadInvoices(); loadPurchases(); loadExpenses();
-    loadTransfers(); loadSalesReturns(); loadDebts();
-  }, [loadCategories, loadProducts, loadCustomers, loadSuppliers, loadPartners, loadInvoices, loadPurchases, loadExpenses, loadTransfers, loadSalesReturns, loadDebts]);
+    loadTransfers(); loadSalesReturns(); loadDebts(); loadPayables();
+  }, [loadCategories, loadProducts, loadCustomers, loadSuppliers, loadPartners, loadInvoices, loadPurchases, loadExpenses, loadTransfers, loadSalesReturns, loadDebts, loadPayables]);
 
   const stock = useMemo(() => getStockValue(), [products, getStockValue]);
   const stockByCat = useMemo(() => getStockByCategory(), [products, categories, getStockByCategory]);
@@ -307,26 +309,27 @@ export function Dashboard() {
     return months;
   }, [invoices]);
 
-  // Plan §Dashboard Fix — offene Refund-Schuld an Kunden + offene Forderungen/Verbindlichkeiten aus Loans.
+  // Refund Payable = was wir dem Kunden noch CASH zurückzahlen müssen.
+  // Falsch wäre `totalAmount - refundPaidAmount` (zählt auch via Credit Note neutralisierte
+  // Forderungen mit). Richtig: `refundAmount - refundPaidAmount` — nur der gecappte Cash-Anteil
+  // den der Refund-Flow als „muss zurück" markiert hat. Wenn der Kunde nie gezahlt hatte,
+  // ist refundAmount = 0 → kein Eintrag im Payable-Topf (nur die Credit Note storniert die Forderung).
   const outstandingRefunds = useMemo(() =>
     salesReturns
       .filter(r => r.status !== 'REJECTED')
-      .reduce((s, r) => s + Math.max(0, (r.totalAmount || 0) - (r.refundPaidAmount || 0)), 0),
+      .reduce((s, r) => s + Math.max(0, (r.refundAmount || 0) - (r.refundPaidAmount || 0)), 0),
     [salesReturns]
   );
   const openRefundCount = useMemo(() =>
-    salesReturns.filter(r => r.status !== 'REJECTED' && (r.totalAmount || 0) - (r.refundPaidAmount || 0) > 0.001).length,
+    salesReturns.filter(r =>
+      r.status !== 'REJECTED' &&
+      (r.refundAmount || 0) - (r.refundPaidAmount || 0) > 0.005
+    ).length,
     [salesReturns]
   );
   const openOwedToUs = useMemo(() =>
     debts
       .filter(d => d.direction === 'MONEY_GIVEN' && (d.status === 'OPEN' || d.status === 'PARTIALLY_REPAID'))
-      .reduce((s, d) => s + Math.max(0, (d.amount || 0) - (d.paidAmount || 0)), 0),
-    [debts]
-  );
-  const openWeOwe = useMemo(() =>
-    debts
-      .filter(d => d.direction === 'MONEY_RECEIVED' && (d.status === 'OPEN' || d.status === 'PARTIALLY_REPAID'))
       .reduce((s, d) => s + Math.max(0, (d.amount || 0) - (d.paidAmount || 0)), 0),
     [debts]
   );
@@ -557,9 +560,11 @@ export function Dashboard() {
             <KPICard label="OWED TO US" value={fmt(openOwedToUs)} unit="BHD · open loans given"
               icon={<TrendingUp size={16} />} accent="green"
               onClick={() => navigate('/debts?direction=MONEY_GIVEN')} />
-            <KPICard label="WE OWE" value={fmt(openWeOwe)} unit="BHD · open loans received"
-              icon={<AlertTriangle size={16} />} accent={openWeOwe > 0 ? 'urgent' : 'none'}
-              onClick={() => navigate('/debts?direction=MONEY_RECEIVED')} />
+            <KPICard label="TOTAL PAYABLES" value={fmt(payablesTotal(payables))}
+              unit={`BHD · ${payables.length} open${overdueCount(payables) > 0 ? ` · ${overdueCount(payables)} overdue` : ''}`}
+              icon={<AlertTriangle size={16} />}
+              accent={overdueCount(payables) > 0 ? 'urgent' : (payablesTotal(payables) > 0 ? 'orange' : 'none')}
+              onClick={() => navigate('/payables')} />
             <KPICard label="MONTHLY EXPENSES" value={fmt(monthlyExpenses)} unit={`BHD · ${fmt(totalExpenses)} total`}
               icon={<Wallet size={16} />} accent="orange" onClick={() => navigate('/expenses')} />
           </div>
@@ -771,7 +776,7 @@ export function Dashboard() {
                 <div className="flex items-center gap-3">
                   <div className="flex items-center justify-center rounded-full shrink-0"
                     style={{ width: 36, height: 36, background: '#E5E9EE', border: '1px solid #D5D9DE', fontSize: 11, color: '#4B5563', fontWeight: 500 }}>
-                    {c.firstName[0]}{c.lastName[0]}
+                    {`${(c.firstName || '').charAt(0)}${(c.lastName || '').charAt(0)}`.toUpperCase() || '?'}
                   </div>
                   <div>
                     <div className="flex items-center gap-2">

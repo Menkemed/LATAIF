@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Package, FileText,
   Receipt, CheckSquare, BarChart3, Settings, LogOut, Building2,
   Wrench, Handshake, UserCheck, ShoppingCart, FolderOpen,
-  HandCoins, Sparkles, Truck, Wallet, Landmark, UserPlus, Factory,
+  HandCoins, Sparkles, Truck, Wallet, Landmark, UserPlus, Factory, FileMinus, CreditCard,
 } from 'lucide-react';
 import { ChevronDown } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
@@ -20,6 +20,7 @@ const navGroups: NavGroup[] = [
       { to: '/clients', label: 'Clients', icon: Users, tone: 'blue' },
       { to: '/offers', label: 'Offers', icon: FileText, tone: 'cyan' },
       { to: '/invoices', label: 'Invoices', icon: Receipt, tone: 'green' },
+      { to: '/credit-notes', label: 'Credit Notes', icon: FileMinus, tone: 'orange' },
       { to: '/orders', label: 'Orders', icon: ShoppingCart, tone: 'orange' },
       { to: '/agents', label: 'Approval', icon: UserCheck, tone: 'purple' },
       { to: '/consignments', label: 'Consignment', icon: Handshake, tone: 'pink' },
@@ -41,6 +42,7 @@ const navGroups: NavGroup[] = [
       { to: '/expenses', label: 'Expenses', icon: Wallet, tone: 'orange' },
       { to: '/banking', label: 'Banking', icon: Landmark, tone: 'blue' },
       { to: '/debts', label: 'Debts', icon: HandCoins, tone: 'pink' },
+      { to: '/payables', label: 'Payables', icon: CreditCard, tone: 'purple' },
     ],
   },
   { label: 'DOCUMENTS', items: [{ to: '/documents', label: 'Documents', icon: FolderOpen, tone: 'cyan' }] },

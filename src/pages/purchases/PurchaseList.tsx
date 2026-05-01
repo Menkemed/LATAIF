@@ -90,7 +90,7 @@ export function PurchaseList() {
       ) : (
         <Card noPadding>
           <div style={{
-            display: 'grid', gridTemplateColumns: '1fr 1.3fr 1.5fr 1fr 1fr 1fr 1fr',
+            display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.3fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)',
             gap: 14, padding: '12px 16px', borderBottom: '1px solid #E5E9EE',
           }}>
             {['NUMBER', 'DATE', 'SUPPLIER', 'TOTAL', 'PAID', 'REMAINING', 'STATUS'].map(h => (
@@ -103,7 +103,7 @@ export function PurchaseList() {
               <div key={p.id} onClick={() => navigate(`/purchases/${p.id}`)}
                 className="cursor-pointer transition-colors"
                 style={{
-                  display: 'grid', gridTemplateColumns: '1fr 1.3fr 1.5fr 1fr 1fr 1fr 1fr',
+                  display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.3fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)',
                   gap: 14, padding: '14px 16px', alignItems: 'center',
                   borderBottom: '1px solid rgba(229,225,214,0.6)',
                 }}

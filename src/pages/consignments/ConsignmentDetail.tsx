@@ -295,11 +295,11 @@ export function ConsignmentDetail() {
           <div>
             {editing ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                <Input label="AGREED PRICE (BHD)" type="number" value={form.agreedPrice}
+                <Input required label="AGREED PRICE (BHD)" type="number" value={form.agreedPrice}
                   onChange={e => setForm({ ...form, agreedPrice: e.target.value })} />
                 <Input label="MINIMUM PRICE (BHD)" type="number" placeholder="Optional" value={form.minimumPrice}
                   onChange={e => setForm({ ...form, minimumPrice: e.target.value })} />
-                <Input label="COMMISSION RATE (%)" type="number" value={form.commissionRate}
+                <Input required label="COMMISSION RATE (%)" type="number" value={form.commissionRate}
                   onChange={e => setForm({ ...form, commissionRate: e.target.value })} />
                 <Input label="EXPIRY DATE" type="date" value={form.expiryDate}
                   onChange={e => setForm({ ...form, expiryDate: e.target.value })} />
@@ -479,7 +479,7 @@ export function ConsignmentDetail() {
       {/* ── Mark as Sold Modal ── */}
       <Modal open={soldModal} onClose={() => setSoldModal(false)} title="Mark as Sold" width={440}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          <Input label="SALE PRICE (BHD)" type="number" placeholder="0"
+          <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
             value={soldPrice}
             onChange={e => setSoldPrice(e.target.value)} />
           <Input label="BUYER (OPTIONAL)" placeholder="Customer ID or name..."

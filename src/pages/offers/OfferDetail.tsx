@@ -282,7 +282,7 @@ export function OfferDetail() {
               const product = products.find(p => p.id === line.productId);
               const outOfRange = product && (
                 (product.minSalePrice && line.unitPrice < product.minSalePrice) ||
-                (product.maxSalePrice && line.unitPrice > product.maxSalePrice)
+                (product.plannedSalePrice && line.unitPrice > product.plannedSalePrice)
               );
               return (
                 <div key={line.id} style={{ display: 'grid', gridTemplateColumns: canEdit ? 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) 32px' : 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr)', gap: 12, padding: '12px 0', borderBottom: '1px solid rgba(229,225,214,0.6)', alignItems: 'center' }}>
@@ -291,18 +291,27 @@ export function OfferDetail() {
                       {product ? `${product.brand} ${product.name}` : 'Unknown Product'}
                     </span>
                     {(() => {
-                      // Plan §Print — Specs unter dem Produkt-Namen, auch im Print-View sichtbar.
+                      // Plan §Print — Specs als 2-Spalten-Grid (kompakt + ästhetisch, auch im Print-View).
                       const specs = getProductSpecs(product, categories);
                       if (specs.length === 0) return null;
                       return (
-                        <span style={{ fontSize: 10, color: '#6B7280', display: 'block', marginTop: 2, lineHeight: 1.4 }}>
-                          {specs.map(s => `${s.label}: ${s.value}`).join(' · ')}
-                        </span>
+                        <div style={{
+                          display: 'grid', gridTemplateColumns: '1fr 1fr',
+                          columnGap: 16, rowGap: 1,
+                          marginTop: 4, fontSize: 10, color: '#444',
+                        }}>
+                          {specs.map((s, i) => (
+                            <div key={i} style={{ display: 'flex', gap: 4, lineHeight: 1.35 }}>
+                              <span style={{ color: '#9CA3AF' }}>{s.label}:</span>
+                              <span style={{ color: '#374151', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</span>
+                            </div>
+                          ))}
+                        </div>
                       );
                     })()}
                     {outOfRange && (
                       <span style={{ fontSize: 10, color: '#AA6E6E', display: 'block', marginTop: 2 }}>
-                        Price outside range ({fmt(product.minSalePrice || 0)} — {fmt(product.maxSalePrice || 0)})
+                        Price outside range ({fmt(product.minSalePrice || 0)} — {fmt(product.plannedSalePrice || 0)})
                       </span>
                     )}
                   </div>

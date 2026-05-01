@@ -217,6 +217,7 @@ function runMigrations(database: Database): void {
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-gold-jewelry'`,
+    // BRANDED_GOLD_JEWELRY — schlank: ohne Model/Serial/Cert/Box.
     `UPDATE categories SET attributes = '[
       {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch"],"required":true,"showInList":true},
       {"key":"color_type","label":"Color","type":"select","options":["Yellow Gold","Rose Gold","White Gold","Two-Tone"],"required":true,"showInList":true},
@@ -224,32 +225,34 @@ function runMigrations(database: Database): void {
       {"key":"karat","label":"Karat","type":"select","options":["24K","22K","21K","18K","14K","9K"],"required":true,"showInList":true},
       {"key":"weight","label":"Weight","type":"number","unit":"g","required":false,"showInList":true},
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
-      {"key":"model_number","label":"Model Number","type":"text","required":false,"showInList":false},
-      {"key":"serial_number","label":"Serial Number","type":"text","required":false,"showInList":false},
-      {"key":"certificate","label":"Certificate","type":"boolean","required":false,"showInList":false},
-      {"key":"box","label":"Box","type":"boolean","required":false,"showInList":false},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-branded-gold-jewelry'`,
+    // ORIGINAL_GOLD_JEWELRY — size optional, plus Model/Serial/Year optional.
     `UPDATE categories SET attributes = '[
       {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch"],"required":true,"showInList":true},
       {"key":"color_type","label":"Color","type":"select","options":["Yellow Gold","Rose Gold","White Gold","Two-Tone"],"required":true,"showInList":true},
-      {"key":"size","label":"Size","type":"text","required":true,"showInList":true},
+      {"key":"size","label":"Size","type":"text","required":false,"showInList":true},
       {"key":"karat","label":"Karat","type":"select","options":["24K","22K","21K","18K","14K","9K"],"required":true,"showInList":true},
       {"key":"weight","label":"Weight","type":"number","unit":"g","required":false,"showInList":true},
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
+      {"key":"model_name","label":"Model Name","type":"text","required":false,"showInList":true},
+      {"key":"model_number","label":"Model Number","type":"text","required":false,"showInList":false},
+      {"key":"serial_number","label":"Serial Number","type":"text","required":false,"showInList":false},
+      {"key":"year","label":"Year","type":"number","required":false,"showInList":false},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-original-gold-jewelry'`,
+    // ORIGINAL_GOLD_JEWELRY — Included-Auswahl ohne Appraisal/Pouch.
+    `UPDATE categories SET scope_options = '["Box","Certificate"]' WHERE id = 'cat-original-gold-jewelry'`,
+    // ACCESSORY — Box/Papers raus aus Attributen (sind im Included-Multi-Select).
     `UPDATE categories SET attributes = '[
       {"key":"item_type","label":"Item Type","type":"select","options":["Handbag","Eyeglass","Wallet","Lighter","Cufflinks","Prayer Beads","Walking Stick","Pen","Key Holder","Other"],"required":true,"showInList":true},
       {"key":"color","label":"Color","type":"text","required":true,"showInList":true},
       {"key":"material","label":"Material","type":"text","required":true,"showInList":true},
       {"key":"description","label":"Description","type":"text","required":true,"showInList":false},
       {"key":"model_number","label":"Model No","type":"text","required":false,"showInList":false},
-      {"key":"serial_number","label":"Serial No","type":"text","required":false,"showInList":false},
-      {"key":"box","label":"Box","type":"boolean","required":false,"showInList":false},
-      {"key":"papers","label":"Papers","type":"boolean","required":false,"showInList":false}
+      {"key":"serial_number","label":"Serial No","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-accessory'`,
-    // Watches: Reference Number + Case Diameter (mm) prominent als Pflichtfelder.
+    // WATCH — Diamonds + Strap Type optional.
     `UPDATE categories SET attributes = '[
       {"key":"reference_number","label":"Reference Number","type":"text","required":true,"showInList":true},
       {"key":"model","label":"Model / Name","type":"text","required":true,"showInList":true},
@@ -258,8 +261,8 @@ function runMigrations(database: Database): void {
       {"key":"dial","label":"Dial","type":"text","required":true,"showInList":false},
       {"key":"bezel","label":"Bezel","type":"text","required":true,"showInList":false},
       {"key":"material","label":"Material","type":"select","options":["Steel","Gold","Rose Gold","White Gold","Two-Tone","Titanium","Plated"],"required":true,"showInList":true},
-      {"key":"diamonds","label":"Diamonds","type":"boolean","required":true,"showInList":false},
-      {"key":"strap_type","label":"Strap Type","type":"select","options":["Leather","Rubber"],"required":true,"showInList":false},
+      {"key":"diamonds","label":"Diamonds","type":"boolean","required":false,"showInList":false},
+      {"key":"strap_type","label":"Strap Type","type":"select","options":["Leather","Rubber"],"required":false,"showInList":false},
       {"key":"movement","label":"Movement / Caliber","type":"text","required":false,"showInList":false},
       {"key":"year","label":"Year","type":"number","required":false,"showInList":false},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
@@ -474,6 +477,35 @@ function runMigrations(database: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_sales_returns_invoice ON sales_returns(invoice_id)`,
     `CREATE INDEX IF NOT EXISTS idx_sales_returns_branch ON sales_returns(branch_id)`,
 
+    // Credit Notes (Storno-Rechnungen) — eigenständige Steuerurkunde, 1:1 zu Sales Return
+    // Industry standard (SAP/DATEV/Xero/QuickBooks): jeder Return erzeugt automatisch eine Credit Note
+    // mit eigener Nummer (CN-YYYY-NNNNN), die in der Customer-/Invoice-History klickbar verlinkt ist.
+    `CREATE TABLE IF NOT EXISTS credit_notes (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      credit_note_number TEXT NOT NULL,
+      invoice_id TEXT NOT NULL,
+      sales_return_id TEXT,
+      customer_id TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      total_amount REAL NOT NULL DEFAULT 0,
+      vat_amount REAL NOT NULL DEFAULT 0,
+      cash_refund_amount REAL NOT NULL DEFAULT 0,
+      receivable_cancel_amount REAL NOT NULL DEFAULT 0,
+      refund_method TEXT,
+      reason TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_credit_notes_invoice ON credit_notes(invoice_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_credit_notes_customer ON credit_notes(customer_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_credit_notes_branch ON credit_notes(branch_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_credit_notes_return ON credit_notes(sales_return_id)`,
+    // Seed credit note doc-type sequence
+    `INSERT OR IGNORE INTO document_sequences (doc_type, prefix, next_number, include_year, padding, updated_at)
+     VALUES ('CN', 'CN', 1, 1, 6, datetime('now'))`,
+
     // ── Phase 4: Banking + Partner (Plan §Banking §10 Transfers, §Partner) ──
 
     // Bank Transfers (Cash↔Bank) — Plan §Banking §10
@@ -625,6 +657,21 @@ function runMigrations(database: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_agent_settlement_pmt_transfer ON agent_settlement_payments(transfer_id)`,
     // #6 Expense Status Field
     `ALTER TABLE expenses ADD COLUMN status TEXT DEFAULT 'PAID'`,
+    // #6b Expense Partial-Payment-Tracking (Plan §Expenses §Pay-Later)
+    `ALTER TABLE expenses ADD COLUMN paid_amount REAL DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS expense_payments (
+      id TEXT PRIMARY KEY,
+      expense_id TEXT NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+      amount REAL NOT NULL,
+      method TEXT NOT NULL,
+      paid_at TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_expense_pmt_expense ON expense_payments(expense_id)`,
+    // Backfill: bestehende PAID-Expenses auf paid_amount = amount setzen,
+    // damit sie nicht als „offen" in /payables erscheinen.
+    `UPDATE expenses SET paid_amount = amount WHERE status = 'PAID' AND paid_amount = 0`,
     // #7 Production Cost Tracking + Status (production_records existiert)
     `ALTER TABLE production_records ADD COLUMN status TEXT DEFAULT 'COMPLETED'`,
     `ALTER TABLE production_records ADD COLUMN labor_cost REAL DEFAULT 0`,
@@ -644,6 +691,83 @@ function runMigrations(database: Database): void {
         console.warn('Migration skipped:', msg);
       }
     }
+  }
+
+  // Plan §Returns §History (Round 4) — Daten-Migration:
+  // Restoriert historischen invoice.paid_amount für Invoices die durch alte Refund-Logik
+  // reduziert wurden. Idempotent via settings-Flag.
+  try {
+    const flag = database.exec(
+      `SELECT value FROM settings WHERE key = 'migration.return_paid_amount_historical_v1'`
+    );
+    const alreadyApplied = flag.length > 0 && flag[0].values.length > 0 && flag[0].values[0][0] === '1';
+    if (!alreadyApplied) {
+      // 1) paid_amount += sum der refund_paid_amount aller refundeten Returns auf dieser Invoice.
+      database.run(
+        `UPDATE invoices
+            SET paid_amount = paid_amount + COALESCE((
+              SELECT SUM(refund_paid_amount)
+                FROM sales_returns
+               WHERE invoice_id = invoices.id
+                 AND status != 'REJECTED'
+                 AND refund_paid_amount > 0
+            ), 0)
+          WHERE id IN (
+            SELECT DISTINCT invoice_id
+              FROM sales_returns
+             WHERE status != 'REJECTED' AND refund_paid_amount > 0
+          )`
+      );
+      // 2) Status korrigieren: Invoices die durch alten Auto-Cancel auf CANCELLED gesetzt
+      //    wurden (paid wurde 0 → cancel), zurück auf FINAL/PARTIAL setzen.
+      database.run(
+        `UPDATE invoices
+            SET status = CASE
+              WHEN paid_amount >= gross_amount - 0.005 THEN 'FINAL'
+              WHEN paid_amount > 0 THEN 'PARTIAL'
+              ELSE 'DRAFT'
+            END
+          WHERE status = 'CANCELLED'
+            AND id IN (
+              SELECT DISTINCT invoice_id
+                FROM sales_returns
+               WHERE status != 'REJECTED' AND refund_paid_amount > 0
+            )`
+      );
+      // Flag setzen, damit Migration nur einmal läuft.
+      database.run(
+        `INSERT OR REPLACE INTO settings (branch_id, key, value, category, updated_at)
+         VALUES ('branch-main', 'migration.return_paid_amount_historical_v1', '1', 'system', datetime('now'))`
+      );
+    }
+  } catch (err) {
+    console.warn('paid_amount-historical migration failed:', err);
+  }
+
+  // Plan §Order — Order-Status-Vereinfachung v1:
+  // Reduziert die 8 Status-Werte auf 5 (pending/arrived/notified/completed/cancelled).
+  // Alte Werte deposit_received/sourcing/sourced werden auf 'pending' gemappt
+  // (Zahlungs-/Beschaffungs-Stand wird ab jetzt aus order_payments + paymentStatus abgeleitet).
+  // Idempotent via settings-Flag.
+  try {
+    const flag = database.exec(
+      `SELECT value FROM settings WHERE key = 'migration.order_status_v2'`
+    );
+    const alreadyApplied = flag.length > 0 && flag[0].values.length > 0 && flag[0].values[0][0] === '1';
+    if (!alreadyApplied) {
+      database.run(
+        `UPDATE orders
+            SET status = 'pending',
+                updated_at = datetime('now')
+          WHERE status IN ('deposit_received', 'sourcing', 'sourced')`
+      );
+      database.run(
+        `INSERT OR REPLACE INTO settings (branch_id, key, value, category, updated_at)
+         VALUES ('branch-main', 'migration.order_status_v2', '1', 'system', datetime('now'))`
+      );
+    }
+  } catch (err) {
+    console.warn('order_status_v2 migration failed:', err);
   }
 }
 
@@ -1154,10 +1278,10 @@ async function seedFreshDatabase(database: Database): Promise<void> {
   );
 
   // ── Demo order ──
-  // ORD-2026-00001: c-5, Patek Aquanaut, sourcing
+  // ORD-2026-00001: c-5, Patek Aquanaut, pending (deposit erhalten = payment partial, order pending)
   database.run(
     `INSERT INTO orders (id, branch_id, order_number, customer_id, requested_brand, requested_model, agreed_price, deposit_amount, deposit_paid, deposit_date, remaining_amount, status, created_at, updated_at, created_by)
-     VALUES (?, 'branch-main', 'ORD-2026-00001', 'c-5', 'Patek Philippe', 'Aquanaut', 95000, 20000, 1, ?, 75000, 'sourcing', ?, ?, 'user-owner')`,
+     VALUES (?, 'branch-main', 'ORD-2026-00001', 'c-5', 'Patek Philippe', 'Aquanaut', 95000, 20000, 1, ?, 75000, 'pending', ?, ?, 'user-owner')`,
     [uuid(), now, now, now]
   );
 

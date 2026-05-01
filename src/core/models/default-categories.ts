@@ -16,9 +16,9 @@ const WATCH_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'material', label: 'Material', type: 'select',
     options: ['Steel', 'Gold', 'Rose Gold', 'White Gold', 'Two-Tone', 'Titanium', 'Plated'],
     required: true, showInList: true },
-  { key: 'diamonds', label: 'Diamonds', type: 'boolean', required: true, showInList: false },
+  { key: 'diamonds', label: 'Diamonds', type: 'boolean', required: false, showInList: false },
   { key: 'strap_type', label: 'Strap Type', type: 'select',
-    options: ['Leather', 'Rubber'], required: true, showInList: false },
+    options: ['Leather', 'Rubber'], required: false, showInList: false },
   { key: 'movement', label: 'Movement / Caliber', type: 'text', required: false, showInList: false },
   { key: 'year', label: 'Year', type: 'number', required: false, showInList: false },
   { key: 'description', label: 'Description', type: 'text', required: false, showInList: false },
@@ -39,7 +39,7 @@ const GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'description', label: 'Description', type: 'text', required: false, showInList: false },
 ];
 
-// Plan §4.3 BRANDED_GOLD_JEWELRY — User-Vorgabe: Brand/Model/Size/Karat + Item Type + Color
+// Plan §4.3 BRANDED_GOLD_JEWELRY — User-Vorgabe: schlanke Eingabemaske ohne Model/Serial/Box/Cert.
 const BRANDED_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'item_type', label: 'Item Type', type: 'select',
     options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch'],
@@ -52,14 +52,10 @@ const BRANDED_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
     options: ['24K', '22K', '21K', '18K', '14K', '9K'], required: true, showInList: true },
   { key: 'weight', label: 'Weight', type: 'number', unit: 'g', required: false, showInList: true },
   { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct', required: false, showInList: true },
-  { key: 'model_number', label: 'Model Number', type: 'text', required: false, showInList: false },
-  { key: 'serial_number', label: 'Serial Number', type: 'text', required: false, showInList: false },
-  { key: 'certificate', label: 'Certificate', type: 'boolean', required: false, showInList: false },
-  { key: 'box', label: 'Box', type: 'boolean', required: false, showInList: false },
   { key: 'description', label: 'Description', type: 'text', required: false, showInList: false },
 ];
 
-// Plan §4.4 ORIGINAL_GOLD_JEWELRY — User-Vorgabe: identisch zu Branded
+// Plan §4.4 ORIGINAL_GOLD_JEWELRY — User-Vorgabe: zusätzlich Model/Serial/Year (alle optional), size optional.
 const ORIGINAL_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'item_type', label: 'Item Type', type: 'select',
     options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch'],
@@ -67,15 +63,20 @@ const ORIGINAL_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'color_type', label: 'Color', type: 'select',
     options: ['Yellow Gold', 'Rose Gold', 'White Gold', 'Two-Tone'],
     required: true, showInList: true },
-  { key: 'size', label: 'Size', type: 'text', required: true, showInList: true },
+  { key: 'size', label: 'Size', type: 'text', required: false, showInList: true },
   { key: 'karat', label: 'Karat', type: 'select',
     options: ['24K', '22K', '21K', '18K', '14K', '9K'], required: true, showInList: true },
   { key: 'weight', label: 'Weight', type: 'number', unit: 'g', required: false, showInList: true },
   { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct', required: false, showInList: true },
+  { key: 'model_name', label: 'Model Name', type: 'text', required: false, showInList: true },
+  { key: 'model_number', label: 'Model Number', type: 'text', required: false, showInList: false },
+  { key: 'serial_number', label: 'Serial Number', type: 'text', required: false, showInList: false },
+  { key: 'year', label: 'Year', type: 'number', required: false, showInList: false },
   { key: 'description', label: 'Description', type: 'text', required: false, showInList: false },
 ];
 
-// Plan §4.5 ACCESSORY — User-Vorgabe: Item Type oben, Color/Material frei
+// Plan §4.5 ACCESSORY — User-Vorgabe: Item Type oben, Color/Material frei.
+// Box/Papers werden über das "Included"-Multi-Select abgebildet, daher hier entfernt.
 const ACCESSORY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'item_type', label: 'Item Type', type: 'select',
     options: ['Handbag', 'Eyeglass', 'Wallet', 'Lighter', 'Cufflinks', 'Prayer Beads', 'Walking Stick', 'Pen', 'Key Holder', 'Other'],
@@ -85,8 +86,6 @@ const ACCESSORY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'description', label: 'Description', type: 'text', required: true, showInList: false },
   { key: 'model_number', label: 'Model No', type: 'text', required: false, showInList: false },
   { key: 'serial_number', label: 'Serial No', type: 'text', required: false, showInList: false },
-  { key: 'box', label: 'Box', type: 'boolean', required: false, showInList: false },
-  { key: 'papers', label: 'Papers', type: 'boolean', required: false, showInList: false },
 ];
 
 // Plan §4.6 SPARE_PART
@@ -134,7 +133,7 @@ export const DEFAULT_CATEGORIES: Omit<Category, 'createdAt'>[] = [
     sortOrder: 3,
     active: true,
     conditionOptions: ['New', 'Pre-Owned', 'Vintage'],
-    scopeOptions: ['Box', 'Certificate', 'Papers', 'Pouch', 'Receipt'],
+    scopeOptions: [], // User-Wunsch: kein "Included"-Feld
     attributes: BRANDED_GOLD_JEWELRY_ATTRIBUTES,
   },
   {
@@ -145,7 +144,7 @@ export const DEFAULT_CATEGORIES: Omit<Category, 'createdAt'>[] = [
     sortOrder: 4,
     active: true,
     conditionOptions: ['New', 'Pre-Owned', 'Vintage', 'Antique'],
-    scopeOptions: ['Box', 'Certificate', 'Appraisal', 'Pouch'],
+    scopeOptions: ['Box', 'Certificate'],
     attributes: ORIGINAL_GOLD_JEWELRY_ATTRIBUTES,
   },
   {
