@@ -326,7 +326,7 @@ export type EventType =
   // Consignment
   | 'consignment.created' | 'consignment.sold' | 'consignment.paid_out' | 'consignment.returned' | 'consignment.expired'
   // Agent
-  | 'agent.created' | 'agent_transfer.created' | 'agent_transfer.sold' | 'agent_transfer.returned' | 'agent_transfer.settled'
+  | 'agent.created' | 'agent_transfer.created' | 'agent_transfer.sold' | 'agent_transfer.returned' | 'agent_transfer.settled' | 'agent_transfer.invoice_created' | 'agent_transfer.invoice_undone'
   // Order
   | 'order.created' | 'order.deposit_received' | 'order.sourced' | 'order.arrived' | 'order.notified' | 'order.completed' | 'order.cancelled'
   // System
