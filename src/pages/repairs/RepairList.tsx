@@ -10,8 +10,61 @@ import { SearchSelect } from '@/components/ui/SearchSelect';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useRepairStore } from '@/stores/repairStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Repair, RepairStatus } from '@/core/models/types';
+
+// Plan §Repair §Item-Details: vereinfachte kategoriespezifische Felder.
+// Ähnlich Collection-Attributes, aber bewusst schlanker für Repair-Use-Case.
+// Brand/Model werden weiterhin in den Repair-Top-Level-Feldern gespeichert
+// (item_brand/item_model); kategorie-spezifische Felder landen in item_attributes.
+type RepairFieldType = 'text' | 'number' | 'select';
+interface RepairFieldDef {
+  key: string;
+  label: string;
+  type: RepairFieldType;
+  options?: string[];
+  unit?: string;
+  required?: boolean;
+  /** Wenn `coreField` gesetzt → speichert in repair.item_brand/itemModel/etc. statt itemAttributes. */
+  coreField?: 'itemBrand' | 'itemModel' | 'itemReference' | 'itemSerial';
+}
+const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
+  'cat-watch': [
+    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
+    { key: 'model', label: 'Model', type: 'text', required: true, coreField: 'itemModel' },
+    { key: 'reference', label: 'Reference', type: 'text', coreField: 'itemReference' },
+    { key: 'serial', label: 'Serial Number', type: 'text', coreField: 'itemSerial' },
+  ],
+  'cat-gold-jewelry': [
+    { key: 'item_type', label: 'Type', type: 'select',
+      options: ['Ring', 'Necklace', 'Bracelet', 'Bangle', 'Brooch', 'Pendant', 'Earrings', 'Other'], required: true },
+    { key: 'weight', label: 'Weight', type: 'number', unit: 'g' },
+    { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct' },
+  ],
+  'cat-branded-gold-jewelry': [
+    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
+    { key: 'item_type', label: 'Type', type: 'select',
+      options: ['Ring', 'Necklace', 'Bracelet', 'Bangle', 'Brooch', 'Pendant', 'Earrings', 'Other'], required: true },
+    { key: 'weight', label: 'Weight', type: 'number', unit: 'g' },
+  ],
+  'cat-original-gold-jewelry': [
+    { key: 'item_type', label: 'Type', type: 'select',
+      options: ['Ring', 'Necklace', 'Bracelet', 'Bangle', 'Brooch', 'Pendant', 'Earrings', 'Other'], required: true },
+    { key: 'weight', label: 'Weight', type: 'number', unit: 'g' },
+    { key: 'karat', label: 'Karat', type: 'select',
+      options: ['24K', '22K', '21K', '18K', '14K', '9K'] },
+    { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct' },
+  ],
+  'cat-accessory': [
+    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
+    { key: 'model', label: 'Model / Type', type: 'text', coreField: 'itemModel' },
+  ],
+  'cat-spare-part': [
+    { key: 'name', label: 'Part Name', type: 'text', required: true, coreField: 'itemModel' },
+    { key: 'reference', label: 'Reference / SKU', type: 'text', coreField: 'itemReference' },
+  ],
+};
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -35,16 +88,32 @@ export function RepairList() {
   const navigate = useNavigate();
   const { repairs, loadRepairs, createRepair, updateStatus } = useRepairStore();
   const { customers, loadCustomers } = useCustomerStore();
+  const { categories, loadCategories } = useProductStore();
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState<RepairStatus | ''>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   const [form, setForm] = useState<Partial<Repair>>({
     repairType: 'internal',
+    taxScheme: 'VAT_10',
+    itemAttributes: {},
   });
   const [searchParams, setSearchParams] = useSearchParams();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); }, [loadRepairs, loadCustomers]);
+  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); }, [loadRepairs, loadCustomers, loadCategories]);
+
+  // Filter Repair-Service-Kategorien aus der UI raus (interne Service-Items, keine Repair-Items)
+  const repairableCategories = useMemo(
+    () => categories.filter(c => !c.id.startsWith('cat-repair-service')),
+    [categories]
+  );
+
+  // Aktive Field-Liste für die gewählte Kategorie. Falls keine Kategorie gewählt
+  // oder unbekannt (Legacy-Repairs) → leere Liste, dann werden generische Felder gezeigt.
+  const activeFields: RepairFieldDef[] = useMemo(() => {
+    if (!form.itemCategoryId) return [];
+    return REPAIR_FIELDS[form.itemCategoryId] || [];
+  }, [form.itemCategoryId]);
 
   // Pre-fill customer from URL
   useEffect(() => {
@@ -78,19 +147,43 @@ export function RepairList() {
   }, [repairs, searchQuery, filterStatus, customers]);
 
   function openNew() {
-    setForm({ repairType: 'internal' });
+    setForm({
+      repairType: 'internal',
+      taxScheme: 'VAT_10',
+      itemAttributes: {},
+    });
     setShowNew(true);
+  }
+
+  function setRepairAttr(key: string, value: string | number | boolean) {
+    setForm(f => ({ ...f, itemAttributes: { ...(f.itemAttributes || {}), [key]: value } }));
+  }
+
+  function setRepairCoreField(field: NonNullable<RepairFieldDef['coreField']>, value: string) {
+    setForm(f => ({ ...f, [field]: value }));
   }
 
   function handleCreate() {
     if (!form.customerId || !form.issueDescription) return;
-    createRepair(form);
+    // Plan §Repair §External: bei external/hybrid soll Estimated Cost als
+    // internalCost mitlaufen, damit die Expense-Auto-Erzeugung bei Status='ready'
+    // greift (siehe repairStore.updateStatus → external/hybrid → expenses).
+    const effectiveInternalCost =
+      (form.repairType === 'external' || form.repairType === 'hybrid')
+        ? (form.internalCost || form.estimatedCost || 0)
+        : (form.internalCost || 0);
+    createRepair({ ...form, internalCost: effectiveInternalCost });
     setShowNew(false);
   }
 
   function handleQuickStatus(e: React.MouseEvent, repairId: string, newStatus: RepairStatus) {
     e.stopPropagation();
-    updateStatus(repairId, newStatus);
+    try {
+      updateStatus(repairId, newStatus);
+    } catch (err) {
+      // Plan §Repair §Picked-Up-Gate: charge > 0 → Invoice + Payment Pflicht.
+      alert(err instanceof Error ? err.message : String(err));
+    }
   }
 
   const activeCount = repairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled').length;
@@ -278,19 +371,95 @@ export function RepairList() {
             >+ New Client</button>
           </div>
 
-          {/* Item Details */}
+          {/* Item Details — kategoriebasiert (Plan §Repair §Item-Details) */}
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
-            <span className="text-overline" style={{ marginBottom: 12 }}>ITEM DETAILS</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
-              <Input label="BRAND" placeholder="e.g. Rolex, Cartier" value={form.itemBrand || ''} onChange={e => setForm({ ...form, itemBrand: e.target.value })} />
-              <Input label="MODEL" placeholder="e.g. Submariner" value={form.itemModel || ''} onChange={e => setForm({ ...form, itemModel: e.target.value })} />
+            <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>ITEM CATEGORY</span>
+            <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
+              {repairableCategories.map(cat => {
+                const active = form.itemCategoryId === cat.id;
+                return (
+                  <button key={cat.id}
+                    onClick={() => setForm({ ...form, itemCategoryId: cat.id, itemAttributes: {}, itemBrand: undefined, itemModel: undefined, itemReference: undefined, itemSerial: undefined })}
+                    className="cursor-pointer rounded-lg transition-all duration-200"
+                    style={{
+                      padding: '8px 14px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6,
+                      border: `1px solid ${active ? cat.color : '#D5D9DE'}`,
+                      color: active ? cat.color : '#6B7280',
+                      background: active ? cat.color + '08' : 'transparent',
+                    }}>
+                    <span className="rounded-full" style={{ width: 5, height: 5, background: cat.color }} />
+                    {cat.name}
+                  </button>
+                );
+              })}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 16 }}>
-              <Input label="REFERENCE" placeholder="Ref. number" value={form.itemReference || ''} onChange={e => setForm({ ...form, itemReference: e.target.value })} />
-              <Input label="SERIAL" placeholder="Serial number" value={form.itemSerial || ''} onChange={e => setForm({ ...form, itemSerial: e.target.value })} />
-            </div>
+
+            {/* Kategorie-spezifische Felder */}
+            {activeFields.length > 0 && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
+                {activeFields.map(field => {
+                  const value = field.coreField
+                    ? (form[field.coreField] as string | undefined) || ''
+                    : (form.itemAttributes?.[field.key] as string | number | undefined) ?? '';
+                  if (field.type === 'select' && field.options) {
+                    return (
+                      <div key={field.key}>
+                        <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                          {field.label.toUpperCase()}
+                          {field.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                        </span>
+                        <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
+                          {field.options.map(opt => {
+                            const sel = value === opt;
+                            return (
+                              <button key={opt}
+                                onClick={() => field.coreField
+                                  ? setRepairCoreField(field.coreField, opt)
+                                  : setRepairAttr(field.key, opt)}
+                                className="cursor-pointer transition-all duration-200"
+                                style={{
+                                  padding: '4px 10px', fontSize: 11, borderRadius: 999,
+                                  border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
+                                  color: sel ? '#0F0F10' : '#6B7280',
+                                  background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                }}>{opt}</button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <Input key={field.key}
+                      required={field.required}
+                      label={field.label.toUpperCase() + (field.unit ? ` (${field.unit})` : '')}
+                      type={field.type === 'number' ? 'number' : 'text'}
+                      placeholder={field.label}
+                      value={String(value)}
+                      onChange={e => {
+                        const v = field.type === 'number' ? Number(e.target.value) : e.target.value;
+                        if (field.coreField) {
+                          setRepairCoreField(field.coreField, String(v));
+                        } else {
+                          setRepairAttr(field.key, v);
+                        }
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Generische Brand/Model wenn keine Kategorie gewählt (Legacy / Quick-Capture) */}
+            {!form.itemCategoryId && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
+                <Input label="BRAND" placeholder="e.g. Rolex, Cartier" value={form.itemBrand || ''} onChange={e => setForm({ ...form, itemBrand: e.target.value })} />
+                <Input label="MODEL" placeholder="e.g. Submariner" value={form.itemModel || ''} onChange={e => setForm({ ...form, itemModel: e.target.value })} />
+              </div>
+            )}
+
             <div style={{ marginTop: 16 }}>
-              <Input label="ITEM DESCRIPTION" placeholder="Additional details about the item..." value={form.itemDescription || ''} onChange={e => setForm({ ...form, itemDescription: e.target.value })} />
+              <Input label="ITEM DESCRIPTION (OPTIONAL)" placeholder="Additional details about the item..." value={form.itemDescription || ''} onChange={e => setForm({ ...form, itemDescription: e.target.value })} />
             </div>
           </div>
 
@@ -315,7 +484,7 @@ export function RepairList() {
 
           {/* Repair Type */}
           <div>
-            <span className="text-overline" style={{ marginBottom: 8 }}>REPAIR TYPE</span>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>REPAIR TYPE</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
               {(['internal', 'external', 'hybrid'] as Repair['repairType'][]).map(type => (
                 <button key={type} onClick={() => setForm({ ...form, repairType: type })}
@@ -330,25 +499,78 @@ export function RepairList() {
                 </button>
               ))}
             </div>
+            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+              {form.repairType === 'internal' && 'Komplett intern bearbeitet — keine externen Kosten.'}
+              {form.repairType === 'external' && 'Komplett extern bearbeitet — Estimated Cost = Workshop-Rechnung. Wird bei Status „Ready" als Expense gebucht.'}
+              {form.repairType === 'hybrid' && 'Teil intern, Teil extern — der externe Anteil (Estimated Cost) wird als Expense gebucht.'}
+            </p>
           </div>
+
+          {/* External-Workshop-Bereich — nur bei external/hybrid sichtbar */}
+          {(form.repairType === 'external' || form.repairType === 'hybrid') && (
+            <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
+              <span className="text-overline" style={{ marginBottom: 12 }}>EXTERNAL REPAIR DETAILS</span>
+              <div style={{ marginTop: 12 }}>
+                <Input label="WORKSHOP NAME" placeholder="z.B. Swiss Time Workshop"
+                  value={form.externalVendor || ''}
+                  onChange={e => setForm({ ...form, externalVendor: e.target.value })} />
+                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                  Estimated Cost (unten) = was der Workshop berechnet. Wird bei Status „Ready" automatisch als Expense in /expenses + /payables gebucht (status PENDING bis bezahlt).
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Costs */}
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>COSTS</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
-              <Input label="ESTIMATED COST (BHD)" type="number" placeholder="0" value={form.estimatedCost || ''} onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
-              <Input label="CHARGE TO CLIENT (BHD)" type="number" placeholder="0" value={form.chargeToCustomer || ''} onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
+              <Input label={form.repairType === 'internal' ? 'ESTIMATED COST (BHD)' : 'ESTIMATED COST / WORKSHOP FEE (BHD)'}
+                type="number" placeholder="0"
+                value={form.estimatedCost || ''}
+                onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
+              <Input label="CHARGE TO CLIENT (BHD)" type="number" placeholder="0 = free repair"
+                value={form.chargeToCustomer || ''}
+                onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
             </div>
-            {form.estimatedCost && form.chargeToCustomer && (
+
+            {/* Service-Tax-Scheme: Default VAT_10 (Standard für Service in BH).
+                Auf ZERO setzen wenn Service vom Workshop schon mit VAT abgerechnet
+                wurde oder generell nicht VAT-pflichtig ist. */}
+            <div style={{ marginTop: 16 }}>
+              <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SERVICE TAX SCHEME (FOR INVOICE)</span>
+              <div className="flex gap-2" style={{ marginTop: 8 }}>
+                {(['ZERO', 'VAT_10'] as const).map(scheme => (
+                  <button key={scheme} onClick={() => setForm({ ...form, taxScheme: scheme })}
+                    className="cursor-pointer rounded transition-all duration-200"
+                    style={{
+                      padding: '7px 14px', fontSize: 12,
+                      border: `1px solid ${form.taxScheme === scheme ? '#0F0F10' : '#D5D9DE'}`,
+                      color: form.taxScheme === scheme ? '#0F0F10' : '#6B7280',
+                      background: form.taxScheme === scheme ? 'rgba(15,15,16,0.06)' : 'transparent',
+                    }}>{scheme === 'ZERO' ? '0% (no VAT)' : 'VAT 10%'}</button>
+                ))}
+              </div>
+              <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                Wird beim Erstellen der Repair-Invoice angewendet. Charge to Client gilt als gross-incl-VAT bei 10%.
+              </p>
+            </div>
+
+            {(form.estimatedCost || 0) > 0 && (form.chargeToCustomer || 0) > 0 && (
               <div className="rounded font-mono" style={{
                 marginTop: 12, padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
                 fontSize: 13, display: 'flex', justifyContent: 'space-between',
               }}>
                 <span style={{ color: '#6B7280' }}>Estimated Margin</span>
-                <span style={{ color: (form.chargeToCustomer - form.estimatedCost) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                  {fmt(form.chargeToCustomer - form.estimatedCost)} BHD
+                <span style={{ color: ((form.chargeToCustomer || 0) - (form.estimatedCost || 0)) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
+                  {fmt((form.chargeToCustomer || 0) - (form.estimatedCost || 0))} BHD
                 </span>
               </div>
+            )}
+            {(form.chargeToCustomer || 0) === 0 && (
+              <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+                Charge = 0 → Free repair, kein Invoice nötig. Kann direkt nach Fertigstellung auf Picked Up.
+              </p>
             )}
           </div>
 

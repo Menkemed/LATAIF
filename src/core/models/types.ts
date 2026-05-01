@@ -410,6 +410,13 @@ export interface Repair {
   repairNumber: string;
   customerId: UUID;
   productId?: UUID;
+  // Plan §Repair §Item-Details: kategorie-basierte Erfassung (vereinfachte Variante
+  // gegenüber Collection — nur die Kategorie + ein paar wichtige Felder pro Typ).
+  itemCategoryId?: UUID;
+  itemAttributes?: Record<string, string | number | boolean>;
+  // Plan §Repair §Tax: Service-Invoice-Tax-Scheme. Default VAT_10, kann auf
+  // ZERO gesetzt werden falls Service nicht VAT-pflichtig ist.
+  taxScheme?: 'VAT_10' | 'ZERO';
   itemBrand?: string;
   itemModel?: string;
   itemReference?: string;

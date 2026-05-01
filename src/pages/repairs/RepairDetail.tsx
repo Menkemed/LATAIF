@@ -58,6 +58,7 @@ export function RepairDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { repairs, loadRepairs, updateRepair, updateStatus, deleteRepair } = useRepairStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const [editing, setEditing] = useState(false);
@@ -67,7 +68,7 @@ export function RepairDetail() {
   const [showHistory, setShowHistory] = useState(false);
   const perm = usePermission();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadProducts(); loadCategories(); }, [loadRepairs, loadCustomers, loadProducts, loadCategories]);
+  useEffect(() => { loadRepairs(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices]);
 
   const repair = useMemo(() => repairs.find(r => r.id === id), [repairs, id]);
   const customer = useMemo(() => repair ? customers.find(c => c.id === repair.customerId) : null, [repair, customers]);
@@ -90,28 +91,47 @@ export function RepairDetail() {
     ? repair.chargeToCustomer - repair.internalCost
     : null;
 
-  // Plan §Repair §12: Wenn fertig → Invoice (INV) erstellen, Repair bleibt bestehen, Invoice verknüpft.
-  function handleCreateRepairInvoice() {
-    if (!repair || !id || !customer || !repair.chargeToCustomer || repair.chargeToCustomer <= 0) return;
-    // Service-Line ohne Product (Repair-Dienstleistung). Wir nutzen productId optional — manche Repairs haben kein Produkt.
-    // Fallback: nutze repair.productId wenn vorhanden, sonst dummy 'repair-service'.
-    const productId = repair.productId || 'repair-service';
-    const unitPrice = repair.chargeToCustomer;
-    const rate = 10; // Repairs default VAT_10
-    const vatAmount = Math.round((unitPrice * rate / (100 + rate)) * 1000) / 1000;
-    const netAmount = unitPrice - vatAmount;
+  // Plan §Repair §Service-Invoice: Service-Item statt Lager-Produkt.
+  // Lazy-seeded "Repair Service"-Produkt pro Branch (idempotent). VAT folgt
+  // repair.taxScheme (vom New-Repair-Modal gewählt: 0% oder 10%).
+  async function handleCreateRepairInvoice() {
+    if (!repair || !id || !customer) return;
+    if (!repair.chargeToCustomer || repair.chargeToCustomer <= 0) {
+      alert('Repair has no charge — no invoice needed. Set Charge to Client first.');
+      return;
+    }
+    if (repair.invoiceId) {
+      const existing = invoices.find(i => i.id === repair.invoiceId);
+      if (existing) {
+        navigate(`/invoices/${existing.id}`);
+        return;
+      }
+    }
+    const { getOrCreateRepairServiceProductId } = await import('@/stores/repairStore');
+    const { currentBranchId: getBranch } = await import('@/core/db/helpers');
+    let branchId: string;
+    try { branchId = getBranch(); } catch { branchId = 'branch-main'; }
+    const productId = getOrCreateRepairServiceProductId(branchId);
+
+    const grossCharge = repair.chargeToCustomer;
+    const scheme = repair.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10';
+    const rate = scheme === 'VAT_10' ? 10 : 0;
+    // chargeToCustomer ist gross-incl-VAT. Bei VAT_10 → Net = gross/1.1.
+    const netAmount = scheme === 'VAT_10' ? grossCharge / (1 + rate / 100) : grossCharge;
+    const vatAmount = grossCharge - netAmount;
+
     const invoice = useInvoiceStore.getState().createDirectInvoice(
       repair.customerId,
       [{
         productId,
         unitPrice: netAmount,
         purchasePrice: repair.internalCost || 0,
-        taxScheme: 'VAT_10',
+        taxScheme: scheme,
         vatRate: rate,
         vatAmount,
-        lineTotal: unitPrice,
+        lineTotal: grossCharge,
       }],
-      `Repair ${repair.repairNumber} · ${repair.issueDescription || ''}`
+      `Repair Service · ${repair.repairNumber}${repair.issueDescription ? ' · ' + repair.issueDescription : ''}`
     );
     if (invoice) {
       updateRepair(id, { invoiceId: invoice.id });
@@ -148,7 +168,13 @@ export function RepairDetail() {
 
   function handleStatusAdvance() {
     if (!id || !nextStatus) return;
-    updateStatus(id, nextStatus);
+    try {
+      updateStatus(id, nextStatus);
+    } catch (err) {
+      // Plan §Repair §Picked-Up-Gate: charge > 0 → Invoice + Payment vorher Pflicht.
+      // updateStatus throwt mit verständlicher Fehlermeldung; an User durchreichen.
+      alert(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function handleDelete() {

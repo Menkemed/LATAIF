@@ -151,8 +151,12 @@ export function WatchList() {
   useEffect(() => { loadCategories(); loadProducts(); }, [loadCategories, loadProducts]);
 
   const filtered = useMemo(() => {
-    // Consignment items are excluded from the inventory view by default.
-    let r = products.filter(p => p.stockStatus !== 'consignment');
+    // Consignment items + interne Service-Produkte (Repair Service) sind aus der
+    // Inventory-View ausgeblendet. Service-Produkte haben categoryId='cat-repair-service-*'.
+    let r = products.filter(p =>
+      p.stockStatus !== 'consignment' &&
+      !(p.categoryId || '').startsWith('cat-repair-service')
+    );
     if (searchQuery) {
       r = r.filter(p => matchesDeep(p, searchQuery, [categories.find(c => c.id === p.categoryId)]));
     }
@@ -204,7 +208,7 @@ export function WatchList() {
                 color: !filterCategory ? '#0F0F10' : '#6B7280',
                 background: !filterCategory ? 'rgba(15,15,16,0.06)' : 'transparent',
               }}>All</button>
-            {categories.map(cat => (
+            {categories.filter(c => !c.id.startsWith('cat-repair-service')).map(cat => (
               <button key={cat.id} onClick={() => setFilterCategory(cat.id)}
                 className="cursor-pointer transition-all duration-200"
                 style={{
@@ -340,7 +344,7 @@ export function WatchList() {
               <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
             </span>
             <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
-              {categories.map(cat => (
+              {categories.filter(c => !c.id.startsWith('cat-repair-service')).map(cat => (
                 <button key={cat.id}
                   onClick={() => {
                     setSelectedCat(cat);

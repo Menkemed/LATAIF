@@ -218,6 +218,11 @@ function runMigrations(database: Database): void {
     `ALTER TABLE purchase_lines ADD COLUMN tax_scheme TEXT`,
     `ALTER TABLE purchase_lines ADD COLUMN vat_rate REAL DEFAULT 0`,
     `ALTER TABLE purchase_lines ADD COLUMN vat_amount REAL DEFAULT 0`,
+    // Plan §Repair §Item-Details: kategorie-basierte Item-Erfassung. Felder
+    // ergänzen statt ersetzen, damit Legacy-Repairs ohne Kategorie weiter funktionieren.
+    `ALTER TABLE repairs ADD COLUMN item_category_id TEXT`,
+    `ALTER TABLE repairs ADD COLUMN item_attributes TEXT DEFAULT '{}'`,
+    `ALTER TABLE repairs ADD COLUMN tax_scheme TEXT DEFAULT 'VAT_10'`,
     // Optionale Tax-Felder auf Order-Ebene (für die Pricing-Section)
     `ALTER TABLE orders ADD COLUMN tax_amount REAL DEFAULT 0`,
     `ALTER TABLE orders ADD COLUMN payment_method TEXT`,

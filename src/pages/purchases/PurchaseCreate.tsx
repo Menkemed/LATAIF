@@ -70,12 +70,16 @@ export function PurchaseCreate() {
     label: s.name,
     subtitle: s.phone || s.email,
   })), [suppliers]);
-  const productOptions = useMemo(() => products.map(p => ({
-    id: p.id,
-    label: `${p.brand} ${p.name}`,
-    subtitle: p.sku || undefined,
-    meta: `${fmt(p.purchasePrice || 0)} BHD`,
-  })), [products]);
+  const productOptions = useMemo(() =>
+    products
+      .filter(p => !(p.categoryId || '').startsWith('cat-repair-service'))
+      .map(p => ({
+        id: p.id,
+        label: `${p.brand} ${p.name}`,
+        subtitle: p.sku || undefined,
+        meta: `${fmt(p.purchasePrice || 0)} BHD`,
+      })),
+    [products]);
 
   // unit_price ist gross-incl-VAT (was an Lieferanten gezahlt wird).
   // total bleibt gross; net + vat-out werden für Anzeige + Reports dekomponiert.

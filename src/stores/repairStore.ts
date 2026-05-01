@@ -5,6 +5,41 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { useInvoiceStore } from '@/stores/invoiceStore';
+
+// Plan §Repair §Service-Invoice: Lazy-seeded "Repair Service"-Kategorie + ein
+// virtuelles Service-Produkt pro Branch. Wird beim Convert-to-Invoice als Line-Item
+// genutzt — Repairs sollen nicht wie Lager-Produkte gebucht werden.
+// Idempotent: erster Aufruf erzeugt, alle weiteren liefern die ID.
+export function getOrCreateRepairServiceProductId(branchId: string): string {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  // 1. Spezial-Kategorie sicherstellen (eine pro Branch).
+  const catId = `cat-repair-service-${branchId}`;
+  const catExists = query('SELECT id FROM categories WHERE id = ?', [catId]);
+  if (catExists.length === 0) {
+    db.run(
+      `INSERT INTO categories (id, branch_id, name, icon, color, attributes, scope_options, condition_options, active, sort_order, created_at, updated_at)
+       VALUES (?, ?, 'Repair Service', 'Wrench', '#0EA5C5', '[]', '[]', '[]', 1, 99, ?, ?)`,
+      [catId, branchId, now, now]
+    );
+  }
+  // 2. Service-Produkt sicherstellen.
+  const prodId = `svc-repair-${branchId}`;
+  const prodExists = query('SELECT id FROM products WHERE id = ?', [prodId]);
+  if (prodExists.length === 0) {
+    db.run(
+      `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
+        purchase_date, purchase_price, purchase_currency, stock_status, tax_scheme, expected_margin, days_in_stock,
+        supplier_name, notes, images, attributes, source_type, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, '', 'Repair Service', NULL, '', '[]', NULL, 0, 'BHD', 'in_stock', 'VAT_10', NULL, 0,
+               NULL, 'Internal service item — used for Repair invoices.', '[]', '{}', 'OWN', ?, ?, NULL)`,
+      [prodId, branchId, catId, now, now]
+    );
+  }
+  saveDatabase();
+  return prodId;
+}
 
 interface RepairStore {
   repairs: Repair[];
@@ -22,11 +57,16 @@ interface RepairStore {
 }
 
 function rowToRepair(row: Record<string, unknown>): Repair {
+  let itemAttrs: Record<string, string | number | boolean> = {};
+  try { itemAttrs = JSON.parse((row.item_attributes as string) || '{}'); } catch { /* */ }
   return {
     id: row.id as string,
     repairNumber: row.repair_number as string,
     customerId: row.customer_id as string,
     productId: row.product_id as string | undefined,
+    itemCategoryId: (row.item_category_id as string | null) || undefined,
+    itemAttributes: itemAttrs,
+    taxScheme: ((row.tax_scheme as string | null) === 'ZERO' ? 'ZERO' : 'VAT_10') as 'ZERO' | 'VAT_10',
     itemBrand: row.item_brand as string | undefined,
     itemModel: row.item_model as string | undefined,
     itemReference: row.item_reference as string | undefined,
@@ -98,13 +138,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     db.run(
       `INSERT INTO repairs (id, branch_id, repair_number, customer_id, product_id,
+        item_category_id, item_attributes, tax_scheme,
         item_brand, item_model, item_reference, item_serial, item_description,
         issue_description, diagnosis, repair_type, external_vendor,
         estimated_cost, internal_cost, charge_to_customer,
         status, received_at, estimated_ready, voucher_code,
         notes, images, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, '[]', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, '[]', ?, ?, ?)`,
       [id, branchId, repairNumber, data.customerId, data.productId || null,
+       data.itemCategoryId || null, JSON.stringify(data.itemAttributes || {}), data.taxScheme || 'VAT_10',
        data.itemBrand || null, data.itemModel || null, data.itemReference || null,
        data.itemSerial || null, data.itemDescription || null,
        data.issueDescription || '', data.diagnosis || null,
@@ -135,6 +177,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     const map: Record<string, string> = {
       customerId: 'customer_id', productId: 'product_id',
+      itemCategoryId: 'item_category_id', taxScheme: 'tax_scheme',
       itemBrand: 'item_brand', itemModel: 'item_model', itemReference: 'item_reference',
       itemSerial: 'item_serial', itemDescription: 'item_description',
       issueDescription: 'issue_description', diagnosis: 'diagnosis',
@@ -152,6 +195,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     for (const [k, v] of Object.entries(data)) {
       const col = map[k];
       if (col) { fields.push(`${col} = ?`); values.push(v); }
+    }
+    if (data.itemAttributes !== undefined) {
+      fields.push('item_attributes = ?'); values.push(JSON.stringify(data.itemAttributes));
     }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);
@@ -185,7 +231,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
           updates.margin = repair.chargeToCustomer - repair.internalCost;
         }
         // Plan §Repair §9 + §Expenses §8: externe Workshop-Kosten automatisch als Expense buchen.
-        if (repair.repairType === 'external' && (repair.internalCost || 0) > 0) {
+        // Gilt für External UND Hybrid (Hybrid hat einen externen Anteil).
+        if ((repair.repairType === 'external' || repair.repairType === 'hybrid') && (repair.internalCost || 0) > 0) {
           const existing = query(
             `SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ?`,
             [id]
@@ -215,13 +262,36 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         }
         break;
       case 'picked_up':
-      case 'DELIVERED':
+      case 'DELIVERED': {
+        // Plan §Repair §Picked-Up-Gate (User-Spec):
+        // Wenn der Repair kostenpflichtig ist (chargeToCustomer > 0), darf erst
+        // nach voller Bezahlung auf Picked Up. Gratis-Repairs (charge=0) dürfen
+        // ohne Invoice direkt abgeschlossen werden.
+        const charge = repair.chargeToCustomer || 0;
+        if (charge > 0.005) {
+          const directlyPaid = repair.customerPaymentStatus === 'PAID';
+          let invoicePaid = false;
+          if (repair.invoiceId) {
+            const inv = useInvoiceStore.getState().invoices.find(i => i.id === repair.invoiceId);
+            if (inv) {
+              invoicePaid = (inv.paidAmount || 0) >= (inv.grossAmount || 0) - 0.005;
+            }
+          }
+          if (!directlyPaid && !invoicePaid) {
+            throw new Error(
+              repair.invoiceId
+                ? 'Repair-Invoice ist noch nicht voll bezahlt — bitte erst Payment buchen, dann Picked Up.'
+                : 'Repair hat einen Charge — bitte erst Invoice erstellen + bezahlen, dann Picked Up.'
+            );
+          }
+        }
         updates.picked_up_at = now;
         // Restore product status if linked
         if (repair.productId) {
           db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, repair.productId]);
         }
         break;
+      }
     }
 
     const fields = Object.entries(updates).map(([k]) => `${k} = ?`);
