@@ -209,6 +209,9 @@ function runMigrations(database: Database): void {
     // und müsste den User erneut fragen (was Doppelbesteuerung verursachen kann).
     `ALTER TABLE order_lines ADD COLUMN tax_scheme TEXT`,
     `ALTER TABLE order_lines ADD COLUMN vat_rate REAL DEFAULT 0`,
+    // Plan §Agent §Convert: Verlinkung Agent → Customer für Convert-to-Invoice.
+    // Optional. Wird beim ersten Convert befüllt und danach wiederverwendet.
+    `ALTER TABLE agents ADD COLUMN customer_id TEXT REFERENCES customers(id)`,
     // Optionale Tax-Felder auf Order-Ebene (für die Pricing-Section)
     `ALTER TABLE orders ADD COLUMN tax_amount REAL DEFAULT 0`,
     `ALTER TABLE orders ADD COLUMN payment_method TEXT`,

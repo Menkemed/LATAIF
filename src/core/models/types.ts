@@ -515,6 +515,10 @@ export interface Agent {
   notes?: string;
   totalSales: number;
   totalCommission: number;
+  // Optionaler Link auf Customer-Stammsatz für Convert-Transfer-to-Invoice.
+  // Wird beim ersten Convert gesetzt (entweder auf bestehenden Customer oder
+  // auto-erzeugten Spiegel-Eintrag) und danach wiederverwendet.
+  customerId?: UUID;
   createdAt: string;
   updatedAt: string;
 }

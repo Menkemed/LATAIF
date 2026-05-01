@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { UserCheck } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { UserCheck, FileText } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { SearchSelect } from '@/components/ui/SearchSelect';
 import { useAgentStore } from '@/stores/agentStore';
 import { useProductStore } from '@/stores/productStore';
+import { useCustomerStore } from '@/stores/customerStore';
+import { useInvoiceStore } from '@/stores/invoiceStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Agent, AgentTransfer } from '@/core/models/types';
 
@@ -16,8 +20,11 @@ function fmt(v: number): string {
 }
 
 export function AgentList() {
-  const { agents, transfers, loadAgents, loadTransfers, createAgent, updateAgent, deleteAgent, createTransfer, updateTransfer, markTransferSold, markTransferReturned, markTransferSettled, deleteTransfer } = useAgentStore();
+  const { agents, transfers, loadAgents, loadTransfers, createAgent, updateAgent, deleteAgent, createTransfer, updateTransfer, markTransferSold, markTransferReturned, markTransferSettled, deleteTransfer, convertTransferToInvoice } = useAgentStore();
   const { products, loadProducts } = useProductStore();
+  const { customers, loadCustomers, createCustomer } = useCustomerStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
+  const navigate = useNavigate();
   const [showNewAgent, setShowNewAgent] = useState(false);
   const [showNewTransfer, setShowNewTransfer] = useState(false);
   const [tab, setTab] = useState<'agents' | 'transfers'>('agents');
@@ -37,8 +44,66 @@ export function AgentList() {
   const [editAgentForm, setEditAgentForm] = useState<Partial<Agent>>({});
   const [editTransfer, setEditTransfer] = useState<AgentTransfer | null>(null);
   const [editTransferForm, setEditTransferForm] = useState<Partial<AgentTransfer>>({});
+  // Convert-Transfer-to-Invoice Modal-State (Plan §Agent §Convert)
+  const [convertModal, setConvertModal] = useState<string | null>(null);
+  const [convertCustomerId, setConvertCustomerId] = useState<string>('');
+  const [convertMode, setConvertMode] = useState<'existing' | 'auto'>('existing');
+  const [convertError, setConvertError] = useState('');
 
-  useEffect(() => { loadAgents(); loadTransfers(); loadProducts(); }, [loadAgents, loadTransfers, loadProducts]);
+  useEffect(() => { loadAgents(); loadTransfers(); loadProducts(); loadCustomers(); loadInvoices(); }, [loadAgents, loadTransfers, loadProducts, loadCustomers, loadInvoices]);
+
+  // Customer-Optionen für SearchSelect (Convert-Modal + Edit-Agent-Modal)
+  const customerOptions = useMemo(() => customers.map(c => ({
+    id: c.id,
+    label: `${c.firstName} ${c.lastName}${c.company ? ` — ${c.company}` : ''}`.trim(),
+    subtitle: c.phone || c.email || undefined,
+  })), [customers]);
+
+  function openConvertModal(transferId: string) {
+    const t = transfers.find(x => x.id === transferId);
+    if (!t) return;
+    const agent = agents.find(a => a.id === t.agentId);
+    setConvertCustomerId(agent?.customerId || '');
+    setConvertMode(agent?.customerId ? 'existing' : 'existing');
+    setConvertError('');
+    setConvertModal(transferId);
+  }
+
+  function handleConvertConfirm() {
+    if (!convertModal) return;
+    const t = transfers.find(x => x.id === convertModal);
+    if (!t) return;
+    const agent = agents.find(a => a.id === t.agentId);
+    if (!agent) { setConvertError('Agent not found.'); return; }
+
+    let customerId = convertCustomerId;
+    if (convertMode === 'auto') {
+      // Auto-Customer aus Agent-Daten anlegen — Name in first/last splitten,
+      // Company/Phone/Email mitnehmen.
+      const parts = (agent.name || '').trim().split(/\s+/);
+      const firstName = parts[0] || agent.name || 'Agent';
+      const lastName = parts.slice(1).join(' ') || '';
+      const newCust = createCustomer({
+        firstName, lastName,
+        company: agent.company,
+        phone: agent.phone,
+        whatsapp: agent.whatsapp,
+        email: agent.email,
+        notes: `Auto-created from agent ${agent.name} for transfer settlements.`,
+      });
+      customerId = newCust.id;
+    }
+
+    if (!customerId) { setConvertError('Please pick a customer or choose auto-create.'); return; }
+
+    try {
+      const invoice = convertTransferToInvoice(convertModal, customerId);
+      setConvertModal(null);
+      navigate(`/invoices/${invoice.id}`);
+    } catch (err) {
+      setConvertError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   const availableProducts = useMemo(() => products.filter(p => p.stockStatus === 'in_stock'), [products]);
 
@@ -104,8 +169,13 @@ export function AgentList() {
             const totalSold = myTransfers
               .filter(t => t.status === 'sold' || t.status === 'settled')
               .reduce((s, t) => s + ((t.actualSalePrice ?? t.agentPrice) || 0), 0);
-            // Plan §Agent §4: berücksichtigt Teilzahlungen via settlementPaidAmount
+            // Plan §Agent §4 + §Convert: für invoice-konvertierte Transfers Zahlen aus
+            // der Invoice ziehen, sonst aus settlement_paid_amount (Legacy-Pfad).
             const totalPaid = myTransfers.reduce((s, t) => {
+              if (t.invoiceId) {
+                const inv = invoices.find(i => i.id === t.invoiceId);
+                return s + (inv?.paidAmount || 0);
+              }
               if (t.settlementStatus === 'paid') {
                 return s + ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0);
               }
@@ -186,13 +256,20 @@ export function AgentList() {
           {filteredTransfers.map(t => {
             const agent = agents.find(a => a.id === t.agentId);
             const product = products.find(p => p.id === t.productId);
-            const amount = (t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0;
-            const paid = t.settlementStatus === 'paid'
-              ? (t.settlementAmount ?? amount)
-              : (t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0);
+            // Wenn schon zur Invoice konvertiert: Zahlen aus der Invoice ziehen,
+            // sonst aus dem Settlement-Feld (Legacy-Pfad).
+            const linkedInvoice = t.invoiceId ? invoices.find(i => i.id === t.invoiceId) : undefined;
+            const amount = linkedInvoice
+              ? linkedInvoice.grossAmount
+              : ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0);
+            const paid = linkedInvoice
+              ? (linkedInvoice.paidAmount || 0)
+              : (t.settlementStatus === 'paid'
+                ? (t.settlementAmount ?? amount)
+                : (t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0));
             const outstanding = Math.max(0, amount - paid);
             const date = (t.transferredAt || t.createdAt || '').split('T')[0];
-            const docLabel = t.invoiceId ? `${t.transferNumber} → INV` : t.transferNumber;
+            const docLabel = linkedInvoice ? `${t.transferNumber} → ${linkedInvoice.invoiceNumber}` : t.transferNumber;
             return (
               <div key={t.id} style={{
                 display: 'grid', gridTemplateColumns: '90px minmax(0,1fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.2fr)',
@@ -215,7 +292,9 @@ export function AgentList() {
                         className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Return</button>
                     </>
                   )}
-                  {(t.status === 'sold' || t.settlementStatus === 'partial') && (
+                  {/* Plan §Agent §Convert: sobald Invoice existiert, läuft Bezahlung ausschließlich
+                      über die Invoice — Settle-Button wird ausgeblendet. */}
+                  {!t.invoiceId && (t.status === 'sold' || t.settlementStatus === 'partial') && (
                     <button onClick={() => {
                       setSettleModal(t.id); setSettleMethod('cash');
                       setSettlePartial(false);
@@ -223,6 +302,20 @@ export function AgentList() {
                     }}
                       className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #0F0F10', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
                       {t.settlementStatus === 'partial' ? 'Pay More' : 'Settle'}
+                    </button>
+                  )}
+                  {/* Convert-to-Invoice: nur für sold-Transfers, ohne bestehende Invoice und ohne
+                      schon gebuchte Settle-Zahlungen (sonst würde es doppelt buchen). */}
+                  {t.status === 'sold' && !t.invoiceId && (t.settlementPaidAmount || 0) === 0 && (
+                    <button onClick={() => openConvertModal(t.id)}
+                      className="cursor-pointer flex items-center gap-1" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #715DE3', color: '#715DE3', borderRadius: 4, background: 'none' }}>
+                      <FileText size={11} /> Convert to Invoice
+                    </button>
+                  )}
+                  {t.invoiceId && (
+                    <button onClick={() => navigate(`/invoices/${t.invoiceId}`)}
+                      className="cursor-pointer flex items-center gap-1" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #715DE3', color: '#715DE3', borderRadius: 4, background: 'rgba(113,93,227,0.06)' }}>
+                      <FileText size={11} /> View Invoice
                     </button>
                   )}
                   <button onClick={() => { setEditTransfer(t); setEditTransferForm({ ...t }); }}
@@ -400,6 +493,81 @@ export function AgentList() {
         </div>
       </Modal>
 
+      {/* Convert Transfer to Invoice Modal */}
+      <Modal open={!!convertModal} onClose={() => setConvertModal(null)} title="Convert Transfer to Invoice" width={460}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {convertModal && (() => {
+            const t = transfers.find(x => x.id === convertModal);
+            if (!t) return null;
+            const agent = agents.find(a => a.id === t.agentId);
+            const settlement = t.settlementAmount || 0;
+            return (
+              <>
+                <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
+                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: '#6B7280' }}>Transfer</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>{t.transferNumber}</span>
+                  </div>
+                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: '#6B7280' }}>Agent</span>
+                    <span style={{ color: '#0F0F10' }}>{agent?.name || '—'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span style={{ color: '#6B7280' }}>Settlement (Forderung)</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(settlement)} BHD</span>
+                  </div>
+                </div>
+                <p style={{ fontSize: 12, color: '#6B7280' }}>
+                  Diese Forderung an den Agent wird als reguläre Invoice angelegt.
+                  Wähle einen bestehenden Customer oder lass automatisch einen aus den Agent-Daten anlegen.
+                  Beim ersten Convert wird die Verknüpfung Agent ↔ Customer am Agent gespeichert
+                  und beim nächsten Mal wiederverwendet.
+                </p>
+                <div>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>BILL TO</span>
+                  <div className="flex gap-2" style={{ marginBottom: 10 }}>
+                    {(['existing', 'auto'] as const).map(m => (
+                      <button key={m} onClick={() => setConvertMode(m)}
+                        className="cursor-pointer rounded transition-all"
+                        style={{ padding: '7px 14px', fontSize: 12,
+                          border: `1px solid ${convertMode === m ? '#0F0F10' : '#D5D9DE'}`,
+                          color: convertMode === m ? '#0F0F10' : '#6B7280',
+                          background: convertMode === m ? 'rgba(15,15,16,0.06)' : 'transparent',
+                        }}>{m === 'existing' ? 'Pick existing customer' : 'Auto-create from agent'}</button>
+                    ))}
+                  </div>
+                  {convertMode === 'existing' ? (
+                    <SearchSelect
+                      placeholder="Search customers…"
+                      options={customerOptions}
+                      value={convertCustomerId}
+                      onChange={setConvertCustomerId}
+                    />
+                  ) : (
+                    <div style={{ padding: '10px 14px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 6, fontSize: 12, color: '#4B5563' }}>
+                      Wird angelegt: <strong style={{ color: '#0F0F10' }}>{agent?.name}</strong>
+                      {agent?.company ? ` · ${agent.company}` : ''}
+                      {agent?.phone ? ` · ${agent.phone}` : ''}
+                    </div>
+                  )}
+                </div>
+                {convertError && (
+                  <div style={{ padding: '8px 12px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 6, fontSize: 12, color: '#DC2626' }}>
+                    {convertError}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => setConvertModal(null)}>Cancel</Button>
+            <Button variant="primary" onClick={handleConvertConfirm}>
+              <FileText size={14} /> Create Invoice
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Edit Agent Modal */}
       <Modal open={!!editAgent} onClose={() => setEditAgent(null)} title={`Edit Approval — ${editAgent?.name || ''}`} width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -427,6 +595,18 @@ export function AgentList() {
                 ))}
               </div>
             </div>
+          </div>
+          <div>
+            <SearchSelect
+              label="LINKED CUSTOMER (für Convert-to-Invoice)"
+              placeholder="Pick existing customer (optional)…"
+              options={customerOptions}
+              value={editAgentForm.customerId || ''}
+              onChange={cid => setEditAgentForm({ ...editAgentForm, customerId: cid || undefined })}
+            />
+            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+              Wird beim ersten Convert automatisch gesetzt. Hier nur ändern wenn nötig.
+            </p>
           </div>
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES</span>

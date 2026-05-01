@@ -1,10 +1,13 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Agent, AgentTransfer, AgentTransferStatus } from '@/core/models/types';
+import type { Agent, AgentTransfer, AgentTransferStatus, Invoice, TaxScheme } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { useInvoiceStore } from '@/stores/invoiceStore';
+import { useCustomerStore } from '@/stores/customerStore';
+import { vatEngine } from '@/core/tax/vat-engine';
 
 interface AgentStore {
   agents: Agent[];
@@ -23,6 +26,11 @@ interface AgentStore {
   markTransferReturned: (id: string) => void;
   // Plan §Agent §4: Teilzahlungen. Wenn amount < settlementAmount → status='partial'.
   markTransferSettled: (id: string, amount?: number, method?: 'cash' | 'bank') => void;
+  // Plan §Agent §Convert: verkauften Transfer in eine Invoice (Forderung an Agent) umwandeln.
+  // Erzeugt die Invoice mit dem gegebenen Customer, persistiert customerId auf dem Agent,
+  // bindet transfer.invoiceId. Ab dann läuft die Bezahlung über die Invoice; markTransferSettled
+  // wird in der UI ausgeblendet.
+  convertTransferToInvoice: (transferId: string, customerId: string) => Invoice;
   // Plan §8 #5 — Audit-Trail der Settlement-Zahlungen.
   getSettlementPayments: (transferId: string) => Array<{ id: string; amount: number; method: string; paidAt: string; note?: string }>;
   deleteTransfer: (id: string) => void;
@@ -38,6 +46,7 @@ function rowToAgent(row: Record<string, unknown>): Agent {
     active: row.active === 1, notes: row.notes as string | undefined,
     totalSales: (row.total_sales as number) || 0,
     totalCommission: (row.total_commission as number) || 0,
+    customerId: (row.customer_id as string | null) || undefined,
     createdAt: row.created_at as string, updatedAt: row.updated_at as string,
   };
 }
@@ -99,11 +108,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
 
     db.run(
-      `INSERT INTO agents (id, branch_id, name, company, phone, whatsapp, email, commission_rate, active, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      `INSERT INTO agents (id, branch_id, name, company, phone, whatsapp, email, commission_rate, active, notes, customer_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
       [id, branchId, data.name || '', data.company || null, data.phone || null,
        data.whatsapp || null, data.email || null, data.commissionRate || 10,
-       data.notes || null, now, now]
+       data.notes || null, data.customerId || null, now, now]
     );
     saveDatabase();
     trackInsert('agents', id, { name: data.name });
@@ -121,6 +130,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       name: 'name', company: 'company', phone: 'phone', whatsapp: 'whatsapp',
       email: 'email', commissionRate: 'commission_rate', notes: 'notes',
       totalSales: 'total_sales', totalCommission: 'total_commission',
+      customerId: 'customer_id',
     };
     for (const [k, v] of Object.entries(data)) {
       const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v); }
@@ -307,5 +317,67 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     saveDatabase();
     trackDelete('agent_transfers', id);
     get().loadTransfers();
+  },
+
+  convertTransferToInvoice: (transferId, customerId) => {
+    const transfer = get().getTransfer(transferId);
+    if (!transfer) throw new Error('Transfer not found.');
+    if (transfer.status !== 'sold') {
+      throw new Error('Convert is only possible for sold transfers.');
+    }
+    if (transfer.invoiceId) {
+      throw new Error('This transfer was already converted to an invoice.');
+    }
+    if ((transfer.settlementPaidAmount || 0) > 0) {
+      throw new Error('Settle payments already exist on this transfer. Please remove them or skip the convert step.');
+    }
+    if (!customerId) throw new Error('Customer is required.');
+
+    // Produkt aus DB ziehen — Tax-Scheme + Einkaufspreis bestimmen die Invoice-Mathematik.
+    const prodRows = query(
+      `SELECT id, tax_scheme, purchase_price FROM products WHERE id = ?`,
+      [transfer.productId]
+    );
+    const prod = prodRows[0];
+    const scheme = ((prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
+    const purchasePrice = (prod?.purchase_price as number | undefined) || 0;
+    const rate = scheme === 'ZERO' ? 0 : 10;
+
+    // settlementAmount ist die brutto-Forderung an den Agent (= actualSalePrice − commission).
+    // Je nach Scheme dekomponieren, damit die fertige Invoice gross == settlementAmount hat.
+    const settlementGross = Number(transfer.settlementAmount || 0);
+    if (settlementGross <= 0) {
+      throw new Error('Settlement amount must be positive before converting to invoice.');
+    }
+    const netInput = scheme === 'VAT_10' ? settlementGross / (1 + rate / 100) : settlementGross;
+    const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
+
+    // Invoice anlegen — eine einzelne Line mit dem Produkt-Snapshot.
+    const inv = useInvoiceStore.getState();
+    const invoice = inv.createDirectInvoice(
+      customerId,
+      [{
+        productId: transfer.productId,
+        unitPrice: calc.netAmount,
+        purchasePrice,
+        taxScheme: scheme,
+        vatRate: rate,
+        vatAmount: calc.vatAmount,
+        lineTotal: calc.grossAmount,
+      }],
+      `Agent settlement · transfer ${transfer.transferNumber}`,
+    );
+
+    // Transfer ↔ Invoice koppeln + Customer-Verknüpfung am Agent merken.
+    get().updateTransfer(transferId, { invoiceId: invoice.id });
+    const agent = get().getAgent(transfer.agentId);
+    if (agent && !agent.customerId) {
+      get().updateAgent(transfer.agentId, { customerId });
+    }
+    // Customer-Liste neu laden, falls der UI-Convert-Flow eben einen neuen Customer erzeugt hat —
+    // sonst sieht /clients den nicht.
+    useCustomerStore.getState().loadCustomers();
+    eventBus.emit('agent_transfer.invoice_created', 'agent_transfer', transferId, { invoiceId: invoice.id });
+    return invoice;
   },
 }));
