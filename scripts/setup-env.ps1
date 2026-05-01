@@ -25,9 +25,14 @@ Write-Host "[OK] Private Key gefunden: $keyPath" -ForegroundColor Green
 [System.Environment]::SetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY", $privateKey, "User")
 Write-Host "[OK] ENV: TAURI_SIGNING_PRIVATE_KEY gesetzt (User-Scope)" -ForegroundColor Green
 
-# 4. TAURI_SIGNING_PRIVATE_KEY_PASSWORD = leer (Key ohne Password generiert)
-[System.Environment]::SetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "", "User")
-Write-Host "[OK] ENV: TAURI_SIGNING_PRIVATE_KEY_PASSWORD = leer" -ForegroundColor Green
+# 4. TAURI_SIGNING_PRIVATE_KEY_PASSWORD setzen
+$keyPassword = Read-Host "Key-Passwort (leer lassen wenn Key ohne Passwort generiert wurde)"
+[System.Environment]::SetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", $keyPassword, "User")
+if ($keyPassword) {
+    Write-Host "[OK] ENV: TAURI_SIGNING_PRIVATE_KEY_PASSWORD gesetzt" -ForegroundColor Green
+} else {
+    Write-Host "[OK] ENV: TAURI_SIGNING_PRIVATE_KEY_PASSWORD = leer" -ForegroundColor Green
+}
 
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor Yellow

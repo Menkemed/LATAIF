@@ -49,6 +49,10 @@ function sh(cmd, opts = {}) {
   return execSync(cmd, { stdio: 'inherit', cwd: ROOT, ...opts });
 }
 
+function shCapture(cmd) {
+  return execSync(cmd, { cwd: ROOT, encoding: 'utf8' }).trim();
+}
+
 function log(msg) { console.log(`\n▸ ${msg}\n`); }
 
 async function main() {
@@ -57,6 +61,18 @@ async function main() {
     console.error('Usage: node scripts/release.mjs <patch|minor|major|x.y.z>');
     process.exit(1);
   }
+
+  // 0. Working tree muss sauber sein — sonst mischt sich der Version-Bump
+  //    mit unrelated WIP und der Release-Commit wird unbrauchbar.
+  const dirty = shCapture('git status --porcelain');
+  if (dirty) {
+    console.error('✘ Working tree ist nicht sauber:');
+    console.error(dirty);
+    console.error('\n  Bitte erst alle Änderungen committen oder stashen, dann neu starten.');
+    process.exit(1);
+  }
+  const branch = shCapture('git rev-parse --abbrev-ref HEAD');
+  log(`Branch: ${branch} (clean)`);
 
   const pkg = readJson(PKG);
   const tauriConf = readJson(TAURI_CONF);
@@ -87,6 +103,15 @@ async function main() {
     process.exit(1);
   }
 
+  // 4a. Version-Bump committen + pushen — sonst zeigt der spätere Tag
+  //     auf einen Commit, der nicht den Release-Code enthält.
+  log(`Commit + Push v${newVersion}…`);
+  sh('git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock');
+  sh(`git commit -m "release: v${newVersion}"`);
+  sh(`git push origin ${branch}`);
+  const releaseSha = shCapture('git rev-parse HEAD');
+  log(`HEAD = ${releaseSha}`);
+
   // 4. latest.json bauen
   const sig = readFileSync(nsisSig, 'utf8').trim();
   const repo = process.env.GITHUB_REPO || 'lataif-bahrain/lataif-desktop';
@@ -114,7 +139,7 @@ async function main() {
   if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
     log(`GitHub-Release v${newVersion} ${asDraft ? 'als DRAFT' : 'LIVE'} hochladen…`);
     try {
-      sh(`gh release create v${newVersion} "${nsisExe}" "${nsisSig}" "${latestPath}" --title "LATAIF v${newVersion}" --notes "Release v${newVersion}" ${draftFlag}`);
+      sh(`gh release create v${newVersion} "${nsisExe}" "${nsisSig}" "${latestPath}" --title "LATAIF v${newVersion}" --notes "Release v${newVersion}" ${draftFlag} --target ${releaseSha}`);
       if (asDraft) {
         log(`✔ Draft-Release: https://github.com/${repo}/releases`);
         console.log(`  → Manuell publishen wenn bereit.`);
