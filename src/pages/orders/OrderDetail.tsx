@@ -16,7 +16,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
-import type { Order, OrderStatus, Product, TaxScheme } from '@/core/models/types';
+import type { Order, OrderLine, OrderStatus, Product, TaxScheme } from '@/core/models/types';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 
@@ -40,7 +40,7 @@ function statusLabel(s: OrderStatus): string {
 export function OrderDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { orders, loadOrders, updateOrder, updateStatus, deleteOrder } = useOrderStore();
+  const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, createProduct } = useProductStore();
@@ -209,13 +209,40 @@ export function OrderDetail() {
     navigate('/orders');
   }
 
-  function handleCreateFinalInvoice() {
+  // Carry-over Logik wird sowohl vom direkten als auch vom Legacy-Pfad benötigt.
+  async function carryOverOrderPaymentsToInvoice(invoiceId: string, orderId: string, orderNumber: string) {
+    const orderPayments = paymentsByOrder[orderId] || [];
+    if (orderPayments.length > 0) {
+      const inv = useInvoiceStore.getState();
+      for (const op of orderPayments) {
+        inv.recordPayment(invoiceId, op.amount, op.method || 'cash', `Carried over from order ${orderNumber}`);
+      }
+      // Flag order_payments as already converted, so cashflow doesn't double-count
+      const { getDatabase: getDb, saveDatabase: saveDb } = await import('@/core/db/database');
+      const db = getDb();
+      db.run(`UPDATE order_payments SET converted_to_invoice = 1 WHERE order_id = ?`, [orderId]);
+      await saveDb();
+    } else if (totalPaid > 0) {
+      useInvoiceStore.getState().recordPayment(invoiceId, totalPaid, 'cash', `Carried over from order ${orderNumber}`);
+    }
+  }
+
+  async function handleCreateFinalInvoice() {
     if (!id || !order) return;
     const gross = order.agreedPrice || totalPaid;
     if (gross <= 0) { alert('Agreed price required.'); return; }
 
-    // Wenn kein Produkt verlinkt (manuell beschriebene Order) → eines auto-erzeugen.
-    // Daten kommen aus den Order-Feldern (Brand/Model/Kategorie/Attribute).
+    // Plan §Order §Convert: Wenn alle Order-Lines einen persistierten Tax-Scheme-Snapshot
+    // haben (Standard für alle Orders ab v0.1.15), übernehmen wir den direkt — kein Modal,
+    // keine Doppelbesteuerung. Das in OrderCreate gewählte Steuerschema ist verbindlich.
+    const orderLines = getOrderLines(id);
+    const allPersisted = orderLines.length > 0 && orderLines.every(l => !!l.taxScheme);
+    if (allPersisted) {
+      await convertWithPersistedSchemes(orderLines);
+      return;
+    }
+
+    // Legacy-Order ohne Scheme-Snapshot (vor v0.1.15 angelegt) → Modal als Fallback.
     if (!linkedProduct) {
       const newProduct = createProduct({
         categoryId: order.categoryId || '',
@@ -232,23 +259,89 @@ export function OrderDetail() {
         notes: order.requestedDetails ? `From order ${order.orderNumber}: ${order.requestedDetails}` : `From order ${order.orderNumber}`,
       });
       setPendingProduct(newProduct);
-      // Order an das neue Produkt binden — sorgt fuer Konsistenz beim naechsten Reload.
       updateOrder(id, { productId: newProduct.id });
     }
-
     setShowInvoiceVatConfirm(true);
   }
 
+  // Direkter Convert-Pfad: Pro Order-Line wird eine Invoice-Line gebaut, mit
+  // der in OrderCreate gewählten Scheme. order_lines.unit_price ist Netto pro Stück
+  // (siehe OrderCreate.unitNetFromGross), daher: lineNet = unitPrice × qty,
+  // dann vatEngine.calculateNet → vat + gross. Keine Doppelbesteuerung möglich,
+  // weil wir nicht erneut auf einen schon-gross-Wert rechnen.
+  async function convertWithPersistedSchemes(orderLines: OrderLine[]) {
+    if (!id || !order) return;
+
+    const invoiceLineInputs: Array<{
+      productId: string; quantity: number; unitPrice: number; purchasePrice: number;
+      taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number;
+    }> = [];
+
+    for (const ol of orderLines) {
+      let prod = ol.productId ? products.find(p => p.id === ol.productId) : undefined;
+      // Für freitext-Lines ohne Produkt eines auto-erzeugen — analog zum bisherigen
+      // Single-Line-Auto-Create, nur jetzt pro Line.
+      if (!prod) {
+        prod = createProduct({
+          categoryId: order.categoryId || '',
+          brand: order.requestedBrand || '',
+          name: ol.description || order.requestedModel || 'Custom Item',
+          condition: order.condition || '',
+          attributes: order.attributes || {},
+          purchasePrice: 0,
+          plannedSalePrice: ol.unitPrice * Math.max(1, ol.quantity),
+          stockStatus: 'sold',
+          taxScheme: ol.taxScheme!,
+          sourceType: 'OWN',
+          notes: `From order ${order.orderNumber}`,
+        });
+      }
+      const scheme = ol.taxScheme!;
+      const rate = ol.vatRate ?? (scheme === 'ZERO' ? 0 : 10);
+      const qty = Math.max(1, ol.quantity);
+      const lineNet = ol.unitPrice * qty;
+      const calc = vatEngine.calculateNet(lineNet, (prod.purchasePrice || 0) * qty, scheme, rate);
+      invoiceLineInputs.push({
+        productId: prod.id,
+        quantity: qty,
+        unitPrice: ol.unitPrice,
+        purchasePrice: prod.purchasePrice || 0,
+        taxScheme: scheme,
+        vatRate: rate,
+        vatAmount: calc.vatAmount,
+        lineTotal: calc.grossAmount,
+      });
+    }
+
+    const invoice = createDirectInvoice(
+      order.customerId,
+      invoiceLineInputs,
+      `Final invoice for order ${order.orderNumber}`,
+    );
+    updateOrder(id, { invoiceId: invoice.id });
+    setPendingProduct(null);
+    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber);
+    navigate(`/invoices/${invoice.id}`);
+  }
+
+  // Legacy-Pfad nur für Orders ohne persistierten Scheme-Snapshot.
+  // KRITISCHER FIX: order.agreedPrice ist GROSS (= subtotal + totalVat in OrderCreate),
+  // nicht NET. Vorher wurde es 1:1 in calculateNet() reingegeben → bei VAT_10
+  // wurden 10% nochmal on top gerechnet → Doppelbesteuerung. Jetzt: Decompose
+  // Gross → Net je nach gewähltem Scheme, dann calculateNet → resultierender
+  // Gross == ursprünglicher agreedPrice.
   async function handleConfirmFinalInvoice(perLine: Record<string, TaxScheme>) {
     setShowInvoiceVatConfirm(false);
     const prod = productForConvert;
     if (!id || !order || !prod) return;
-    // `agreedPrice` ist der Netto-Verkaufspreis (Plan §Tax §7: System rechnet Gross auto).
-    const agreedNet = order.agreedPrice || totalPaid;
-    if (agreedNet <= 0) { alert('Agreed price required.'); return; }
+    const grossAgreed = order.agreedPrice || totalPaid;
+    if (grossAgreed <= 0) { alert('Agreed price required.'); return; }
     const taxScheme = (perLine[prod.id] || prod.taxScheme || 'MARGIN') as TaxScheme;
-    const vatRate = 10;
-    const calc = vatEngine.calculateNet(agreedNet, prod.purchasePrice || 0, taxScheme, vatRate);
+    const vatRate = taxScheme === 'ZERO' ? 0 : 10;
+    const netInput = taxScheme === 'VAT_10'
+      ? grossAgreed / (1 + vatRate / 100)
+      : grossAgreed;
+    const calc = vatEngine.calculateNet(netInput, prod.purchasePrice || 0, taxScheme, vatRate);
     const invoice = createDirectInvoice(
       order.customerId,
       [{
@@ -264,21 +357,7 @@ export function OrderDetail() {
     );
     updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
-    // Carry over each order payment as a real invoice payment, preserving method
-    const orderPayments = paymentsByOrder[id] || [];
-    if (orderPayments.length > 0) {
-      const inv = useInvoiceStore.getState();
-      for (const op of orderPayments) {
-        inv.recordPayment(invoice.id, op.amount, op.method || 'cash', `Carried over from order ${order.orderNumber}`);
-      }
-      // Flag order_payments as already converted, so cashflow doesn't double-count
-      const { getDatabase: getDb, saveDatabase: saveDb } = await import('@/core/db/database');
-      const db = getDb();
-      db.run(`UPDATE order_payments SET converted_to_invoice = 1 WHERE order_id = ?`, [id]);
-      await saveDb();
-    } else if (totalPaid > 0) {
-      useInvoiceStore.getState().recordPayment(invoice.id, totalPaid, 'cash', `Carried over from order ${order.orderNumber}`);
-    }
+    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber);
     navigate(`/invoices/${invoice.id}`);
   }
 

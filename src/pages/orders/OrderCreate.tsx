@@ -152,11 +152,16 @@ export function OrderCreate() {
   function buildPayload() {
     const first = lines[0];
     const product = first?.productId ? products.find(p => p.id === first.productId) : undefined;
-    const draftLines = lines.map(l => ({
+    // Per-Line auch Scheme + VatRate persistieren — sonst ginge die in dieser
+    // Maske gewählte Steuer beim Save verloren und Convert-to-Invoice müsste
+    // erneut fragen / könnte falsch rechnen.
+    const draftLines = lines.map((l, i) => ({
       productId: l.productId,
       description: l.description,
       quantity: l.quantity,
       unitPrice: l.unitPrice,
+      taxScheme: computed[i].scheme,
+      vatRate: computed[i].vatRate,
     }));
     return {
       customerId,

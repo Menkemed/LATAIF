@@ -204,6 +204,11 @@ function runMigrations(database: Database): void {
       created_at TEXT NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_order_lines_order ON order_lines(order_id)`,
+    // Plan §Order §Convert: Tax-Scheme + Rate per order_line persistieren —
+    // sonst kennt Convert-to-Invoice die in OrderCreate gewählte Scheme nicht
+    // und müsste den User erneut fragen (was Doppelbesteuerung verursachen kann).
+    `ALTER TABLE order_lines ADD COLUMN tax_scheme TEXT`,
+    `ALTER TABLE order_lines ADD COLUMN vat_rate REAL DEFAULT 0`,
     // Optionale Tax-Felder auf Order-Ebene (für die Pricing-Section)
     `ALTER TABLE orders ADD COLUMN tax_amount REAL DEFAULT 0`,
     `ALTER TABLE orders ADD COLUMN payment_method TEXT`,

@@ -16,7 +16,7 @@ interface OrderStore {
   updateStatus: (id: string, status: OrderStatus) => void;
   deleteOrder: (id: string) => void;
   // Lines per Order
-  rewriteOrderLines: (orderId: string, lines: Array<{ productId?: string; description: string; quantity: number; unitPrice: number }>) => void;
+  rewriteOrderLines: (orderId: string, lines: Array<{ productId?: string; description: string; quantity: number; unitPrice: number; taxScheme?: OrderLine['taxScheme']; vatRate?: number }>) => void;
   getOrderLines: (orderId: string) => OrderLine[];
 }
 
@@ -113,16 +113,17 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
        data.expectedDelivery || null, initialStatus, data.notes || null, now, now, userId]
     );
 
-    // Order Lines persistieren falls übergeben
+    // Order Lines persistieren falls übergeben — inkl. Tax-Scheme-Snapshot,
+    // damit Convert-to-Invoice ohne erneutes Nachfragen funktioniert.
     if (data.lines && data.lines.length > 0) {
       const stmt = db.prepare(
-        `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       data.lines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
         const total = qty * (l.unitPrice || 0);
-        stmt.run([uuid(), id, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1, now]);
+        stmt.run([uuid(), id, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1, l.taxScheme || null, l.vatRate ?? null, now]);
       });
       stmt.free();
     }
@@ -220,13 +221,13 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     db.run(`DELETE FROM order_lines WHERE order_id = ?`, [orderId]);
     if (lines.length > 0) {
       const stmt = db.prepare(
-        `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       lines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
         const total = qty * (l.unitPrice || 0);
-        stmt.run([uuid(), orderId, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1, now]);
+        stmt.run([uuid(), orderId, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1, l.taxScheme || null, l.vatRate ?? null, now]);
       });
       stmt.free();
     }
@@ -256,6 +257,8 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         unitPrice: (r.unit_price as number) || 0,
         lineTotal: (r.line_total as number) || 0,
         position: (r.position as number) || 0,
+        taxScheme: (r.tax_scheme as OrderLine['taxScheme'] | null) || undefined,
+        vatRate: r.vat_rate != null ? (r.vat_rate as number) : undefined,
       }));
     } catch { return []; }
   },

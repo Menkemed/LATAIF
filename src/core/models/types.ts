@@ -614,9 +614,13 @@ export interface OrderLine {
   productId?: UUID;          // optional: bei freier Beschreibung kein Produkt
   description: string;
   quantity: number;
-  unitPrice: number;
-  lineTotal: number;          // qty * unitPrice
+  unitPrice: number;          // NET pro Stück (System rechnet VAT auf, Plan §Tax §7)
+  lineTotal: number;          // qty * unitPrice (= line-net)
   position: number;
+  // Tax-Scheme & Rate werden bereits in OrderCreate festgelegt und müssen hier
+  // persistiert sein, damit Convert-to-Invoice nicht erneut fragt und nicht doppelt rechnet.
+  taxScheme?: TaxScheme;     // VAT_10 / ZERO / MARGIN — undefined = Legacy-Order ohne Snapshot
+  vatRate?: number;           // 10 oder 0
   product?: Product;
 }
 
