@@ -301,7 +301,7 @@ export function AgentList() {
                       setSettleAmount(String(Math.max(0, amount - paid).toFixed(2)));
                     }}
                       className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #0F0F10', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
-                      {t.settlementStatus === 'partial' ? 'Pay More' : 'Settle'}
+                      {t.settlementStatus === 'partial' ? 'Receive More' : 'Settle'}
                     </button>
                   )}
                   {/* Convert-to-Invoice: nur für sold-Transfers, ohne bestehende Invoice und ohne
@@ -467,7 +467,7 @@ export function AgentList() {
               onChange={e => setSettleAmount(e.target.value)} />
           )}
           <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAID FROM</span>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>RECEIVED INTO</span>
             <div className="flex gap-2">
               {(['cash', 'bank'] as const).map(m => (
                 <button key={m} onClick={() => setSettleMethod(m)}
@@ -479,6 +479,9 @@ export function AgentList() {
                   }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
               ))}
             </div>
+            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+              Der Agent zahlt uns aus — Geld kommt rein.
+            </p>
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSettleModal(null)}>Cancel</Button>

@@ -574,19 +574,24 @@ export function AnalyticsPage() {
       }
     } catch { /* ignore */ }
 
-    // Agent/Approval commission payout (outflow)
-    let agentCommCash = 0, agentCommBank = 0;
+    // Agent/Approval Settlements (Inflow): Der Agent verkauft unsere Ware und
+    // zahlt uns den Erlös abzüglich Kommission aus → Geld kommt rein.
+    // Konvertierte Transfers (mit invoice_id) werden hier NICHT gezählt — deren
+    // Cashflow läuft über die Invoice-Payments (= cashReceived/bankReceived).
+    let agentSettleCash = 0, agentSettleBank = 0;
     try {
       const agRows = qry(
-        `SELECT commission_paid_from, COALESCE(SUM(commission_amount),0) as total
-         FROM agent_transfers WHERE branch_id = ? AND status = 'settled'
-         AND commission_paid_from IS NOT NULL GROUP BY commission_paid_from`,
+        `SELECT asp.method, COALESCE(SUM(asp.amount),0) as total
+         FROM agent_settlement_payments asp
+         JOIN agent_transfers at ON at.id = asp.transfer_id
+         WHERE at.branch_id = ? AND at.invoice_id IS NULL
+         GROUP BY asp.method`,
         [branchId]
       );
       for (const r of agRows) {
         const t = (r.total as number) || 0;
-        if (r.commission_paid_from === 'cash') agentCommCash += t;
-        else if (r.commission_paid_from === 'bank') agentCommBank += t;
+        if (r.method === 'cash') agentSettleCash += t;
+        else if (r.method === 'bank') agentSettleBank += t;
       }
     } catch { /* ignore */ }
 
@@ -714,16 +719,16 @@ export function AnalyticsPage() {
 
     const cashBalance = openingCash + cashReceived + borrowedInCash + debtRepaidToUsCash
                       + repairCashIn + consignSaleCash + orderDepositCash + purchaseRefundCash
-                      + partnerInvestCash + bankToCash
+                      + partnerInvestCash + bankToCash + agentSettleCash
                       - lentOutCash - debtRepaidByUsCash - taxPaidFromCash - productEkCash
-                      - repairCashOut - consignPayoutCash - agentCommCash
+                      - repairCashOut - consignPayoutCash
                       - purchasePaidCash - expenseCash - salesRefundCash
                       - partnerWithdrawCash - cashToBank;
     const bankBalance = openingBank + bankReceived + cardNetToBank + borrowedInBank + debtRepaidToUsBank
                       + repairBankIn + consignSaleBank + orderDepositBank + purchaseRefundBank
-                      + partnerInvestBank + cashToBank
+                      + partnerInvestBank + cashToBank + agentSettleBank
                       - lentOutBank - debtRepaidByUsBank - taxPaidFromBank - productEkBank
-                      - repairBankOut - consignPayoutBank - agentCommBank - salesRefundBank
+                      - repairBankOut - consignPayoutBank - salesRefundBank
                       - partnerWithdrawBank - bankToCash
                       - purchasePaidBank - expenseBank;
     const totalLiquid = cashBalance + bankBalance;
@@ -804,7 +809,7 @@ export function AnalyticsPage() {
       cashToBank, bankToCash,
       repairCashIn, repairBankIn, repairCashOut, repairBankOut,
       consignSaleCash, consignSaleBank, consignPayoutCash, consignPayoutBank,
-      agentCommCash, agentCommBank,
+      agentSettleCash, agentSettleBank,
       orderDepositCash, orderDepositBank,
       // Debt flows
       lentOutCash, lentOutBank, borrowedInCash, borrowedInBank,
@@ -1388,7 +1393,7 @@ export function AnalyticsPage() {
                 {(finance.repairCashOut + finance.repairBankOut) > 0 && <TableRow label="Repair internal costs paid" value={`- ${fmtDec(finance.repairCashOut + finance.repairBankOut, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.consignSaleCash + finance.consignSaleBank) > 0 && <TableRow label="Consignment sales received" value={`+ ${fmtDec(finance.consignSaleCash + finance.consignSaleBank, 2)} BHD`} color="#7EAA6E" />}
                 {(finance.consignPayoutCash + finance.consignPayoutBank) > 0 && <TableRow label="Consignment payouts to consignors" value={`- ${fmtDec(finance.consignPayoutCash + finance.consignPayoutBank, 2)} BHD`} color="#AA6E6E" />}
-                {(finance.agentCommCash + finance.agentCommBank) > 0 && <TableRow label="Approval commissions paid" value={`- ${fmtDec(finance.agentCommCash + finance.agentCommBank, 2)} BHD`} color="#AA6E6E" />}
+                {(finance.agentSettleCash + finance.agentSettleBank) > 0 && <TableRow label="Agent settlements received" value={`+ ${fmtDec(finance.agentSettleCash + finance.agentSettleBank, 2)} BHD`} color="#7EAA6E" />}
                 {(finance.orderDepositCash + finance.orderDepositBank) > 0 && <TableRow label="Order deposits (pre-invoice)" value={`+ ${fmtDec(finance.orderDepositCash + finance.orderDepositBank, 2)} BHD`} color="#7EAA6E" />}
                 {finance.taxPaidTotal > 0 && <TableRow label="Quarterly tax paid (outflow)" value={`- ${fmtDec(finance.taxPaidTotal, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.lentOutCash + finance.lentOutBank) > 0 && <TableRow label="Lent out (debts to us)" value={`- ${fmtDec(finance.lentOutCash + finance.lentOutBank, 2)} BHD`} color="#AA956E" />}
