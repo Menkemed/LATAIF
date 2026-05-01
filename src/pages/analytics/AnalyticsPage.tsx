@@ -388,7 +388,12 @@ export function AnalyticsPage() {
       [branchId]
     );
     const totalInputVat = num(inputVatRow[0] || {}, 'input_vat');
-    const netVatOwed = Math.max(0, totalVat - totalInputVat);
+    // Plan §Tax §Erstattung: Wenn Input > Output → wir haben Anspruch auf Erstattung
+    // vom Finanzamt (statt Schuld). Beide Beträge separat halten, damit UI zwischen
+    // „we owe NBR" (netVatOwed) und „NBR owes us" (vatRefundDue) unterscheidet.
+    const netVatBalance = totalVat - totalInputVat;
+    const netVatOwed = Math.max(0, netVatBalance);
+    const vatRefundDue = Math.max(0, -netVatBalance);
 
     // Open invoices (issued or partially_paid)
     const open = qry(
@@ -747,8 +752,9 @@ export function AnalyticsPage() {
 
     // ── Quarterly VAT (owed) ──
     // vat = Output-VAT (aus Sales), inputVat = Vorsteuer (aus Purchases),
-    // netVat = max(0, vat − inputVat) = was effektiv an NBR gezahlt werden muss.
-    type QuarterRow = { year: number; quarter: number; vat: number; inputVat: number; netVat: number; paid: number };
+    // netVat = max(0, vat − inputVat) = was effektiv an NBR gezahlt werden muss,
+    // refund = max(0, inputVat − vat) = was die NBR uns erstatten muss.
+    type QuarterRow = { year: number; quarter: number; vat: number; inputVat: number; netVat: number; refund: number; paid: number };
     const fyStartRow = qry(
       `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.fiscal_year_start_month'`,
       [branchId]
@@ -822,18 +828,20 @@ export function AnalyticsPage() {
         const [yearStr, qStr] = k.split('-Q');
         const owed = quarterlyVatOwed[k] || 0;
         const input = quarterlyInputVat[k] || 0;
+        const balance = owed - input;
         return {
           year: parseInt(yearStr),
           quarter: parseInt(qStr),
           vat: owed,
           inputVat: input,
-          netVat: Math.max(0, owed - input),
+          netVat: Math.max(0, balance),
+          refund: Math.max(0, -balance),
           paid: quarterlyVatPaid[k] || 0,
         };
       });
 
     return {
-      netRevenue, grossRevenue, totalVat, totalInputVat, netVatOwed, profitAfterVat,
+      netRevenue, grossRevenue, totalVat, totalInputVat, netVatOwed, vatRefundDue, profitAfterVat,
       openCount, openValue, paidCount, paidValue,
       repairRevenue: repRev, consignmentComm, agentCommTotal,
       outstandingPayments,
@@ -1321,9 +1329,11 @@ export function AnalyticsPage() {
                 icon={<DollarSign size={16} />}
               />
               <KPICard
-                label="NET VAT OWED"
-                value={fmt(finance.netVatOwed)}
-                unit={`Output ${fmt(finance.totalVat)} − Input ${fmt(finance.totalInputVat)} BHD`}
+                label={finance.vatRefundDue > 0 ? 'VAT REFUND DUE' : 'NET VAT OWED'}
+                value={fmt(finance.vatRefundDue > 0 ? finance.vatRefundDue : finance.netVatOwed)}
+                unit={finance.vatRefundDue > 0
+                  ? `Input ${fmt(finance.totalInputVat)} > Output ${fmt(finance.totalVat)} BHD — NBR schuldet uns`
+                  : `Output ${fmt(finance.totalVat)} − Input ${fmt(finance.totalInputVat)} BHD`}
                 icon={<FileText size={16} />}
               />
               <KPICard
@@ -1455,16 +1465,25 @@ export function AnalyticsPage() {
                   <p style={{ padding: 24, textAlign: 'center', fontSize: 13, color: '#6B7280' }}>No VAT-relevant invoices yet.</p>
                 )}
                 {finance.quarterly.map(q => {
-                  // Plan §Purchase §Tax: Net-VAT (Output − Input) ist die Schuld an die NBR.
+                  // Plan §Purchase §Tax + §Erstattung: Net-VAT = Schuld an NBR,
+                  // Refund = Erstattung von NBR. Visuell unterscheiden.
+                  const isRefund = q.refund > 0.005;
                   const remaining = q.netVat - q.paid;
-                  const isSettled = remaining <= 0.01;
+                  const isSettled = !isRefund && remaining <= 0.01;
                   return (
                     <div key={`${q.year}-${q.quarter}`}
                       className="flex items-center justify-between"
                       style={{ padding: '14px 0', borderBottom: '1px solid #E5E9EE', gap: 16 }}>
                       <div className="flex items-center gap-3" style={{ flex: 1 }}>
-                        {isSettled ? <CheckCircle2 size={16} style={{ color: '#7EAA6E' }} /> : <Clock size={16} style={{ color: '#AA956E' }} />}
+                        {isRefund ? <CheckCircle2 size={16} style={{ color: '#3D7FFF' }} />
+                          : isSettled ? <CheckCircle2 size={16} style={{ color: '#7EAA6E' }} />
+                          : <Clock size={16} style={{ color: '#AA956E' }} />}
                         <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{q.year} · Q{q.quarter}</span>
+                        {isRefund && (
+                          <span style={{ fontSize: 10, color: '#3D7FFF', padding: '2px 8px', borderRadius: 999, background: 'rgba(61,127,255,0.10)', border: '1px solid rgba(61,127,255,0.3)' }}>
+                            Refund Due
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-6">
                         <div className="text-right">
@@ -1476,8 +1495,10 @@ export function AnalyticsPage() {
                           <span className="font-mono" style={{ fontSize: 14, color: q.inputVat > 0 ? '#7EAA6E' : '#6B7280' }}>− {fmtDec(q.inputVat, 2)}</span>
                         </div>
                         <div className="text-right">
-                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>NET OWED</span>
-                          <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10', fontWeight: 600 }}>{fmtDec(q.netVat, 2)}</span>
+                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>{isRefund ? 'REFUND' : 'NET OWED'}</span>
+                          <span className="font-mono" style={{ fontSize: 14, color: isRefund ? '#3D7FFF' : '#0F0F10', fontWeight: 600 }}>
+                            {fmtDec(isRefund ? q.refund : q.netVat, 2)}
+                          </span>
                         </div>
                         <div className="text-right">
                           <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>PAID</span>
@@ -1485,9 +1506,11 @@ export function AnalyticsPage() {
                         </div>
                         <div className="text-right" style={{ minWidth: 90 }}>
                           <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>REMAINING</span>
-                          <span className="font-mono" style={{ fontSize: 14, color: isSettled ? '#7EAA6E' : '#AA6E6E' }}>{fmtDec(Math.max(0, remaining), 2)}</span>
+                          <span className="font-mono" style={{ fontSize: 14, color: isRefund ? '#3D7FFF' : isSettled ? '#7EAA6E' : '#AA6E6E' }}>
+                            {isRefund ? '—' : fmtDec(Math.max(0, remaining), 2)}
+                          </span>
                         </div>
-                        {!isSettled && (
+                        {!isSettled && !isRefund && (
                           <button
                             onClick={() => setTaxPayQuarter({ year: q.year, quarter: q.quarter, vat: q.netVat, paid: q.paid })}
                             className="cursor-pointer"

@@ -20,7 +20,7 @@ function fmt(v: number): string {
 }
 
 export function AgentList() {
-  const { agents, transfers, loadAgents, loadTransfers, createAgent, updateAgent, deleteAgent, createTransfer, updateTransfer, markTransferSold, markTransferReturned, markTransferSettled, deleteTransfer, convertTransferToInvoice } = useAgentStore();
+  const { agents, transfers, loadAgents, loadTransfers, createAgent, updateAgent, deleteAgent, createTransfer, updateTransfer, markTransferSold, markTransferReturned, markTransferSettled, deleteTransfer, convertTransferToInvoice, undoTransferInvoiceConvert } = useAgentStore();
   const { products, loadProducts } = useProductStore();
   const { customers, loadCustomers, createCustomer } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
@@ -63,8 +63,26 @@ export function AgentList() {
     const t = transfers.find(x => x.id === transferId);
     if (!t) return;
     const agent = agents.find(a => a.id === t.agentId);
-    setConvertCustomerId(agent?.customerId || '');
-    setConvertMode(agent?.customerId ? 'existing' : 'existing');
+    // Plan §Agent §Convert §Auto-Match: Wenn der Agent noch nicht mit einem
+    // Customer verknüpft ist, schauen wir ob es schon einen Kunden mit
+    // gleichem Phone oder Email gibt — der ist wahrscheinlich der gleiche.
+    // Erspart dem User das doppelte Anlegen.
+    let initialCustomerId = agent?.customerId || '';
+    if (!initialCustomerId && agent) {
+      const norm = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
+      const phoneA = norm(agent.phone);
+      const emailA = norm(agent.email);
+      const whatsAppA = norm(agent.whatsapp);
+      const match = customers.find(c => {
+        if (phoneA && norm(c.phone) === phoneA) return true;
+        if (emailA && norm(c.email) === emailA) return true;
+        if (whatsAppA && norm(c.whatsapp) === whatsAppA) return true;
+        return false;
+      });
+      if (match) initialCustomerId = match.id;
+    }
+    setConvertCustomerId(initialCustomerId);
+    setConvertMode('existing');
     setConvertError('');
     setConvertModal(transferId);
   }
@@ -312,12 +330,32 @@ export function AgentList() {
                       <FileText size={11} /> Convert to Invoice
                     </button>
                   )}
-                  {t.invoiceId && (
-                    <button onClick={() => navigate(`/invoices/${t.invoiceId}`)}
-                      className="cursor-pointer flex items-center gap-1" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #715DE3', color: '#715DE3', borderRadius: 4, background: 'rgba(113,93,227,0.06)' }}>
-                      <FileText size={11} /> View Invoice
-                    </button>
-                  )}
+                  {t.invoiceId && (() => {
+                    // Plan §Agent §Convert §Undo: Undo nur erlaubt solange Invoice noch unbezahlt.
+                    const canUndo = !linkedInvoice || (linkedInvoice.paidAmount || 0) <= 0.005;
+                    return (
+                      <>
+                        <button onClick={() => navigate(`/invoices/${t.invoiceId}`)}
+                          className="cursor-pointer flex items-center gap-1" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #715DE3', color: '#715DE3', borderRadius: 4, background: 'rgba(113,93,227,0.06)' }}>
+                          <FileText size={11} /> View Invoice
+                        </button>
+                        {canUndo && (
+                          <button onClick={() => {
+                            if (!window.confirm(`Convert rückgängig machen? Die Invoice wird gelöscht und der Transfer wieder auf "Sold" gesetzt.`)) return;
+                            try {
+                              undoTransferInvoiceConvert(t.id);
+                            } catch (err) {
+                              alert(err instanceof Error ? err.message : String(err));
+                            }
+                          }}
+                            title="Convert rückgängig machen (nur möglich solange Invoice unbezahlt)"
+                            className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', borderRadius: 4, background: 'none' }}>
+                            Undo
+                          </button>
+                        )}
+                      </>
+                    );
+                  })()}
                   <button onClick={() => { setEditTransfer(t); setEditTransferForm({ ...t }); }}
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
                     Edit

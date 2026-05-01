@@ -16,6 +16,7 @@ import { formatProductMultiLine } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Repair, RepairStatus } from '@/core/models/types';
+import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -91,6 +92,15 @@ export function RepairDetail() {
     ? repair.chargeToCustomer - repair.internalCost
     : null;
 
+  // Plan §Repair §Picked-Up-Gate (UX): Picked-Up blockieren wenn charge > 0
+  // und nicht bezahlt. Button wird disabled + Hinweis angezeigt.
+  const linkedInvoice = repair.invoiceId ? invoices.find(i => i.id === repair.invoiceId) : null;
+  const charge = repair.chargeToCustomer || 0;
+  const isPaid = charge <= 0.005
+    || repair.customerPaymentStatus === 'PAID'
+    || (linkedInvoice ? (linkedInvoice.paidAmount || 0) >= (linkedInvoice.grossAmount || 0) - 0.005 : false);
+  const blockedPickup = nextStatus === 'picked_up' && !isPaid;
+
   // Plan §Repair §Service-Invoice: Service-Item statt Lager-Produkt.
   // Lazy-seeded "Repair Service"-Produkt pro Branch (idempotent). VAT folgt
   // repair.taxScheme (vom New-Repair-Modal gewählt: 0% oder 10%).
@@ -162,6 +172,16 @@ export function RepairDetail() {
       externalVendor: form.externalVendor,
       estimatedReady: form.estimatedReady,
       notes: form.notes,
+      // Plan §Repair §Item-Details: kategoriebasierte Item-Attribute beim Save mitnehmen
+      itemCategoryId: form.itemCategoryId,
+      itemAttributes: form.itemAttributes,
+      itemBrand: form.itemBrand,
+      itemModel: form.itemModel,
+      itemReference: form.itemReference,
+      itemSerial: form.itemSerial,
+      itemDescription: form.itemDescription,
+      issueDescription: form.issueDescription,
+      taxScheme: form.taxScheme,
     });
     setEditing(false);
   }
@@ -248,8 +268,10 @@ export function RepairDetail() {
             ) : (
               <>
                 {nextStatus && perm.canManageRepairs && (
-                  <Button variant="primary" onClick={handleStatusAdvance}>
-                    <ClipboardCheck size={14} /> Mark as {STATUS_LABELS[nextStatus]}
+                  <Button variant="primary" onClick={handleStatusAdvance}
+                    disabled={blockedPickup}
+                    title={blockedPickup ? 'Repair hat einen Charge — bitte erst Invoice erstellen + bezahlen.' : undefined}>
+                    <ClipboardCheck size={14} /> {blockedPickup ? 'Picked Up — Payment ausstehend' : `Mark as ${STATUS_LABELS[nextStatus]}`}
                   </Button>
                 )}
                 {repair.status === 'ready' && customer && (
@@ -524,23 +546,65 @@ export function RepairDetail() {
 
           {/* Item & Product Info */}
           <Card>
-            <span className="text-overline" style={{ marginBottom: 16 }}>ITEM INFORMATION</span>
+            <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+              <span className="text-overline">ITEM INFORMATION</span>
+              {repair.itemCategoryId && (() => {
+                const cat = categories.find(c => c.id === repair.itemCategoryId);
+                if (!cat) return null;
+                return (
+                  <span style={{
+                    fontSize: 11, padding: '3px 10px', borderRadius: 999,
+                    background: cat.color + '15', color: cat.color, border: `1px solid ${cat.color}30`,
+                  }}>{cat.name}</span>
+                );
+              })()}
+            </div>
             <div style={{ marginTop: 16 }}>
-              {repair.itemBrand && renderField('Brand', repair.itemBrand)}
-              {repair.itemModel && renderField('Model', repair.itemModel)}
-              {repair.itemReference && renderField('Reference', repair.itemReference)}
-              {repair.itemSerial && renderField('Serial Number', repair.itemSerial)}
-              {repair.itemDescription && (
-                <div style={{ marginTop: 16 }}>
-                  <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Item Description</span>
-                  <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6 }}>{repair.itemDescription}</p>
-                </div>
+              {editing ? (
+                <RepairItemEditor
+                  form={form}
+                  setForm={setForm}
+                  categories={categories.filter(c => !c.id.startsWith('cat-repair-service'))}
+                />
+              ) : (
+                <>
+                  {/* Top-Level item-Felder (Legacy + core fields) */}
+                  {repair.itemBrand && renderField('Brand', repair.itemBrand)}
+                  {repair.itemModel && renderField('Model', repair.itemModel)}
+                  {repair.itemReference && renderField('Reference', repair.itemReference)}
+                  {repair.itemSerial && renderField('Serial Number', repair.itemSerial)}
+                  {/* Kategoriespezifische Attribute aus item_attributes */}
+                  {repair.itemCategoryId && repair.itemAttributes && (() => {
+                    const fields = REPAIR_FIELDS[repair.itemCategoryId] || [];
+                    return fields
+                      .filter(f => !f.coreField)
+                      .map(f => {
+                        const v = repair.itemAttributes?.[f.key];
+                        if (v === undefined || v === '') return null;
+                        const display = f.unit ? `${v} ${f.unit}` : String(v);
+                        return <div key={f.key}>{renderField(f.label, display)}</div>;
+                      });
+                  })()}
+                  {repair.itemDescription && (
+                    <div style={{ marginTop: 16 }}>
+                      <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Item Description</span>
+                      <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6 }}>{repair.itemDescription}</p>
+                    </div>
+                  )}
+                </>
               )}
 
               {/* Issue Description */}
               <div style={{ marginTop: 16 }}>
                 <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Issue Description</span>
-                <p style={{ fontSize: 13, color: '#0F0F10', lineHeight: 1.6 }}>{repair.issueDescription || '\u2014'}</p>
+                {editing ? (
+                  <textarea value={form.issueDescription || ''}
+                    onChange={e => setForm({ ...form, issueDescription: e.target.value })}
+                    rows={3}
+                    style={{ width: '100%', background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }} />
+                ) : (
+                  <p style={{ fontSize: 13, color: '#0F0F10', lineHeight: 1.6 }}>{repair.issueDescription || '\u2014'}</p>
+                )}
               </div>
 
               {/* Linked Product */}
@@ -612,6 +676,115 @@ export function RepairDetail() {
         entityId={repair.id}
         title={`History · ${repair.repairNumber}`}
       />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plan §Repair §Item-Details Edit-Mode: kategorie-basierte Item-Editor-Komponente.
+// Wiederverwendet die REPAIR_FIELDS-Config (geteilt mit RepairList).
+// ──────────────────────────────────────────────────────────────────────────
+interface RepairItemEditorProps {
+  form: Partial<Repair>;
+  setForm: (v: Partial<Repair>) => void;
+  categories: Array<{ id: string; name: string; color: string }>;
+}
+function RepairItemEditor({ form, setForm, categories }: RepairItemEditorProps) {
+  const activeFields: RepairFieldDef[] = form.itemCategoryId ? (REPAIR_FIELDS[form.itemCategoryId] || []) : [];
+
+  function setAttr(key: string, value: string | number | boolean) {
+    setForm({ ...form, itemAttributes: { ...(form.itemAttributes || {}), [key]: value } });
+  }
+  function setCore(field: NonNullable<RepairFieldDef['coreField']>, value: string) {
+    setForm({ ...form, [field]: value });
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Kategorie-Chips */}
+      <div>
+        <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>CATEGORY</span>
+        <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
+          {categories.map(cat => {
+            const active = form.itemCategoryId === cat.id;
+            return (
+              <button key={cat.id}
+                onClick={() => setForm({ ...form, itemCategoryId: cat.id, itemAttributes: {} })}
+                className="cursor-pointer rounded-lg transition-all duration-200"
+                style={{
+                  padding: '8px 14px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6,
+                  border: `1px solid ${active ? cat.color : '#D5D9DE'}`,
+                  color: active ? cat.color : '#6B7280',
+                  background: active ? cat.color + '08' : 'transparent',
+                }}>
+                <span className="rounded-full" style={{ width: 5, height: 5, background: cat.color }} />
+                {cat.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Kategoriespezifische Felder */}
+      {activeFields.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          {activeFields.map(field => {
+            const value = field.coreField
+              ? (form[field.coreField] as string | undefined) || ''
+              : (form.itemAttributes?.[field.key] as string | number | undefined) ?? '';
+            if (field.type === 'select' && field.options) {
+              return (
+                <div key={field.key}>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                    {field.label.toUpperCase()}
+                    {field.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                  </span>
+                  <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
+                    {field.options.map(opt => {
+                      const sel = value === opt;
+                      return (
+                        <button key={opt}
+                          onClick={() => field.coreField ? setCore(field.coreField, opt) : setAttr(field.key, opt)}
+                          className="cursor-pointer transition-all duration-200"
+                          style={{
+                            padding: '4px 10px', fontSize: 11, borderRadius: 999,
+                            border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
+                            color: sel ? '#0F0F10' : '#6B7280',
+                            background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                          }}>{opt}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <Input key={field.key}
+                required={field.required}
+                label={field.label.toUpperCase() + (field.unit ? ` (${field.unit})` : '')}
+                type={field.type === 'number' ? 'number' : 'text'}
+                value={String(value)}
+                onChange={e => {
+                  const v = field.type === 'number' ? Number(e.target.value) : e.target.value;
+                  if (field.coreField) setCore(field.coreField, String(v));
+                  else setAttr(field.key, v);
+                }}
+              />
+            );
+          })}
+        </div>
+      )}
+
+      {/* Generic Brand/Model fallback wenn keine Kategorie */}
+      {!form.itemCategoryId && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <Input label="BRAND" value={form.itemBrand || ''} onChange={e => setForm({ ...form, itemBrand: e.target.value })} />
+          <Input label="MODEL" value={form.itemModel || ''} onChange={e => setForm({ ...form, itemModel: e.target.value })} />
+        </div>
+      )}
+
+      <Input label="ITEM DESCRIPTION (OPTIONAL)" value={form.itemDescription || ''}
+        onChange={e => setForm({ ...form, itemDescription: e.target.value })} />
     </div>
   );
 }

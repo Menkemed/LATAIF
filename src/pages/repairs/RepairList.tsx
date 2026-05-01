@@ -11,60 +11,10 @@ import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useRepairStore } from '@/stores/repairStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useInvoiceStore } from '@/stores/invoiceStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Repair, RepairStatus } from '@/core/models/types';
-
-// Plan §Repair §Item-Details: vereinfachte kategoriespezifische Felder.
-// Ähnlich Collection-Attributes, aber bewusst schlanker für Repair-Use-Case.
-// Brand/Model werden weiterhin in den Repair-Top-Level-Feldern gespeichert
-// (item_brand/item_model); kategorie-spezifische Felder landen in item_attributes.
-type RepairFieldType = 'text' | 'number' | 'select';
-interface RepairFieldDef {
-  key: string;
-  label: string;
-  type: RepairFieldType;
-  options?: string[];
-  unit?: string;
-  required?: boolean;
-  /** Wenn `coreField` gesetzt → speichert in repair.item_brand/itemModel/etc. statt itemAttributes. */
-  coreField?: 'itemBrand' | 'itemModel' | 'itemReference' | 'itemSerial';
-}
-const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
-  'cat-watch': [
-    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
-    { key: 'model', label: 'Model', type: 'text', required: true, coreField: 'itemModel' },
-    { key: 'reference', label: 'Reference', type: 'text', coreField: 'itemReference' },
-    { key: 'serial', label: 'Serial Number', type: 'text', coreField: 'itemSerial' },
-  ],
-  'cat-gold-jewelry': [
-    { key: 'item_type', label: 'Type', type: 'select',
-      options: ['Ring', 'Necklace', 'Bracelet', 'Bangle', 'Brooch', 'Pendant', 'Earrings', 'Other'], required: true },
-    { key: 'weight', label: 'Weight', type: 'number', unit: 'g' },
-    { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct' },
-  ],
-  'cat-branded-gold-jewelry': [
-    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
-    { key: 'item_type', label: 'Type', type: 'select',
-      options: ['Ring', 'Necklace', 'Bracelet', 'Bangle', 'Brooch', 'Pendant', 'Earrings', 'Other'], required: true },
-    { key: 'weight', label: 'Weight', type: 'number', unit: 'g' },
-  ],
-  'cat-original-gold-jewelry': [
-    { key: 'item_type', label: 'Type', type: 'select',
-      options: ['Ring', 'Necklace', 'Bracelet', 'Bangle', 'Brooch', 'Pendant', 'Earrings', 'Other'], required: true },
-    { key: 'weight', label: 'Weight', type: 'number', unit: 'g' },
-    { key: 'karat', label: 'Karat', type: 'select',
-      options: ['24K', '22K', '21K', '18K', '14K', '9K'] },
-    { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct' },
-  ],
-  'cat-accessory': [
-    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
-    { key: 'model', label: 'Model / Type', type: 'text', coreField: 'itemModel' },
-  ],
-  'cat-spare-part': [
-    { key: 'name', label: 'Part Name', type: 'text', required: true, coreField: 'itemModel' },
-    { key: 'reference', label: 'Reference / SKU', type: 'text', coreField: 'itemReference' },
-  ],
-};
+import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -89,6 +39,7 @@ export function RepairList() {
   const { repairs, loadRepairs, createRepair, updateStatus } = useRepairStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { categories, loadCategories } = useProductStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState<RepairStatus | ''>('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -100,7 +51,21 @@ export function RepairList() {
   });
   const [searchParams, setSearchParams] = useSearchParams();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); }, [loadRepairs, loadCustomers, loadCategories]);
+  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadInvoices(); }, [loadRepairs, loadCustomers, loadCategories, loadInvoices]);
+
+  // Plan §Repair §Picked-Up-Gate (UX): button für „Picked Up" deaktivieren wenn
+  // charge > 0 und noch nicht voll bezahlt — User sieht direkt warum's blockiert,
+  // statt erst auf einen Alert zu warten.
+  function isRepairBlockedFromPickup(rep: Repair): boolean {
+    const charge = rep.chargeToCustomer || 0;
+    if (charge <= 0.005) return false;
+    if (rep.customerPaymentStatus === 'PAID') return false;
+    if (rep.invoiceId) {
+      const inv = invoices.find(i => i.id === rep.invoiceId);
+      if (inv && (inv.paidAmount || 0) >= (inv.grossAmount || 0) - 0.005) return false;
+    }
+    return true;
+  }
 
   // Filter Repair-Service-Kategorien aus der UI raus (interne Service-Items, keine Repair-Items)
   const repairableCategories = useMemo(
@@ -244,6 +209,7 @@ export function RepairList() {
       {filtered.map(rep => {
         const next = NEXT_STATUS[rep.status];
         const itemLabel = [rep.itemBrand, rep.itemModel].filter(Boolean).join(' ');
+        const blockedPickup = next?.status === 'picked_up' && isRepairBlockedFromPickup(rep);
 
         return (
           <div
@@ -328,24 +294,31 @@ export function RepairList() {
             <div style={{ textAlign: 'right' }}>
               {next && (
                 <button
-                  onClick={(e) => handleQuickStatus(e, rep.id, next.status)}
-                  className="cursor-pointer transition-all duration-200"
+                  onClick={(e) => { if (!blockedPickup) handleQuickStatus(e, rep.id, next.status); else e.stopPropagation(); }}
+                  disabled={blockedPickup}
+                  title={blockedPickup ? 'Erst Invoice + Payment, dann Picked Up.' : undefined}
+                  className={blockedPickup ? '' : 'cursor-pointer transition-all duration-200'}
                   style={{
                     padding: '5px 12px', fontSize: 11, borderRadius: 999,
-                    border: '1px solid #D5D9DE', color: '#4B5563',
+                    border: `1px solid ${blockedPickup ? '#E5E9EE' : '#D5D9DE'}`,
+                    color: blockedPickup ? '#9CA3AF' : '#4B5563',
                     background: 'transparent',
+                    cursor: blockedPickup ? 'not-allowed' : 'pointer',
+                    opacity: blockedPickup ? 0.5 : 1,
                   }}
                   onMouseEnter={e => {
+                    if (blockedPickup) return;
                     e.currentTarget.style.borderColor = '#0F0F10';
                     e.currentTarget.style.color = '#0F0F10';
                     e.currentTarget.style.background = 'rgba(15,15,16,0.06)';
                   }}
                   onMouseLeave={e => {
+                    if (blockedPickup) return;
                     e.currentTarget.style.borderColor = '#D5D9DE';
                     e.currentTarget.style.color = '#4B5563';
                     e.currentTarget.style.background = 'transparent';
                   }}
-                >{next.label}</button>
+                >{blockedPickup ? 'Unpaid' : next.label}</button>
               )}
             </div>
           </div>

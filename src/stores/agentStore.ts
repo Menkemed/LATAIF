@@ -31,6 +31,9 @@ interface AgentStore {
   // bindet transfer.invoiceId. Ab dann läuft die Bezahlung über die Invoice; markTransferSettled
   // wird in der UI ausgeblendet.
   convertTransferToInvoice: (transferId: string, customerId: string) => Invoice;
+  // Plan §Agent §Convert §Undo: Convert rückgängig machen. Erlaubt nur solange
+  // die Invoice noch nicht (teilweise) bezahlt wurde — sonst Doppelbuchung.
+  undoTransferInvoiceConvert: (transferId: string) => void;
   // Plan §8 #5 — Audit-Trail der Settlement-Zahlungen.
   getSettlementPayments: (transferId: string) => Array<{ id: string; amount: number; method: string; paidAt: string; note?: string }>;
   deleteTransfer: (id: string) => void;
@@ -379,5 +382,26 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     useCustomerStore.getState().loadCustomers();
     eventBus.emit('agent_transfer.invoice_created', 'agent_transfer', transferId, { invoiceId: invoice.id });
     return invoice;
+  },
+
+  undoTransferInvoiceConvert: (transferId) => {
+    const transfer = get().getTransfer(transferId);
+    if (!transfer) throw new Error('Transfer not found.');
+    if (!transfer.invoiceId) throw new Error('This transfer has no linked invoice.');
+    const inv = useInvoiceStore.getState();
+    const invoice = inv.invoices.find(i => i.id === transfer.invoiceId);
+    if (!invoice) {
+      // Invoice fehlt → einfach den Link löschen, Daten konsistent halten.
+      get().updateTransfer(transferId, { invoiceId: undefined });
+      return;
+    }
+    if ((invoice.paidAmount || 0) > 0.005) {
+      throw new Error(
+        'Invoice hat schon eine Zahlung — Undo nicht erlaubt (würde Doppelbuchung erzeugen). Erst Payment löschen, dann Undo.'
+      );
+    }
+    inv.deleteInvoice(invoice.id);
+    get().updateTransfer(transferId, { invoiceId: undefined });
+    eventBus.emit('agent_transfer.invoice_undone', 'agent_transfer', transferId, { invoiceId: invoice.id });
   },
 }));
