@@ -9,11 +9,13 @@ import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { ImageUpload } from '@/components/ui/ImageUpload';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
-import type { ConsignmentStatus } from '@/core/models/types';
+import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
+import type { AiCategoryId } from '@/core/ai/ai-service';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -32,7 +34,7 @@ export function ConsignmentList() {
     markSold, markPaidOut, markReturned,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts } = useProductStore();
+  const { products, loadProducts, categories, loadCategories, createProduct, nextAvailableSku } = useProductStore();
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('');
@@ -48,24 +50,33 @@ export function ConsignmentList() {
   const [paidMethod, setPaidMethod] = useState('bank_transfer');
   const [paidRef, setPaidRef] = useState('');
 
-  // New consignment form
+  // New consignment form (Consignor + Konditionen — Produktdaten kommen aus productForm).
   const [form, setForm] = useState({
     consignorId: '',
-    productId: '',
     agreedPrice: '',
     minimumPrice: '',
     commissionRate: '15',
     expiryDate: '',
     notes: '',
     consignorSearch: '',
-    productSearch: '',
   });
+
+  // Plan §Consignment §New: Das Produkt wird beim Anlegen NEU erfasst (Kundenware), nicht
+  // aus dem eigenen Lager gewählt. Layout/Felder identisch zu Collection > New Item, aber
+  // ohne Einkaufspreis/Paid-From/Supplier (wir kaufen das Stück nicht — es bleibt Eigentum
+  // des Consignors bis zum Verkauf).
+  const [selectedCat, setSelectedCat] = useState<Category | null>(null);
+  const [productForm, setProductForm] = useState<Partial<Product>>({
+    condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
+  });
+  const [aiBusy, setAiBusy] = useState(false);
 
   useEffect(() => {
     loadConsignments();
     loadCustomers();
     loadProducts();
-  }, [loadConsignments, loadCustomers, loadProducts]);
+    loadCategories();
+  }, [loadConsignments, loadCustomers, loadProducts, loadCategories]);
 
   // Lookup helpers
   const getCustomer = (id: string) => customers.find(c => c.id === id);
@@ -115,19 +126,45 @@ export function ConsignmentList() {
 
   function openNew() {
     setForm({
-      consignorId: '', productId: '',
+      consignorId: '',
       agreedPrice: '', minimumPrice: '', commissionRate: '15',
-      expiryDate: '', notes: '', consignorSearch: '', productSearch: '',
+      expiryDate: '', notes: '', consignorSearch: '',
+    });
+    const firstCat = categories[0] || null;
+    setSelectedCat(firstCat);
+    setProductForm({
+      categoryId: firstCat?.id || '',
+      condition: firstCat?.conditionOptions?.[0] || '',
+      taxScheme: 'MARGIN',
+      scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
+      images: [],
     });
     setShowNew(true);
   }
 
+  function updateAttr(key: string, value: string | number | boolean) {
+    setProductForm(p => ({ ...p, attributes: { ...(p.attributes || {}), [key]: value } }));
+  }
+
   function handleCreate() {
-    if (!form.consignorId || !form.productId) return;
+    // Pflicht: Consignor + Kategorie + Brand + Name. Rest darf Quick-Capture-Style leer sein.
+    if (!form.consignorId) return;
+    if (!productForm.categoryId || !productForm.brand || !productForm.name) return;
+
+    // Schritt 1: Produkt anlegen — als Consignment-Ware (kein Einkauf von uns).
+    const newProduct = createProduct({
+      ...productForm,
+      purchasePrice: 0,           // wir bezahlen nichts an den Consignor beim Intake
+      stockStatus: 'consignment', // raus aus normalem Lager-Filter
+      sourceType: 'CONSIGNMENT',
+      quantity: 1,
+    });
+
+    // Schritt 2: Consignment-Vertrag verknüpfen.
     const rateVal = Number(form.commissionRate) || 0;
     createConsignment({
       consignorId: form.consignorId,
-      productId: form.productId,
+      productId: newProduct.id,
       agreedPrice: form.agreedPrice ? Number(form.agreedPrice) : 0,
       minimumPrice: form.minimumPrice ? Number(form.minimumPrice) : undefined,
       commissionType,
@@ -341,16 +378,251 @@ export function ConsignmentList() {
             >+ New Client</button>
           </div>
 
-          {/* Product Selection */}
-          <SearchSelect
-            label="PRODUCT"
-            placeholder="Search products..."
-            options={products.filter(p => p.stockStatus === 'in_stock').map(p => ({
-              id: p.id, label: `${p.brand} ${p.name}`, subtitle: `${fmt(p.purchasePrice)} BHD`, meta: p.sku,
-            }))}
-            value={form.productId}
-            onChange={id => setForm({ ...form, productId: id })}
-          />
+          {/* Plan §Consignment §New: Item wird hier neu erfasst — wie Collection > New Item.
+              Kein Picker auf eigene Inventar-Produkte. */}
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
+              CONSIGNED ITEM
+            </span>
+            <div style={{
+              padding: '8px 12px', borderRadius: 8, background: '#F2F7FA',
+              border: '1px solid #E5E9EE', color: '#6B7280', fontSize: 12, lineHeight: 1.5,
+              marginBottom: 16,
+            }}>
+              <strong style={{ color: '#0F0F10' }}>Customer-owned item:</strong> Wird neu erfasst, gehört dem
+              Consignor bis zum Verkauf. Kein Eigeninventar.
+            </div>
+
+            {/* Kategorie */}
+            <div style={{ marginBottom: 16 }}>
+              <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
+                CATEGORY <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
+              </span>
+              <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
+                {categories.map(cat => (
+                  <button key={cat.id}
+                    onClick={() => {
+                      setSelectedCat(cat);
+                      setProductForm(p => ({ ...p, categoryId: cat.id, condition: cat.conditionOptions?.[0] || '', attributes: {} }));
+                    }}
+                    className="cursor-pointer rounded-lg transition-all duration-200"
+                    style={{
+                      padding: '10px 18px', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8,
+                      border: `1px solid ${productForm.categoryId === cat.id ? cat.color : '#D5D9DE'}`,
+                      color: productForm.categoryId === cat.id ? cat.color : '#6B7280',
+                      background: productForm.categoryId === cat.id ? cat.color + '08' : 'transparent',
+                    }}>
+                    <span className="rounded-full" style={{ width: 6, height: 6, background: cat.color }} />
+                    {cat.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Brand + Name */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <Input required label="BRAND" placeholder="e.g. Rolex, Hermes, Cartier"
+                value={productForm.brand || ''}
+                onChange={e => setProductForm(p => ({ ...p, brand: e.target.value }))} />
+              <Input required label="NAME / MODEL" placeholder="e.g. Submariner, Birkin 30"
+                value={productForm.name || ''}
+                onChange={e => setProductForm(p => ({ ...p, name: e.target.value }))} />
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <Input label="SKU / REFERENCE" placeholder="Internal reference"
+                value={productForm.sku || ''}
+                onChange={e => setProductForm(p => ({ ...p, sku: e.target.value }))} />
+            </div>
+
+            {/* Dynamische Kategorie-Attribute */}
+            {selectedCat && selectedCat.attributes.length > 0 && (
+              <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 16, marginTop: 16 }}>
+                <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
+                  {selectedCat.attributes.map(attr => {
+                    if (attr.type === 'select' && attr.options) {
+                      return (
+                        <div key={attr.key}>
+                          <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                            {attr.label.toUpperCase()}
+                            {attr.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                          </span>
+                          <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
+                            {attr.options.map(opt => (
+                              <button key={opt} onClick={() => updateAttr(attr.key, opt)}
+                                className="cursor-pointer transition-all duration-200"
+                                style={{
+                                  padding: '4px 10px', fontSize: 11, borderRadius: 999,
+                                  border: `1px solid ${productForm.attributes?.[attr.key] === opt ? '#0F0F10' : '#D5D9DE'}`,
+                                  color: productForm.attributes?.[attr.key] === opt ? '#0F0F10' : '#6B7280',
+                                  background: productForm.attributes?.[attr.key] === opt ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                }}>{opt}</button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div key={attr.key}>
+                        <Input
+                          required={attr.required}
+                          label={attr.label.toUpperCase() + (attr.unit ? ` (${attr.unit})` : '')}
+                          type={attr.type === 'number' ? 'number' : 'text'}
+                          placeholder={attr.label}
+                          value={(productForm.attributes?.[attr.key] as string) || ''}
+                          onChange={e => updateAttr(attr.key, attr.type === 'number' ? Number(e.target.value) : e.target.value)}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Condition */}
+            {selectedCat && selectedCat.conditionOptions.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
+                  CONDITION <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
+                </span>
+                <div className="flex gap-2" style={{ marginTop: 8 }}>
+                  {selectedCat.conditionOptions.map(cond => (
+                    <button key={cond} onClick={() => setProductForm(p => ({ ...p, condition: cond }))}
+                      className="cursor-pointer rounded transition-all duration-200"
+                      style={{
+                        padding: '7px 14px', fontSize: 12,
+                        border: `1px solid ${productForm.condition === cond ? '#0F0F10' : '#D5D9DE'}`,
+                        color: productForm.condition === cond ? '#0F0F10' : '#6B7280',
+                        background: productForm.condition === cond ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      }}>{cond}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Scope / Included */}
+            {selectedCat && selectedCat.scopeOptions.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <span className="text-overline" style={{ marginBottom: 8 }}>INCLUDED</span>
+                <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
+                  {selectedCat.scopeOptions.map(item => {
+                    const sel = (productForm.scopeOfDelivery || []).includes(item);
+                    return (
+                      <button key={item}
+                        onClick={() => setProductForm(p => {
+                          const s = p.scopeOfDelivery || [];
+                          return { ...p, scopeOfDelivery: sel ? s.filter(x => x !== item) : [...s, item] };
+                        })}
+                        className="cursor-pointer transition-all duration-200"
+                        style={{
+                          padding: '5px 12px', fontSize: 11, borderRadius: 999,
+                          border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
+                          color: sel ? '#0F0F10' : '#6B7280',
+                          background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                        }}>{item}</button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* AI Identify */}
+            {productForm.categoryId && (
+              <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 16, marginTop: 16 }}>
+                <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+                  <div>
+                    <span className="text-overline">AI IDENTIFY &amp; RESEARCH</span>
+                    <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                      Füllt Brand, Name, Kategorie-Felder, Description automatisch — alles editierbar.
+                    </div>
+                  </div>
+                  <button disabled={aiBusy}
+                    className="cursor-pointer transition-colors"
+                    style={{
+                      background: aiBusy ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
+                      border: 'none', borderRadius: 8, fontSize: 12, padding: '8px 14px',
+                    }}
+                    onClick={async () => {
+                      const ai = await import('@/core/ai/ai-service');
+                      if (!ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
+                      const hasImage = (productForm.images || []).length > 0;
+                      const hasHints = !!productForm.brand || !!productForm.name || !!productForm.sku;
+                      if (!hasImage && !hasHints) {
+                        alert('Add a photo OR type a brand/name/reference hint first, then click AI Identify.');
+                        return;
+                      }
+                      setAiBusy(true);
+                      try {
+                        const result = await ai.identifyProduct({
+                          categoryId: productForm.categoryId as AiCategoryId,
+                          imageBase64: hasImage ? productForm.images![0] : undefined,
+                          hints: hasHints ? { brand: productForm.brand, name: productForm.name, reference: productForm.sku } : undefined,
+                        });
+                        setProductForm(f => {
+                          const updated = { ...f };
+                          if (result.brand) updated.brand = result.brand;
+                          if (result.name) updated.name = result.name;
+                          if (result.sku && !f.sku) updated.sku = nextAvailableSku(result.sku);
+                          if (result.condition) updated.condition = result.condition;
+                          if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
+                          if (result.estimatedValue && !form.agreedPrice) {
+                            // Plan §Consignment: AI-Schätzung schreibt nicht ins Produkt sondern in
+                            // den Consignment-Agreed-Price-Vorschlag, da das Produkt selbst keinen Sale Price hat.
+                            setForm(prev => ({ ...prev, agreedPrice: String(result.estimatedValue) }));
+                          }
+                          if (result.taxScheme && !f.taxScheme) updated.taxScheme = result.taxScheme;
+                          if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0 && (!f.scopeOfDelivery || f.scopeOfDelivery.length === 0)) {
+                            updated.scopeOfDelivery = result.scopeOfDelivery;
+                          }
+                          const attrs = { ...(f.attributes || {}) };
+                          for (const [k, v] of Object.entries(result.attributes || {})) {
+                            if (v === null || v === undefined || v === '') continue;
+                            attrs[k] = v as string | number | boolean | string[];
+                          }
+                          updated.attributes = attrs;
+                          return updated;
+                        });
+                      } catch (e) { alert(String(e)); }
+                      finally { setAiBusy(false); }
+                    }}
+                  >{aiBusy ? 'Researching…' : 'AI Identify'}</button>
+                </div>
+              </div>
+            )}
+
+            {/* Photos */}
+            <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 16, marginTop: 16 }}>
+              <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+                <span className="text-overline">PHOTOS</span>
+                <span style={{ fontSize: 11, color: '#6B7280' }}>Add at least one photo for best AI results</span>
+              </div>
+              <ImageUpload images={productForm.images || []}
+                onChange={imgs => setProductForm(p => ({ ...p, images: imgs }))}
+                maxImages={6} />
+            </div>
+
+            {/* Tax Scheme + Storage Location */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
+              <div>
+                <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>TAX SCHEME</span>
+                <div className="flex gap-2" style={{ marginTop: 8 }}>
+                  {(['MARGIN', 'VAT_10', 'ZERO'] as TaxScheme[]).map(scheme => (
+                    <button key={scheme} onClick={() => setProductForm(p => ({ ...p, taxScheme: scheme }))}
+                      className="cursor-pointer rounded transition-all duration-200"
+                      style={{
+                        padding: '7px 14px', fontSize: 12,
+                        border: `1px solid ${productForm.taxScheme === scheme ? '#0F0F10' : '#D5D9DE'}`,
+                        color: productForm.taxScheme === scheme ? '#0F0F10' : '#6B7280',
+                        background: productForm.taxScheme === scheme ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      }}>{scheme === 'MARGIN' ? 'Margin' : scheme === 'VAT_10' ? 'VAT 10%' : 'Zero'}</button>
+                  ))}
+                </div>
+              </div>
+              <Input label="STORAGE LOCATION" placeholder="Safe, Shelf, Display..."
+                value={productForm.storageLocation || ''}
+                onChange={e => setProductForm(p => ({ ...p, storageLocation: e.target.value }))} />
+            </div>
+          </div>
 
           {/* Pricing */}
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
@@ -451,7 +723,7 @@ export function ConsignmentList() {
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}
-              disabled={!form.consignorId || !form.productId}
+              disabled={!form.consignorId || !productForm.categoryId || !productForm.brand || !productForm.name}
             >Create Consignment</Button>
           </div>
         </div>
