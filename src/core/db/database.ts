@@ -212,6 +212,12 @@ function runMigrations(database: Database): void {
     // Plan §Agent §Convert: Verlinkung Agent → Customer für Convert-to-Invoice.
     // Optional. Wird beim ersten Convert befüllt und danach wiederverwendet.
     `ALTER TABLE agents ADD COLUMN customer_id TEXT REFERENCES customers(id)`,
+    // Plan §Purchase §Tax: Input-VAT per Purchase-Line, damit sie gegen
+    // Output-VAT in der Steuer-Abrechnung verrechnet werden kann.
+    // Default tax_scheme=NULL ⇒ kein VAT (Backward-Compat für Altbestände).
+    `ALTER TABLE purchase_lines ADD COLUMN tax_scheme TEXT`,
+    `ALTER TABLE purchase_lines ADD COLUMN vat_rate REAL DEFAULT 0`,
+    `ALTER TABLE purchase_lines ADD COLUMN vat_amount REAL DEFAULT 0`,
     // Optionale Tax-Felder auf Order-Ebene (für die Pricing-Section)
     `ALTER TABLE orders ADD COLUMN tax_amount REAL DEFAULT 0`,
     `ALTER TABLE orders ADD COLUMN payment_method TEXT`,

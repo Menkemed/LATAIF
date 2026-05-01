@@ -763,9 +763,14 @@ export interface PurchaseLine {
   productId?: UUID;
   description?: string;
   quantity: number;
-  unitPrice: number;
-  lineTotal: number;
+  unitPrice: number;          // gross-incl-VAT pro Stück (was wir dem Lieferanten zahlen)
+  lineTotal: number;          // qty × unitPrice (= gross)
   position: number;
+  // Plan §Purchase §Tax: Input-VAT (Vorsteuer). NULL/'ZERO' = keine Vorsteuer
+  // (Default für Altbestände); 'VAT_10' = 10% Vorsteuer im Bruttopreis enthalten.
+  taxScheme?: 'ZERO' | 'VAT_10';
+  vatRate?: number;            // 0 oder 10
+  vatAmount?: number;          // dekomponiert: lineTotal × rate / (100 + rate)
 }
 
 // Plan §Purchase Returns §8: 'credit' erlaubt Nutzung von Supplier-Credit-Balance.

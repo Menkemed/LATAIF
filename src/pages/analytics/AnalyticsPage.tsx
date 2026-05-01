@@ -378,6 +378,18 @@ export function AnalyticsPage() {
     const totalVat = num(r, 'stored_vat') + num(marginVatRow[0] || {}, 'margin_vat');
     const profitAfterVat = num(r, 'profit');
 
+    // Plan §Purchase §Tax: Input-VAT (Vorsteuer aus Purchases) für Verrechnung
+    // gegen Output-VAT. Zählt nur nicht-stornierte Purchases.
+    const inputVatRow = qry(
+      `SELECT COALESCE(SUM(pl.vat_amount), 0) AS input_vat
+       FROM purchase_lines pl
+       JOIN purchases p ON p.id = pl.purchase_id
+       WHERE p.branch_id = ? AND p.status != 'CANCELLED'`,
+      [branchId]
+    );
+    const totalInputVat = num(inputVatRow[0] || {}, 'input_vat');
+    const netVatOwed = Math.max(0, totalVat - totalInputVat);
+
     // Open invoices (issued or partially_paid)
     const open = qry(
       `SELECT COUNT(*) as cnt, COALESCE(SUM(gross_amount - paid_amount),0) as outstanding
@@ -734,7 +746,9 @@ export function AnalyticsPage() {
     const totalLiquid = cashBalance + bankBalance;
 
     // ── Quarterly VAT (owed) ──
-    type QuarterRow = { year: number; quarter: number; vat: number; paid: number };
+    // vat = Output-VAT (aus Sales), inputVat = Vorsteuer (aus Purchases),
+    // netVat = max(0, vat − inputVat) = was effektiv an NBR gezahlt werden muss.
+    type QuarterRow = { year: number; quarter: number; vat: number; inputVat: number; netVat: number; paid: number };
     const fyStartRow = qry(
       `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.fiscal_year_start_month'`,
       [branchId]
@@ -777,20 +791,49 @@ export function AnalyticsPage() {
       const key = `${t.year}-Q${t.quarter}`;
       quarterlyVatPaid[key] = (quarterlyVatPaid[key] || 0) + ((t.amount as number) || 0);
     }
-    const quarterly: QuarterRow[] = Object.keys(quarterlyVatOwed)
+    // Plan §Purchase §Tax: Input-VAT per Fiscal-Quarter — wird gegen Output-VAT
+    // verrechnet, sodass nur die Netto-Schuld an die NBR ausgewiesen wird.
+    const inputVatByPurchase = qry(
+      `SELECT COALESCE(p.purchase_date, p.created_at) AS d,
+              COALESCE((SELECT SUM(vat_amount) FROM purchase_lines WHERE purchase_id = p.id), 0) AS input_vat
+       FROM purchases p
+       WHERE p.branch_id = ? AND p.status != 'CANCELLED'`,
+      [branchId]
+    );
+    const quarterlyInputVat: Record<string, number> = {};
+    for (const row of inputVatByPurchase) {
+      const d = new Date((row.d as string) || Date.now());
+      const year = d.getFullYear();
+      const month = d.getMonth() + 1;
+      const fyOffset = ((month - fyStartMonth + 12) % 12);
+      const q = Math.floor(fyOffset / 3) + 1;
+      const key = `${year}-Q${q}`;
+      quarterlyInputVat[key] = (quarterlyInputVat[key] || 0) + ((row.input_vat as number) || 0);
+    }
+    // Gemeinsame Key-Menge — auch Quartale, in denen es nur Purchases ohne Sales gab
+    // (z.B. erstes Lager-Aufbau), sollen sichtbar sein.
+    const allQuarterKeys = new Set<string>([
+      ...Object.keys(quarterlyVatOwed),
+      ...Object.keys(quarterlyInputVat),
+    ]);
+    const quarterly: QuarterRow[] = Array.from(allQuarterKeys)
       .sort((a, b) => b.localeCompare(a))
       .map(k => {
         const [yearStr, qStr] = k.split('-Q');
+        const owed = quarterlyVatOwed[k] || 0;
+        const input = quarterlyInputVat[k] || 0;
         return {
           year: parseInt(yearStr),
           quarter: parseInt(qStr),
-          vat: quarterlyVatOwed[k] || 0,
+          vat: owed,
+          inputVat: input,
+          netVat: Math.max(0, owed - input),
           paid: quarterlyVatPaid[k] || 0,
         };
       });
 
     return {
-      netRevenue, grossRevenue, totalVat, profitAfterVat,
+      netRevenue, grossRevenue, totalVat, totalInputVat, netVatOwed, profitAfterVat,
       openCount, openValue, paidCount, paidValue,
       repairRevenue: repRev, consignmentComm, agentCommTotal,
       outstandingPayments,
@@ -1278,9 +1321,9 @@ export function AnalyticsPage() {
                 icon={<DollarSign size={16} />}
               />
               <KPICard
-                label="TOTAL VAT"
-                value={fmt(finance.totalVat)}
-                unit="BHD collected"
+                label="NET VAT OWED"
+                value={fmt(finance.netVatOwed)}
+                unit={`Output ${fmt(finance.totalVat)} − Input ${fmt(finance.totalInputVat)} BHD`}
                 icon={<FileText size={16} />}
               />
               <KPICard
@@ -1412,7 +1455,8 @@ export function AnalyticsPage() {
                   <p style={{ padding: 24, textAlign: 'center', fontSize: 13, color: '#6B7280' }}>No VAT-relevant invoices yet.</p>
                 )}
                 {finance.quarterly.map(q => {
-                  const remaining = q.vat - q.paid;
+                  // Plan §Purchase §Tax: Net-VAT (Output − Input) ist die Schuld an die NBR.
+                  const remaining = q.netVat - q.paid;
                   const isSettled = remaining <= 0.01;
                   return (
                     <div key={`${q.year}-${q.quarter}`}
@@ -1424,8 +1468,16 @@ export function AnalyticsPage() {
                       </div>
                       <div className="flex items-center gap-6">
                         <div className="text-right">
-                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>VAT OWED</span>
+                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>OUTPUT VAT</span>
                           <span className="font-mono" style={{ fontSize: 14, color: '#4B5563' }}>{fmtDec(q.vat, 2)}</span>
+                        </div>
+                        <div className="text-right">
+                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>INPUT VAT</span>
+                          <span className="font-mono" style={{ fontSize: 14, color: q.inputVat > 0 ? '#7EAA6E' : '#6B7280' }}>− {fmtDec(q.inputVat, 2)}</span>
+                        </div>
+                        <div className="text-right">
+                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>NET OWED</span>
+                          <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10', fontWeight: 600 }}>{fmtDec(q.netVat, 2)}</span>
                         </div>
                         <div className="text-right">
                           <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>PAID</span>
@@ -1437,7 +1489,7 @@ export function AnalyticsPage() {
                         </div>
                         {!isSettled && (
                           <button
-                            onClick={() => setTaxPayQuarter(q)}
+                            onClick={() => setTaxPayQuarter({ year: q.year, quarter: q.quarter, vat: q.netVat, paid: q.paid })}
                             className="cursor-pointer"
                             style={{ padding: '6px 14px', fontSize: 11, background: 'rgba(15,15,16,0.08)', border: '1px solid rgba(198,163,109,0.3)', borderRadius: 6, color: '#0F0F10' }}
                           >Mark paid</button>

@@ -10,10 +10,11 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus } from '@/core/models/types';
+import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
+import { useProductStore } from '@/stores/productStore';
 
 interface PurchaseInput {
   supplierId: string;
@@ -21,13 +22,20 @@ interface PurchaseInput {
   notes?: string;
   lines: Array<{
     productId?: string;       // if omitted → new product is created
-    newProductBrand?: string; // required if productId not set
-    newProductName?: string;  // required if productId not set
+    // Plan §Purchase §New-Item: bei „New" wird das Produkt mit voller
+    // Collection-Spec angelegt (Kategorie + dyn. Attribute + Photos + Tax-Scheme).
+    // Legacy-Felder newProductBrand/Name/etc. bleiben als Fallback erhalten.
+    newProduct?: Partial<Product>;
+    newProductBrand?: string;
+    newProductName?: string;
     newProductCategoryId?: string;
     newProductSku?: string;
     description?: string;
     quantity: number;
-    unitPrice: number;
+    unitPrice: number;        // gross-incl-VAT pro Stück (was an den Lieferanten gezahlt wird)
+    // Plan §Purchase §Tax: Input-VAT (Vorsteuer) per Line.
+    taxScheme?: 'ZERO' | 'VAT_10';
+    vatRate?: number;          // 0 oder 10
   }>;
   initialPayment?: { amount: number; method: 'cash' | 'bank'; reference?: string };
 }
@@ -88,6 +96,9 @@ function rowToLine(row: Record<string, unknown>): PurchaseLine {
     unitPrice: (row.unit_price as number) || 0,
     lineTotal: (row.line_total as number) || 0,
     position: (row.position as number) || 0,
+    taxScheme: (row.tax_scheme as 'ZERO' | 'VAT_10' | null) || undefined,
+    vatRate: row.vat_rate != null ? (row.vat_rate as number) : undefined,
+    vatAmount: row.vat_amount != null ? (row.vat_amount as number) : undefined,
   };
 }
 
@@ -194,29 +205,55 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
     // Create or link products for each line and build line records.
     // Plan §5: Ware kommt IMMER ins Inventar, product_status = IN_STOCK, source_type = OWN
-    const lineRecords: Array<{ id: string; productId: string; description: string | null; qty: number; unitPrice: number; lineTotal: number; position: number }> = [];
+    const lineRecords: Array<{
+      id: string; productId: string; description: string | null;
+      qty: number; unitPrice: number; lineTotal: number; position: number;
+      taxScheme: 'ZERO' | 'VAT_10'; vatRate: number; vatAmount: number;
+    }> = [];
     let total = 0;
     input.lines.forEach((ln, idx) => {
       let productId = ln.productId;
       if (!productId) {
-        // Create a new product
-        productId = uuid();
-        const pNow = new Date().toISOString();
-        db.run(
-          `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
-            purchase_date, purchase_price, purchase_currency, stock_status, tax_scheme, expected_margin, days_in_stock,
-            supplier_name, notes, images, attributes, created_at, updated_at, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'BHD', 'in_stock', 'MARGIN', NULL, 0, NULL, ?, '[]', '{}', ?, ?, ?)`,
-          [productId, branchId, ln.newProductCategoryId || 'cat-watches', ln.newProductBrand || '', ln.newProductName || '',
-           ln.newProductSku || null, '', purchaseDate, ln.unitPrice, ln.description || null, pNow, pNow, userId]
-        );
+        if (ln.newProduct) {
+          // Plan §Purchase §New-Item: Neues Produkt mit voller Collection-Spec
+          // (Kategorie + dyn. Attribute + Photos + Tax-Scheme + Storage etc.).
+          // Eine zentrale Stelle für das INSERT — useProductStore.createProduct —
+          // statt SQL hier zu duplizieren.
+          const created = useProductStore.getState().createProduct({
+            ...ln.newProduct,
+            purchasePrice: ln.unitPrice,        // Bruttopreis aus dem Purchase-Line-Input
+            purchaseDate,
+            stockStatus: 'in_stock',
+            quantity: ln.quantity || 1,
+          });
+          productId = created.id;
+        } else {
+          // Legacy-Pfad: nur Brand/Name/SKU/Kategorie aus Inline-Eingabe.
+          productId = uuid();
+          const pNow = new Date().toISOString();
+          db.run(
+            `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
+              purchase_date, purchase_price, purchase_currency, stock_status, tax_scheme, expected_margin, days_in_stock,
+              supplier_name, notes, images, attributes, created_at, updated_at, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'BHD', 'in_stock', 'MARGIN', NULL, 0, NULL, ?, '[]', '{}', ?, ?, ?)`,
+            [productId, branchId, ln.newProductCategoryId || 'cat-watches', ln.newProductBrand || '', ln.newProductName || '',
+             ln.newProductSku || null, '', purchaseDate, ln.unitPrice, ln.description || null, pNow, pNow, userId]
+          );
+        }
       }
-      const lineTotal = ln.quantity * ln.unitPrice;
+      const qty = Math.max(1, ln.quantity || 1);
+      const unitPrice = ln.unitPrice || 0;
+      const lineTotal = qty * unitPrice;       // gross-incl-VAT
+      const scheme: 'ZERO' | 'VAT_10' = ln.taxScheme || 'ZERO';
+      const rate = ln.vatRate ?? (scheme === 'VAT_10' ? 10 : 0);
+      // Input-VAT aus Brutto dekomponieren: vat = gross × rate / (100 + rate).
+      const vatAmount = rate > 0 ? lineTotal * rate / (100 + rate) : 0;
       total += lineTotal;
       const lineId = uuid();
       lineRecords.push({
         id: lineId, productId, description: ln.description || null,
-        qty: ln.quantity, unitPrice: ln.unitPrice, lineTotal, position: idx + 1,
+        qty, unitPrice, lineTotal, position: idx + 1,
+        taxScheme: scheme, vatRate: rate, vatAmount,
       });
     });
 
@@ -231,13 +268,13 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
        purchaseDate, input.notes || null, now, now, userId]
     );
 
-    // Insert lines
+    // Insert lines (inkl. Input-VAT-Felder)
     const lineStmt = db.prepare(
-      `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const l of lineRecords) {
-      lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position]);
+      lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount]);
     }
     lineStmt.free();
 
