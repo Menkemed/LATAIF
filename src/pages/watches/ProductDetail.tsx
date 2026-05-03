@@ -94,24 +94,17 @@ export function ProductDetail() {
 
   function handleSave() {
     if (!id) return;
-    const errs = validate();
-    setErrors(errs);
-    if (Object.keys(errs).length > 0) {
-      // Scroll to the first invalid field; small delay so the banner renders first.
-      setTimeout(() => {
-        const firstKey = Object.keys(errs)[0];
-        const el = document.getElementById(`field-${firstKey}`);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 50);
-      return;
-    }
+    // Plan §Quick-Capture (User-Spec): kein blockierendes Required, auch
+    // nicht im Edit-Mode. validate() läuft nur noch für visuelle Inline-Hints —
+    // Save geht immer durch. Vom Handy soll man jederzeit teil-speichern können,
+    // Details kommen wenn sie kommen.
+    setErrors(validate());
     const margin = form.plannedSalePrice ? form.plannedSalePrice - (form.purchasePrice || 0) : undefined;
     updateProduct(id, {
       ...form,
       attributes: formAttrs,
       expectedMargin: margin,
     });
-    setErrors({});
     setEditing(false);
   }
 
