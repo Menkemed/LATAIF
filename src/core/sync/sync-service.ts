@@ -152,6 +152,55 @@ async function pullChanges(): Promise<number> {
   saveDatabase();
   localStorage.setItem(STORAGE_KEY_LAST, String(last_sync_id));
 
+  // Plan §LAN-Sync: nach dem Pull die betroffenen Stores neu laden — sonst
+  // bleibt die UI auf dem alten Stand und neue Items vom Handy tauchen erst
+  // beim naechsten App-Start auf. Wir reloaden anhand der Tabellen die im
+  // Changeset vorkommen, damit nicht jedes Mal alle Stores rauschen.
+  const tablesChanged = new Set(changes.map((c: { table_name: string }) => c.table_name));
+  if (tablesChanged.size > 0) {
+    try {
+      if (tablesChanged.has('products')) {
+        const { useProductStore } = await import('@/stores/productStore');
+        useProductStore.getState().loadProducts();
+      }
+      if (tablesChanged.has('customers')) {
+        const { useCustomerStore } = await import('@/stores/customerStore');
+        useCustomerStore.getState().loadCustomers();
+      }
+      if (tablesChanged.has('invoices') || tablesChanged.has('invoice_lines') || tablesChanged.has('payments')) {
+        const { useInvoiceStore } = await import('@/stores/invoiceStore');
+        useInvoiceStore.getState().loadInvoices();
+      }
+      if (tablesChanged.has('repairs')) {
+        const { useRepairStore } = await import('@/stores/repairStore');
+        useRepairStore.getState().loadRepairs();
+      }
+      if (tablesChanged.has('orders') || tablesChanged.has('order_lines')) {
+        const { useOrderStore } = await import('@/stores/orderStore');
+        useOrderStore.getState().loadOrders();
+      }
+      if (tablesChanged.has('purchases') || tablesChanged.has('purchase_lines')) {
+        const { usePurchaseStore } = await import('@/stores/purchaseStore');
+        usePurchaseStore.getState().loadPurchases();
+      }
+      if (tablesChanged.has('agents') || tablesChanged.has('agent_transfers')) {
+        const { useAgentStore } = await import('@/stores/agentStore');
+        useAgentStore.getState().loadAgents();
+        useAgentStore.getState().loadTransfers();
+      }
+      if (tablesChanged.has('consignments')) {
+        const { useConsignmentStore } = await import('@/stores/consignmentStore');
+        useConsignmentStore.getState().loadConsignments();
+      }
+      if (tablesChanged.has('expenses')) {
+        const { useExpenseStore } = await import('@/stores/expenseStore');
+        useExpenseStore.getState().loadExpenses();
+      }
+    } catch (err) {
+      console.warn('[Sync] Store reload after pull failed:', err);
+    }
+  }
+
   return changes.length;
 }
 
