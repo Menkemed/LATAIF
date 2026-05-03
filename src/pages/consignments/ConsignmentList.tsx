@@ -147,9 +147,11 @@ export function ConsignmentList() {
   }
 
   function handleCreate() {
-    // Pflicht: Consignor + Kategorie + Brand + Name. Rest darf Quick-Capture-Style leer sein.
+    // Quick-Capture-Regel (User-Spec): Pflicht ist nur Consignor + Kategorie.
+    // Brand/Name dürfen leer bleiben — vom Handy soll ein Foto-only-Save möglich
+    // sein, Details kommen später im Edit-Modus.
     if (!form.consignorId) return;
-    if (!productForm.categoryId || !productForm.brand || !productForm.name) return;
+    if (!productForm.categoryId) return;
 
     // Schritt 1: Produkt anlegen — als Consignment-Ware (kein Einkauf von uns).
     const newProduct = createProduct({
@@ -723,7 +725,7 @@ export function ConsignmentList() {
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}
-              disabled={!form.consignorId || !productForm.categoryId || !productForm.brand || !productForm.name}
+              disabled={!form.consignorId || !productForm.categoryId}
             >Create Consignment</Button>
           </div>
         </div>

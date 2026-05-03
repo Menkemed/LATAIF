@@ -67,7 +67,11 @@ export function NewProductModal({
   }
 
   function handleSubmit() {
-    if (!form.categoryId || !form.brand || !form.name) return;
+    // Quick-Capture-Regel (User-Spec, gleich wie Collection > New Item):
+    // vom Handy soll ein Foto-only-Save möglich sein, Brand/Name dürfen leer
+    // bleiben und werden später im Edit-Modus ergänzt. Nur die Kategorie ist
+    // technisch nötig (steuert dyn. Felder + Filter).
+    if (!form.categoryId) return;
     onSubmit(form);
   }
 
@@ -347,7 +351,7 @@ export function NewProductModal({
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={handleSubmit}
-            disabled={!form.categoryId || !form.brand || !form.name}
+            disabled={!form.categoryId}
           >
             <Save size={14} /> {submitLabel || 'Save'}
           </Button>

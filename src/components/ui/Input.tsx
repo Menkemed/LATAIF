@@ -8,14 +8,18 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 export const Input = forwardRef<HTMLInputElement, InputProps>(
   ({ label, error, required, className = '', ...props }, ref) => {
     const [focused, setFocused] = useState(false);
-    // Strip auto `*` if user already added one to label.
-    const displayLabel = label && required && !label.trim().endsWith('*') ? label : label;
 
     return (
       <div className={className}>
-        {displayLabel && (
+        {label && (
           <label className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
-            {displayLabel}
+            {label}
+            {/* Quick-Capture-Regel (User-Spec): `*` ist nur ein visueller Hinweis,
+                niemals ein blockierendes Pflichtfeld. Native HTML5-required wird
+                bewusst NICHT ans <input> weitergegeben — sonst löst der Mobile-Browser
+                seine eigene Validation-UI aus (rotes Outline, „Please fill out…"-Tooltip),
+                was den Foto-only-Save vom Handy verhindert. Die einzelnen Forms machen
+                ihre eigenen JS-Checks beim Save. */}
             {required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
           </label>
         )}
@@ -30,7 +34,6 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
             color: '#0F0F10',
           }}
           placeholder={props.placeholder}
-          required={required}
           onFocus={(e) => { setFocused(true); props.onFocus?.(e); }}
           onBlur={(e) => { setFocused(false); props.onBlur?.(e); }}
           {...props}
