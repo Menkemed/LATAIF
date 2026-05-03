@@ -407,6 +407,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       get().updateTransfer(transferId, {
         settlementPaidAmount: 0,
         settlementStatus: 'pending',
+        // Status zurück auf 'sold' falls vorher 'settled' — die Wahrheit über
+        // den Zahlungsstand lebt jetzt in der Invoice, nicht mehr im Transfer.
+        status: 'sold',
       });
     }
 

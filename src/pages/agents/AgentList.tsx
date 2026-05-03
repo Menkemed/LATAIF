@@ -465,24 +465,40 @@ export function AgentList() {
           {settleModal && (() => {
             const t = transfers.find(x => x.id === settleModal);
             if (!t) return null;
-            const amount = (t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0;
-            const prevPaid = t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0;
+            // Plan §Agent §Settle+Invoice: Wenn Invoice existiert, Zahlen aus
+            // der Invoice ziehen (sonst zeigen wir veraltete Settle-State-Zahlen).
+            const linkedInv = t.invoiceId ? invoices.find(i => i.id === t.invoiceId) : undefined;
+            const amount = linkedInv ? linkedInv.grossAmount : ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0);
+            const prevPaid = linkedInv
+              ? (linkedInv.paidAmount || 0)
+              : (t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0);
             const remaining = Math.max(0, amount - prevPaid);
             return (
-              <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
-                <div className="flex justify-between" style={{ marginBottom: 4 }}>
-                  <span style={{ color: '#6B7280' }}>Total</span>
-                  <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(amount)} BHD</span>
+              <>
+                {linkedInv && (
+                  <div style={{
+                    padding: '8px 12px', borderRadius: 8, background: 'rgba(113,93,227,0.06)',
+                    border: '1px solid rgba(113,93,227,0.25)', fontSize: 11, color: '#4B5563', lineHeight: 1.5,
+                  }}>
+                    <strong style={{ color: '#0F0F10' }}>Wird in Invoice {linkedInv.invoiceNumber} gebucht.</strong>
+                    {' '}Kein zweiter Topf — sobald die Invoice bezahlt ist, ist auch der Transfer fertig.
+                  </div>
+                )}
+                <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
+                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: '#6B7280' }}>Total</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(amount)} BHD</span>
+                  </div>
+                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: '#6B7280' }}>Already Paid</span>
+                    <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(prevPaid)} BHD</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span style={{ color: '#6B7280' }}>Remaining</span>
+                    <span className="font-mono" style={{ color: '#DC2626' }}>{fmt(remaining)} BHD</span>
+                  </div>
                 </div>
-                <div className="flex justify-between" style={{ marginBottom: 4 }}>
-                  <span style={{ color: '#6B7280' }}>Already Paid</span>
-                  <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(prevPaid)} BHD</span>
-                </div>
-                <div className="flex justify-between">
-                  <span style={{ color: '#6B7280' }}>Remaining</span>
-                  <span className="font-mono" style={{ color: '#DC2626' }}>{fmt(remaining)} BHD</span>
-                </div>
-              </div>
+              </>
             );
           })()}
           <div>
