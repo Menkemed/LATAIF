@@ -99,12 +99,12 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       </select>
     </div>
     <div class="row">
-      <label>Brand *</label>
-      <input id="brand" type="text" placeholder="e.g. Rolex" />
+      <label>Brand</label>
+      <input id="brand" type="text" placeholder="e.g. Rolex (optional)" />
     </div>
     <div class="row">
-      <label>Model / Name *</label>
-      <input id="name" type="text" placeholder="e.g. Submariner Date" />
+      <label>Model / Name</label>
+      <input id="name" type="text" placeholder="e.g. Submariner Date (optional)" />
     </div>
     <div class="row">
       <label>SKU / Reference</label>
@@ -232,9 +232,16 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   $('saveBtn').onclick = async () => {
     setText('captureError', '');
     setText('captureSuccess', '');
+    // Quick-Capture-Regel (User-Spec): vom Handy soll ein Foto-only-Save
+    // moeglich sein, Brand/Name duerfen leer bleiben. Mindestens ein Photo
+    // ODER ein beliebiges anderes Feld verlangen, damit kein Geister-Eintrag
+    // entsteht.
     const brand = $('brand').value.trim();
     const name = $('name').value.trim();
-    if (!brand || !name) return setText('captureError', 'Brand and Name are required.');
+    const sku = $('sku').value.trim();
+    if (!brand && !name && !sku && !photoDataUrl) {
+      return setText('captureError', 'Add a photo or at least one detail.');
+    }
 
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) { init(); return; }
@@ -290,7 +297,8 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       }
       if (!res.ok) throw new Error('Save failed: ' + res.status);
 
-      setText('captureSuccess', brand + ' ' + name + ' saved. It will appear on the desktop within 30 seconds.');
+      const itemLabel = (brand + ' ' + name).trim() || sku || 'Item';
+      setText('captureSuccess', itemLabel + ' saved. It will appear on the desktop within 30 seconds.');
       // Reset form
       $('brand').value = '';
       $('name').value = '';
