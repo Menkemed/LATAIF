@@ -270,8 +270,20 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const newPaid = Math.min(total, prevPaid + paidNow);
     const isFull = newPaid >= total - 0.005;
 
-    // Plan §8 #5 — Audit-Trail: jede Teilzahlung als eigene Zeile in agent_settlement_payments.
-    if (paidNow > 0) {
+    // Plan §Agent §Settle+Invoice (User-Spec): Wenn der Transfer schon eine
+    // Invoice hat, läuft die Bezahlung exklusiv über die Invoice — sonst
+    // doppelte Banking-Buchung. Settle-Klick wird zur Invoice-Payment.
+    if (t.invoiceId && paidNow > 0) {
+      const inv = useInvoiceStore.getState();
+      const invoice = inv.invoices.find(i => i.id === t.invoiceId);
+      if (invoice) {
+        // method: 'cash'/'bank' → Invoice nutzt 'cash'/'bank_transfer' Convention.
+        const invMethod = method === 'bank' ? 'bank_transfer' : (method || 'cash');
+        inv.recordPayment(t.invoiceId, paidNow, invMethod, isFull ? 'Final settlement (from Agent)' : 'Partial settlement (from Agent)');
+      }
+    } else if (paidNow > 0) {
+      // Plan §8 #5 — Audit-Trail: jede Teilzahlung als eigene Zeile in agent_settlement_payments.
+      // Nur wenn KEINE Invoice existiert (Legacy-Pfad) — sonst doppelte Buchung.
       const payId = uuid();
       db.run(
         `INSERT INTO agent_settlement_payments (id, transfer_id, amount, method, paid_at, note, created_at)
@@ -325,16 +337,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   convertTransferToInvoice: (transferId, customerId) => {
     const transfer = get().getTransfer(transferId);
     if (!transfer) throw new Error('Transfer not found.');
-    if (transfer.status !== 'sold') {
-      throw new Error('Convert is only possible for sold transfers.');
+    if (transfer.status !== 'sold' && transfer.status !== 'settled') {
+      throw new Error('Convert is only possible for sold or settled transfers.');
     }
     if (transfer.invoiceId) {
       throw new Error('This transfer was already converted to an invoice.');
     }
-    if ((transfer.settlementPaidAmount || 0) > 0) {
-      throw new Error('Settle payments already exist on this transfer. Please remove them or skip the convert step.');
-    }
     if (!customerId) throw new Error('Customer is required.');
+    // Plan §Agent §Settle+Invoice (User-Spec): bestehende Settle-Payments
+    // werden in die neue Invoice migriert (statt zu blocken). Kein Geld-Verlust,
+    // keine Doppelbuchung.
 
     // Produkt aus DB ziehen — Tax-Scheme + Einkaufspreis bestimmen die Invoice-Mathematik.
     const prodRows = query(
@@ -377,6 +389,27 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (agent && !agent.customerId) {
       get().updateAgent(transfer.agentId, { customerId });
     }
+
+    // Plan §Agent §Settle+Invoice: bestehende Settle-Payments in die neue
+    // Invoice migrieren, sonst zählen sie weiter parallel und Banking
+    // bucht das Geld doppelt. Nach der Migration werden die alten
+    // agent_settlement_payments entfernt + transfer.settlementPaidAmount
+    // zurückgesetzt — die Wahrheit lebt jetzt in der Invoice.
+    const existingSettlePayments = get().getSettlementPayments(transferId);
+    if (existingSettlePayments.length > 0) {
+      const db = getDatabase();
+      for (const sp of existingSettlePayments) {
+        const invMethod = sp.method === 'bank' ? 'bank_transfer' : (sp.method || 'cash');
+        inv.recordPayment(invoice.id, sp.amount, invMethod, `Migrated from settlement (${sp.paidAt})`);
+      }
+      db.run('DELETE FROM agent_settlement_payments WHERE transfer_id = ?', [transferId]);
+      saveDatabase();
+      get().updateTransfer(transferId, {
+        settlementPaidAmount: 0,
+        settlementStatus: 'pending',
+      });
+    }
+
     // Customer-Liste neu laden, falls der UI-Convert-Flow eben einen neuen Customer erzeugt hat —
     // sonst sieht /clients den nicht.
     useCustomerStore.getState().loadCustomers();

@@ -422,14 +422,15 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
 
     // Plan §8 #9 — Agent Settlement Payments: Der Agent verkauft unsere Ware
     // und zahlt uns den Erlös abzüglich Kommission aus → Geld kommt REIN.
-    // Nicht raus (das war ein historischer Buchungsfehler — ein Agent-Settle ist
-    // kein Outflow von uns an den Agent, sondern ein Inflow vom Agent an uns).
+    // WICHTIG: Nur Transfers OHNE Invoice einbeziehen — wenn eine Invoice
+    // existiert, läuft der Cashflow über die Invoice-Payments (in `payments`-
+    // Tabelle, oben schon als SALES_IN gezählt). Sonst Doppelbuchung.
     const agentPay = query(
       `SELECT asp.id, asp.amount, asp.method, asp.paid_at, asp.transfer_id, at.agent_id, a.name AS agent_name
          FROM agent_settlement_payments asp
          JOIN agent_transfers at ON at.id = asp.transfer_id
          LEFT JOIN agents a ON a.id = at.agent_id
-         WHERE at.branch_id = ?`,
+         WHERE at.branch_id = ? AND at.invoice_id IS NULL`,
       [branchId]
     );
     for (const p of agentPay) {

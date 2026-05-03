@@ -310,21 +310,23 @@ export function AgentList() {
                         className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Return</button>
                     </>
                   )}
-                  {/* Plan §Agent §Convert: sobald Invoice existiert, läuft Bezahlung ausschließlich
-                      über die Invoice — Settle-Button wird ausgeblendet. */}
-                  {!t.invoiceId && (t.status === 'sold' || t.settlementStatus === 'partial') && (
+                  {/* Plan §Agent §Settle+Invoice (User-Spec): Settle und Convert sind
+                      ORTHOGONAL — beide Buttons solange sinnvoll, Reihenfolge egal.
+                      - Settle bleibt sichtbar solange Outstanding > 0 (auch nach Convert,
+                        bucht dann direkt in die Invoice).
+                      - Convert nur solange keine Invoice existiert; Settle-Payments
+                        werden beim Convert in die Invoice migriert. */}
+                  {(t.status === 'sold' || t.status === 'settled') && outstanding > 0 && (
                     <button onClick={() => {
                       setSettleModal(t.id); setSettleMethod('cash');
                       setSettlePartial(false);
-                      setSettleAmount(String(Math.max(0, amount - paid).toFixed(2)));
+                      setSettleAmount(String(outstanding.toFixed(2)));
                     }}
                       className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #0F0F10', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
-                      {t.settlementStatus === 'partial' ? 'Receive More' : 'Settle'}
+                      {paid > 0 ? 'Receive More' : 'Settle'}
                     </button>
                   )}
-                  {/* Convert-to-Invoice: nur für sold-Transfers, ohne bestehende Invoice und ohne
-                      schon gebuchte Settle-Zahlungen (sonst würde es doppelt buchen). */}
-                  {t.status === 'sold' && !t.invoiceId && (t.settlementPaidAmount || 0) === 0 && (
+                  {(t.status === 'sold' || t.status === 'settled') && !t.invoiceId && (
                     <button onClick={() => openConvertModal(t.id)}
                       className="cursor-pointer flex items-center gap-1" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #715DE3', color: '#715DE3', borderRadius: 4, background: 'none' }}>
                       <FileText size={11} /> Convert to Invoice
