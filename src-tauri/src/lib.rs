@@ -21,13 +21,16 @@ async fn sync_server_stop(state: tauri::State<'_, AppHandleState>) -> Result<Str
 
 #[tauri::command]
 async fn sync_server_status(state: tauri::State<'_, AppHandleState>) -> Result<serde_json::Value, String> {
-    let (running, port) = state.server.status().await;
+    let (running, port, self_token) = state.server.status().await;
     let ip = local_ip_address::local_ip().map(|i| i.to_string()).unwrap_or_else(|_| "0.0.0.0".into());
     Ok(serde_json::json!({
         "running": running,
         "port": port,
         "ip": ip,
         "url": if running { format!("http://{}:{}", ip, port) } else { String::new() },
+        // Self-Token wird nur returnt wenn Server gerade laeuft. JS in autoLanSetup
+        // verwendet ihn als Sync-Auth-Token (kein expliziter Login noetig).
+        "selfToken": self_token,
     }))
 }
 

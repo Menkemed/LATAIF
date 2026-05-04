@@ -18,6 +18,10 @@ export interface ServerStatus {
   port: number;
   ip: string;
   url: string;
+  /** Plan §LAN-Sync §Self-Token: vom Rust-Server beim Start generiertes JWT
+   *  mit Owner-Claims, damit der Desktop-Client direkt gegen seinen eigenen
+   *  Server pullen kann (kein expliziter Login nötig). */
+  selfToken?: string | null;
 }
 
 export async function startSyncServer(): Promise<string> {

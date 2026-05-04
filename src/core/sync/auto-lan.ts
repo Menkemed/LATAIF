@@ -22,9 +22,18 @@ export async function autoLanSetup(): Promise<LanMode> {
   // Already configured manually? Skip.
   if (localStorage.getItem(LAN_SETUP_DONE_KEY) === '1') {
     const mode = getLanMode();
-    // Re-start local server if we were a server last time
+    // Re-start local server if we were a server last time. Self-Token wird
+    // bei jedem Start frisch generiert, also auch hier neu in localStorage
+    // ablegen — alter Token aus vorheriger Session ist abgelaufen/ungültig.
     if (mode === 'server') {
-      try { await startSyncServer(); } catch { /* ignore */ }
+      try {
+        await startSyncServer();
+        const status = await getServerStatus();
+        if (status && status.url && status.selfToken) {
+          setSyncConfig(status.url, status.selfToken);
+          startAutoSync();
+        }
+      } catch { /* ignore */ }
     }
     return mode;
   }
@@ -46,10 +55,14 @@ export async function autoLanSetup(): Promise<LanMode> {
     await startSyncServer();
     const status = await getServerStatus();
     if (status && status.running && status.url) {
-      setSyncConfig(status.url, '');
+      // Plan §LAN-Sync §Self-Token: bei Server-Mode liefert der Rust-Server
+      // direkt einen JWT mit Owner-Claims mit. Damit ist isSyncConfigured()
+      // sofort true und startAutoSync() greift — User muss sich nicht extra
+      // einloggen damit Pull-Loop läuft.
+      setSyncConfig(status.url, status.selfToken || '');
       setLanMode('server');
       localStorage.setItem(LAN_SETUP_DONE_KEY, '1');
-      // Don't auto-start push/pull sync yet (needs login)
+      if (status.selfToken) startAutoSync();
       return 'server';
     }
   } catch (err) {

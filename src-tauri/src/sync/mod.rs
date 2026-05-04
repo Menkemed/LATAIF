@@ -28,6 +28,11 @@ pub struct SyncServer {
     pub handle: Mutex<Option<JoinHandle<()>>>,
     pub mdns: Mutex<Option<ServiceDaemon>>,
     pub db_path: PathBuf,
+    /// Plan §LAN-Sync §Self-Token: beim Server-Start automatisch generierter
+    /// JWT mit Owner-Claims, damit der Desktop direkt gegen seinen eigenen
+    /// Server pullen kann ohne expliziten Login. Wird per Tauri-Command an
+    /// das JS-Frontend ausgeliefert (autoLanSetup speichert es als Sync-Token).
+    pub self_token: Mutex<Option<String>>,
 }
 
 impl SyncServer {
@@ -39,6 +44,7 @@ impl SyncServer {
             handle: Mutex::new(None),
             mdns: Mutex::new(None),
             db_path,
+            self_token: Mutex::new(None),
         }
     }
 
@@ -50,10 +56,25 @@ impl SyncServer {
 
         let conn = db::init_database(&self.db_path).map_err(|e| format!("DB init failed: {e}"))?;
 
+        let jwt_secret = std::env::var("JWT_SECRET")
+            .unwrap_or_else(|_| "lataif_secret_2026_change_in_production".to_string());
+
+        // Plan §LAN-Sync §Self-Token: JWT für die lokale Desktop-Instanz generieren.
+        // Default-Claims passen zu single-tenant single-branch Deployments — wenn
+        // der User später Multi-Tenant aktiviert, kann er einen normalen Login machen
+        // (überschreibt den Self-Token via setSyncConfig).
+        let self_token = auth::create_token(
+            "self-desktop",
+            "tenant-1",
+            "branch-main",
+            "owner",
+            &jwt_secret,
+        ).map_err(|_| "Self-token generation failed".to_string())?;
+        *self.self_token.lock().await = Some(self_token);
+
         let state = Arc::new(AppState {
             db: Mutex::new(conn),
-            jwt_secret: std::env::var("JWT_SECRET")
-                .unwrap_or_else(|_| "lataif_secret_2026_change_in_production".to_string()),
+            jwt_secret,
         });
 
         let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
@@ -129,8 +150,12 @@ impl SyncServer {
         Ok("Server stopped".into())
     }
 
-    pub async fn status(&self) -> (bool, u16) {
-        (*self.running.lock().await, self.port)
+    pub async fn status(&self) -> (bool, u16, Option<String>) {
+        (
+            *self.running.lock().await,
+            self.port,
+            self.self_token.lock().await.clone(),
+        )
     }
 }
 
