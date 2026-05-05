@@ -392,7 +392,11 @@ export interface Setting {
 export type CanonicalRepairStatus = 'RECEIVED' | 'IN_PROGRESS' | 'SENT_TO_WORKSHOP' | 'READY' | 'DELIVERED' | 'CANCELLED';
 export type RepairStatus =
   | CanonicalRepairStatus
-  | 'received' | 'diagnosed' | 'in_progress' | 'sent_to_workshop' | 'ready' | 'picked_up' | 'cancelled';
+  | 'received' | 'diagnosed' | 'in_progress' | 'sent_to_workshop' | 'ready' | 'picked_up' | 'cancelled'
+  // User-Spec §Repair Return: Ware geht ohne Reparatur zurück (nicht reparierbar,
+  // Kunde will nicht, wirtschaftlich nicht sinnvoll, nur Diagnose). Terminal — wie
+  // 'picked_up' und 'cancelled'.
+  | 'returned';
 
 export function canonicalRepairStatus(s: RepairStatus | string | undefined | null): CanonicalRepairStatus {
   const v = String(s || '').toLowerCase();

@@ -54,6 +54,10 @@ interface RepairStore {
   generateVoucherCode: () => string;
   // Plan §8 #1 — Customer-Charge Payment-Tracking
   recordCustomerPayment: (id: string, amount: number, method: 'cash' | 'bank' | 'card', date?: string) => void;
+  // User-Spec §Repair Bulk-Invoice: mehrere READY-Repairs eines Customers in
+  // EINE gemeinsame Multi-Line-Invoice. Validiert atomisch: alle ready, kein
+  // invoiceId, alle gleicher Customer, charge>0. Linkt invoiceId auf jedem Repair.
+  createCombinedRepairInvoice: (repairIds: string[]) => { invoiceId: string };
 }
 
 function rowToRepair(row: Record<string, unknown>): Repair {
@@ -263,30 +267,22 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         break;
       case 'picked_up':
       case 'DELIVERED': {
-        // Plan §Repair §Picked-Up-Gate (User-Spec):
-        // Wenn der Repair kostenpflichtig ist (chargeToCustomer > 0), darf erst
-        // nach voller Bezahlung auf Picked Up. Gratis-Repairs (charge=0) dürfen
-        // ohne Invoice direkt abgeschlossen werden.
-        const charge = repair.chargeToCustomer || 0;
-        if (charge > 0.005) {
-          const directlyPaid = repair.customerPaymentStatus === 'PAID';
-          let invoicePaid = false;
-          if (repair.invoiceId) {
-            const inv = useInvoiceStore.getState().invoices.find(i => i.id === repair.invoiceId);
-            if (inv) {
-              invoicePaid = (inv.paidAmount || 0) >= (inv.grossAmount || 0) - 0.005;
-            }
-          }
-          if (!directlyPaid && !invoicePaid) {
-            throw new Error(
-              repair.invoiceId
-                ? 'Repair-Invoice ist noch nicht voll bezahlt — bitte erst Payment buchen, dann Picked Up.'
-                : 'Repair hat einen Charge — bitte erst Invoice erstellen + bezahlen, dann Picked Up.'
-            );
-          }
-        }
+        // Plan §Repair §Pickup ↔ Payment (User-Spec): Pickup und Bezahlung sind
+        // ORTHOGONAL — beide unabhängig setzbar. Kein Gate mehr; ein Klient kann
+        // die Ware abholen, bevor die Invoice voll bezahlt ist (offene Forderung
+        // bleibt sichtbar in der Invoice + Payables).
         updates.picked_up_at = now;
-        // Restore product status if linked
+        if (repair.productId) {
+          db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, repair.productId]);
+        }
+        break;
+      }
+      case 'returned':
+      case 'cancelled':
+      case 'CANCELLED': {
+        // User-Spec §Repair Return: Ware ohne Reparatur an Kunden zurück. Terminal
+        // wie picked_up — wenn ein Produkt verlinkt war, geht es zurück in den Bestand.
+        updates.completed_at = now;
         if (repair.productId) {
           db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, repair.productId]);
         }
@@ -308,6 +304,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       sent_to_workshop: 'repair.started', SENT_TO_WORKSHOP: 'repair.started',
       ready: 'repair.ready', READY: 'repair.ready',
       picked_up: 'repair.picked_up', DELIVERED: 'repair.picked_up',
+      returned: 'repair.returned',
     };
     if (eventMap[status]) {
       eventBus.emit(eventMap[status] as any, 'repair', id, { status, customerId: repair.customerId });
@@ -362,5 +359,74 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     trackUpdate('repairs', id, { customerPayment: amount, method, date: payDate, status: newStatus });
     eventBus.emit('repair.payment_received' as any, 'repair', id, { amount, method, totalPaid: newPaid, status: newStatus });
     get().loadRepairs();
+  },
+
+  createCombinedRepairInvoice: (repairIds) => {
+    if (!repairIds || repairIds.length === 0) {
+      throw new Error('No repairs selected.');
+    }
+
+    // Atomische Validation VOR jeder Mutation — sonst halb-erzeugte Invoice.
+    const reps = repairIds.map(rid => {
+      const r = get().getRepair(rid);
+      if (!r) throw new Error(`Repair ${rid} not found.`);
+      if (r.status !== 'ready' && r.status !== 'READY') {
+        throw new Error(`Repair ${r.repairNumber} is not READY — only ready repairs can be combined.`);
+      }
+      if (r.invoiceId) {
+        throw new Error(`Repair ${r.repairNumber} is already linked to an invoice.`);
+      }
+      if (!r.chargeToCustomer || r.chargeToCustomer <= 0) {
+        throw new Error(`Repair ${r.repairNumber} has no charge — nothing to invoice.`);
+      }
+      return r;
+    });
+
+    const customerId = reps[0].customerId;
+    if (reps.some(r => r.customerId !== customerId)) {
+      throw new Error('All selected repairs must belong to the same client.');
+    }
+
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    const productId = getOrCreateRepairServiceProductId(branchId);
+
+    // Pro Repair eine Invoice-Line — chargeToCustomer ist gross-incl-VAT je nach
+    // taxScheme dekomponiert. So bleibt Mixed-Scheme (eine Repair VAT_10, andere
+    // ZERO) korrekt aggregiert.
+    const lines = reps.map(r => {
+      const scheme = r.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10';
+      const rate = scheme === 'VAT_10' ? 10 : 0;
+      const gross = r.chargeToCustomer || 0;
+      const net = scheme === 'VAT_10' ? gross / (1 + rate / 100) : gross;
+      const vat = gross - net;
+      return {
+        productId,
+        unitPrice: net,
+        purchasePrice: r.internalCost || 0,
+        taxScheme: scheme,
+        vatRate: rate,
+        vatAmount: vat,
+        lineTotal: gross,
+      };
+    });
+
+    const refs = reps.map(r => r.repairNumber).join(', ');
+    const invoice = useInvoiceStore.getState().createDirectInvoice(
+      customerId,
+      lines,
+      `Combined Repair Service · ${refs}`,
+    );
+
+    // Pro Repair invoiceId koppeln. updateRepair lädt bereits neu am Ende.
+    for (const r of reps) {
+      get().updateRepair(r.id, { invoiceId: invoice.id });
+    }
+
+    eventBus.emit('repair.combined_invoice_created' as any, 'repair', reps[0].id, {
+      invoiceId: invoice.id, repairIds: reps.map(r => r.id),
+    });
+
+    return { invoiceId: invoice.id };
   },
 }));

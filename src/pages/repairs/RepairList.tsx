@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Wrench } from 'lucide-react';
+import { Wrench, FileText } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -26,6 +26,7 @@ const STATUS_FILTERS: { value: RepairStatus | ''; label: string }[] = [
   { value: 'in_progress', label: 'In Progress' },
   { value: 'ready', label: 'Ready' },
   { value: 'picked_up', label: 'Picked Up' },
+  { value: 'returned', label: 'Returned' },
 ];
 
 const NEXT_STATUS: Partial<Record<RepairStatus, { status: RepairStatus; label: string }>> = {
@@ -36,14 +37,20 @@ const NEXT_STATUS: Partial<Record<RepairStatus, { status: RepairStatus; label: s
 
 export function RepairList() {
   const navigate = useNavigate();
-  const { repairs, loadRepairs, createRepair, updateStatus } = useRepairStore();
+  const { repairs, loadRepairs, createRepair, updateStatus, createCombinedRepairInvoice } = useRepairStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { categories, loadCategories } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState<RepairStatus | ''>('');
+  const [filterCustomerId, setFilterCustomerId] = useState<string>('');
+  const [sortDate, setSortDate] = useState<'desc' | 'asc'>('desc');
   const [searchQuery, setSearchQuery] = useState('');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
+  // Bulk-Combined-Invoice (User-Spec): Multi-Select READY-Repairs eines Customers.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkModal, setBulkModal] = useState(false);
+  const [bulkError, setBulkError] = useState('');
   const [form, setForm] = useState<Partial<Repair>>({
     repairType: 'internal',
     taxScheme: 'VAT_10',
@@ -99,6 +106,56 @@ export function RepairList() {
     return c ? `${c.firstName} ${c.lastName}` : '\u2014';
   };
 
+  // Bulk-Eligibility: nur READY-Repairs ohne Invoice mit Charge > 0.
+  const isEligibleForBulk = (r: Repair) =>
+    r.status === 'ready' && !r.invoiceId && (r.chargeToCustomer || 0) > 0;
+
+  const validSelectedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const rid of selectedIds) {
+      const r = repairs.find(x => x.id === rid);
+      if (r && isEligibleForBulk(r)) ids.add(rid);
+    }
+    return ids;
+  }, [selectedIds, repairs]);
+  const selectedRepairs = useMemo(
+    () => repairs.filter(r => validSelectedIds.has(r.id)),
+    [validSelectedIds, repairs],
+  );
+  const selectedCustomerIds = useMemo(
+    () => new Set(selectedRepairs.map(r => r.customerId)),
+    [selectedRepairs],
+  );
+  const sameCustomer = selectedCustomerIds.size <= 1;
+  const selectedTotal = selectedRepairs.reduce((s, r) => s + (r.chargeToCustomer || 0), 0);
+
+  const toggleSelect = (id: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelectedIds(new Set());
+
+  function handleBulkConfirm() {
+    if (validSelectedIds.size === 0) return;
+    if (!sameCustomer) {
+      setBulkError('All selected repairs must belong to the same client.');
+      return;
+    }
+    try {
+      const res = createCombinedRepairInvoice(Array.from(validSelectedIds));
+      setBulkModal(false);
+      setSelectedIds(new Set());
+      navigate(`/invoices/${res.invoiceId}`);
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const filtered = useMemo(() => {
     let r = repairs;
     if (searchQuery) {
@@ -108,8 +165,15 @@ export function RepairList() {
       });
     }
     if (filterStatus) r = r.filter(rep => rep.status === filterStatus);
-    return r;
-  }, [repairs, searchQuery, filterStatus, customers]);
+    if (filterCustomerId) r = r.filter(rep => rep.customerId === filterCustomerId);
+    // Sortierung nach Empfangsdatum (received_at), Fallback auf createdAt.
+    const sorted = [...r].sort((a, b) => {
+      const ad = a.receivedAt || a.createdAt || '';
+      const bd = b.receivedAt || b.createdAt || '';
+      return sortDate === 'desc' ? bd.localeCompare(ad) : ad.localeCompare(bd);
+    });
+    return sorted;
+  }, [repairs, searchQuery, filterStatus, filterCustomerId, sortDate, customers]);
 
   function openNew() {
     setForm({
@@ -177,15 +241,81 @@ export function RepairList() {
         </div>
       }
     >
+      {/* Bulk-Action-Toolbar — sichtbar sobald >=1 READY-Repair selektiert */}
+      {validSelectedIds.size > 0 && (
+        <div style={{
+          marginBottom: 12, padding: '10px 14px', borderRadius: 8,
+          background: sameCustomer ? 'rgba(113,93,227,0.06)' : 'rgba(220,38,38,0.06)',
+          border: `1px solid ${sameCustomer ? 'rgba(113,93,227,0.3)' : 'rgba(220,38,38,0.3)'}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        }}>
+          <div style={{ fontSize: 12, color: '#0F0F10' }}>
+            <strong>{validSelectedIds.size} ready repair(s)</strong> selected
+            {sameCustomer ? (
+              <> · combined charge <span className="font-mono">{selectedTotal.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD</span></>
+            ) : (
+              <span style={{ color: '#DC2626', marginLeft: 8 }}>
+                · all selections must be from the same client
+              </span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={clearSelection}>Clear</Button>
+            <Button variant="primary" onClick={() => { setBulkError(''); setBulkModal(true); }} disabled={!sameCustomer}>
+              <FileText size={14} /> Create Combined Invoice
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Filter + Sort Toolbar (User-Spec): Client-Filter + Date-Sort.
+          Search-Filter steht im PageLayout-Header (oben rechts), Status-Filter
+          ebenso. Hier nur die zwei zusätzlichen Controls. */}
+      <div className="flex items-end gap-3" style={{ marginBottom: 16 }}>
+        <div style={{ minWidth: 280, flex: '0 0 auto' }}>
+          <SearchSelect
+            label="FILTER BY CLIENT"
+            placeholder="All clients"
+            options={customerOptions}
+            value={filterCustomerId}
+            onChange={setFilterCustomerId}
+          />
+        </div>
+        {filterCustomerId && (
+          <button onClick={() => setFilterCustomerId('')}
+            className="cursor-pointer" style={{
+              padding: '8px 12px', fontSize: 12, color: '#6B7280',
+              background: 'none', border: '1px solid #D5D9DE', borderRadius: 6,
+            }}>Clear</button>
+        )}
+        <div style={{ flex: 1 }} />
+        <div>
+          <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>SORT BY DATE</span>
+          <div className="flex gap-1">
+            {[{ v: 'desc' as const, label: 'Newest first' }, { v: 'asc' as const, label: 'Oldest first' }].map(o => (
+              <button key={o.v} onClick={() => setSortDate(o.v)}
+                className="cursor-pointer transition-all duration-200"
+                style={{
+                  padding: '7px 14px', fontSize: 12, borderRadius: 6,
+                  border: `1px solid ${sortDate === o.v ? '#0F0F10' : '#D5D9DE'}`,
+                  color: sortDate === o.v ? '#0F0F10' : '#6B7280',
+                  background: sortDate === o.v ? 'rgba(15,15,16,0.06)' : 'transparent',
+                }}>{o.label}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
       {/* Table Header */}
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '1.2fr 1.8fr 2fr 1.5fr 1fr 1fr 1fr',
+          gridTemplateColumns: '36px 1.2fr 1.8fr 2fr 1.5fr 1fr 1fr 1fr',
           gap: 16,
           padding: '0 16px 12px',
         }}
       >
+        <span></span>
         <span className="text-overline">REPAIR #</span>
         <span className="text-overline">CLIENT</span>
         <span className="text-overline">ITEM</span>
@@ -210,6 +340,8 @@ export function RepairList() {
         const next = NEXT_STATUS[rep.status];
         const itemLabel = [rep.itemBrand, rep.itemModel].filter(Boolean).join(' ');
         const blockedPickup = next?.status === 'picked_up' && isRepairBlockedFromPickup(rep);
+        const eligible = isEligibleForBulk(rep);
+        const checked = validSelectedIds.has(rep.id);
 
         return (
           <div
@@ -217,16 +349,28 @@ export function RepairList() {
             className="cursor-pointer transition-colors"
             style={{
               display: 'grid',
-              gridTemplateColumns: '1.2fr 1.8fr 2fr 1.5fr 1fr 1fr 1fr',
+              gridTemplateColumns: '36px 1.2fr 1.8fr 2fr 1.5fr 1fr 1fr 1fr',
               gap: 16,
               padding: '14px 16px',
               alignItems: 'center',
               borderBottom: '1px solid rgba(229,225,214,0.6)',
+              background: checked ? 'rgba(113,93,227,0.04)' : undefined,
             }}
             onClick={() => navigate(`/repairs/${rep.id}`)}
-            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            onMouseEnter={e => (e.currentTarget.style.background = checked ? 'rgba(113,93,227,0.08)' : 'rgba(15,15,16,0.03)')}
+            onMouseLeave={e => (e.currentTarget.style.background = checked ? 'rgba(113,93,227,0.04)' : 'transparent')}
           >
+            {/* Bulk-Select Checkbox — nur für eligible Repairs (READY ohne Invoice). */}
+            <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              onClick={e => e.stopPropagation()}>
+              {eligible ? (
+                <input type="checkbox" checked={checked}
+                  onChange={() => toggleSelect(rep.id)}
+                  title="Select for combined invoice"
+                  style={{ cursor: 'pointer', width: 16, height: 16, accentColor: '#715DE3' }} />
+              ) : null}
+            </span>
+
             {/* Repair Number */}
             <div>
               <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{rep.repairNumber}</span>
@@ -494,18 +638,34 @@ export function RepairList() {
             </div>
           )}
 
-          {/* Costs */}
+          {/* Costs — bei Hybrid zwei getrennte Inputs (User-Spec): Internal-Anteil
+              (eigene Teile/Labor) UND Workshop Fee (externer Anteil) gehen beide in
+              die Margen-Rechnung. */}
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>COSTS</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
-              <Input label={form.repairType === 'internal' ? 'ESTIMATED COST (BHD)' : 'ESTIMATED COST / WORKSHOP FEE (BHD)'}
-                type="number" placeholder="0"
-                value={form.estimatedCost || ''}
-                onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
-              <Input label="CHARGE TO CLIENT (BHD)" type="number" placeholder="0 = free repair"
-                value={form.chargeToCustomer || ''}
-                onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
-            </div>
+            {form.repairType === 'hybrid' ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginTop: 12 }}>
+                <Input label="INTERNAL COST (BHD)" type="number" placeholder="0"
+                  value={form.internalCost || ''}
+                  onChange={e => setForm({ ...form, internalCost: Number(e.target.value) || undefined })} />
+                <Input label="WORKSHOP FEE (BHD)" type="number" placeholder="0"
+                  value={form.estimatedCost || ''}
+                  onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
+                <Input label="CHARGE TO CLIENT (BHD)" type="number" placeholder="0 = free"
+                  value={form.chargeToCustomer || ''}
+                  onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
+                <Input label={form.repairType === 'internal' ? 'ESTIMATED COST (BHD)' : 'WORKSHOP FEE (BHD)'}
+                  type="number" placeholder="0"
+                  value={form.estimatedCost || ''}
+                  onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
+                <Input label="CHARGE TO CLIENT (BHD)" type="number" placeholder="0 = free repair"
+                  value={form.chargeToCustomer || ''}
+                  onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
+              </div>
+            )}
 
             {/* Service-Tax-Scheme: Default VAT_10 (Standard für Service in BH).
                 Auf ZERO setzen wenn Service vom Workshop schon mit VAT abgerechnet
@@ -529,17 +689,24 @@ export function RepairList() {
               </p>
             </div>
 
-            {(form.estimatedCost || 0) > 0 && (form.chargeToCustomer || 0) > 0 && (
-              <div className="rounded font-mono" style={{
-                marginTop: 12, padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
-                fontSize: 13, display: 'flex', justifyContent: 'space-between',
-              }}>
-                <span style={{ color: '#6B7280' }}>Estimated Margin</span>
-                <span style={{ color: ((form.chargeToCustomer || 0) - (form.estimatedCost || 0)) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                  {fmt((form.chargeToCustomer || 0) - (form.estimatedCost || 0))} BHD
-                </span>
-              </div>
-            )}
+            {(() => {
+              const totalCost = (form.estimatedCost || 0) + (form.repairType === 'hybrid' ? (form.internalCost || 0) : 0);
+              const charge = form.chargeToCustomer || 0;
+              if (totalCost <= 0 || charge <= 0) return null;
+              const margin = charge - totalCost;
+              return (
+                <div className="rounded font-mono" style={{
+                  marginTop: 12, padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
+                  fontSize: 13, display: 'flex', justifyContent: 'space-between',
+                }}>
+                  <span style={{ color: '#6B7280' }}>
+                    Estimated Margin
+                    {form.repairType === 'hybrid' && ` (charge − internal − workshop)`}
+                  </span>
+                  <span style={{ color: margin >= 0 ? '#7EAA6E' : '#AA6E6E' }}>{fmt(margin)} BHD</span>
+                </div>
+              );
+            })()}
             {(form.chargeToCustomer || 0) === 0 && (
               <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
                 Charge = 0 → Free repair, kein Invoice nötig. Kann direkt nach Fertigstellung auf Picked Up.
@@ -581,6 +748,76 @@ export function RepairList() {
         onClose={() => setShowQuickCustomer(false)}
         onCreated={(id) => { loadCustomers(); setForm(f => ({ ...f, customerId: id })); }}
       />
+
+      {/* Bulk Combined-Invoice Modal */}
+      <Modal open={bulkModal} onClose={() => setBulkModal(false)} title="Create Combined Invoice" width={520}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {(() => {
+            if (selectedRepairs.length === 0) {
+              return <p style={{ fontSize: 12, color: '#6B7280' }}>No repairs selected.</p>;
+            }
+            const c = customers.find(cc => cc.id === selectedRepairs[0].customerId);
+            return (
+              <>
+                <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
+                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: '#6B7280' }}>Client</span>
+                    <span style={{ color: '#0F0F10' }}>{c ? `${c.firstName} ${c.lastName}` : '—'}</span>
+                  </div>
+                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: '#6B7280' }}>Repairs</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>{selectedRepairs.length}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span style={{ color: '#6B7280' }}>Combined Charge</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>
+                      {selectedTotal.toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid #E5E9EE', borderRadius: 6 }}>
+                  {selectedRepairs.map(r => (
+                    <div key={r.id} style={{
+                      display: 'grid', gridTemplateColumns: '110px 1fr auto',
+                      gap: 8, padding: '8px 12px', alignItems: 'center', fontSize: 12,
+                      borderBottom: '1px solid rgba(229,225,214,0.6)',
+                    }}>
+                      <span className="font-mono" style={{ color: '#4B5563', fontSize: 11 }}>{r.repairNumber}</span>
+                      <span style={{ color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {[r.itemBrand, r.itemModel].filter(Boolean).join(' ') || r.issueDescription || '—'}
+                      </span>
+                      <span className="font-mono" style={{ color: '#0F0F10' }}>
+                        {(r.chargeToCustomer || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <p style={{ fontSize: 12, color: '#6B7280' }}>
+                  Diese {selectedRepairs.length} Repairs werden zu EINER Multi-Line-Invoice zusammengefasst.
+                  Jeder Repair wird mit der neuen Invoice verknüpft. Sobald die Invoice bezahlt ist, springen
+                  alle verbundenen Repairs auf "Paid". Mark-as-Picked-Up in der Invoice setzt alle Repairs
+                  gleichzeitig auf "Picked Up".
+                </p>
+              </>
+            );
+          })()}
+
+          {bulkError && (
+            <div style={{ padding: '8px 12px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 6, fontSize: 12, color: '#DC2626' }}>
+              {bulkError}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => setBulkModal(false)}>Cancel</Button>
+            <Button variant="primary" onClick={handleBulkConfirm} disabled={!sameCustomer || validSelectedIds.size === 0}>
+              <FileText size={14} /> Create Invoice
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </PageLayout>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText } from 'lucide-react';
+import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -40,6 +40,7 @@ const STATUS_LABELS: Record<string, string> = {
   ready: 'Ready for Pickup',
   picked_up: 'Picked Up',
   cancelled: 'Cancelled',
+  returned: 'Returned',
   RECEIVED: 'Received',
   IN_PROGRESS: 'In Progress',
   SENT_TO_WORKSHOP: 'Sent to Workshop',
@@ -92,14 +93,25 @@ export function RepairDetail() {
     ? repair.chargeToCustomer - repair.internalCost
     : null;
 
-  // Plan §Repair §Picked-Up-Gate (UX): Picked-Up blockieren wenn charge > 0
-  // und nicht bezahlt. Button wird disabled + Hinweis angezeigt.
+  // Plan §Repair §Pickup ↔ Payment (User-Spec): zwei orthogonale Status.
+  // Payment wird aus Invoice abgeleitet wenn verlinkt, sonst aus customerPaymentStatus.
+  // Pickup ist unabhängig — kein Payment-Gate mehr.
   const linkedInvoice = repair.invoiceId ? invoices.find(i => i.id === repair.invoiceId) : null;
   const charge = repair.chargeToCustomer || 0;
-  const isPaid = charge <= 0.005
-    || repair.customerPaymentStatus === 'PAID'
-    || (linkedInvoice ? (linkedInvoice.paidAmount || 0) >= (linkedInvoice.grossAmount || 0) - 0.005 : false);
-  const blockedPickup = nextStatus === 'picked_up' && !isPaid;
+  const paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' | 'FREE' = (() => {
+    if (charge <= 0.005) return 'FREE';
+    if (linkedInvoice) {
+      const paid = linkedInvoice.paidAmount || 0;
+      const gross = linkedInvoice.grossAmount || 0;
+      if (gross > 0 && paid >= gross - 0.005) return 'PAID';
+      if (paid > 0.005) return 'PARTIALLY_PAID';
+      return 'UNPAID';
+    }
+    if (repair.customerPaymentStatus === 'PAID') return 'PAID';
+    if (repair.customerPaymentStatus === 'PARTIALLY_PAID') return 'PARTIALLY_PAID';
+    return 'UNPAID';
+  })();
+  const pickupStatus: 'NOT_PICKED_UP' | 'PICKED_UP' = repair.status === 'picked_up' ? 'PICKED_UP' : 'NOT_PICKED_UP';
 
   // Plan §Repair §Service-Invoice: Service-Item statt Lager-Produkt.
   // Lazy-seeded "Repair Service"-Produkt pro Branch (idempotent). VAT folgt
@@ -268,10 +280,21 @@ export function RepairDetail() {
             ) : (
               <>
                 {nextStatus && perm.canManageRepairs && (
-                  <Button variant="primary" onClick={handleStatusAdvance}
-                    disabled={blockedPickup}
-                    title={blockedPickup ? 'Repair hat einen Charge — bitte erst Invoice erstellen + bezahlen.' : undefined}>
-                    <ClipboardCheck size={14} /> {blockedPickup ? 'Picked Up — Payment ausstehend' : `Mark as ${STATUS_LABELS[nextStatus]}`}
+                  <Button variant="primary" onClick={handleStatusAdvance}>
+                    <ClipboardCheck size={14} /> Mark as {STATUS_LABELS[nextStatus]}
+                  </Button>
+                )}
+                {/* User-Spec §Repair Return: Ware ohne Reparatur zurück. Sichtbar in
+                    allen nicht-terminalen Status (received bis ready). */}
+                {perm.canManageRepairs && repair.status !== 'picked_up' && repair.status !== 'returned'
+                  && repair.status !== 'cancelled' && repair.status !== 'CANCELLED' && repair.status !== 'DELIVERED' && (
+                  <Button variant="secondary" onClick={() => {
+                    if (!id) return;
+                    if (!window.confirm(`Mark repair ${repair.repairNumber} as returned to customer (no repair performed)?`)) return;
+                    try { updateStatus(id, 'returned'); }
+                    catch (err) { alert(err instanceof Error ? err.message : String(err)); }
+                  }}>
+                    <RotateCcw size={14} /> Mark as Returned
                   </Button>
                 )}
                 {repair.status === 'ready' && customer && (
@@ -346,6 +369,44 @@ export function RepairDetail() {
                   });
                 })()}
               </div>
+
+              {/* Payment + Pickup als zwei unabhängige Status (User-Spec) — sichtbar
+                  ab Ready, weil davor noch nichts zum Bezahlen/Abholen da ist. */}
+              {(repair.status === 'ready' || repair.status === 'picked_up') && (
+                <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E5E9EE', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Payment</span>
+                    <span style={{
+                      fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
+                      background: paymentStatus === 'PAID' || paymentStatus === 'FREE' ? 'rgba(126,170,110,0.12)'
+                        : paymentStatus === 'PARTIALLY_PAID' ? 'rgba(170,149,110,0.12)'
+                        : 'rgba(170,110,110,0.12)',
+                      color: paymentStatus === 'PAID' || paymentStatus === 'FREE' ? '#5C8550'
+                        : paymentStatus === 'PARTIALLY_PAID' ? '#8A7548'
+                        : '#8A4848',
+                      border: `1px solid ${paymentStatus === 'PAID' || paymentStatus === 'FREE' ? 'rgba(126,170,110,0.4)'
+                        : paymentStatus === 'PARTIALLY_PAID' ? 'rgba(170,149,110,0.4)'
+                        : 'rgba(170,110,110,0.4)'}`,
+                    }}>
+                      {paymentStatus === 'FREE' ? 'Free Repair'
+                        : paymentStatus === 'PAID' ? 'Paid'
+                        : paymentStatus === 'PARTIALLY_PAID' ? 'Partially Paid'
+                        : 'Unpaid'}
+                    </span>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Pickup</span>
+                    <span style={{
+                      fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
+                      background: pickupStatus === 'PICKED_UP' ? 'rgba(126,170,110,0.12)' : 'rgba(107,114,128,0.10)',
+                      color: pickupStatus === 'PICKED_UP' ? '#5C8550' : '#6B7280',
+                      border: `1px solid ${pickupStatus === 'PICKED_UP' ? 'rgba(126,170,110,0.4)' : 'rgba(107,114,128,0.3)'}`,
+                    }}>
+                      {pickupStatus === 'PICKED_UP' ? 'Picked Up' : 'Not Picked Up'}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

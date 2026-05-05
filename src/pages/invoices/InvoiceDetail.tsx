@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/Input';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useRepairStore } from '@/stores/repairStore';
 import type { PaymentMethod } from '@/core/models/types';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-format';
@@ -51,6 +52,7 @@ export function InvoiceDetail() {
   const { invoices, loadInvoices, updateInvoice, rewriteInvoiceLines, recordPayment, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { repairs, loadRepairs, updateStatus: updateRepairStatus } = useRepairStore();
   const perm = usePermission();
 
   const [editing, setEditing] = useState(false);
@@ -96,7 +98,7 @@ export function InvoiceDetail() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelRefundMethod, setCancelRefundMethod] = useState<'cash' | 'bank'>('bank');
 
-  useEffect(() => { loadInvoices(); loadCustomers(); loadProducts(); loadCategories(); loadSalesReturns(); loadCreditNotes(); }, [loadInvoices, loadCustomers, loadProducts, loadCategories, loadSalesReturns, loadCreditNotes]);
+  useEffect(() => { loadInvoices(); loadCustomers(); loadProducts(); loadCategories(); loadSalesReturns(); loadCreditNotes(); loadRepairs(); }, [loadInvoices, loadCustomers, loadProducts, loadCategories, loadSalesReturns, loadCreditNotes, loadRepairs]);
 
   // Derived status label — industry-standard naming (SAP/Xero/QuickBooks):
   // CANCELLED → Cancelled
@@ -155,6 +157,20 @@ export function InvoiceDetail() {
   const isPaid = invoice.status === 'FINAL';
   const canRecordPayment = !isDraft && !isCancelled && !isPaid;
   const canCancel = !isCancelled && !isPaid;
+
+  // Plan §Repair §Pickup-from-Invoice (User-Spec): wenn diese Invoice an Repairs
+  // gekoppelt ist (auch eine Bulk-Invoice mit mehreren), voll bezahlt + mind. einer
+  // noch nicht abgeholt → "Mark as Picked Up"-Button setzt ALLE verbundenen Repairs
+  // gleichzeitig auf picked_up — Repair-Dashboard sieht das automatisch (gleicher Store).
+  const linkedRepairs = useMemo(
+    () => repairs.filter(r => r.invoiceId === invoice.id),
+    [repairs, invoice.id],
+  );
+  const pendingRepairs = useMemo(
+    () => linkedRepairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled' && r.status !== 'returned' && r.status !== 'CANCELLED' && r.status !== 'DELIVERED'),
+    [linkedRepairs],
+  );
+  const canMarkRepairPickedUp = pendingRepairs.length > 0 && isPaid;
 
   function handleSaveEdit() {
     if (!id) return;
@@ -506,6 +522,25 @@ export function InvoiceDetail() {
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}
+                {canMarkRepairPickedUp && (
+                  <Button variant="primary" onClick={() => {
+                    const refs = pendingRepairs.map(r => r.repairNumber).join(', ');
+                    const msg = pendingRepairs.length === 1
+                      ? `Mark repair ${refs} as picked up?`
+                      : `Mark all ${pendingRepairs.length} linked repairs as picked up? (${refs})`;
+                    if (!window.confirm(msg)) return;
+                    try {
+                      for (const r of pendingRepairs) {
+                        updateRepairStatus(r.id, 'picked_up');
+                      }
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : String(err));
+                    }
+                  }}>
+                    <ExternalLink size={14} /> Mark as Picked Up
+                    {pendingRepairs.length > 1 ? ` (${pendingRepairs.length})` : ''}
+                  </Button>
+                )}
                 {(() => {
                   // Plan §Returns Fix: Create Return erlauben auch bei PARTIAL (nicht nur FINAL).
                   // Blockieren wenn bereits voll zurückgegeben UND voll erstattet, oder wenn CANCELLED.

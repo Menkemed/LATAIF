@@ -150,32 +150,59 @@ export function ConsignmentList() {
     // Quick-Capture-Regel (User-Spec): Pflicht ist nur Consignor + Kategorie.
     // Brand/Name dürfen leer bleiben — vom Handy soll ein Foto-only-Save möglich
     // sein, Details kommen später im Edit-Modus.
-    if (!form.consignorId) return;
-    if (!productForm.categoryId) return;
+    if (!form.consignorId) {
+      alert('Please select a consignor first.');
+      return;
+    }
+    if (!productForm.categoryId) {
+      alert('Please select a category first.');
+      return;
+    }
 
-    // Schritt 1: Produkt anlegen — als Consignment-Ware (kein Einkauf von uns).
-    const newProduct = createProduct({
-      ...productForm,
-      purchasePrice: 0,           // wir bezahlen nichts an den Consignor beim Intake
-      stockStatus: 'consignment', // raus aus normalem Lager-Filter
-      sourceType: 'CONSIGNMENT',
-      quantity: 1,
-    });
-
-    // Schritt 2: Consignment-Vertrag verknüpfen.
-    const rateVal = Number(form.commissionRate) || 0;
-    createConsignment({
-      consignorId: form.consignorId,
-      productId: newProduct.id,
-      agreedPrice: form.agreedPrice ? Number(form.agreedPrice) : 0,
-      minimumPrice: form.minimumPrice ? Number(form.minimumPrice) : undefined,
-      commissionType,
-      commissionValue: rateVal,
-      commissionRate: commissionType === 'percent' ? rateVal : 0,
-      expiryDate: form.expiryDate || undefined,
-      notes: form.notes || undefined,
-    });
+    // Modal schon hier schließen — der Modal-Tree mit allen Photos / Form-Inputs
+    // re-rendert sonst während der schweren DB-Saves und kann unter Tauri zum
+    // Hänger führen. Bei Fehler unten setzen wir's optional zurück.
     setShowNew(false);
+
+    try {
+      // Schritt 1: Produkt anlegen — als Consignment-Ware (kein Einkauf von uns).
+      const newProduct = createProduct({
+        ...productForm,
+        purchasePrice: 0,           // wir bezahlen nichts an den Consignor beim Intake
+        stockStatus: 'consignment', // raus aus normalem Lager-Filter
+        sourceType: 'CONSIGNMENT',
+        quantity: 1,
+      });
+
+      // Schritt 2: Consignment-Vertrag verknüpfen.
+      const rateVal = Number(form.commissionRate) || 0;
+      createConsignment({
+        consignorId: form.consignorId,
+        productId: newProduct.id,
+        agreedPrice: form.agreedPrice ? Number(form.agreedPrice) : 0,
+        minimumPrice: form.minimumPrice ? Number(form.minimumPrice) : undefined,
+        commissionType,
+        commissionValue: rateVal,
+        commissionRate: commissionType === 'percent' ? rateVal : 0,
+        expiryDate: form.expiryDate || undefined,
+        notes: form.notes || undefined,
+      });
+
+      // Form zurücksetzen für nächsten Eintrag.
+      setForm({
+        consignorId: '', agreedPrice: '', minimumPrice: '',
+        commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '',
+      });
+      setProductForm({
+        condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [],
+        purchaseCurrency: 'BHD', attributes: {},
+      });
+      setSelectedCat(null);
+    } catch (err) {
+      // Fehler sichtbar machen statt stiller Crash.
+      alert(`Failed to create consignment: ${err instanceof Error ? err.message : String(err)}`);
+      setShowNew(true); // Modal wieder öffnen damit User korrigieren kann
+    }
   }
 
   function handleMarkSold() {
@@ -560,6 +587,10 @@ export function ConsignmentList() {
                           imageBase64: hasImage ? productForm.images![0] : undefined,
                           hints: hasHints ? { brand: productForm.brand, name: productForm.name, reference: productForm.sku } : undefined,
                         });
+                        // Plan §Consignment §AI-Identify: zwei getrennte setStates.
+                        // Updater von setProductForm muss PURE bleiben — kein verschachteltes
+                        // setForm darin (würde unter React 18 strict mode doppelt feuern und
+                        // im schlimmsten Fall die UI hängen lassen).
                         setProductForm(f => {
                           const updated = { ...f };
                           if (result.brand) updated.brand = result.brand;
@@ -567,11 +598,6 @@ export function ConsignmentList() {
                           if (result.sku && !f.sku) updated.sku = nextAvailableSku(result.sku);
                           if (result.condition) updated.condition = result.condition;
                           if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
-                          if (result.estimatedValue && !form.agreedPrice) {
-                            // Plan §Consignment: AI-Schätzung schreibt nicht ins Produkt sondern in
-                            // den Consignment-Agreed-Price-Vorschlag, da das Produkt selbst keinen Sale Price hat.
-                            setForm(prev => ({ ...prev, agreedPrice: String(result.estimatedValue) }));
-                          }
                           if (result.taxScheme && !f.taxScheme) updated.taxScheme = result.taxScheme;
                           if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0 && (!f.scopeOfDelivery || f.scopeOfDelivery.length === 0)) {
                             updated.scopeOfDelivery = result.scopeOfDelivery;
@@ -584,6 +610,11 @@ export function ConsignmentList() {
                           updated.attributes = attrs;
                           return updated;
                         });
+                        // AI-Schätzung schreibt in den Consignment-Agreed-Price-Vorschlag,
+                        // da das Produkt selbst keinen Sale Price hat. Außerhalb des Updaters.
+                        if (result.estimatedValue && !form.agreedPrice) {
+                          setForm(prev => ({ ...prev, agreedPrice: String(result.estimatedValue) }));
+                        }
                       } catch (e) { alert(String(e)); }
                       finally { setAiBusy(false); }
                     }}

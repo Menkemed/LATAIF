@@ -1,39 +1,30 @@
 // Plan §Agent §Detail (User-Spec): Approval-Account-Detailseite.
 // Zeigt: Header (Name + Status), KPIs (Total Given/Sold/Paid/Outstanding),
-// Profil-Karte, Item-Liste mit allen Transfers, Payment-History.
+// Items via geteilter TransferTable (gleiche Render-/Action-Logik wie der
+// Transfers-Tab in AgentList — durch Zustand-Store automatisch synchron).
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, FileText, History as HistoryIcon, Mail, Phone } from 'lucide-react';
+import { ArrowLeft, Edit3, History as HistoryIcon, Mail, Phone } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { StatusDot } from '@/components/ui/StatusDot';
+import { TransferTable } from '@/components/agents/TransferTable';
 import { useAgentStore } from '@/stores/agentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import type { AgentTransfer } from '@/core/models/types';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
-
-const STATUS_FILTERS: { value: '' | AgentTransfer['status']; label: string }[] = [
-  { value: '', label: 'All' },
-  { value: 'transferred', label: 'On Approval' },
-  { value: 'sold', label: 'Sold' },
-  { value: 'settled', label: 'Settled' },
-  { value: 'returned', label: 'Returned' },
-];
 
 export function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { agents, transfers, loadAgents, loadTransfers } = useAgentStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts } = useProductStore();
+  const { loadProducts } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
-  const [filterStatus, setFilterStatus] = useState<'' | AgentTransfer['status']>('');
   const [showHistory, setShowHistory] = useState(false);
 
   useEffect(() => {
@@ -49,10 +40,6 @@ export function AgentDetail() {
   const myTransfers = useMemo(
     () => transfers.filter(t => t.agentId === id),
     [transfers, id],
-  );
-  const filtered = useMemo(
-    () => filterStatus ? myTransfers.filter(t => t.status === filterStatus) : myTransfers,
-    [myTransfers, filterStatus],
   );
 
   const stats = useMemo(() => {
@@ -164,88 +151,16 @@ export function AgentDetail() {
           </Card>
         </div>
 
-        {/* Items / Transfers */}
+        {/* Items / Transfers — geteilte Komponente, gefiltert auf diesen Klient.
+            Sync: Wenn der User hier auf "Sold" klickt, wird der Zustand-Store
+            geupdated und der Transfers-Tab in AgentList sieht das sofort. */}
         <div style={{ marginBottom: 16 }}>
-          <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
-            <h2 className="font-display" style={{ fontSize: 18, color: '#0F0F10' }}>Items</h2>
-            <div className="flex gap-1">
-              {STATUS_FILTERS.map(sf => (
-                <button key={sf.value} onClick={() => setFilterStatus(sf.value)}
-                  className="cursor-pointer transition-all duration-200"
-                  style={{
-                    padding: '5px 12px', borderRadius: 999, fontSize: 11,
-                    border: `1px solid ${filterStatus === sf.value ? '#0F0F10' : 'transparent'}`,
-                    color: filterStatus === sf.value ? '#0F0F10' : '#6B7280',
-                    background: filterStatus === sf.value ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{sf.label}</button>
-              ))}
-            </div>
-          </div>
-
-          {filtered.length === 0 ? (
-            <div style={{ padding: '48px 0', textAlign: 'center', fontSize: 13, color: '#6B7280', border: '1px dashed #E5E9EE', borderRadius: 8 }}>
-              {myTransfers.length === 0 ? 'Noch keine Items übergeben.' : 'Keine Items in diesem Filter.'}
-            </div>
-          ) : (
-            <Card>
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: '90px minmax(0,1fr) minmax(0,2fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.7fr) minmax(0,0.7fr)',
-                gap: 12, padding: '0 4px 10px',
-                fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
-              }}>
-                <span>Date</span>
-                <span>Document</span>
-                <span>Item</span>
-                <span style={{ textAlign: 'right' }}>Amount</span>
-                <span style={{ textAlign: 'right' }}>Paid</span>
-                <span style={{ textAlign: 'right' }}>Outstanding</span>
-                <span>Status</span>
-                <span></span>
-              </div>
-              <div style={{ borderTop: '1px solid #E5E9EE' }} />
-              {filtered.map(t => {
-                const product = products.find(p => p.id === t.productId);
-                const linkedInvoice = t.invoiceId ? invoices.find(i => i.id === t.invoiceId) : undefined;
-                const amount = linkedInvoice ? linkedInvoice.grossAmount : ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0);
-                const paid = linkedInvoice
-                  ? (linkedInvoice.paidAmount || 0)
-                  : (t.settlementStatus === 'paid'
-                    ? (t.settlementAmount ?? amount)
-                    : (t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0));
-                const outstanding = Math.max(0, amount - paid);
-                const date = (t.transferredAt || t.createdAt || '').split('T')[0];
-                const docLabel = linkedInvoice ? `${t.transferNumber} → ${linkedInvoice.invoiceNumber}` : t.transferNumber;
-                return (
-                  <div key={t.id} style={{
-                    display: 'grid',
-                    gridTemplateColumns: '90px minmax(0,1fr) minmax(0,2fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.7fr) minmax(0,0.7fr)',
-                    gap: 12, padding: '12px 4px', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)',
-                  }}>
-                    <span style={{ fontSize: 11, color: '#6B7280' }}>{date || '—'}</span>
-                    <span className="font-mono" style={{ fontSize: 11, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis' }}>{docLabel}</span>
-                    <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {product ? `${product.brand} ${product.name}` : '—'}
-                    </span>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right' }}>{fmt(amount)}</span>
-                    <span className="font-mono" style={{ fontSize: 12, color: paid > 0 ? '#7EAA6E' : '#6B7280', textAlign: 'right' }}>{fmt(paid)}</span>
-                    <span className="font-mono" style={{ fontSize: 12, color: outstanding > 0 ? '#AA6E6E' : '#6B7280', textAlign: 'right' }}>{fmt(outstanding)}</span>
-                    <StatusDot status={t.status} />
-                    <div className="flex gap-1 justify-end">
-                      {linkedInvoice && (
-                        <button onClick={() => navigate(`/invoices/${linkedInvoice.id}`)}
-                          title="View Invoice"
-                          className="cursor-pointer flex items-center gap-1"
-                          style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #715DE3', color: '#715DE3', borderRadius: 4, background: 'rgba(113,93,227,0.06)' }}>
-                          <FileText size={11} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </Card>
-          )}
+          <h2 className="font-display" style={{ fontSize: 18, color: '#0F0F10', marginBottom: 12 }}>Items</h2>
+          <TransferTable
+            transfers={myTransfers}
+            showAgentColumn={false}
+            emptyMessage="Noch keine Items übergeben."
+          />
         </div>
 
         {/* Notes */}

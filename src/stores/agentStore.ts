@@ -31,6 +31,10 @@ interface AgentStore {
   // bindet transfer.invoiceId. Ab dann läuft die Bezahlung über die Invoice; markTransferSettled
   // wird in der UI ausgeblendet.
   convertTransferToInvoice: (transferId: string, customerId: string) => Invoice;
+  // Plan §Agent §Convert §Bulk (User-Spec): mehrere sold-Transfers EINES Agents in EINE
+  // gemeinsame Multi-Line-Invoice umwandeln. Validiert atomisch: alle sold, kein invoiceId,
+  // alle gleicher Agent. Migriert pro Transfer bestehende Settle-Payments in die neue Invoice.
+  convertTransfersToInvoice: (transferIds: string[], customerId: string) => Invoice;
   // Plan §Agent §Convert §Undo: Convert rückgängig machen. Erlaubt nur solange
   // die Invoice noch nicht (teilweise) bezahlt wurde — sonst Doppelbuchung.
   undoTransferInvoiceConvert: (transferId: string) => void;
@@ -420,15 +424,121 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     return invoice;
   },
 
+  convertTransfersToInvoice: (transferIds, customerId) => {
+    if (!customerId) throw new Error('Customer is required.');
+    if (!transferIds || transferIds.length === 0) {
+      throw new Error('No transfers selected.');
+    }
+
+    // Atomische Validation VOR jeder DB-Mutation — sonst halb-konvertierte
+    // Invoices wenn ein einzelner Transfer durch ein Race verknallt ist.
+    const ts = transferIds.map(id => {
+      const t = get().getTransfer(id);
+      if (!t) throw new Error(`Transfer ${id} not found.`);
+      if (t.status !== 'sold' && t.status !== 'settled') {
+        throw new Error(`Transfer ${t.transferNumber} is not sold — cannot convert.`);
+      }
+      if (t.invoiceId) {
+        throw new Error(`Transfer ${t.transferNumber} was already converted.`);
+      }
+      return t;
+    });
+
+    const agentId = ts[0].agentId;
+    if (ts.some(t => t.agentId !== agentId)) {
+      throw new Error('All selected transfers must belong to the same approval / agent.');
+    }
+
+    // Pro Transfer eine Invoice-Line bauen — Tax-Scheme + Margin-Mathematik
+    // wie im Single-Convert-Pfad. Snapshot pro Line damit Mixed-Scheme-Invoices
+    // (z.B. Watch via MARGIN + Strap via VAT_10) sauber aggregieren.
+    const lines = ts.map(t => {
+      const prodRows = query(
+        `SELECT id, tax_scheme, purchase_price FROM products WHERE id = ?`,
+        [t.productId]
+      );
+      const prod = prodRows[0];
+      const scheme = ((prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
+      const purchasePrice = (prod?.purchase_price as number | undefined) || 0;
+      const rate = scheme === 'ZERO' ? 0 : 10;
+      const settlementGross = Number(t.settlementAmount || 0);
+      if (settlementGross <= 0) {
+        throw new Error(`Settlement amount must be positive for transfer ${t.transferNumber}.`);
+      }
+      const netInput = scheme === 'VAT_10' ? settlementGross / (1 + rate / 100) : settlementGross;
+      const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
+      return {
+        productId: t.productId,
+        unitPrice: calc.netAmount,
+        purchasePrice,
+        taxScheme: scheme,
+        vatRate: rate,
+        vatAmount: calc.vatAmount,
+        lineTotal: calc.grossAmount,
+      };
+    });
+
+    const inv = useInvoiceStore.getState();
+    const noteRefs = ts.map(t => t.transferNumber).join(', ');
+    const invoice = inv.createDirectInvoice(
+      customerId,
+      lines,
+      `Combined agent settlement · transfers ${noteRefs}`,
+    );
+
+    // Pro Transfer: invoiceId koppeln + bestehende Settle-Payments in die
+    // neue Invoice migrieren (sonst Doppelbuchung).
+    const db = getDatabase();
+    for (const t of ts) {
+      get().updateTransfer(t.id, { invoiceId: invoice.id });
+      const sps = get().getSettlementPayments(t.id);
+      if (sps.length > 0) {
+        for (const sp of sps) {
+          const invMethod = sp.method === 'bank' ? 'bank_transfer' : (sp.method || 'cash');
+          inv.recordPayment(invoice.id, sp.amount, invMethod, `Migrated from settlement ${t.transferNumber} (${sp.paidAt})`);
+        }
+        db.run('DELETE FROM agent_settlement_payments WHERE transfer_id = ?', [t.id]);
+        get().updateTransfer(t.id, {
+          settlementPaidAmount: 0,
+          settlementStatus: 'pending',
+          status: 'sold',
+        });
+      }
+    }
+    saveDatabase();
+
+    // Customer-Verknüpfung am Agent merken (falls nicht schon).
+    const agent = get().getAgent(agentId);
+    if (agent && !agent.customerId) {
+      get().updateAgent(agentId, { customerId });
+    }
+
+    useCustomerStore.getState().loadCustomers();
+    for (const t of ts) {
+      eventBus.emit('agent_transfer.invoice_created', 'agent_transfer', t.id, { invoiceId: invoice.id, bulk: true });
+    }
+    return invoice;
+  },
+
   undoTransferInvoiceConvert: (transferId) => {
     const transfer = get().getTransfer(transferId);
     if (!transfer) throw new Error('Transfer not found.');
     if (!transfer.invoiceId) throw new Error('This transfer has no linked invoice.');
     const inv = useInvoiceStore.getState();
     const invoice = inv.invoices.find(i => i.id === transfer.invoiceId);
+    // Bulk-Convert: mehrere Transfers können auf dieselbe Invoice zeigen.
+    // Beim Undo löschen wir die geteilte Invoice — also müssen ALLE
+    // koppelnden Transfers entlinkt werden, sonst hängen sie mit toter
+    // invoiceId rum.
+    const sharedTransferIds = get().transfers
+      .filter(t => t.invoiceId === transfer.invoiceId)
+      .map(t => t.id);
+
     if (!invoice) {
-      // Invoice fehlt → einfach den Link löschen, Daten konsistent halten.
-      get().updateTransfer(transferId, { invoiceId: undefined });
+      // Invoice fehlt → alle Links löschen, Daten konsistent halten.
+      for (const tid of sharedTransferIds) {
+        get().updateTransfer(tid, { invoiceId: undefined });
+      }
       return;
     }
     if ((invoice.paidAmount || 0) > 0.005) {
@@ -437,7 +547,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       );
     }
     inv.deleteInvoice(invoice.id);
-    get().updateTransfer(transferId, { invoiceId: undefined });
-    eventBus.emit('agent_transfer.invoice_undone', 'agent_transfer', transferId, { invoiceId: invoice.id });
+    for (const tid of sharedTransferIds) {
+      get().updateTransfer(tid, { invoiceId: undefined });
+      eventBus.emit('agent_transfer.invoice_undone', 'agent_transfer', tid, { invoiceId: invoice.id });
+    }
   },
 }));
