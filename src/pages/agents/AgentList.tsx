@@ -8,6 +8,7 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useAgentStore } from '@/stores/agentStore';
 import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -27,6 +28,7 @@ export function AgentList() {
   const navigate = useNavigate();
   const [showNewAgent, setShowNewAgent] = useState(false);
   const [showNewTransfer, setShowNewTransfer] = useState(false);
+  const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   const [tab, setTab] = useState<'agents' | 'transfers'>('agents');
   const [agentForm, setAgentForm] = useState<Partial<Agent>>({ commissionRate: 10 });
   const [transferForm, setTransferForm] = useState<Partial<AgentTransfer> & { agentId?: string; productId?: string }>({ commissionRate: 10 });
@@ -203,12 +205,17 @@ export function AgentList() {
               return s;
             }, 0);
             const outstanding = Math.max(0, totalSold - totalPaid);
+            // Plan §Agent §Status (User-Spec): Aktiv = mindestens ein Item beim
+            // Agent (status='transferred'). Inaktiv = nichts mehr offen.
+            // Alter manueller `agent.active`-Toggle wird ignoriert — Status leitet
+            // sich aus dem realen Zustand ab.
+            const isActive = activeTransfers.length > 0;
             return (
-              <Card key={agent.id} hoverable onClick={() => { setEditAgent(agent); setEditAgentForm({ ...agent }); }}>
+              <Card key={agent.id} hoverable onClick={() => navigate(`/agents/${agent.id}`)}>
                 <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
                   <h3 style={{ fontSize: 16, color: '#0F0F10', fontWeight: 500 }}>{agent.name}</h3>
-                  <span style={{ fontSize: 12, color: agent.active ? '#7EAA6E' : '#AA6E6E' }}>
-                    {agent.active ? 'Active' : 'Inactive'}
+                  <span style={{ fontSize: 12, color: isActive ? '#7EAA6E' : '#AA6E6E' }}>
+                    {isActive ? 'Active' : 'Inactive'}
                   </span>
                 </div>
                 {agent.company && <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>{agent.company}</p>}
@@ -240,6 +247,12 @@ export function AgentList() {
                     <div style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Outstanding</div>
                     <div className="font-mono" style={{ fontSize: 13, color: outstanding > 0 ? '#AA6E6E' : '#6B7280' }}>{fmt(outstanding)} BHD</div>
                   </div>
+                </div>
+                <div style={{ borderTop: '1px solid #E5E9EE', marginTop: 10, paddingTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
+                  <button onClick={(e) => { e.stopPropagation(); setEditAgent(agent); setEditAgentForm({ ...agent }); }}
+                    className="cursor-pointer" style={{ padding: '3px 10px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', borderRadius: 4, background: 'none' }}>
+                    Edit
+                  </button>
                 </div>
               </Card>
             );
@@ -373,22 +386,92 @@ export function AgentList() {
         </>
       )}
 
-      {/* New Approval Modal */}
+      {/* New Approval Modal — Customer-Picker oder neuer Customer (User-Spec) */}
       <Modal open={showNewAgent} onClose={() => setShowNewAgent(false)} title="New Approval" width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input required label="NAME" placeholder="Approval name" value={agentForm.name || ''} onChange={e => setAgentForm({ ...agentForm, name: e.target.value })} />
-          <Input label="COMPANY" placeholder="Company" value={agentForm.company || ''} onChange={e => setAgentForm({ ...agentForm, company: e.target.value })} />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Input label="PHONE" placeholder="+973..." value={agentForm.phone || ''} onChange={e => setAgentForm({ ...agentForm, phone: e.target.value })} />
-            <Input required label="COMMISSION %" type="number" value={agentForm.commissionRate || ''} onChange={e => setAgentForm({ ...agentForm, commissionRate: Number(e.target.value) })} />
+          <div style={{
+            padding: '8px 12px', borderRadius: 8, background: '#F2F7FA',
+            border: '1px solid #E5E9EE', color: '#6B7280', fontSize: 12, lineHeight: 1.5,
+          }}>
+            <strong style={{ color: '#0F0F10' }}>Bestehenden Client wählen</strong> oder mit dem Plus einen neuen anlegen.
+            Name, Company, Phone und Email werden vom Customer übernommen.
           </div>
-          <Input label="EMAIL" placeholder="email" value={agentForm.email || ''} onChange={e => setAgentForm({ ...agentForm, email: e.target.value })} />
+
+          <div className="flex items-end gap-2">
+            <div style={{ flex: 1 }}>
+              <SearchSelect
+                label="CLIENT"
+                placeholder="Search clients..."
+                options={customerOptions}
+                value={agentForm.customerId || ''}
+                onChange={cid => {
+                  const c = customers.find(cc => cc.id === cid);
+                  if (c) {
+                    const fullName = `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.firstName || c.lastName || 'Client';
+                    setAgentForm({
+                      ...agentForm,
+                      customerId: c.id,
+                      name: fullName,
+                      company: c.company,
+                      phone: c.phone,
+                      whatsapp: c.whatsapp,
+                      email: c.email,
+                    });
+                  } else {
+                    setAgentForm({ ...agentForm, customerId: undefined });
+                  }
+                }}
+              />
+            </div>
+            <button onClick={() => setShowQuickCustomer(true)}
+              title="New Client"
+              className="cursor-pointer flex items-center justify-center"
+              style={{ width: 38, height: 38, borderRadius: 8, border: '1px solid #D5D9DE', background: '#FFFFFF', color: '#0F0F10', fontSize: 18, fontWeight: 300, marginBottom: 2 }}>
+              +
+            </button>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Input label="COMMISSION %" type="number" value={agentForm.commissionRate || ''} onChange={e => setAgentForm({ ...agentForm, commissionRate: Number(e.target.value) })} />
+            <Input label="PHONE (override)" placeholder={agentForm.phone || ''} value={agentForm.phone || ''} onChange={e => setAgentForm({ ...agentForm, phone: e.target.value })} />
+          </div>
+
+          {agentForm.customerId && (
+            <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
+              <div style={{ color: '#6B7280', marginBottom: 4 }}>SELECTED</div>
+              <div style={{ color: '#0F0F10' }}>{agentForm.name}{agentForm.company ? ` · ${agentForm.company}` : ''}</div>
+              {agentForm.phone && <div style={{ color: '#4B5563', fontSize: 11, marginTop: 2 }}>{agentForm.phone}</div>}
+            </div>
+          )}
+
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewAgent(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreateAgent}>Create Approval</Button>
+            <Button variant="primary" onClick={handleCreateAgent} disabled={!agentForm.name}>Create Approval</Button>
           </div>
         </div>
       </Modal>
+
+      {/* QuickCustomerModal — wird vom + bei Client benutzt */}
+      <QuickCustomerModal open={showQuickCustomer} onClose={() => setShowQuickCustomer(false)}
+        onCreated={(id) => {
+          loadCustomers();
+          // gerade angelegten Customer in den Form-State übernehmen
+          setTimeout(() => {
+            const fresh = useCustomerStore.getState().customers.find(c => c.id === id);
+            if (fresh) {
+              const fullName = `${fresh.firstName || ''} ${fresh.lastName || ''}`.trim() || 'Client';
+              setAgentForm(f => ({
+                ...f,
+                customerId: fresh.id,
+                name: fullName,
+                company: fresh.company,
+                phone: fresh.phone,
+                whatsapp: fresh.whatsapp,
+                email: fresh.email,
+              }));
+            }
+          }, 50);
+        }} />
 
       {/* New Transfer Modal */}
       <Modal open={showNewTransfer} onClose={() => setShowNewTransfer(false)} title="New Transfer" width={520}>

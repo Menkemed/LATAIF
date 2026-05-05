@@ -16,6 +16,7 @@ import { RepairDetail } from '@/pages/repairs/RepairDetail';
 import { ConsignmentList } from '@/pages/consignments/ConsignmentList';
 import { ConsignmentDetail } from '@/pages/consignments/ConsignmentDetail';
 import { AgentList } from '@/pages/agents/AgentList';
+import { AgentDetail } from '@/pages/agents/AgentDetail';
 import { MetalList } from '@/pages/metals/MetalList';
 import { OrderList } from '@/pages/orders/OrderList';
 import { OrderCreate } from '@/pages/orders/OrderCreate';
@@ -127,6 +128,7 @@ export default function App() {
           <Route path="/consignments" element={<ConsignmentList />} />
           <Route path="/consignments/:id" element={<ConsignmentDetail />} />
           <Route path="/agents" element={<AgentList />} />
+          <Route path="/agents/:id" element={<AgentDetail />} />
           <Route path="/metals" element={<MetalList />} />
           <Route path="/orders" element={<OrderList />} />
           <Route path="/orders/new" element={<OrderCreate />} />
