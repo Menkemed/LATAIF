@@ -45,6 +45,7 @@ import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { ImportPage } from '@/pages/settings/ImportPage';
 import { GlobalSearch } from '@/components/shared/GlobalSearch';
 import { UpdateBanner } from '@/components/shared/UpdateBanner';
+import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { initDatabase } from '@/core/db/database';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
@@ -111,6 +112,7 @@ export default function App() {
         <GlobalSearch />
         <UpdateBanner />
         <Sidebar />
+        <ErrorBoundary>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/clients" element={<CustomerList />} />
@@ -154,6 +156,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/import" element={<ImportPage />} />
         </Routes>
+        </ErrorBoundary>
       </div>
     </BrowserRouter>
   );

@@ -159,50 +159,64 @@ export function ConsignmentList() {
       return;
     }
 
-    // Modal schon hier schließen — der Modal-Tree mit allen Photos / Form-Inputs
-    // re-rendert sonst während der schweren DB-Saves und kann unter Tauri zum
-    // Hänger führen. Bei Fehler unten setzen wir's optional zurück.
+    // Snapshot der Form-Daten BEVOR React was reseted — die DB-Saves laufen
+    // gleich in einem Defer-Tick, da darf das Form schon weg sein.
+    const snapshot = {
+      product: { ...productForm },
+      consignorId: form.consignorId,
+      agreedPrice: form.agreedPrice,
+      minimumPrice: form.minimumPrice,
+      commissionRate: form.commissionRate,
+      expiryDate: form.expiryDate,
+      notes: form.notes,
+      commissionType,
+    };
+
+    // Modal sofort zu + Form leeren in DIESEM Tick — React commit'tet den
+    // leeren-Modal-State, bevor wir die ~3-4 synchronen DB-Saves anstoßen.
+    // Sonst rendert React während der DB-Operation noch den vollen Modal-Tree
+    // (Photos, Inputs, AI-Identify-Box) und unter Tauri/sql.js wirkt das wie
+    // ein Hänger / führt zur weißen Seite.
     setShowNew(false);
+    setForm({
+      consignorId: '', agreedPrice: '', minimumPrice: '',
+      commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '',
+    });
+    setProductForm({
+      condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [],
+      purchaseCurrency: 'BHD', attributes: {},
+    });
+    setSelectedCat(null);
 
-    try {
-      // Schritt 1: Produkt anlegen — als Consignment-Ware (kein Einkauf von uns).
-      const newProduct = createProduct({
-        ...productForm,
-        purchasePrice: 0,           // wir bezahlen nichts an den Consignor beim Intake
-        stockStatus: 'consignment', // raus aus normalem Lager-Filter
-        sourceType: 'CONSIGNMENT',
-        quantity: 1,
-      });
-
-      // Schritt 2: Consignment-Vertrag verknüpfen.
-      const rateVal = Number(form.commissionRate) || 0;
-      createConsignment({
-        consignorId: form.consignorId,
-        productId: newProduct.id,
-        agreedPrice: form.agreedPrice ? Number(form.agreedPrice) : 0,
-        minimumPrice: form.minimumPrice ? Number(form.minimumPrice) : undefined,
-        commissionType,
-        commissionValue: rateVal,
-        commissionRate: commissionType === 'percent' ? rateVal : 0,
-        expiryDate: form.expiryDate || undefined,
-        notes: form.notes || undefined,
-      });
-
-      // Form zurücksetzen für nächsten Eintrag.
-      setForm({
-        consignorId: '', agreedPrice: '', minimumPrice: '',
-        commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '',
-      });
-      setProductForm({
-        condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [],
-        purchaseCurrency: 'BHD', attributes: {},
-      });
-      setSelectedCat(null);
-    } catch (err) {
-      // Fehler sichtbar machen statt stiller Crash.
-      alert(`Failed to create consignment: ${err instanceof Error ? err.message : String(err)}`);
-      setShowNew(true); // Modal wieder öffnen damit User korrigieren kann
-    }
+    // DB-Schreiben in den nächsten Macrotask schieben — gibt React Zeit, den
+    // modal-close-Render zu commiten, BEVOR der Main-Thread für die synchronen
+    // SQLite-Saves blockiert wird.
+    setTimeout(() => {
+      try {
+        const newProduct = createProduct({
+          ...snapshot.product,
+          purchasePrice: 0,
+          stockStatus: 'consignment',
+          sourceType: 'CONSIGNMENT',
+          quantity: 1,
+        });
+        const rateVal = Number(snapshot.commissionRate) || 0;
+        createConsignment({
+          consignorId: snapshot.consignorId,
+          productId: newProduct.id,
+          agreedPrice: snapshot.agreedPrice ? Number(snapshot.agreedPrice) : 0,
+          minimumPrice: snapshot.minimumPrice ? Number(snapshot.minimumPrice) : undefined,
+          commissionType: snapshot.commissionType,
+          commissionValue: rateVal,
+          commissionRate: snapshot.commissionType === 'percent' ? rateVal : 0,
+          expiryDate: snapshot.expiryDate || undefined,
+          notes: snapshot.notes || undefined,
+        });
+      } catch (err) {
+        console.error('[Consignment] create failed:', err);
+        alert(`Failed to create consignment: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, 0);
   }
 
   function handleMarkSold() {

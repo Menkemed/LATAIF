@@ -128,8 +128,18 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     try { branchId = currentBranchId(); } catch { return []; }
     const txs: BankTransaction[] = [];
 
+    // Eine fehlerhafte Quell-Query (z.B. fehlende Spalte nach Schema-Drift) darf nicht
+    // die ganze Banking-Page killen. Pro Block try/catch — bei Fehler nur loggen, weiter.
+    const safeQuery = (label: string, sql: string, params: unknown[]): Record<string, unknown>[] => {
+      try { return query(sql, params); }
+      catch (err) {
+        console.error(`[bankingStore] ${label} query failed:`, err);
+        return [];
+      }
+    };
+
     // SALES_IN: invoice payments
-    const payments = query(
+    const payments = safeQuery('payments',
       `SELECT p.id, p.amount, p.method, p.received_at, p.invoice_id, i.invoice_number, p.created_at
        FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
        WHERE p.branch_id = ?`,
@@ -152,7 +162,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     }
 
     // PURCHASE_OUT: purchase payments
-    const purchPay = query(
+    const purchPay = safeQuery('purchase_payments',
       `SELECT pp.id, pp.amount, pp.method, pp.paid_at, pp.purchase_id, p.purchase_number, pp.created_at AS created_at
        FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
        WHERE p.branch_id = ?`,
@@ -175,7 +185,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     }
 
     // EXPENSE_OUT: expenses
-    const expenses = query(
+    const expenses = safeQuery('expenses',
       `SELECT id, amount, payment_method, expense_date, description, expense_number, category, created_at
        FROM expenses WHERE branch_id = ?`,
       [branchId]
@@ -199,7 +209,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     // LOAN_IN / LOAN_OUT: initial amount + repayments
     // Plan §Loan §3: MONEY_GIVEN → receivable (cash out at inception, in at repayment)
     //                MONEY_RECEIVED → payable (cash in at inception, out at repayment)
-    const debts = query(
+    const debts = safeQuery('debts',
       `SELECT id, direction, amount, source, counterparty, created_at
        FROM debts WHERE branch_id = ?`,
       [branchId]
@@ -221,7 +231,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
         description: `Loan ${isGiven ? 'given to' : 'received from'} ${d.counterparty || ''}`,
       });
     }
-    const debtPay = query(
+    const debtPay = safeQuery('debt_payments',
       `SELECT dp.id, dp.amount, dp.source, dp.paid_at, dp.debt_id, d.direction, d.counterparty, dp.created_at AS created_at
        FROM debt_payments dp JOIN debts d ON d.id = dp.debt_id
        WHERE d.branch_id = ?`,
@@ -247,7 +257,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     }
 
     // PARTNER_INVESTMENT_IN / PARTNER_WITHDRAWAL_OUT / PARTNER_PROFIT_OUT
-    const partnerTx = query(
+    const partnerTx = safeQuery('partner_transactions',
       `SELECT pt.id, pt.amount, pt.type, pt.method, pt.transaction_date, pt.partner_id, pt.transaction_number, pr.name, pt.created_at AS created_at
        FROM partner_transactions pt LEFT JOIN partners pr ON pr.id = pt.partner_id
        WHERE pt.branch_id = ?`,
@@ -306,7 +316,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
 
     // CONSIGNOR PAYOUT (Plan §Commission §8): du schuldest Besitzer, Auszahlung ist Outflow.
     // Wird als EXPENSE_OUT kategorisiert (liability settlement).
-    const payouts = query(
+    const payouts = safeQuery('consignment_payouts',
       `SELECT id, consignment_number, payout_amount, payout_method, payout_date, updated_at
        FROM consignments WHERE branch_id = ? AND payout_status = 'paid' AND payout_amount > 0`,
       [branchId]
@@ -329,7 +339,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
 
     // REFUND_OUT: sales returns — nutze refund_paid_amount damit Teilzahlungen
     // via recordRefundPayment() auch im Cashflow auftauchen (Plan §Returns Fix).
-    const salesRet = query(
+    const salesRet = safeQuery('sales_returns',
       `SELECT id, refund_amount, refund_paid_amount, refund_paid_date, refund_method, return_date, return_number, invoice_id, created_at, updated_at
        FROM sales_returns WHERE branch_id = ? AND status != 'REJECTED'
          AND (refund_paid_amount > 0 OR refund_amount > 0)`,
@@ -355,7 +365,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     }
 
     // REFUND_IN: purchase returns with refund_amount > 0 (money back from supplier)
-    const purchRet = query(
+    const purchRet = safeQuery('purchase_returns',
       `SELECT id, refund_amount, refund_method, return_date, return_number, purchase_id, created_at
        FROM purchase_returns WHERE branch_id = ? AND refund_amount > 0 AND status != 'CANCELLED'`,
       [branchId]
@@ -377,7 +387,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     }
 
     // Plan §8 #9 — Order-Payments (Anzahlungen + Zahlungen vor Invoice-Erstellung)
-    const orderPay = query(
+    const orderPay = safeQuery('order_payments',
       `SELECT op.id, op.amount, op.method, op.paid_at, op.order_id, o.order_number,
               COALESCE(op.converted_to_invoice, 0) AS converted, op.created_at AS created_at
          FROM order_payments op JOIN orders o ON o.id = op.order_id
@@ -404,7 +414,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
 
     // Plan §8 #9 — Repair Customer-Payments (direkt auf repair.customer_paid_amount).
     // Abzüglich bereits in einer verknüpften Invoice gezählter Beträge (invoice_id gesetzt & FINAL).
-    const repairPay = query(
+    const repairPay = safeQuery('repair_payments',
       `SELECT r.id, r.repair_number, r.customer_paid_amount, r.customer_payment_method, r.customer_payment_date, r.invoice_id, r.updated_at
          FROM repairs r WHERE r.branch_id = ? AND r.customer_paid_amount > 0`,
       [branchId]
@@ -428,7 +438,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     }
 
     // Plan §8 #9 — Metal Payments (Verkauf von Edelmetallen).
-    const metalPay = query(
+    const metalPay = safeQuery('metal_payments',
       `SELECT mp.id, mp.amount, mp.method, mp.paid_at, mp.metal_id, pm.metal_type, mp.created_at AS created_at
          FROM metal_payments mp LEFT JOIN precious_metals pm ON pm.id = mp.metal_id
          WHERE pm.branch_id = ?`,
@@ -455,7 +465,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     // WICHTIG: Nur Transfers OHNE Invoice einbeziehen — wenn eine Invoice
     // existiert, läuft der Cashflow über die Invoice-Payments (in `payments`-
     // Tabelle, oben schon als SALES_IN gezählt). Sonst Doppelbuchung.
-    const agentPay = query(
+    const agentPay = safeQuery('agent_settlement_payments',
       `SELECT asp.id, asp.amount, asp.method, asp.paid_at, asp.transfer_id, at.agent_id, a.name AS agent_name, asp.created_at AS created_at
          FROM agent_settlement_payments asp
          JOIN agent_transfers at ON at.id = asp.transfer_id

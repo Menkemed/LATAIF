@@ -37,7 +37,7 @@ const TYPE_COLORS: Record<BankTransactionType, string> = {
 };
 
 export function BankingPage() {
-  const { transfers, loadTransfers, createTransfer, getTransactions, getBalances } = useBankingStore();
+  const { transfers, loadTransfers, createTransfer, getTransactions } = useBankingStore();
   const [showNew, setShowNew] = useState(false);
   const [amount, setAmount] = useState('');
   const [direction, setDirection] = useState<'CASH_TO_BANK' | 'BANK_TO_CASH'>('CASH_TO_BANK');
@@ -48,8 +48,23 @@ export function BankingPage() {
 
   useEffect(() => { loadTransfers(); }, [loadTransfers]);
 
-  const balances = useMemo(() => getBalances(), [getBalances, transfers]);
-  const allTxs = useMemo(() => getTransactions(), [getTransactions, transfers]);
+  // getTransactions feuert ~14 SQL-Queries — auf Production-Daten merklich langsam.
+  // Vorher lief das doppelt (einmal für allTxs, einmal über getBalances). Wir
+  // berechnen die Balances jetzt aus derselben Tx-Liste statt nochmal zu queryn.
+  const allTxs = useMemo(() => {
+    try { return getTransactions(); }
+    catch (err) { console.error('[BankingPage] getTransactions failed:', err); return []; }
+  }, [getTransactions, transfers]);
+
+  const balances = useMemo(() => {
+    let cash = 0, bank = 0;
+    for (const t of allTxs) {
+      const sign = t.flow === 'in' ? 1 : -1;
+      if (t.account === 'cash') cash += sign * t.amount;
+      else bank += sign * t.amount;
+    }
+    return { cash, bank };
+  }, [allTxs]);
   const filteredTxs = useMemo(() => {
     return allTxs.filter(t => {
       if (accountFilter !== 'all' && t.account !== accountFilter) return false;
