@@ -17,12 +17,14 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+// SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
+// fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
+function fmt(v: number | null | undefined): string {
+  return (v ?? 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
-function fmtPct(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+function fmtPct(v: number | null | undefined): string {
+  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
 type StatusFilter = '' | ConsignmentStatus;
@@ -342,7 +344,7 @@ export function ConsignmentList() {
                     </td>
                     <td style={{ padding: '14px 18px' }}>
                       <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmtPct(con.commissionRate)}%</span>
-                      {con.commissionAmount !== undefined && (
+                      {con.commissionAmount != null && (
                         <span className="font-mono" style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 2 }}>
                           {fmt(con.commissionAmount)} BHD
                         </span>

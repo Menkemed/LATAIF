@@ -12,12 +12,12 @@ import { useProductStore } from '@/stores/productStore';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+function fmt(v: number | null | undefined): string {
+  return (v ?? 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
-function fmtPct(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+function fmtPct(v: number | null | undefined): string {
+  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
 function daysUntil(dateStr: string): number {
