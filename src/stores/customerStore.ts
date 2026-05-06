@@ -315,7 +315,10 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       const loanCount = Number(loanRow[0]?.cnt || 0);
 
       return {
-        revenue: Math.max(0, paidIn - paidOut),
+        // User-Spec: Revenue darf negativ werden wenn Refund > Zahlungen — Kunde hat
+        // mehr zurückbekommen als bezahlt (Goodwill-Refund / Storno mit Aufschlag).
+        // Vorher wurde mit Math.max(0,…) auf 0 geclampt, das hat den Refund unsichtbar gemacht.
+        revenue: paidIn - paidOut,
         profit: profitIn - profitOut,
         outstanding: invoiceOutstanding + loanOpen,
         invoiceOutstanding,

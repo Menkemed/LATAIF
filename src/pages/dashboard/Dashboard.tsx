@@ -111,8 +111,39 @@ export function Dashboard() {
     if (!when) return true;
     return when >= periodStart && when <= periodEnd;
   }), [invoices, periodStart, periodEnd]);
-  const totalRevenue = useMemo(() => finalInvoices.reduce((s, i) => s + i.grossAmount, 0), [finalInvoices]);
-  const totalProfit = useMemo(() => finalInvoices.reduce((s, i) => s + (i.marginSnapshot || 0), 0), [finalInvoices]);
+  // Refund-Abzug: Cash-Refunds auf FINAL-Invoices, datiert per refund_paid_date (oder return_date
+  // als Fallback) im Zeitraum. Sonst zeigt das Dashboard inflated Revenue weil Refunds nirgends
+  // einlaufen — User-Spec: Invoice paid = +, Refund = − im selben Topf.
+  const finalInvoiceMap = useMemo(() => {
+    const m = new Map<string, typeof invoices[number]>();
+    for (const i of invoices) if (i.status === 'FINAL') m.set(i.id, i);
+    return m;
+  }, [invoices]);
+  const refundsByPeriod = useMemo(() => {
+    let cash = 0, profit = 0;
+    for (const r of salesReturns) {
+      const inv = finalInvoiceMap.get(r.invoiceId);
+      if (!inv) continue;
+      const paid = r.refundPaidAmount || 0;
+      if (paid <= 0) continue;
+      const when = r.refundPaidDate || r.returnDate;
+      if (when && (when < periodStart.split('T')[0] || when > periodEnd.split('T')[0])) continue;
+      cash += paid;
+      // Pro-rata: Anteil der Marge entspricht Anteil am Brutto.
+      const gross = inv.grossAmount || 0;
+      const margin = inv.marginSnapshot || 0;
+      if (gross > 0) profit += paid * (margin / gross);
+    }
+    return { cash, profit };
+  }, [salesReturns, finalInvoiceMap, periodStart, periodEnd]);
+  const totalRevenue = useMemo(
+    () => finalInvoices.reduce((s, i) => s + i.grossAmount, 0) - refundsByPeriod.cash,
+    [finalInvoices, refundsByPeriod]
+  );
+  const totalProfit = useMemo(
+    () => finalInvoices.reduce((s, i) => s + (i.marginSnapshot || 0), 0) - refundsByPeriod.profit,
+    [finalInvoices, refundsByPeriod]
+  );
   // Plan §Dashboard §3.A+B: durchschnittlicher Verkauf + Margin %
   const avgSale = useMemo(() => finalInvoices.length > 0 ? totalRevenue / finalInvoices.length : 0, [finalInvoices, totalRevenue]);
   const marginPct = useMemo(() => totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0, [totalRevenue, totalProfit]);
@@ -199,10 +230,19 @@ export function Dashboard() {
   //   ≥12 months & last year known → same month last year × 1.10 (Last year +10%)
   const currentMonthRevenue = useMemo(() => {
     const prefix = new Date().toISOString().slice(0, 7);
-    return invoices
+    const gross = invoices
       .filter(i => i.status === 'FINAL' && (i.issuedAt || i.createdAt || '').startsWith(prefix))
       .reduce((s, i) => s + i.grossAmount, 0);
-  }, [invoices]);
+    // Refund-Abzug für die laufende Monats-Achse — symmetrisch zu totalRevenue.
+    const refundsThisMonth = salesReturns.reduce((s, r) => {
+      const inv = finalInvoiceMap.get(r.invoiceId);
+      if (!inv) return s;
+      const paid = r.refundPaidAmount || 0;
+      const when = r.refundPaidDate || r.returnDate || '';
+      return when.startsWith(prefix) ? s + paid : s;
+    }, 0);
+    return gross - refundsThisMonth;
+  }, [invoices, salesReturns, finalInvoiceMap]);
 
   const { monthlyTarget, monthlyTargetSource } = useMemo<{ monthlyTarget: number; monthlyTargetSource: string }>(() => {
     // 1) Manual override (per-branch)
@@ -216,7 +256,8 @@ export function Dashboard() {
       }
     } catch { /* fall through */ }
 
-    // Build month-by-month gross totals for FINAL invoices.
+    // Build month-by-month NET totals for FINAL invoices (gross minus refunds in same month).
+    // Sonst basiert das Ziel auf inflated Gross-Umsatz, der nie wirklich realisiert wurde.
     const sumsByMonth = new Map<string, number>();
     for (const inv of invoices) {
       if (inv.status !== 'FINAL') continue;
@@ -224,6 +265,16 @@ export function Dashboard() {
       if (!iso) continue;
       const key = iso.slice(0, 7); // YYYY-MM
       sumsByMonth.set(key, (sumsByMonth.get(key) || 0) + (inv.grossAmount || 0));
+    }
+    for (const r of salesReturns) {
+      const inv = finalInvoiceMap.get(r.invoiceId);
+      if (!inv) continue;
+      const paid = r.refundPaidAmount || 0;
+      if (paid <= 0) continue;
+      const when = r.refundPaidDate || r.returnDate;
+      if (!when) continue;
+      const key = when.slice(0, 7);
+      sumsByMonth.set(key, (sumsByMonth.get(key) || 0) - paid);
     }
     const now = new Date();
     const currentKey = now.toISOString().slice(0, 7);
@@ -248,7 +299,7 @@ export function Dashboard() {
     // 4) 2–11 months (or 12+ without prior-year data) → best month so far
     const best = Math.max(...completedMonths);
     return { monthlyTarget: best > 0 ? best : 20000, monthlyTargetSource: 'Best month so far' };
-  }, [invoices]);
+  }, [invoices, salesReturns, finalInvoiceMap]);
 
   const monthlyTargetPct = monthlyTarget > 0 ? (currentMonthRevenue / monthlyTarget) * 100 : 0;
 

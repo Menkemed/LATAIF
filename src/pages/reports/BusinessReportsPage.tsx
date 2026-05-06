@@ -10,6 +10,7 @@ import { useProductStore } from '@/stores/productStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -126,11 +127,12 @@ export function BusinessReportsPage() {
   const { customers, loadCustomers } = useCustomerStore();
   const { partners, loadPartners } = usePartnerStore();
   const { loadPurchases } = usePurchaseStore();
+  const { returns: salesReturns, loadReturns: loadSalesReturns } = useSalesReturnStore();
 
   useEffect(() => {
     loadInvoices(); loadProducts(); loadCategories();
-    loadExpenses(); loadSuppliers(); loadCustomers(); loadPartners(); loadPurchases();
-  }, [loadInvoices, loadProducts, loadCategories, loadExpenses, loadSuppliers, loadCustomers, loadPartners, loadPurchases]);
+    loadExpenses(); loadSuppliers(); loadCustomers(); loadPartners(); loadPurchases(); loadSalesReturns();
+  }, [loadInvoices, loadProducts, loadCategories, loadExpenses, loadSuppliers, loadCustomers, loadPartners, loadPurchases, loadSalesReturns]);
 
   // Plan §Reports §4+6: Zeitraum-Filter auf Invoice-Liste.
   const filteredInvoices = useMemo(() => {
@@ -144,8 +146,12 @@ export function BusinessReportsPage() {
   }, [invoices, periodRange, statusFilter, customerFilter]);
 
   // ── Sales Report (Plan §Reports §A) — only FINAL count (Plan §Sales §3)
+  // Refunds (cash gezahlt auf FINAL-Invoices, im Periode-Range) ziehen Gross/Net/VAT
+  // proportional ab — sonst zeigt der Sales-Report inflated Umsatz.
   const salesReport = useMemo(() => {
     const finalInvs = filteredInvoices.filter(i => i.status === 'FINAL');
+    const finalIds = new Set(finalInvs.map(i => i.id));
+    const finalById = new Map(finalInvs.map(i => [i.id, i]));
     const gross = finalInvs.reduce((s, i) => s + i.grossAmount, 0);
     const vat = finalInvs.reduce((s, i) => s + i.vatAmount, 0);
     const net = finalInvs.reduce((s, i) => s + i.netAmount, 0);
@@ -154,12 +160,39 @@ export function BusinessReportsPage() {
       const m = (i.issuedAt || i.createdAt || '').substring(0, 7);
       byMonth[m] = (byMonth[m] || 0) + i.grossAmount;
     }
-    return { count: finalInvs.length, gross, vat, net, byMonth };
-  }, [filteredInvoices]);
+    let refundCash = 0, refundNet = 0, refundVat = 0;
+    for (const r of salesReturns) {
+      if (!finalIds.has(r.invoiceId)) continue;
+      const paid = r.refundPaidAmount || 0;
+      if (paid <= 0) continue;
+      const when = r.refundPaidDate || r.returnDate;
+      if (when && (when < periodRange.from.split('T')[0] || when > periodRange.to.split('T')[0])) continue;
+      const inv = finalById.get(r.invoiceId)!;
+      const g = inv.grossAmount || 0;
+      refundCash += paid;
+      if (g > 0) {
+        refundNet += paid * ((inv.netAmount || 0) / g);
+        refundVat += paid * ((inv.vatAmount || 0) / g);
+      }
+      const mKey = (when || '').substring(0, 7);
+      if (mKey) byMonth[mKey] = (byMonth[mKey] || 0) - paid;
+    }
+    return {
+      count: finalInvs.length,
+      gross: gross - refundCash,
+      vat: vat - refundVat,
+      net: net - refundNet,
+      byMonth,
+    };
+  }, [filteredInvoices, salesReturns, periodRange]);
 
   // ── Profit Report (Plan §Reports §B) — optional Category-Filter via invoice_lines
+  // Refunds: pro-rata Profit-Anteil abziehen wenn KEIN Category-Filter aktiv (Filter
+  // bricht die Aggregation, bleibt unverändert — würde sonst falsch zuordnen).
   const profitReport = useMemo(() => {
     const finalInvs = filteredInvoices.filter(i => i.status === 'FINAL');
+    const finalIds = new Set(finalInvs.map(i => i.id));
+    const finalById = new Map(finalInvs.map(i => [i.id, i]));
     let profit = 0, cost = 0;
     for (const i of finalInvs) {
       if (categoryFilter) {
@@ -176,9 +209,21 @@ export function BusinessReportsPage() {
         cost += (i.purchasePriceSnapshot || 0);
       }
     }
+    if (!categoryFilter) {
+      for (const r of salesReturns) {
+        if (!finalIds.has(r.invoiceId)) continue;
+        const paid = r.refundPaidAmount || 0;
+        if (paid <= 0) continue;
+        const when = r.refundPaidDate || r.returnDate;
+        if (when && (when < periodRange.from.split('T')[0] || when > periodRange.to.split('T')[0])) continue;
+        const inv = finalById.get(r.invoiceId)!;
+        const g = inv.grossAmount || 0;
+        if (g > 0) profit -= paid * ((inv.marginSnapshot || 0) / g);
+      }
+    }
     const margin = salesReport.gross > 0 ? (profit / salesReport.gross) * 100 : 0;
     return { profit, cost, margin };
-  }, [filteredInvoices, salesReport.gross, categoryFilter, products]);
+  }, [filteredInvoices, salesReport.gross, categoryFilter, products, salesReturns, periodRange]);
 
   // ── Tax Report (Plan §Reports §C)
   const taxReport = useMemo(() => {

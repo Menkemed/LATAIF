@@ -232,9 +232,28 @@ export function AnalyticsPage() {
     );
     const inv = invoices[0] || {};
     const invoiceCount = num(inv, 'cnt');
-    const grossRevenue = num(inv, 'gross');
-    const netRevenue = num(inv, 'net');
-    const totalProfit = num(inv, 'profit');
+    const grossInvoiced = num(inv, 'gross');
+    const netInvoiced = num(inv, 'net');
+    const profitInvoiced = num(inv, 'profit');
+
+    // Refund-Abzug: Cash-Refunds, die zu FINAL-Invoices gehören. Pro-rata netto/profit
+    // entsprechend dem Anteil des Refund-Brutto am Original-Brutto pro Invoice.
+    const refundsRow = qry(
+      `SELECT COALESCE(SUM(r.refund_paid_amount), 0)                                                         AS cash,
+              COALESCE(SUM(r.refund_paid_amount * (i.net_amount      / NULLIF(i.gross_amount, 0))), 0)         AS net,
+              COALESCE(SUM(r.refund_paid_amount * (i.margin_snapshot / NULLIF(i.gross_amount, 0))), 0)         AS profit
+         FROM sales_returns r
+         JOIN invoices i ON i.id = r.invoice_id
+        WHERE i.branch_id = ? AND i.status = 'FINAL'`,
+      [branchId]
+    );
+    const refundCash   = num(refundsRow[0] || {}, 'cash');
+    const refundNet    = num(refundsRow[0] || {}, 'net');
+    const refundProfit = num(refundsRow[0] || {}, 'profit');
+
+    const grossRevenue = grossInvoiced - refundCash;
+    const netRevenue   = netInvoiced   - refundNet;
+    const totalProfit  = profitInvoiced - refundProfit;
     const marginPct = safeDiv(totalProfit, netRevenue) * 100;
     const avgSaleValue = safeDiv(grossRevenue, invoiceCount);
 
@@ -373,10 +392,21 @@ export function AnalyticsPage() {
       [branchId]
     );
     const r = rev[0] || {};
-    const netRevenue = num(r, 'net');
-    const grossRevenue = num(r, 'gross');
+    // Refund-Abzug: identisch zu sales-block — pro-rata net/gross/profit aus Cash-Refunds
+    // auf FINAL-Invoices. Sonst zeigt der Finance-Tab inflated Revenue & Profit.
+    const fRefundsRow = qry(
+      `SELECT COALESCE(SUM(sr.refund_paid_amount), 0)                                                             AS cash,
+              COALESCE(SUM(sr.refund_paid_amount * (i.net_amount      / NULLIF(i.gross_amount, 0))), 0)             AS net,
+              COALESCE(SUM(sr.refund_paid_amount * (i.margin_snapshot / NULLIF(i.gross_amount, 0))), 0)             AS profit
+         FROM sales_returns sr
+         JOIN invoices i ON i.id = sr.invoice_id
+        WHERE i.branch_id = ? AND i.status = 'FINAL'`,
+      [branchId]
+    );
+    const netRevenue = num(r, 'net') - num(fRefundsRow[0] || {}, 'net');
+    const grossRevenue = num(r, 'gross') - num(fRefundsRow[0] || {}, 'cash');
     const totalVat = num(r, 'stored_vat') + num(marginVatRow[0] || {}, 'margin_vat');
-    const profitAfterVat = num(r, 'profit');
+    const profitAfterVat = num(r, 'profit') - num(fRefundsRow[0] || {}, 'profit');
 
     // Plan §Purchase §Tax: Input-VAT (Vorsteuer aus Purchases) für Verrechnung
     // gegen Output-VAT. Zählt nur nicht-stornierte Purchases.
