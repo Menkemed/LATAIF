@@ -5,6 +5,19 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import {
+  postOrderPayment,
+  postOrderPaymentReversed,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface OrderStore {
   orders: Order[];
@@ -132,16 +145,20 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // persistieren — sonst zeigt OrderDetail Total Paid = 0 (summiert aus order_payments), waehrend
     // OrderList den deposit_amount aus der orders-Tabelle nimmt → Inkonsistenz.
     const initialPaid = data.fullyPaid ? (data.agreedPrice || 0) : (data.depositAmount || 0);
+    let initialPaymentId: string | null = null;
+    const paidAt = data.depositDate || now.split('T')[0];
+    const method = data.paymentMethod || 'cash';
     if (initialPaid > 0) {
+      initialPaymentId = uuid();
       db.run(
         `INSERT INTO order_payments (id, order_id, amount, paid_at, method, note, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
-          uuid(),
+          initialPaymentId,
           id,
           initialPaid,
-          data.depositDate || now.split('T')[0],
-          data.paymentMethod || 'cash',
+          paidAt,
+          method,
           data.fullyPaid ? 'Initial full payment' : 'Initial deposit',
           now,
         ]
@@ -152,6 +169,20 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     trackInsert('orders', id, { orderNumber, customerId: data.customerId });
     eventBus.emit('order.created', 'order', id, { customerId: data.customerId });
     get().loadOrders();
+
+    // ZIEL.md §3a — Initial-Deposit ans Ledger.
+    if (initialPaymentId && initialPaid > 0 && data.customerId) {
+      const payId = initialPaymentId;
+      const customerId = data.customerId;
+      safePost(`postOrderPayment(${payId}) [initial]`, () => {
+        if (hasLedgerEntries('ORDER_PAYMENT', payId)) return;
+        postOrderPayment(
+          { id: payId, orderId: id, amount: initialPaid, method, paidAt },
+          customerId
+        );
+      });
+    }
+
     return get().getOrder(id)!;
   },
 
@@ -265,6 +296,17 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
 
   deleteOrder: (id) => {
     const db = getDatabase();
+    // ZIEL.md §3a — Vor dem CASCADE-Delete der order_payments deren Ledger-Buchungen reversen,
+    // sonst hängt Customer-Deposits-Liability ohne Quelle in der Luft.
+    const payRows = query('SELECT id FROM order_payments WHERE order_id = ?', [id]);
+    for (const r of payRows) {
+      const opId = r.id as string;
+      safePost(`postOrderPaymentReversed(${opId}) [delete-order]`, () => {
+        if (!hasLedgerEntries('ORDER_PAYMENT', opId)) return;
+        if (hasReversalFor('ORDER_PAYMENT', opId)) return;
+        postOrderPaymentReversed(opId);
+      });
+    }
     db.run(`DELETE FROM order_lines WHERE order_id = ?`, [id]);
     db.run(`DELETE FROM orders WHERE id = ?`, [id]);
     saveDatabase();

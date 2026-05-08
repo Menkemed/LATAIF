@@ -58,6 +58,7 @@ const navGroups: NavGroup[] = [
     items: [
       { to: '/analytics', label: 'Analytics', icon: BarChart3, tone: 'blue' },
       { to: '/business-reports', label: 'Business Reports', icon: BarChart3, tone: 'cyan' },
+      { to: '/reconciliation', label: 'Reconciliation', icon: BarChart3, tone: 'orange' },
     ],
   },
   { label: 'AI', items: [{ to: '/ai', label: 'AI', icon: Sparkles, tone: 'purple' }] },

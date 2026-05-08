@@ -4,6 +4,19 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackInsert, trackDelete, trackPayment } from '@/core/sync/track';
 import { useOrderStore } from '@/stores/orderStore';
+import {
+  postOrderPayment,
+  postOrderPaymentReversed,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 // Plan §Order §Payment-Sync: Order-Summary (depositAmount/remaining/fullyPaid/status) immer
 // aus der Summe der order_payments ableiten, damit OrderList/OrderDetail synchron sind.
@@ -54,6 +67,11 @@ interface OrderPaymentStore {
   addPayment: (p: Omit<OrderPayment, 'id' | 'createdAt'>) => OrderPayment;
   deletePayment: (id: string, orderId: string) => void;
   totalPaid: (orderId: string) => number;
+  // Plan §3a + §Order Convert: Beim Convert-to-Invoice werden alle Order-Payments
+  // ans Ledger zurück-gespiegelt (Customer-Deposits → Cash-Reverse), damit die parallel
+  // erzeugten invoice_payments nicht doppelt-Cash buchen. SQL-Flag converted_to_invoice=1
+  // wird in derselben Operation gesetzt.
+  markConvertedToInvoice: (orderId: string) => void;
 }
 
 function rowToPayment(r: Record<string, unknown>): OrderPayment {
@@ -102,6 +120,19 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     trackPayment('orders', p.orderId, p.amount, p.method || 'cash');
     get().loadPayments(p.orderId);
     useOrderStore.getState().loadOrders(); // Order-Summary in UI refreshen
+
+    // ZIEL.md §3a — Order-Payment ans Ledger (DEBIT cash / CREDIT CUSTOMER_DEPOSITS).
+    safePost(`postOrderPayment(${id})`, () => {
+      if (hasLedgerEntries('ORDER_PAYMENT', id)) return;
+      const orderRow = query('SELECT customer_id FROM orders WHERE id = ?', [p.orderId])[0];
+      const customerId = orderRow?.customer_id as string | undefined;
+      if (!customerId) return;
+      postOrderPayment(
+        { id, orderId: p.orderId, amount: p.amount, method: p.method, paidAt: p.paidAt },
+        customerId
+      );
+    });
+
     return { id, createdAt: now, ...p };
   },
 
@@ -113,6 +144,31 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     trackDelete('order_payments', id);
     get().loadPayments(orderId);
     useOrderStore.getState().loadOrders();
+
+    // ZIEL.md §3a — Reverse Ledger-Buchung beim Löschen.
+    safePost(`postOrderPaymentReversed(${id}) [delete]`, () => {
+      if (!hasLedgerEntries('ORDER_PAYMENT', id)) return;
+      if (hasReversalFor('ORDER_PAYMENT', id)) return;
+      postOrderPaymentReversed(id);
+    });
+  },
+
+  markConvertedToInvoice: (orderId) => {
+    const db = getDatabase();
+    // Ledger zuerst reverse — bevor wir das converted_to_invoice-Flag setzen.
+    // Das stellt sicher, dass die nachfolgenden invoice_payments (die im Carry-Over
+    // erzeugt werden) auf nicht-doppelten Cash-Stand buchen.
+    const rows = query('SELECT id FROM order_payments WHERE order_id = ?', [orderId]);
+    for (const r of rows) {
+      const opId = r.id as string;
+      safePost(`postOrderPaymentReversed(${opId}) [convert]`, () => {
+        if (!hasLedgerEntries('ORDER_PAYMENT', opId)) return;
+        if (hasReversalFor('ORDER_PAYMENT', opId)) return;
+        postOrderPaymentReversed(opId);
+      });
+    }
+    db.run(`UPDATE order_payments SET converted_to_invoice = 1 WHERE order_id = ?`, [orderId]);
+    saveDatabase();
   },
 
   totalPaid: (orderId) => {

@@ -412,6 +412,11 @@ export function canonicalRepairStatus(s: RepairStatus | string | undefined | nul
 export interface Repair {
   id: UUID;
   repairNumber: string;
+  // Plan §Repair §Own-Item: zwei Varianten — Kundenreparatur (CUSTOMER) oder eigenes
+  // Inventar-Repair (OWN). Bei OWN ist customerId ein internes Sentinel
+  // (sys-own-shop-{branchId}), wird in der UI nicht angezeigt; Kosten gehen direkt
+  // auf das verlinkte Produkt (productId Pflicht), keine Charge / kein Invoice.
+  repairScope?: 'CUSTOMER' | 'OWN';
   customerId: UUID;
   productId?: UUID;
   // Plan §Repair §Item-Details: kategorie-basierte Erfassung (vereinfachte Variante
@@ -430,6 +435,10 @@ export interface Repair {
   diagnosis?: string;
   repairType: 'internal' | 'external' | 'hybrid';
   externalVendor?: string;
+  // Plan §Repair §Workshop-as-Supplier: Workshop/Goldsmith ist ein Supplier-FK,
+  // nicht mehr ein freier Text. Bei externer Repair-Auto-Expense wird supplier_id
+  // gesetzt, sodass die offene Forderung in der Supplier-Bilanz erscheint.
+  workshopSupplierId?: UUID;
   estimatedCost?: number;
   actualCost?: number;
   internalCost: number;
@@ -848,7 +857,9 @@ export interface PurchaseReturn {
 // Sales Return (Plan §Returns §17)
 export type SalesReturnStatus = 'REQUESTED' | 'APPROVED' | 'REJECTED' | 'REFUNDED' | 'CLOSED';
 // Refund-Status (getrennt von Return-Status — Ware kann zurück sein OHNE dass Geld zurück ist).
-export type RefundStatus = 'NOT_REFUNDED' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
+// PENDING_REFUND: Return existiert, Refund noch offen (kein Cash geflossen).
+// NOT_REFUNDED: Legacy-Wert, wird wie PENDING_REFUND behandelt.
+export type RefundStatus = 'PENDING_REFUND' | 'NOT_REFUNDED' | 'PARTIALLY_REFUNDED' | 'REFUNDED';
 // Plan §Returns §6 + §Commission §13: Standard IN_STOCK/UNDER_REPAIR/WRITE_OFF.
 // Consignment-spezifisch (§13 Option A/B): RETURN_TO_OWNER (verlässt System) / KEEP_AS_OWN (source_type→OWN).
 export type ProductDisposition = 'IN_STOCK' | 'UNDER_REPAIR' | 'WRITE_OFF' | 'RETURN_TO_OWNER' | 'KEEP_AS_OWN';
@@ -1012,6 +1023,10 @@ export interface Expense {
   description?: string;
   relatedModule?: string;
   relatedEntityId?: UUID;
+  // Plan §Repair §Workshop-as-Supplier: optionaler FK auf den Supplier, der die
+  // Rechnung gestellt hat. Bei gesetztem supplier_id zählt eine offene (PENDING)
+  // Expense in die Supplier-Outstanding-Bilanz.
+  supplierId?: UUID;
   // Status-Semantik:
   //  - PAID:      paid_amount >= amount (voll bezahlt)
   //  - PENDING:   paid_amount < amount  (Unpaid + Partially Paid)

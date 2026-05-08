@@ -6,6 +6,166 @@ import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNu
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import {
+  postRepairPayment,
+  postExpense,
+  postExpensePayment,
+  reverseSource,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+import type { Expense } from '@/core/models/types';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
+
+// Hybrid-Margin-Bug: Bei Hybrid fließen BEIDE Kostenarten ein — der interne Anteil
+// (internalCost) und der externe Workshop-Anteil (estimatedCost). Bei pure
+// internal/external wird der relevante Cost-Wert vom Form bereits in internalCost
+// gespiegelt, deshalb reicht dort internalCost allein.
+export function computeRepairTotalCost(
+  r: Pick<Repair, 'repairType' | 'internalCost' | 'estimatedCost'>,
+): number {
+  const internal = r.internalCost || 0;
+  if (r.repairType === 'hybrid') {
+    return internal + (r.estimatedCost || 0);
+  }
+  return internal;
+}
+
+// Plan §Repair §Workshop-as-Supplier — Late-Bind Reconciliation:
+// Wenn der Workshop-Supplier auf einem External/Hybrid-Repair erst NACH dem READY-
+// Uebergang per Edit gesetzt wird, hat die existierende RepairCosts-Expense
+// supplier_id=NULL und (sofern bereits Ledger-Eintraege vorhanden) eine A/P-Buchung
+// ohne Counterparty. Damit erscheint das Payable nicht im Supplier-Dashboard und
+// supplierBalance() liefert 0.
+//
+// Diese Funktion zieht alles nach:
+//   1. expenses.supplier_id wird gesetzt (+ optional Description angereichert).
+//   2. Falls noch keine Ledger-Eintraege existieren -> postExpense laeuft frisch
+//      mit Supplier-Counterparty.
+//   3. Falls bereits Eintraege existieren (z.B. via Backfill) und noch nicht
+//      reversed -> reverseSource + postExpense erneut mit korrektem Counterparty.
+//   4. Existierende expense_payments (Teil/Vollzahlungen) werden analog re-posted,
+//      damit auch die A/P-DEBIT-Seite den richtigen Supplier traegt.
+//
+// Limitation: reverseSource laesst nur EINEN Reversal pro Source zu. Mehrfache
+// Supplier-Wechsel nach diesem Reconcile sind nicht abgedeckt — fuer den vom User
+// gemeldeten Fall (NULL -> Supplier) reicht das. Multi-Step waere ein eigener Slice.
+function reconcileRepairSupplier(repairId: string, supplierId: string): void {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+
+  const expRows = query(
+    `SELECT * FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`,
+    [repairId]
+  );
+  if (expRows.length === 0) return;
+
+  const expRow = expRows[0];
+  const expenseId = expRow.id as string;
+  const previousSupplierId = (expRow.supplier_id as string | null) || null;
+  if (previousSupplierId === supplierId) return;
+
+  // Description optional anreichern (nur wenn noch keine " · ..."-Sektion drin).
+  let description = (expRow.description as string | null) || '';
+  const sNameRow = query('SELECT name FROM suppliers WHERE id = ?', [supplierId]);
+  const supplierName = sNameRow.length > 0 ? (sNameRow[0].name as string) : '';
+  if (supplierName && !description.includes(supplierName)) {
+    description = description.replace(/\s+·\s+.*$/, '') + ' · ' + supplierName;
+  }
+
+  db.run(
+    `UPDATE expenses SET supplier_id = ?, description = ? WHERE id = ?`,
+    [supplierId, description, expenseId]
+  );
+  saveDatabase();
+  trackUpdate('expenses', expenseId, { supplierId, description });
+
+  // Ledger neu ausrichten.
+  const expense: Expense = {
+    id: expenseId,
+    expenseNumber: expRow.expense_number as string,
+    branchId: expRow.branch_id as string,
+    category: (expRow.category as Expense['category']) || 'RepairCosts',
+    amount: Number(expRow.amount || 0),
+    paidAmount: Number(expRow.paid_amount || 0),
+    paymentMethod: (expRow.payment_method as 'cash' | 'bank') || 'bank',
+    expenseDate: expRow.expense_date as string,
+    description,
+    relatedModule: 'repair',
+    relatedEntityId: repairId,
+    supplierId,
+    status: (expRow.status as Expense['status']) || 'PENDING',
+    createdAt: expRow.created_at as string,
+  };
+
+  safePost(`reconcileRepairSupplier:expense(${expenseId})`, () => {
+    if (hasLedgerEntries('EXPENSE', expenseId) && !hasReversalFor('EXPENSE', expenseId)) {
+      reverseSource('EXPENSE', expenseId, now);
+    }
+    postExpense(expense);
+  });
+
+  // Bestehende expense_payments mit umhaengen.
+  const paymentRows = query(
+    `SELECT * FROM expense_payments WHERE expense_id = ? ORDER BY created_at ASC`,
+    [expenseId]
+  );
+  for (const pRow of paymentRows) {
+    const payId = pRow.id as string;
+    const payAmt = Number(pRow.amount || 0);
+    if (payAmt <= 0) continue;
+    safePost(`reconcileRepairSupplier:payment(${payId})`, () => {
+      if (hasLedgerEntries('EXPENSE_PAYMENT', payId) && !hasReversalFor('EXPENSE_PAYMENT', payId)) {
+        reverseSource('EXPENSE_PAYMENT', payId, now);
+      }
+      postExpensePayment(
+        {
+          id: payId,
+          expenseId,
+          amount: payAmt,
+          method: ((pRow.method as 'cash' | 'bank') || 'bank'),
+          paidAt: pRow.paid_at as string,
+          createdAt: (pRow.created_at as string) || now,
+          note: (pRow.note as string | null) || undefined,
+        },
+        supplierId
+      );
+    });
+  }
+
+  eventBus.emit('repair.supplier_linked' as any, 'repair', repairId, {
+    supplierId, expenseId,
+  });
+}
+
+// Plan §Repair §Own-Item: Sentinel-Customer pro Branch, der intern alle Own-Item-
+// Repairs als customer_id-FK trägt. Wird in keinem UI-Customer-View gelistet
+// (customerStore filtert sys-* heraus). Damit bleiben FK-Constraints sauber, ohne
+// dass der User je einen "Own Shop"-Fake-Client sieht.
+export function getOrCreateOwnShopCustomerId(branchId: string): string {
+  const db = getDatabase();
+  const id = `sys-own-shop-${branchId}`;
+  const existing = query('SELECT id FROM customers WHERE id = ?', [id]);
+  if (existing.length === 0) {
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO customers (id, branch_id, first_name, last_name, country, language,
+        vip_level, preferences, customer_type, sales_stage,
+        total_revenue, total_profit, purchase_count, notes, created_at, updated_at)
+       VALUES (?, ?, 'Own', 'Shop', 'BH', 'en', 0, '[]', 'SYSTEM', 'lead', 0, 0, 0,
+               'Internal sentinel — never shown in UI.', ?, ?)`,
+      [id, branchId, now, now]
+    );
+    saveDatabase();
+  }
+  return id;
+}
 
 // Plan §Repair §Service-Invoice: Lazy-seeded "Repair Service"-Kategorie + ein
 // virtuelles Service-Produkt pro Branch. Wird beim Convert-to-Invoice als Line-Item
@@ -66,6 +226,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
   return {
     id: row.id as string,
     repairNumber: row.repair_number as string,
+    repairScope: ((row.repair_scope as string) === 'OWN' ? 'OWN' : 'CUSTOMER') as 'CUSTOMER' | 'OWN',
     customerId: row.customer_id as string,
     productId: row.product_id as string | undefined,
     itemCategoryId: (row.item_category_id as string | null) || undefined,
@@ -80,6 +241,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     diagnosis: row.diagnosis as string | undefined,
     repairType: (row.repair_type as Repair['repairType']) || 'internal',
     externalVendor: row.external_vendor as string | undefined,
+    workshopSupplierId: (row.workshop_supplier_id as string) || undefined,
     estimatedCost: row.estimated_cost as number | undefined,
     actualCost: row.actual_cost as number | undefined,
     internalCost: (row.internal_cost as number) || 0,
@@ -140,24 +302,39 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const repairNumber = get().getNextRepairNumber();
     const voucherCode = get().generateVoucherCode();
 
+    // Plan §Repair §Own-Item: bei OWN-scope keinen Client erzwingen, stattdessen
+    // den per-branch Sentinel verwenden. Charge/Invoice gibt es nicht.
+    const scope: 'CUSTOMER' | 'OWN' = data.repairScope === 'OWN' ? 'OWN' : 'CUSTOMER';
+    if (scope === 'OWN' && !data.productId) {
+      throw new Error('Own-item repair requires a linked product (productId).');
+    }
+    const effectiveCustomerId = scope === 'OWN'
+      ? getOrCreateOwnShopCustomerId(branchId)
+      : data.customerId;
+    if (!effectiveCustomerId) {
+      throw new Error('Customer repair requires a customerId.');
+    }
+    // OWN-scope: explizit NULL — kein Charge-Feld in der UI rendern lassen.
+    const effectiveCharge = scope === 'OWN' ? null : (data.chargeToCustomer || null);
+
     db.run(
       `INSERT INTO repairs (id, branch_id, repair_number, customer_id, product_id,
         item_category_id, item_attributes, tax_scheme,
         item_brand, item_model, item_reference, item_serial, item_description,
-        issue_description, diagnosis, repair_type, external_vendor,
+        issue_description, diagnosis, repair_type, external_vendor, workshop_supplier_id,
         estimated_cost, internal_cost, charge_to_customer,
         status, received_at, estimated_ready, voucher_code,
-        notes, images, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, '[]', ?, ?, ?)`,
-      [id, branchId, repairNumber, data.customerId, data.productId || null,
+        notes, images, repair_scope, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, '[]', ?, ?, ?, ?)`,
+      [id, branchId, repairNumber, effectiveCustomerId, data.productId || null,
        data.itemCategoryId || null, JSON.stringify(data.itemAttributes || {}), data.taxScheme || 'VAT_10',
        data.itemBrand || null, data.itemModel || null, data.itemReference || null,
        data.itemSerial || null, data.itemDescription || null,
        data.issueDescription || '', data.diagnosis || null,
-       data.repairType || 'internal', data.externalVendor || null,
-       data.estimatedCost || null, data.internalCost || 0, data.chargeToCustomer || null,
+       data.repairType || 'internal', data.externalVendor || null, data.workshopSupplierId || null,
+       data.estimatedCost || null, data.internalCost || 0, effectiveCharge,
        now, data.estimatedReady || null, voucherCode,
-       data.notes || null, now, now, userId]
+       data.notes || null, scope, now, now, userId]
     );
 
     // If linked to a product, update its status
@@ -176,6 +353,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   updateRepair: (id, data) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // Snapshot fuer Late-Bind-Detection (Workshop-Supplier nachtraeglich gesetzt).
+    const before = get().getRepair(id);
     const fields: string[] = [];
     const values: unknown[] = [];
 
@@ -186,6 +365,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       itemSerial: 'item_serial', itemDescription: 'item_description',
       issueDescription: 'issue_description', diagnosis: 'diagnosis',
       repairType: 'repair_type', externalVendor: 'external_vendor',
+      workshopSupplierId: 'workshop_supplier_id',
       estimatedCost: 'estimated_cost', actualCost: 'actual_cost',
       internalCost: 'internal_cost', chargeToCustomer: 'charge_to_customer',
       customerPaidFrom: 'customer_paid_from', internalPaidFrom: 'internal_paid_from',
@@ -194,6 +374,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       startedAt: 'started_at', completedAt: 'completed_at',
       pickedUpAt: 'picked_up_at', estimatedReady: 'estimated_ready',
       invoiceId: 'invoice_id', notes: 'notes',
+      repairScope: 'repair_scope',
     };
 
     for (const [k, v] of Object.entries(data)) {
@@ -208,6 +389,20 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     db.run(`UPDATE repairs SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
     trackUpdate('repairs', id, data);
+
+    // Plan §Repair §Workshop-as-Supplier: Wenn der Supplier auf einem External/
+    // Hybrid-Repair erst NACH dem READY-Uebergang per Edit gesetzt wird, muss die
+    // bereits angelegte RepairCosts-Expense + ihre Ledger-Buchungen auf den neuen
+    // Supplier umgehaengt werden — sonst fehlt der A/P-Eintrag im Supplier-Saldo
+    // und keine offene Forderung erscheint im Supplier-Dashboard.
+    const supplierWasMissing = !before?.workshopSupplierId;
+    const supplierNowSet = !!data.workshopSupplierId;
+    const effectiveType = (data.repairType ?? before?.repairType) || 'internal';
+    const isExternalOrHybrid = effectiveType === 'external' || effectiveType === 'hybrid';
+    if (supplierWasMissing && supplierNowSet && isExternalOrHybrid) {
+      reconcileRepairSupplier(id, data.workshopSupplierId as string);
+    }
+
     get().loadRepairs();
   },
 
@@ -229,14 +424,60 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         if (!repair.startedAt) updates.started_at = now;
         break;
       case 'READY':
-      case 'ready':
+      case 'ready': {
         updates.completed_at = now;
-        if (repair.chargeToCustomer && repair.internalCost) {
-          updates.margin = repair.chargeToCustomer - repair.internalCost;
+
+        // Workshop-Fee für Supplier-A/P:
+        // – Hybrid: der externe Anteil liegt explizit in estimatedCost.
+        // – External: Workshop-Fee liegt in estimatedCost (oder gespiegelt in
+        //   internalCost via handleCreate-Fallback). Prefer estimatedCost.
+        const workshopFee =
+          repair.repairType === 'hybrid'
+            ? (repair.estimatedCost || 0)
+            : repair.repairType === 'external'
+            ? (repair.estimatedCost || repair.internalCost || 0)
+            : 0;
+
+        if (repair.repairScope === 'OWN') {
+          // OWN-Item: gesamter Repair-Cost auf verlinkte Produkt kapitalisieren.
+          // Idempotent: nur beim ersten Übergang nach READY (completedAt guard).
+          if (repair.productId && !repair.completedAt) {
+            const totalCost = computeRepairTotalCost(repair);
+            if (totalCost > 0) {
+              db.run(
+                `UPDATE products SET purchase_price = COALESCE(purchase_price, 0) + ?, updated_at = ? WHERE id = ?`,
+                [totalCost, now, repair.productId]
+              );
+              trackUpdate('products', repair.productId, { purchasePriceDelta: totalCost, fromRepair: id });
+            }
+            // Own-Item: kein Pickup-Schritt — Produkt geht direkt zurück in Bestand.
+            db.run(
+              `UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
+              [now, repair.productId]
+            );
+          }
+          // KEIN break hier — Expense-Block unten gilt auch für OWN wenn Supplier verlinkt.
+        } else {
+          // CUSTOMER-scope: Margin berechnen.
+          if (repair.chargeToCustomer) {
+            const totalCost = computeRepairTotalCost(repair);
+            if (totalCost > 0) {
+              updates.margin = repair.chargeToCustomer - totalCost;
+            }
+          }
         }
-        // Plan §Repair §9 + §Expenses §8: externe Workshop-Kosten automatisch als Expense buchen.
-        // Gilt für External UND Hybrid (Hybrid hat einen externen Anteil).
-        if ((repair.repairType === 'external' || repair.repairType === 'hybrid') && (repair.internalCost || 0) > 0) {
+
+        // Plan §Repair §9 + §Expenses §8 + §Workshop-as-Supplier:
+        // Expense für Workshop-Fee (Supplier-A/P) automatisch buchen.
+        // – CUSTOMER-scope: immer wenn externe/hybride Kosten vorhanden (P&L + Supplier-Bilanz).
+        // – OWN-scope: nur wenn Supplier verlinkt (reine A/P-Erfassung für Supplier-Bilanz;
+        //   Kosten sind bereits in product.purchase_price kapitalisiert).
+        const isExternalOrHybrid = repair.repairType === 'external' || repair.repairType === 'hybrid';
+        const expenseNeeded = isExternalOrHybrid
+          && workshopFee > 0
+          && (repair.repairScope !== 'OWN' || !!repair.workshopSupplierId);
+
+        if (expenseNeeded) {
           const existing = query(
             `SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ?`,
             [id]
@@ -248,23 +489,31 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
             const expenseId = uuid();
             const expenseNumber = getNextDocumentNumber('EXP');
             const method = repair.internalPaidFrom || 'bank';
-            // Default-Status PENDING — Workshop-Rechnung wurde erfasst aber noch nicht bezahlt.
-            // User muss explizit „Mark as Paid" wählen → erscheint sonst in /payables-Liste.
-            // Wenn `internalPaidFrom` explizit gesetzt ist (cash/bank), gilt das als Sofort-Zahlung.
-            const status = repair.internalPaidFrom ? 'PAID' : 'PENDING';
+            const expStatus = repair.internalPaidFrom ? 'PAID' : 'PENDING';
+            let workshopLabel = '';
+            if (repair.workshopSupplierId) {
+              const sRow = query(`SELECT name FROM suppliers WHERE id = ?`, [repair.workshopSupplierId]);
+              if (sRow.length > 0) workshopLabel = ' · ' + (sRow[0].name as string);
+            }
+            if (!workshopLabel && repair.externalVendor) workshopLabel = ' · ' + repair.externalVendor;
+            const paidAmount = expStatus === 'PAID' ? workshopFee : 0;
             db.run(
-              `INSERT INTO expenses (id, branch_id, expense_number, category, amount, payment_method,
-                expense_date, description, related_module, related_entity_id, status, created_at, created_by)
-               VALUES (?, ?, ?, 'RepairCosts', ?, ?, ?, ?, 'repair', ?, ?, ?, ?)`,
-              [expenseId, branchId, expenseNumber, repair.internalCost, method,
+              `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
+                expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
+               VALUES (?, ?, ?, 'RepairCosts', ?, ?, ?, ?, ?, 'repair', ?, ?, ?, ?, ?)`,
+              [expenseId, branchId, expenseNumber, workshopFee, paidAmount, method,
                now.split('T')[0],
-               `External repair ${repair.repairNumber}${repair.externalVendor ? ' · ' + repair.externalVendor : ''}`,
-               id, status, now, userId]
+               `External repair ${repair.repairNumber}${workshopLabel}`,
+               id, repair.workshopSupplierId || null, expStatus, now, userId]
             );
-            trackInsert('expenses', expenseId, { category: 'RepairCosts', amount: repair.internalCost, repairId: id, status });
+            trackInsert('expenses', expenseId, {
+              category: 'RepairCosts', amount: workshopFee, repairId: id,
+              supplierId: repair.workshopSupplierId, status: expStatus,
+            });
           }
         }
         break;
+      }
       case 'picked_up':
       case 'DELIVERED': {
         // Plan §Repair §Pickup ↔ Payment (User-Spec): Pickup und Bezahlung sind
@@ -359,6 +608,20 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     trackUpdate('repairs', id, { customerPayment: amount, method, date: payDate, status: newStatus });
     eventBus.emit('repair.payment_received' as any, 'repair', id, { amount, method, totalPaid: newPaid, status: newStatus });
     get().loadRepairs();
+
+    // ZIEL.md §3a — Repair-Customer-Payment ans Ledger.
+    // Nur wenn KEINE Invoice gekoppelt ist — sonst läuft die Bezahlung über
+    // invoice_payments (matcht bankingStore-Filter `if (r.invoice_id) continue`).
+    if (!r.invoiceId) {
+      const paymentId = uuid();
+      safePost(`postRepairPayment(${paymentId})`, () => {
+        if (hasLedgerEntries('REPAIR_PAYMENT', paymentId)) return;
+        postRepairPayment({
+          id: paymentId, repairId: id, amount, method,
+          paidAt: payDate, customerId: r.customerId,
+        });
+      });
+    }
   },
 
   createCombinedRepairInvoice: (repairIds) => {
@@ -416,6 +679,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       customerId,
       lines,
       `Combined Repair Service · ${refs}`,
+      undefined,
+      'repair',
     );
 
     // Pro Repair invoiceId koppeln. updateRepair lädt bereits neu am Ende.

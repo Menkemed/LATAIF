@@ -11,7 +11,8 @@ import { ImageUpload } from '@/components/ui/ImageUpload';
 import { printMultipleHangtags } from '@/core/pdf/hangtag';
 import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
-import { exportExcel } from '@/core/utils/export-file';
+import { exportFile } from '@/core/utils/export-file';
+import ExcelJS from 'exceljs';
 import type { Product, TaxScheme, StockStatus, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 
@@ -19,91 +20,134 @@ function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
 }
 
-function htmlEsc(v: unknown): string {
-  return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-}
-
-// Excel-Export aller (gefilterten) Produkte als formatierte HTML-Tabelle mit MS-Excel MIME.
-// Öffnet sich in Excel/Numbers mit echten Spalten + Headern.
-function exportProductsToExcel(items: Product[], categories: Category[]) {
+// Echtes .xlsx via ExcelJS — Bilder werden als binary in xl/media/ eingebettet
+// und von Excel nativ in der Zelle gerendert. Der frühere HTML-zu-.xls-Hack
+// scheiterte daran, dass Excel <img src="data:..."> als verknüpftes externes Bild
+// behandelt und mit "linked image cannot be displayed" verweigerte.
+async function exportProductsToExcel(items: Product[], categories: Category[]) {
   const today = new Date().toISOString().split('T')[0];
   const cat = (id: string) => categories.find(c => c.id === id)?.name || '';
-  const headers = [
-    'SKU', 'Brand', 'Name', 'Category', 'Quantity', 'Condition',
-    'Purchase Price (BHD)', 'Planned Sale Price (BHD)', 'Min Sale (BHD)', 'Max Sale (BHD)',
-    'Expected Margin (BHD)', 'Tax Scheme', 'Stock Status', 'Source Type',
-    'Storage Location', 'Supplier', 'Purchase Source', 'Paid From', 'Purchase Date',
-    'Days in Stock', 'Notes',
-  ];
-  const rows = items.map(p => [
-    p.sku || '',
-    p.brand,
-    p.name,
-    cat(p.categoryId),
-    p.quantity || 1,
-    p.condition || '',
-    p.purchasePrice,
-    p.plannedSalePrice ?? '',
-    p.minSalePrice ?? '',
-    p.maxSalePrice ?? '',
-    p.expectedMargin ?? '',
-    p.taxScheme === 'MARGIN' ? 'Margin Scheme' : p.taxScheme === 'VAT_10' ? 'VAT 10%' : 'Zero',
-    p.stockStatus,
-    p.sourceType,
-    p.storageLocation || '',
-    p.supplierName || '',
-    p.purchaseSource || '',
-    p.paidFrom || '',
-    p.purchaseDate || '',
-    p.daysInStock ?? '',
-    p.notes || '',
-  ]);
 
-  // Totals row (only OWN, in_stock)
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'LATAIF';
+  wb.created = new Date();
+  const ws = wb.addWorksheet('Collection');
+
+  ws.columns = [
+    { header: 'Image',                    key: 'image',    width: 12 },
+    { header: 'SKU',                      key: 'sku',      width: 14 },
+    { header: 'Brand',                    key: 'brand',    width: 16 },
+    { header: 'Name',                     key: 'name',     width: 26 },
+    { header: 'Category',                 key: 'category', width: 14 },
+    { header: 'Quantity',                 key: 'qty',      width: 9,  style: { numFmt: '#,##0' } },
+    { header: 'Condition',                key: 'cond',     width: 12 },
+    { header: 'Purchase Price (BHD)',     key: 'pp',       width: 16, style: { numFmt: '#,##0.000' } },
+    { header: 'Planned Sale Price (BHD)', key: 'spp',      width: 18, style: { numFmt: '#,##0.000' } },
+    { header: 'Min Sale (BHD)',           key: 'min',      width: 14, style: { numFmt: '#,##0.000' } },
+    { header: 'Max Sale (BHD)',           key: 'max',      width: 14, style: { numFmt: '#,##0.000' } },
+    { header: 'Expected Margin (BHD)',    key: 'margin',   width: 16, style: { numFmt: '#,##0.000' } },
+    { header: 'Tax Scheme',               key: 'tax',      width: 14 },
+    { header: 'Stock Status',             key: 'status',   width: 14 },
+    { header: 'Source Type',              key: 'source',   width: 12 },
+    { header: 'Storage Location',         key: 'storage',  width: 16 },
+    { header: 'Supplier',                 key: 'supplier', width: 16 },
+    { header: 'Purchase Source',          key: 'psource',  width: 16 },
+    { header: 'Paid From',                key: 'paid',     width: 10 },
+    { header: 'Purchase Date',            key: 'pdate',    width: 14 },
+    { header: 'Days in Stock',            key: 'days',     width: 10 },
+    { header: 'Notes',                    key: 'notes',    width: 26 },
+  ];
+
+  // Header-Row Styling.
+  const header = ws.getRow(1);
+  header.font = { bold: true, size: 11, color: { argb: 'FF0F0F10' } };
+  header.alignment = { vertical: 'middle', horizontal: 'left' };
+  header.height = 22;
+  header.eachCell(cell => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F7FA' } };
+    cell.border = { bottom: { style: 'thin', color: { argb: 'FFC6A36D' } } };
+  });
+
+  // Data-Rows + Image-Embedding.
+  for (let i = 0; i < items.length; i++) {
+    const p = items[i];
+    const row = ws.addRow({
+      image:    '', // Platzhalter — Bild wird via addImage über die Zelle gelegt.
+      sku:      p.sku || '',
+      brand:    p.brand,
+      name:     p.name,
+      category: cat(p.categoryId),
+      qty:      p.quantity || 1,
+      cond:     p.condition || '',
+      pp:       p.purchasePrice,
+      spp:      p.plannedSalePrice ?? '',
+      min:      p.minSalePrice ?? '',
+      max:      p.maxSalePrice ?? '',
+      margin:   p.expectedMargin ?? '',
+      tax:      p.taxScheme === 'MARGIN' ? 'Margin Scheme' : p.taxScheme === 'VAT_10' ? 'VAT 10%' : 'Zero',
+      status:   p.stockStatus,
+      source:   p.sourceType,
+      storage:  p.storageLocation || '',
+      supplier: p.supplierName || '',
+      psource:  p.purchaseSource || '',
+      paid:     p.paidFrom || '',
+      pdate:    p.purchaseDate || '',
+      days:     p.daysInStock ?? '',
+      notes:    p.notes || '',
+    });
+    row.height = 60; // ~80 px — passt zu 75x75 Bild.
+    row.alignment = { vertical: 'middle' };
+
+    // Erstes Bild aus images[] als data-URL einlesen, decodieren, einbetten.
+    const src = p.images?.[0] || '';
+    const m = src.match(/^data:image\/(png|jpe?g);base64,(.+)$/i);
+    if (m) {
+      const ext = m[1].toLowerCase().startsWith('jp') ? 'jpeg' : 'png';
+      try {
+        const bin = atob(m[2]);
+        const buf = new Uint8Array(bin.length);
+        for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
+        const imgId = wb.addImage({ buffer: buf as unknown as ArrayBuffer, extension: ext });
+        // tl/br positioning: Spalte 0 = Image, Datenzeile = i+1 (Header ist row 0).
+        // Wir setzen tl + ext (size in pixel) statt br, damit die Zelle nicht streckt.
+        ws.addImage(imgId, {
+          tl: { col: 0.1, row: i + 1.1 },
+          ext: { width: 70, height: 70 },
+          editAs: 'oneCell',
+        });
+      } catch (err) {
+        console.warn('[Excel-Export] image decode failed for', p.id, err);
+      }
+    }
+  }
+
+  // Totals-Row (nur OWN, in_stock).
   const ownInStock = items.filter(p =>
     (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
   );
   const totalQty = ownInStock.reduce((s, p) => s + (p.quantity || 1), 0);
-  const totalEK = ownInStock.reduce((s, p) => s + p.purchasePrice * (p.quantity || 1), 0);
-  const totalVK = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * (p.quantity || 1), 0);
+  const totalEK  = ownInStock.reduce((s, p) => s + p.purchasePrice * (p.quantity || 1), 0);
+  const totalVK  = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * (p.quantity || 1), 0);
 
-  const html = `<html><head><meta charset="UTF-8">
-    <style>
-      body { font-family: Calibri, Arial, sans-serif; }
-      h2 { color: #0F0F10; margin: 0 0 4px; font-family: Georgia, serif; }
-      .meta { color: #6B7280; font-size: 11px; margin-bottom: 16px; }
-      table { border-collapse: collapse; width: 100%; }
-      th { background: #F2F7FA; color: #0F0F10; font-weight: 600; padding: 8px 10px; text-align: left;
-           border: 1px solid #C6A36D; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
-      td { border: 1px solid #D5D9DE; padding: 6px 10px; font-size: 12px; }
-      tr:nth-child(even) td { background: #FAF8F1; }
-      .num { text-align: right; mso-number-format: "#,##0.000"; }
-      .total td { background: #0F0F10; color: #FFFFFF; font-weight: 600; }
-      .total td.num { color: #FFFFFF; }
-    </style></head><body>
-    <h2>LATAIF — Collection Export</h2>
-    <div class="meta">Generated ${today} · ${items.length} item${items.length !== 1 ? 's' : ''} ·
-      Stock value (OWN, In Stock): ${totalEK.toFixed(2)} BHD purchase / ${totalVK.toFixed(2)} BHD planned sale</div>
-    <table>
-      <thead><tr>${headers.map(h => `<th>${htmlEsc(h)}</th>`).join('')}</tr></thead>
-      <tbody>
-        ${rows.map(r => `<tr>${r.map((v, i) => {
-          const numCol = [4, 6, 7, 8, 9, 10, 19].includes(i);
-          return `<td class="${numCol ? 'num' : ''}">${htmlEsc(v)}</td>`;
-        }).join('')}</tr>`).join('')}
-        <tr class="total">
-          <td colspan="4">TOTAL (OWN · In Stock)</td>
-          <td class="num">${totalQty}</td>
-          <td></td>
-          <td class="num">${totalEK.toFixed(2)}</td>
-          <td class="num">${totalVK.toFixed(2)}</td>
-          <td colspan="${headers.length - 8}"></td>
-        </tr>
-      </tbody>
-    </table>
-  </body></html>`;
+  const totalRow = ws.addRow({
+    image: '', sku: '', brand: '', name: 'TOTAL (OWN · In Stock)', category: '',
+    qty: totalQty, cond: '', pp: totalEK, spp: totalVK,
+  });
+  totalRow.height = 22;
+  totalRow.eachCell(cell => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F0F10' } };
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  });
 
-  exportExcel(`LATAIF_Collection_${today}.xls`, html);
+  // Kopfzeile fixieren beim Scrollen.
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+  const buffer = await wb.xlsx.writeBuffer();
+  await exportFile(
+    `LATAIF_Collection_${today}.xlsx`,
+    new Uint8Array(buffer),
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
 }
 
 // Per-card price toggle: each product card holds its own Cost/Asking state.

@@ -1,6 +1,17 @@
 // ═══════════════════════════════════════════════════════════
 // LATAIF — Sales Returns (Plan §Returns)
 // ═══════════════════════════════════════════════════════════
+// Refactor 2026-05 — clean refund/CN wiring:
+//  - createReturn: status=REQUESTED, refund_status=PENDING_REFUND, applies product
+//    disposition NOW (User-Spec: Disposition beim Anlegen). KEINE CN, KEIN Cash.
+//  - approveReturn: status=APPROVED, erstellt Credit Note (Industry Standard) und
+//    revertiert VAT auf Invoice. KEIN Cash bewegt sich.
+//  - recordRefundPayment: tatsächlicher Cash-Out → Banking ↓, refund_paid_amount ↑,
+//    CN cashRefund/receivableCancel-Split wird live nachgezogen, refund_status
+//    transitioned. Auto-approve, falls noch REQUESTED, damit CN garantiert existiert.
+//  - refundReturn: Convenience-Wrapper (approve + recordRefundPayment in einem).
+//  - rejectReturn: revertiert Disposition (best-effort), nur erlaubt vor Approval.
+//  - deleteReturn: revertiert Disposition + VAT + löscht CN.
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
@@ -10,11 +21,123 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { trackInsert, trackUpdate, trackStatusChange, trackRefund, trackDelete } from '@/core/sync/track';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 
-// Plan §Returns §History (Round 4):
-//  - Bei Refund wird invoice.paid_amount NICHT mehr reduziert — bleibt historisch („Kunde hat gezahlt").
-//  - Auto-Cancel ist entfernt: Status bleibt FINAL/PARTIAL, returnState='RETURNED' wird über
-//    getInvoiceReturnSummary geliefert und in der UI als „Returned"-Badge angezeigt.
-//  - CANCELLED ist nur noch für explizite User-Stornos.
+// ── Helpers ────────────────────────────────────────────────
+
+// Disposition auf Produkt anwenden (Plan §Returns §6 + §Commission §13).
+// Wird in createReturn aufgerufen — Ware ist physisch zurück, Status muss reflektieren.
+function applyDisposition(
+  db: ReturnType<typeof getDatabase>,
+  lines: Array<{ productId?: string; quantity: number; unitPrice: number }>,
+  disposition: ProductDisposition,
+  now: string,
+): void {
+  for (const line of lines) {
+    if (!line.productId) continue;
+    if (disposition === 'RETURN_TO_OWNER') {
+      // Plan §Commission §13 A — Ware verlässt System, Consignment auf RETURNED_TO_OWNER.
+      db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, line.productId]);
+      db.run(
+        `UPDATE consignments SET status = 'RETURNED_TO_OWNER', updated_at = ?
+         WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK')`,
+        [now, line.productId]
+      );
+    } else if (disposition === 'KEEP_AS_OWN') {
+      // Plan §Commission §13 B — bleibt im System als OWN, purchase_price = letzter Verkaufspreis.
+      db.run(
+        `UPDATE products SET stock_status = 'in_stock', source_type = 'OWN',
+         purchase_price = COALESCE(?, purchase_price), updated_at = ? WHERE id = ?`,
+        [line.unitPrice ?? null, now, line.productId]
+      );
+      db.run(
+        `UPDATE consignments SET status = 'RETURNED', updated_at = ?
+         WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK')`,
+        [now, line.productId]
+      );
+    } else if (disposition === 'IN_STOCK') {
+      // Quantity-aware Restock.
+      const qty = Math.max(1, line.quantity || 1);
+      db.run(
+        `UPDATE products SET
+           quantity = COALESCE(quantity, 0) + ?,
+           stock_status = 'in_stock',
+           updated_at = ? WHERE id = ?`,
+        [qty, now, line.productId]
+      );
+    } else {
+      const newStatus = disposition === 'UNDER_REPAIR' ? 'in_repair'
+        : disposition === 'WRITE_OFF' ? 'sold'
+        : 'in_stock';
+      db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [newStatus, now, line.productId]);
+    }
+  }
+}
+
+// Best-effort Revert (für reject/delete). KEEP_AS_OWN/RETURN_TO_OWNER nicht voll
+// reversibel — Logwarnung statt stillschweigend zerstören.
+function revertDisposition(
+  db: ReturnType<typeof getDatabase>,
+  lines: SalesReturnLine[],
+  disposition: ProductDisposition,
+  now: string,
+): void {
+  for (const line of lines) {
+    if (!line.productId) continue;
+    if (disposition === 'IN_STOCK') {
+      const qty = Math.max(1, line.quantity || 1);
+      db.run(
+        `UPDATE products SET
+           quantity = MAX(0, COALESCE(quantity, 0) - ?),
+           stock_status = 'sold',
+           updated_at = ? WHERE id = ?`,
+        [qty, now, line.productId]
+      );
+    } else if (disposition === 'UNDER_REPAIR' || disposition === 'WRITE_OFF') {
+      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
+    } else if (disposition === 'KEEP_AS_OWN' || disposition === 'RETURN_TO_OWNER') {
+      // Nicht voll reversibel (purchase_price/source_type Snapshot fehlt). Manueller Cleanup nötig.
+      console.warn(`[Return] cannot fully revert ${disposition} disposition for product ${line.productId} — manual cleanup may be needed`);
+      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
+    }
+  }
+}
+
+// Berechnet Cash-Refundability nach Industriestandard (SAP/Xero/QuickBooks):
+//   cashRefund = max(0, customerPaid − (invoiceGross − allReturns) − otherRefundsAlreadyPaid)
+// d. h. nur was Customer NACH Returns überzahlt hat ist cash-pflichtig zurückzugeben.
+function computeRefundSplit(
+  returnId: string,
+  invoiceId: string,
+  totalAmount: number,
+): { cashRefundCap: number; receivableCancel: number; customerPaid: number; invoiceGross: number } {
+  const invRow = query('SELECT paid_amount, gross_amount FROM invoices WHERE id = ?', [invoiceId])[0];
+  const customerPaid = (invRow?.paid_amount as number) || 0;
+  const invoiceGross = (invRow?.gross_amount as number) || 0;
+
+  const otherReturnsRow = query(
+    `SELECT COALESCE(SUM(total_amount), 0) AS s
+     FROM sales_returns
+     WHERE invoice_id = ? AND id != ? AND status != 'REJECTED'`,
+    [invoiceId, returnId]
+  )[0];
+  const otherReturnsTotal = (otherReturnsRow?.s as number) || 0;
+
+  const otherRefundsRow = query(
+    `SELECT COALESCE(SUM(refund_paid_amount), 0) AS s
+     FROM sales_returns
+     WHERE invoice_id = ? AND id != ? AND status != 'REJECTED'`,
+    [invoiceId, returnId]
+  )[0];
+  const otherRefundsAlreadyPaid = (otherRefundsRow?.s as number) || 0;
+
+  const owedAfterAllReturns = Math.max(0, invoiceGross - otherReturnsTotal - totalAmount);
+  const surplus = Math.max(0, customerPaid - owedAfterAllReturns - otherRefundsAlreadyPaid);
+  const cashRefundCap = Math.min(totalAmount, surplus);
+  const receivableCancel = Math.max(0, totalAmount - cashRefundCap);
+
+  return { cashRefundCap, receivableCancel, customerPaid, invoiceGross };
+}
+
+// ── Store ──────────────────────────────────────────────────
 
 interface SalesReturnStore {
   returns: SalesReturn[];
@@ -38,25 +161,22 @@ interface SalesReturnStore {
   approveReturn: (id: string) => void;
   rejectReturn: (id: string) => void;
   refundReturn: (id: string, partialAmount?: number) => void;
-  // Tracking partieller Refund-Zahlungen — separate Aktion vom Return selbst.
   recordRefundPayment: (returnId: string, amount: number, method: 'cash' | 'bank' | 'card' | 'credit' | 'other', date?: string) => void;
   deleteReturn: (id: string) => void;
-  // Live-Aggregation aller Returns einer Invoice + Status-Berechnung.
-  // invoicePaid wird benötigt damit Outstanding Refund die tatsächliche Cash-Rückzahlbarkeit kennt.
   getInvoiceReturnSummary: (invoiceId: string, invoiceGross: number, invoicePaid?: number) => {
     returns: SalesReturn[];
-    totalReturned: number;        // Geschuldete Rückzahlung gesamt
-    totalRefundPaid: number;      // Schon zurückgezahlt gesamt
-    outstandingRefund: number;    // Noch offen ans Customer (CASH only)
+    totalReturned: number;
+    totalRefundPaid: number;
+    outstandingRefund: number;
     returnState: 'NONE' | 'PARTIAL_RETURN' | 'RETURNED';
     refundState: RefundStatus;
   };
-  // Pro Customer offene Refund-Schuld (Refund Payable).
   getCustomerRefundPayable: (customerId: string) => number;
   getReturnedQtyForLine: (invoiceLineId: string) => number;
 }
 
 function rowToReturn(row: Record<string, unknown>): SalesReturn {
+  const rawStatus = row.refund_status as RefundStatus | undefined;
   return {
     id: row.id as string,
     returnNumber: row.return_number as string,
@@ -67,11 +187,12 @@ function rowToReturn(row: Record<string, unknown>): SalesReturn {
     totalAmount: (row.total_amount as number) || 0,
     vatCorrected: (row.vat_corrected as number) || 0,
     returnDate: row.return_date as string,
-    refundMethod: row.refund_method as 'cash' | 'bank' | 'card' | 'credit' | 'other' | 'other' | undefined,
+    refundMethod: row.refund_method as 'cash' | 'bank' | 'card' | 'credit' | 'other' | undefined,
     refundAmount: (row.refund_amount as number) || 0,
     refundPaidAmount: (row.refund_paid_amount as number) || 0,
     refundPaidDate: (row.refund_paid_date as string | null) || undefined,
-    refundStatus: (row.refund_status as RefundStatus) || 'NOT_REFUNDED',
+    // Legacy 'NOT_REFUNDED' wird auf 'PENDING_REFUND' normalisiert (semantisch identisch).
+    refundStatus: rawStatus === 'NOT_REFUNDED' ? 'PENDING_REFUND' : (rawStatus || 'PENDING_REFUND'),
     productDisposition: row.product_disposition as ProductDisposition | undefined,
     reason: (row.reason as string | null) || undefined,
     notes: row.notes as string | undefined,
@@ -113,6 +234,9 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
 
   getReturn: (id) => get().returns.find(r => r.id === id),
 
+  // ── Create ───────────────────────────────────────────────
+  // Plan 2026-05: Disposition wird sofort angewandt. KEINE CN, KEIN Cash.
+  // Refund-Status startet als PENDING_REFUND.
   createReturn: (input) => {
     if (!input.lines || input.lines.length === 0) {
       throw new Error('Return must include at least one line.');
@@ -124,12 +248,10 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
-    // Look up invoice for customer_id and invoice details
     const invRows = query('SELECT customer_id FROM invoices WHERE id = ?', [input.invoiceId]);
     const customerId = invRows[0]?.customer_id as string;
 
-    // Cap pro Linie: keine Return-Quantity > Original-Invoice-Line-Quantity − bereits zurückgegeben.
-    // Plus: Beträge müssen positiv sein.
+    // Per-Line Cap & Validierung.
     for (const l of input.lines) {
       if (!Number.isFinite(l.quantity) || l.quantity < 0) {
         throw new Error('Return quantity must be a non-negative number.');
@@ -161,14 +283,15 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     const returnDate = input.returnDate || now.split('T')[0];
     const total = input.lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
     const vatCorrected = input.lines.reduce((s, l) => s + l.vatAmount, 0);
+    const disposition: ProductDisposition = input.productDisposition || 'IN_STOCK';
 
     db.run(
       `INSERT INTO sales_returns (id, branch_id, return_number, invoice_id, customer_id, status, total_amount,
         vat_corrected, return_date, refund_method, refund_amount, refund_paid_amount, refund_status,
         product_disposition, reason, notes, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 'REQUESTED', ?, ?, ?, ?, 0, 0, 'NOT_REFUNDED', ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 'REQUESTED', ?, ?, ?, ?, 0, 0, 'PENDING_REFUND', ?, ?, ?, ?, ?)`,
       [id, branchId, returnNumber, input.invoiceId, customerId, total, vatCorrected, returnDate,
-       input.refundMethod || null, input.productDisposition || null,
+       input.refundMethod || null, disposition,
        input.reason || null, input.notes || null, now, userId]
     );
 
@@ -181,168 +304,42 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     }
     stmt.free();
 
+    // Plan 2026-05 §C: Disposition beim Anlegen anwenden — Ware ist physisch retour.
+    applyDisposition(db, input.lines, disposition, now);
+
     saveDatabase();
     trackInsert('sales_returns', id, { returnNumber, invoiceId: input.invoiceId, total });
     get().loadReturns();
     return get().getReturn(id)!;
   },
 
+  // ── Approve ──────────────────────────────────────────────
+  // Plan 2026-05 §B: Approve = formaler Buchungsschritt. Erstellt Credit Note
+  // (Industry Standard, auch bei unbezahlter Invoice → cashRefund=0, receivableCancel=total).
+  // VAT auf Invoice wird hier reduziert. Cash bewegt sich NICHT.
   approveReturn: (id) => {
-    const db = getDatabase();
     const r = get().getReturn(id);
     if (!r) return;
-    db.run(`UPDATE sales_returns SET status = 'APPROVED' WHERE id = ?`, [id]);
-    saveDatabase();
-    trackStatusChange('sales_returns', id, r.status, 'APPROVED');
-    get().loadReturns();
-  },
+    // Idempotent: schon approved oder weiter im Lifecycle → no-op.
+    if (r.status === 'APPROVED' || r.status === 'REFUNDED' || r.status === 'CLOSED' || r.status === 'REJECTED') {
+      return;
+    }
 
-  rejectReturn: (id) => {
-    const db = getDatabase();
-    const r = get().getReturn(id);
-    if (!r) return;
-    db.run(`UPDATE sales_returns SET status = 'REJECTED' WHERE id = ?`, [id]);
-    saveDatabase();
-    trackStatusChange('sales_returns', id, r.status, 'REJECTED');
-    get().loadReturns();
-  },
-
-  refundReturn: (id, partialAmount) => {
     const db = getDatabase();
     const now = new Date().toISOString();
-    const r = get().getReturn(id);
-    if (!r || r.status !== 'APPROVED' && r.status !== 'REQUESTED') return;
-    // Plan §Returns Fix E — kein Doppel-Refund.
-    if (r.refundStatus === 'REFUNDED') { console.warn('[Return] already fully refunded'); return; }
 
-    // Industry-Standard (SAP/Xero/QuickBooks): Cash-Refund nur soweit der Kunde
-    // mehr gezahlt hat als er nach dem Return noch schuldet.
-    //   cashRefund = max(0, customerPaid − (invoiceGross − sumOfAllReturns))
-    // Bereits andere Returns auf derselben Invoice werden mitgezählt — sonst doppelte Refunds.
-    const invRow = query('SELECT paid_amount, gross_amount FROM invoices WHERE id = ?', [r.invoiceId])[0];
-    const customerPaid = (invRow?.paid_amount as number) || 0;
-    const invoiceGross = (invRow?.gross_amount as number) || 0;
+    // Cash/Receivable-Split berechnen (Industriestandard).
+    const { cashRefundCap, receivableCancel } = computeRefundSplit(id, r.invoiceId, r.totalAmount);
 
-    const otherReturnsRow = query(
-      `SELECT COALESCE(SUM(total_amount), 0) AS s
-       FROM sales_returns
-       WHERE invoice_id = ? AND id != ? AND status != 'REJECTED'`,
-      [r.invoiceId, id]
-    )[0];
-    const otherReturnsTotal = (otherReturnsRow?.s as number) || 0;
-    const otherRefundsRow = query(
-      `SELECT COALESCE(SUM(refund_paid_amount), 0) AS s
-       FROM sales_returns
-       WHERE invoice_id = ? AND id != ? AND status != 'REJECTED'`,
-      [r.invoiceId, id]
-    )[0];
-    const otherRefundsAlreadyPaid = (otherRefundsRow?.s as number) || 0;
-
-    // Industriestandard: nach allen Returns verbleibender Schuldbetrag.
-    const owedAfterAllReturns = Math.max(0, invoiceGross - otherReturnsTotal - r.totalAmount);
-    // Surplus = was Customer mehr gezahlt hat als er noch schuldet, abzüglich bereits zurückgezahlter Refunds anderer Returns.
-    const surplus = Math.max(0, customerPaid - owedAfterAllReturns - otherRefundsAlreadyPaid);
-    const cap = Math.min(r.totalAmount, surplus);
-
-    // partialAmount erlaubt manuelle Über-Steuerung, aber NIE über Cap.
-    const requestedAmount = typeof partialAmount === 'number' && partialAmount >= 0 && partialAmount <= r.totalAmount
-      ? partialAmount
-      : r.totalAmount;
-    const refundAmount = Math.min(requestedAmount, cap);
-    if (refundAmount < requestedAmount) {
-      console.info(`[Return] cash refund capped at ${refundAmount} (paid=${customerPaid}, gross=${invoiceGross}, other returns=${otherReturnsTotal}, this return=${r.totalAmount})`);
-    }
-    // Refund-Status berechnen: vollständig vs. teilweise.
-    const newRefundStatus: RefundStatus = refundAmount >= r.totalAmount - 0.005 ? 'REFUNDED'
-      : refundAmount > 0 ? 'PARTIALLY_REFUNDED'
-      : 'NOT_REFUNDED';
-    db.run(
-      `UPDATE sales_returns SET status = 'REFUNDED', refund_amount = ?,
-        refund_paid_amount = ?, refund_paid_date = ?, refund_status = ? WHERE id = ?`,
-      [refundAmount, refundAmount, now.split('T')[0], newRefundStatus, id]
-    );
-
-    // Plan §Returns §6 + §Commission §13: Product disposition.
-    const disposition = r.productDisposition || 'IN_STOCK';
-    for (const line of r.lines) {
-      if (!line.productId) continue;
-
-      if (disposition === 'RETURN_TO_OWNER') {
-        // Plan §Commission §13 A: Ware verlässt dein System → Consignment auf RETURNED_TO_OWNER,
-        // Produkt auf RETURNED (aus Inventar entfernt).
-        db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, line.productId]);
-        db.run(
-          `UPDATE consignments SET status = 'RETURNED_TO_OWNER', updated_at = ?
-           WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK')`,
-          [now, line.productId]
-        );
-      } else if (disposition === 'KEEP_AS_OWN') {
-        // Plan §Commission §13 B: bleibt bei dir → source_type → OWN, Status in_stock.
-        // Neuer purchase_price = letzter Verkaufspreis (wie in der returned line).
-        db.run(
-          `UPDATE products SET stock_status = 'in_stock', source_type = 'OWN',
-           purchase_price = COALESCE(?, purchase_price), updated_at = ? WHERE id = ?`,
-          [line.unitPrice ?? null, now, line.productId]
-        );
-        db.run(
-          `UPDATE consignments SET status = 'RETURNED', updated_at = ?
-           WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK')`,
-          [now, line.productId]
-        );
-      } else if (disposition === 'IN_STOCK') {
-        // Quantity-aware Restock: gibt die zurückgegebene Menge ans Lager zurück.
-        const qty = Math.max(1, line.quantity || 1);
-        db.run(
-          `UPDATE products SET
-             quantity = COALESCE(quantity, 0) + ?,
-             stock_status = 'in_stock',
-             updated_at = ? WHERE id = ?`,
-          [qty, now, line.productId]
-        );
-      } else {
-        const newStatus = disposition === 'UNDER_REPAIR' ? 'in_repair'
-          : disposition === 'WRITE_OFF' ? 'sold' /* keep sold but flagged in notes */
-          : 'in_stock';
-        db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [newStatus, now, line.productId]);
-      }
-    }
-
-    if (refundAmount > 0 && r.refundMethod) {
-      trackRefund('sales_returns', id, refundAmount, r.refundMethod);
-    }
-
-    // Plan §Returns §11: VAT-Korrektur auf Invoice-Ebene.
-    // VAT-Delta proportional zum tatsächlich refundeten Anteil. Bei Vollrefund: Delta = vatCorrected;
-    // bei 50% Refund: 50% von vatCorrected.
-    // Plan §Returns §History: paid_amount BLEIBT historisch — wir reduzieren ihn NICHT mehr.
-    // Begründung: „Kunde hat gezahlt" bleibt sichtbar; der Refund ist eine eigene Cash-Out-Bewegung
-    // (refund_paid_amount auf sales_return / Credit Note). Banking-Saldo nutzt
-    // payments + sales_returns.refund_paid_amount → bleibt korrekt.
-    const refundRatio = r.totalAmount > 0 ? Math.min(1, refundAmount / r.totalAmount) : 0;
-    const invoiceVatDelta = (r.vatCorrected || 0) * refundRatio;
-    db.run(
-      `UPDATE invoices SET
-         vat_amount = MAX(0, vat_amount - ?),
-         updated_at = ?
-       WHERE id = ?`,
-      [invoiceVatDelta, now, r.invoiceId]
-    );
-
-    saveDatabase();
-    trackStatusChange('sales_returns', id, r.status, 'REFUNDED');
-
-    // Industry Standard: jeder bestätigte Sales Return erzeugt eine Credit Note (Storno-Rechnung).
-    // CN ist eigenständige Steuerurkunde — verlinkt zur Invoice + zum Return.
-    // Splitting: Cash-Refund (was zurückfließt) vs Forderungsstornierung (was nur als offen wegfällt).
+    // Credit Note erstellen — eigenständige Steuerurkunde, 1:1 zum Return.
     try {
-      const receivableCancel = Math.max(0, r.totalAmount - refundAmount);
       useCreditNoteStore.getState().createCreditNote({
         invoiceId: r.invoiceId,
         customerId: r.customerId,
         salesReturnId: r.id,
         totalAmount: r.totalAmount,
         vatAmount: r.vatCorrected || 0,
-        cashRefundAmount: refundAmount,
+        cashRefundAmount: cashRefundCap,
         receivableCancelAmount: receivableCancel,
         refundMethod: r.refundMethod,
         reason: r.reason,
@@ -350,80 +347,176 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       });
     } catch (e) {
       console.warn('[Return] credit note auto-creation failed:', e);
+      throw new Error(`Approve failed: credit note could not be created — ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    get().loadReturns();
-    // Plan §Returns §History: kein Auto-Cancel mehr — Invoice-Status bleibt FINAL/PARTIAL,
-    // returnState='RETURNED' wird über getInvoiceReturnSummary an die UI gegeben und dort
-    // als „Returned"-Badge angezeigt. CANCELLED ist nur für explizite User-Stornos.
-  },
-
-  deleteReturn: (id) => {
-    const db = getDatabase();
-    const r = get().getReturn(id);
-    if (!r) return;
-    const now = new Date().toISOString();
-    // Plan §Returns §History: paid_amount wird in refundReturn nicht mehr reduziert (historisch).
-    // → kein Paid-Revert nötig. NUR vat_amount wurde reduziert → den müssen wir bei delete restorieren.
-    const refundedCash = Number(r.refundPaidAmount || 0);
-    const vatReverted  = Math.min(Number(r.vatCorrected || 0), refundedCash);
-    if (r.status === 'REFUNDED' && vatReverted > 0) {
+    // VAT-Korrektur auf Invoice — CN ist die Steuerurkunde, die VAT-Pflicht reversiert.
+    // Voll, nicht proportional zu Cash (Receivable-Cancel reversiert ebenfalls VAT).
+    if ((r.vatCorrected || 0) > 0) {
       db.run(
-        `UPDATE invoices SET
-           vat_amount  = vat_amount  + ?,
-           updated_at  = ?
-         WHERE id = ?`,
-        [vatReverted, now, r.invoiceId]
+        `UPDATE invoices SET vat_amount = MAX(0, vat_amount - ?), updated_at = ? WHERE id = ?`,
+        [r.vatCorrected || 0, now, r.invoiceId]
       );
     }
-    // Verknüpfte Credit-Note löschen (cascade) — Industriestandard: CN gehört zum Return.
-    // Ergänzung Issue I: Cascade-Delete im Audit-Log spurbar machen.
-    const cnRows = query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [id]);
-    for (const cn of cnRows) {
-      trackDelete('credit_notes', cn.id as string);
+
+    // Plan 2026-05: Umsatz/Profit korrigieren — Customer-LTV reduzieren.
+    // Profit-Anteil proportional zur retournierten Quote der Original-Invoice.
+    const invRow = query('SELECT margin_snapshot, gross_amount FROM invoices WHERE id = ?', [r.invoiceId])[0];
+    const invGross = (invRow?.gross_amount as number) || 0;
+    const invMargin = (invRow?.margin_snapshot as number) || 0;
+    const profitDelta = invGross > 0 ? invMargin * (r.totalAmount / invGross) : 0;
+    db.run(
+      `UPDATE customers SET
+         total_revenue = MAX(0, total_revenue - ?),
+         total_profit = total_profit - ?,
+         updated_at = ?
+       WHERE id = ?`,
+      [r.totalAmount, profitDelta, now, r.customerId]
+    );
+
+    // Nach CN-Erstellung: wenn effektives Invoice-Outstanding (gross - paid - Σ CN.cancel) = 0,
+    // Invoice auf RETURNED setzen (Forderung vollständig durch Return abgedeckt).
+    try {
+      const invCheck = query(
+        `SELECT i.gross_amount, i.paid_amount,
+                COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn WHERE cn.invoice_id = i.id), 0) AS cn_cancel
+         FROM invoices i WHERE i.id = ?`,
+        [r.invoiceId]
+      )[0];
+      if (invCheck) {
+        const gross = (invCheck.gross_amount as number) || 0;
+        const paid  = (invCheck.paid_amount as number)  || 0;
+        const cancel= (invCheck.cn_cancel as number)    || 0;
+        if (gross > 0 && (gross - paid - cancel) <= 0.005) {
+          db.run(
+            `UPDATE invoices SET status = 'RETURNED', updated_at = ? WHERE id = ? AND status IN ('PARTIAL', 'DRAFT')`,
+            [now, r.invoiceId]
+          );
+        }
+      }
+    } catch (e) {
+      console.warn('[Return] invoice status update check failed:', e);
     }
-    db.run(`DELETE FROM credit_notes WHERE sales_return_id = ?`, [id]);
-    db.run(`DELETE FROM sales_return_lines WHERE return_id = ?`, [id]);
-    db.run(`DELETE FROM sales_returns WHERE id = ?`, [id]);
+
+    db.run(`UPDATE sales_returns SET status = 'APPROVED' WHERE id = ?`, [id]);
     saveDatabase();
-    trackDelete('sales_returns', id);
+    trackStatusChange('sales_returns', id, r.status, 'APPROVED');
     get().loadReturns();
-    // CN-Store ebenfalls neu laden, damit UI keine Phantom-CN zeigt.
-    try { useCreditNoteStore.getState().loadCreditNotes(); } catch { /* */ }
   },
 
-  // Partielle Refund-Zahlung dokumentieren — kann mehrfach aufgerufen werden,
-  // bis refund_paid_amount = total_amount.
+  // ── Reject ───────────────────────────────────────────────
+  // Nur erlaubt vor Approval (keine CN ausgestellt). Disposition wird best-effort revertiert.
+  rejectReturn: (id) => {
+    const r = get().getReturn(id);
+    if (!r) return;
+    if (r.status === 'APPROVED' || r.status === 'REFUNDED' || r.status === 'CLOSED') {
+      console.warn('[Return] cannot reject after approval — use deleteReturn instead');
+      throw new Error('Cannot reject a return that has been approved. Use delete instead.');
+    }
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    // Disposition revertieren (Ware war beim Anlegen schon umgebucht).
+    revertDisposition(db, r.lines, r.productDisposition || 'IN_STOCK', now);
+    db.run(`UPDATE sales_returns SET status = 'REJECTED' WHERE id = ?`, [id]);
+    saveDatabase();
+    trackStatusChange('sales_returns', id, r.status, 'REJECTED');
+    get().loadReturns();
+  },
+
+  // ── Refund (convenience wrapper) ─────────────────────────
+  // Plan 2026-05: Ruft approveReturn (idempotent) + recordRefundPayment(cap) auf.
+  // KEIN eigener CN-Code mehr.
+  refundReturn: (id, partialAmount) => {
+    const r = get().getReturn(id);
+    if (!r) return;
+    if (r.refundStatus === 'REFUNDED') { console.warn('[Return] already fully refunded'); return; }
+
+    // 1) Approve (idempotent — erstellt CN + reduziert VAT, falls noch nicht passiert).
+    if (r.status === 'REQUESTED') {
+      get().approveReturn(id);
+    }
+    const r2 = get().getReturn(id);
+    if (!r2) return;
+
+    // 2) Cap berechnen — wieviel Cash kann tatsächlich zurückfließen.
+    const { cashRefundCap } = computeRefundSplit(id, r2.invoiceId, r2.totalAmount);
+    const remainingCashRefundable = Math.max(0, cashRefundCap - (r2.refundPaidAmount || 0));
+    const requestedAmount = typeof partialAmount === 'number' && partialAmount >= 0 && partialAmount <= r2.totalAmount
+      ? partialAmount
+      : r2.totalAmount;
+    const refundAmount = Math.min(requestedAmount, remainingCashRefundable);
+
+    // 3a) Cash fließt → recordRefundPayment.
+    if (refundAmount > 0) {
+      get().recordRefundPayment(id, refundAmount, r2.refundMethod || 'cash');
+      return;
+    }
+
+    // 3b) Kein Cash refundbar (Customer hat noch nichts gezahlt) → CN ist ausreichend,
+    // Return-Status auf REFUNDED (nichts mehr zu tun aus Buchhaltungssicht).
+    const db = getDatabase();
+    db.run(`UPDATE sales_returns SET status = 'REFUNDED' WHERE id = ?`, [id]);
+    saveDatabase();
+    trackStatusChange('sales_returns', id, r2.status, 'REFUNDED');
+    get().loadReturns();
+  },
+
+  // ── Record Refund Payment ────────────────────────────────
+  // Cash fließt tatsächlich → Banking ↓, refund_paid_amount ↑, CN-Split-Update.
+  // Auto-approve, falls noch REQUESTED, damit CN garantiert existiert wenn Geld bewegt wird.
   recordRefundPayment: (returnId, amount, method, date) => {
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Refund payment amount must be a positive number.');
     }
     const db = getDatabase();
-    const r = get().getReturn(returnId);
+    let r = get().getReturn(returnId);
     if (!r) return;
-    // Plan §Returns Fix E — kein Doppel-Refund wenn bereits voll erstattet.
     if (r.refundStatus === 'REFUNDED') { console.warn('[Return] already fully refunded'); return; }
+
+    // Auto-approve falls noch REQUESTED — CN muss existieren bevor Cash fließt.
+    if (r.status === 'REQUESTED') {
+      get().approveReturn(returnId);
+      r = get().getReturn(returnId);
+      if (!r) return;
+    }
+
     const remaining = Math.max(0, r.totalAmount - (r.refundPaidAmount || 0));
-    // Float-Tolerance 0.005 BHD (3-Dezimal-Präzision).
     if (remaining <= 0.005) { console.warn('[Return] nothing left to refund'); return; }
-    const newPaid = Math.min(r.totalAmount, (r.refundPaidAmount || 0) + amount);
-    const newStatus: RefundStatus = newPaid >= r.totalAmount - 0.005 ? 'REFUNDED'
+
+    // Cap: Cash-Refundability laut Industriestandard (Customer-Surplus nach allen Returns).
+    const { cashRefundCap } = computeRefundSplit(returnId, r.invoiceId, r.totalAmount);
+    const refundableNow = Math.max(0, cashRefundCap - (r.refundPaidAmount || 0));
+    const cappedAmount = Math.min(amount, refundableNow, remaining);
+
+    if (cappedAmount <= 0) {
+      console.warn('[Return] no cash refundable now — customer surplus exhausted');
+      return;
+    }
+
+    const newPaid = (r.refundPaidAmount || 0) + cappedAmount;
+    const newRefundStatus: RefundStatus = newPaid >= r.totalAmount - 0.005 ? 'REFUNDED'
       : newPaid > 0 ? 'PARTIALLY_REFUNDED'
-      : 'NOT_REFUNDED';
-    const refundDate = date || new Date().toISOString().split('T')[0];
+      : 'PENDING_REFUND';
+    // Voll erstattet → Return-Status auch auf REFUNDED.
+    const newReturnStatus = newRefundStatus === 'REFUNDED' ? 'REFUNDED' : r.status;
+
+    const now = new Date().toISOString();
+    const refundDate = date || now.split('T')[0];
+
     db.run(
       `UPDATE sales_returns SET refund_paid_amount = ?, refund_paid_date = ?,
-        refund_method = ?, refund_status = ? WHERE id = ?`,
-      [newPaid, refundDate, method, newStatus, returnId]
+        refund_method = ?, refund_status = ?, status = ?,
+        refund_amount = MAX(refund_amount, ?) WHERE id = ?`,
+      [newPaid, refundDate, method, newRefundStatus, newReturnStatus, newPaid, returnId]
     );
-    if (amount > 0 && method !== 'credit') {
-      trackRefund('sales_returns', returnId, amount, method);
+
+    if (cappedAmount > 0 && method !== 'credit') {
+      trackRefund('sales_returns', returnId, cappedAmount, method);
     }
     saveDatabase();
-    trackUpdate('sales_returns', returnId, { refundPayment: amount, method, date: refundDate, status: newStatus });
+    trackUpdate('sales_returns', returnId, { refundPayment: cappedAmount, method, date: refundDate, status: newRefundStatus });
 
-    // Auto-Sync der zugehörigen Credit Note: cashRefundAmount + receivableCancelAmount
-    // werden nachträglich aktualisiert wenn ein Refund-Payment dazukommt.
+    // CN-Sync: cashRefund/receivableCancel-Split nachziehen.
     try {
       const cnRows = query(
         `SELECT id, total_amount FROM credit_notes WHERE sales_return_id = ? LIMIT 1`,
@@ -445,20 +538,93 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       console.warn('[Return] credit note update failed:', e);
     }
 
+    // Invoice RETURNED setzen, wenn Forderung durch Cash + CN-Cancel vollständig gedeckt.
+    try {
+      const invCheck = query(
+        `SELECT i.gross_amount, i.paid_amount, i.status AS inv_status,
+                COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn WHERE cn.invoice_id = i.id), 0) AS cn_cancel
+         FROM invoices i WHERE i.id = ?`,
+        [r.invoiceId]
+      )[0];
+      if (invCheck && (invCheck.inv_status === 'PARTIAL' || invCheck.inv_status === 'DRAFT')) {
+        const gross = (invCheck.gross_amount as number) || 0;
+        const paid  = (invCheck.paid_amount as number)  || 0;
+        const cancel= (invCheck.cn_cancel as number)    || 0;
+        if (gross > 0 && (gross - paid - cancel) <= 0.005) {
+          db.run(
+            `UPDATE invoices SET status = 'RETURNED', updated_at = ? WHERE id = ?`,
+            [now, r.invoiceId]
+          );
+        }
+      }
+    } catch (e) {
+      console.warn('[Return] invoice status update check (recordRefundPayment) failed:', e);
+    }
+
+    if (newReturnStatus !== r.status) {
+      trackStatusChange('sales_returns', returnId, r.status, newReturnStatus);
+    }
     get().loadReturns();
-    // Plan §Returns §History: kein Auto-Cancel — Invoice-Status bleibt FINAL/PARTIAL.
   },
 
-  // Aggregiert alle Returns einer Invoice + Status-Berechnung (live).
+  // ── Delete ───────────────────────────────────────────────
+  // Vollständiges Rollback: Disposition revert, VAT zurück, CN löschen.
+  deleteReturn: (id) => {
+    const db = getDatabase();
+    const r = get().getReturn(id);
+    if (!r) return;
+    const now = new Date().toISOString();
+
+    // Disposition revertieren (außer wenn schon rejected — dann war's bereits revertiert).
+    if (r.status !== 'REJECTED') {
+      revertDisposition(db, r.lines, r.productDisposition || 'IN_STOCK', now);
+    }
+
+    // VAT restoren (wenn Approve passierte — vat_corrected wurde abgezogen).
+    const wasApproved = r.status === 'APPROVED' || r.status === 'REFUNDED' || r.status === 'CLOSED';
+    const vatToRestore = wasApproved ? Number(r.vatCorrected || 0) : 0;
+    if (vatToRestore > 0) {
+      db.run(
+        `UPDATE invoices SET vat_amount = vat_amount + ?, updated_at = ? WHERE id = ?`,
+        [vatToRestore, now, r.invoiceId]
+      );
+    }
+    // Customer-LTV restaurieren — analog zur Reduktion in approveReturn.
+    if (wasApproved) {
+      const invRow = query('SELECT margin_snapshot, gross_amount FROM invoices WHERE id = ?', [r.invoiceId])[0];
+      const invGross = (invRow?.gross_amount as number) || 0;
+      const invMargin = (invRow?.margin_snapshot as number) || 0;
+      const profitDelta = invGross > 0 ? invMargin * (r.totalAmount / invGross) : 0;
+      db.run(
+        `UPDATE customers SET
+           total_revenue = total_revenue + ?,
+           total_profit = total_profit + ?,
+           updated_at = ?
+         WHERE id = ?`,
+        [r.totalAmount, profitDelta, now, r.customerId]
+      );
+    }
+
+    // Verknüpfte Credit-Note(s) löschen — Cascade.
+    const cnRows = query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [id]);
+    for (const cn of cnRows) {
+      trackDelete('credit_notes', cn.id as string);
+    }
+    db.run(`DELETE FROM credit_notes WHERE sales_return_id = ?`, [id]);
+    db.run(`DELETE FROM sales_return_lines WHERE return_id = ?`, [id]);
+    db.run(`DELETE FROM sales_returns WHERE id = ?`, [id]);
+    saveDatabase();
+    trackDelete('sales_returns', id);
+    get().loadReturns();
+    try { useCreditNoteStore.getState().loadCreditNotes(); } catch { /* */ }
+  },
+
+  // ── Aggregations (unverändert — Reports lesen hier) ─────
   getInvoiceReturnSummary: (invoiceId, invoiceGross, invoicePaid) => {
     const returns = get().returns.filter(r => r.invoiceId === invoiceId && r.status !== 'REJECTED');
     const totalReturned = returns.reduce((s, r) => s + (r.totalAmount || 0), 0);
     const totalRefundPaid = returns.reduce((s, r) => s + (r.refundPaidAmount || 0), 0);
 
-    // Industriestandard: Cash-Outstanding-Refund = nur was Customer überzahlt hat,
-    // abzüglich was wir bereits zurückgezahlt haben. Wenn Customer nichts gezahlt hat
-    // (oder weniger als der nach-Returns-verbleibende Schuldbetrag) → kein Cash zurück nötig.
-    // Falls invoicePaid nicht übergeben wurde, fallback auf alte Formel (Backwards-Compat).
     let outstandingRefund: number;
     if (typeof invoicePaid === 'number') {
       const owedAfterReturns = Math.max(0, invoiceGross - totalReturned);
@@ -468,10 +634,6 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       outstandingRefund = Math.max(0, totalReturned - totalRefundPaid);
     }
 
-    // returnState per-line statt SUM(total) — sonst kassiert ein Doppel-Return
-    // dieselbe Line zweimal und meldet die ganze Invoice als 'RETURNED' während andere
-    // Lines noch nicht zurück sind. Vergleich: ALLE invoice_lines müssen vollständig
-    // zurückgegeben sein (returned_qty >= original_qty).
     let returnState: 'NONE' | 'PARTIAL_RETURN' | 'RETURNED';
     if (returns.length === 0) {
       returnState = 'NONE';
@@ -501,40 +663,34 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
           returnState = 'PARTIAL_RETURN';
         }
       } catch {
-        // Fallback wenn SQL fehlschlägt: Sum-basierte Heuristik (alt).
         returnState = totalReturned >= invoiceGross - 0.005 ? 'RETURNED' : 'PARTIAL_RETURN';
       }
     }
-    // Refund-State berücksichtigt Cash-Refundability: wenn nichts zurückzuzahlen ist, gilt als REFUNDED.
+
     let refundState: RefundStatus;
     if (totalReturned === 0) {
-      refundState = 'NOT_REFUNDED';
+      refundState = 'PENDING_REFUND';
     } else if (typeof invoicePaid === 'number') {
       const owedAfterReturns = Math.max(0, invoiceGross - totalReturned);
       const cashRefundable = Math.max(0, invoicePaid - owedAfterReturns);
-      if (cashRefundable < 0.01) refundState = 'REFUNDED';                 // nichts zurückzuzahlen → settled
+      if (cashRefundable < 0.01) refundState = 'REFUNDED';
       else if (totalRefundPaid >= cashRefundable - 0.01) refundState = 'REFUNDED';
       else if (totalRefundPaid > 0) refundState = 'PARTIALLY_REFUNDED';
-      else refundState = 'NOT_REFUNDED';
+      else refundState = 'PENDING_REFUND';
     } else {
       refundState = totalRefundPaid >= totalReturned - 0.005 ? 'REFUNDED'
         : totalRefundPaid > 0 ? 'PARTIALLY_REFUNDED'
-        : 'NOT_REFUNDED';
+        : 'PENDING_REFUND';
     }
     return { returns, totalReturned, totalRefundPaid, outstandingRefund, returnState, refundState };
   },
 
-  // Pro Customer offene Refund-Schuld (Refund Payable an Kunden) live.
-  // Nutzt refundAmount (gecappter Cash-Anteil) — NICHT totalAmount, sonst würde via
-  // Credit Note neutralisierte Forderung als „Cash-Schuld" gezählt.
   getCustomerRefundPayable: (customerId) => {
     return get().returns
       .filter(r => r.customerId === customerId && r.status !== 'REJECTED')
       .reduce((sum, r) => sum + Math.max(0, (r.refundAmount || 0) - (r.refundPaidAmount || 0)), 0);
   },
 
-  // Aggregiert die retournierte Menge pro invoice_line (über alle Returns).
-  // Wird für Line-Item-Markierung in InvoiceDetail genutzt.
   getReturnedQtyForLine: (invoiceLineId) => {
     let qty = 0;
     for (const r of get().returns) {

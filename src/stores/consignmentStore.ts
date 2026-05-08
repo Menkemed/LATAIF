@@ -5,6 +5,14 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { postConsignmentPayout, hasLedgerEntries } from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface ConsignmentStore {
   consignments: Consignment[];
@@ -169,13 +177,30 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
   markPaidOut: (id, method, reference) => {
     const con = get().getConsignment(id);
     const full = con?.payoutAmount || 0;
+    const alreadyPaid = con?.payoutPaidAmount || 0;
+    const delta = Math.max(0, full - alreadyPaid);
+    const payoutDate = new Date().toISOString().split('T')[0];
     get().updateConsignment(id, {
       status: 'paid_out', payoutStatus: 'paid',
       payoutPaidAmount: full,
-      payoutMethod: method, payoutDate: new Date().toISOString().split('T')[0],
+      payoutMethod: method, payoutDate,
       payoutReference: reference,
     });
     eventBus.emit('consignment.paid_out', 'consignment', id, {});
+
+    // ZIEL.md §3a — nur den Delta posten (was JETZT gezahlt wird), Vorzahlungen
+    // sind bereits über recordPartialPayout im Ledger.
+    if (con && delta > 0) {
+      const ledgerMethod: 'cash' | 'bank' = method === 'cash' ? 'cash' : 'bank';
+      const synthId = uuid();
+      safePost(`postConsignmentPayout(${synthId}) [markPaidOut]`, () => {
+        if (hasLedgerEntries('CONSIGNMENT_PAYOUT', synthId)) return;
+        postConsignmentPayout({
+          id: synthId, consignmentId: id, consignorId: con.consignorId,
+          amount: delta, method: ledgerMethod, paidAt: payoutDate,
+        });
+      });
+    }
   },
 
   // Plan §8 #2 — Teilausgleich. Mehrfach aufrufbar bis payoutAmount erreicht.
@@ -187,18 +212,33 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     if (!con) return;
     const target = con.payoutAmount || 0;
     const newPaid = target > 0 ? Math.min(target, (con.payoutPaidAmount || 0) + amount) : (con.payoutPaidAmount || 0) + amount;
+    const appliedAmount = newPaid - (con.payoutPaidAmount || 0);  // tatsächlich neu gezahlt (geclamped)
     const fully = target > 0 && newPaid >= target - 0.005;
     const newPayoutStatus: Consignment['payoutStatus'] = fully ? 'paid' : (newPaid > 0 ? 'partial' : 'pending');
     const newStatus = fully ? 'paid_out' : con.status;
+    const payoutDate = new Date().toISOString().split('T')[0];
     get().updateConsignment(id, {
       status: newStatus,
       payoutStatus: newPayoutStatus,
       payoutPaidAmount: newPaid,
       payoutMethod: method,
-      payoutDate: new Date().toISOString().split('T')[0],
+      payoutDate,
       payoutReference: reference,
     });
     if (fully) eventBus.emit('consignment.paid_out', 'consignment', id, {});
+
+    // ZIEL.md §3a — Cash-Bewegung an Consignor.
+    if (appliedAmount > 0) {
+      const ledgerMethod: 'cash' | 'bank' = method === 'cash' ? 'cash' : 'bank';
+      const synthId = uuid();
+      safePost(`postConsignmentPayout(${synthId}) [partial]`, () => {
+        if (hasLedgerEntries('CONSIGNMENT_PAYOUT', synthId)) return;
+        postConsignmentPayout({
+          id: synthId, consignmentId: id, consignorId: con.consignorId,
+          amount: appliedAmount, method: ledgerMethod, paidAt: payoutDate,
+        });
+      });
+    }
   },
 
   markReturned: (id) => {

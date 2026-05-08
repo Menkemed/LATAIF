@@ -12,6 +12,20 @@ import type { BankTransfer } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackDelete } from '@/core/sync/track';
+import {
+  postBankTransfer,
+  postBankTransferReversed,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+// Buchungsfehler blockieren den operativen Domain-Insert NICHT.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 export type BankAccount = 'cash' | 'bank';
 
@@ -103,15 +117,33 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     saveDatabase();
     trackInsert('bank_transfers', id, { amount: data.amount, direction: data.direction });
     get().loadTransfers();
-    return get().transfers.find(t => t.id === id)!;
+    const transfer = get().transfers.find(t => t.id === id)!;
+
+    // ZIEL.md §3a — Ledger-Posting für Bank-Transfer.
+    safePost(`postBankTransfer(${id})`, () => {
+      if (hasLedgerEntries('BANK_TRANSFER', id)) return;
+      postBankTransfer(transfer);
+    });
+
+    return transfer;
   },
 
   deleteTransfer: (id) => {
+    const before = get().transfers.find(t => t.id === id);
     const db = getDatabase();
     db.run(`DELETE FROM bank_transfers WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('bank_transfers', id);
     get().loadTransfers();
+
+    // ZIEL.md §3a — Storno der Ledger-Buchung beim Löschen.
+    if (before) {
+      safePost(`postBankTransferReversed(${id})`, () => {
+        if (!hasLedgerEntries('BANK_TRANSFER', id)) return;
+        if (hasReversalFor('BANK_TRANSFER', id)) return;
+        postBankTransferReversed(before);
+      });
+    }
   },
 
   getTotals: () => {
@@ -184,10 +216,14 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       });
     }
 
-    // EXPENSE_OUT: expenses
+    // EXPENSE_OUT: nur tatsächlich bezahlte Beträge (paid_amount > 0).
+    // Pending-Expenses (Supplier-Payables, z.B. Repair-Workshop-Kosten) bewegen
+    // noch kein Geld → dürfen nicht als Cashflow erscheinen.
     const expenses = safeQuery('expenses',
-      `SELECT id, amount, payment_method, expense_date, description, expense_number, category, created_at
-       FROM expenses WHERE branch_id = ?`,
+      `SELECT id, COALESCE(paid_amount, 0) AS paid_amount, payment_method,
+              expense_date, description, expense_number, category, created_at
+       FROM expenses
+       WHERE branch_id = ? AND status != 'CANCELLED' AND COALESCE(paid_amount, 0) > 0`,
       [branchId]
     );
     for (const e of expenses) {
@@ -198,7 +234,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
         createdAt: (e.created_at as string) || date,
         type: 'EXPENSE_OUT',
         account: accountFor(e.payment_method as string),
-        amount: (e.amount as number) || 0,
+        amount: (e.paid_amount as number) || 0,
         flow: 'out',
         relatedModule: 'expense',
         relatedEntityId: e.id as string,
@@ -339,8 +375,10 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
 
     // REFUND_OUT: sales returns — nutze refund_paid_amount damit Teilzahlungen
     // via recordRefundPayment() auch im Cashflow auftauchen (Plan §Returns Fix).
+    // Fix 2026-05: sales_returns hat KEIN updated_at — vorher silent empty wegen
+    // safeQuery-Schluck. Nur created_at + refund_paid_date.
     const salesRet = safeQuery('sales_returns',
-      `SELECT id, refund_amount, refund_paid_amount, refund_paid_date, refund_method, return_date, return_number, invoice_id, created_at, updated_at
+      `SELECT id, refund_amount, refund_paid_amount, refund_paid_date, refund_method, return_date, return_number, invoice_id, created_at
        FROM sales_returns WHERE branch_id = ? AND status != 'REJECTED'
          AND (refund_paid_amount > 0 OR refund_amount > 0)`,
       [branchId]
@@ -353,7 +391,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       txs.push({
         id: `sret-${r.id}`,
         date,
-        createdAt: (r.updated_at as string) || (r.created_at as string) || date,
+        createdAt: (r.created_at as string) || date,
         type: 'REFUND',
         account: accountFor(r.refund_method as string),
         amount,
@@ -489,13 +527,19 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       });
     }
 
-    // Sort: primär nach Datum (neueste zuerst), sekundär nach Insert-Timestamp
-    // (User-Spec: "im Banking genau in dieser Reihenfolge ... in der sie wirklich
-    // passiert sind"). Tiebreaker für same-day Bookings ist createdAt DESC.
+    // Sort: primär nach Datum (neueste zuerst), sekundär nach Insert-Timestamp.
+    // Fix 2026-05: date-Felder kommen aus verschiedenen DB-Spalten — manche sind
+    // YYYY-MM-DD, manche voller ISO-String. Beim String-Compare würde '2026-05-06'
+    // gegen '2026-05-06T22:33:00Z' falsche Ergebnisse geben. Daher: primär die
+    // ersten 10 Zeichen (Datum-Anteil), sekundär createdAt als voller Timestamp.
     txs.sort((a, b) => {
-      const d = b.date.localeCompare(a.date);
+      const dA = (a.date || '').slice(0, 10);
+      const dB = (b.date || '').slice(0, 10);
+      const d = dB.localeCompare(dA);
       if (d !== 0) return d;
-      return b.createdAt.localeCompare(a.createdAt);
+      const cA = a.createdAt || a.date || '';
+      const cB = b.createdAt || b.date || '';
+      return cB.localeCompare(cA);
     });
     return txs;
   },

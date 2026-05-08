@@ -15,6 +15,23 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
 import { useProductStore } from '@/stores/productStore';
+import {
+  postPurchaseReceived,
+  postPurchasePayment,
+  postPurchaseCancelled,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+// Wenn die Buchung scheitert, wird das Domain-Insert NICHT zurückgerollt; stattdessen
+// loggen wir und überlassen die Korrektur der Reconciliation-View. Der operative Flow
+// (Purchase / Payment / Cancel) darf nicht an einer Bilanz-Diskrepanz blockiert werden.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface PurchaseInput {
   supplierId: string;
@@ -279,11 +296,13 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     lineStmt.free();
 
     // Initial payment (if any)
+    let initialPaymentId: string | null = null;
     if (input.initialPayment && input.initialPayment.amount > 0) {
+      initialPaymentId = uuid();
       db.run(
         `INSERT INTO purchase_payments (id, purchase_id, amount, method, paid_at, reference, note, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), id, input.initialPayment.amount, input.initialPayment.method, purchaseDate, input.initialPayment.reference || null, null, now]
+        [initialPaymentId, id, input.initialPayment.amount, input.initialPayment.method, purchaseDate, input.initialPayment.reference || null, null, now]
       );
       trackPayment('purchases', id, input.initialPayment.amount, input.initialPayment.method);
     }
@@ -291,6 +310,34 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     saveDatabase();
     trackInsert('purchases', id, { purchaseNumber, supplierId: input.supplierId, total });
     get().loadPurchases();
+
+    // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
+    safePost(`postPurchaseReceived(${id})`, () => {
+      if (hasLedgerEntries('PURCHASE', id)) return;
+      const fresh = get().getPurchase(id);
+      if (fresh) postPurchaseReceived(fresh);
+    });
+    if (initialPaymentId && input.initialPayment) {
+      const ipId = initialPaymentId;
+      const ipMethod = input.initialPayment.method;
+      safePost(`postPurchasePayment(${ipId}) [initial]`, () => {
+        if (hasLedgerEntries('PURCHASE_PAYMENT', ipId)) return;
+        const fresh = get().getPurchase(id);
+        const ip = fresh?.payments.find(p => p.id === ipId);
+        if (ip) postPurchasePayment(ip, input.supplierId);
+        else if (fresh) {
+          // Fallback wenn loadPurchases nicht alle Felder hatte
+          postPurchasePayment(
+            {
+              id: ipId, purchaseId: id, amount: input.initialPayment!.amount,
+              method: ipMethod, paidAt: purchaseDate, createdAt: now,
+            },
+            input.supplierId
+          );
+        }
+      });
+    }
+
     return get().getPurchase(id)!;
   },
 
@@ -301,10 +348,12 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     if (!p) return;
     if (p.status === 'CANCELLED') return;
 
+    const paymentId = uuid();
+    const paidAt = now.split('T')[0];
     db.run(
       `INSERT INTO purchase_payments (id, purchase_id, amount, method, paid_at, reference, note, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uuid(), purchaseId, amount, method, now.split('T')[0], reference || null, note || null, now]
+      [paymentId, purchaseId, amount, method, paidAt, reference || null, note || null, now]
     );
     const newPaid = p.paidAmount + amount;
     const newStatus = computeStatus(p.totalAmount, newPaid);
@@ -316,6 +365,18 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     trackPayment('purchases', purchaseId, amount, method);
     if (newStatus !== p.status) trackStatusChange('purchases', purchaseId, p.status, newStatus);
     get().loadPurchases();
+
+    // ZIEL.md §3a — Ledger-Posting für Supplier-Zahlung.
+    safePost(`postPurchasePayment(${paymentId})`, () => {
+      if (hasLedgerEntries('PURCHASE_PAYMENT', paymentId)) return;
+      postPurchasePayment(
+        {
+          id: paymentId, purchaseId, amount,
+          method, paidAt, reference, note, createdAt: now,
+        },
+        p.supplierId
+      );
+    });
   },
 
   cancelPurchase: (id) => {
@@ -327,6 +388,15 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     saveDatabase();
     trackStatusChange('purchases', id, p.status, 'CANCELLED');
     get().loadPurchases();
+
+    // ZIEL.md §3a — Ledger-Storno bei Purchase-Cancel (spiegelt INVENTORY/VAT_INPUT/AP).
+    // Bestehende Payments bleiben gebucht — sie waren echtes Geld raus, wurden gezahlt.
+    // Falls Lieferant refundiert, ist das eine separate Transaktion.
+    safePost(`postPurchaseCancelled(${id})`, () => {
+      if (!hasLedgerEntries('PURCHASE', id)) return;
+      if (hasReversalFor('PURCHASE', id)) return;
+      postPurchaseCancelled({ id } as Purchase);
+    });
   },
 
   deletePurchase: (id) => {

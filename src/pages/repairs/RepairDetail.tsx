@@ -7,11 +7,14 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
-import { useRepairStore } from '@/stores/repairStore';
+import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useSupplierStore } from '@/stores/supplierStore';
+import { useExpenseStore } from '@/stores/expenseStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { useProductStore } from '@/stores/productStore';
+import { SearchSelect } from '@/components/ui/SearchSelect';
 import { formatProductMultiLine } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -24,9 +27,14 @@ function fmt(v: number): string {
 
 // Plan §Repair §6: RECEIVED → IN_PROGRESS → (SENT_TO_WORKSHOP if external) → READY → DELIVERED.
 // Flow extended um SENT_TO_WORKSHOP wenn external; sonst direkt ready.
-function getStatusFlow(repairType: string | undefined): RepairStatus[] {
+// OWN-scope endet bei 'ready' — kein Pickup, da das Produkt sowieso bei uns bleibt.
+function getStatusFlow(repairType: string | undefined, scope?: 'CUSTOMER' | 'OWN'): RepairStatus[] {
   const base: RepairStatus[] = ['received', 'diagnosed', 'in_progress'];
-  if (repairType === 'external' || repairType === 'hybrid') {
+  const ext = repairType === 'external' || repairType === 'hybrid';
+  if (scope === 'OWN') {
+    return ext ? [...base, 'sent_to_workshop', 'ready'] : [...base, 'ready'];
+  }
+  if (ext) {
     return [...base, 'sent_to_workshop', 'ready', 'picked_up'];
   }
   return [...base, 'ready', 'picked_up'];
@@ -49,8 +57,8 @@ const STATUS_LABELS: Record<string, string> = {
   CANCELLED: 'Cancelled',
 };
 
-function getNextStatus(current: RepairStatus, repairType?: string): RepairStatus | null {
-  const flow = getStatusFlow(repairType);
+function getNextStatus(current: RepairStatus, repairType?: string, scope?: 'CUSTOMER' | 'OWN'): RepairStatus | null {
+  const flow = getStatusFlow(repairType, scope);
   const idx = flow.indexOf(current);
   if (idx === -1 || idx >= flow.length - 1) return null;
   return flow[idx + 1];
@@ -63,6 +71,8 @@ export function RepairDetail() {
   const { invoices, loadInvoices } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
+  const { expenses, loadExpenses } = useExpenseStore();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Repair>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -70,11 +80,31 @@ export function RepairDetail() {
   const [showHistory, setShowHistory] = useState(false);
   const perm = usePermission();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices]);
+  useEffect(() => { loadRepairs(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadExpenses(); }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadExpenses]);
+
+  const supplierOptions = useMemo(() => suppliers
+    .filter(s => s.active)
+    .map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
+    [suppliers]);
 
   const repair = useMemo(() => repairs.find(r => r.id === id), [repairs, id]);
   const customer = useMemo(() => repair ? customers.find(c => c.id === repair.customerId) : null, [repair, customers]);
   const product = useMemo(() => repair?.productId ? products.find(p => p.id === repair.productId) : null, [repair, products]);
+
+  // Live payment status from the linked expense — derived from expenseStore so it
+  // re-renders automatically when recordExpensePayment() updates the store.
+  const workshopExpensePaid = useMemo(() => {
+    if (!id || !repair) return false;
+    const fee = repair.repairType === 'hybrid'
+      ? (repair.estimatedCost || 0)
+      : repair.repairType === 'external'
+      ? (repair.estimatedCost || repair.internalCost || 0)
+      : 0;
+    if (fee <= 0) return false;
+    const linked = expenses.find(e => e.relatedModule === 'repair' && e.relatedEntityId === id);
+    if (!linked) return !!repair.internalPaidFrom;
+    return linked.status === 'PAID' || (linked.amount > 0 && linked.paidAmount >= linked.amount - 0.005);
+  }, [id, repair, expenses]);
 
   useEffect(() => {
     if (repair) setForm({ ...repair });
@@ -88,10 +118,20 @@ export function RepairDetail() {
     );
   }
 
-  const nextStatus = getNextStatus(repair.status, repair.repairType);
-  const margin = repair.chargeToCustomer != null && repair.internalCost != null
-    ? repair.chargeToCustomer - repair.internalCost
+  const nextStatus = getNextStatus(repair.status, repair.repairType, repair.repairScope);
+  // Hybrid-Margin-Fix: bei Hybrid ziehen wir Internal + Workshop ab, sonst nur internalCost
+  // (Workshop ist bei external bereits in internalCost gespiegelt).
+  const margin = repair.chargeToCustomer != null
+    ? repair.chargeToCustomer - computeRepairTotalCost(repair)
     : null;
+
+  // Workshop fee owed to supplier (for display in status panel + OWN-scope).
+  // Hybrid: external portion is estimatedCost. External: estimatedCost || internalCost fallback.
+  const repairExternalFee = (() => {
+    if (repair.repairType === 'hybrid') return repair.estimatedCost || 0;
+    if (repair.repairType === 'external') return repair.estimatedCost || repair.internalCost || 0;
+    return 0;
+  })();
 
   // Plan §Repair §Pickup ↔ Payment (User-Spec): zwei orthogonale Status.
   // Payment wird aus Invoice abgeleitet wenn verlinkt, sonst aus customerPaymentStatus.
@@ -153,7 +193,9 @@ export function RepairDetail() {
         vatAmount,
         lineTotal: grossCharge,
       }],
-      `Repair Service · ${repair.repairNumber}${repair.issueDescription ? ' · ' + repair.issueDescription : ''}`
+      `Repair Service · ${repair.repairNumber}${repair.issueDescription ? ' · ' + repair.issueDescription : ''}`,
+      undefined,
+      'repair',
     );
     if (invoice) {
       updateRepair(id, { invoiceId: invoice.id });
@@ -164,12 +206,18 @@ export function RepairDetail() {
   function handleSave() {
     if (!id) return;
     // Internal cost mirrors actual (or estimated if actual not yet set) unless explicitly overridden.
+    // Bei Hybrid ist der Fallback aber nicht erlaubt: dort ist estimatedCost = Workshop Fee
+    // (separate Größe), und darf nicht in internalCost gespiegelt werden — sonst doppelt
+    // gezählt in der Margin.
     const derivedInternal = form.actualCost ?? form.estimatedCost ?? 0;
-    const effectiveInternal = form.internalCost && form.internalCost > 0
-      ? form.internalCost
-      : derivedInternal;
+    const effectiveInternal = form.repairType === 'hybrid'
+      ? (form.internalCost || 0)
+      : (form.internalCost && form.internalCost > 0 ? form.internalCost : derivedInternal);
+    const totalCost = form.repairType === 'hybrid'
+      ? effectiveInternal + (form.estimatedCost || 0)
+      : effectiveInternal;
     const computedMargin = form.chargeToCustomer != null
-      ? form.chargeToCustomer - effectiveInternal
+      ? form.chargeToCustomer - totalCost
       : undefined;
     updateRepair(id, {
       diagnosis: form.diagnosis,
@@ -182,6 +230,7 @@ export function RepairDetail() {
       margin: computedMargin,
       repairType: form.repairType,
       externalVendor: form.externalVendor,
+      workshopSupplierId: form.workshopSupplierId,
       estimatedReady: form.estimatedReady,
       notes: form.notes,
       // Plan §Repair §Item-Details: kategoriebasierte Item-Attribute beim Save mitnehmen
@@ -285,8 +334,9 @@ export function RepairDetail() {
                   </Button>
                 )}
                 {/* User-Spec §Repair Return: Ware ohne Reparatur zurück. Sichtbar in
-                    allen nicht-terminalen Status (received bis ready). */}
-                {perm.canManageRepairs && repair.status !== 'picked_up' && repair.status !== 'returned'
+                    allen nicht-terminalen Status (received bis ready). Bei OWN-scope
+                    nicht relevant — eigenes Inventar wird nicht "zurückgegeben". */}
+                {perm.canManageRepairs && repair.repairScope !== 'OWN' && repair.status !== 'picked_up' && repair.status !== 'returned'
                   && repair.status !== 'cancelled' && repair.status !== 'CANCELLED' && repair.status !== 'DELIVERED' && (
                   <Button variant="secondary" onClick={() => {
                     if (!id) return;
@@ -298,22 +348,19 @@ export function RepairDetail() {
                   </Button>
                 )}
                 {repair.status === 'ready' && customer && (
-                  <>
-                    <Button variant="secondary" onClick={() => setShowMessage(true)}>
-                      <MessageCircle size={14} /> AI Notify
-                    </Button>
-                    {/* Plan §Repair §12: Wenn fertig → Invoice erstellen (INV) */}
-                    {!repair.invoiceId && repair.chargeToCustomer != null && repair.chargeToCustomer > 0 && perm.canCreateInvoices && (
-                      <Button variant="primary" onClick={handleCreateRepairInvoice}>
-                        <FileText size={14} /> Create Invoice
-                      </Button>
-                    )}
-                    {repair.invoiceId && (
-                      <Button variant="ghost" onClick={() => navigate(`/invoices/${repair.invoiceId}`)}>
-                        <ExternalLink size={14} /> View Invoice
-                      </Button>
-                    )}
-                  </>
+                  <Button variant="secondary" onClick={() => setShowMessage(true)}>
+                    <MessageCircle size={14} /> AI Notify
+                  </Button>
+                )}
+                {repair.repairScope !== 'OWN' && customer && !repair.invoiceId && repair.chargeToCustomer != null && repair.chargeToCustomer > 0 && perm.canCreateInvoices && (
+                  <Button variant="primary" onClick={handleCreateRepairInvoice}>
+                    <FileText size={14} /> Create Invoice
+                  </Button>
+                )}
+                {repair.invoiceId && (
+                  <Button variant="ghost" onClick={() => navigate(`/invoices/${repair.invoiceId}`)}>
+                    <ExternalLink size={14} /> View Invoice
+                  </Button>
                 )}
                 <Button variant="secondary" onClick={handleDownloadVoucher}><Download size={14} /> Voucher</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
@@ -343,7 +390,7 @@ export function RepairDetail() {
               <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>STATUS FLOW</span>
               <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
                 {(() => {
-                  const flow = getStatusFlow(repair.repairType);
+                  const flow = getStatusFlow(repair.repairType, repair.repairScope);
                   const currentIdx = flow.indexOf(repair.status);
                   return flow.map((s, i) => {
                     const isActive = i <= currentIdx;
@@ -371,40 +418,78 @@ export function RepairDetail() {
               </div>
 
               {/* Payment + Pickup als zwei unabhängige Status (User-Spec) — sichtbar
-                  ab Ready, weil davor noch nichts zum Bezahlen/Abholen da ist. */}
+                  ab Ready. Bei OWN-scope: kein Pickup (Produkt bleibt intern), stattdessen
+                  Workshop-Payable-Status wenn externe Workshop-Kosten anfallen. */}
               {(repair.status === 'ready' || repair.status === 'picked_up') && (
-                <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E5E9EE', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <div>
-                    <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Payment</span>
-                    <span style={{
-                      fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
-                      background: paymentStatus === 'PAID' || paymentStatus === 'FREE' ? 'rgba(126,170,110,0.12)'
-                        : paymentStatus === 'PARTIALLY_PAID' ? 'rgba(170,149,110,0.12)'
-                        : 'rgba(170,110,110,0.12)',
-                      color: paymentStatus === 'PAID' || paymentStatus === 'FREE' ? '#5C8550'
-                        : paymentStatus === 'PARTIALLY_PAID' ? '#8A7548'
-                        : '#8A4848',
-                      border: `1px solid ${paymentStatus === 'PAID' || paymentStatus === 'FREE' ? 'rgba(126,170,110,0.4)'
-                        : paymentStatus === 'PARTIALLY_PAID' ? 'rgba(170,149,110,0.4)'
-                        : 'rgba(170,110,110,0.4)'}`,
-                    }}>
-                      {paymentStatus === 'FREE' ? 'Free Repair'
-                        : paymentStatus === 'PAID' ? 'Paid'
-                        : paymentStatus === 'PARTIALLY_PAID' ? 'Partially Paid'
-                        : 'Unpaid'}
-                    </span>
-                  </div>
-                  <div>
-                    <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Pickup</span>
-                    <span style={{
-                      fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
-                      background: pickupStatus === 'PICKED_UP' ? 'rgba(126,170,110,0.12)' : 'rgba(107,114,128,0.10)',
-                      color: pickupStatus === 'PICKED_UP' ? '#5C8550' : '#6B7280',
-                      border: `1px solid ${pickupStatus === 'PICKED_UP' ? 'rgba(126,170,110,0.4)' : 'rgba(107,114,128,0.3)'}`,
-                    }}>
-                      {pickupStatus === 'PICKED_UP' ? 'Picked Up' : 'Not Picked Up'}
-                    </span>
-                  </div>
+                <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E5E9EE', display: 'grid', gridTemplateColumns: repair.repairScope === 'OWN' ? '1fr' : '1fr 1fr', gap: 12 }}>
+                  {repair.repairScope === 'OWN' ? (
+                    // OWN-scope: kein Kunden-Payment, stattdessen Workshop-Payable anzeigen
+                    repairExternalFee > 0 && repair.workshopSupplierId ? (
+                      <div>
+                        <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Workshop Payable</span>
+                        <span style={{
+                          fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
+                          background: workshopExpensePaid ? 'rgba(126,170,110,0.12)' : 'rgba(170,110,110,0.12)',
+                          color: workshopExpensePaid ? '#5C8550' : '#8A4848',
+                          border: `1px solid ${workshopExpensePaid ? 'rgba(126,170,110,0.4)' : 'rgba(170,110,110,0.4)'}`,
+                        }}>
+                          {workshopExpensePaid
+                            ? `Paid · ${repairExternalFee.toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD`
+                            : `Pending · ${repairExternalFee.toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD`}
+                        </span>
+                      </div>
+                    ) : null
+                  ) : (
+                    <>
+                      <div>
+                        <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Payment</span>
+                        <span style={{
+                          fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
+                          background: paymentStatus === 'PAID' || paymentStatus === 'FREE' ? 'rgba(126,170,110,0.12)'
+                            : paymentStatus === 'PARTIALLY_PAID' ? 'rgba(170,149,110,0.12)'
+                            : 'rgba(170,110,110,0.12)',
+                          color: paymentStatus === 'PAID' || paymentStatus === 'FREE' ? '#5C8550'
+                            : paymentStatus === 'PARTIALLY_PAID' ? '#8A7548'
+                            : '#8A4848',
+                          border: `1px solid ${paymentStatus === 'PAID' || paymentStatus === 'FREE' ? 'rgba(126,170,110,0.4)'
+                            : paymentStatus === 'PARTIALLY_PAID' ? 'rgba(170,149,110,0.4)'
+                            : 'rgba(170,110,110,0.4)'}`,
+                        }}>
+                          {paymentStatus === 'FREE' ? 'Free Repair'
+                            : paymentStatus === 'PAID' ? 'Paid'
+                            : paymentStatus === 'PARTIALLY_PAID' ? 'Partially Paid'
+                            : 'Unpaid'}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Pickup</span>
+                        <span style={{
+                          fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
+                          background: pickupStatus === 'PICKED_UP' ? 'rgba(126,170,110,0.12)' : 'rgba(107,114,128,0.10)',
+                          color: pickupStatus === 'PICKED_UP' ? '#5C8550' : '#6B7280',
+                          border: `1px solid ${pickupStatus === 'PICKED_UP' ? 'rgba(126,170,110,0.4)' : 'rgba(107,114,128,0.3)'}`,
+                        }}>
+                          {pickupStatus === 'PICKED_UP' ? 'Picked Up' : 'Not Picked Up'}
+                        </span>
+                      </div>
+                      {/* Workshop Payable für CUSTOMER-scope external/hybrid */}
+                      {repairExternalFee > 0 && (
+                        <div style={{ gridColumn: '1 / -1' }}>
+                          <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 4 }}>Workshop Payable</span>
+                          <span style={{
+                            fontSize: 12, padding: '4px 10px', borderRadius: 999, display: 'inline-block',
+                            background: workshopExpensePaid ? 'rgba(126,170,110,0.12)' : 'rgba(170,110,110,0.12)',
+                            color: workshopExpensePaid ? '#5C8550' : '#8A4848',
+                            border: `1px solid ${workshopExpensePaid ? 'rgba(126,170,110,0.4)' : 'rgba(170,110,110,0.4)'}`,
+                          }}>
+                            {workshopExpensePaid
+                              ? `Paid · ${repairExternalFee.toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD`
+                              : `Pending · ${repairExternalFee.toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD`}
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -428,22 +513,38 @@ export function RepairDetail() {
               </span>
             </div>
 
-            {/* Customer */}
-            <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
-              <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>CUSTOMER</span>
-              <span style={{ fontSize: 15, color: '#0F0F10' }}>
-                {customer ? `${customer.firstName} ${customer.lastName}` : repair.customerId}
-              </span>
-              {customer?.phone && (
-                <span style={{ fontSize: 13, color: '#6B7280', display: 'block', marginTop: 4 }}>{customer.phone}</span>
-              )}
-            </div>
+            {/* Customer (nur bei CUSTOMER-scope) — bei OWN-scope stattdessen Inventory-Hinweis */}
+            {repair.repairScope === 'OWN' ? (
+              <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
+                <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>OWN INVENTORY ITEM</span>
+                <span style={{ fontSize: 15, color: '#0F0F10' }}>
+                  {product ? `${product.brand} ${product.name}` : 'Linked product'}
+                </span>
+                {product && (
+                  <button onClick={() => navigate(`/collection/${product.id}`)}
+                    className="cursor-pointer transition-colors"
+                    style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12, marginTop: 6, padding: 0 }}>
+                    View product →
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
+                <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>CUSTOMER</span>
+                <span style={{ fontSize: 15, color: '#0F0F10' }}>
+                  {customer ? `${customer.firstName} ${customer.lastName}` : repair.customerId}
+                </span>
+                {customer?.phone && (
+                  <span style={{ fontSize: 13, color: '#6B7280', display: 'block', marginTop: 4 }}>{customer.phone}</span>
+                )}
+              </div>
+            )}
 
             {/* Costs */}
             <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <Input label="ESTIMATED COST (BHD)" type="number" value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
+                  <Input label={form.repairType === 'hybrid' ? 'WORKSHOP FEE (BHD)' : 'ESTIMATED COST (BHD)'} type="number" value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
                   <Input label="ACTUAL COST (BHD)" type="number" value={form.actualCost ?? ''} onChange={e => setForm({ ...form, actualCost: e.target.value ? Number(e.target.value) : undefined })} />
                   <Input label="INTERNAL COST (BHD)" type="number" value={form.internalCost ?? 0} onChange={e => setForm({ ...form, internalCost: Number(e.target.value) })} />
                   <Input label="CHARGE TO CUSTOMER (BHD)" type="number" value={form.chargeToCustomer ?? ''} onChange={e => setForm({ ...form, chargeToCustomer: e.target.value ? Number(e.target.value) : undefined })} />
@@ -486,7 +587,9 @@ export function RepairDetail() {
                 <>
                   {repair.estimatedCost != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
-                      <span className="text-overline">ESTIMATED COST</span>
+                      <span className="text-overline">
+                        {repair.repairType === 'hybrid' ? 'WORKSHOP FEE / EXTERNAL COST' : 'ESTIMATED COST'}
+                      </span>
                       <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}>{fmt(repair.estimatedCost)} BHD</span>
                     </div>
                   )}
@@ -520,7 +623,7 @@ export function RepairDetail() {
                   )}
                   {margin != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
-                      <span className="text-overline">MARGIN</span>
+                      <span className="text-overline">MARGIN / PROFIT</span>
                       <span className="font-mono" style={{ fontSize: 16, color: margin >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
                         {fmt(margin)} BHD
                       </span>
@@ -555,7 +658,14 @@ export function RepairDetail() {
                       ))}
                     </div>
                   </div>
-                  <Input label="EXTERNAL VENDOR" value={form.externalVendor || ''} onChange={e => setForm({ ...form, externalVendor: e.target.value || undefined })} />
+                  {/* Plan §Repair §Workshop-as-Supplier: Picker statt Free-Text. */}
+                  <SearchSelect
+                    label="WORKSHOP / GOLDSMITH (SUPPLIER)"
+                    placeholder="Search supplier..."
+                    options={supplierOptions}
+                    value={form.workshopSupplierId || ''}
+                    onChange={sid => setForm({ ...form, workshopSupplierId: sid || undefined })}
+                  />
                   <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value || undefined })} />
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>DIAGNOSIS</span>
@@ -581,7 +691,24 @@ export function RepairDetail() {
               ) : (
                 <>
                   {renderField('Repair Type', repair.repairType.charAt(0).toUpperCase() + repair.repairType.slice(1))}
-                  {repair.externalVendor && renderField('External Vendor', repair.externalVendor)}
+                  {/* Plan §Repair §Workshop-as-Supplier: bevorzugt Supplier-Lookup;
+                      Fallback auf Legacy-Free-Text falls noch nicht migriert. */}
+                  {(() => {
+                    const sup = repair.workshopSupplierId
+                      ? suppliers.find(s => s.id === repair.workshopSupplierId)
+                      : null;
+                    if (sup) {
+                      return renderField('Workshop / Goldsmith', (
+                        <button onClick={() => navigate(`/suppliers/${sup.id}`)}
+                          className="cursor-pointer transition-colors"
+                          style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 13, padding: 0, textAlign: 'right' }}>
+                          {sup.name} →
+                        </button>
+                      ));
+                    }
+                    if (repair.externalVendor) return renderField('External Vendor', repair.externalVendor);
+                    return null;
+                  })()}
                   {renderField('Received', repair.receivedAt ? new Date(repair.receivedAt).toLocaleDateString() : undefined)}
                   {repair.diagnosedAt && renderField('Diagnosed', new Date(repair.diagnosedAt).toLocaleDateString())}
                   {repair.startedAt && renderField('Started', new Date(repair.startedAt).toLocaleDateString())}

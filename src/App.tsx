@@ -39,14 +39,17 @@ import { BankingPage } from '@/pages/banking/BankingPage';
 import { PartnersPage } from '@/pages/partners/PartnersPage';
 import { ProductionPage } from '@/pages/production/ProductionPage';
 import { BusinessReportsPage } from '@/pages/reports/BusinessReportsPage';
+import { ReconciliationPage } from '@/pages/reports/ReconciliationPage';
+import { BackfillPage } from '@/pages/reports/BackfillPage';
 import { LoginPage } from '@/pages/auth/LoginPage';
 import { OnboardingPage } from '@/pages/auth/OnboardingPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { ImportPage } from '@/pages/settings/ImportPage';
+import { LedgerDebugPage } from '@/pages/settings/LedgerDebugPage';
 import { GlobalSearch } from '@/components/shared/GlobalSearch';
 import { UpdateBanner } from '@/components/shared/UpdateBanner';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
-import { initDatabase } from '@/core/db/database';
+import { initDatabase, flushDatabase, flushDatabaseSync } from '@/core/db/database';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
 
@@ -87,6 +90,39 @@ export default function App() {
       })
       .catch(err => { console.error('DB init failed:', err); setDbError(String(err)); });
   }, [initialize]);
+
+  // Persistence-Flush vor App-Close. Ohne diesen Hook kann der OS-Kill
+  // einen pending writeFile abschneiden und der letzte saveDatabase()-Call
+  // ist dann nie auf der Platte gelandet.
+  useEffect(() => {
+    const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+
+    if (isTauri) {
+      let unlisten: (() => void) | null = null;
+      let cancelled = false;
+      import('@tauri-apps/api/window').then(async (mod) => {
+        if (cancelled) return;
+        const win = mod.getCurrentWindow();
+        unlisten = await win.onCloseRequested(async (event) => {
+          // Default-Close abbrechen, async drainen, dann manuell zerstoeren.
+          event.preventDefault();
+          try { await flushDatabase(); } catch (err) { console.error('[App] flush on close failed:', err); }
+          await win.destroy();
+        });
+      });
+      return () => { cancelled = true; if (unlisten) unlisten(); };
+    }
+
+    // Browser-Fallback: beforeunload + pagehide. Async laeuft hier nicht durch,
+    // also synchroner localStorage-Flush.
+    const handler = () => { flushDatabaseSync(); };
+    window.addEventListener('beforeunload', handler);
+    window.addEventListener('pagehide', handler);
+    return () => {
+      window.removeEventListener('beforeunload', handler);
+      window.removeEventListener('pagehide', handler);
+    };
+  }, []);
 
   if (!dbReady) {
     return (
@@ -150,11 +186,14 @@ export default function App() {
           <Route path="/partners" element={<PartnersPage />} />
           <Route path="/production" element={<ProductionPage />} />
           <Route path="/business-reports" element={<BusinessReportsPage />} />
+          <Route path="/reconciliation" element={<ReconciliationPage />} />
+          <Route path="/ledger-backfill" element={<BackfillPage />} />
           <Route path="/credit-notes" element={<CreditNoteList />} />
           <Route path="/credit-notes/:id" element={<CreditNoteDetail />} />
           <Route path="/ai" element={<AIPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/import" element={<ImportPage />} />
+          <Route path="/ledger-debug" element={<LedgerDebugPage />} />
         </Routes>
         </ErrorBoundary>
       </div>

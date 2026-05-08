@@ -8,6 +8,7 @@ import type { Supplier } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { supplierBalance } from '@/core/ledger/queries';
 
 interface SupplierCredit {
   id: string;
@@ -121,6 +122,9 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   // Plan §Supplier §4: computed from purchases/payments.
   // Plan §Purchase Returns §8: creditBalance = Summe aller Returns mit refund_method='credit'
   // MINUS verbrauchte Credit-Payments auf Purchases.
+  // Plan §Repair §Workshop-as-Supplier: zusätzlich fließen Repair-Expenses
+  // (category='RepairCosts', supplier_id=?) in die Bilanz ein, damit Workshop-
+  // Forderungen sichtbar werden — gleicher Ledger, unterschiedliche Quellen.
   getLedger: (id) => {
     try {
       const p = query(
@@ -128,8 +132,19 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
          FROM purchases WHERE supplier_id = ? AND status != 'CANCELLED'`,
         [id]
       );
-      const totalPurchases = (p[0]?.t as number) || 0;
-      const totalPaid = (p[0]?.paid as number) || 0;
+      const purchasesTotal = (p[0]?.t as number) || 0;
+      const purchasesPaid = (p[0]?.paid as number) || 0;
+
+      const e = query(
+        `SELECT COALESCE(SUM(amount),0) as t, COALESCE(SUM(paid_amount),0) as paid
+         FROM expenses WHERE supplier_id = ? AND status != 'CANCELLED'`,
+        [id]
+      );
+      const expensesTotal = (e[0]?.t as number) || 0;
+      const expensesPaid = (e[0]?.paid as number) || 0;
+
+      const totalPurchases = purchasesTotal + expensesTotal;
+      const totalPaid = purchasesPaid + expensesPaid;
 
       const credit = query(
         `SELECT
@@ -144,10 +159,16 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       const used = (credit[0]?.used as number) || 0;
       const creditBalance = Math.max(0, earned - used);
 
+      // ZIEL.md §3a — outstandingBalance kommt aus dem zentralen Ledger.
+      // totalPurchases/totalPaid bleiben aus Domain-Aggregation, da das Ledger
+      // keine Flow-over-time-Splits zwischen "vergangener Einkauf" und "Zahlung"
+      // pro Lieferanten direkt anbietet.
+      const outstandingBalance = supplierBalance(id);
+
       return {
         totalPurchases,
         totalPaid,
-        outstandingBalance: totalPurchases - totalPaid,
+        outstandingBalance,
         creditBalance,
       };
     } catch {

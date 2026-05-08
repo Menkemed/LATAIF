@@ -5,6 +5,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { customerBalance } from '@/core/ledger/queries';
 
 interface CustomerStore {
   customers: Customer[];
@@ -78,7 +79,11 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   loadCustomers: () => {
     try {
       const branchId = currentBranchId();
-      const rows = query('SELECT * FROM customers WHERE branch_id = ? ORDER BY updated_at DESC', [branchId]);
+      // Sentinel-Customers (z.B. sys-own-shop-* für Own-Item Repairs) werden in keiner UI gelistet.
+      const rows = query(
+        `SELECT * FROM customers WHERE branch_id = ? AND id NOT LIKE 'sys-%' ORDER BY updated_at DESC`,
+        [branchId]
+      );
       set({ customers: rows.map(rowToCustomer), loading: false });
     } catch {
       set({ customers: [], loading: false });
@@ -216,26 +221,33 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   },
 
   // Plan §Customer §4: aggregiert alle offenen Invoices (PARTIAL) pro Kunde.
-  // Berücksichtigt NICHT stornierte/gelöschte Invoices.
+  // Subtrahiert CN receivable_cancel_amount — deckt den Teil, der durch Return-CN
+  // bereits schuldbefreit ist (kein Cash mehr ausstehend für diesen Betrag).
   getOutstanding: (customerId) => {
     try {
       const branchId = currentBranchId();
       const rows = query(
-        `SELECT COALESCE(SUM(gross_amount), 0) AS gross,
-                COALESCE(SUM(paid_amount), 0) AS paid,
-                COUNT(*) AS cnt
-         FROM invoices
-         WHERE customer_id = ? AND branch_id = ? AND status IN ('PARTIAL', 'DRAFT')`,
+        `SELECT
+           COALESCE(SUM(MAX(0, i.gross_amount - i.paid_amount
+             - COALESCE(cn_totals.cancel_amount, 0))), 0) AS outstanding,
+           COALESCE(SUM(i.gross_amount), 0) AS gross,
+           COALESCE(SUM(i.paid_amount), 0) AS paid,
+           COALESCE(SUM(CASE WHEN (i.gross_amount - i.paid_amount
+             - COALESCE(cn_totals.cancel_amount, 0)) > 0.005 THEN 1 ELSE 0 END), 0) AS cnt
+         FROM invoices i
+         LEFT JOIN (
+           SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
+           FROM credit_notes GROUP BY invoice_id
+         ) cn_totals ON cn_totals.invoice_id = i.id
+         WHERE i.customer_id = ? AND i.branch_id = ? AND i.status IN ('PARTIAL', 'DRAFT')`,
         [customerId, branchId]
       );
       const r = rows[0] || {};
-      const gross = Number(r.gross || 0);
-      const paid = Number(r.paid || 0);
       return {
-        outstanding: Math.max(0, gross - paid),
+        outstanding: Number(r.outstanding || 0),
         invoiceCount: Number(r.cnt || 0),
-        totalPaid: paid,
-        totalGross: gross,
+        totalPaid: Number(r.paid || 0),
+        totalGross: Number(r.gross || 0),
       };
     } catch {
       return { outstanding: 0, invoiceCount: 0, totalPaid: 0, totalGross: 0 };
@@ -277,12 +289,20 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       const paidOut  = Number(outflowRow[0]?.paid_out  || 0);
       const profitOut= Number(outflowRow[0]?.profit_out || 0);
 
-      // Outstanding aus Invoices (PARTIAL/DRAFT mit gross > paid).
+      // Outstanding aus Invoices — subtrahiert CN receivable_cancel für korrekte Netto-Schuld.
+      // open_cnt zählt nur Invoices mit tatsächlich offenen Beträgen (nach CN-Abzug).
       const openRow = query(
-        `SELECT COALESCE(SUM(gross_amount - paid_amount), 0) AS outstanding,
-                COUNT(*) AS open_cnt
-         FROM invoices
-         WHERE customer_id = ? AND status IN ('PARTIAL', 'DRAFT')`,
+        `SELECT
+           COALESCE(SUM(MAX(0, i.gross_amount - i.paid_amount
+             - COALESCE(cn_totals.cancel_amount, 0))), 0) AS outstanding,
+           COALESCE(SUM(CASE WHEN (i.gross_amount - i.paid_amount
+             - COALESCE(cn_totals.cancel_amount, 0)) > 0.005 THEN 1 ELSE 0 END), 0) AS open_cnt
+         FROM invoices i
+         LEFT JOIN (
+           SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
+           FROM credit_notes GROUP BY invoice_id
+         ) cn_totals ON cn_totals.invoice_id = i.id
+         WHERE i.customer_id = ? AND i.status IN ('PARTIAL', 'DRAFT')`,
         [customerId]
       );
 
@@ -310,7 +330,9 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       );
 
       const o = openRow[0] || {};
-      const invoiceOutstanding = Math.max(0, Number(o.outstanding || 0));
+      // ZIEL.md §3a — invoiceOutstanding kommt aus dem zentralen Ledger.
+      // Domain-Aggregation bleibt nur als Fallback (catch-Block) und für openInvoiceCount.
+      const invoiceOutstanding = Math.max(0, customerBalance(customerId));
       const loanOpen = Math.max(0, Number(loanRow[0]?.open_lent || 0));
       const loanCount = Number(loanRow[0]?.cnt || 0);
 

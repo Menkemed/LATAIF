@@ -72,12 +72,28 @@ async function persistDb(data: Uint8Array): Promise<void> {
   }
 
   // Browser-only fallback
+  localStorage.setItem(STORAGE_KEY, encodeForLocalStorage(data));
+}
+
+function encodeForLocalStorage(data: Uint8Array): string {
   const CHUNK = 8192;
   let binary = '';
   for (let i = 0; i < data.length; i += CHUNK) {
     binary += String.fromCharCode(...data.subarray(i, i + CHUNK));
   }
-  localStorage.setItem(STORAGE_KEY, btoa(binary));
+  return btoa(binary);
+}
+
+// Synchroner Browser-Save fuer beforeunload — async-Pfade laufen waehrend
+// Window-Close nicht zuverlaessig durch, localStorage.setItem dagegen blockiert
+// die Main-Thread und ist garantiert persistiert bevor der Tab zumacht.
+function persistDbSync(data: Uint8Array): void {
+  if (isTauri()) return; // Tauri kann hier nichts synchron tun
+  try {
+    localStorage.setItem(STORAGE_KEY, encodeForLocalStorage(data));
+  } catch (err) {
+    console.error('[DB] sync persist failed:', err);
+  }
 }
 
 function runMigrations(database: Database): void {
@@ -702,6 +718,58 @@ function runMigrations(database: Database): void {
     // #9 Bank-Transfer Auto-Sync — keine Schema-Änderung, nur Logik
     // #10 Offer ↔ Invoice Roundtrip
     `ALTER TABLE offers ADD COLUMN invoice_id TEXT`,
+    // #11 Own-Item Repair: Repairs sollen entweder Kundenreparatur (CUSTOMER) sein
+    // oder eigenes Inventar-Repair (OWN) — letztere ohne Client/Charge, Cost geht
+    // direkt auf das Produkt. Default für Bestand = CUSTOMER (kein Datenverlust).
+    `ALTER TABLE repairs ADD COLUMN repair_scope TEXT DEFAULT 'CUSTOMER'`,
+    // #12 External-Repair Supplier-Link: Workshop/Goldsmith ist nun ein normaler
+    // Supplier (FK), nicht mehr ein freier Text. Repair-Cost mit offener Zahlung
+    // erscheint dann beim jeweiligen Supplier in den Payables. Bestehende Repairs
+    // behalten external_vendor als Free-Text (Fallback in UI).
+    `ALTER TABLE repairs ADD COLUMN workshop_supplier_id TEXT REFERENCES suppliers(id)`,
+    `ALTER TABLE expenses ADD COLUMN supplier_id TEXT REFERENCES suppliers(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_expenses_supplier ON expenses(supplier_id)`,
+
+    // ── Phase 9: Central Financial Ledger (SSOT) — ZIEL.md §3a ──
+    // Doppelte Buchführung. Pro transaction_id gilt SUM(DEBIT) = SUM(CREDIT).
+    // Immutable: keine UPDATEs/DELETEs. Korrektur via reverses_entry_id.
+    // Schreibpfad ausschließlich über core/ledger/posting.ts.
+    `CREATE TABLE IF NOT EXISTS ledger_entries (
+      id                  TEXT PRIMARY KEY,
+      branch_id           TEXT NOT NULL,
+      tenant_id           TEXT,
+      entry_no            INTEGER NOT NULL,
+      transaction_id      TEXT NOT NULL,
+      occurred_at         TEXT NOT NULL,
+      recorded_at         TEXT NOT NULL,
+      account             TEXT NOT NULL,
+      direction           TEXT NOT NULL CHECK (direction IN ('DEBIT','CREDIT')),
+      amount              REAL NOT NULL CHECK (amount >= 0),
+      currency            TEXT NOT NULL DEFAULT 'BHD',
+      counterparty_type   TEXT,
+      counterparty_id     TEXT,
+      source_module       TEXT NOT NULL,
+      source_id           TEXT NOT NULL,
+      source_line_id      TEXT,
+      reverses_entry_id   TEXT REFERENCES ledger_entries(id),
+      tax_scheme_snapshot TEXT,
+      vat_rate_snapshot   REAL,
+      metadata_json       TEXT,
+      created_by          TEXT NOT NULL,
+      created_at          TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_ledger_branch_account_date ON ledger_entries(branch_id, account, occurred_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_ledger_transaction ON ledger_entries(transaction_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ledger_source ON ledger_entries(source_module, source_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ledger_counterparty ON ledger_entries(counterparty_type, counterparty_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_ledger_branch_no ON ledger_entries(branch_id, entry_no)`,
+
+    // Sequenzcounter pro Branch — entry_no monoton, gap-frei, vergeben in postEntries().
+    `CREATE TABLE IF NOT EXISTS ledger_sequence (
+      branch_id   TEXT PRIMARY KEY,
+      next_no     INTEGER NOT NULL DEFAULT 1,
+      updated_at  TEXT NOT NULL
+    )`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
@@ -1331,10 +1399,70 @@ async function seedFreshDatabase(database: Database): Promise<void> {
   saveDatabase();
 }
 
-export async function saveDatabase(): Promise<void> {
-  if (!db) return;
-  const data = db.export();
-  await persistDb(data);
+// ── Persistence-Mutex ─────────────────────────────────────────
+//
+// Vorher: jede Mutation rief saveDatabase() *ohne* await auf → mehrere
+// fs.writeFile Aufrufe schrieben gleichzeitig in dieselbe Datei. Reihenfolge
+// ist OS-abhaengig: ein langsamer alter Snapshot konnte einen frischen
+// ueberschreiben → User sah seine Aenderung nach Restart wieder verschwinden.
+// Auch der Mobile-Sync-Pull konnte so mit einem stale in-memory Schnappschuss
+// ueberschrieben werden.
+//
+// Jetzt: parallele saveDatabase()-Aufrufe werden koalesziert. Es laeuft
+// IMMER nur ein writeFile gleichzeitig. Setzt jemand "dirty" waehrend ein
+// Save laeuft, dreht die Schleife eine weitere Runde — am Ende ist garantiert
+// der allerletzte In-Memory-State auf der Platte.
+let saveInFlight: Promise<void> | null = null;
+let dirty = false;
+
+async function drainSaves(): Promise<void> {
+  try {
+    while (dirty && db) {
+      dirty = false;
+      const data = db.export();
+      try {
+        await persistDb(data);
+      } catch (err) {
+        console.error('[DB] persistDb failed, will retry on next save:', err);
+        dirty = true; // naechster saveDatabase()-Caller probiert es nochmal
+        break;
+      }
+    }
+  } finally {
+    saveInFlight = null;
+  }
+}
+
+export function saveDatabase(): Promise<void> {
+  if (!db) return Promise.resolve();
+  dirty = true;
+  if (saveInFlight) return saveInFlight;
+  saveInFlight = drainSaves();
+  return saveInFlight;
+}
+
+// Wartet bis alle pending writes durch sind. MUSS vor App-Quit awaited werden,
+// sonst killt der OS den Prozess waehrend ein writeFile noch laeuft.
+export async function flushDatabase(): Promise<void> {
+  // Mehrere Runden falls neue Mutations *waehrend* dem Drain kommen.
+  for (let i = 0; i < 10; i++) {
+    if (saveInFlight) await saveInFlight;
+    if (!dirty) return;
+    saveDatabase();
+  }
+}
+
+// Synchroner Flush fuer Browser beforeunload (localStorage.setItem blockiert).
+// Nicht fuer Tauri verwenden — dort macht App.tsx einen async flushDatabase()
+// im CloseRequested-Handler.
+export function flushDatabaseSync(): void {
+  if (!db || isTauri()) return;
+  try {
+    const data = db.export();
+    persistDbSync(data);
+  } catch (err) {
+    console.error('[DB] flushDatabaseSync failed:', err);
+  }
 }
 
 export function getDatabase(): Database {

@@ -8,6 +8,19 @@ import type { Partner, PartnerTransaction, PartnerTransactionType } from '@/core
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import {
+  postPartnerTransaction,
+  postPartnerTransactionReversed,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface PartnerStore {
   partners: Partner[];
@@ -170,6 +183,13 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
     trackDelete('partner_transactions', id);
     get().loadTransactions();
     get().loadPartners();
+
+    // ZIEL.md §3a — Reverse Ledger-Buchung beim Löschen.
+    safePost(`postPartnerTransactionReversed(${id})`, () => {
+      if (!hasLedgerEntries('PARTNER_TX', id)) return;
+      if (hasReversalFor('PARTNER_TX', id)) return;
+      postPartnerTransactionReversed(id);
+    });
   },
 
   getPartnerLedger: (partnerId) => {
@@ -232,5 +252,18 @@ function recordTx(
   trackInsert('partner_transactions', id, { partnerId, type, amount, method, paymentStatus });
   get().loadTransactions();
   get().loadPartners();
+
+  // ZIEL.md §3a — Partner-Transaction ans Ledger.
+  // Wir posten unabhängig von payment_status; das matched die existierende Cashflow-Logik
+  // im bankingStore, die PENDING-Bank-Transfers ebenfalls als bewegte Cash zählt.
+  safePost(`postPartnerTransaction(${id})`, () => {
+    if (hasLedgerEntries('PARTNER_TX', id)) return;
+    postPartnerTransaction({
+      id, partnerId, type, amount, method,
+      transactionDate: date || now.split('T')[0],
+      transactionNumber: txNumber,
+    });
+  });
+
   return get().transactions.find(t => t.id === id)!;
 }

@@ -1,11 +1,28 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme } from '@/core/models/types';
+import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme, PaymentMethod } from '@/core/models/types';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
+import {
+  postInvoiceIssued,
+  postInvoicePayment,
+  postInvoiceCancelled,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+// Domain-Insert + Ledger-Posting laufen in einem Try/Catch. Posting-Fehler werden
+// loggend an die Konsole gemeldet, damit ein Bilanz-Bug nicht den Verkaufsfluss
+// blockiert; Reconciliation-View zeigt Diskrepanzen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface InvoiceStore {
   invoices: Invoice[];
@@ -13,7 +30,7 @@ interface InvoiceStore {
   loadInvoices: () => void;
   getInvoice: (id: string) => Invoice | undefined;
   createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>) => Invoice;
-  createDirectInvoice: (customerId: string, lines: { productId: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string) => Invoice;
+  createDirectInvoice: (customerId: string, lines: { productId: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair') => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   rewriteInvoiceLines: (id: string, lines: { productId: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[]) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string) => void;
@@ -181,12 +198,35 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     trackInsert('invoices', id, { invoiceNumber, customerId: offer.customer_id as string });
     eventBus.emit('invoice.created', 'invoice', id, { offerId, total: offer.total });
     eventBus.emit('invoice.issued', 'invoice', id, {});
+
+    // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
+    safePost(`postInvoiceIssued(${id}) from offer`, () => {
+      if (hasLedgerEntries('INVOICE', id)) return;
+      const fresh: Invoice = {
+        id, invoiceNumber, customerId: offer.customer_id as string,
+        status: 'PARTIAL', currency: 'BHD',
+        netAmount: sumNet, vatRateSnapshot: vatRate, vatAmount: sumVat,
+        grossAmount: sumGross, taxSchemeSnapshot: invoiceScheme as InvoiceTaxScheme,
+        purchasePriceSnapshot: totalPurchase, salePriceSnapshot: totalSale, marginSnapshot: margin,
+        paidAmount: 0, issuedAt: now, dueAt: dueDate,
+        lines: lines.map((l, i) => ({
+          id: uuid(), invoiceId: id, productId: l.productId,
+          quantity: 1,
+          unitPrice: l.unitPrice, purchasePriceSnapshot: l.purchasePrice,
+          vatRate: l.vatRate, taxScheme: l.taxScheme as TaxScheme,
+          vatAmount: l.vatAmount, lineTotal: l.lineTotal, position: i + 1,
+        })),
+        createdAt: now, createdBy: userId, offerId,
+      };
+      postInvoiceIssued(fresh);
+    });
+
     get().loadInvoices();
 
     return get().getInvoice(id)!;
   },
 
-  createDirectInvoice: (customerId, lines, notes, issuedAtOverride) => {
+  createDirectInvoice: (customerId, lines, notes, issuedAtOverride, numbering) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -194,7 +234,14 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
-    const invoiceNumber = get().getNextInvoiceNumber();
+    // Repair-Invoices haben eine eigene Nummernserie analog zum Sales-Flow:
+    //   RPINV-YYYY-NNNNNN  während PARTIAL
+    //   RINV-YYYY-NNNNNN   nach Voll-Zahlung (siehe recordPayment)
+    // So bleiben Repair-Rechnungen in der Invoice-Liste sichtbar, vermischen sich
+    // aber nicht mit den normalen Sales-Nummern (PINV/INV).
+    const invoiceNumber = numbering === 'repair'
+      ? getNextDocumentNumber('RPINV')
+      : get().getNextInvoiceNumber();
     // Issued-At Override (z.B. nachträgliche Rechnung mit Datum aus Vergangenheit).
     // Akzeptiert "YYYY-MM-DD" oder volles ISO. Default = jetzt.
     const issuedAt = issuedAtOverride
@@ -242,6 +289,28 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     saveDatabase();
     trackInsert('invoices', id, { invoiceNumber, customerId });
     eventBus.emit('invoice.created', 'invoice', id, { customerId, grossAmount });
+
+    // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
+    safePost(`postInvoiceIssued(${id})`, () => {
+      if (hasLedgerEntries('INVOICE', id)) return;
+      const fresh: Invoice = {
+        id, invoiceNumber, customerId, status: 'PARTIAL', currency: 'BHD',
+        netAmount, vatRateSnapshot: lines[0]?.vatRate || 10, vatAmount: totalVat,
+        grossAmount, taxSchemeSnapshot: taxScheme as InvoiceTaxScheme,
+        purchasePriceSnapshot: totalPurchase, salePriceSnapshot: netAmount, marginSnapshot: margin,
+        paidAmount: 0, issuedAt, notes,
+        lines: lines.map((l, i) => ({
+          id: uuid(), invoiceId: id, productId: l.productId,
+          quantity: Math.max(1, l.quantity || 1),
+          unitPrice: l.unitPrice, purchasePriceSnapshot: l.purchasePrice,
+          vatRate: l.vatRate, taxScheme: l.taxScheme as TaxScheme,
+          vatAmount: l.vatAmount, lineTotal: l.lineTotal, position: i + 1,
+        })),
+        createdAt: now, createdBy: userId,
+      };
+      postInvoiceIssued(fresh);
+    });
+
     get().loadInvoices();
     return get().getInvoice(id)!;
   },
@@ -288,6 +357,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         [now, id]
       );
       saveDatabase();
+
+      // ZIEL.md §3a — Ledger-Storno bei Invoice-Cancel.
+      safePost(`postInvoiceCancelled(${id})`, () => {
+        if (!hasLedgerEntries('INVOICE', id)) return;     // nie gepostet → nichts zu reverten
+        if (hasReversalFor('INVOICE', id)) return;        // bereits storniert
+        postInvoiceCancelled({ id } as Invoice);
+      });
     }
 
     if (data.status === 'FINAL') {
@@ -408,10 +484,17 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const prevStatus = inv.status;
       const newStatus: InvoiceStatus = wasFullyPaid ? 'FINAL' : 'PARTIAL';
 
-      // Wenn Konvertierung PARTIAL → FINAL: neue INV-Nummer zuweisen
+      // Wenn Konvertierung PARTIAL → FINAL: neue Nummer in der jeweiligen Serie zuweisen.
+      //   Sales:  PINV  → INV
+      //   Repair: RPINV → RINV
+      // So bleiben Repair-Rechnungen sauber in eigener Serie, parallel zur Sales-Logik.
       let newInvoiceNumber = inv.invoiceNumber;
       if (wasFullyPaid && inv.status !== 'FINAL') {
-        newInvoiceNumber = getNextDocumentNumber('INV');
+        if (inv.invoiceNumber.startsWith('RPINV-')) {
+          newInvoiceNumber = getNextDocumentNumber('RINV');
+        } else {
+          newInvoiceNumber = getNextDocumentNumber('INV');
+        }
       }
 
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, invoice_number = ?, updated_at = ? WHERE id = ?`,
@@ -434,6 +517,27 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     saveDatabase();
     trackInsert('payments', paymentId, { invoiceId, amount, method });
     trackPayment('invoices', invoiceId, amount, method);
+
+    // ZIEL.md §3a — Ledger-Posting für Customer-Zahlung.
+    const invForLedger = get().getInvoice(invoiceId);
+    if (invForLedger) {
+      safePost(`postInvoicePayment(${paymentId})`, () => {
+        if (hasLedgerEntries('PAYMENT', paymentId)) return;
+        postInvoicePayment(
+          {
+            id: paymentId,
+            invoiceId,
+            amount,
+            method: method as PaymentMethod,
+            receivedAt: now,
+            notes,
+            createdAt: now,
+          },
+          invForLedger.customerId
+        );
+      });
+    }
+
     get().loadInvoices();
   },
 

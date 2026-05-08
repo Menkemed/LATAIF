@@ -4,6 +4,14 @@ import type { PreciousMetal, MetalStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getSetting } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { postMetalPayment, hasLedgerEntries } from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface MetalStore {
   metals: PreciousMetal[];
@@ -210,6 +218,15 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
     trackInsert('metal_payments', paymentId, { metalId, amount, method });
     trackUpdate('precious_metals', metalId, { paidAmount: newPaid, paymentStatus: newStatus, status: newMetalStatus });
     get().loadMetals();
+
+    // ZIEL.md §3a — Metal-Payment ans Ledger.
+    safePost(`postMetalPayment(${paymentId})`, () => {
+      if (hasLedgerEntries('METAL_PAYMENT', paymentId)) return;
+      postMetalPayment({
+        id: paymentId, metalId, amount, method,
+        paidAt: date || now.split('T')[0],
+      });
+    });
   },
 
   getMetalPayments: (metalId) => {

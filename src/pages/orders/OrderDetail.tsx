@@ -213,15 +213,14 @@ export function OrderDetail() {
   async function carryOverOrderPaymentsToInvoice(invoiceId: string, orderId: string, orderNumber: string) {
     const orderPayments = paymentsByOrder[orderId] || [];
     if (orderPayments.length > 0) {
+      // ZIEL.md §3a — Order-Payment-Ledger reversen BEVOR die Invoice-Payments
+      // gepostet werden. Sonst doppelt-Cash (Order-Payment + Invoice-Payment).
+      // markConvertedToInvoice macht beides atomar (Reverse + SQL-Flag).
+      useOrderPaymentStore.getState().markConvertedToInvoice(orderId);
       const inv = useInvoiceStore.getState();
       for (const op of orderPayments) {
         inv.recordPayment(invoiceId, op.amount, op.method || 'cash', `Carried over from order ${orderNumber}`);
       }
-      // Flag order_payments as already converted, so cashflow doesn't double-count
-      const { getDatabase: getDb, saveDatabase: saveDb } = await import('@/core/db/database');
-      const db = getDb();
-      db.run(`UPDATE order_payments SET converted_to_invoice = 1 WHERE order_id = ?`, [orderId]);
-      await saveDb();
     } else if (totalPaid > 0) {
       useInvoiceStore.getState().recordPayment(invoiceId, totalPaid, 'cash', `Carried over from order ${orderNumber}`);
     }

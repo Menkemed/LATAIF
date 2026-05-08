@@ -89,6 +89,29 @@ export function SupplierDetail() {
     } catch { return []; }
   }, [id, purchases]);
 
+  const repairExpenses = useMemo(() => {
+    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; expenseDate: string; status: string; repairId?: string }>;
+    try {
+      const rows = query(
+        `SELECT id, expense_number, description, amount, paid_amount, expense_date, status, related_entity_id
+         FROM expenses
+         WHERE supplier_id = ? AND related_module = 'repair' AND status != 'CANCELLED'
+         ORDER BY expense_date DESC`,
+        [id]
+      );
+      return rows.map(r => ({
+        id: r.id as string,
+        expenseNumber: r.expense_number as string,
+        description: r.description as string,
+        amount: (r.amount as number) || 0,
+        paidAmount: (r.paid_amount as number) || 0,
+        expenseDate: r.expense_date as string,
+        status: r.status as string,
+        repairId: (r.related_entity_id as string) || undefined,
+      }));
+    } catch { return []; }
+  }, [id, purchases]);
+
   if (!supplier) {
     return (
       <div className="flex-1 flex items-center justify-center" style={{ height: '100vh', background: '#FFFFFF' }}>
@@ -219,6 +242,44 @@ export function SupplierDetail() {
             </div>
           )}
         </Card>
+
+        {/* Repair Expenses / Workshop Payables */}
+        {repairExpenses.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <Card>
+              <span className="text-overline" style={{ marginBottom: 12 }}>REPAIR COSTS / WORKSHOP PAYABLES ({repairExpenses.length})</span>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.8fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12, marginTop: 12 }}>
+                <span className="text-overline">EXPENSE #</span>
+                <span className="text-overline">DESCRIPTION</span>
+                <span className="text-overline">DATE</span>
+                <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
+                <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>PAID</span>
+                <span className="text-overline">STATUS</span>
+                {repairExpenses.map(e => {
+                  const remaining = Math.max(0, e.amount - e.paidAmount);
+                  return (
+                    <div key={e.id} style={{ display: 'contents' }}
+                      onClick={() => e.repairId && navigate(`/repairs/${e.repairId}`)}
+                    >
+                      <span className="font-mono" style={{ fontSize: 12, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: e.repairId ? 'pointer' : 'default' }}>{e.expenseNumber}</span>
+                      <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description}</span>
+                      <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(e.expenseDate)}</span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(e.amount)}</span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(e.paidAmount)}</span>
+                      <span style={{
+                        fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE',
+                        color: e.status === 'PAID' ? '#16A34A' : remaining > 0 ? '#DC2626' : '#6B7280',
+                        fontWeight: remaining > 0 ? 600 : 400,
+                      }}>
+                        {e.status === 'PAID' ? 'Paid' : remaining > 0 ? `${fmt(remaining)} pending` : e.status}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          </div>
+        )}
 
         {/* Payments History */}
         <div style={{ marginTop: 24 }}>

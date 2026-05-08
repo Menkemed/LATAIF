@@ -199,25 +199,32 @@ export const usePayablesStore = create<PayablesStore>((set) => ({
 
       // 5) Open Expenses — alles wo paid_amount < amount (Pay-Later + Partial Payment)
       const expenseRows = query(
-        `SELECT id, expense_number, category, amount, paid_amount, expense_date, description, created_at
-         FROM expenses
-         WHERE status != 'CANCELLED' AND amount > COALESCE(paid_amount, 0) + 0.005`,
+        `SELECT e.id, e.expense_number, e.category, e.amount, e.paid_amount,
+                e.expense_date, e.description, e.created_at, e.supplier_id, e.related_module,
+                s.name AS supplier_name
+         FROM expenses e
+         LEFT JOIN suppliers s ON s.id = e.supplier_id
+         WHERE e.status != 'CANCELLED' AND e.amount > COALESCE(e.paid_amount, 0) + 0.005`,
         []
       );
       for (const r of expenseRows) {
         const cat = (r.category as string) || 'Expense';
         const desc = (r.description as string) || '';
+        const supplierName = r.supplier_name as string | null;
+        const supplierId = r.supplier_id as string | null;
         rows.push(build({
           type: 'expense',
           sourceTable: 'expenses',
           sourceId: r.id as string,
-          counterpartyName: desc || cat,
+          counterpartyId: supplierId || undefined,
+          counterpartyName: supplierName || desc || cat,
+          counterpartyHref: supplierId ? `/suppliers/${supplierId}` : undefined,
           referenceNumber: (r.expense_number as string) || ((r.id as string) || '').slice(0, 8),
           issuedAt: (r.expense_date as string) || (r.created_at as string),
           totalAmount: Number(r.amount || 0),
           paidAmount: Number(r.paid_amount || 0),
           navigateTo: '/expenses',
-          detailLabel: `Expense · ${cat}`,
+          detailLabel: supplierName ? `${cat} · ${desc || cat}` : `Expense · ${cat}`,
         }, today, gracePeriodDays));
       }
 

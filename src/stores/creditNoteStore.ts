@@ -10,6 +10,7 @@ import type { CreditNote } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackDelete } from '@/core/sync/track';
+import { postCreditNote, hasLedgerEntries } from '@/core/ledger/posting';
 
 interface CreditNoteStore {
   creditNotes: CreditNote[];
@@ -149,6 +150,14 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
       createdAt: now, createdBy: userId || undefined,
     };
     set(state => ({ creditNotes: [cn, ...state.creditNotes] }));
+
+    // ZIEL.md §3a — Ledger-Posting für Credit Note.
+    try {
+      if (!hasLedgerEntries('CREDIT_NOTE', id)) postCreditNote(cn);
+    } catch (err) {
+      console.error(`[ledger] postCreditNote(${id}) failed:`, err);
+    }
+
     return cn;
   },
 

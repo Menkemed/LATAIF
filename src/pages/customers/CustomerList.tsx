@@ -121,7 +121,11 @@ export function CustomerList() {
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.outstanding > 0 ? '#AA6E6E' : '#6B7280', minWidth: 0, overflow: 'hidden' }}>
               <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.outstanding > 0 ? fmt(stats.outstanding) : '\u2014'}</div>
               {stats.openInvoiceCount > 0 && (
-                <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.openInvoiceCount} open</div>
+                <div
+                  onClick={e => { e.stopPropagation(); navigate(`/invoices?customer=${c.id}`); }}
+                  style={{ fontSize: 10, color: '#3D7FFF', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'underline' }}>
+                  {stats.openInvoiceCount} open
+                </div>
               )}
             </div>
           </div>

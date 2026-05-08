@@ -8,6 +8,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { useProductStore } from '@/stores/productStore';
+import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
 import { usePermission } from '@/hooks/usePermission';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { printHangtag } from '@/core/pdf/hangtag';
@@ -23,6 +24,7 @@ export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { products, categories, loadProducts, loadCategories, updateProduct, deleteProduct, nextAvailableSku } = useProductStore();
+  const { repairs, loadRepairs } = useRepairStore();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Product>>({});
   const [formAttrs, setFormAttrs] = useState<Record<string, string | number | boolean | string[]>>({});
@@ -34,7 +36,16 @@ export function ProductDetail() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const perm = usePermission();
 
-  useEffect(() => { loadCategories(); loadProducts(); }, [loadCategories, loadProducts]);
+  useEffect(() => { loadCategories(); loadProducts(); loadRepairs(); }, [loadCategories, loadProducts, loadRepairs]);
+
+  // Plan §Repair §Own-Item: alle Repairs die mit diesem Produkt verlinkt sind —
+  // werden in einer eigenen Section unten angezeigt (Cost-Historie + Issue + Datum).
+  const productRepairs = useMemo(
+    () => repairs.filter(r => r.productId === id).sort((a, b) =>
+      (b.receivedAt || b.createdAt || '').localeCompare(a.receivedAt || a.createdAt || '')
+    ),
+    [repairs, id],
+  );
 
   const product = useMemo(() => products.find(p => p.id === id), [products, id]);
   // Im Edit-Mode: Kategorie aus form.categoryId → Felder passen sich live an.
@@ -667,6 +678,60 @@ export function ProductDetail() {
             )}
           </Card>
         </div>
+
+        {/* Repair History — alle Repairs (CUSTOMER + OWN) die dieses Produkt
+            betreffen. Bei OWN wird der Cost auf den Product-Cost addiert; sichtbar
+            hier als Audit-Trail. */}
+        {productRepairs.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <Card>
+              <span className="text-overline" style={{ marginBottom: 16 }}>REPAIR HISTORY</span>
+              <div style={{ marginTop: 12 }}>
+                {productRepairs.map(rep => {
+                  const totalCost = computeRepairTotalCost(rep);
+                  const isOwn = rep.repairScope === 'OWN';
+                  return (
+                    <div key={rep.id}
+                      onClick={() => navigate(`/repairs/${rep.id}`)}
+                      className="cursor-pointer transition-colors"
+                      style={{ padding: '12px 14px', borderBottom: '1px solid #E5E9EE', display: 'grid', gridTemplateColumns: '120px 1fr 100px 130px 110px', gap: 16, alignItems: 'center' }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                    >
+                      <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{rep.repairNumber}</span>
+                      <div>
+                        <div style={{ fontSize: 13, color: '#0F0F10' }}>{rep.issueDescription || 'Repair'}</div>
+                        {rep.diagnosis && (
+                          <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>{rep.diagnosis}</div>
+                        )}
+                      </div>
+                      <span style={{
+                        fontSize: 11, padding: '3px 8px', borderRadius: 999, textAlign: 'center',
+                        background: isOwn ? 'rgba(170,149,110,0.12)' : 'rgba(113,93,227,0.06)',
+                        color: isOwn ? '#8A7548' : '#715DE3',
+                        border: `1px solid ${isOwn ? 'rgba(170,149,110,0.4)' : 'rgba(113,93,227,0.3)'}`,
+                      }}>{isOwn ? 'Own Item' : 'Customer'}</span>
+                      <span style={{ fontSize: 12, color: '#6B7280' }}>
+                        {rep.receivedAt ? new Date(rep.receivedAt).toLocaleDateString() : '—'}
+                      </span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right' }}>
+                        {totalCost > 0 ? `${fmt(totalCost)} BHD` : '—'}
+                      </span>
+                    </div>
+                  );
+                })}
+                {productRepairs.some(r => r.repairScope === 'OWN' && r.completedAt) && (
+                  <div className="flex justify-between" style={{ padding: '12px 14px', marginTop: 4, fontSize: 12, color: '#6B7280' }}>
+                    <span>Total Own-Item repair cost capitalized into purchase price</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>
+                      {fmt(productRepairs.filter(r => r.repairScope === 'OWN' && r.completedAt).reduce((s, r) => s + computeRepairTotalCost(r), 0))} BHD
+                    </span>
+                  </div>
+                )}
+              </div>
+            </Card>
+          </div>
+        )}
       </div>
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Item" width={400}>

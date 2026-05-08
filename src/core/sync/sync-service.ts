@@ -154,50 +154,80 @@ async function pullChanges(): Promise<number> {
 
   // Plan §LAN-Sync: nach dem Pull die betroffenen Stores neu laden — sonst
   // bleibt die UI auf dem alten Stand und neue Items vom Handy tauchen erst
-  // beim naechsten App-Start auf. Wir reloaden anhand der Tabellen die im
-  // Changeset vorkommen, damit nicht jedes Mal alle Stores rauschen.
+  // beim naechsten App-Start auf. Per-Store try/catch, sonst killt ein einziger
+  // fehlender Store die ganze Reload-Kette.
+  //
+  // Frueher waren hier nur 9 Stores. Mobile-Aenderungen an Suppliers, Offers,
+  // Tasks, Documents, Credit-Notes etc. waren erst nach App-Restart sichtbar —
+  // genau das Symptom "hochgeladen, kurz da, nach Restart in DB drin aber in
+  // UI weg". Reload-Map deckt jetzt alle Tabellen mit Store-Backing ab.
   const tablesChanged = new Set(changes.map((c: { table_name: string }) => c.table_name));
   if (tablesChanged.size > 0) {
-    try {
-      if (tablesChanged.has('products')) {
-        const { useProductStore } = await import('@/stores/productStore');
-        useProductStore.getState().loadProducts();
+    type Reloader = { tables: string[]; reload: () => Promise<void> };
+    const reloadMap: Reloader[] = [
+      { tables: ['products'],
+        reload: async () => { (await import('@/stores/productStore')).useProductStore.getState().loadProducts(); } },
+      { tables: ['customers'],
+        reload: async () => { (await import('@/stores/customerStore')).useCustomerStore.getState().loadCustomers(); } },
+      { tables: ['invoices', 'invoice_lines', 'payments'],
+        reload: async () => { (await import('@/stores/invoiceStore')).useInvoiceStore.getState().loadInvoices(); } },
+      { tables: ['repairs'],
+        reload: async () => { (await import('@/stores/repairStore')).useRepairStore.getState().loadRepairs(); } },
+      { tables: ['orders', 'order_lines'],
+        reload: async () => { (await import('@/stores/orderStore')).useOrderStore.getState().loadOrders(); } },
+      { tables: ['order_payments'],
+        reload: async () => { (await import('@/stores/orderPaymentStore')).useOrderPaymentStore.getState().loadPayments(); } },
+      { tables: ['purchases', 'purchase_lines', 'purchase_payments', 'purchase_returns', 'purchase_return_lines'],
+        reload: async () => {
+          const m = await import('@/stores/purchaseStore');
+          m.usePurchaseStore.getState().loadPurchases();
+          m.usePurchaseStore.getState().loadReturns();
+        } },
+      { tables: ['agents', 'agent_transfers', 'agent_settlement_payments'],
+        reload: async () => {
+          const m = await import('@/stores/agentStore');
+          m.useAgentStore.getState().loadAgents();
+          m.useAgentStore.getState().loadTransfers();
+        } },
+      { tables: ['consignments'],
+        reload: async () => { (await import('@/stores/consignmentStore')).useConsignmentStore.getState().loadConsignments(); } },
+      { tables: ['expenses', 'expense_payments'],
+        reload: async () => { (await import('@/stores/expenseStore')).useExpenseStore.getState().loadExpenses(); } },
+      // Ab hier neu: Stores die zuvor nicht reloaded wurden.
+      { tables: ['suppliers', 'supplier_credits'],
+        reload: async () => { (await import('@/stores/supplierStore')).useSupplierStore.getState().loadSuppliers(); } },
+      { tables: ['offers', 'offer_lines'],
+        reload: async () => { (await import('@/stores/offerStore')).useOfferStore.getState().loadOffers(); } },
+      { tables: ['partners', 'partner_transactions'],
+        reload: async () => {
+          const m = await import('@/stores/partnerStore');
+          m.usePartnerStore.getState().loadPartners();
+          m.usePartnerStore.getState().loadTransactions();
+        } },
+      { tables: ['debts', 'debt_payments'],
+        reload: async () => { (await import('@/stores/debtStore')).useDebtStore.getState().loadDebts(); } },
+      { tables: ['sales_returns', 'sales_return_lines'],
+        reload: async () => { (await import('@/stores/salesReturnStore')).useSalesReturnStore.getState().loadReturns(); } },
+      { tables: ['credit_notes'],
+        reload: async () => { (await import('@/stores/creditNoteStore')).useCreditNoteStore.getState().loadCreditNotes(); } },
+      { tables: ['tasks'],
+        reload: async () => { (await import('@/stores/taskStore')).useTaskStore.getState().loadTasks(); } },
+      { tables: ['documents'],
+        reload: async () => { (await import('@/stores/documentStore')).useDocumentStore.getState().loadDocuments(); } },
+      { tables: ['customer_messages'],
+        reload: async () => { (await import('@/stores/customerMessageStore')).useCustomerMessageStore.getState().loadMessages(); } },
+      { tables: ['bank_transfers'],
+        reload: async () => { (await import('@/stores/bankingStore')).useBankingStore.getState().loadTransfers(); } },
+      { tables: ['precious_metals', 'metal_payments'],
+        reload: async () => { (await import('@/stores/metalStore')).useMetalStore.getState().loadMetals(); } },
+      { tables: ['production_records', 'production_inputs', 'production_outputs'],
+        reload: async () => { (await import('@/stores/productionStore')).useProductionStore.getState().loadRecords(); } },
+    ];
+    for (const entry of reloadMap) {
+      if (entry.tables.some(t => tablesChanged.has(t))) {
+        try { await entry.reload(); }
+        catch (err) { console.warn('[Sync] Store reload failed for', entry.tables[0], ':', err); }
       }
-      if (tablesChanged.has('customers')) {
-        const { useCustomerStore } = await import('@/stores/customerStore');
-        useCustomerStore.getState().loadCustomers();
-      }
-      if (tablesChanged.has('invoices') || tablesChanged.has('invoice_lines') || tablesChanged.has('payments')) {
-        const { useInvoiceStore } = await import('@/stores/invoiceStore');
-        useInvoiceStore.getState().loadInvoices();
-      }
-      if (tablesChanged.has('repairs')) {
-        const { useRepairStore } = await import('@/stores/repairStore');
-        useRepairStore.getState().loadRepairs();
-      }
-      if (tablesChanged.has('orders') || tablesChanged.has('order_lines')) {
-        const { useOrderStore } = await import('@/stores/orderStore');
-        useOrderStore.getState().loadOrders();
-      }
-      if (tablesChanged.has('purchases') || tablesChanged.has('purchase_lines')) {
-        const { usePurchaseStore } = await import('@/stores/purchaseStore');
-        usePurchaseStore.getState().loadPurchases();
-      }
-      if (tablesChanged.has('agents') || tablesChanged.has('agent_transfers')) {
-        const { useAgentStore } = await import('@/stores/agentStore');
-        useAgentStore.getState().loadAgents();
-        useAgentStore.getState().loadTransfers();
-      }
-      if (tablesChanged.has('consignments')) {
-        const { useConsignmentStore } = await import('@/stores/consignmentStore');
-        useConsignmentStore.getState().loadConsignments();
-      }
-      if (tablesChanged.has('expenses')) {
-        const { useExpenseStore } = await import('@/stores/expenseStore');
-        useExpenseStore.getState().loadExpenses();
-      }
-    } catch (err) {
-      console.warn('[Sync] Store reload after pull failed:', err);
     }
   }
 

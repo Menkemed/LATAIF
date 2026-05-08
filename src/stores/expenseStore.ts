@@ -8,6 +8,22 @@ import type { Expense, ExpenseCategory, ExpensePayment } from '@/core/models/typ
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import {
+  postExpense,
+  postExpensePayment,
+  postExpenseCancelled,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+// Buchungsfehler blockieren den operativen Domain-Insert NICHT; Reconciliation-View
+// surfaces Diskrepanzen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface ExpenseStore {
   expenses: Expense[];
@@ -40,6 +56,7 @@ function rowToExpense(row: Record<string, unknown>): Expense {
     description: row.description as string | undefined,
     relatedModule: row.related_module as string | undefined,
     relatedEntityId: row.related_entity_id as string | undefined,
+    supplierId: row.supplier_id as string | undefined,
     status: (row.status as 'PENDING' | 'PAID' | 'CANCELLED') || 'PAID',
     createdAt: row.created_at as string,
     createdBy: row.created_by as string | undefined,
@@ -112,39 +129,65 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
 
     db.run(
       `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
-        expense_date, description, related_module, related_entity_id, status, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, expenseNumber, data.category || 'Miscellaneous', amount, initialPaid,
        method, expenseDate,
        data.description || null, data.relatedModule || null, data.relatedEntityId || null,
-       status, now, userId]
+       data.supplierId || null, status, now, userId]
     );
 
     // Audit-Trail: Initial-Zahlung als expense_payments-Eintrag (falls > 0).
+    let initialPayId: string | null = null;
     if (initialPaid > 0) {
-      const payId = uuid();
+      initialPayId = uuid();
       db.run(
         `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [payId, id, initialPaid, method, expenseDate, 'Initial payment on creation', now]
+        [initialPayId, id, initialPaid, method, expenseDate, 'Initial payment on creation', now]
       );
-      trackInsert('expense_payments', payId, { expenseId: id, amount: initialPaid, method });
+      trackInsert('expense_payments', initialPayId, { expenseId: id, amount: initialPaid, method });
     }
 
     saveDatabase();
     trackInsert('expenses', id, { expenseNumber, category: data.category, amount, paidAmount: initialPaid, status });
     get().loadExpenses();
+
+    // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
+    safePost(`postExpense(${id})`, () => {
+      if (hasLedgerEntries('EXPENSE', id)) return;
+      const fresh = get().getExpense(id);
+      if (fresh) postExpense(fresh);
+    });
+    if (initialPayId && initialPaid > 0) {
+      const payId = initialPayId;
+      const supplierId = data.supplierId;
+      safePost(`postExpensePayment(${payId}) [initial]`, () => {
+        if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
+        postExpensePayment(
+          {
+            id: payId, expenseId: id, amount: initialPaid,
+            method, paidAt: expenseDate, createdAt: now,
+            note: 'Initial payment on creation',
+          },
+          supplierId
+        );
+      });
+    }
+
     return get().getExpense(id)!;
   },
 
   updateExpense: (id, data) => {
     const db = getDatabase();
+    const before = get().getExpense(id);
     const fields: string[] = [];
     const values: unknown[] = [];
     const map: Record<string, string> = {
       category: 'category', amount: 'amount', paymentMethod: 'payment_method',
       expenseDate: 'expense_date', description: 'description',
       relatedModule: 'related_module', relatedEntityId: 'related_entity_id',
+      supplierId: 'supplier_id',
       status: 'status',
     };
     for (const [k, v] of Object.entries(data)) {
@@ -166,6 +209,16 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     saveDatabase();
     trackUpdate('expenses', id, data);
     get().loadExpenses();
+
+    // ZIEL.md §3a — Ledger-Storno bei Expense-Cancel.
+    // Reverst nur EXPENSES_OPERATING/AP. Bereits geleistete Cash-Zahlungen bleiben gebucht.
+    if (data.status === 'CANCELLED' && before && before.status !== 'CANCELLED') {
+      safePost(`postExpenseCancelled(${id})`, () => {
+        if (!hasLedgerEntries('EXPENSE', id)) return;
+        if (hasReversalFor('EXPENSE', id)) return;
+        postExpenseCancelled(before);
+      });
+    }
   },
 
   deleteExpense: (id) => {
@@ -209,6 +262,18 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     trackInsert('expense_payments', payId, { expenseId: id, amount: applied, method });
     trackUpdate('expenses', id, { paidAmount: newPaid, status: newStatus });
     get().loadExpenses();
+
+    // ZIEL.md §3a — Ledger-Posting für Expense-Zahlung.
+    safePost(`postExpensePayment(${payId})`, () => {
+      if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
+      postExpensePayment(
+        {
+          id: payId, expenseId: id, amount: applied,
+          method, paidAt: payDate, createdAt: now, note: note ?? undefined,
+        },
+        exp.supplierId
+      );
+    });
   },
 
   getExpensePayments: (id) => {

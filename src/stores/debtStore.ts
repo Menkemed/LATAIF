@@ -4,6 +4,22 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import type { Debt, DebtPayment, DebtDirection, CashSource, DebtStatus } from '@/core/models/types';
+import { canonicalLoanDirection } from '@/core/models/types';
+import {
+  postLoanCreated,
+  postLoanPayment,
+  postLoanCancelled,
+  postLoanPaymentReversed,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface DebtStore {
   debts: Debt[];
@@ -161,10 +177,18 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
       amount: debt.amount, source: debt.source,
     });
     get().loadDebts();
+
+    // ZIEL.md §3a — Loan-Anlage ans Ledger.
+    safePost(`postLoanCreated(${id})`, () => {
+      if (hasLedgerEntries('LOAN', id)) return;
+      postLoanCreated(debt);
+    });
+
     return debt;
   },
 
   updateDebt: (id, data) => {
+    const before = get().debts.find(d => d.id === id);
     // Validation BEVOR DB-Mutation, damit kein partieller State entsteht.
     if (data.amount !== undefined) {
       const newAmount = Number(data.amount);
@@ -218,10 +242,43 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
     saveDatabase();
     trackUpdate('debts', id, data);
     get().loadDebts();
+
+    // ZIEL.md §3a — Loan-Storno bei Status='CANCELLED' (oder Legacy 'cancelled').
+    // Bestehende Repayments bleiben gebucht (echtes Geld). Reconciliation surface
+    // Diskrepanzen, falls cancelled trotz schon erfolgter Rückzahlungen.
+    if (data.status !== undefined) {
+      const newStatus = String(data.status).toUpperCase();
+      const oldStatus = String(before?.status || '').toUpperCase();
+      if (newStatus === 'CANCELLED' && oldStatus !== 'CANCELLED' && before) {
+        safePost(`postLoanCancelled(${id})`, () => {
+          if (!hasLedgerEntries('LOAN', id)) return;
+          if (hasReversalFor('LOAN', id)) return;
+          postLoanCancelled(before);
+        });
+      }
+    }
   },
 
   deleteDebt: (id) => {
     const db = getDatabase();
+    // ZIEL.md §3a — Vor dem CASCADE-Delete der debt_payments deren Ledger-Buchungen reversen.
+    const payRows = query('SELECT id FROM debt_payments WHERE debt_id = ?', [id]);
+    for (const r of payRows) {
+      const dpId = r.id as string;
+      safePost(`postLoanPaymentReversed(${dpId}) [delete-debt]`, () => {
+        if (!hasLedgerEntries('LOAN_PAYMENT', dpId)) return;
+        if (hasReversalFor('LOAN_PAYMENT', dpId)) return;
+        postLoanPaymentReversed(dpId);
+      });
+    }
+    // LOAN-Eintrag selbst spiegeln, falls noch nicht storniert.
+    safePost(`postLoanCancelled(${id}) [delete-debt]`, () => {
+      if (!hasLedgerEntries('LOAN', id)) return;
+      if (hasReversalFor('LOAN', id)) return;
+      const debt = get().debts.find(d => d.id === id);
+      if (debt) postLoanCancelled(debt);
+    });
+
     db.run('DELETE FROM debt_payments WHERE debt_id = ?', [id]);
     db.run('DELETE FROM debts WHERE id = ?', [id]);
     saveDatabase();
@@ -273,6 +330,16 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
 
     get().loadPaymentsForDebt(debtId);
     get().loadDebts();
+
+    // ZIEL.md §3a — Repayment ans Ledger.
+    safePost(`postLoanPayment(${id})`, () => {
+      if (hasLedgerEntries('LOAN_PAYMENT', id)) return;
+      const dir = canonicalLoanDirection(debt?.direction);
+      postLoanPayment(
+        { id, debtId, amount, source, paidAt, notes, createdAt: now },
+        dir
+      );
+    });
 
     return { id, debtId, amount, source, paidAt, notes, createdAt: now };
   },

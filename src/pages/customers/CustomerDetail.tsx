@@ -37,19 +37,24 @@ const TYPES: { value: CustomerType; label: string }[] = [
   { value: 'investor', label: 'Investor' }, { value: 'gift_buyer', label: 'Gift Buyer' },
 ];
 
-// Customer-scope payments helper — fetches all payments across all invoices of this customer.
-function useCustomerPayments(customerId: string | undefined) {
+type PaymentEntry =
+  | { type: 'payment'; id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceId: string }
+  | { type: 'refund'; id: string; amount: number; method: string; receivedAt: string; returnNumber: string; invoiceId: string; invoiceNumber: string; creditNoteId?: string };
+
+// Merged payment + refund history sorted by date descending.
+function useCustomerPayments(customerId: string | undefined): PaymentEntry[] {
   return useMemo(() => {
-    if (!customerId) return [] as Array<{ id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceId: string }>;
+    if (!customerId) return [];
     try {
-      const rows = query(
+      const payRows = query(
         `SELECT p.id, p.amount, p.method, p.received_at, p.notes, i.invoice_number, i.id AS invoice_id
          FROM payments p JOIN invoices i ON i.id = p.invoice_id
          WHERE i.customer_id = ?
          ORDER BY p.received_at DESC`,
         [customerId]
       );
-      return rows.map(r => ({
+      const payments: PaymentEntry[] = payRows.map(r => ({
+        type: 'payment' as const,
         id: r.id as string,
         amount: r.amount as number,
         method: (r.method as string) || '',
@@ -58,6 +63,33 @@ function useCustomerPayments(customerId: string | undefined) {
         invoiceNumber: r.invoice_number as string,
         invoiceId: r.invoice_id as string,
       }));
+
+      const refundRows = query(
+        `SELECT sr.id, sr.return_number, sr.refund_paid_amount, sr.refund_method,
+                sr.refund_paid_date, sr.invoice_id, i.invoice_number,
+                cn.id AS cn_id
+         FROM sales_returns sr
+         JOIN invoices i ON i.id = sr.invoice_id
+         LEFT JOIN credit_notes cn ON cn.sales_return_id = sr.id
+         WHERE sr.customer_id = ? AND sr.refund_paid_amount > 0
+         ORDER BY sr.refund_paid_date DESC`,
+        [customerId]
+      );
+      const refunds: PaymentEntry[] = refundRows.map(r => ({
+        type: 'refund' as const,
+        id: r.id as string,
+        amount: (r.refund_paid_amount as number) || 0,
+        method: (r.refund_method as string) || 'cash',
+        receivedAt: (r.refund_paid_date as string) || '',
+        returnNumber: r.return_number as string,
+        invoiceId: r.invoice_id as string,
+        invoiceNumber: r.invoice_number as string,
+        creditNoteId: (r.cn_id as string | null) || undefined,
+      }));
+
+      return [...payments, ...refunds].sort(
+        (a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime()
+      );
     } catch { return []; }
   }, [customerId]);
 }
@@ -103,6 +135,23 @@ export function CustomerDetail() {
   );
   const customerLoans = useMemo(() => id ? debts.filter(d => d.customerId === id) : [], [debts, id]);
   const customerPayments = useCustomerPayments(id);
+
+  // CN receivable_cancel per invoice — für korrekte "Remaining" Anzeige in der Invoice-Tabelle.
+  const invoiceCNCancelMap = useMemo(() => {
+    if (!customerInvoices.length) return {} as Record<string, number>;
+    try {
+      const ids = customerInvoices.map(i => i.id);
+      const rows = query(
+        `SELECT invoice_id, COALESCE(SUM(receivable_cancel_amount), 0) AS cancel_amount
+         FROM credit_notes WHERE invoice_id IN (${ids.map(() => '?').join(',')})
+         GROUP BY invoice_id`,
+        ids
+      );
+      const map: Record<string, number> = {};
+      for (const r of rows) map[r.invoice_id as string] = Number(r.cancel_amount || 0);
+      return map;
+    } catch { return {}; }
+  }, [customerInvoices]);
 
   const matchingProducts = useMemo(() => {
     if (!customer) return [];
@@ -165,13 +214,14 @@ export function CustomerDetail() {
   };
   const stageColor = stageColors[customer.salesStage] || stageColors.dormant;
 
-  // Invoice status pill (Paid/Unpaid/Partially Paid)
-  function invoiceStatusPill(inv: typeof customerInvoices[number]) {
-    const remaining = inv.grossAmount - inv.paidAmount;
+  // Invoice status pill — netRemaining and cnCancel already account for CN receivable_cancel.
+  function invoiceStatusPill(inv: typeof customerInvoices[number], netRemaining: number, cnCancel: number) {
     let label: string, fg: string, bg: string;
     if (inv.status === 'CANCELLED') { label = 'Cancelled'; fg = '#6B7280'; bg = 'rgba(107,114,128,0.10)'; }
+    else if (inv.status === 'RETURNED') { label = 'Refunded'; fg = '#715DE3'; bg = 'rgba(113,93,227,0.10)'; }
     else if (inv.status === 'DRAFT') { label = 'Draft'; fg = '#6B7280'; bg = 'rgba(107,114,128,0.10)'; }
-    else if (remaining <= 0.01) { label = 'Paid'; fg = '#16A34A'; bg = 'rgba(22,163,74,0.10)'; }
+    else if (netRemaining <= 0.01 && cnCancel > 0.01) { label = 'Refunded'; fg = '#715DE3'; bg = 'rgba(113,93,227,0.10)'; }
+    else if (netRemaining <= 0.01) { label = 'Paid'; fg = '#16A34A'; bg = 'rgba(22,163,74,0.10)'; }
     else if (inv.paidAmount > 0) { label = 'Partial'; fg = '#FF8730'; bg = 'rgba(255,135,48,0.10)'; }
     else { label = 'Unpaid'; fg = '#DC2626'; bg = 'rgba(220,38,38,0.08)'; }
     return (
@@ -496,7 +546,8 @@ export function CustomerDetail() {
                       <span>Date</span><span>Invoice #</span><span>Total Amount</span><span>Paid</span><span>Status</span><span style={{ textAlign: 'right' }}>Remaining</span>
                     </div>
                     {customerInvoices.slice(0, 5).map(inv => {
-                      const remaining = Math.max(0, inv.grossAmount - inv.paidAmount);
+                      const cnCancel = invoiceCNCancelMap[inv.id] || 0;
+                      const remaining = Math.max(0, inv.grossAmount - inv.paidAmount - cnCancel);
                       return (
                         <div key={inv.id} className="cursor-pointer transition-colors"
                           onClick={() => navigate(`/invoices/${inv.id}`)}
@@ -510,7 +561,7 @@ export function CustomerDetail() {
                           <span className="font-mono" style={{ color: '#3D7FFF' }}>{inv.invoiceNumber}</span>
                           <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(inv.grossAmount)} BHD</span>
                           <span className="font-mono" style={{ color: '#4B5563' }}>{fmt(inv.paidAmount)} BHD</span>
-                          <span>{invoiceStatusPill(inv)}</span>
+                          <span>{invoiceStatusPill(inv, remaining, cnCancel)}</span>
                           <span className="font-mono" style={{ textAlign: 'right', color: remaining > 0 ? '#DC2626' : '#16A34A' }}>{fmt(remaining)} BHD</span>
                         </div>
                       );
@@ -638,24 +689,44 @@ export function CustomerDetail() {
                   }}>
                     <span>Date</span><span>Amount</span><span>Method</span><span>For</span><span>Reference / Note</span>
                   </div>
-                  {customerPayments.slice(0, 5).map(p => (
-                    <div key={p.id} style={{
+                  {customerPayments.slice(0, 8).map(p => (
+                    <div key={`${p.type}:${p.id}`} style={{
                       display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1.2fr)',
                       gap: 12, padding: '14px 0', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)', fontSize: 13,
                     }}>
                       <span style={{ color: '#4B5563' }}>{fmtDate(p.receivedAt)}</span>
-                      <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(p.amount)} BHD</span>
+                      {p.type === 'payment' ? (
+                        <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(p.amount)} BHD</span>
+                      ) : (
+                        <span className="font-mono" style={{ color: '#DC2626' }}>{'-'}{fmt(p.amount)} BHD</span>
+                      )}
                       <span className="flex items-center gap-2" style={{ color: '#4B5563', textTransform: 'capitalize' }}>
                         <MethodIcon method={p.method} /> {p.method.replace('_', ' ')}
                       </span>
-                      <Link to={`/invoices/${p.invoiceId}`} className="cursor-pointer" style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>
-                        Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{p.invoiceNumber}</span>
-                      </Link>
-                      <span style={{ color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.notes || '\u2014'}</span>
+                      {p.type === 'payment' ? (
+                        <Link to={`/invoices/${p.invoiceId}`} style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>
+                          Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{p.invoiceNumber}</span>
+                        </Link>
+                      ) : (
+                        <Link to={`/invoices/${p.invoiceId}`} style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>
+                          Return{' \u00b7 '}<span className="font-mono" style={{ color: '#DC2626' }}>{p.returnNumber}</span>
+                        </Link>
+                      )}
+                      {p.type === 'payment' ? (
+                        <span style={{ color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.notes || '\u2014'}</span>
+                      ) : (
+                        p.creditNoteId ? (
+                          <Link to={`/credit-notes/${p.creditNoteId}`} style={{ fontSize: 13, color: '#715DE3', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            Credit Note
+                          </Link>
+                        ) : (
+                          <span style={{ color: '#6B7280' }}>Refund</span>
+                        )
+                      )}
                     </div>
                   ))}
                   <div style={{ fontSize: 11, color: '#6B7280', marginTop: 12 }}>
-                    Showing {Math.min(5, customerPayments.length)} of {customerPayments.length} payment{customerPayments.length === 1 ? '' : 's'}
+                    Showing {Math.min(8, customerPayments.length)} of {customerPayments.length} entr{customerPayments.length === 1 ? 'y' : 'ies'}
                   </div>
                 </Card>
               </div>

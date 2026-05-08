@@ -1,0 +1,1432 @@
+// ═══════════════════════════════════════════════════════════
+// LATAIF — Central Financial Ledger: Posting Service
+// ZIEL.md §3a — Single Source of Truth, Double-Entry, Immutable.
+//
+// Dies ist der EINZIGE Schreibpfad für finanzwirksame Vorgänge.
+// Domain-Tabellen (invoices, payments, credit_notes, ...) bleiben
+// als operative Records, sind aber NICHT die Wahrheit für Geld.
+//
+// Invarianten:
+//   - Pro transaction_id gilt SUM(DEBIT) === SUM(CREDIT).
+//   - Einträge sind immutable (kein UPDATE, kein DELETE).
+//   - Korrektur ausschliesslich via reversing entries (reverses_entry_id).
+//   - amount ist immer >= 0; direction ('DEBIT'|'CREDIT') gibt das Vorzeichen.
+//   - entry_no ist pro branch_id monoton, gap-frei (vergeben durch ledger_sequence).
+// ═══════════════════════════════════════════════════════════
+
+import { v4 as uuid } from 'uuid';
+import { getDatabase, saveDatabase } from '@/core/db/database';
+import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
+import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection } from '@/core/models/types';
+import { canonicalLoanDirection } from '@/core/models/types';
+
+// ── Kontenrahmen (siehe ZIEL.md §3a) ──────────────────────────
+
+export type LedgerAccount =
+  | 'CASH'
+  | 'BANK'
+  | 'CARD_CLEARING'
+  | 'ACCOUNTS_RECEIVABLE'
+  | 'ACCOUNTS_PAYABLE'
+  | 'REVENUE'
+  | 'COGS'
+  | 'INVENTORY'
+  | 'VAT_OUTPUT'
+  | 'VAT_INPUT'
+  | 'MARGIN_VAT'
+  | 'REFUNDS'
+  | 'CARD_FEES'
+  | 'SUPPLIER_CREDIT'
+  // Customer-Deposits: Anzahlung vom Kunden vor Rechnungserstellung. Verbindlichkeit
+  // (CREDIT-natur) — wir schulden Ware. Wird beim Convert-to-Invoice gegen AR verrechnet.
+  | 'CUSTOMER_DEPOSITS'
+  // Loans-Receivable: wir haben Geld verliehen (we_lend / MONEY_GIVEN). Asset, DEBIT-natur.
+  | 'LOAN_RECEIVABLE'
+  // Loans-Payable: wir haben Geld geliehen (we_borrow / MONEY_RECEIVED). Liability, CREDIT-natur.
+  | 'LOAN_PAYABLE'
+  | 'COMMISSION_PAYABLE_AGENT'
+  | 'COMMISSION_PAYABLE_CONSIGNOR'
+  | 'PARTNER_EQUITY'
+  | 'EXPENSES_OPERATING'
+  | 'TAX_PAID'
+  | 'INTERNAL_TRANSFER';
+
+export type LedgerDirection = 'DEBIT' | 'CREDIT';
+
+export type SourceModule =
+  | 'INVOICE'
+  | 'PAYMENT'
+  | 'CREDIT_NOTE'
+  | 'REFUND'
+  | 'PURCHASE'
+  | 'PURCHASE_PAYMENT'
+  | 'PURCHASE_RETURN'
+  | 'EXPENSE'
+  | 'EXPENSE_PAYMENT'
+  | 'ORDER_PAYMENT'
+  | 'LOAN'
+  | 'LOAN_PAYMENT'
+  | 'REPAIR_PAYMENT'
+  | 'AGENT_SETTLEMENT'
+  | 'CONSIGNMENT_PAYOUT'
+  | 'METAL_PAYMENT'
+  | 'BANK_TRANSFER'
+  | 'PARTNER_TX'
+  | 'TAX_PAYMENT'
+  | 'STOCK_ADJUST';
+
+export type CounterpartyType =
+  | 'CUSTOMER'
+  | 'SUPPLIER'
+  | 'AGENT'
+  | 'PARTNER'
+  | 'INTERNAL';
+
+// ── Eintrag-Shape ──────────────────────────────────────────────
+
+export interface LedgerEntryInput {
+  account: LedgerAccount;
+  direction: LedgerDirection;
+  amount: number; // immer >= 0
+  counterpartyType?: CounterpartyType;
+  counterpartyId?: string;
+  sourceLineId?: string;
+  taxSchemeSnapshot?: string;
+  vatRateSnapshot?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PostContext {
+  occurredAt: string;             // Geschäftsdatum (z.B. invoice.issuedAt)
+  sourceModule: SourceModule;
+  sourceId: string;
+  reversesEntryId?: string;       // bei Korrektur-Buchung
+  branchId?: string;              // Default: currentBranchId()
+  userId?: string;                // Default: currentUserId()
+  currency?: string;              // Default: 'BHD'
+}
+
+export interface PostingResult {
+  transactionId: string;
+  entryIds: string[];
+}
+
+// ── Rundung BHD: 3 Dezimalstellen (siehe ZIEL.md §5) ──────────
+
+const ROUND = (n: number) => Math.round(n * 1000) / 1000;
+const EPSILON = 0.001;
+
+// ── Sequenz-Helper: nächste entry_no pro Branch reservieren ───
+
+function reserveEntryNos(branchId: string, count: number): number[] {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT OR IGNORE INTO ledger_sequence (branch_id, next_no, updated_at) VALUES (?, 1, ?)`,
+    [branchId, now]
+  );
+  db.run(
+    `UPDATE ledger_sequence SET next_no = next_no + ?, updated_at = ? WHERE branch_id = ?`,
+    [count, now, branchId]
+  );
+  const r = db.exec(
+    `SELECT next_no FROM ledger_sequence WHERE branch_id = ?`,
+    [branchId]
+  );
+  const newNext = (r[0]?.values?.[0]?.[0] as number) ?? (count + 1);
+  const firstClaimed = newNext - count;
+  return Array.from({ length: count }, (_, i) => firstClaimed + i);
+}
+
+// ── Low-Level: atomare Buchung ────────────────────────────────
+
+export function postEntries(
+  entries: LedgerEntryInput[],
+  ctx: PostContext
+): PostingResult {
+  if (entries.length === 0) {
+    throw new Error('postEntries: empty entries array');
+  }
+
+  // Bilanz-Check: SUM(DEBIT) === SUM(CREDIT)
+  const debits = entries
+    .filter(e => e.direction === 'DEBIT')
+    .reduce((s, e) => s + ROUND(e.amount), 0);
+  const credits = entries
+    .filter(e => e.direction === 'CREDIT')
+    .reduce((s, e) => s + ROUND(e.amount), 0);
+  if (Math.abs(debits - credits) > EPSILON) {
+    throw new Error(
+      `postEntries: imbalance — debits=${debits} credits=${credits} (transaction must net to zero)`
+    );
+  }
+  for (const e of entries) {
+    if (!(e.amount >= 0)) {
+      throw new Error(`postEntries: amount must be >= 0 (got ${e.amount} for ${e.account})`);
+    }
+  }
+
+  const branchId = ctx.branchId ?? currentBranchId();
+  const userId = ctx.userId ?? currentUserId();
+  const currency = ctx.currency ?? 'BHD';
+  const recordedAt = new Date().toISOString();
+  const transactionId = uuid();
+  const nos = reserveEntryNos(branchId, entries.length);
+
+  const db = getDatabase();
+  db.run('BEGIN');
+  try {
+    const entryIds: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const id = uuid();
+      entryIds.push(id);
+      db.run(
+        `INSERT INTO ledger_entries (
+          id, branch_id, tenant_id, entry_no, transaction_id,
+          occurred_at, recorded_at,
+          account, direction, amount, currency,
+          counterparty_type, counterparty_id,
+          source_module, source_id, source_line_id,
+          reverses_entry_id, tax_scheme_snapshot, vat_rate_snapshot,
+          metadata_json, created_by, created_at
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          branchId,
+          nos[i],
+          transactionId,
+          ctx.occurredAt,
+          recordedAt,
+          e.account,
+          e.direction,
+          ROUND(e.amount),
+          currency,
+          e.counterpartyType ?? null,
+          e.counterpartyId ?? null,
+          ctx.sourceModule,
+          ctx.sourceId,
+          e.sourceLineId ?? null,
+          ctx.reversesEntryId ?? null,
+          e.taxSchemeSnapshot ?? null,
+          e.vatRateSnapshot ?? null,
+          e.metadata ? JSON.stringify(e.metadata) : null,
+          userId,
+          recordedAt,
+        ]
+      );
+    }
+    db.run('COMMIT');
+    // Persist nach jeder erfolgreichen Buchung — sonst gehen Posts beim Browser-Reload verloren,
+    // weil sql.js in-memory ist und localStorage nur via saveDatabase() aktualisiert wird.
+    saveDatabase();
+    return { transactionId, entryIds };
+  } catch (err) {
+    db.run('ROLLBACK');
+    throw err;
+  }
+}
+
+// ── Idempotency-Helpers ───────────────────────────────────────
+
+/**
+ * Liefert true, wenn für (source_module, source_id) bereits Original-Buchungen
+ * existieren (also nicht selbst eine Reversal-Buchung). Wire-Up ruft das auf,
+ * um Doppel-Postings beim Replay/Re-Save zu vermeiden.
+ */
+export function hasLedgerEntries(sourceModule: SourceModule, sourceId: string): boolean {
+  const rows = query(
+    `SELECT 1 FROM ledger_entries
+     WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NULL
+     LIMIT 1`,
+    [sourceModule, sourceId]
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Liefert true, wenn (source_module, source_id) bereits eine Reversal-Transaktion
+ * hat. Verhindert Doppel-Stornos.
+ */
+export function hasReversalFor(sourceModule: SourceModule, sourceId: string): boolean {
+  const rows = query(
+    `SELECT 1 FROM ledger_entries
+     WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NOT NULL
+     LIMIT 1`,
+    [sourceModule, sourceId]
+  );
+  return rows.length > 0;
+}
+
+// ── Domain-Mappings ───────────────────────────────────────────
+
+function vatAccountFor(scheme: string | undefined): LedgerAccount {
+  if (scheme === 'MARGIN') return 'MARGIN_VAT';
+  return 'VAT_OUTPUT';
+}
+
+/**
+ * Lädt das Tax-Scheme der Original-Invoice eines CN.
+ * Gibt 'mixed' zurück, wenn die Invoice gemischt ist — Caller muss dann fallen
+ * auf VAT_OUTPUT zurück (da CN keine Line-Granularität hat).
+ */
+function lookupInvoiceTaxScheme(invoiceId: string): string | undefined {
+  const rows = query(
+    `SELECT tax_scheme_snapshot FROM invoices WHERE id = ?`,
+    [invoiceId]
+  );
+  return rows[0]?.tax_scheme_snapshot as string | undefined;
+}
+
+function cashAccountFor(method: PaymentMethod): LedgerAccount {
+  switch (method) {
+    case 'cash':          return 'CASH';
+    case 'bank_transfer': return 'BANK';
+    case 'card':          return 'CARD_CLEARING';
+    default:              return 'BANK';
+  }
+}
+
+// ── Invoice (issued) ──────────────────────────────────────────
+//
+// Pro Line:
+//   DEBIT  AR              by lineTotal
+//   CREDIT REVENUE         by (lineTotal - vatAmount)
+//   CREDIT VAT/MARGIN_VAT  by vatAmount   (übersprungen wenn 0)
+
+export function postInvoiceIssued(invoice: Invoice): PostingResult {
+  if (!invoice.lines || invoice.lines.length === 0) {
+    throw new Error(`postInvoiceIssued: invoice ${invoice.id} has no lines`);
+  }
+  const occurredAt = invoice.issuedAt ?? invoice.createdAt;
+  const entries: LedgerEntryInput[] = [];
+  for (const line of invoice.lines) {
+    const gross = ROUND(line.lineTotal);
+    const vat = ROUND(line.vatAmount);
+    const net = ROUND(gross - vat);
+
+    entries.push({
+      account: 'ACCOUNTS_RECEIVABLE',
+      direction: 'DEBIT',
+      amount: gross,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: invoice.customerId,
+      sourceLineId: line.id,
+      taxSchemeSnapshot: line.taxScheme,
+      vatRateSnapshot: line.vatRate,
+      metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId },
+    });
+    if (net > 0) {
+      entries.push({
+        account: 'REVENUE',
+        direction: 'CREDIT',
+        amount: net,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: invoice.customerId,
+        sourceLineId: line.id,
+        taxSchemeSnapshot: line.taxScheme,
+        vatRateSnapshot: line.vatRate,
+        metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId },
+      });
+    }
+    if (vat > 0) {
+      entries.push({
+        account: vatAccountFor(line.taxScheme),
+        direction: 'CREDIT',
+        amount: vat,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: invoice.customerId,
+        sourceLineId: line.id,
+        taxSchemeSnapshot: line.taxScheme,
+        vatRateSnapshot: line.vatRate,
+        metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId },
+      });
+    }
+  }
+  return postEntries(entries, {
+    occurredAt,
+    sourceModule: 'INVOICE',
+    sourceId: invoice.id,
+    currency: invoice.currency,
+  });
+}
+
+// ── Payment (Customer-Zahlung gegen Invoice) ──────────────────
+//
+//   DEBIT  CASH/BANK/CARD_CLEARING  by amount
+//   CREDIT ACCOUNTS_RECEIVABLE      by amount
+
+export function postInvoicePayment(
+  payment: Payment,
+  customerId: string
+): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postInvoicePayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc = cashAccountFor(payment.method);
+  return postEntries(
+    [
+      {
+        account: cashAcc,
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: { invoiceId: payment.invoiceId, method: payment.method },
+      },
+      {
+        account: 'ACCOUNTS_RECEIVABLE',
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: { invoiceId: payment.invoiceId, method: payment.method },
+      },
+    ],
+    {
+      occurredAt: payment.receivedAt,
+      sourceModule: 'PAYMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+// ── Credit Note (Storno-Rechnung / Sales Return) ──────────────
+//
+// Logik: Der CN-Total wird in zwei Teile gespalten:
+//   - cashRefundAmount  → echtes Geld zurück an Kunden
+//   - receivableCancelAmount → nur Forderungs-Abbau (kein Cash)
+//
+// Buchung:
+//   DEBIT  REVENUE      by (totalAmount - vatAmount)
+//   DEBIT  VAT_OUTPUT   by vatAmount
+//   CREDIT ACCOUNTS_RECEIVABLE  by receivableCancelAmount
+//   CREDIT CASH/BANK    by cashRefundAmount
+
+export function postCreditNote(cn: CreditNote): PostingResult {
+  const total = ROUND(cn.totalAmount);
+  const vat = ROUND(cn.vatAmount);
+  const net = ROUND(total - vat);
+  const cashRefund = ROUND(cn.cashRefundAmount);
+  const arCancel = ROUND(cn.receivableCancelAmount);
+
+  if (Math.abs(cashRefund + arCancel - total) > EPSILON) {
+    throw new Error(
+      `postCreditNote ${cn.id}: cashRefund(${cashRefund}) + arCancel(${arCancel}) !== total(${total})`
+    );
+  }
+
+  const entries: LedgerEntryInput[] = [];
+
+  if (net > 0) {
+    entries.push({
+      account: 'REVENUE',
+      direction: 'DEBIT',
+      amount: net,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: cn.customerId,
+      metadata: { creditNoteNumber: cn.creditNoteNumber, invoiceId: cn.invoiceId },
+    });
+  }
+  if (vat > 0) {
+    // VAT-Konto richtet sich nach dem Tax-Scheme der Original-Invoice.
+    // 'mixed' fällt auf VAT_OUTPUT zurück, weil CN keine Line-Granularität hat.
+    const origScheme = lookupInvoiceTaxScheme(cn.invoiceId);
+    const vatAcc = origScheme === 'MARGIN' ? 'MARGIN_VAT' : 'VAT_OUTPUT';
+    entries.push({
+      account: vatAcc,
+      direction: 'DEBIT',
+      amount: vat,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: cn.customerId,
+      taxSchemeSnapshot: origScheme,
+      metadata: { creditNoteNumber: cn.creditNoteNumber, invoiceId: cn.invoiceId, originalScheme: origScheme },
+    });
+  }
+  if (arCancel > 0) {
+    entries.push({
+      account: 'ACCOUNTS_RECEIVABLE',
+      direction: 'CREDIT',
+      amount: arCancel,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: cn.customerId,
+      metadata: { creditNoteNumber: cn.creditNoteNumber, invoiceId: cn.invoiceId },
+    });
+  }
+  if (cashRefund > 0) {
+    const refundAcc: LedgerAccount =
+      cn.refundMethod === 'cash' ? 'CASH' :
+      cn.refundMethod === 'card' ? 'CARD_CLEARING' :
+      'BANK';
+    entries.push({
+      account: refundAcc,
+      direction: 'CREDIT',
+      amount: cashRefund,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: cn.customerId,
+      metadata: {
+        creditNoteNumber: cn.creditNoteNumber,
+        invoiceId: cn.invoiceId,
+        refundMethod: cn.refundMethod ?? 'bank',
+      },
+    });
+  }
+
+  return postEntries(entries, {
+    occurredAt: cn.issuedAt,
+    sourceModule: 'CREDIT_NOTE',
+    sourceId: cn.id,
+  });
+}
+
+// ── Storno: Original-Buchung spiegeln ─────────────────────────
+//
+// Lädt alle bestehenden Einträge zu (sourceModule, sourceId) und
+// schreibt eine spiegelverkehrte Buchung (DEBIT↔CREDIT) mit
+// reverses_entry_id zum jeweiligen Original.
+
+export function reverseSource(
+  sourceModule: SourceModule,
+  sourceId: string,
+  occurredAt: string
+): PostingResult {
+  if (hasReversalFor(sourceModule, sourceId)) {
+    throw new Error(`reverseSource: ${sourceModule}/${sourceId} already reversed`);
+  }
+  const db = getDatabase();
+  const r = db.exec(
+    `SELECT id, account, direction, amount, counterparty_type, counterparty_id,
+            source_line_id, tax_scheme_snapshot, vat_rate_snapshot, currency
+     FROM ledger_entries
+     WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NULL`,
+    [sourceModule, sourceId]
+  );
+  if (r.length === 0 || r[0].values.length === 0) {
+    throw new Error(`reverseSource: no entries found for ${sourceModule}/${sourceId}`);
+  }
+  const cols = r[0].columns;
+  const idIdx = cols.indexOf('id');
+  const accIdx = cols.indexOf('account');
+  const dirIdx = cols.indexOf('direction');
+  const amtIdx = cols.indexOf('amount');
+  const ctIdx = cols.indexOf('counterparty_type');
+  const ciIdx = cols.indexOf('counterparty_id');
+  const slIdx = cols.indexOf('source_line_id');
+  const tsIdx = cols.indexOf('tax_scheme_snapshot');
+  const vrIdx = cols.indexOf('vat_rate_snapshot');
+  const curIdx = cols.indexOf('currency');
+
+  // Wir schreiben EINE Reverse-Transaction mit allen gespiegelten Entries.
+  // Für jede Originalzeile setzen wir reverses_entry_id; daher rufen wir
+  // postEntries nicht direkt auf, sondern bauen die INSERTs selbst.
+  const branchId = currentBranchId();
+  const userId = currentUserId();
+  const recordedAt = new Date().toISOString();
+  const transactionId = uuid();
+  const rows = r[0].values;
+  const nos = reserveEntryNos(branchId, rows.length);
+  const currency = (rows[0][curIdx] as string) ?? 'BHD';
+
+  db.run('BEGIN');
+  try {
+    const entryIds: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const newId = uuid();
+      entryIds.push(newId);
+      const flipped = (row[dirIdx] as string) === 'DEBIT' ? 'CREDIT' : 'DEBIT';
+      db.run(
+        `INSERT INTO ledger_entries (
+          id, branch_id, tenant_id, entry_no, transaction_id,
+          occurred_at, recorded_at,
+          account, direction, amount, currency,
+          counterparty_type, counterparty_id,
+          source_module, source_id, source_line_id,
+          reverses_entry_id, tax_scheme_snapshot, vat_rate_snapshot,
+          metadata_json, created_by, created_at
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newId,
+          branchId,
+          nos[i],
+          transactionId,
+          occurredAt,
+          recordedAt,
+          row[accIdx],
+          flipped,
+          row[amtIdx],
+          currency,
+          row[ctIdx],
+          row[ciIdx],
+          sourceModule,
+          sourceId,
+          row[slIdx],
+          row[idIdx],                     // reverses_entry_id → Original
+          row[tsIdx],
+          row[vrIdx],
+          JSON.stringify({ reversal: true }),
+          userId,
+          recordedAt,
+        ]
+      );
+    }
+    db.run('COMMIT');
+    saveDatabase();
+    return { transactionId, entryIds };
+  } catch (err) {
+    db.run('ROLLBACK');
+    throw err;
+  }
+}
+
+// ── Convenience: Invoice-Storno ───────────────────────────────
+
+export function postInvoiceCancelled(invoice: Invoice): PostingResult {
+  return reverseSource('INVOICE', invoice.id, new Date().toISOString());
+}
+
+// ── Purchase (received goods) ─────────────────────────────────
+//
+// Pro Line:
+//   DEBIT  INVENTORY        by (lineTotal - vatAmount)   netto Anschaffungskosten
+//   DEBIT  VAT_INPUT        by vatAmount                 Vorsteuer (rückforderbar)
+//   CREDIT ACCOUNTS_PAYABLE by lineTotal                 Schuld beim Lieferanten
+
+export function postPurchaseReceived(purchase: Purchase): PostingResult {
+  if (!purchase.lines || purchase.lines.length === 0) {
+    throw new Error(`postPurchaseReceived: purchase ${purchase.id} has no lines`);
+  }
+  const occurredAt = purchase.purchaseDate ?? purchase.createdAt;
+  const entries: LedgerEntryInput[] = [];
+  for (const line of purchase.lines) {
+    const gross = ROUND(line.lineTotal);
+    const vat = ROUND(line.vatAmount ?? 0);
+    const net = ROUND(gross - vat);
+
+    if (net > 0) {
+      entries.push({
+        account: 'INVENTORY',
+        direction: 'DEBIT',
+        amount: net,
+        counterpartyType: 'SUPPLIER',
+        counterpartyId: purchase.supplierId,
+        sourceLineId: line.id,
+        taxSchemeSnapshot: line.taxScheme,
+        vatRateSnapshot: line.vatRate,
+        metadata: { purchaseNumber: purchase.purchaseNumber, productId: line.productId },
+      });
+    }
+    if (vat > 0) {
+      entries.push({
+        account: 'VAT_INPUT',
+        direction: 'DEBIT',
+        amount: vat,
+        counterpartyType: 'SUPPLIER',
+        counterpartyId: purchase.supplierId,
+        sourceLineId: line.id,
+        taxSchemeSnapshot: line.taxScheme,
+        vatRateSnapshot: line.vatRate,
+        metadata: { purchaseNumber: purchase.purchaseNumber, productId: line.productId },
+      });
+    }
+    if (gross > 0) {
+      entries.push({
+        account: 'ACCOUNTS_PAYABLE',
+        direction: 'CREDIT',
+        amount: gross,
+        counterpartyType: 'SUPPLIER',
+        counterpartyId: purchase.supplierId,
+        sourceLineId: line.id,
+        taxSchemeSnapshot: line.taxScheme,
+        vatRateSnapshot: line.vatRate,
+        metadata: { purchaseNumber: purchase.purchaseNumber, productId: line.productId },
+      });
+    }
+  }
+  return postEntries(entries, {
+    occurredAt,
+    sourceModule: 'PURCHASE',
+    sourceId: purchase.id,
+  });
+}
+
+// ── Purchase Payment (Zahlung an Lieferanten) ─────────────────
+//
+//   DEBIT  ACCOUNTS_PAYABLE      by amount
+//   CREDIT CASH/BANK/SUPPLIER_CR by amount
+//
+// 'credit'-Methode konsumiert vorhandenes Supplier-Credit-Guthaben:
+//   AP runter ← SUPPLIER_CREDIT runter (beide DEBIT-natur, also CREDIT auf Credit).
+
+function purchaseCashAccountFor(method: PurchasePayment['method']): LedgerAccount {
+  switch (method) {
+    case 'cash':   return 'CASH';
+    case 'bank':   return 'BANK';
+    case 'credit': return 'SUPPLIER_CREDIT';
+    default:       return 'BANK';
+  }
+}
+
+export function postPurchasePayment(
+  payment: PurchasePayment,
+  supplierId: string
+): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postPurchasePayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc = purchaseCashAccountFor(payment.method);
+  return postEntries(
+    [
+      {
+        account: 'ACCOUNTS_PAYABLE',
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: 'SUPPLIER',
+        counterpartyId: supplierId,
+        metadata: { purchaseId: payment.purchaseId, method: payment.method },
+      },
+      {
+        account: cashAcc,
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: 'SUPPLIER',
+        counterpartyId: supplierId,
+        metadata: { purchaseId: payment.purchaseId, method: payment.method },
+      },
+    ],
+    {
+      occurredAt: payment.paidAt,
+      sourceModule: 'PURCHASE_PAYMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+// ── Convenience: Purchase-Storno ──────────────────────────────
+
+export function postPurchaseCancelled(purchase: Purchase): PostingResult {
+  return reverseSource('PURCHASE', purchase.id, new Date().toISOString());
+}
+
+// ── Expense (recorded, before/without payment) ────────────────
+//
+// Wir buchen IMMER zuerst gegen AP, auch wenn die Expense „payNow" ist.
+// Die direkte Cash-Bewegung erfolgt separat als EXPENSE_PAYMENT.
+// Vorteil: Storno einer Expense reverst NUR EXPENSES_OPERATING/AP — bereits
+// geleistete Cash-Zahlungen bleiben gebucht (echtes Geld ist raus).
+//
+//   DEBIT  EXPENSES_OPERATING by amount
+//   CREDIT ACCOUNTS_PAYABLE   by amount (counterparty: supplier wenn gesetzt)
+
+export function postExpense(expense: Expense): PostingResult {
+  const amount = ROUND(expense.amount);
+  if (amount <= 0) {
+    throw new Error(`postExpense: amount must be > 0 (got ${expense.amount})`);
+  }
+  const occurredAt = expense.expenseDate ?? expense.createdAt;
+  const counterpartyType: CounterpartyType | undefined = expense.supplierId ? 'SUPPLIER' : undefined;
+  return postEntries(
+    [
+      {
+        account: 'EXPENSES_OPERATING',
+        direction: 'DEBIT',
+        amount,
+        counterpartyType,
+        counterpartyId: expense.supplierId,
+        metadata: {
+          expenseNumber: expense.expenseNumber,
+          category: expense.category,
+          relatedModule: expense.relatedModule,
+          relatedEntityId: expense.relatedEntityId,
+        },
+      },
+      {
+        account: 'ACCOUNTS_PAYABLE',
+        direction: 'CREDIT',
+        amount,
+        counterpartyType,
+        counterpartyId: expense.supplierId,
+        metadata: { expenseNumber: expense.expenseNumber, category: expense.category },
+      },
+    ],
+    {
+      occurredAt,
+      sourceModule: 'EXPENSE',
+      sourceId: expense.id,
+    }
+  );
+}
+
+// ── Expense Payment ───────────────────────────────────────────
+//
+//   DEBIT  ACCOUNTS_PAYABLE  by amount
+//   CREDIT CASH/BANK         by amount
+
+function expenseCashAccountFor(method: ExpensePayment['method']): LedgerAccount {
+  switch (method) {
+    case 'cash': return 'CASH';
+    case 'bank': return 'BANK';
+    default:     return 'BANK';
+  }
+}
+
+export function postExpensePayment(
+  payment: ExpensePayment,
+  supplierId?: string
+): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postExpensePayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc = expenseCashAccountFor(payment.method);
+  const counterpartyType: CounterpartyType | undefined = supplierId ? 'SUPPLIER' : undefined;
+  return postEntries(
+    [
+      {
+        account: 'ACCOUNTS_PAYABLE',
+        direction: 'DEBIT',
+        amount,
+        counterpartyType,
+        counterpartyId: supplierId,
+        metadata: { expenseId: payment.expenseId, method: payment.method },
+      },
+      {
+        account: cashAcc,
+        direction: 'CREDIT',
+        amount,
+        counterpartyType,
+        counterpartyId: supplierId,
+        metadata: { expenseId: payment.expenseId, method: payment.method },
+      },
+    ],
+    {
+      occurredAt: payment.paidAt,
+      sourceModule: 'EXPENSE_PAYMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+// ── Convenience: Expense-Storno ───────────────────────────────
+
+export function postExpenseCancelled(expense: Expense): PostingResult {
+  return reverseSource('EXPENSE', expense.id, new Date().toISOString());
+}
+
+// ── Bank Transfer (internal: cash ↔ bank) ─────────────────────
+//
+// CASH_TO_BANK:  DEBIT BANK / CREDIT CASH
+// BANK_TO_CASH:  DEBIT CASH / CREDIT BANK
+//
+// Source ist BANK_TRANSFER — Cashflow-Reports können diese Quelle filtern,
+// damit innerbetriebliche Verschiebungen nicht als externe Geldflüsse zählen.
+// Counterparty: INTERNAL.
+
+export function postBankTransfer(transfer: BankTransfer): PostingResult {
+  const amount = ROUND(transfer.amount);
+  if (amount <= 0) {
+    throw new Error(`postBankTransfer: amount must be > 0 (got ${transfer.amount})`);
+  }
+  const occurredAt = transfer.transferDate ?? transfer.createdAt;
+  const fromTo: { dr: LedgerAccount; cr: LedgerAccount } =
+    transfer.direction === 'CASH_TO_BANK'
+      ? { dr: 'BANK', cr: 'CASH' }
+      : { dr: 'CASH', cr: 'BANK' };
+
+  return postEntries(
+    [
+      {
+        account: fromTo.dr,
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: 'INTERNAL',
+        metadata: { direction: transfer.direction, notes: transfer.notes },
+      },
+      {
+        account: fromTo.cr,
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: 'INTERNAL',
+        metadata: { direction: transfer.direction, notes: transfer.notes },
+      },
+    ],
+    {
+      occurredAt,
+      sourceModule: 'BANK_TRANSFER',
+      sourceId: transfer.id,
+    }
+  );
+}
+
+// ── Convenience: Bank-Transfer-Storno ─────────────────────────
+
+export function postBankTransferReversed(transfer: BankTransfer): PostingResult {
+  return reverseSource('BANK_TRANSFER', transfer.id, new Date().toISOString());
+}
+
+// ── Order Payment (Anzahlung vor Invoice-Erstellung) ─────────
+//
+// Kunde zahlt Deposit auf eine Order. Geld geht physisch ein, ist aber
+// noch keine Bezahlung einer Rechnung — es ist eine Verbindlichkeit
+// gegenüber dem Kunden (wir schulden Ware oder Refund).
+//
+//   DEBIT  CASH/BANK/CARD       by amount
+//   CREDIT CUSTOMER_DEPOSITS    by amount
+//
+// Beim Convert-to-Invoice werden diese Order-Payments per
+// reverseSource('ORDER_PAYMENT', id) zurück gespiegelt. Die parallel
+// erzeugten invoice_payments posten dann normal (DEBIT cash, CREDIT AR).
+// Net: Cash bleibt gleich (Reversal -X plus Invoice-Payment +X), die
+// Customer-Deposits-Verbindlichkeit löst sich auf, und AR wird gemindert.
+
+export interface OrderPaymentLike {
+  id: string;
+  orderId: string;
+  amount: number;
+  method?: string;          // 'cash' | 'bank' | 'card' | 'bank_transfer' | undefined
+  paidAt: string;
+}
+
+function orderPaymentCashAccountFor(method?: string): LedgerAccount {
+  const m = (method || 'cash').toLowerCase();
+  if (m === 'cash') return 'CASH';
+  if (m === 'card') return 'CARD_CLEARING';
+  // 'bank', 'bank_transfer', sonstiges → BANK
+  return 'BANK';
+}
+
+export function postOrderPayment(
+  payment: OrderPaymentLike,
+  customerId: string
+): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postOrderPayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc = orderPaymentCashAccountFor(payment.method);
+  return postEntries(
+    [
+      {
+        account: cashAcc,
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: { orderId: payment.orderId, method: payment.method ?? 'cash' },
+      },
+      {
+        account: 'CUSTOMER_DEPOSITS',
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: { orderId: payment.orderId, method: payment.method ?? 'cash' },
+      },
+    ],
+    {
+      occurredAt: payment.paidAt,
+      sourceModule: 'ORDER_PAYMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+// Reverse einen Order-Payment-Eintrag — bei Lösch oder Convert-to-Invoice.
+export function postOrderPaymentReversed(orderPaymentId: string): PostingResult {
+  return reverseSource('ORDER_PAYMENT', orderPaymentId, new Date().toISOString());
+}
+
+// ── Loan / Debt ───────────────────────────────────────────────
+//
+// Zwei Richtungen:
+//   MONEY_GIVEN (we_lend):
+//     DEBIT  LOAN_RECEIVABLE        by amount
+//     CREDIT cashAccountFor(source) by amount   (Geld geht raus)
+//
+//   MONEY_RECEIVED (we_borrow):
+//     DEBIT  cashAccountFor(source) by amount   (Geld kommt rein)
+//     CREDIT LOAN_PAYABLE           by amount
+//
+// Beim Repayment dreht sich die Cash-Bewegung um, und die jeweilige
+// Loan-Bilanz wird abgebaut.
+
+function loanCashAccountFor(source: 'cash' | 'bank'): LedgerAccount {
+  return source === 'cash' ? 'CASH' : 'BANK';
+}
+
+export function postLoanCreated(debt: Debt): PostingResult {
+  const amount = ROUND(debt.amount);
+  if (amount <= 0) {
+    throw new Error(`postLoanCreated: amount must be > 0 (got ${debt.amount})`);
+  }
+  const dir: CanonicalLoanDirection = canonicalLoanDirection(debt.direction);
+  const cashAcc = loanCashAccountFor(debt.source);
+  const occurredAt = debt.createdAt;
+
+  const entries: LedgerEntryInput[] =
+    dir === 'MONEY_GIVEN'
+      ? [
+          {
+            account: 'LOAN_RECEIVABLE',
+            direction: 'DEBIT',
+            amount,
+            metadata: { loanNumber: debt.loanNumber, counterparty: debt.counterparty, direction: 'MONEY_GIVEN' },
+          },
+          {
+            account: cashAcc,
+            direction: 'CREDIT',
+            amount,
+            metadata: { loanNumber: debt.loanNumber, counterparty: debt.counterparty, direction: 'MONEY_GIVEN' },
+          },
+        ]
+      : [
+          {
+            account: cashAcc,
+            direction: 'DEBIT',
+            amount,
+            metadata: { loanNumber: debt.loanNumber, counterparty: debt.counterparty, direction: 'MONEY_RECEIVED' },
+          },
+          {
+            account: 'LOAN_PAYABLE',
+            direction: 'CREDIT',
+            amount,
+            metadata: { loanNumber: debt.loanNumber, counterparty: debt.counterparty, direction: 'MONEY_RECEIVED' },
+          },
+        ];
+
+  return postEntries(entries, {
+    occurredAt,
+    sourceModule: 'LOAN',
+    sourceId: debt.id,
+  });
+}
+
+export function postLoanPayment(payment: DebtPayment, direction: CanonicalLoanDirection): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postLoanPayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc = loanCashAccountFor(payment.source);
+
+  // MONEY_GIVEN repayment: counterparty zahlt zurück → cash REIN, LOAN_RECEIVABLE runter.
+  // MONEY_RECEIVED repayment: wir zahlen zurück → cash RAUS, LOAN_PAYABLE runter.
+  const entries: LedgerEntryInput[] =
+    direction === 'MONEY_GIVEN'
+      ? [
+          {
+            account: cashAcc,
+            direction: 'DEBIT',
+            amount,
+            metadata: { debtId: payment.debtId, direction: 'MONEY_GIVEN' },
+          },
+          {
+            account: 'LOAN_RECEIVABLE',
+            direction: 'CREDIT',
+            amount,
+            metadata: { debtId: payment.debtId, direction: 'MONEY_GIVEN' },
+          },
+        ]
+      : [
+          {
+            account: 'LOAN_PAYABLE',
+            direction: 'DEBIT',
+            amount,
+            metadata: { debtId: payment.debtId, direction: 'MONEY_RECEIVED' },
+          },
+          {
+            account: cashAcc,
+            direction: 'CREDIT',
+            amount,
+            metadata: { debtId: payment.debtId, direction: 'MONEY_RECEIVED' },
+          },
+        ];
+
+  return postEntries(entries, {
+    occurredAt: payment.paidAt,
+    sourceModule: 'LOAN_PAYMENT',
+    sourceId: payment.id,
+  });
+}
+
+// Loan-Storno: spiegelt nur die LOAN-Originalbuchung zurück.
+// Bestehende Repayments bleiben gebucht — Reconciliation surface deren
+// Diskrepanz, falls der Loan trotz erfolgter Rückzahlungen storniert wird.
+export function postLoanCancelled(debt: Debt): PostingResult {
+  return reverseSource('LOAN', debt.id, new Date().toISOString());
+}
+
+export function postLoanPaymentReversed(paymentId: string): PostingResult {
+  return reverseSource('LOAN_PAYMENT', paymentId, new Date().toISOString());
+}
+
+// ── Tax Payment (Quartals-VAT-Abführung) ─────────────────────
+//
+//   DEBIT  TAX_PAID by amount
+//   CREDIT CASH/BANK by amount
+
+export interface TaxPaymentLike {
+  id: string;
+  amount: number;
+  source: 'cash' | 'bank';
+  paidAt: string;            // ISO
+  year?: number;
+  quarter?: number;
+  note?: string;
+}
+
+export function postTaxPayment(payment: TaxPaymentLike): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postTaxPayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc: LedgerAccount = payment.source === 'cash' ? 'CASH' : 'BANK';
+  return postEntries(
+    [
+      {
+        account: 'TAX_PAID',
+        direction: 'DEBIT',
+        amount,
+        metadata: { year: payment.year, quarter: payment.quarter, note: payment.note },
+      },
+      {
+        account: cashAcc,
+        direction: 'CREDIT',
+        amount,
+        metadata: { year: payment.year, quarter: payment.quarter, note: payment.note },
+      },
+    ],
+    {
+      occurredAt: payment.paidAt,
+      sourceModule: 'TAX_PAYMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+export function postTaxPaymentReversed(paymentId: string): PostingResult {
+  return reverseSource('TAX_PAYMENT', paymentId, new Date().toISOString());
+}
+
+// ── Partner Transaction (Equity-Bewegung) ────────────────────
+//
+//   INVESTMENT          : DEBIT cash/bank      / CREDIT PARTNER_EQUITY
+//   WITHDRAWAL          : DEBIT PARTNER_EQUITY / CREDIT cash/bank
+//   PROFIT_DISTRIBUTION : DEBIT PARTNER_EQUITY / CREDIT cash/bank
+//
+// Wir machen keinen Unterschied zwischen WITHDRAWAL (Kapital-Rückgabe) und
+// PROFIT_DISTRIBUTION (Gewinn-Auszahlung) auf Ledger-Ebene — beide reduzieren
+// PARTNER_EQUITY und treiben Cash raus. Der semantische Unterschied (Capital vs.
+// Profits) ist später via Sub-Account oder Reporting trennbar; für jetzt: gleich.
+
+export type PartnerTxKind = 'INVESTMENT' | 'WITHDRAWAL' | 'PROFIT_DISTRIBUTION';
+
+export interface PartnerTxLike {
+  id: string;
+  partnerId: string;
+  type: PartnerTxKind;
+  amount: number;
+  method: 'cash' | 'bank';
+  transactionDate: string;
+  transactionNumber?: string;
+}
+
+export function postPartnerTransaction(tx: PartnerTxLike): PostingResult {
+  const amount = ROUND(tx.amount);
+  if (amount <= 0) {
+    throw new Error(`postPartnerTransaction: amount must be > 0 (got ${tx.amount})`);
+  }
+  const cashAcc: LedgerAccount = tx.method === 'cash' ? 'CASH' : 'BANK';
+  const meta = { partnerTxNumber: tx.transactionNumber, type: tx.type };
+
+  const entries: LedgerEntryInput[] =
+    tx.type === 'INVESTMENT'
+      ? [
+          {
+            account: cashAcc,
+            direction: 'DEBIT',
+            amount,
+            counterpartyType: 'PARTNER',
+            counterpartyId: tx.partnerId,
+            metadata: meta,
+          },
+          {
+            account: 'PARTNER_EQUITY',
+            direction: 'CREDIT',
+            amount,
+            counterpartyType: 'PARTNER',
+            counterpartyId: tx.partnerId,
+            metadata: meta,
+          },
+        ]
+      : [
+          {
+            account: 'PARTNER_EQUITY',
+            direction: 'DEBIT',
+            amount,
+            counterpartyType: 'PARTNER',
+            counterpartyId: tx.partnerId,
+            metadata: meta,
+          },
+          {
+            account: cashAcc,
+            direction: 'CREDIT',
+            amount,
+            counterpartyType: 'PARTNER',
+            counterpartyId: tx.partnerId,
+            metadata: meta,
+          },
+        ];
+
+  return postEntries(entries, {
+    occurredAt: tx.transactionDate,
+    sourceModule: 'PARTNER_TX',
+    sourceId: tx.id,
+  });
+}
+
+export function postPartnerTransactionReversed(txId: string): PostingResult {
+  return reverseSource('PARTNER_TX', txId, new Date().toISOString());
+}
+
+// ── Repair Payment (Customer-Charge ohne Invoice) ────────────
+//
+// Anwendungsfall: Kunde zahlt direkt für die Reparatur, OHNE dass eine Invoice
+// erstellt wird. Wenn später eine Invoice gekoppelt wird, läuft die Bezahlung
+// über invoice_payments (siehe bankingStore-Filter `if (r.invoice_id) continue`).
+//
+//   DEBIT  CASH/BANK/CARD by amount
+//   CREDIT REVENUE        by amount
+//
+// VAT-Split nicht modelliert — Standalone-Repair-Cash geht direkt in REVENUE.
+// Bei späterem Invoice-Convert müsste manuell reverst werden (Reconciliation surface).
+
+export interface RepairPaymentLike {
+  id: string;            // synthetisch — repair_payments-Tabelle existiert nicht,
+                         // also UUID per Aufruf erzeugt; Reconciliation linkt via metadata.repairId.
+  repairId: string;
+  amount: number;
+  method: 'cash' | 'bank' | 'card';
+  paidAt: string;
+  customerId?: string;
+}
+
+function repairCashAccountFor(method: 'cash' | 'bank' | 'card'): LedgerAccount {
+  if (method === 'cash') return 'CASH';
+  if (method === 'card') return 'CARD_CLEARING';
+  return 'BANK';
+}
+
+export function postRepairPayment(payment: RepairPaymentLike): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postRepairPayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc = repairCashAccountFor(payment.method);
+  const cpType: CounterpartyType | undefined = payment.customerId ? 'CUSTOMER' : undefined;
+  return postEntries(
+    [
+      {
+        account: cashAcc,
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: cpType,
+        counterpartyId: payment.customerId,
+        metadata: { repairId: payment.repairId, method: payment.method },
+      },
+      {
+        account: 'REVENUE',
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: cpType,
+        counterpartyId: payment.customerId,
+        metadata: { repairId: payment.repairId, method: payment.method },
+      },
+    ],
+    {
+      occurredAt: payment.paidAt,
+      sourceModule: 'REPAIR_PAYMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+export function postRepairPaymentReversed(paymentId: string): PostingResult {
+  return reverseSource('REPAIR_PAYMENT', paymentId, new Date().toISOString());
+}
+
+// ── Metal Payment (Verkauf von Edelmetallen) ──────────────────
+//
+//   DEBIT  CASH/BANK/CARD by amount
+//   CREDIT REVENUE        by amount
+//
+// Wie Repair-Payments: simplified, kein VAT-Split. Wenn Edelmetallverkäufe je
+// VAT-pflichtig werden, separater Sub-Account.
+
+export interface MetalPaymentLike {
+  id: string;
+  metalId: string;
+  amount: number;
+  method: string;        // 'cash' | 'bank' | 'card' | etc.
+  paidAt: string;
+}
+
+function metalCashAccountFor(method: string): LedgerAccount {
+  const m = (method || 'bank').toLowerCase();
+  if (m === 'cash') return 'CASH';
+  if (m === 'card') return 'CARD_CLEARING';
+  return 'BANK';
+}
+
+export function postMetalPayment(payment: MetalPaymentLike): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postMetalPayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc = metalCashAccountFor(payment.method);
+  return postEntries(
+    [
+      {
+        account: cashAcc,
+        direction: 'DEBIT',
+        amount,
+        metadata: { metalId: payment.metalId, method: payment.method },
+      },
+      {
+        account: 'REVENUE',
+        direction: 'CREDIT',
+        amount,
+        metadata: { metalId: payment.metalId, method: payment.method },
+      },
+    ],
+    {
+      occurredAt: payment.paidAt,
+      sourceModule: 'METAL_PAYMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+export function postMetalPaymentReversed(paymentId: string): PostingResult {
+  return reverseSource('METAL_PAYMENT', paymentId, new Date().toISOString());
+}
+
+// ── Agent Settlement Payment (Legacy-Pfad ohne Invoice) ──────
+//
+// Anwendungsfall: Agent verkauft unsere Ware, behält Kommission, überweist uns
+// das Settlement. Wenn KEINE Invoice gekoppelt ist (UI-Fallback), läuft die Cash-
+// Bewegung direkt über agent_settlement_payments. Die Convert-to-Invoice-Logik
+// reverst diese Buchungen, sobald eine Invoice angelegt wird (siehe
+// agentStore.convertTransferToInvoice).
+//
+//   DEBIT  CASH/BANK by amount
+//   CREDIT REVENUE   by amount
+//
+// Match bestehende bankingStore-Klassifizierung (SALES_IN). Kein VAT-Split —
+// wenn das gewünscht ist, MUSS Convert-to-Invoice genutzt werden.
+
+export interface AgentSettlementPaymentLike {
+  id: string;
+  transferId: string;
+  amount: number;
+  method: 'cash' | 'bank';
+  paidAt: string;
+}
+
+export function postAgentSettlementPayment(payment: AgentSettlementPaymentLike, agentId?: string): PostingResult {
+  const amount = ROUND(payment.amount);
+  if (amount <= 0) {
+    throw new Error(`postAgentSettlementPayment: amount must be > 0 (got ${payment.amount})`);
+  }
+  const cashAcc: LedgerAccount = payment.method === 'cash' ? 'CASH' : 'BANK';
+  const cpType: CounterpartyType | undefined = agentId ? 'AGENT' : undefined;
+  return postEntries(
+    [
+      {
+        account: cashAcc,
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: cpType,
+        counterpartyId: agentId,
+        metadata: { transferId: payment.transferId, method: payment.method },
+      },
+      {
+        account: 'REVENUE',
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: cpType,
+        counterpartyId: agentId,
+        metadata: { transferId: payment.transferId, method: payment.method },
+      },
+    ],
+    {
+      occurredAt: payment.paidAt,
+      sourceModule: 'AGENT_SETTLEMENT',
+      sourceId: payment.id,
+    }
+  );
+}
+
+export function postAgentSettlementPaymentReversed(paymentId: string): PostingResult {
+  return reverseSource('AGENT_SETTLEMENT', paymentId, new Date().toISOString());
+}
+
+// ── Consignment Payout (Auszahlung an Consignor) ─────────────
+//
+// Wir haben Ware fremder Personen (Consignor) verkauft, die Buyer-Invoice hat
+// die volle salePrice als REVENUE gebucht. Beim Payout an den Consignor müssen
+// wir die nicht-uns-gehörende Hälfte raus aus dem System nehmen.
+//
+//   DEBIT  EXPENSES_OPERATING by amount  (Pseudo-Aufwand: Geld fließt raus, ist nicht unser Erlös)
+//   CREDIT CASH/BANK          by amount
+//
+// Ergebnis: REVENUE − EXPENSES_OPERATING ergibt die echte Marge (= Kommission).
+// Match bestehende bankingStore-Klassifizierung (EXPENSE_OUT).
+
+export interface ConsignmentPayoutLike {
+  id: string;             // synthetisch — consignment_payouts existiert nicht als eigene Tabelle
+  consignmentId: string;
+  consignorId?: string;   // customer_id des Consignors
+  amount: number;
+  method: 'cash' | 'bank';
+  paidAt: string;
+}
+
+export function postConsignmentPayout(payout: ConsignmentPayoutLike): PostingResult {
+  const amount = ROUND(payout.amount);
+  if (amount <= 0) {
+    throw new Error(`postConsignmentPayout: amount must be > 0 (got ${payout.amount})`);
+  }
+  const cashAcc: LedgerAccount = payout.method === 'cash' ? 'CASH' : 'BANK';
+  const cpType: CounterpartyType | undefined = payout.consignorId ? 'CUSTOMER' : undefined;
+  return postEntries(
+    [
+      {
+        account: 'EXPENSES_OPERATING',
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: cpType,
+        counterpartyId: payout.consignorId,
+        metadata: { consignmentId: payout.consignmentId, kind: 'consignor_payout', method: payout.method },
+      },
+      {
+        account: cashAcc,
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: cpType,
+        counterpartyId: payout.consignorId,
+        metadata: { consignmentId: payout.consignmentId, kind: 'consignor_payout', method: payout.method },
+      },
+    ],
+    {
+      occurredAt: payout.paidAt,
+      sourceModule: 'CONSIGNMENT_PAYOUT',
+      sourceId: payout.id,
+    }
+  );
+}
+
+export function postConsignmentPayoutReversed(payoutId: string): PostingResult {
+  return reverseSource('CONSIGNMENT_PAYOUT', payoutId, new Date().toISOString());
+}

@@ -14,6 +14,7 @@ import { useProductStore } from '@/stores/productStore';
 import { exportCsv } from '@/core/utils/export-file';
 import { exportNbrVatReport } from '@/core/tax/nbr-export';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { query } from '@/core/db/helpers';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -99,6 +100,24 @@ export function InvoiceList() {
   }, [showNbrExport, nbrCandidates]);
 
   useEffect(() => { loadInvoices(); loadOffers(); loadCustomers(); loadProducts(); loadSalesReturns(); }, [loadInvoices, loadOffers, loadCustomers, loadProducts, loadSalesReturns]);
+
+  // CN-aware open count — subtrahiert receivable_cancel damit zurückgebuchte Forderungen nicht als "open" zählen.
+  const openInvoiceCount = useMemo(() => {
+    try {
+      const rows = query(
+        `SELECT COALESCE(SUM(CASE WHEN (i.gross_amount - i.paid_amount
+             - COALESCE(cn_totals.cancel_amount, 0)) > 0.005 THEN 1 ELSE 0 END), 0) AS cnt
+         FROM invoices i
+         LEFT JOIN (
+           SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
+           FROM credit_notes GROUP BY invoice_id
+         ) cn_totals ON cn_totals.invoice_id = i.id
+         WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'FINAL', 'RETURNED')`,
+        []
+      );
+      return Number(rows[0]?.cnt || 0);
+    } catch { return invoices.filter(i => i.status !== 'CANCELLED' && i.paidAmount < i.grossAmount - 0.005).length; }
+  }, [invoices]);
 
   // URL-Param: /invoices?customer=:id → nur Invoices dieses Kunden anzeigen.
   const customerFilter = searchParams.get('customer') || '';
@@ -191,7 +210,7 @@ export function InvoiceList() {
       title="Invoices"
       subtitle={customerFilter
         ? `Filtered by client: ${customerFilterName || customerFilter} \u00b7 ${filtered.length} invoice${filtered.length === 1 ? '' : 's'}`
-        : `${invoices.length} invoices \u00b7 ${invoices.filter(i => i.status !== 'CANCELLED' && i.paidAmount < i.grossAmount - 0.005).length} open`}
+        : `${invoices.length} invoices \u00b7 ${openInvoiceCount} open`}
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by invoice #, client, product..."
       actions={
         <div className="flex gap-2">
@@ -222,9 +241,9 @@ export function InvoiceList() {
         </div>
       }
     >
-      {/* Table — Plan §Sales Übersicht: Net/VAT entfernt, Remaining + granulare Status. */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.4fr)', gap: 12, padding: '0 12px 10px' }}>
-        {['DATE', 'INVOICE #', 'CLIENT', 'PHONE', 'TOTAL', 'PAID', 'REMAINING', 'STATUS'].map(h => (
+      {/* Table — Plan §Sales Übersicht: Net/VAT entfernt, Remaining + granulare Status + Refund-Status. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.3fr) minmax(0,1.2fr)', gap: 12, padding: '0 12px 10px' }}>
+        {['DATE', 'INVOICE #', 'CLIENT', 'PHONE', 'TOTAL', 'PAID', 'REMAINING', 'STATUS', 'REFUND'].map(h => (
           <span key={h} className="text-overline">{h}</span>
         ))}
       </div>
@@ -244,11 +263,22 @@ export function InvoiceList() {
         const displayStatus = deriveDisplayStatus(inv, sum.returnState);
         const statusStyle = STATUS_STYLE[displayStatus];
         const isOpenPayment = displayStatus === 'Partially Paid' || displayStatus === 'Unpaid';
+        // Refund-Spalte: nur relevant wenn die Invoice mindestens einen Return hat.
+        const hasReturns = sum.returns.length > 0;
+        const refundLabel = !hasReturns ? '—'
+          : sum.refundState === 'REFUNDED' ? (sum.outstandingRefund < 0.005 ? 'Settled' : 'Refunded')
+          : sum.refundState === 'PARTIALLY_REFUNDED' ? 'Partial'
+          : 'Pending';
+        const refundStyle = !hasReturns
+          ? { fg: '#9CA3AF', bg: 'transparent' }
+          : sum.refundState === 'REFUNDED' ? { fg: '#16A34A', bg: 'rgba(22,163,74,0.10)' }
+          : sum.refundState === 'PARTIALLY_REFUNDED' ? { fg: '#D97706', bg: 'rgba(217,119,6,0.10)' }
+          : { fg: '#DC2626', bg: 'rgba(220,38,38,0.08)' };
         return (
           <div key={inv.id}
             className="cursor-pointer transition-colors"
             style={{
-              display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1.4fr)',
+              display: 'grid', gridTemplateColumns: 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.5fr) minmax(0,1fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.3fr) minmax(0,1.2fr)',
               gap: 12, padding: '14px 12px', alignItems: 'center',
               borderBottom: '1px solid rgba(229,225,214,0.6)',
             }}
@@ -294,6 +324,24 @@ export function InvoiceList() {
                     padding: '3px 8px', fontSize: 10, border: '1px solid #16A34A',
                     color: '#16A34A', borderRadius: 4, background: 'none',
                   }}>Pay</button>
+              )}
+            </div>
+            {/* REFUND column */}
+            <div style={{ minWidth: 0 }}>
+              {hasReturns ? (
+                <span
+                  title={sum.outstandingRefund > 0.005
+                    ? `Outstanding cash refund: ${sum.outstandingRefund.toFixed(2)} BHD · ${sum.totalRefundPaid.toFixed(2)} of ${sum.totalReturned.toFixed(2)} paid`
+                    : `${sum.totalRefundPaid.toFixed(2)} of ${sum.totalReturned.toFixed(2)} BHD refunded`}
+                  style={{
+                    padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
+                    color: refundStyle.fg, background: refundStyle.bg,
+                    border: `1px solid ${refundStyle.fg}33`, whiteSpace: 'nowrap',
+                  }}>
+                  {refundLabel}
+                </span>
+              ) : (
+                <span style={{ fontSize: 12, color: '#9CA3AF' }}>{refundLabel}</span>
               )}
             </div>
           </div>

@@ -155,8 +155,9 @@ export function InvoiceDetail() {
   const isDraft = invoice.status === 'DRAFT';
   const isCancelled = invoice.status === 'CANCELLED';
   const isPaid = invoice.status === 'FINAL';
-  const canRecordPayment = !isDraft && !isCancelled && !isPaid;
-  const canCancel = !isCancelled && !isPaid;
+  const isReturned = invoice.status === 'RETURNED';
+  const canRecordPayment = !isDraft && !isCancelled && !isPaid && !isReturned && remaining > 0.005;
+  const canCancel = !isCancelled && !isPaid && !isReturned;
 
   // Plan §Repair §Pickup-from-Invoice (User-Spec): wenn diese Invoice an Repairs
   // gekoppelt ist (auch eine Bulk-Invoice mit mehreren), voll bezahlt + mind. einer
@@ -1018,9 +1019,10 @@ export function InvoiceDetail() {
                                   REFUNDED: { fg: '#7EAA6E', bg: 'rgba(126,170,110,0.1)' },
                                   SETTLED:  { fg: '#7EAA6E', bg: 'rgba(126,170,110,0.1)' },
                                   PARTIALLY_REFUNDED: { fg: '#D97706', bg: 'rgba(217,119,6,0.1)' },
+                                  PENDING_REFUND: { fg: '#DC2626', bg: 'rgba(220,38,38,0.1)' },
                                   NOT_REFUNDED: { fg: '#DC2626', bg: 'rgba(220,38,38,0.1)' },
                                 };
-                                const { fg, bg } = colorMap[effectiveStatus] || colorMap.NOT_REFUNDED;
+                                const { fg, bg } = colorMap[effectiveStatus] || colorMap.PENDING_REFUND;
                                 return (
                                   <span title={effectiveStatus === 'SETTLED' ? 'No cash refund needed — customer never paid' : undefined}
                                     style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, color: fg, background: bg, border: `1px solid ${fg}30` }}>
@@ -1612,7 +1614,7 @@ export function InvoiceDetail() {
             <div className="flex gap-2">
               {[
                 { id: true, label: 'Refund jetzt zahlen' },
-                { id: false, label: 'Refund später (Status: Not Refunded)' },
+                { id: false, label: 'Refund später (Status: Pending)' },
               ].map(o => (
                 <button key={String(o.id)} onClick={() => setReturnRefundNow(o.id)}
                   className="cursor-pointer rounded"

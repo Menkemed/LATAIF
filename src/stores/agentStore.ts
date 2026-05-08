@@ -8,6 +8,19 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { vatEngine } from '@/core/tax/vat-engine';
+import {
+  postAgentSettlementPayment,
+  postAgentSettlementPaymentReversed,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+
+// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface AgentStore {
   agents: Agent[];
@@ -289,12 +302,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // Plan §8 #5 — Audit-Trail: jede Teilzahlung als eigene Zeile in agent_settlement_payments.
       // Nur wenn KEINE Invoice existiert (Legacy-Pfad) — sonst doppelte Buchung.
       const payId = uuid();
+      const settleMethod: 'cash' | 'bank' = method || 'cash';
+      const paidDate = now.split('T')[0];
       db.run(
         `INSERT INTO agent_settlement_payments (id, transfer_id, amount, method, paid_at, note, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [payId, id, paidNow, method || 'cash', now.split('T')[0], isFull ? 'Final settlement' : 'Partial settlement', now]
+        [payId, id, paidNow, settleMethod, paidDate, isFull ? 'Final settlement' : 'Partial settlement', now]
       );
-      trackInsert('agent_settlement_payments', payId, { transferId: id, amount: paidNow, method: method || 'cash' });
+      trackInsert('agent_settlement_payments', payId, { transferId: id, amount: paidNow, method: settleMethod });
+
+      // ZIEL.md §3a — Settlement-Cashflow ans Ledger.
+      safePost(`postAgentSettlementPayment(${payId})`, () => {
+        if (hasLedgerEntries('AGENT_SETTLEMENT', payId)) return;
+        postAgentSettlementPayment(
+          { id: payId, transferId: id, amount: paidNow, method: settleMethod, paidAt: paidDate },
+          t.agentId
+        );
+      });
     }
 
     get().updateTransfer(id, {
@@ -402,6 +426,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const existingSettlePayments = get().getSettlementPayments(transferId);
     if (existingSettlePayments.length > 0) {
       const db = getDatabase();
+      // ZIEL.md §3a — bestehende Ledger-Buchungen der Settlement-Payments reversen,
+      // BEVOR die Invoice-Payments gepostet werden. Sonst Doppelbuchung von cash + revenue.
+      for (const sp of existingSettlePayments) {
+        safePost(`postAgentSettlementPaymentReversed(${sp.id}) [convert]`, () => {
+          if (!hasLedgerEntries('AGENT_SETTLEMENT', sp.id)) return;
+          if (hasReversalFor('AGENT_SETTLEMENT', sp.id)) return;
+          postAgentSettlementPaymentReversed(sp.id);
+        });
+      }
       for (const sp of existingSettlePayments) {
         const invMethod = sp.method === 'bank' ? 'bank_transfer' : (sp.method || 'cash');
         inv.recordPayment(invoice.id, sp.amount, invMethod, `Migrated from settlement (${sp.paidAt})`);
@@ -493,6 +526,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       get().updateTransfer(t.id, { invoiceId: invoice.id });
       const sps = get().getSettlementPayments(t.id);
       if (sps.length > 0) {
+        // ZIEL.md §3a — vor invoice_payments-Posting die alten AGENT_SETTLEMENT-Buchungen reversen.
+        for (const sp of sps) {
+          safePost(`postAgentSettlementPaymentReversed(${sp.id}) [bulk-convert]`, () => {
+            if (!hasLedgerEntries('AGENT_SETTLEMENT', sp.id)) return;
+            if (hasReversalFor('AGENT_SETTLEMENT', sp.id)) return;
+            postAgentSettlementPaymentReversed(sp.id);
+          });
+        }
         for (const sp of sps) {
           const invMethod = sp.method === 'bank' ? 'bank_transfer' : (sp.method || 'cash');
           inv.recordPayment(invoice.id, sp.amount, invMethod, `Migrated from settlement ${t.transferNumber} (${sp.paidAt})`);
