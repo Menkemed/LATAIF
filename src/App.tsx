@@ -100,11 +100,15 @@ export default function App() {
     if (isTauri) {
       let unlisten: (() => void) | null = null;
       let cancelled = false;
+      let closing = false;
       import('@tauri-apps/api/window').then(async (mod) => {
         if (cancelled) return;
         const win = mod.getCurrentWindow();
         unlisten = await win.onCloseRequested(async (event) => {
-          // Default-Close abbrechen, async drainen, dann manuell zerstoeren.
+          // Zweiter Pass (durch destroy() ausgeloest) muss durchgehen, sonst
+          // Endlosloop und das X-Knopf scheint kaputt.
+          if (closing) return;
+          closing = true;
           event.preventDefault();
           try { await flushDatabase(); } catch (err) { console.error('[App] flush on close failed:', err); }
           await win.destroy();

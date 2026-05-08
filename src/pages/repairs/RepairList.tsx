@@ -112,17 +112,6 @@ export function RepairList() {
       meta: `${p.purchasePrice.toLocaleString('en-US')} BHD`,
     })), [products]);
 
-  function isRepairBlockedFromPickup(rep: Repair): boolean {
-    const charge = rep.chargeToCustomer || 0;
-    if (charge <= 0.005) return false;
-    if (rep.customerPaymentStatus === 'PAID') return false;
-    if (rep.invoiceId) {
-      const inv = invoices.find(i => i.id === rep.invoiceId);
-      if (inv && (inv.paidAmount || 0) >= (inv.grossAmount || 0) - 0.005) return false;
-    }
-    return true;
-  }
-
   function getPaymentStyle(rep: Repair) {
     if (rep.repairScope === 'OWN') return null;
     const charge = rep.chargeToCustomer || 0;
@@ -268,6 +257,16 @@ export function RepairList() {
     }
   }
 
+  function handleQuickInvoice(e: React.MouseEvent, repairId: string) {
+    e.stopPropagation();
+    try {
+      const res = createCombinedRepairInvoice([repairId]);
+      navigate(`/invoices/${res.invoiceId}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   const activeCount = repairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled').length;
 
   return (
@@ -381,8 +380,8 @@ export function RepairList() {
         const rawNext = NEXT_STATUS[rep.status];
         const next = (rep.repairScope === 'OWN' && rawNext?.status === 'picked_up') ? undefined : rawNext;
         const itemLabel = [rep.itemBrand, rep.itemModel].filter(Boolean).join(' ');
-        const blockedPickup = next?.status === 'picked_up' && isRepairBlockedFromPickup(rep);
         const eligible = isEligibleForBulk(rep);
+        const showInvoiceShortcut = eligible;
         const checked = validSelectedIds.has(rep.id);
         const statusStyle = REPAIR_STATUS_STYLE[rep.status] ?? { label: rep.status, fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' };
         const payStyle = getPaymentStyle(rep);
@@ -499,34 +498,52 @@ export function RepairList() {
             </div>
 
             {/* Quick Status Action */}
-            <div style={{ textAlign: 'right' }}>
-              {next && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+              {showInvoiceShortcut && (
                 <button
-                  onClick={(e) => { if (!blockedPickup) handleQuickStatus(e, rep.id, next.status); else e.stopPropagation(); }}
-                  disabled={blockedPickup}
-                  title={blockedPickup ? 'Invoice + Payment required before Picked Up.' : undefined}
+                  onClick={(e) => handleQuickInvoice(e, rep.id)}
+                  title="Create Invoice from this repair"
                   style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
                     padding: '4px 10px', fontSize: 11, borderRadius: 999,
-                    border: '1px solid #D5D9DE',
-                    color: blockedPickup ? '#9CA3AF' : '#4B5563',
+                    border: '1px solid #715DE3',
+                    color: '#715DE3',
                     background: 'transparent',
-                    cursor: blockedPickup ? 'not-allowed' : 'pointer',
-                    opacity: blockedPickup ? 0.5 : 1,
+                    cursor: 'pointer',
                     transition: 'all 0.15s',
                   }}
                   onMouseEnter={e => {
-                    if (blockedPickup) return;
+                    e.currentTarget.style.background = 'rgba(113,93,227,0.10)';
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = 'transparent';
+                  }}
+                >
+                  <FileText size={11} /> Create Invoice
+                </button>
+              )}
+              {next && (
+                <button
+                  onClick={(e) => handleQuickStatus(e, rep.id, next.status)}
+                  style={{
+                    padding: '4px 10px', fontSize: 11, borderRadius: 999,
+                    border: '1px solid #D5D9DE',
+                    color: '#4B5563',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s',
+                  }}
+                  onMouseEnter={e => {
                     e.currentTarget.style.borderColor = '#0F0F10';
                     e.currentTarget.style.color = '#0F0F10';
                     e.currentTarget.style.background = 'rgba(15,15,16,0.06)';
                   }}
                   onMouseLeave={e => {
-                    if (blockedPickup) return;
                     e.currentTarget.style.borderColor = '#D5D9DE';
                     e.currentTarget.style.color = '#4B5563';
                     e.currentTarget.style.background = 'transparent';
                   }}
-                >{blockedPickup ? 'Unpaid' : next.label}</button>
+                >{next.label}</button>
               )}
             </div>
           </div>
