@@ -510,6 +510,50 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
               category: 'RepairCosts', amount: workshopFee, repairId: id,
               supplierId: repair.workshopSupplierId, status: expStatus,
             });
+
+            // Ohne diesen Post wuerde A/P im Ledger fehlen → Supplier-Outstanding
+            // zeigt zu wenig (Bug v0.1.25, sichtbar an „ali gold" Detail-Page).
+            const expenseDescription = `External repair ${repair.repairNumber}${workshopLabel}`;
+            const expenseRecord: Expense = {
+              id: expenseId,
+              expenseNumber,
+              branchId,
+              category: 'RepairCosts',
+              amount: workshopFee,
+              paidAmount,
+              paymentMethod: method,
+              expenseDate: now.split('T')[0],
+              description: expenseDescription,
+              relatedModule: 'repair',
+              relatedEntityId: id,
+              supplierId: repair.workshopSupplierId,
+              status: expStatus as Expense['status'],
+              createdAt: now,
+            };
+            safePost(`postExpense(${expenseId}) [repair-ready]`, () => {
+              if (hasLedgerEntries('EXPENSE', expenseId)) return;
+              postExpense(expenseRecord);
+            });
+            if (expStatus === 'PAID' && paidAmount > 0) {
+              const payId = uuid();
+              db.run(
+                `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                [payId, expenseId, paidAmount, method, now.split('T')[0], 'Auto-paid on repair ready', now]
+              );
+              trackInsert('expense_payments', payId, { expenseId, amount: paidAmount, method });
+              safePost(`postExpensePayment(${payId}) [repair-ready]`, () => {
+                if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
+                postExpensePayment(
+                  {
+                    id: payId, expenseId, amount: paidAmount,
+                    method, paidAt: now.split('T')[0], createdAt: now,
+                    note: 'Auto-paid on repair ready',
+                  },
+                  repair.workshopSupplierId
+                );
+              });
+            }
           }
         }
         break;
