@@ -205,7 +205,7 @@ export interface Offer {
 // ── Invoice ──
 
 // Plan §Sales §2: Partial Invoice (PINV) + Final Invoice (INV). Storno (§14).
-export type InvoiceStatus = 'DRAFT' | 'PARTIAL' | 'FINAL' | 'CANCELLED';
+export type InvoiceStatus = 'DRAFT' | 'PARTIAL' | 'FINAL' | 'CANCELLED' | 'RETURNED';
 
 export interface InvoiceLine {
   id: UUID;

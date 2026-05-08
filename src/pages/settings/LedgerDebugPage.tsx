@@ -276,7 +276,7 @@ export function LedgerDebugPage() {
         id: uuid(),
         expenseNumber: 'EXP-TEST-' + Date.now(),
         branchId: currentBranchId(),
-        category: 'Office',
+        category: 'Miscellaneous',
         amount: 250,
         paidAmount: 0,
         paymentMethod: 'cash',

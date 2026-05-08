@@ -80,7 +80,7 @@ export function backfillInvoices(branchId: string): BackfillResult {
     const lines: InvoiceLine[] = lineRows.map(lr => ({
       id: lr.id as string,
       invoiceId: id,
-      productId: (lr.product_id as string | null) || undefined,
+      productId: (lr.product_id as string | null) || '',
       quantity: Number(lr.quantity || 1),
       unitPrice: Number(lr.unit_price || 0),
       purchasePriceSnapshot: Number(lr.purchase_price_snapshot || 0),
@@ -98,7 +98,7 @@ export function backfillInvoices(branchId: string): BackfillResult {
       customerId: r.customer_id as string,
       offerId: (r.offer_id as string | null) || undefined,
       status: (r.status as Invoice['status']) || 'FINAL',
-      currency: (r.currency as string) || 'BHD',
+      currency: ((r.currency as string) || 'BHD') as Invoice['currency'],
       netAmount: Number(r.net_amount || 0),
       vatRateSnapshot: Number(r.vat_rate_snapshot || 0),
       vatAmount: Number(r.vat_amount || 0),
@@ -106,7 +106,7 @@ export function backfillInvoices(branchId: string): BackfillResult {
       taxSchemeSnapshot: (r.tax_scheme_snapshot as Invoice['taxSchemeSnapshot']) || undefined,
       paidAmount: Number(r.paid_amount || 0),
       issuedAt: r.issued_at as string,
-      dueDate: (r.due_date as string | null) || undefined,
+      dueAt: (r.due_date as string | null) || undefined,
       lines,
       createdAt: r.created_at as string,
     };

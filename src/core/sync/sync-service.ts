@@ -175,8 +175,9 @@ async function pullChanges(): Promise<number> {
         reload: async () => { (await import('@/stores/repairStore')).useRepairStore.getState().loadRepairs(); } },
       { tables: ['orders', 'order_lines'],
         reload: async () => { (await import('@/stores/orderStore')).useOrderStore.getState().loadOrders(); } },
-      { tables: ['order_payments'],
-        reload: async () => { (await import('@/stores/orderPaymentStore')).useOrderPaymentStore.getState().loadPayments(); } },
+      // order_payments / customer_messages: per-entity store (loadPayments(orderId)/
+      // loadMessages(customerId)). Beim Sync-Pull kennen wir die Entity-ID nicht —
+      // betroffene Detail-Pages reloaden beim Nav-Switch. Bewusst aus der Map raus.
       { tables: ['purchases', 'purchase_lines', 'purchase_payments', 'purchase_returns', 'purchase_return_lines'],
         reload: async () => {
           const m = await import('@/stores/purchaseStore');
@@ -214,8 +215,6 @@ async function pullChanges(): Promise<number> {
         reload: async () => { (await import('@/stores/taskStore')).useTaskStore.getState().loadTasks(); } },
       { tables: ['documents'],
         reload: async () => { (await import('@/stores/documentStore')).useDocumentStore.getState().loadDocuments(); } },
-      { tables: ['customer_messages'],
-        reload: async () => { (await import('@/stores/customerMessageStore')).useCustomerMessageStore.getState().loadMessages(); } },
       { tables: ['bank_transfers'],
         reload: async () => { (await import('@/stores/bankingStore')).useBankingStore.getState().loadTransfers(); } },
       { tables: ['precious_metals', 'metal_payments'],
