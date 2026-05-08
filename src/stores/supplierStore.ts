@@ -4,11 +4,17 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Supplier } from '@/core/models/types';
+import type { Supplier, PurchasePayment } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { supplierBalance } from '@/core/ledger/queries';
+import { postPurchasePayment, hasLedgerEntries } from '@/core/ledger/posting';
+
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface SupplierCredit {
   id: string;
@@ -159,11 +165,14 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       const used = (credit[0]?.used as number) || 0;
       const creditBalance = Math.max(0, earned - used);
 
-      // ZIEL.md §3a — outstandingBalance kommt aus dem zentralen Ledger.
-      // totalPurchases/totalPaid bleiben aus Domain-Aggregation, da das Ledger
-      // keine Flow-over-time-Splits zwischen "vergangener Einkauf" und "Zahlung"
-      // pro Lieferanten direkt anbietet.
-      const outstandingBalance = supplierBalance(id);
+      // outstandingBalance = totalPurchases − totalPaid (Domain-Wahrheit), damit
+      // die KPI-Karte mit der sichtbaren Tabelle uebereinstimmt — auch fuer
+      // historische Repair-Expenses, die vor dem Ledger-Post-Fix angelegt
+      // wurden und deshalb keinen ledger_entries-Eintrag haben.
+      // supplierBalance(id) (Ledger-basiert) wird bewusst NICHT mehr genutzt,
+      // weil unvollstaendiges Ledger zu unter-zaehlten Salden fuehrt — die
+      // Reconciliation-Page macht den Ledger-vs-Domain-Vergleich separat.
+      const outstandingBalance = totalPurchases - totalPaid;
 
       return {
         totalPurchases,
@@ -224,13 +233,36 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     );
     // Als Purchase-Payment mit method='credit' verbuchen — existierender Status-Reconcile greift.
     const payId = uuid();
+    const paidAt = now.split('T')[0];
     db.run(
       `INSERT INTO purchase_payments (id, purchase_id, amount, method, paid_at, reference, note, created_at)
        VALUES (?, ?, ?, 'credit', ?, ?, 'Applied from supplier credit', ?)`,
-      [payId, purchaseId, apply, now.split('T')[0], creditId, now]
+      [payId, purchaseId, apply, paidAt, creditId, now]
     );
     saveDatabase();
     trackUpdate('supplier_credits', creditId, { usedAmount: newUsed, status: newStatus });
     trackInsert('purchase_payments', payId, { purchaseId, amount: apply, method: 'credit' });
+
+    // Ledger-Post: Method='credit' bucht AP runter ↔ SUPPLIER_CREDIT runter (kein Cash).
+    // Ohne den Post bleibt sowohl die A/P-Reduktion als auch der Credit-Verbrauch unsichtbar
+    // im zentralen Ledger → Reconciliation-Page hat dauerhaft eine Diskrepanz.
+    const supRow = query(`SELECT supplier_id FROM purchases WHERE id = ?`, [purchaseId])[0];
+    const supplierId = (supRow?.supplier_id as string) || '';
+    if (supplierId) {
+      const payment: PurchasePayment = {
+        id: payId,
+        purchaseId,
+        amount: apply,
+        method: 'credit',
+        paidAt,
+        reference: creditId,
+        note: 'Applied from supplier credit',
+        createdAt: now,
+      };
+      safePost(`postPurchasePayment(${payId}) [credit]`, () => {
+        if (hasLedgerEntries('PURCHASE_PAYMENT', payId)) return;
+        postPurchasePayment(payment, supplierId);
+      });
+    }
   },
 }));

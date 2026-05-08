@@ -10,6 +10,7 @@ import {
   postRepairPayment,
   postExpense,
   postExpensePayment,
+  postExpenseCancelled,
   reverseSource,
   hasLedgerEntries,
   hasReversalFor,
@@ -614,7 +615,14 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
         [new Date().toISOString(), repair.productId]);
     }
-    // Auto-erzeugte Repair-Cost-Expenses cancellen (Cashflow-Bereinigung).
+    // Auto-erzeugte Repair-Cost-Expenses VOR dem Cancel einsammeln, damit wir sie
+    // anschliessend gezielt im Ledger reverten koennen.
+    const linkedExpenses = query(
+      `SELECT id, expense_number, branch_id, category, amount, paid_amount, payment_method,
+              expense_date, description, related_module, related_entity_id, supplier_id, status, created_at
+         FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`,
+      [id]
+    );
     db.run(
       `UPDATE expenses SET status = 'CANCELLED'
        WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`,
@@ -623,6 +631,34 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     db.run(`DELETE FROM repairs WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('repairs', id);
+
+    // Reverse fuer jeden zugehoerigen Workshop-Expense — sonst bleibt A/P-Buchung
+    // im Ledger trotz geloeschtem Repair stehen (Supplier-Saldo zu hoch).
+    for (const er of linkedExpenses) {
+      const expId = er.id as string;
+      const expForReverse: Expense = {
+        id: expId,
+        expenseNumber: er.expense_number as string,
+        branchId: er.branch_id as string,
+        category: (er.category as Expense['category']) || 'RepairCosts',
+        amount: Number(er.amount || 0),
+        paidAmount: Number(er.paid_amount || 0),
+        paymentMethod: (er.payment_method as 'cash' | 'bank') || 'bank',
+        expenseDate: er.expense_date as string,
+        description: er.description as string,
+        relatedModule: 'repair',
+        relatedEntityId: id,
+        supplierId: (er.supplier_id as string) || undefined,
+        status: er.status as Expense['status'],
+        createdAt: er.created_at as string,
+      };
+      safePost(`postExpenseCancelled(${expId}) [repair-delete]`, () => {
+        if (!hasLedgerEntries('EXPENSE', expId)) return;
+        if (hasReversalFor('EXPENSE', expId)) return;
+        postExpenseCancelled(expForReverse);
+      });
+    }
+
     get().loadRepairs();
   },
 

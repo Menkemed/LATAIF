@@ -20,6 +20,53 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackStatusChange, trackRefund, trackDelete } from '@/core/sync/track';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
+import {
+  postCreditNote,
+  reverseSource,
+  hasLedgerEntries,
+  hasReversalFor,
+} from '@/core/ledger/posting';
+import type { CreditNote } from '@/core/models/types';
+
+// Wenn sich CN.cash_refund_amount oder refund_method nach erstem Posting aendert,
+// urspruengliche Buchung reverten + neu posten — sonst zeigen CASH/BANK-Salden im
+// Ledger den falschen Refund-Pfad. Hilfsfunktion ist zentral, da gleicher Pattern
+// nach jedem CN-UPDATE noetig ist.
+function repostCreditNoteFromCnId(cnId: string, occurredAt: string): void {
+  try {
+    const cnRow = query(
+      `SELECT id, credit_note_number, branch_id, customer_id, invoice_id, sales_return_id,
+              total_amount, vat_amount, cash_refund_amount, receivable_cancel_amount,
+              refund_method, reason, notes, status, issued_at, created_at
+         FROM credit_notes WHERE id = ?`,
+      [cnId]
+    )[0];
+    if (!cnRow) return;
+    if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
+      reverseSource('CREDIT_NOTE', cnId, occurredAt);
+    }
+    const cn: CreditNote = {
+      id: cnRow.id as string,
+      creditNoteNumber: cnRow.credit_note_number as string,
+      branchId: cnRow.branch_id as string,
+      customerId: cnRow.customer_id as string,
+      invoiceId: cnRow.invoice_id as string,
+      salesReturnId: (cnRow.sales_return_id as string) || undefined,
+      totalAmount: Number(cnRow.total_amount || 0),
+      vatAmount: Number(cnRow.vat_amount || 0),
+      cashRefundAmount: Number(cnRow.cash_refund_amount || 0),
+      receivableCancelAmount: Number(cnRow.receivable_cancel_amount || 0),
+      refundMethod: (cnRow.refund_method as CreditNote['refundMethod']) || 'bank',
+      reason: (cnRow.reason as string) || undefined,
+      notes: (cnRow.notes as string) || undefined,
+      issuedAt: cnRow.issued_at as string,
+      createdAt: cnRow.created_at as string,
+    };
+    postCreditNote(cn);
+  } catch (err) {
+    console.error('[ledger] repostCreditNote failed:', err);
+  }
+}
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -533,6 +580,11 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
         saveDatabase();
         trackUpdate('credit_notes', cnId, { cashRefundAmount: newPaid, receivableCancelAmount: newCancel });
         useCreditNoteStore.getState().loadCreditNotes();
+
+        // Cash/AR-Split hat sich geaendert (oder Method) — Original-Posting reverten und mit
+        // neuem Stand frisch posten, damit CASH/BANK-Saldo im Ledger den tatsaechlichen
+        // Refund-Pfad reflektiert.
+        repostCreditNoteFromCnId(cnId, now);
       }
     } catch (e) {
       console.warn('[Return] credit note update failed:', e);

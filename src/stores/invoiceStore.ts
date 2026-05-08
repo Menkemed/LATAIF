@@ -10,9 +10,12 @@ import {
   postInvoiceIssued,
   postInvoicePayment,
   postInvoiceCancelled,
+  postExpense,
+  postExpenseCancelled,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+import type { Expense } from '@/core/models/types';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Domain-Insert + Ledger-Posting laufen in einem Try/Catch. Posting-Fehler werden
@@ -347,6 +350,14 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     // Plan §8 #6 — bei Stornierung verknüpfte Auto-Expenses (Card-Fees etc.) als CANCELLED markieren.
     if (data.status === 'CANCELLED') {
+      // Vor dem UPDATE Auto-Expenses fuer Reverse-Posting einsammeln (sonst sind sie nach
+      // dem Cancel-UPDATE nicht mehr im richtigen Status fuer postExpenseCancelled).
+      const linkedExpenses = query(
+        `SELECT id, expense_number, branch_id, category, amount, paid_amount, payment_method,
+                expense_date, description, related_module, related_entity_id, supplier_id, status, created_at
+           FROM expenses WHERE related_module = 'invoice' AND related_entity_id = ? AND status != 'CANCELLED'`,
+        [id]
+      );
       db.run(
         `UPDATE expenses SET status = 'CANCELLED' WHERE related_module = 'invoice' AND related_entity_id = ? AND status != 'CANCELLED'`,
         [id]
@@ -364,6 +375,32 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         if (hasReversalFor('INVOICE', id)) return;        // bereits storniert
         postInvoiceCancelled({ id } as Invoice);
       });
+
+      // Auto-Expenses (Card-Fees etc.) ebenfalls reverten — sonst Doppelbuchung im Ledger.
+      for (const er of linkedExpenses) {
+        const expId = er.id as string;
+        const expForReverse: Expense = {
+          id: expId,
+          expenseNumber: er.expense_number as string,
+          branchId: er.branch_id as string,
+          category: (er.category as Expense['category']) || 'CardFees',
+          amount: Number(er.amount || 0),
+          paidAmount: Number(er.paid_amount || 0),
+          paymentMethod: (er.payment_method as 'cash' | 'bank') || 'bank',
+          expenseDate: er.expense_date as string,
+          description: er.description as string,
+          relatedModule: 'invoice',
+          relatedEntityId: id,
+          supplierId: (er.supplier_id as string) || undefined,
+          status: er.status as Expense['status'],
+          createdAt: er.created_at as string,
+        };
+        safePost(`postExpenseCancelled(${expId}) [invoice-cancel]`, () => {
+          if (!hasLedgerEntries('EXPENSE', expId)) return;
+          if (hasReversalFor('EXPENSE', expId)) return;
+          postExpenseCancelled(expForReverse);
+        });
+      }
     }
 
     if (data.status === 'FINAL') {
@@ -461,15 +498,40 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (fee > 0) {
         const expenseId = uuid();
         const expenseNumber = getNextDocumentNumber('EXP');
+        const expenseDescription = `Card fee for payment ${paymentId.slice(0, 8)} (${feeRate}% of ${amount.toFixed(3)} BHD)`;
+        const expenseDate = now.split('T')[0];
         db.run(
           `INSERT INTO expenses (id, branch_id, expense_number, category, amount, payment_method,
             expense_date, description, related_module, related_entity_id, created_at, created_by)
            VALUES (?, ?, ?, 'CardFees', ?, 'bank', ?, ?, 'invoice', ?, ?, ?)`,
-          [expenseId, branchId, expenseNumber, fee, now.split('T')[0],
-           `Card fee for payment ${paymentId.slice(0, 8)} (${feeRate}% of ${amount.toFixed(3)} BHD)`,
+          [expenseId, branchId, expenseNumber, fee, expenseDate,
+           expenseDescription,
            invoiceId, now, userId]
         );
         trackInsert('expenses', expenseId, { category: 'CardFees', amount: fee, auto: true, invoiceId });
+
+        // Ledger-Post fuer Auto-Card-Fee. Status 'PENDING' (paidAmount 0) — dieser
+        // Expense wird in einem zweiten Schritt manuell bezahlt (oder von einer
+        // Card-Reconciliation-Routine). Posting ergibt EXPENSES_OPERATING vs A/P.
+        const cardFeeExpense: Expense = {
+          id: expenseId,
+          expenseNumber,
+          branchId,
+          category: 'CardFees',
+          amount: fee,
+          paidAmount: 0,
+          paymentMethod: 'bank',
+          expenseDate,
+          description: expenseDescription,
+          relatedModule: 'invoice',
+          relatedEntityId: invoiceId,
+          status: 'PENDING',
+          createdAt: now,
+        };
+        safePost(`postExpense(${expenseId}) [card-fee]`, () => {
+          if (hasLedgerEntries('EXPENSE', expenseId)) return;
+          postExpense(cardFeeExpense);
+        });
       }
     }
 
@@ -543,6 +605,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
   deleteInvoice: (id) => {
     const db = getDatabase();
+    // Vor dem Cancel die Auto-Expenses fuer Reverse-Posting einsammeln.
+    const linkedExpenses = query(
+      `SELECT id, expense_number, branch_id, category, amount, paid_amount, payment_method,
+              expense_date, description, related_module, related_entity_id, supplier_id, status, created_at
+         FROM expenses WHERE related_module = 'invoice' AND related_entity_id = ? AND status != 'CANCELLED'`,
+      [id]
+    );
     // Auto-erzeugte Expenses (Card-Fees etc.) cancellen, damit Cashflow konsistent bleibt.
     db.run(
       `UPDATE expenses SET status = 'CANCELLED'
@@ -554,6 +623,39 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     db.run(`DELETE FROM invoices WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('invoices', id);
+
+    // Ledger: Invoice-Reverse + jeden zugehoerigen CardFee-Expense reverten,
+    // sonst bleiben Geist-Eintraege bestehen die nie wieder geclearbar sind.
+    safePost(`postInvoiceCancelled(${id}) [delete]`, () => {
+      if (!hasLedgerEntries('INVOICE', id)) return;
+      if (hasReversalFor('INVOICE', id)) return;
+      postInvoiceCancelled({ id } as Invoice);
+    });
+    for (const er of linkedExpenses) {
+      const expId = er.id as string;
+      const expForReverse: Expense = {
+        id: expId,
+        expenseNumber: er.expense_number as string,
+        branchId: er.branch_id as string,
+        category: (er.category as Expense['category']) || 'CardFees',
+        amount: Number(er.amount || 0),
+        paidAmount: Number(er.paid_amount || 0),
+        paymentMethod: (er.payment_method as 'cash' | 'bank') || 'bank',
+        expenseDate: er.expense_date as string,
+        description: er.description as string,
+        relatedModule: 'invoice',
+        relatedEntityId: id,
+        supplierId: (er.supplier_id as string) || undefined,
+        status: er.status as Expense['status'],
+        createdAt: er.created_at as string,
+      };
+      safePost(`postExpenseCancelled(${expId}) [invoice-delete]`, () => {
+        if (!hasLedgerEntries('EXPENSE', expId)) return;
+        if (hasReversalFor('EXPENSE', expId)) return;
+        postExpenseCancelled(expForReverse);
+      });
+    }
+
     get().loadInvoices();
   },
 

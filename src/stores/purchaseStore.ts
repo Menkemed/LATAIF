@@ -19,6 +19,7 @@ import {
   postPurchaseReceived,
   postPurchasePayment,
   postPurchaseCancelled,
+  postEntries,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -515,6 +516,59 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
     saveDatabase();
     trackStatusChange('purchase_returns', id, 'DRAFT', finalStatus);
+
+    // Ledger: Net-Effekt der Return-Buchung — INVENTORY runter, A/P runter (Anteil
+    // ohne Refund) und Cash/Bank/SUPPLIER_CREDIT rauf (Refund-Anteil). Idempotent
+    // ueber sourceModule='PURCHASE_RETURN' + sourceId=id. VAT-Korrektur bleibt approx,
+    // weil purchase_return_lines kein vat_amount tragen — vernachlaessigt fuer jetzt.
+    const apReduction = ret.totalAmount - refundAmount;
+    const refundCashAcc =
+      ret.refundMethod === 'cash'   ? 'CASH'   :
+      ret.refundMethod === 'bank'   ? 'BANK'   :
+      ret.refundMethod === 'credit' ? 'SUPPLIER_CREDIT' :
+      'BANK';
+    safePost(`postPurchaseReturn(${id})`, () => {
+      if (hasLedgerEntries('PURCHASE_RETURN', id)) return;
+      const entries: Parameters<typeof postEntries>[0] = [];
+      if (ret.totalAmount > 0) {
+        entries.push({
+          account: 'INVENTORY',
+          direction: 'CREDIT',
+          amount: ret.totalAmount,
+          counterpartyType: 'SUPPLIER',
+          counterpartyId: purchase.supplierId,
+          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber },
+        });
+      }
+      if (apReduction > 0.005) {
+        entries.push({
+          account: 'ACCOUNTS_PAYABLE',
+          direction: 'DEBIT',
+          amount: apReduction,
+          counterpartyType: 'SUPPLIER',
+          counterpartyId: purchase.supplierId,
+          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, side: 'ap-reduction' },
+        });
+      }
+      if (refundAmount > 0.005) {
+        entries.push({
+          account: refundCashAcc,
+          direction: 'DEBIT',
+          amount: refundAmount,
+          counterpartyType: 'SUPPLIER',
+          counterpartyId: purchase.supplierId,
+          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, refundMethod: ret.refundMethod, side: 'refund-in' },
+        });
+      }
+      if (entries.length > 0) {
+        postEntries(entries, {
+          occurredAt: now,
+          sourceModule: 'PURCHASE_RETURN',
+          sourceId: id,
+        });
+      }
+    });
+
     get().loadPurchases();
     get().loadReturns();
   },

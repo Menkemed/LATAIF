@@ -209,7 +209,7 @@ export function SupplierDetail() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 32 }}>
           <KPICard label="TOTAL PURCHASES" value={fmt(ledger.totalPurchases)} unit="BHD" />
           <KPICard label="TOTAL PAID" value={fmt(ledger.totalPaid)} unit="BHD" />
-          <KPICard label="OUTSTANDING" value={fmt(ledger.outstandingBalance)} unit={`BHD · ${supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length} open`} />
+          <KPICard label="OUTSTANDING" value={fmt(ledger.outstandingBalance)} unit={`BHD · ${supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length + repairExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length} open`} />
           <KPICard label="CREDIT BALANCE" value={fmt(ledger.creditBalance)} unit="BHD available" />
         </div>
 

@@ -11,10 +11,17 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { ProductionRecord, ProductionInput, ProductionOutput, Product } from '@/core/models/types';
+import type { ProductionRecord, ProductionInput, ProductionOutput, Product, Expense } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { postExpense, postExpensePayment, hasLedgerEntries } from '@/core/ledger/posting';
+
+function safePost(label: string, fn: () => void): void {
+  try { fn(); } catch (err) {
+    console.error(`[ledger] ${label} failed:`, err);
+  }
+}
 
 interface ProductionStore {
   records: ProductionRecord[];
@@ -211,16 +218,60 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
       catch { branchId = 'branch-main'; userId = 'user-owner'; }
       const expenseId = uuid();
       const expenseNumber = getNextDocumentNumber('EXP');
+      const expenseAmount = labor + overhead;
+      const expenseDate = now.split('T')[0];
+      const expenseDescription = `Production ${r.recordNumber} — Labor ${labor.toFixed(2)} + Overhead ${overhead.toFixed(2)}`;
       db.run(
-        `INSERT INTO expenses (id, branch_id, expense_number, category, amount, payment_method,
+        `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
           expense_date, description, related_module, related_entity_id, status, created_at, created_by)
-         VALUES (?, ?, ?, 'Other', ?, 'cash', ?, ?, 'production', ?, 'PAID', ?, ?)`,
-        [expenseId, branchId, expenseNumber, labor + overhead, now.split('T')[0],
-         `Production ${r.recordNumber} — Labor ${labor.toFixed(2)} + Overhead ${overhead.toFixed(2)}`,
+         VALUES (?, ?, ?, 'Miscellaneous', ?, ?, 'cash', ?, ?, 'production', ?, 'PAID', ?, ?)`,
+        [expenseId, branchId, expenseNumber, expenseAmount, expenseAmount, expenseDate,
+         expenseDescription,
          id, now, userId]
       );
-      trackInsert('expenses', expenseId, { category: 'Other', amount: labor + overhead, auto: true, productionId: id });
+      trackInsert('expenses', expenseId, { category: 'Miscellaneous', amount: expenseAmount, auto: true, productionId: id });
       saveDatabase();
+
+      // Ledger-Post fuer Production-Expense (PAID, also direkt gegen Cash gegenbuchbar
+      // beim postExpense — siehe posting.ts: paidAmount > 0 fuehrt zur Cash-Side-Buchung).
+      const productionExpense: Expense = {
+        id: expenseId,
+        expenseNumber,
+        branchId,
+        category: 'Miscellaneous',
+        amount: expenseAmount,
+        paidAmount: expenseAmount,
+        paymentMethod: 'cash',
+        expenseDate,
+        description: expenseDescription,
+        relatedModule: 'production',
+        relatedEntityId: id,
+        status: 'PAID',
+        createdAt: now,
+      };
+      safePost(`postExpense(${expenseId}) [production]`, () => {
+        if (hasLedgerEntries('EXPENSE', expenseId)) return;
+        postExpense(productionExpense);
+      });
+      // Production-Expenses sind direkt PAID — Cash-Leg via expense_payment + Ledger-Post.
+      const payId = uuid();
+      db.run(
+        `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
+         VALUES (?, ?, ?, 'cash', ?, ?, ?)`,
+        [payId, expenseId, expenseAmount, expenseDate, 'Auto-paid on production complete', now]
+      );
+      trackInsert('expense_payments', payId, { expenseId, amount: expenseAmount, method: 'cash' });
+      safePost(`postExpensePayment(${payId}) [production]`, () => {
+        if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
+        postExpensePayment(
+          {
+            id: payId, expenseId, amount: expenseAmount,
+            method: 'cash', paidAt: expenseDate, createdAt: now,
+            note: 'Auto-paid on production complete',
+          },
+          undefined
+        );
+      });
     }
   },
 

@@ -2,10 +2,11 @@ import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { Consignment, ConsignmentStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { postConsignmentPayout, hasLedgerEntries } from '@/core/ledger/posting';
+import { postConsignmentPayout, postCreditNote, hasLedgerEntries } from '@/core/ledger/posting';
+import type { CreditNote } from '@/core/models/types';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -334,8 +335,45 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       [totalAmount, vatCorrected, now, con.invoiceId]
     );
 
+    // Synthetische Credit Note erzeugen + ans Ledger posten, damit Revenue/VAT/Cash
+    // bilanziert werden — analog zu salesReturnStore.approveReturn. Die paid_amount
+    // wurde oben reduziert → der Cash-Anteil ist die effektive Rueckzahlung an Kunde.
+    const cnId = uuid();
+    const cnNumber = getNextDocumentNumber('CN');
+    db.run(
+      `INSERT INTO credit_notes (id, branch_id, credit_note_number, invoice_id, customer_id,
+         issued_at, total_amount, vat_amount, cash_refund_amount, receivable_cancel_amount,
+         refund_method, sales_return_id, reason, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'cash', ?, ?, ?, ?)`,
+      [cnId, branchId, cnNumber, con.invoiceId, customerId, now, totalAmount, vatCorrected,
+       totalAmount, returnId, `Consignment post-sale return (${con.consignmentNumber})`, now, userId]
+    );
+    trackInsert('credit_notes', cnId, { creditNoteNumber: cnNumber, invoiceId: con.invoiceId, totalAmount });
+
     saveDatabase();
     trackInsert('sales_returns', returnId, { returnNumber, invoiceId: con.invoiceId, consignmentId: id, disposition });
+
+    const cn: CreditNote = {
+      id: cnId,
+      creditNoteNumber: cnNumber,
+      branchId,
+      customerId,
+      invoiceId: con.invoiceId,
+      salesReturnId: returnId,
+      totalAmount,
+      vatAmount: vatCorrected,
+      cashRefundAmount: totalAmount,
+      receivableCancelAmount: 0,
+      refundMethod: 'cash',
+      reason: `Consignment post-sale return (${con.consignmentNumber})`,
+      issuedAt: now,
+      createdAt: now,
+    };
+    safePost(`postCreditNote(${cnId}) [consignment-return]`, () => {
+      if (hasLedgerEntries('CREDIT_NOTE', cnId)) return;
+      postCreditNote(cn);
+    });
+
     eventBus.emit('consignment.returned', 'consignment', id, { disposition, returnId });
   },
 
