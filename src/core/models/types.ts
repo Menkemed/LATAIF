@@ -111,6 +111,8 @@ export interface Product {
   sourceType: ProductSourceType;
   notes?: string;
   images: string[];
+  /** Plan §Image-Duplicate-Detection: perceptual hash des ersten Bildes (16-stelliger Hex / 64bit DCT-pHash). */
+  imageHash?: string;
   // Dynamic attributes (category-specific)
   attributes: Record<string, string | number | boolean | string[]>;
   createdAt: string;

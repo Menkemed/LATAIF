@@ -186,6 +186,67 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     init();
   };
 
+  // Perceptual Hash (pHash) — selbe Logik wie desktop/src/core/utils/image-hash.ts.
+  // 32x32 Luminanz → 2D DCT-II → 8x8 Frequenz-Signature → Median-Threshold → 64-bit Hex.
+  // Wird VOR dem Push berechnet und mitgeschickt, damit der Desktop-SyncDuplicateGuard
+  // direkt den Score vergleichen kann ohne Bild-Recompute.
+  function dct1d(input, N) {
+    const out = new Float64Array(N);
+    for (let k = 0; k < N; k++) {
+      let sum = 0;
+      for (let n = 0; n < N; n++) sum += input[n] * Math.cos(((2 * n + 1) * k * Math.PI) / (2 * N));
+      out[k] = sum;
+    }
+    return out;
+  }
+  function dct2d(input, N) {
+    const rowDct = new Float64Array(N * N);
+    const row = new Float64Array(N);
+    for (let r = 0; r < N; r++) {
+      for (let c = 0; c < N; c++) row[c] = input[r * N + c];
+      const d = dct1d(row, N);
+      for (let c = 0; c < N; c++) rowDct[r * N + c] = d[c];
+    }
+    const out = new Float64Array(N * N);
+    const col = new Float64Array(N);
+    for (let c = 0; c < N; c++) {
+      for (let r = 0; r < N; r++) col[r] = rowDct[r * N + c];
+      const d = dct1d(col, N);
+      for (let r = 0; r < N; r++) out[r * N + c] = d[r];
+    }
+    return out;
+  }
+  async function computePhash(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const N = 32;
+          const canvas = document.createElement('canvas');
+          canvas.width = N; canvas.height = N;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, N, N);
+          const data = ctx.getImageData(0, 0, N, N).data;
+          const lum = new Float64Array(N * N);
+          for (let i = 0; i < N * N; i++) {
+            lum[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+          }
+          const dct = dct2d(lum, N);
+          const sig = new Float64Array(64);
+          let idx = 0;
+          for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) sig[idx++] = dct[r * N + c];
+          const sorted = [...sig.slice(1)].sort((a, b) => a - b);
+          const median = sorted[Math.floor(sorted.length / 2)];
+          let hash = 0n;
+          for (let i = 0; i < 64; i++) if (sig[i] > median) hash |= (1n << BigInt(i));
+          resolve(hash.toString(16).padStart(16, '0'));
+        } catch (e) { reject(e); }
+      };
+      img.onerror = reject;
+      img.src = dataUrl;
+    });
+  }
+
   // Foto auf max 1600px verkleinern + auf 0.85 JPEG komprimieren bevor speichern.
   function resizePhoto(file, maxDim, quality) {
     return new Promise((resolve, reject) => {
@@ -251,6 +312,12 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       const productId = uuid();
       const now = new Date().toISOString();
       const branchId = localStorage.getItem(BRANCH_KEY) || 'branch-main';
+      // pHash vom Photo (falls vorhanden) — wird vom Desktop-SyncDuplicateGuard
+      // als starkes Match-Signal verwendet, auch wenn Brand/Name leer sind.
+      let imageHash = null;
+      if (photoDataUrl) {
+        try { imageHash = await computePhash(photoDataUrl); } catch (e) { console.warn('pHash failed:', e); }
+      }
       // Snake_case matching the desktop products table schema. All required columns included.
       const productData = {
         id: productId,
@@ -271,6 +338,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
         source_type: 'OWN',
         notes: $('notes').value.trim() || null,
         images: JSON.stringify(photoDataUrl ? [photoDataUrl] : []),
+        image_hash: imageHash,
         attributes: '{}',
         created_at: now,
         updated_at: now,

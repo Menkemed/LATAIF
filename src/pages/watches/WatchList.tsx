@@ -406,6 +406,9 @@ export function WatchList() {
           <Button variant="ghost" onClick={() => exportProductsToExcel(filtered, categories)}>
             Export Excel ({filtered.length})
           </Button>
+          <Button variant="ghost" onClick={() => navigate('/settings?tab=duplicates')}>
+            Find Duplicates
+          </Button>
           <Button variant="secondary" onClick={() => navigate('/import')}>Import Excel</Button>
           <Button variant="primary" onClick={() => openNew()}>New Item</Button>
         </div>

@@ -6,6 +6,7 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getStockAggregates } from '@/core/lots/lot-queries';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { computeImageHash, hashDistance, HASH_IDENTICAL_THRESHOLD, HASH_SIMILAR_THRESHOLD } from '@/core/utils/image-hash';
 
 interface ProductStore {
   products: Product[];
@@ -97,11 +98,51 @@ function rowToProduct(row: Record<string, unknown>): Product {
     sourceType: (row.source_type as 'OWN' | 'CONSIGNMENT' | 'AGENT') || 'OWN',
     notes: row.notes as string | undefined,
     images: JSON.parse((row.images as string) || '[]'),
+    imageHash: (row.image_hash as string) || undefined,
     attributes: JSON.parse((row.attributes as string) || '{}'),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
   };
+}
+
+// Plan §Image-Duplicate-Detection — Lazy-Backfill.
+// Über alle Produkte mit Bild aber ohne image_hash: pHash berechnen und
+// persistieren. Batches von 5, kleine setTimeout-Pause zwischen Batches damit
+// der Main-Thread atmen kann. Idempotent — re-runs ignorieren bereits-gehashte.
+let backfillRunning = false;
+function backfillImageHashes(products: Product[]): void {
+  if (backfillRunning) return;
+  const todo = products.filter(p => p.images.length > 0 && !p.imageHash);
+  if (todo.length === 0) return;
+  backfillRunning = true;
+  let i = 0;
+  const BATCH = 5;
+  async function processBatch() {
+    const slice = todo.slice(i, i + BATCH);
+    for (const p of slice) {
+      try {
+        const hash = await computeImageHash(p.images[0]);
+        try {
+          getDatabase().run('UPDATE products SET image_hash = ? WHERE id = ?', [hash, p.id]);
+          trackUpdate('products', p.id, { imageHash: hash });
+          // Local store mutate ohne loadProducts-Re-Query — wir wollen den
+          // Reload nicht 1x pro Item triggern. Nach der Schleife einmal speichern.
+          p.imageHash = hash;
+        } catch (err) { console.warn('[backfill] persist failed:', err); }
+      } catch { /* broken image → skip silently */ }
+    }
+    i += BATCH;
+    if (i < todo.length) {
+      setTimeout(processBatch, 50);
+    } else {
+      try { saveDatabase(); } catch { /* */ }
+      backfillRunning = false;
+      // Final reload — Store-State auf neuesten Stand mit Hashes.
+      useProductStore.getState().loadProducts();
+    }
+  }
+  setTimeout(processBatch, 100);
 }
 
 function parseResults(results: { columns: string[]; values: unknown[][] }[]): Record<string, unknown>[] {
@@ -142,7 +183,11 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM products WHERE branch_id = ? ORDER BY updated_at DESC', [branchId]);
-      set({ products: rows.map(rowToProduct), loading: false });
+      const products = rows.map(rowToProduct);
+      set({ products, loading: false });
+      // Lazy-Backfill für pHash auf bestehende Produkte mit Bild aber ohne Hash.
+      // Im Hintergrund, in Batches von 5, damit die Main-Thread nicht stockt.
+      backfillImageHashes(products);
     } catch {
       set({ products: [], loading: false });
     }
@@ -212,6 +257,20 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     trackInsert('products', id, { brand: product.brand, name: product.name, categoryId: product.categoryId, purchasePrice: product.purchasePrice });
     eventBus.emit('product.created', 'product', id, { brand: product.brand, name: product.name });
     get().loadProducts();
+    // pHash async im Hintergrund berechnen — blockt das Speichern nicht.
+    // Bei Fehler (broken image / Node-Env) still failen, ist optional.
+    if (product.images.length > 0) {
+      computeImageHash(product.images[0])
+        .then(hash => {
+          try {
+            getDatabase().run('UPDATE products SET image_hash = ? WHERE id = ?', [hash, id]);
+            saveDatabase();
+            trackUpdate('products', id, { imageHash: hash });
+            get().loadProducts();
+          } catch (err) { console.warn('[productStore] image hash persist failed:', err); }
+        })
+        .catch(err => { console.warn('[productStore] image hash compute failed:', err); });
+    }
     return product;
   },
 
@@ -240,6 +299,15 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     if (data.scopeOfDelivery) { fields.push('scope_of_delivery = ?'); values.push(JSON.stringify(data.scopeOfDelivery)); }
     if (data.attributes) { fields.push('attributes = ?'); values.push(JSON.stringify(data.attributes)); }
     if (data.images) { fields.push('images = ?'); values.push(JSON.stringify(data.images)); }
+    // Caller darf imageHash direkt setzen (z.B. Mobile-Push hat den Hash schon).
+    // Sonst lassen wir das Feld leer und der Backfill in loadProducts holt's nach.
+    if ((data as { imageHash?: string }).imageHash !== undefined) {
+      fields.push('image_hash = ?');
+      values.push((data as { imageHash?: string }).imageHash || null);
+    } else if (data.images) {
+      // Bild geändert → alten Hash löschen, Backfill rechnet neu.
+      fields.push('image_hash = NULL');
+    }
 
     fields.push('updated_at = ?'); values.push(now); values.push(id);
     db.run(`UPDATE products SET ${fields.join(', ')} WHERE id = ?`, values);
@@ -589,6 +657,21 @@ export const useProductStore = create<ProductStore>((set, get) => ({
           && Math.abs(cWeight - pWeight) <= 0.5) {
         score += 50;
         reasons.push(`Same ${pAttrs.item_type} · ${pAttrs.weight}g · ${pAttrs.karat}`);
+      }
+
+      // 7) Image-Hash (pHash). Hamming ≤6 = sehr ähnlich (gleiche Aufnahme),
+      // ≤12 = visuell ähnlich. Phone-Uploads sind oft das primäre Signal.
+      const cHash = (candidate as { imageHash?: string }).imageHash || '';
+      const pHash = p.imageHash || '';
+      if (cHash && pHash) {
+        const dist = hashDistance(cHash, pHash);
+        if (dist <= HASH_IDENTICAL_THRESHOLD) {
+          score += 80;
+          reasons.push(`Same photo (visual match)`);
+        } else if (dist <= HASH_SIMILAR_THRESHOLD) {
+          score += 40;
+          reasons.push(`Similar photo`);
+        }
       }
 
       if (score >= 40) {

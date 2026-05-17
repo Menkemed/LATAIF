@@ -2492,7 +2492,17 @@ function DangerZoneTab() {
 
 export function SettingsPage() {
   const perm = usePermission();
-  const [activeTab, setActiveTab] = useState<TabKey>('company');
+  // Initial-Tab via ?tab=<key>. Erlaubt Deeplinks von anderen Seiten (z.B.
+  // Collection "Find Duplicates" → ?tab=duplicates).
+  const initialTab = ((): TabKey => {
+    try {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      const valid: TabKey[] = ['company', 'tax', 'categories', 'branch', 'branches', 'users', 'numbering', 'language', 'phone', 'ai', 'sync', 'updates', 'duplicates', 'danger'];
+      if (t && valid.includes(t as TabKey)) return t as TabKey;
+    } catch { /* */ }
+    return 'company';
+  })();
+  const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
   const [hoveredTab, setHoveredTab] = useState<TabKey | null>(null);
 
   // Route-Guard: ohne ADMIN keine Settings-Seite. Verhindert auch UI-basierte Manipulation.

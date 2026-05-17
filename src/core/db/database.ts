@@ -1229,6 +1229,10 @@ function runMigrations(database: Database): void {
        SELECT 1 FROM stock_lots sl
        WHERE sl.product_id = products.id
      )`,
+
+    // Plan §Image-Duplicate-Detection — 16-stelliger Hex pHash (64 bit DCT).
+    // Befüllt von createProduct/updateProduct + Lazy-Backfill in loadProducts.
+    `ALTER TABLE products ADD COLUMN image_hash TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
