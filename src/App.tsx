@@ -52,6 +52,7 @@ import { LedgerDebugPage } from '@/pages/settings/LedgerDebugPage';
 import { GlobalSearch } from '@/components/shared/GlobalSearch';
 import { UpdateBanner } from '@/components/shared/UpdateBanner';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
+import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync } from '@/core/db/database';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
@@ -108,12 +109,19 @@ export default function App() {
         if (cancelled) return;
         const win = mod.getCurrentWindow();
         unlisten = await win.onCloseRequested(async (event) => {
-          // Zweiter Pass (durch destroy() ausgeloest) muss durchgehen, sonst
-          // Endlosloop und das X-Knopf scheint kaputt.
           if (closing) return;
           closing = true;
           event.preventDefault();
-          try { await flushDatabase(); } catch (err) { console.error('[App] flush on close failed:', err); }
+          // Flush mit 3s-Cap: wenn saveInFlight haengt, darf der X-Button
+          // trotzdem nicht blockieren. destroy() laeuft IMMER.
+          try {
+            await Promise.race([
+              flushDatabase(),
+              new Promise<void>((_, reject) => setTimeout(() => reject(new Error('flush timeout')), 3000)),
+            ]);
+          } catch (err) {
+            console.warn('[App] flush on close skipped:', err);
+          }
           await win.destroy();
         });
       });
@@ -164,6 +172,7 @@ export default function App() {
       <div className="app-layout" style={{ background: '#F2F7FA' }}>
         <GlobalSearch />
         <UpdateBanner />
+        <SyncDuplicateGuard />
         <Sidebar />
         <ErrorBoundary>
         <Routes>

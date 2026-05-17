@@ -136,11 +136,19 @@ async function pullChanges(): Promise<number> {
 
   // Apply remote changes to local DB
   const db = getDatabase();
+  // Plan §Sync-Duplicate-Detection: track IDs of products freshly inserted
+  // via Sync (z.B. Foto-Upload vom Handy), damit der SyncDuplicateGuard
+  // sie nach dem Reload gegen die DB scoren und ein Side-by-Side-Review
+  // zum Mergen anbieten kann.
+  const insertedProductIds: string[] = [];
   for (const change of changes) {
     try {
       const data = JSON.parse(change.data);
       if (change.action === 'insert' || change.action === 'update') {
         applyUpsert(db, change.table_name, change.record_id, data);
+        if (change.action === 'insert' && change.table_name === 'products') {
+          insertedProductIds.push(change.record_id);
+        }
       } else if (change.action === 'delete') {
         db.run(`DELETE FROM ${change.table_name} WHERE id = ?`, [change.record_id]);
       }
@@ -228,6 +236,15 @@ async function pullChanges(): Promise<number> {
         catch (err) { console.warn('[Sync] Store reload failed for', entry.tables[0], ':', err); }
       }
     }
+  }
+
+  // SyncDuplicateGuard hört auf dieses Event und reviewt phone-uploaded
+  // Produkte gegen die bestehende DB. Erst nach dem Store-Reload feuern —
+  // sonst hat der Guard die neuen Items noch nicht im productStore-State.
+  if (insertedProductIds.length > 0) {
+    window.dispatchEvent(new CustomEvent('lataif:sync-products-inserted', {
+      detail: { ids: insertedProductIds },
+    }));
   }
 
   return changes.length;

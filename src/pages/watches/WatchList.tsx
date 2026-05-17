@@ -24,6 +24,15 @@ function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
+function FilterGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center" style={{ gap: 8, flexWrap: 'wrap' }}>
+      <span className="text-overline" style={{ color: '#6B7280', marginRight: 4 }}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
 // Echtes .xlsx via ExcelJS — Bilder werden als binary in xl/media/ eingebettet
 // und von Excel nativ in der Zelle gerendert. Der frühere HTML-zu-.xls-Hack
 // scheiterte daran, dass Excel <img src="data:..."> als verknüpftes externes Bild
@@ -380,55 +389,7 @@ export function WatchList() {
       }
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by brand, name, SKU..."
       actions={
-        <div className="flex items-center gap-3">
-          {/* Ownership Filter \u2014 Own / Consignment / All */}
-          <div className="flex gap-1" style={{ marginRight: 4 }}>
-            {(['own', 'consignment', 'all'] as const).map(o => (
-              <button key={o} onClick={() => setFilterOwnership(o)}
-                className="cursor-pointer transition-all duration-200"
-                style={{
-                  padding: '6px 12px', borderRadius: 999, fontSize: 12,
-                  border: `1px solid ${filterOwnership === o ? '#0F0F10' : 'transparent'}`,
-                  color: filterOwnership === o ? '#0F0F10' : '#6B7280',
-                  background: filterOwnership === o ? 'rgba(15,15,16,0.06)' : 'transparent',
-                }}>{o === 'own' ? 'Own' : o === 'consignment' ? 'Consignment' : 'All'}</button>
-            ))}
-          </div>
-          {/* Category Filter */}
-          <div className="flex gap-1" style={{ marginRight: 4 }}>
-            <button onClick={() => setFilterCategory('')}
-              className="cursor-pointer transition-all duration-200"
-              style={{
-                padding: '6px 12px', borderRadius: 999, fontSize: 12,
-                border: `1px solid ${!filterCategory ? '#0F0F10' : 'transparent'}`,
-                color: !filterCategory ? '#0F0F10' : '#6B7280',
-                background: !filterCategory ? 'rgba(15,15,16,0.06)' : 'transparent',
-              }}>All</button>
-            {categories.filter(c => !c.id.startsWith('cat-repair-service')).map(cat => (
-              <button key={cat.id} onClick={() => setFilterCategory(cat.id)}
-                className="cursor-pointer transition-all duration-200"
-                style={{
-                  padding: '6px 12px', borderRadius: 999, fontSize: 12,
-                  border: `1px solid ${filterCategory === cat.id ? cat.color : 'transparent'}`,
-                  color: filterCategory === cat.id ? cat.color : '#6B7280',
-                  background: filterCategory === cat.id ? cat.color + '10' : 'transparent',
-                }}>{cat.name}</button>
-            ))}
-          </div>
-          {/* Status Filter */}
-          <div className="flex gap-1" style={{ marginRight: 4 }}>
-            {(['', 'in_stock', 'sold'] as (StockStatus | '')[]).map(s => (
-              <button key={s} onClick={() => setFilterStatus(s)}
-                className="cursor-pointer transition-all duration-200"
-                style={{
-                  padding: '6px 10px', borderRadius: 999, fontSize: 11,
-                  border: 'none', background: 'transparent',
-                  color: filterStatus === s ? '#0F0F10' : '#6B7280',
-                  textDecoration: filterStatus === s ? 'underline' : 'none',
-                  textUnderlineOffset: 4,
-                }}>{s === '' ? 'Any' : s === 'in_stock' ? 'In Stock' : 'Sold'}</button>
-            ))}
-          </div>
+        <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <Button variant="ghost" onClick={() => {
             const tags = filtered.map(p => ({
               sku: p.sku || p.id.slice(0, 12),
@@ -450,6 +411,67 @@ export function WatchList() {
         </div>
       }
     >
+      {/* Filter Bar — wraps cleanly on smaller screens. */}
+      <div style={{
+        background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12,
+        padding: '14px 18px', marginBottom: 16,
+        display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap',
+      }}>
+        <FilterGroup label="Ownership">
+          {(['own', 'consignment', 'all'] as const).map(o => (
+            <button key={o} onClick={() => setFilterOwnership(o)}
+              className="cursor-pointer transition-all duration-200"
+              style={{
+                padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                border: `1px solid ${filterOwnership === o ? '#0F0F10' : '#D5D9DE'}`,
+                color: filterOwnership === o ? '#0F0F10' : '#6B7280',
+                background: filterOwnership === o ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
+              }}>{o === 'own' ? 'Own' : o === 'consignment' ? 'Consignment' : 'All'}</button>
+          ))}
+        </FilterGroup>
+        <FilterGroup label="Category">
+          <button onClick={() => setFilterCategory('')}
+            className="cursor-pointer transition-all duration-200"
+            style={{
+              padding: '6px 12px', borderRadius: 999, fontSize: 12,
+              border: `1px solid ${!filterCategory ? '#0F0F10' : '#D5D9DE'}`,
+              color: !filterCategory ? '#0F0F10' : '#6B7280',
+              background: !filterCategory ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
+            }}>All</button>
+          {categories.filter(c => !c.id.startsWith('cat-repair-service')).map(cat => (
+            <button key={cat.id} onClick={() => setFilterCategory(cat.id)}
+              className="cursor-pointer transition-all duration-200"
+              style={{
+                padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                border: `1px solid ${filterCategory === cat.id ? cat.color : '#D5D9DE'}`,
+                color: filterCategory === cat.id ? cat.color : '#6B7280',
+                background: filterCategory === cat.id ? cat.color + '15' : '#FFFFFF',
+              }}>{cat.name}</button>
+          ))}
+        </FilterGroup>
+        <FilterGroup label="Status">
+          {(['', 'in_stock', 'sold'] as (StockStatus | '')[]).map(s => (
+            <button key={s} onClick={() => setFilterStatus(s)}
+              className="cursor-pointer transition-all duration-200"
+              style={{
+                padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                border: `1px solid ${filterStatus === s ? '#0F0F10' : '#D5D9DE'}`,
+                color: filterStatus === s ? '#0F0F10' : '#6B7280',
+                background: filterStatus === s ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
+              }}>{s === '' ? 'Any' : s === 'in_stock' ? 'In Stock' : 'Sold'}</button>
+          ))}
+        </FilterGroup>
+        {(filterOwnership !== 'own' || filterCategory || filterStatus !== '') && (
+          <button onClick={() => { setFilterOwnership('own'); setFilterCategory(''); setFilterStatus(''); }}
+            className="cursor-pointer"
+            style={{
+              padding: '6px 12px', borderRadius: 999, fontSize: 12,
+              border: 'none', background: 'transparent',
+              color: '#AA956E', marginLeft: 'auto',
+            }}>Clear filters</button>
+        )}
+      </div>
+
       {filtered.length === 0 ? (
         <div style={{ padding: '80px 0', textAlign: 'center' }}>
           <Package size={40} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 16px' }} />

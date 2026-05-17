@@ -1,13 +1,15 @@
 import { useEffect, useState, useCallback } from 'react';
 import { v4 as uuid } from 'uuid';
+import { useNavigate } from 'react-router-dom';
 import {
   Building2, Receipt, Tags, GitBranch, Users, Hash, AlertTriangle,
-  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone,
+  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, Package, ArrowRight, ExternalLink,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
+import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase } from '@/core/db/database';
 import { exportFile } from '@/core/utils/export-file';
 import { query, currentBranchId } from '@/core/db/helpers';
@@ -20,7 +22,7 @@ import type { Category, CategoryAttribute, AttributeType, UserRole } from '@/cor
 
 // ── Constants ──
 
-type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'danger';
+type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'duplicates' | 'danger';
 
 interface TabDef {
   key: TabKey;
@@ -41,6 +43,7 @@ const TABS: TabDef[] = [
   { key: 'ai', label: 'AI / OpenAI', icon: <Sparkles size={16} /> },
   { key: 'sync', label: 'Sync / Server', icon: <Cloud size={16} /> },
   { key: 'updates', label: 'Updates', icon: <Cloud size={16} /> },
+  { key: 'duplicates', label: 'Duplicates', icon: <Copy size={16} /> },
   { key: 'danger', label: 'Danger Zone', icon: <AlertTriangle size={16} /> },
 ];
 
@@ -1986,6 +1989,280 @@ function SyncTab() {
 // DANGER ZONE TAB
 // ═══════════════════════════════════════════════════════════
 
+// ── Duplicates Tab — post-hoc scan über bestehende Produkte ──
+// Iteriert alle Products, nutzt productStore.findPossibleDuplicates() (gleicher
+// Score-Helper wie der Live-Check beim Anlegen), bildet Pairs (de-dupliziert
+// via sortierter ID-Keys) und zeigt sie zum manuellen Review an.
+// Variante A: kein Auto-Merge — User entscheidet Pair-by-Pair was passieren soll.
+
+interface DuplicatePair {
+  a: Product;
+  b: Product;
+  score: number;
+  reasons: string[];
+}
+
+function DuplicatesTab() {
+  const { products, findPossibleDuplicates, deleteProduct, loadProducts } = useProductStore();
+  const navigate = useNavigate();
+  const [scanning, setScanning] = useState(false);
+  const [pairs, setPairs] = useState<DuplicatePair[] | null>(null);
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [actionMsg, setActionMsg] = useState<{ text: string; ok: boolean } | null>(null);
+
+  function pairKey(a: Product, b: Product) {
+    return [a.id, b.id].sort().join('|');
+  }
+
+  function scan() {
+    setScanning(true);
+    setActionMsg(null);
+    // setTimeout damit der Button-Text auf "Scanning..." flippen kann bevor
+    // der synchrone Sweep blockiert.
+    setTimeout(() => {
+      const seen = new Set<string>();
+      const found: DuplicatePair[] = [];
+      for (const p of products) {
+        if (!p.id) continue;
+        const matches = findPossibleDuplicates(p, p.id);
+        for (const m of matches) {
+          const key = pairKey(p, m.product);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          found.push({ a: p, b: m.product, score: m.score, reasons: m.reasons });
+        }
+      }
+      found.sort((x, y) => y.score - x.score);
+      setPairs(found);
+      setDismissed(new Set());
+      setScanning(false);
+    }, 0);
+  }
+
+  function dismissPair(a: Product, b: Product) {
+    setDismissed(prev => {
+      const next = new Set(prev);
+      next.add(pairKey(a, b));
+      return next;
+    });
+    setActionMsg({ text: 'Pair als „kein Duplikat" markiert.', ok: true });
+  }
+
+  function deleteOne(victim: Product, partner: Product) {
+    try {
+      deleteProduct(victim.id);
+      dismissPair(victim, partner);
+      setActionMsg({ text: `„${victim.brand} ${victim.name}" gelöscht.`, ok: true });
+      loadProducts();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setActionMsg({ text: `Löschen nicht möglich — ${msg} Stattdessen das andere Item versuchen.`, ok: false });
+    }
+  }
+
+  const visiblePairs = (pairs || []).filter(p => !dismissed.has(pairKey(p.a, p.b)));
+  const visibleCount = visiblePairs.length;
+  const totalCount = pairs?.length || 0;
+  const dismissedCount = totalCount - visibleCount;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <div className="flex items-start justify-between gap-4" style={{ flexWrap: 'wrap' }}>
+          <div>
+            <h2 className="text-display-xs" style={{ color: '#0F0F10' }}>Doppelte Artikel finden</h2>
+            <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4, maxWidth: 560 }}>
+              Scannt alle Produkte und zeigt mögliche Duplikate (gleiche SKU, Serial, Reference, Brand+Name, oder Gold-Fingerprint). Du entscheidest pro Treffer manuell — kein Auto-Merge.
+            </p>
+          </div>
+          <Button variant="primary" onClick={scan} disabled={scanning}>
+            {scanning ? 'Scanning…' : pairs ? `Re-scan ${products.length} products` : `Scan ${products.length} products`}
+          </Button>
+        </div>
+
+        {actionMsg && (
+          <div style={{
+            marginTop: 16, padding: '10px 14px', borderRadius: 8,
+            background: actionMsg.ok ? 'rgba(126,170,110,0.10)' : 'rgba(170,110,110,0.10)',
+            border: `1px solid ${actionMsg.ok ? 'rgba(126,170,110,0.35)' : 'rgba(170,110,110,0.35)'}`,
+            color: actionMsg.ok ? '#3F6E2F' : '#7A3535', fontSize: 12,
+          }}>
+            {actionMsg.text}
+          </div>
+        )}
+      </Card>
+
+      {pairs !== null && (
+        <Card>
+          {totalCount === 0 ? (
+            <div style={{ padding: '40px 0', textAlign: 'center' }}>
+              <Check size={32} strokeWidth={1.5} style={{ color: '#7EAA6E', margin: '0 auto 12px' }} />
+              <p style={{ fontSize: 14, color: '#0F0F10' }}>Keine Duplikate gefunden.</p>
+              <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>
+                {products.length} Produkte gescannt, nichts mit Score ≥ 40 gemeinsam.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between" style={{ marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <span style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>
+                    {visibleCount} of {totalCount} pair{totalCount === 1 ? '' : 's'} to review
+                  </span>
+                  {dismissedCount > 0 && (
+                    <span style={{ fontSize: 12, color: '#6B7280', marginLeft: 10 }}>
+                      ({dismissedCount} erledigt)
+                    </span>
+                  )}
+                </div>
+                {dismissedCount > 0 && (
+                  <Button variant="ghost" onClick={() => setDismissed(new Set())}>
+                    Erledigte wieder einblenden
+                  </Button>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-3">
+                {visiblePairs.map(pair => (
+                  <DuplicatePairCard
+                    key={pairKey(pair.a, pair.b)}
+                    pair={pair}
+                    onOpen={pid => navigate(`/collection/${pid}`)}
+                    onDelete={victimId => {
+                      const victim = pair.a.id === victimId ? pair.a : pair.b;
+                      const partner = pair.a.id === victimId ? pair.b : pair.a;
+                      deleteOne(victim, partner);
+                    }}
+                    onKeepBoth={() => dismissPair(pair.a, pair.b)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function DuplicatePairCard({
+  pair, onOpen, onDelete, onKeepBoth,
+}: {
+  pair: DuplicatePair;
+  onOpen: (productId: string) => void;
+  onDelete: (productId: string) => void;
+  onKeepBoth: () => void;
+}) {
+  const { a, b, score, reasons } = pair;
+  const severity = score >= 100 ? 'severe' : score >= 60 ? 'warn' : 'mild';
+  const severityColor = severity === 'severe' ? '#AA6E6E' : severity === 'warn' ? '#AA956E' : '#6E8AAA';
+  const severityBg = severity === 'severe' ? 'rgba(170,110,110,0.08)' : severity === 'warn' ? 'rgba(170,149,110,0.10)' : 'rgba(110,138,170,0.08)';
+  const severityLabel = score >= 100 ? 'Almost certainly duplicate' : score >= 60 ? 'Likely duplicate' : 'Possibly similar';
+
+  return (
+    <div style={{
+      border: `1px solid ${severityColor}40`, borderRadius: 10,
+      background: severityBg, padding: 14,
+      display: 'flex', flexDirection: 'column', gap: 12,
+    }}>
+      {/* Reason chips top */}
+      <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
+        <span style={{
+          fontSize: 11, padding: '3px 10px', borderRadius: 999,
+          color: severityColor, background: '#FFFFFF', border: `1px solid ${severityColor}50`,
+          fontWeight: 500,
+        }}>{severityLabel}</span>
+        {reasons.map((r, i) => (
+          <span key={i} style={{
+            fontSize: 11, padding: '2px 8px', borderRadius: 999,
+            background: '#FFFFFF', color: '#4B5563', border: '1px solid #E5E9EE',
+          }}>{r}</span>
+        ))}
+      </div>
+
+      {/* Side-by-side */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 12, alignItems: 'stretch' }}>
+        <DuplicatePairSide product={a} onOpen={() => onOpen(a.id)} onDelete={() => onDelete(a.id)} />
+        <div style={{ display: 'flex', alignItems: 'center', color: '#6B7280' }}>
+          <ArrowRight size={18} />
+        </div>
+        <DuplicatePairSide product={b} onOpen={() => onOpen(b.id)} onDelete={() => onDelete(b.id)} />
+      </div>
+
+      {/* Footer actions */}
+      <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid rgba(0,0,0,0.06)' }}>
+        <Button variant="ghost" onClick={onKeepBoth}>Kein Duplikat / Beide behalten</Button>
+      </div>
+    </div>
+  );
+}
+
+function DuplicatePairSide({
+  product, onOpen, onDelete,
+}: {
+  product: Product;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const attrs = product.attributes || {};
+  const ref = String(attrs.reference_number || attrs.reference || attrs.referenceNo || '').trim();
+  const serial = String(attrs.serial_number || attrs.serialNo || '').trim();
+  const weight = Number(attrs.weight) || 0;
+  const karat = String(attrs.karat || '').trim();
+  const status = product.stockStatus || 'in_stock';
+
+  return (
+    <div style={{
+      background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8,
+      padding: 12, display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0,
+    }}>
+      <div className="flex items-start gap-3">
+        <div style={{
+          width: 64, height: 64, flexShrink: 0,
+          background: '#F2F7FA', borderRadius: 6, overflow: 'hidden',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: '1px solid #E5E9EE',
+        }}>
+          {product.images?.[0] ? (
+            <img src={product.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ) : (
+            <Package size={22} strokeWidth={1} style={{ color: '#6B7280' }} />
+          )}
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5 }}>{product.brand}</div>
+          <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500, lineHeight: 1.3 }}>{product.name}</div>
+          {product.sku && <div className="font-mono" style={{ fontSize: 11, color: '#4B5563', marginTop: 2 }}>{product.sku}</div>}
+          <div style={{
+            fontSize: 10, marginTop: 4, padding: '1px 6px', borderRadius: 999,
+            display: 'inline-block',
+            background: status === 'in_stock' ? 'rgba(126,170,110,0.10)' : 'rgba(170,110,110,0.10)',
+            color: status === 'in_stock' ? '#3F6E2F' : '#7A3535',
+          }}>{status === 'in_stock' ? 'In Stock' : status === 'sold' ? 'Sold' : status}</div>
+        </div>
+      </div>
+      {(ref || serial || weight > 0) && (
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 10px',
+          fontSize: 11, color: '#4B5563',
+        }}>
+          {ref && (<><span style={{ color: '#6B7280' }}>Ref</span><span className="font-mono">{ref}</span></>)}
+          {serial && (<><span style={{ color: '#6B7280' }}>Serial</span><span className="font-mono">{serial}</span></>)}
+          {weight > 0 && (<><span style={{ color: '#6B7280' }}>Weight</span><span className="font-mono">{weight}g{karat ? ` · ${karat}` : ''}</span></>)}
+        </div>
+      )}
+      <div className="flex gap-2" style={{ marginTop: 'auto' }}>
+        <Button variant="ghost" onClick={onOpen}>
+          <ExternalLink size={12} /> Open
+        </Button>
+        <Button variant="secondary" onClick={onDelete}>
+          <Trash2 size={12} /> Delete this
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function DangerZoneTab() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
@@ -2244,6 +2521,7 @@ export function SettingsPage() {
       case 'ai': return <AiTab />;
       case 'sync': return <SyncTab />;
       case 'updates': return <UpdatesTab />;
+      case 'duplicates': return <DuplicatesTab />;
       case 'danger': return <DangerZoneTab />;
     }
   };

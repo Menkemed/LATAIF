@@ -44,6 +44,13 @@ interface ProductStore {
     candidate: Partial<Product>,
     excludeProductId?: string,
   ) => Array<{ product: Product; score: number; reasons: string[] }>;
+  /**
+   * Plan §Sync-Duplicate: vereinigt zwei Produkte. Übernimmt qty von Source ins
+   * Target, kopiert Source-Bild falls Target noch keins hat, löscht Source.
+   * Wird vom SyncDuplicateGuard aufgerufen, wenn der User ein phone-uploaded
+   * Item als Duplikat bestätigt — statt Neu-Anlage wird die Menge addiert.
+   */
+  mergeIntoExisting: (sourceProductId: string, targetProductId: string) => void;
 }
 
 function rowToCategory(row: Record<string, unknown>): Category {
@@ -266,6 +273,48 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     db.run('DELETE FROM products WHERE id = ?', [id]);
     saveDatabase();
     trackDelete('products', id);
+    get().loadProducts();
+  },
+
+  mergeIntoExisting: (sourceId, targetId) => {
+    const products = get().products;
+    const source = products.find(p => p.id === sourceId);
+    const target = products.find(p => p.id === targetId);
+    if (!source || !target) throw new Error('Source or target product not found');
+    if (sourceId === targetId) throw new Error('Cannot merge product into itself');
+
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const addQty = Math.max(1, source.quantity || 1);
+    const newQty = (target.quantity || 1) + addQty;
+
+    // Source-Bild ins Target übernehmen wenn Target noch keins hat — Foto vom
+    // Handy soll nicht verloren gehen, nur weil wir das Source-Item löschen.
+    const targetImages = Array.isArray(target.images) ? target.images : [];
+    const sourceImages = Array.isArray(source.images) ? source.images : [];
+    const mergedImages = targetImages.length === 0 && sourceImages.length > 0
+      ? [sourceImages[0]]
+      : targetImages;
+    const imagesChanged = mergedImages.length !== targetImages.length;
+
+    if (imagesChanged) {
+      db.run(`UPDATE products SET quantity = ?, images = ?, updated_at = ? WHERE id = ?`,
+        [newQty, JSON.stringify(mergedImages), now, targetId]);
+    } else {
+      db.run(`UPDATE products SET quantity = ?, updated_at = ? WHERE id = ?`,
+        [newQty, now, targetId]);
+    }
+
+    db.run('DELETE FROM products WHERE id = ?', [sourceId]);
+    saveDatabase();
+
+    // Sync-Tracking: andere Peers sollen Source ebenfalls droppen + Target-Qty sehen.
+    trackUpdate('products', targetId, imagesChanged
+      ? { quantity: newQty, images: mergedImages }
+      : { quantity: newQty });
+    trackDelete('products', sourceId);
+
+    eventBus.emit('product.updated', 'product', targetId, { quantity: newQty, mergedFrom: sourceId });
     get().loadProducts();
   },
 
