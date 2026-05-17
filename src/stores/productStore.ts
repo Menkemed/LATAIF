@@ -54,6 +54,14 @@ interface ProductStore {
    * Item als Duplikat bestätigt — statt Neu-Anlage wird die Menge addiert.
    */
   mergeIntoExisting: (sourceProductId: string, targetProductId: string) => void;
+  /**
+   * Plan §Duplicate-Groups: Liefert pro productId die Summe aller verknüpften
+   * Datensätze (invoice_lines + consignments + agent_transfers + repairs +
+   * sales_return_lines + orders). Nutzt 1 SQL-Query mit Subqueries für N IDs.
+   * Wird vom Cluster-Algorithmus für die Master-Selection genutzt: Produkte mit
+   * linked records gewinnen +1000 Punkte (siehe spec).
+   */
+  getLinkedRecordCounts: (productIds?: string[]) => Map<string, number>;
 }
 
 function rowToCategory(row: Record<string, unknown>): Category {
@@ -461,6 +469,42 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
     eventBus.emit('product.updated', 'product', targetId, { quantity: newQty, mergedFrom: sourceId });
     get().loadProducts();
+  },
+
+  getLinkedRecordCounts: (productIds) => {
+    const result = new Map<string, number>();
+    const ids = productIds && productIds.length > 0 ? productIds : get().products.map(p => p.id);
+    if (ids.length === 0) return result;
+    // SQL.js mag keine Array-Bindings, also baue WHERE id IN (?, ?, ...) dynamisch.
+    // 100er-Batches damit der Query nicht zu lang wird.
+    const BATCH = 100;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const slice = ids.slice(i, i + BATCH);
+      const placeholders = slice.map(() => '?').join(', ');
+      // Subqueries summieren alle linked-table-Hits pro product. Wenn 0 → kein
+      // linked record. Wenn >0 → darf nicht gelöscht werden.
+      const sql = `
+        SELECT id,
+          (SELECT COUNT(*) FROM invoice_lines       WHERE product_id = products.id) +
+          (SELECT COUNT(*) FROM consignments        WHERE product_id = products.id) +
+          (SELECT COUNT(*) FROM agent_transfers     WHERE product_id = products.id) +
+          (SELECT COUNT(*) FROM repairs             WHERE product_id = products.id) +
+          (SELECT COUNT(*) FROM sales_return_lines  WHERE product_id = products.id) +
+          (SELECT COUNT(*) FROM orders              WHERE product_id = products.id)
+          AS linked_count
+        FROM products
+        WHERE id IN (${placeholders})
+      `;
+      try {
+        const rows = query(sql, slice);
+        for (const r of rows) {
+          result.set(r.id as string, Number(r.linked_count) || 0);
+        }
+      } catch (err) {
+        console.warn('[getLinkedRecordCounts] batch query failed:', err);
+      }
+    }
+    return result;
   },
 
   createCategory: (data) => {

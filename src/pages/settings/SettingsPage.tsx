@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Receipt, Tags, GitBranch, Users, Hash, AlertTriangle,
-  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, Package, ArrowRight, ExternalLink,
+  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, Package, ExternalLink,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -1989,85 +1989,270 @@ function SyncTab() {
 // DANGER ZONE TAB
 // ═══════════════════════════════════════════════════════════
 
-// ── Duplicates Tab — post-hoc scan über bestehende Produkte ──
-// Iteriert alle Products, nutzt productStore.findPossibleDuplicates() (gleicher
-// Score-Helper wie der Live-Check beim Anlegen), bildet Pairs (de-dupliziert
-// via sortierter ID-Keys) und zeigt sie zum manuellen Review an.
-// Variante A: kein Auto-Merge — User entscheidet Pair-by-Pair was passieren soll.
+// ── Duplicates Tab — Cluster-basiert (Union-Find auf dem Aehnlichkeits-Graph) ──
+// Pro Verbindungskomponente eine Gruppe; transitive Duplikate (A~B, B~C → {A,B,C})
+// landen in derselben Karte. Master-Suggestion via Score:
+//   linked records +1000, SKU +100, Stock +50, Stammdaten +20, Bilder +5/each, Alter
+// User kann Master manuell überschreiben, einzelne Items aus der Gruppe entfernen
+// (False-Positive), oder die ganze Gruppe ignorieren. Sicherheits-Check: Produkte
+// mit linked records werden niemals gelöscht — Delete fällt auf Merge zurück.
 
-interface DuplicatePair {
-  a: Product;
-  b: Product;
+interface DuplicateEdge {
+  otherId: string;
   score: number;
   reasons: string[];
 }
 
+interface DuplicateGroup {
+  id: string;                                         // sorted-member-ids als stable key
+  members: Product[];
+  edgesByMember: Map<string, DuplicateEdge[]>;
+  maxScore: number;
+  topReasons: string[];                                // unique, by frequency
+  suggestedMasterId: string;
+  masterReasons: string[];                             // why this is the suggested master
+  linkedCounts: Map<string, number>;
+}
+
+class UnionFind {
+  private parent = new Map<string, string>();
+  private rank = new Map<string, number>();
+  constructor(ids: string[]) {
+    for (const id of ids) { this.parent.set(id, id); this.rank.set(id, 0); }
+  }
+  find(x: string): string {
+    let cur = x;
+    while (this.parent.get(cur) !== cur) {
+      const p = this.parent.get(cur)!;
+      this.parent.set(cur, this.parent.get(p)!);
+      cur = this.parent.get(cur)!;
+    }
+    return cur;
+  }
+  union(a: string, b: string): void {
+    const ra = this.find(a), rb = this.find(b);
+    if (ra === rb) return;
+    const rankA = this.rank.get(ra) || 0;
+    const rankB = this.rank.get(rb) || 0;
+    if (rankA < rankB) this.parent.set(ra, rb);
+    else if (rankA > rankB) this.parent.set(rb, ra);
+    else { this.parent.set(rb, ra); this.rank.set(ra, rankA + 1); }
+  }
+}
+
+function computeMasterScore(p: Product, linkedCount: number): number {
+  let s = 0;
+  if (linkedCount > 0) s += 1000 + Math.min(linkedCount, 10) * 10;     // 1) linked > all
+  if (p.sku) s += 100;                                                  // 2) hat SKU
+  if ((p.quantity || 0) > 0 && p.stockStatus === 'in_stock') s += 50;  // 3) Bestand
+  if (p.brand) s += 20;                                                 // 4) Stammdaten
+  if (p.name) s += 20;
+  if (p.plannedSalePrice && p.plannedSalePrice > 0) s += 20;
+  if (p.notes) s += 10;
+  s += Math.min(p.images.length, 5) * 5;                                // 5) Bilder
+  // 6) Alter — bis zu 10 Punkte (1 pro Monat, gecappt)
+  try {
+    const days = (Date.now() - new Date(p.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+    s += Math.min(days / 30, 10);
+  } catch { /* */ }
+  return s;
+}
+
+function describeMasterReasons(p: Product, linkedCount: number): string[] {
+  const out: string[] = [];
+  if (linkedCount > 0) out.push(`${linkedCount} verknüpfte Datensätze`);
+  if (p.sku) out.push(`hat SKU (${p.sku})`);
+  if ((p.quantity || 0) > 0 && p.stockStatus === 'in_stock') out.push(`auf Lager`);
+  const stammdatenCount = [p.brand, p.name, p.plannedSalePrice].filter(Boolean).length;
+  if (stammdatenCount === 3) out.push('vollständige Stammdaten');
+  if (p.images.length > 1) out.push(`${p.images.length} Bilder`);
+  return out;
+}
+
+function severityFromScore(score: number): { text: string; color: string; bg: string } {
+  if (score >= 100) return { text: 'Almost certainly duplicate', color: '#AA6E6E', bg: 'rgba(170,110,110,0.10)' };
+  if (score >= 60)  return { text: 'Likely duplicate',           color: '#AA956E', bg: 'rgba(170,149,110,0.12)' };
+  return { text: 'Possibly similar', color: '#6E8AAA', bg: 'rgba(110,138,170,0.12)' };
+}
+
 function DuplicatesTab() {
-  const { products, findPossibleDuplicates, deleteProduct, loadProducts } = useProductStore();
+  const { products, findPossibleDuplicates, deleteProduct, mergeIntoExisting, getLinkedRecordCounts, loadProducts } = useProductStore();
   const navigate = useNavigate();
   const [scanning, setScanning] = useState(false);
-  const [pairs, setPairs] = useState<DuplicatePair[] | null>(null);
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [groups, setGroups] = useState<DuplicateGroup[] | null>(null);
+  const [ignoredGroups, setIgnoredGroups] = useState<Set<string>>(new Set());
   const [actionMsg, setActionMsg] = useState<{ text: string; ok: boolean } | null>(null);
-  // Match-Modus: 'all' nutzt SKU/Serial/Ref/Brand/Name/Gold/Image; 'image-only'
-  // ignoriert alle Identitäts-Felder und matched ausschliesslich nach pHash.
-  // Image-only fängt z.B. doppelt fotografierte Items mit unterschiedlicher SKU.
   const [matchMode, setMatchMode] = useState<'all' | 'image-only'>('all');
-
-  function pairKey(a: Product, b: Product) {
-    return [a.id, b.id].sort().join('|');
-  }
 
   function scan() {
     setScanning(true);
     setActionMsg(null);
-    // setTimeout damit der Button-Text auf "Scanning..." flippen kann bevor
-    // der synchrone Sweep blockiert.
     setTimeout(() => {
+      // Phase 1: Edges sammeln (jedes Pair max einmal via sorted-key dedupe).
+      const edgeKey = (a: string, b: string) => [a, b].sort().join('|');
+      const edges: Array<{ a: string; b: string; score: number; reasons: string[] }> = [];
       const seen = new Set<string>();
-      const found: DuplicatePair[] = [];
       for (const p of products) {
         if (!p.id) continue;
         const matches = findPossibleDuplicates(p, p.id, { mode: matchMode });
         for (const m of matches) {
-          const key = pairKey(p, m.product);
+          const key = edgeKey(p.id, m.product.id);
           if (seen.has(key)) continue;
           seen.add(key);
-          found.push({ a: p, b: m.product, score: m.score, reasons: m.reasons });
+          edges.push({ a: p.id, b: m.product.id, score: m.score, reasons: m.reasons });
         }
       }
-      found.sort((x, y) => y.score - x.score);
-      setPairs(found);
-      setDismissed(new Set());
+      if (edges.length === 0) {
+        setGroups([]);
+        setIgnoredGroups(new Set());
+        setScanning(false);
+        return;
+      }
+
+      // Phase 2: Union-Find auf Edges. Nur Produkte mit ≥1 Edge sind im Graph.
+      const involvedIds = new Set<string>();
+      for (const e of edges) { involvedIds.add(e.a); involvedIds.add(e.b); }
+      const uf = new UnionFind([...involvedIds]);
+      for (const e of edges) uf.union(e.a, e.b);
+
+      // Phase 3: Edges nach Root gruppieren.
+      const rootBuckets = new Map<string, { ids: Set<string>; edges: typeof edges }>();
+      for (const e of edges) {
+        const r = uf.find(e.a);
+        if (!rootBuckets.has(r)) rootBuckets.set(r, { ids: new Set(), edges: [] });
+        const b = rootBuckets.get(r)!;
+        b.ids.add(e.a); b.ids.add(e.b); b.edges.push(e);
+      }
+
+      // Phase 4: Linked-Counts in einem Bulk-Query holen (alle Cluster-Member auf einmal).
+      const allClusterIds = [...rootBuckets.values()].flatMap(b => [...b.ids]);
+      const linkedAll = getLinkedRecordCounts(allClusterIds);
+
+      // Phase 5: DuplicateGroup-Objekte bauen.
+      const out: DuplicateGroup[] = [];
+      for (const { ids, edges: groupEdges } of rootBuckets.values()) {
+        if (ids.size < 2) continue;
+        const members = [...ids].map(id => products.find(p => p.id === id)).filter(Boolean) as Product[];
+        if (members.length < 2) continue;
+        const maxScore = Math.max(...groupEdges.map(e => e.score));
+
+        const edgesByMember = new Map<string, DuplicateEdge[]>();
+        for (const e of groupEdges) {
+          if (!edgesByMember.has(e.a)) edgesByMember.set(e.a, []);
+          if (!edgesByMember.has(e.b)) edgesByMember.set(e.b, []);
+          edgesByMember.get(e.a)!.push({ otherId: e.b, score: e.score, reasons: e.reasons });
+          edgesByMember.get(e.b)!.push({ otherId: e.a, score: e.score, reasons: e.reasons });
+        }
+
+        // Combined reasons — unique, häufigste oben.
+        const reasonCounts = new Map<string, number>();
+        for (const e of groupEdges) for (const r of e.reasons) reasonCounts.set(r, (reasonCounts.get(r) || 0) + 1);
+        const topReasons = [...reasonCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([r]) => r);
+
+        // Master-Suggestion: höchster Score gewinnt; bei Gleichstand erstes Element.
+        const scored = members.map(p => ({
+          product: p,
+          score: computeMasterScore(p, linkedAll.get(p.id) || 0),
+          linked: linkedAll.get(p.id) || 0,
+        })).sort((a, b) => b.score - a.score);
+        const suggested = scored[0].product;
+        const masterReasons = describeMasterReasons(suggested, scored[0].linked);
+
+        const linkedCounts = new Map<string, number>();
+        for (const m of members) linkedCounts.set(m.id, linkedAll.get(m.id) || 0);
+
+        out.push({
+          id: [...ids].sort().join('|'),
+          members,
+          edgesByMember,
+          maxScore,
+          topReasons,
+          suggestedMasterId: suggested.id,
+          masterReasons,
+          linkedCounts,
+        });
+      }
+      out.sort((a, b) => b.maxScore - a.maxScore);
+      setGroups(out);
+      setIgnoredGroups(new Set());
       setScanning(false);
     }, 0);
   }
 
-  function dismissPair(a: Product, b: Product) {
-    setDismissed(prev => {
-      const next = new Set(prev);
-      next.add(pairKey(a, b));
-      return next;
-    });
-    setActionMsg({ text: 'Pair als „kein Duplikat" markiert.', ok: true });
+  function ignoreGroup(groupId: string) {
+    setIgnoredGroups(prev => { const next = new Set(prev); next.add(groupId); return next; });
+    setActionMsg({ text: 'Gruppe als „kein Duplikat" markiert.', ok: true });
   }
 
-  function deleteOne(victim: Product, partner: Product) {
+  function handleDelete(productId: string, label: string) {
     try {
-      deleteProduct(victim.id);
-      dismissPair(victim, partner);
-      setActionMsg({ text: `„${victim.brand} ${victim.name}" gelöscht.`, ok: true });
+      deleteProduct(productId);
+      setActionMsg({ text: `„${label}" gelöscht.`, ok: true });
       loadProducts();
+      // Cluster nach Löschung neu bauen — entferntes Item kann ganze Gruppe auflösen.
+      setGroups(prev => prev?.map(g => ({
+        ...g,
+        members: g.members.filter(m => m.id !== productId),
+      })).filter(g => g.members.length >= 2) || null);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setActionMsg({ text: `Löschen nicht möglich — ${msg} Stattdessen das andere Item versuchen.`, ok: false });
+      setActionMsg({ text: `Löschen nicht möglich — ${msg} (Item hat verknüpfte Datensätze — stattdessen mergen oder das Master-Item wechseln).`, ok: false });
     }
   }
 
-  const visiblePairs = (pairs || []).filter(p => !dismissed.has(pairKey(p.a, p.b)));
-  const visibleCount = visiblePairs.length;
-  const totalCount = pairs?.length || 0;
-  const dismissedCount = totalCount - visibleCount;
+  function handleMergeAllIntoMaster(group: DuplicateGroup, masterId: string) {
+    const master = group.members.find(m => m.id === masterId);
+    if (!master) return;
+    let merged = 0, failed = 0;
+    for (const m of group.members) {
+      if (m.id === masterId) continue;
+      try {
+        mergeIntoExisting(m.id, masterId);
+        merged++;
+      } catch (e) {
+        failed++;
+        console.warn('[duplicates] merge failed for', m.id, e);
+      }
+    }
+    setActionMsg({
+      text: failed === 0
+        ? `${merged} Items in „${master.brand} ${master.name}" zusammengeführt.`
+        : `${merged} zusammengeführt, ${failed} fehlgeschlagen (verknüpfte Datensätze).`,
+      ok: failed === 0,
+    });
+    loadProducts();
+    setGroups(prev => prev?.filter(g => g.id !== group.id) || null);
+  }
+
+  function handleDeleteAllExceptMaster(group: DuplicateGroup, masterId: string) {
+    const safe: Product[] = [];
+    const unsafe: Product[] = [];
+    for (const m of group.members) {
+      if (m.id === masterId) continue;
+      if ((group.linkedCounts.get(m.id) || 0) > 0) unsafe.push(m);
+      else safe.push(m);
+    }
+    if (unsafe.length > 0) {
+      setActionMsg({
+        text: `${unsafe.length} Items haben verknüpfte Datensätze und können nicht gelöscht werden — nutze „Alle in Master mergen" statt dessen, oder wechsle das Master.`,
+        ok: false,
+      });
+      return;
+    }
+    let deleted = 0;
+    for (const m of safe) {
+      try { deleteProduct(m.id); deleted++; }
+      catch (err) { console.warn('[duplicates] delete failed:', err); }
+    }
+    setActionMsg({ text: `${deleted} Items gelöscht. Master behalten.`, ok: true });
+    loadProducts();
+    setGroups(prev => prev?.filter(g => g.id !== group.id) || null);
+  }
+
+  const visibleGroups = (groups || []).filter(g => !ignoredGroups.has(g.id));
+  const totalCount = groups?.length || 0;
+  const ignoredCount = totalCount - visibleGroups.length;
+  const totalProductsInGroups = visibleGroups.reduce((sum, g) => sum + g.members.length, 0);
 
   return (
     <div className="flex flex-col gap-4">
@@ -2075,8 +2260,8 @@ function DuplicatesTab() {
         <div className="flex items-start justify-between gap-4" style={{ flexWrap: 'wrap' }}>
           <div>
             <h2 className="text-display-xs" style={{ color: '#0F0F10' }}>Doppelte Artikel finden</h2>
-            <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4, maxWidth: 560 }}>
-              Scannt alle Produkte und zeigt mögliche Duplikate. Du entscheidest pro Treffer manuell — kein Auto-Merge.
+            <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4, maxWidth: 600 }}>
+              Scannt alle Produkte und gruppiert sie zu Duplikat-Clustern. Pro Gruppe wird automatisch ein Hauptprodukt vorgeschlagen (linked records &gt; SKU &gt; Stammdaten). Du entscheidest final — kein Auto-Löschen.
             </p>
             <div className="flex items-center gap-2" style={{ marginTop: 12 }}>
               <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5, marginRight: 4 }}>Match by</span>
@@ -2093,7 +2278,7 @@ function DuplicatesTab() {
             </div>
           </div>
           <Button variant="primary" onClick={scan} disabled={scanning}>
-            {scanning ? 'Scanning…' : pairs ? `Re-scan ${products.length} products` : `Scan ${products.length} products`}
+            {scanning ? 'Scanning…' : groups ? `Re-scan ${products.length} products` : `Scan ${products.length} products`}
           </Button>
         </div>
 
@@ -2109,14 +2294,14 @@ function DuplicatesTab() {
         )}
       </Card>
 
-      {pairs !== null && (
+      {groups !== null && (
         <Card>
           {totalCount === 0 ? (
             <div style={{ padding: '40px 0', textAlign: 'center' }}>
               <Check size={32} strokeWidth={1.5} style={{ color: '#7EAA6E', margin: '0 auto 12px' }} />
               <p style={{ fontSize: 14, color: '#0F0F10' }}>Keine Duplikate gefunden.</p>
               <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>
-                {products.length} Produkte gescannt, nichts mit Score ≥ 40 gemeinsam.
+                {products.length} Produkte gescannt, keine Cluster mit Score ≥ 40.
               </p>
             </div>
           ) : (
@@ -2124,33 +2309,31 @@ function DuplicatesTab() {
               <div className="flex items-center justify-between" style={{ marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
                 <div>
                   <span style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>
-                    {visibleCount} of {totalCount} pair{totalCount === 1 ? '' : 's'} to review
+                    {visibleGroups.length} Gruppe{visibleGroups.length === 1 ? '' : 'n'} · {totalProductsInGroups} Produkte
                   </span>
-                  {dismissedCount > 0 && (
+                  {ignoredCount > 0 && (
                     <span style={{ fontSize: 12, color: '#6B7280', marginLeft: 10 }}>
-                      ({dismissedCount} erledigt)
+                      ({ignoredCount} ignoriert)
                     </span>
                   )}
                 </div>
-                {dismissedCount > 0 && (
-                  <Button variant="ghost" onClick={() => setDismissed(new Set())}>
-                    Erledigte wieder einblenden
+                {ignoredCount > 0 && (
+                  <Button variant="ghost" onClick={() => setIgnoredGroups(new Set())}>
+                    Ignorierte wieder einblenden
                   </Button>
                 )}
               </div>
 
-              <div className="flex flex-col gap-3">
-                {visiblePairs.map(pair => (
-                  <DuplicatePairCard
-                    key={pairKey(pair.a, pair.b)}
-                    pair={pair}
+              <div className="flex flex-col gap-4">
+                {visibleGroups.map(group => (
+                  <DuplicateGroupCard
+                    key={group.id}
+                    group={group}
                     onOpen={pid => navigate(`/collection/${pid}`)}
-                    onDelete={victimId => {
-                      const victim = pair.a.id === victimId ? pair.a : pair.b;
-                      const partner = pair.a.id === victimId ? pair.b : pair.a;
-                      deleteOne(victim, partner);
-                    }}
-                    onKeepBoth={() => dismissPair(pair.a, pair.b)}
+                    onDelete={(pid, label) => handleDelete(pid, label)}
+                    onMergeAllIntoMaster={masterId => handleMergeAllIntoMaster(group, masterId)}
+                    onDeleteAllExceptMaster={masterId => handleDeleteAllExceptMaster(group, masterId)}
+                    onIgnoreGroup={() => ignoreGroup(group.id)}
                   />
                 ))}
               </div>
@@ -2162,62 +2345,118 @@ function DuplicatesTab() {
   );
 }
 
-function DuplicatePairCard({
-  pair, onOpen, onDelete, onKeepBoth,
+function DuplicateGroupCard({
+  group, onOpen, onDelete, onMergeAllIntoMaster, onDeleteAllExceptMaster, onIgnoreGroup,
 }: {
-  pair: DuplicatePair;
+  group: DuplicateGroup;
   onOpen: (productId: string) => void;
-  onDelete: (productId: string) => void;
-  onKeepBoth: () => void;
+  onDelete: (productId: string, label: string) => void;
+  onMergeAllIntoMaster: (masterId: string) => void;
+  onDeleteAllExceptMaster: (masterId: string) => void;
+  onIgnoreGroup: () => void;
 }) {
-  const { a, b, score, reasons } = pair;
-  const severity = score >= 100 ? 'severe' : score >= 60 ? 'warn' : 'mild';
-  const severityColor = severity === 'severe' ? '#AA6E6E' : severity === 'warn' ? '#AA956E' : '#6E8AAA';
-  const severityBg = severity === 'severe' ? 'rgba(170,110,110,0.08)' : severity === 'warn' ? 'rgba(170,149,110,0.10)' : 'rgba(110,138,170,0.08)';
-  const severityLabel = score >= 100 ? 'Almost certainly duplicate' : score >= 60 ? 'Likely duplicate' : 'Possibly similar';
+  const [overrideMaster, setOverrideMaster] = useState<string | null>(null);
+  const [removedFromGroup, setRemovedFromGroup] = useState<Set<string>>(new Set());
+  const masterId = overrideMaster || group.suggestedMasterId;
+  const visibleMembers = group.members.filter(m => !removedFromGroup.has(m.id));
+  if (visibleMembers.length < 2) return null;
+
+  const sev = severityFromScore(group.maxScore);
+  const masterProduct = visibleMembers.find(m => m.id === masterId) || visibleMembers[0];
+  const nonMasterUnsafeCount = visibleMembers.filter(m => m.id !== masterId && (group.linkedCounts.get(m.id) || 0) > 0).length;
 
   return (
     <div style={{
-      border: `1px solid ${severityColor}40`, borderRadius: 10,
-      background: severityBg, padding: 14,
-      display: 'flex', flexDirection: 'column', gap: 12,
+      border: `1px solid ${sev.color}40`, borderRadius: 12,
+      background: sev.bg, padding: 16,
+      display: 'flex', flexDirection: 'column', gap: 14,
     }}>
-      {/* Reason chips top */}
-      <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
-        <span style={{
-          fontSize: 11, padding: '3px 10px', borderRadius: 999,
-          color: severityColor, background: '#FFFFFF', border: `1px solid ${severityColor}50`,
-          fontWeight: 500,
-        }}>{severityLabel}</span>
-        {reasons.map((r, i) => (
-          <span key={i} style={{
-            fontSize: 11, padding: '2px 8px', borderRadius: 999,
-            background: '#FFFFFF', color: '#4B5563', border: '1px solid #E5E9EE',
-          }}>{r}</span>
-        ))}
-      </div>
-
-      {/* Side-by-side */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 12, alignItems: 'stretch' }}>
-        <DuplicatePairSide product={a} onOpen={() => onOpen(a.id)} onDelete={() => onDelete(a.id)} />
-        <div style={{ display: 'flex', alignItems: 'center', color: '#6B7280' }}>
-          <ArrowRight size={18} />
+      {/* Header */}
+      <div className="flex items-start justify-between gap-3" style={{ flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
+          <div className="flex items-center" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 15, color: '#0F0F10', fontWeight: 600 }}>Mögliche Duplikat-Gruppe</span>
+            <span style={{
+              fontSize: 11, padding: '3px 10px', borderRadius: 999,
+              background: '#FFFFFF', color: '#0F0F10', border: '1px solid #D5D9DE',
+            }}>{visibleMembers.length} Produkte</span>
+            <span style={{
+              fontSize: 11, padding: '3px 10px', borderRadius: 999,
+              color: sev.color, background: '#FFFFFF', border: `1px solid ${sev.color}50`, fontWeight: 500,
+            }}>{sev.text} · max Score {group.maxScore}</span>
+          </div>
+          <div className="flex items-center" style={{ gap: 6, flexWrap: 'wrap' }}>
+            {group.topReasons.map((r, i) => (
+              <span key={i} style={{
+                fontSize: 11, padding: '2px 8px', borderRadius: 999,
+                background: '#FFFFFF', color: '#4B5563', border: '1px solid #E5E9EE',
+              }}>{r}</span>
+            ))}
+          </div>
         </div>
-        <DuplicatePairSide product={b} onOpen={() => onOpen(b.id)} onDelete={() => onDelete(b.id)} />
       </div>
 
-      {/* Footer actions */}
-      <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid rgba(0,0,0,0.06)' }}>
-        <Button variant="ghost" onClick={onKeepBoth}>Kein Duplikat / Beide behalten</Button>
+      {/* Member list */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {visibleMembers.map(m => {
+          const isMaster = m.id === masterId;
+          const isSuggested = m.id === group.suggestedMasterId;
+          const linked = group.linkedCounts.get(m.id) || 0;
+          return (
+            <DuplicateMemberRow
+              key={m.id}
+              product={m}
+              isMaster={isMaster}
+              isSuggested={isSuggested}
+              linkedCount={linked}
+              suggestedReasons={isSuggested ? group.masterReasons : []}
+              edgesToOthers={group.edgesByMember.get(m.id) || []}
+              onMakeMaster={() => setOverrideMaster(m.id)}
+              onRemoveFromGroup={() => setRemovedFromGroup(s => new Set(s).add(m.id))}
+              onOpen={() => onOpen(m.id)}
+              onDelete={() => onDelete(m.id, `${m.brand} ${m.name}`)}
+            />
+          );
+        })}
+      </div>
+
+      {/* Footer: group-level actions */}
+      <div className="flex items-center justify-between" style={{
+        paddingTop: 10, borderTop: '1px solid rgba(0,0,0,0.06)', flexWrap: 'wrap', gap: 8,
+      }}>
+        <div style={{ fontSize: 11, color: '#6B7280' }}>
+          Hauptprodukt: <strong style={{ color: '#0F0F10' }}>{masterProduct.brand} {masterProduct.name}</strong>
+        </div>
+        <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+          <Button variant="ghost" onClick={onIgnoreGroup}>Gruppe ignorieren</Button>
+          <Button variant="secondary" onClick={() => onMergeAllIntoMaster(masterId)}>
+            Alle in Master mergen ({visibleMembers.length - 1})
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => onDeleteAllExceptMaster(masterId)}
+            disabled={nonMasterUnsafeCount > 0}
+            title={nonMasterUnsafeCount > 0 ? `${nonMasterUnsafeCount} mit linked records — nicht löschbar` : ''}
+          >
+            <Trash2 size={12} /> Alle außer Master löschen
+          </Button>
+        </div>
       </div>
     </div>
   );
 }
 
-function DuplicatePairSide({
-  product, onOpen, onDelete,
+function DuplicateMemberRow({
+  product, isMaster, isSuggested, linkedCount, suggestedReasons, edgesToOthers, onMakeMaster, onRemoveFromGroup, onOpen, onDelete,
 }: {
   product: Product;
+  isMaster: boolean;
+  isSuggested: boolean;
+  linkedCount: number;
+  suggestedReasons: string[];
+  edgesToOthers: DuplicateEdge[];
+  onMakeMaster: () => void;
+  onRemoveFromGroup: () => void;
   onOpen: () => void;
   onDelete: () => void;
 }) {
@@ -2227,54 +2466,96 @@ function DuplicatePairSide({
   const weight = Number(attrs.weight) || 0;
   const karat = String(attrs.karat || '').trim();
   const status = product.stockStatus || 'in_stock';
+  const topEdgeScore = edgesToOthers.length > 0 ? Math.max(...edgesToOthers.map(e => e.score)) : 0;
 
   return (
     <div style={{
-      background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 8,
-      padding: 12, display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0,
+      background: '#FFFFFF',
+      border: isMaster ? '2px solid #AA956E' : '1px solid #E5E9EE',
+      borderRadius: 10,
+      padding: 12,
+      display: 'grid', gridTemplateColumns: '72px 1fr auto', gap: 12, alignItems: 'center',
+      position: 'relative',
     }}>
-      <div className="flex items-start gap-3">
-        <div style={{
-          width: 64, height: 64, flexShrink: 0,
-          background: '#F2F7FA', borderRadius: 6, overflow: 'hidden',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          border: '1px solid #E5E9EE',
-        }}>
-          {product.images?.[0] ? (
-            <img src={product.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-          ) : (
-            <Package size={22} strokeWidth={1} style={{ color: '#6B7280' }} />
+      {/* Image */}
+      <div style={{
+        width: 72, height: 72, background: '#F2F7FA', borderRadius: 8, overflow: 'hidden',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid #E5E9EE',
+      }}>
+        {product.images?.[0] ? (
+          <img src={product.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        ) : (
+          <Package size={26} strokeWidth={1} style={{ color: '#6B7280' }} />
+        )}
+      </div>
+
+      {/* Details */}
+      <div style={{ minWidth: 0 }}>
+        <div className="flex items-center" style={{ gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
+          {isMaster && (
+            <span style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 999,
+              background: '#AA956E', color: '#FFFFFF', fontWeight: 600, letterSpacing: 0.5,
+            }}>MASTER</span>
+          )}
+          {isSuggested && !isMaster && (
+            <span style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 999,
+              background: 'rgba(170,149,110,0.15)', color: '#AA956E', border: '1px solid rgba(170,149,110,0.35)',
+            }}>Empfohlen</span>
+          )}
+          <span style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5 }}>{product.brand}</span>
+        </div>
+        <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500, lineHeight: 1.3 }}>{product.name || '—'}</div>
+        <div className="flex items-center" style={{ gap: 10, marginTop: 4, fontSize: 11, color: '#4B5563', flexWrap: 'wrap' }}>
+          {product.sku && <span className="font-mono">{product.sku}</span>}
+          <span style={{
+            padding: '1px 6px', borderRadius: 999,
+            background: status === 'in_stock' ? 'rgba(126,170,110,0.10)' : 'rgba(170,110,110,0.10)',
+            color: status === 'in_stock' ? '#3F6E2F' : '#7A3535', fontSize: 10,
+          }}>{status === 'in_stock' ? 'In Stock' : status === 'sold' ? 'Sold' : status}</span>
+          {linkedCount > 0 && (
+            <span style={{
+              padding: '1px 6px', borderRadius: 999,
+              background: 'rgba(170,110,110,0.10)', color: '#7A3535', fontSize: 10,
+            }}>{linkedCount} linked record{linkedCount === 1 ? '' : 's'} — nicht löschbar</span>
+          )}
+          {ref && <span className="font-mono" style={{ color: '#6B7280' }}>Ref {ref}</span>}
+          {serial && <span className="font-mono" style={{ color: '#6B7280' }}>SN {serial}</span>}
+          {weight > 0 && <span className="font-mono" style={{ color: '#6B7280' }}>{weight}g{karat ? ` · ${karat}` : ''}</span>}
+          {topEdgeScore > 0 && <span style={{ color: '#6B7280' }}>Score {topEdgeScore}</span>}
+        </div>
+        {isSuggested && suggestedReasons.length > 0 && (
+          <div className="flex items-center" style={{ gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10, color: '#AA956E', fontWeight: 500 }}>Warum Master:</span>
+            {suggestedReasons.map((r, i) => (
+              <span key={i} style={{
+                fontSize: 10, padding: '1px 6px', borderRadius: 999,
+                background: 'rgba(170,149,110,0.10)', color: '#AA956E', border: '1px solid rgba(170,149,110,0.25)',
+              }}>{r}</span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div className="flex flex-col" style={{ gap: 4, alignItems: 'flex-end' }}>
+        {!isMaster && (
+          <Button variant="ghost" onClick={onMakeMaster}>Als Master setzen</Button>
+        )}
+        <div className="flex" style={{ gap: 4 }}>
+          <Button variant="ghost" onClick={onOpen}><ExternalLink size={12} /></Button>
+          <Button variant="ghost" onClick={onRemoveFromGroup} title="Aus Gruppe entfernen (False Positive)">
+            <X size={12} />
+          </Button>
+          {!isMaster && (
+            <Button variant="ghost" onClick={onDelete} disabled={linkedCount > 0}
+              title={linkedCount > 0 ? 'Hat linked records — nicht löschbar' : 'Diesen Eintrag löschen'}
+            >
+              <Trash2 size={12} />
+            </Button>
           )}
         </div>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5 }}>{product.brand}</div>
-          <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500, lineHeight: 1.3 }}>{product.name}</div>
-          {product.sku && <div className="font-mono" style={{ fontSize: 11, color: '#4B5563', marginTop: 2 }}>{product.sku}</div>}
-          <div style={{
-            fontSize: 10, marginTop: 4, padding: '1px 6px', borderRadius: 999,
-            display: 'inline-block',
-            background: status === 'in_stock' ? 'rgba(126,170,110,0.10)' : 'rgba(170,110,110,0.10)',
-            color: status === 'in_stock' ? '#3F6E2F' : '#7A3535',
-          }}>{status === 'in_stock' ? 'In Stock' : status === 'sold' ? 'Sold' : status}</div>
-        </div>
-      </div>
-      {(ref || serial || weight > 0) && (
-        <div style={{
-          display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 10px',
-          fontSize: 11, color: '#4B5563',
-        }}>
-          {ref && (<><span style={{ color: '#6B7280' }}>Ref</span><span className="font-mono">{ref}</span></>)}
-          {serial && (<><span style={{ color: '#6B7280' }}>Serial</span><span className="font-mono">{serial}</span></>)}
-          {weight > 0 && (<><span style={{ color: '#6B7280' }}>Weight</span><span className="font-mono">{weight}g{karat ? ` · ${karat}` : ''}</span></>)}
-        </div>
-      )}
-      <div className="flex gap-2" style={{ marginTop: 'auto' }}>
-        <Button variant="ghost" onClick={onOpen}>
-          <ExternalLink size={12} /> Open
-        </Button>
-        <Button variant="secondary" onClick={onDelete}>
-          <Trash2 size={12} /> Delete this
-        </Button>
       </div>
     </div>
   );
