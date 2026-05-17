@@ -35,3 +35,6 @@ src-tauri/target/
 
 # OS
 Thumbs.db
+
+# Local backups
+src.backup-*/
