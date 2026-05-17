@@ -112,17 +112,41 @@ export default function App() {
           if (closing) return;
           closing = true;
           event.preventDefault();
-          // Flush mit 3s-Cap: wenn saveInFlight haengt, darf der X-Button
-          // trotzdem nicht blockieren. destroy() laeuft IMMER.
+          // Hard-Deadline: nach 3s ist das Fenster IMMER weg, egal was passiert.
+          // setTimeout setzen BEVOR async-Work startet, sonst kann ein hängender
+          // flush/destroy auch den Hard-Exit blockieren — der ist im selben
+          // Event-Loop-Tick wie das setTimeout, nicht innerhalb des awaits.
+          const hardExitTimer = setTimeout(async () => {
+            console.warn('[App] close took too long — forcing exit via plugin-process');
+            try {
+              const proc = await import('@tauri-apps/plugin-process');
+              await proc.exit(0);
+            } catch (err) { console.error('[App] hard exit failed:', err); }
+          }, 3000);
           try {
-            await Promise.race([
-              flushDatabase(),
-              new Promise<void>((_, reject) => setTimeout(() => reject(new Error('flush timeout')), 3000)),
-            ]);
-          } catch (err) {
-            console.warn('[App] flush on close skipped:', err);
+            // Best-effort flush mit 1.5s-Cap.
+            try {
+              await Promise.race([
+                flushDatabase(),
+                new Promise<void>((_, reject) => setTimeout(() => reject(new Error('flush timeout')), 1500)),
+              ]);
+            } catch (err) { console.warn('[App] flush on close skipped:', err); }
+            // Fire-and-forget destroy — nicht awaiten, weil Tauri v2 in manchen
+            // States nie resolved. Wenn destroy funktioniert, ist das Fenster
+            // weg bevor der Hard-Exit feuert. Wenn nicht, fängt der setTimeout es.
+            win.destroy().catch(err => console.warn('[App] destroy failed:', err));
+          } finally {
+            clearTimeout(hardExitTimer);
+            // ABER: hard-exit-Sicherheitsnetz nochmal als finaler Fallback —
+            // falls destroy() weder resolved noch das Fenster zumacht. Nach
+            // weiteren 1.5s gibt's keine Ausreden mehr.
+            setTimeout(async () => {
+              try {
+                const proc = await import('@tauri-apps/plugin-process');
+                await proc.exit(0);
+              } catch { /* */ }
+            }, 1500);
           }
-          await win.destroy();
         });
       });
       return () => { cancelled = true; if (unlisten) unlisten(); };
