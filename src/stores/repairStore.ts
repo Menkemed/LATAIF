@@ -230,6 +230,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     repairScope: ((row.repair_scope as string) === 'OWN' ? 'OWN' : 'CUSTOMER') as 'CUSTOMER' | 'OWN',
     customerId: row.customer_id as string,
     productId: row.product_id as string | undefined,
+    lotId: (row.lot_id as string | null) || undefined,
     itemCategoryId: (row.item_category_id as string | null) || undefined,
     itemAttributes: itemAttrs,
     taxScheme: ((row.tax_scheme as string | null) === 'ZERO' ? 'ZERO' : 'VAT_10') as 'ZERO' | 'VAT_10',
@@ -265,6 +266,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     invoiceId: row.invoice_id as string | undefined,
     notes: row.notes as string | undefined,
     images: JSON.parse((row.images as string) || '[]'),
+    staffId: (row.staff_id as string) || undefined,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
@@ -319,15 +321,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const effectiveCharge = scope === 'OWN' ? null : (data.chargeToCustomer || null);
 
     db.run(
-      `INSERT INTO repairs (id, branch_id, repair_number, customer_id, product_id,
+      `INSERT INTO repairs (id, branch_id, repair_number, customer_id, product_id, lot_id,
         item_category_id, item_attributes, tax_scheme,
         item_brand, item_model, item_reference, item_serial, item_description,
         issue_description, diagnosis, repair_type, external_vendor, workshop_supplier_id,
         estimated_cost, internal_cost, charge_to_customer,
         status, received_at, estimated_ready, voucher_code,
-        notes, images, repair_scope, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, '[]', ?, ?, ?, ?)`,
-      [id, branchId, repairNumber, effectiveCustomerId, data.productId || null,
+        notes, images, repair_scope, staff_id, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)`,
+      [id, branchId, repairNumber, effectiveCustomerId, data.productId || null, data.lotId || null,
        data.itemCategoryId || null, JSON.stringify(data.itemAttributes || {}), data.taxScheme || 'VAT_10',
        data.itemBrand || null, data.itemModel || null, data.itemReference || null,
        data.itemSerial || null, data.itemDescription || null,
@@ -335,7 +337,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
        data.repairType || 'internal', data.externalVendor || null, data.workshopSupplierId || null,
        data.estimatedCost || null, data.internalCost || 0, effectiveCharge,
        now, data.estimatedReady || null, voucherCode,
-       data.notes || null, scope, now, now, userId]
+       data.notes || null, scope, data.staffId || null, now, now, userId]
     );
 
     // If linked to a product, update its status
@@ -360,7 +362,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const values: unknown[] = [];
 
     const map: Record<string, string> = {
-      customerId: 'customer_id', productId: 'product_id',
+      customerId: 'customer_id', productId: 'product_id', lotId: 'lot_id',
       itemCategoryId: 'item_category_id', taxScheme: 'tax_scheme',
       itemBrand: 'item_brand', itemModel: 'item_model', itemReference: 'item_reference',
       itemSerial: 'item_serial', itemDescription: 'item_description',
@@ -376,6 +378,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       pickedUpAt: 'picked_up_at', estimatedReady: 'estimated_ready',
       invoiceId: 'invoice_id', notes: 'notes',
       repairScope: 'repair_scope',
+      staffId: 'staff_id',
     };
 
     for (const [k, v] of Object.entries(data)) {
@@ -450,6 +453,34 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
                 [totalCost, now, repair.productId]
               );
               trackUpdate('products', repair.productId, { purchasePriceDelta: totalCost, fromRepair: id });
+
+              // Phase 5 — Stock-Lot fuer dieses Produkt mit dem kapitalisierten
+              // Repair-Cost anreichern. Strategie:
+              //   1. Explizit gewaehlter Lot (repair.lotId) — User wusste welches
+              //      physische Stueck er zur Repair gegeben hat.
+              //   2. Fallback: aeltester ACTIVE Lot (FIFO-konsistent zum Sale-Pfad,
+              //      damit die naechste Sale direkt den korrigierten Cost-Snapshot zieht).
+              // Beide Pfade schreiben perPiece = totalCost / qty_remaining auf unit_cost.
+              const lotRows = repair.lotId
+                ? query(
+                    `SELECT id, qty_remaining FROM stock_lots WHERE id = ? AND status != 'CANCELLED' AND qty_remaining > 0`,
+                    [repair.lotId]
+                  )
+                : query(
+                    `SELECT id, qty_remaining FROM stock_lots
+                      WHERE product_id = ? AND status = 'ACTIVE' AND qty_remaining > 0
+                      ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+                    [repair.productId]
+                  );
+              if (lotRows.length > 0) {
+                const lotId = lotRows[0].id as string;
+                const qtyRem = Number(lotRows[0].qty_remaining) || 1;
+                const perPiece = totalCost / qtyRem;
+                db.run(
+                  `UPDATE stock_lots SET unit_cost = unit_cost + ? WHERE id = ?`,
+                  [perPiece, lotId]
+                );
+              }
             }
             // Own-Item: kein Pickup-Schritt — Produkt geht direkt zurück in Bestand.
             db.run(

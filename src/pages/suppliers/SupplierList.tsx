@@ -7,12 +7,16 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { PhoneInput } from '@/components/ui/PhoneInput';
+import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
+import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Supplier } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 export function SupplierList() {
@@ -35,6 +39,15 @@ export function SupplierList() {
     setShowNew(false);
     setForm({});
   }
+
+  // Duplicate-Check live im New-Supplier-Modal (Name oder Phone).
+  const duplicateMatches = useMemo(() => {
+    if (!showNew) return [];
+    return findSimilarContacts(
+      { name: form.name, phone: form.phone },
+      suppliers,
+    );
+  }, [showNew, form.name, form.phone, suppliers]);
 
   const totalOutstanding = suppliers.reduce((s, x) => s + (x.outstandingBalance || 0), 0);
   const totalCredit = suppliers.reduce((s, x) => s + (x.creditBalance || 0), 0);
@@ -81,13 +94,13 @@ export function SupplierList() {
                 {s.phone && <div>{s.phone}</div>}
                 {s.email && <div style={{ color: '#6B7280' }}>{s.email}</div>}
               </div>
-              <div className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(s.totalPurchases || 0)}</div>
-              <div className="font-mono" style={{ fontSize: 13, color: '#16A34A' }}>{fmt(s.totalPaid || 0)}</div>
+              <div className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={s.totalPurchases || 0}/></div>
+              <div className="font-mono" style={{ fontSize: 13, color: '#16A34A' }}><Bhd v={s.totalPaid || 0}/></div>
               <div className="font-mono" style={{ fontSize: 13, color: (s.outstandingBalance || 0) > 0 ? '#DC2626' : '#6B7280' }}>
-                {fmt(s.outstandingBalance || 0)}
+                <Bhd v={s.outstandingBalance || 0}/>
               </div>
               <div className="font-mono" style={{ fontSize: 13, color: (s.creditBalance || 0) > 0 ? '#AA956E' : '#6B7280' }}>
-                {fmt(s.creditBalance || 0)}
+                <Bhd v={s.creditBalance || 0}/>
               </div>
               <div>
                 <span style={{
@@ -103,9 +116,16 @@ export function SupplierList() {
 
       <Modal open={showNew} onClose={() => setShowNew(false)} title="New Supplier" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {duplicateMatches.length > 0 && (
+            <DuplicateWarningBanner
+              matches={duplicateMatches}
+              entityLabel="supplier"
+              onSelectMatch={s => { setShowNew(false); navigate(`/suppliers/${s.id}`); }}
+            />
+          )}
           <Input required label="NAME" placeholder="e.g. Gold Dealer LLC" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} autoFocus />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <Input label="PHONE" placeholder="+973 3xxx xxxx" value={form.phone || ''} onChange={e => setForm({ ...form, phone: e.target.value })} />
+            <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
             <Input label="EMAIL" placeholder="contact@supplier.com" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
           </div>
           <Input label="ADDRESS" placeholder="Street, City" value={form.address || ''} onChange={e => setForm({ ...form, address: e.target.value })} />
@@ -121,7 +141,9 @@ export function SupplierList() {
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!form.name}>Create Supplier</Button>
+            <Button variant="primary" onClick={handleCreate} disabled={!form.name}>
+              {duplicateMatches.length > 0 ? 'Create anyway' : 'Create Supplier'}
+            </Button>
           </div>
         </div>
       </Modal>

@@ -32,6 +32,12 @@ export interface CategoryAttribute {
   required: boolean;
   unit?: string;         // e.g. "mm", "ct", "g"
   showInList: boolean;   // show in collection list view
+  // Optional: nur sichtbar (und nur dann required), wenn ein anderes Attribut
+  // einen bestimmten Wert hat. Beispiel: karat_color hängt von material ab.
+  dependsOn?: {
+    key: string;
+    valueIncludes: string[];
+  };
 }
 
 export interface Category {
@@ -55,13 +61,13 @@ export interface Category {
 export type CanonicalStockStatus = 'IN_STOCK' | 'RESERVED' | 'SOLD' | 'GIVEN_TO_AGENT' | 'UNDER_REPAIR' | 'RETURNED' | 'WRITE_OFF';
 export type StockStatus =
   | CanonicalStockStatus
-  | 'in_stock' | 'reserved' | 'offered' | 'sold' | 'consignment'
+  | 'in_stock' | 'reserved' | 'offered' | 'sold' | 'consignment' | 'consignment_reserved'
   | 'in_repair' | 'with_agent' | 'on_order';
 
 export function canonicalStockStatus(s: StockStatus | string | undefined | null): CanonicalStockStatus {
   const v = String(s || '').toLowerCase();
   if (v === 'in_stock' || v === 'consignment' || v === 'offered') return 'IN_STOCK';
-  if (v === 'reserved') return 'RESERVED';
+  if (v === 'reserved' || v === 'consignment_reserved') return 'RESERVED';
   if (v === 'sold') return 'SOLD';
   if (v === 'with_agent' || v === 'given_to_agent') return 'GIVEN_TO_AGENT';
   if (v === 'in_repair' || v === 'under_repair') return 'UNDER_REPAIR';
@@ -101,7 +107,7 @@ export interface Product {
   daysInStock?: number;
   supplierName?: string;
   purchaseSource?: string;
-  paidFrom?: 'cash' | 'bank' | null;
+  paidFrom?: 'cash' | 'bank' | 'benefit' | null;
   sourceType: ProductSourceType;
   notes?: string;
   images: string[];
@@ -245,6 +251,11 @@ export interface Invoice {
   dueAt?: string;
   notes?: string;
   lines: InvoiceLine[];
+  // Wave-2: einheitliches Staff-Feld — welcher Mitarbeiter den Sale gemacht hat.
+  staffId?: UUID;
+  // 2026-05-16 — Optischer Marker fuer Final-Invoices ("Special" vs "Normal").
+  // true = Display mit Punkt-Praefix (`.000021` / `.Repair-000021`); false/undef = ohne.
+  specialMark?: boolean;
   createdAt: string;
   createdBy?: UUID;
   customer?: Customer;
@@ -252,7 +263,7 @@ export interface Invoice {
 
 // ── Payment ──
 
-export type PaymentMethod = 'bank_transfer' | 'cash' | 'card' | 'crypto' | 'other';
+export type PaymentMethod = 'bank_transfer' | 'cash' | 'card' | 'benefit' | 'crypto' | 'other';
 
 export interface Payment {
   id: UUID;
@@ -419,6 +430,11 @@ export interface Repair {
   repairScope?: 'CUSTOMER' | 'OWN';
   customerId: UUID;
   productId?: UUID;
+  // Stock-Lots Phase 5d (Refinement): bei OWN-Repair waehlt der User explizit
+  // welcher Lot des verlinkten Produkts den Repair-Cost kapitalisiert. Wird beim
+  // READY-Uebergang in unit_cost dieses Lots eingebucht. Optional — Fallback
+  // = aeltester ACTIVE Lot des Produkts (FIFO-konsistent zur Sale-Konsumption).
+  lotId?: UUID;
   // Plan §Repair §Item-Details: kategorie-basierte Erfassung (vereinfachte Variante
   // gegenüber Collection — nur die Kategorie + ein paar wichtige Felder pro Typ).
   itemCategoryId?: UUID;
@@ -443,12 +459,12 @@ export interface Repair {
   actualCost?: number;
   internalCost: number;
   chargeToCustomer?: number;
-  customerPaidFrom?: 'cash' | 'bank' | null;
-  internalPaidFrom?: 'cash' | 'bank' | null;
+  customerPaidFrom?: 'cash' | 'bank' | 'benefit' | null;
+  internalPaidFrom?: 'cash' | 'bank' | 'benefit' | null;
   // Plan §8 — Repair customer payment tracking
   customerPaidAmount?: number;
   customerPaymentStatus?: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
-  customerPaymentMethod?: 'cash' | 'bank' | 'card' | null;
+  customerPaymentMethod?: 'cash' | 'bank' | 'card' | 'benefit' | null;
   customerPaymentDate?: string;
   margin?: number;
   status: RepairStatus;
@@ -462,6 +478,8 @@ export interface Repair {
   invoiceId?: UUID;
   notes?: string;
   images: string[];
+  // Wave-2: einheitliches Staff-Feld — welcher Mitarbeiter die Repair betreut hat.
+  staffId?: UUID;
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;
@@ -513,6 +531,7 @@ export interface Consignment {
   buyerId?: UUID;
   invoiceId?: UUID;
   notes?: string;
+  staffId?: UUID;
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;
@@ -572,6 +591,7 @@ export interface AgentTransfer {
   settlementPaidAmount?: number;  // Plan §Agent §4: Teilzahlung tracking
   settlementStatus: 'pending' | 'partial' | 'paid';
   notes?: string;
+  staffId?: UUID;
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;
@@ -696,7 +716,7 @@ export interface Order {
 
 export type DebtDirection = 'we_lend' | 'we_borrow' | 'MONEY_GIVEN' | 'MONEY_RECEIVED';
 export type CanonicalLoanDirection = 'MONEY_GIVEN' | 'MONEY_RECEIVED';
-export type CashSource = 'cash' | 'bank';
+export type CashSource = 'cash' | 'bank' | 'benefit';
 // Plan §Loan §10: OPEN / PARTIALLY_REPAID / REPAID / CANCELLED.
 // Legacy-Werte (open/settled) bleiben erlaubt; canonicalLoanStatus normalisiert.
 export type CanonicalLoanStatus = 'OPEN' | 'PARTIALLY_REPAID' | 'REPAID' | 'CANCELLED';
@@ -734,6 +754,7 @@ export interface Debt {
   dueDate?: string;            // ISO date
   notes?: string;
   status: DebtStatus;
+  staffId?: UUID;
   createdAt: string;
   updatedAt: string;
   settledAt?: string;
@@ -818,6 +839,7 @@ export interface Purchase {
   notes?: string;
   lines: PurchaseLine[];
   payments: PurchasePayment[];
+  staffId?: UUID;
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;
@@ -894,6 +916,7 @@ export interface SalesReturn {
   reason?: string;               // Optional: Grund für die Rückgabe
   notes?: string;
   lines: SalesReturnLine[];
+  staffId?: UUID;
   createdAt: string;
   createdBy?: UUID;
 }
@@ -963,7 +986,10 @@ export interface BankTransfer {
   id: UUID;
   branchId: UUID;
   amount: number;
-  direction: 'CASH_TO_BANK' | 'BANK_TO_CASH';
+  direction:
+    | 'CASH_TO_BANK' | 'BANK_TO_CASH'
+    | 'CASH_TO_BENEFIT' | 'BENEFIT_TO_CASH'
+    | 'BANK_TO_BENEFIT' | 'BENEFIT_TO_BANK';
   transferDate: string;
   notes?: string;
   createdAt: string;
@@ -1009,7 +1035,7 @@ export interface PartnerTransaction {
 }
 
 // Expense (Plan §Expenses §3 + §11)
-export type ExpenseCategory = 'Rent' | 'Salary' | 'Utilities' | 'CardFees' | 'RepairCosts' | 'Transport' | 'Miscellaneous';
+export type ExpenseCategory = 'Rent' | 'Salary' | 'Utilities' | 'CardFees' | 'RepairCosts' | 'Transport' | 'ConsignorLoss' | 'Miscellaneous';
 
 export interface Expense {
   id: UUID;
@@ -1018,7 +1044,7 @@ export interface Expense {
   category: ExpenseCategory;
   amount: number;
   paidAmount: number;          // Plan §Expenses §Pay-Later — Teilzahlungen
-  paymentMethod: 'cash' | 'bank';
+  paymentMethod: 'cash' | 'bank' | 'benefit';
   expenseDate: string;
   description?: string;
   relatedModule?: string;
@@ -1032,7 +1058,50 @@ export interface Expense {
   //  - PENDING:   paid_amount < amount  (Unpaid + Partially Paid)
   //  - CANCELLED: storniert, zählt nicht in Cashflow/Payables
   status?: 'PENDING' | 'PAID' | 'CANCELLED';
+  // Wenn diese Expense von einem Recurring-Template generiert wurde, traegt sie
+  // dessen ID hier — sonst NULL/undefined fuer manuell angelegte.
+  recurringTemplateId?: UUID;
+  // Bei category='Salary' verpflichtet: welcher Mitarbeiter bekommt das Gehalt.
+  employeeId?: UUID;
   createdAt: string;
+  createdBy?: UUID;
+}
+
+export interface RecurringExpenseTemplate {
+  id: UUID;
+  branchId: UUID;
+  category: ExpenseCategory;
+  amount: number;
+  paymentMethod: 'cash' | 'bank';
+  payNowDefault: boolean;       // false = generierte Expense bleibt PENDING (Payable)
+  description?: string;
+  dayOfMonth: number;           // 1..31 (am Monatsende auf letzten Tag geclampt)
+  startDate: string;            // YYYY-MM-DD
+  endDate?: string;             // optional; danach keine neuen Instanzen
+  active: boolean;              // false = pausiert
+  lastGeneratedPeriod?: string; // 'YYYY-MM'
+  supplierId?: UUID;
+  employeeId?: UUID;            // bei category='Salary' Pflicht (UI-validiert)
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: UUID;
+}
+
+export type EmploymentStatus = 'active' | 'on_leave' | 'inactive';
+
+export interface Employee {
+  id: UUID;
+  branchId: UUID;
+  name: string;
+  role?: string;                // 'Sales', 'Repair Tech', 'Manager', etc. (free text)
+  employmentStatus: EmploymentStatus;
+  baseSalary?: number;          // monatliches Base-Gehalt (BHD), optional
+  phone?: string;
+  email?: string;
+  notes?: string;
+  userId?: UUID;                // optional: verknuepfter Login-User
+  createdAt: string;
+  updatedAt: string;
   createdBy?: UUID;
 }
 
@@ -1040,7 +1109,7 @@ export interface ExpensePayment {
   id: UUID;
   expenseId: UUID;
   amount: number;
-  method: 'cash' | 'bank';
+  method: 'cash' | 'bank' | 'benefit';
   paidAt: string;
   note?: string;
   createdAt: string;

@@ -21,6 +21,8 @@ import { GaugeChart } from '@/components/charts/GaugeChart';
 import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
 import { query, currentBranchId } from '@/core/db/helpers';
+import { isLoanGiven, canonicalLoanStatus } from '@/core/models/types';
+import { receivablesSummary, type ReceivableSource } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
 
 function getGreeting(): string {
@@ -101,6 +103,7 @@ export function Dashboard() {
 
   const stock = useMemo(() => getStockValue(), [products, getStockValue]);
   const stockByCat = useMemo(() => getStockByCategory(), [products, categories, getStockByCategory]);
+
   const featured = useMemo(() => products.filter(p => p.stockStatus === 'in_stock').slice(0, 4), [products]);
   const topClients = useMemo(() => [...customers].sort((a, b) => b.totalRevenue - a.totalRevenue).slice(0, 5), [customers]);
 
@@ -152,10 +155,6 @@ export function Dashboard() {
   const supplierPayables = useMemo(
     () => suppliers.reduce((s, sup) => s + (sup.outstandingBalance || 0), 0),
     [suppliers]
-  );
-  const customerReceivables = useMemo(
-    () => invoices.filter(i => i.status === 'PARTIAL').reduce((s, i) => s + Math.max(0, i.grossAmount - i.paidAmount), 0),
-    [invoices]
   );
   const partnerCapital = useMemo(
     () => partners.reduce((s, p) => s + (p.balance || 0), 0),
@@ -209,10 +208,29 @@ export function Dashboard() {
     return totalProfit * (totalShare / 100);
   }, [partners, totalProfit]);
 
+  // ZIEL.md §3a — Receivables-Breakdown: Total + Anzahl Kunden + Source-Mix
+  // (Invoice / Consignment / Approval / Repair). Quelle ist receivablesSummary()
+  // (core/finance/receivables.ts) — Domain-Sum statt reinem Ledger-AR, damit auch
+  // Repairs (leben ausserhalb des Ledgers) erfasst sind. useMemo-Deps an Invoices/
+  // Returns; Repair-Aenderungen triggern via repairs-Store-Reload, der die DB
+  // aktualisiert — beim naechsten Render wird neu gerechnet.
+  const arSummary = useMemo(
+    () => receivablesSummary(),
+    [invoices, salesReturns]
+  );
+  const customerReceivables = arSummary.total;
+  const arSourceLabel = useMemo(() => {
+    const labels: Record<ReceivableSource, string> = { INVOICE: 'Invoices', CONSIGNMENT: 'Consignment', APPROVAL: 'Approval', REPAIR: 'Repairs' };
+    if (arSummary.sources.length === 0) return '';
+    if (arSummary.sources.length === 1) return labels[arSummary.sources[0]];
+    return arSummary.sources.map(s => labels[s]).join(', ');
+  }, [arSummary]);
+
   // Alerts (Plan §Dashboard §7)
   const alerts: Array<{ key: string; level: 'urgent' | 'warn' | 'info'; text: string }> = [];
   if (customerReceivables > 0) {
-    alerts.push({ key: 'open-inv', level: 'warn', text: `${fmt(customerReceivables)} BHD outstanding from customers (${invoices.filter(i => i.status === 'PARTIAL').length} invoices)` });
+    const fromTxt = arSourceLabel ? ` from ${arSummary.clientCount} client${arSummary.clientCount === 1 ? '' : 's'} (${arSourceLabel})` : '';
+    alerts.push({ key: 'open-inv', level: 'warn', text: `${fmt(customerReceivables)} BHD outstanding${fromTxt}` });
   }
   if (supplierPayables > 0) {
     alerts.push({ key: 'sup-debt', level: 'warn', text: `${fmt(supplierPayables)} BHD owed to suppliers` });
@@ -378,10 +396,33 @@ export function Dashboard() {
     ).length,
     [salesReturns]
   );
-  const openOwedToUs = useMemo(() =>
+  // Private Cash-Darlehen aus der `debts`-Tabelle — KEIN Bezug zu Handel-Forderungen
+  // (Invoices/Repairs/Consignments → das ist customerReceivables). Hier nur Bargeld-Loans.
+  // Robust gegen Legacy-Direction ('we_lend'/'we_borrow') und Legacy-Status ('open'/'settled').
+  const openLoanFilter = (d: typeof debts[number]) => {
+    const s = canonicalLoanStatus(d.status, d.amount, d.paidAmount);
+    return s === 'OPEN' || s === 'PARTIALLY_REPAID';
+  };
+  const loansGiven = useMemo(() =>
     debts
-      .filter(d => d.direction === 'MONEY_GIVEN' && (d.status === 'OPEN' || d.status === 'PARTIALLY_REPAID'))
+      .filter(d => isLoanGiven(d.direction))
+      .filter(openLoanFilter)
       .reduce((s, d) => s + Math.max(0, (d.amount || 0) - (d.paidAmount || 0)), 0),
+    [debts]
+  );
+  const loansTaken = useMemo(() =>
+    debts
+      .filter(d => !isLoanGiven(d.direction))
+      .filter(openLoanFilter)
+      .reduce((s, d) => s + Math.max(0, (d.amount || 0) - (d.paidAmount || 0)), 0),
+    [debts]
+  );
+  const loansGivenCount = useMemo(() =>
+    debts.filter(d => isLoanGiven(d.direction) && openLoanFilter(d)).length,
+    [debts]
+  );
+  const loansTakenCount = useMemo(() =>
+    debts.filter(d => !isLoanGiven(d.direction) && openLoanFilter(d)).length,
     [debts]
   );
 
@@ -478,7 +519,7 @@ export function Dashboard() {
                   fontSize: 28, fontWeight: 700, color: '#FFFFFF',
                   letterSpacing: '-0.025em', lineHeight: 1.1,
                 }}>
-                  {spotGold.bhdPerGram.toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g</span>
+                  {(spotGold.usdPerOunce * 1.417 / 116.64).toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g</span>
                 </div>
                 <div className="font-mono" style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)', marginTop: 6 }}>
                   ${spotGold.usdPerOunce.toFixed(2)} /oz · ${spotGold.usdPerGram.toFixed(2)} /g
@@ -506,7 +547,7 @@ export function Dashboard() {
                   fontSize: 28, fontWeight: 700, color: '#FFFFFF',
                   letterSpacing: '-0.025em', lineHeight: 1.1,
                 }}>
-                  {spotSilver.bhdPerGram.toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g</span>
+                  {(spotSilver.usdPerOunce * 1.417 / 116.64).toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g</span>
                 </div>
                 <div className="font-mono" style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)', marginTop: 6 }}>
                   ${spotSilver.usdPerOunce.toFixed(2)} /oz · ${spotSilver.usdPerGram.toFixed(2)} /g
@@ -586,9 +627,16 @@ export function Dashboard() {
         <DashSection title="Performance" subtitle="Umsatz, Profit und Bestand für die gewählte Periode">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
             <KPICard label="REVENUE (FINAL)" value={fmt(totalRevenue)} unit={`BHD · ${finalInvoices.length} inv.`} icon={<TrendingUp size={16} />} accent="green" onClick={() => navigate('/invoices?filter=FINAL')} />
-            <KPICard label="PROFIT" value={fmt(totalProfit)} unit={`BHD · ${marginPct.toFixed(1)}% margin`} icon={<TrendingUp size={16} />} accent="purple" onClick={() => navigate('/reports')} />
+            <KPICard label="PROFIT" value={fmt(totalProfit)} unit={`BHD · ${marginPct.toFixed(1)}% margin`} icon={<TrendingUp size={16} />} accent="purple" onClick={() => navigate('/business-reports')} />
             <KPICard label="AVG SALE" value={fmt(avgSale)} unit="BHD per invoice" icon={<FileText size={16} />} onClick={() => navigate('/invoices')} />
-            <KPICard label="STOCK VALUE" value={fmt(stock.purchaseTotal)} unit={`BHD · ${stock.count} items (OWN)`} icon={<Package size={16} />} accent="blue" onClick={() => navigate('/collection')} />
+            <KPICard
+              label="STOCK VALUE"
+              value={fmt(stock.purchaseTotal)}
+              unit={`BHD · ${stock.count} items`}
+              icon={<Package size={16} />}
+              accent="blue"
+              onClick={() => navigate('/collection')}
+            />
           </div>
         </DashSection>
 
@@ -597,20 +645,23 @@ export function Dashboard() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
             <KPICard label="CASH" value={fmt(accountBalances.cash)} unit="BHD" icon={<Wallet size={16} />} accent="green" onClick={() => navigate('/banking')} />
             <KPICard label="BANK" value={fmt(accountBalances.bank)} unit="BHD" icon={<Landmark size={16} />} accent="blue" onClick={() => navigate('/banking')} />
-            <KPICard label="RECEIVABLES" value={fmt(customerReceivables)} unit={`BHD · ${invoices.filter(i => i.status === 'PARTIAL').length} partial inv.`} icon={<FileText size={16} />} accent="orange" onClick={() => navigate('/invoices?filter=PARTIAL')} />
+            <KPICard label="RECEIVABLES"
+              value={fmt(customerReceivables)}
+              unit={arSummary.clientCount === 0
+                ? 'BHD'
+                : `BHD · ${arSummary.clientCount} client${arSummary.clientCount === 1 ? '' : 's'}${arSourceLabel ? ` (${arSourceLabel})` : ''}`}
+              icon={<FileText size={16} />} accent="orange"
+              onClick={() => navigate('/receivables')} />
             <KPICard label="SUPPLIER PAYABLES" value={fmt(supplierPayables)} unit={`BHD · ${openPurchases} open`} icon={<ShoppingCart size={16} />} accent="orange" onClick={() => navigate('/purchases?filter=UNPAID')} />
           </div>
         </DashSection>
 
         {/* ── SECTION: OPEN ITEMS / RISKS ── */}
-        <DashSection title="Open Items" subtitle="Was Aufmerksamkeit braucht — Refunds, Forderungen, Verbindlichkeiten">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
+        <DashSection title="Open Items" subtitle="Was Aufmerksamkeit braucht — Refunds, Verbindlichkeiten, Ausgaben">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20 }}>
             <KPICard label="REFUND PAYABLE" value={fmt(outstandingRefunds)} unit={`BHD · ${openRefundCount} open returns`}
               icon={<FileText size={16} />} accent={outstandingRefunds > 0 ? 'urgent' : 'none'}
               onClick={() => navigate('/invoices?filter=returns')} />
-            <KPICard label="OWED TO US" value={fmt(openOwedToUs)} unit="BHD · open loans given"
-              icon={<TrendingUp size={16} />} accent="green"
-              onClick={() => navigate('/debts?direction=MONEY_GIVEN')} />
             <KPICard label="TOTAL PAYABLES" value={fmt(payablesTotal(payables))}
               unit={`BHD · ${payables.length} open${overdueCount(payables) > 0 ? ` · ${overdueCount(payables)} overdue` : ''}`}
               icon={<AlertTriangle size={16} />}
@@ -618,6 +669,28 @@ export function Dashboard() {
               onClick={() => navigate('/payables')} />
             <KPICard label="MONTHLY EXPENSES" value={fmt(monthlyExpenses)} unit={`BHD · ${fmt(totalExpenses)} total`}
               icon={<Wallet size={16} />} accent="orange" onClick={() => navigate('/expenses')} />
+          </div>
+        </DashSection>
+
+        {/* ── SECTION: PRIVATE LOANS ── (Cash-Darlehen, NICHT Handel — getrennt von Receivables/Payables) */}
+        <DashSection title="Private Loans" subtitle="Bar-Darlehen außerhalb des Handels — kein Bezug zu Rechnungen oder Lieferanten">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 20 }}>
+            <KPICard label="LOANS GIVEN"
+              value={fmt(loansGiven)}
+              unit={loansGivenCount === 0
+                ? 'BHD · no open loans'
+                : `BHD · ${loansGivenCount} open loan${loansGivenCount === 1 ? '' : 's'}`}
+              icon={<TrendingUp size={16} />}
+              accent={loansGiven > 0 ? 'green' : 'none'}
+              onClick={() => navigate('/debts?direction=MONEY_GIVEN')} />
+            <KPICard label="LOANS TAKEN"
+              value={fmt(loansTaken)}
+              unit={loansTakenCount === 0
+                ? 'BHD · no open loans'
+                : `BHD · ${loansTakenCount} open loan${loansTakenCount === 1 ? '' : 's'}`}
+              icon={<AlertTriangle size={16} />}
+              accent={loansTaken > 0 ? 'orange' : 'none'}
+              onClick={() => navigate('/debts?direction=MONEY_RECEIVED')} />
           </div>
         </DashSection>
 

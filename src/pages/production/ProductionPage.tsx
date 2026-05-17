@@ -9,9 +9,10 @@ import { Input } from '@/components/ui/Input';
 import { SearchMultiSelect } from '@/components/ui/SearchSelect';
 import { useProductionStore } from '@/stores/productionStore';
 import { useProductStore } from '@/stores/productStore';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 interface OutputDraft {
@@ -101,7 +102,7 @@ export function ProductionPage() {
               <span style={{ fontSize: 12, color: '#4B5563' }}>{r.productionDate}</span>
               <span style={{ fontSize: 12, color: '#DC2626' }}>−{r.inputs.length}</span>
               <span style={{ fontSize: 12, color: '#16A34A' }}>+{r.outputs.length}</span>
-              <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(r.totalValue)}</span>
+              <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={r.totalValue}/></span>
               <span style={{ fontSize: 12, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.notes || '—'}</span>
               <button onClick={() => setConfirmDelete(r.id)} className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#6B7280' }}>
                 <Trash2 size={14} />
@@ -179,18 +180,18 @@ export function ProductionPage() {
           }}>
             <div className="flex justify-between" style={{ fontSize: 13 }}>
               <span style={{ color: '#6B7280' }}>Input Value</span>
-              <span className="font-mono" style={{ color: '#DC2626' }}>− {fmt(inputTotal)} BHD</span>
+              <span className="font-mono" style={{ color: '#DC2626' }}>− <Bhd v={inputTotal}/> BHD</span>
             </div>
             <div className="flex justify-between" style={{ fontSize: 13, marginTop: 4 }}>
               <span style={{ color: '#6B7280' }}>Output Value</span>
-              <span className="font-mono" style={{ color: '#16A34A' }}>+ {fmt(outputTotal)} BHD</span>
+              <span className="font-mono" style={{ color: '#16A34A' }}>+ <Bhd v={outputTotal}/> BHD</span>
             </div>
             <div className="flex justify-between" style={{ fontSize: 14, marginTop: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <span style={{ color: balanced ? '#16A34A' : '#DC2626', fontWeight: 500 }}>
                 {balanced ? 'Balanced ✓' : 'Out of balance'}
               </span>
               <span className="font-mono" style={{ color: balanced ? '#16A34A' : '#DC2626' }}>
-                {fmt(Math.abs(inputTotal - outputTotal))} BHD
+                <Bhd v={Math.abs(inputTotal - outputTotal)}/> BHD
               </span>
             </div>
           </div>

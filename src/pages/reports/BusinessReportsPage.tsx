@@ -1,25 +1,33 @@
 // Plan §Reports — 8 strukturierte Reports mit Export
 // SALES / PROFIT / TAX / INVENTORY / EXPENSE / PAYABLES / RECEIVABLES / PARTNER
 import { useEffect, useMemo, useState } from 'react';
-import { Download, BarChart3, TrendingUp, Percent, Package, Wallet, ShoppingCart, FileText, UserPlus } from 'lucide-react';
+import { Download, BarChart3, TrendingUp, Percent, Package, Wallet, ShoppingCart, FileText, UserPlus, Users } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
+import { useRepairStore } from '@/stores/repairStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
+import { getStockAggregates } from '@/core/lots/lot-queries';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
+import { useAgentStore } from '@/stores/agentStore';
+import { useConsignmentStore } from '@/stores/consignmentStore';
+import { useDebtStore } from '@/stores/debtStore';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
-type ReportKey = 'sales' | 'profit' | 'tax' | 'inventory' | 'expense' | 'payables' | 'receivables' | 'partner';
+type ReportKey = 'sales' | 'profit' | 'tax' | 'inventory' | 'expense' | 'payables' | 'receivables' | 'partner' | 'staff';
 
 interface ReportDef {
   key: ReportKey;
@@ -37,6 +45,7 @@ const REPORTS: ReportDef[] = [
   { key: 'payables',    label: 'Payables',    icon: ShoppingCart, color: '#D97706' },
   { key: 'receivables', label: 'Receivables', icon: FileText,     color: '#16A34A' },
   { key: 'partner',     label: 'Partners',    icon: UserPlus,     color: '#7C3AED' },
+  { key: 'staff',       label: 'By Staff',    icon: Users,        color: '#0891B2' },
 ];
 
 function escapeHtml(s: string): string {
@@ -126,13 +135,19 @@ export function BusinessReportsPage() {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { partners, loadPartners } = usePartnerStore();
-  const { loadPurchases } = usePurchaseStore();
+  const { purchases, loadPurchases } = usePurchaseStore();
   const { returns: salesReturns, loadReturns: loadSalesReturns } = useSalesReturnStore();
+  const { employees, loadEmployees } = useEmployeeStore();
+  const { repairs, loadRepairs } = useRepairStore();
+  const { transfers, loadTransfers } = useAgentStore();
+  const { consignments, loadConsignments } = useConsignmentStore();
+  const { debts, loadDebts } = useDebtStore();
 
   useEffect(() => {
     loadInvoices(); loadProducts(); loadCategories();
     loadExpenses(); loadSuppliers(); loadCustomers(); loadPartners(); loadPurchases(); loadSalesReturns();
-  }, [loadInvoices, loadProducts, loadCategories, loadExpenses, loadSuppliers, loadCustomers, loadPartners, loadPurchases, loadSalesReturns]);
+    loadEmployees(); loadRepairs(); loadTransfers(); loadConsignments(); loadDebts();
+  }, [loadInvoices, loadProducts, loadCategories, loadExpenses, loadSuppliers, loadCustomers, loadPartners, loadPurchases, loadSalesReturns, loadEmployees, loadRepairs, loadTransfers, loadConsignments, loadDebts]);
 
   // Plan §Reports §4+6: Zeitraum-Filter auf Invoice-Liste.
   const filteredInvoices = useMemo(() => {
@@ -243,20 +258,29 @@ export function BusinessReportsPage() {
 
   // ── Inventory Report (Plan §Reports §D)
   // Plan §Commission §5: nur OWN-Ware zählt als Asset.
+  // Phase 7 Stock-Lots: Wert kommt aus stock_lots (Σ qty_remaining × unit_cost)
+  // statt single product.purchase_price. Bei Multi-Lot-Produkten ist das die
+  // einzige korrekte Bewertung. Count zaehlt jetzt auch Stueck (qty), nicht Produkte.
   const inventoryReport = useMemo(() => {
     const inStock = products.filter(p =>
       (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
     );
-    const value = inStock.reduce((s, p) => s + p.purchasePrice, 0);
+    const agg = getStockAggregates(inStock.map(p => p.id));
+    let totalCount = 0, totalValue = 0;
     const byCat: Record<string, { count: number; value: number; name: string }> = {};
     for (const p of inStock) {
       const c = categories.find(x => x.id === p.categoryId);
       const name = c?.name || 'Uncategorized';
+      const a = agg.get(p.id);
+      const qty = a ? a.totalQty : (p.quantity || 1);
+      const val = a ? a.totalValue : p.purchasePrice * (p.quantity || 1);
+      totalCount += qty;
+      totalValue += val;
       const e = byCat[p.categoryId] || { count: 0, value: 0, name };
-      e.count += 1; e.value += p.purchasePrice; e.name = name;
+      e.count += qty; e.value += val; e.name = name;
       byCat[p.categoryId] = e;
     }
-    return { count: inStock.length, value, byCat: Object.values(byCat) };
+    return { count: totalCount, value: totalValue, byCat: Object.values(byCat) };
   }, [products, categories]);
 
   // ── Expense Report (Plan §Reports §E)
@@ -312,6 +336,121 @@ export function BusinessReportsPage() {
     const totalBalance = rows.reduce((s, x) => s + x.balance, 0);
     return { rows, totalBalance };
   }, [partners]);
+
+  // ── Staff Report ── Sales + Repairs + Purchases + Transfers + Consignments + Returns + Debts
+  // pro Mitarbeiter im Periode-Range.
+  // Unassigned (kein staff_id) wird als separate Zeile gefuehrt damit die Summen
+  // mit den jeweiligen Modul-Reports uebereinstimmen.
+  const staffReport = useMemo(() => {
+    const inRange = (when: string | undefined | null): boolean => {
+      if (!when) return false;
+      return when >= periodRange.from && when <= periodRange.to;
+    };
+    const finalInvs = filteredInvoices.filter(i => i.status === 'FINAL');
+    const repairsInRange    = repairs.filter(r => inRange(r.receivedAt || r.createdAt));
+    const purchasesInRange  = purchases.filter(p => p.status !== 'CANCELLED' && inRange(p.purchaseDate || p.createdAt));
+    const transfersInRange  = transfers.filter(t => inRange(t.transferredAt || t.createdAt));
+    const consignsInRange   = consignments.filter(c => inRange(c.agreementDate || c.createdAt));
+    const returnsInRange    = salesReturns.filter(r => inRange(r.returnDate || r.createdAt));
+    const debtsInRange      = debts.filter(d => inRange(d.createdAt));
+
+    type StaffRow = {
+      id: string;
+      name: string;
+      role: string;
+      revenue: number;
+      profit: number;
+      invoiceCount: number;
+      repairCount: number;
+      repairCharge: number;
+      purchaseCount: number;
+      purchaseSpend: number;
+      transferCount: number;
+      consignCount: number;
+      returnCount: number;
+      debtCount: number;
+    };
+    const map = new Map<string, StaffRow>();
+    const ensure = (id: string, name: string, role: string): StaffRow => {
+      const existing = map.get(id);
+      if (existing) return existing;
+      const row: StaffRow = {
+        id, name, role,
+        revenue: 0, profit: 0, invoiceCount: 0,
+        repairCount: 0, repairCharge: 0,
+        purchaseCount: 0, purchaseSpend: 0,
+        transferCount: 0, consignCount: 0, returnCount: 0, debtCount: 0,
+      };
+      map.set(id, row);
+      return row;
+    };
+    const resolve = (sid: string | undefined | null): StaffRow => {
+      const id = sid || '__unassigned__';
+      if (id === '__unassigned__') return ensure(id, 'Unassigned', '—');
+      const e = employees.find(x => x.id === id);
+      return ensure(id, e?.name || id.slice(0, 8), e?.role || '—');
+    };
+
+    for (const e of employees) ensure(e.id, e.name, e.role || '—');
+    for (const i of finalInvs) {
+      const e = resolve(i.staffId);
+      e.revenue      += i.grossAmount || 0;
+      e.profit       += i.marginSnapshot || 0;
+      e.invoiceCount += 1;
+    }
+    for (const r of repairsInRange) {
+      const e = resolve(r.staffId);
+      e.repairCount  += 1;
+      e.repairCharge += r.chargeToCustomer || 0;
+    }
+    for (const p of purchasesInRange) {
+      const e = resolve(p.staffId);
+      e.purchaseCount += 1;
+      e.purchaseSpend += p.totalAmount || 0;
+    }
+    for (const t of transfersInRange) {
+      const e = resolve(t.staffId);
+      e.transferCount += 1;
+    }
+    for (const c of consignsInRange) {
+      const e = resolve(c.staffId);
+      e.consignCount += 1;
+    }
+    for (const r of returnsInRange) {
+      const e = resolve(r.staffId);
+      e.returnCount += 1;
+    }
+    for (const d of debtsInRange) {
+      const e = resolve(d.staffId);
+      e.debtCount += 1;
+    }
+    const rows = Array.from(map.values())
+      .filter(r => r.invoiceCount > 0 || r.repairCount > 0 || r.purchaseCount > 0
+                 || r.transferCount > 0 || r.consignCount > 0 || r.returnCount > 0 || r.debtCount > 0)
+      .sort((a, b) => b.revenue - a.revenue);
+    const totals = rows.reduce(
+      (s, r) => ({
+        revenue: s.revenue + r.revenue,
+        profit: s.profit + r.profit,
+        invoiceCount: s.invoiceCount + r.invoiceCount,
+        repairCount: s.repairCount + r.repairCount,
+        repairCharge: s.repairCharge + r.repairCharge,
+        purchaseCount: s.purchaseCount + r.purchaseCount,
+        purchaseSpend: s.purchaseSpend + r.purchaseSpend,
+        transferCount: s.transferCount + r.transferCount,
+        consignCount: s.consignCount + r.consignCount,
+        returnCount: s.returnCount + r.returnCount,
+        debtCount: s.debtCount + r.debtCount,
+      }),
+      {
+        revenue: 0, profit: 0, invoiceCount: 0,
+        repairCount: 0, repairCharge: 0,
+        purchaseCount: 0, purchaseSpend: 0,
+        transferCount: 0, consignCount: 0, returnCount: 0, debtCount: 0,
+      }
+    );
+    return { rows, totals };
+  }, [filteredInvoices, repairs, purchases, transfers, consignments, salesReturns, debts, periodRange, employees]);
 
   function buildReportRows(): { title: string; rows: string[][] } {
     switch (active) {
@@ -374,6 +513,26 @@ export function BusinessReportsPage() {
           ...partnerReport.rows.map(r => [r.name, r.share.toFixed(2), r.invested.toFixed(2), r.withdrawn.toFixed(2), r.profitShare.toFixed(2), r.balance.toFixed(2)]),
           ['', '', '', '', '', ''],
           ['Total balance', '', '', '', '', partnerReport.totalBalance.toFixed(2)],
+        ]};
+      case 'staff':
+        return { title: 'Activity by Staff', rows: [
+          ['Staff', 'Role', 'Invoices', 'Revenue', 'Profit', 'Repairs', 'Repair Charge',
+           'Purchases', 'Purchase Spend', 'Transfers', 'Consignments', 'Returns', 'Debts'],
+          ...staffReport.rows.map(r => [
+            r.name, r.role, String(r.invoiceCount),
+            r.revenue.toFixed(2), r.profit.toFixed(2),
+            String(r.repairCount), r.repairCharge.toFixed(2),
+            String(r.purchaseCount), r.purchaseSpend.toFixed(2),
+            String(r.transferCount), String(r.consignCount),
+            String(r.returnCount), String(r.debtCount),
+          ]),
+          ['', '', '', '', '', '', '', '', '', '', '', '', ''],
+          ['Total', '', String(staffReport.totals.invoiceCount),
+           staffReport.totals.revenue.toFixed(2), staffReport.totals.profit.toFixed(2),
+           String(staffReport.totals.repairCount), staffReport.totals.repairCharge.toFixed(2),
+           String(staffReport.totals.purchaseCount), staffReport.totals.purchaseSpend.toFixed(2),
+           String(staffReport.totals.transferCount), String(staffReport.totals.consignCount),
+           String(staffReport.totals.returnCount), String(staffReport.totals.debtCount)],
         ]};
     }
   }
@@ -496,7 +655,7 @@ export function BusinessReportsPage() {
             {Object.entries(salesReport.byMonth).sort().map(([m, v]) => (
               <div key={m} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                 <span style={{ color: '#0F0F10' }}>{m}</span>
-                <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(v)} BHD</span>
+                <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={v}/> BHD</span>
               </div>
             ))}
             {Object.keys(salesReport.byMonth).length === 0 && <p style={{ color: '#6B7280', fontSize: 13 }}>No FINAL invoices yet.</p>}
@@ -515,9 +674,9 @@ export function BusinessReportsPage() {
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>FINAL INVOICES (Profit per Invoice)</span>
             {invoices.filter(i => i.status === 'FINAL').slice(0, 20).map(i => (
               <div key={i.id} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
-                <span className="font-mono" style={{ color: '#0F0F10' }}>{i.invoiceNumber}</span>
-                <span style={{ color: '#6B7280' }}>Cost: {fmt(i.purchasePriceSnapshot || 0)}</span>
-                <span className="font-mono" style={{ color: '#16A34A' }}>+{fmt(i.marginSnapshot || 0)} BHD</span>
+                <span className="font-mono" style={{ color: '#0F0F10' }}>{formatInvoiceDisplayShort(i)}</span>
+                <span style={{ color: '#6B7280' }}>Cost: <Bhd v={i.purchasePriceSnapshot || 0}/></span>
+                <span className="font-mono" style={{ color: '#16A34A' }}>+<Bhd v={i.marginSnapshot || 0}/> BHD</span>
               </div>
             ))}
           </Card>
@@ -550,7 +709,7 @@ export function BusinessReportsPage() {
                 <span style={{ color: '#0F0F10' }}>{c.name}</span>
                 <div className="flex gap-6">
                   <span style={{ color: '#6B7280' }}>{c.count} items</span>
-                  <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(c.value)} BHD</span>
+                  <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={c.value}/> BHD</span>
                 </div>
               </div>
             ))}
@@ -566,7 +725,7 @@ export function BusinessReportsPage() {
             {Object.entries(expenseReport.totals).map(([k, v]) => (
               <div key={k} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                 <span style={{ color: '#0F0F10' }}>{k}</span>
-                <span className="font-mono" style={{ color: '#DC2626' }}>{fmt(v)} BHD</span>
+                <span className="font-mono" style={{ color: '#DC2626' }}><Bhd v={v}/> BHD</span>
               </div>
             ))}
           </Card>
@@ -583,8 +742,8 @@ export function BusinessReportsPage() {
                 <div key={s.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                   <span style={{ color: '#0F0F10' }}>{s.name}</span>
                   <div className="flex gap-6">
-                    <span style={{ color: '#6B7280' }}>of {fmt(s.totalPurchases)} total</span>
-                    <span className="font-mono" style={{ color: '#DC2626' }}>− {fmt(s.outstanding)} BHD</span>
+                    <span style={{ color: '#6B7280' }}>of <Bhd v={s.totalPurchases}/> total</span>
+                    <span className="font-mono" style={{ color: '#DC2626' }}>− <Bhd v={s.outstanding}/> BHD</span>
                   </div>
                 </div>
               ))}
@@ -603,7 +762,7 @@ export function BusinessReportsPage() {
                   <span style={{ color: '#0F0F10' }}>{c.name}</span>
                   <div className="flex gap-6">
                     <span style={{ color: '#6B7280' }}>{c.count} partial inv.</span>
-                    <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(c.outstanding)} BHD</span>
+                    <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={c.outstanding}/> BHD</span>
                   </div>
                 </div>
               ))}
@@ -625,13 +784,70 @@ export function BusinessReportsPage() {
                     <span style={{ fontSize: 12, color: '#6B7280' }}>{r.share}% share</span>
                   </div>
                   <div className="flex gap-6" style={{ fontSize: 11, color: '#6B7280' }}>
-                    <span>Invested: <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(r.invested)}</span></span>
-                    <span>Withdrawn: <span className="font-mono" style={{ color: '#DC2626' }}>{fmt(r.withdrawn)}</span></span>
-                    <span>Profit: <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(r.profitShare)}</span></span>
-                    <span>Balance: <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(r.balance)} BHD</span></span>
+                    <span>Invested: <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={r.invested}/></span></span>
+                    <span>Withdrawn: <span className="font-mono" style={{ color: '#DC2626' }}><Bhd v={r.withdrawn}/></span></span>
+                    <span>Profit: <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={r.profitShare}/></span></span>
+                    <span>Balance: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={r.balance}/> BHD</span></span>
                   </div>
                 </div>
               ))}
+          </Card>
+        </div>
+      )}
+
+      {active === 'staff' && (
+        <div style={{ display: 'grid', gap: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
+            <MetricCard label="TOTAL REVENUE" value={`${fmt(staffReport.totals.revenue)} BHD`} />
+            <MetricCard label="TOTAL PROFIT"  value={`${fmt(staffReport.totals.profit)} BHD`} />
+            <MetricCard label="INVOICES"      value={String(staffReport.totals.invoiceCount)} />
+            <MetricCard label="REPAIRS"       value={String(staffReport.totals.repairCount)} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 16 }}>
+            <MetricCard label="PURCHASES"    value={String(staffReport.totals.purchaseCount)} />
+            <MetricCard label="PURCHASE SPEND" value={`${fmt(staffReport.totals.purchaseSpend)} BHD`} />
+            <MetricCard label="TRANSFERS"    value={String(staffReport.totals.transferCount)} />
+            <MetricCard label="CONSIGNMENTS" value={String(staffReport.totals.consignCount)} />
+            <MetricCard label="RETURNS / DEBTS" value={`${staffReport.totals.returnCount} · ${staffReport.totals.debtCount}`} />
+          </div>
+          <Card noPadding>
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,0.8fr) minmax(0,0.55fr) minmax(0,0.85fr) minmax(0,0.85fr) minmax(0,0.55fr) minmax(0,0.85fr) minmax(0,0.55fr) minmax(0,0.85fr) minmax(0,0.55fr) minmax(0,0.55fr) minmax(0,0.55fr) minmax(0,0.55fr)',
+              gap: 10, padding: '12px 16px', borderBottom: '1px solid #E5E9EE',
+            }}>
+              {['STAFF', 'ROLE', 'INV', 'REVENUE', 'PROFIT', 'REP', 'REP CHARGE',
+                'PUR', 'PUR SPEND', 'TRF', 'CON', 'RET', 'DEBT'].map(h => (
+                <span key={h} className="text-overline">{h}</span>
+              ))}
+            </div>
+            {staffReport.rows.length === 0 ? (
+              <p style={{ padding: '32px 16px', fontSize: 13, color: '#6B7280', textAlign: 'center' }}>
+                No staff activity in this period.
+              </p>
+            ) : (
+              staffReport.rows.map(r => (
+                <div key={r.id} style={{
+                  display: 'grid', gridTemplateColumns: 'minmax(0,1.3fr) minmax(0,0.8fr) minmax(0,0.55fr) minmax(0,0.85fr) minmax(0,0.85fr) minmax(0,0.55fr) minmax(0,0.85fr) minmax(0,0.55fr) minmax(0,0.85fr) minmax(0,0.55fr) minmax(0,0.55fr) minmax(0,0.55fr) minmax(0,0.55fr)',
+                  gap: 10, padding: '12px 16px', alignItems: 'center',
+                  borderBottom: '1px solid rgba(229,225,214,0.6)',
+                  opacity: r.id === '__unassigned__' ? 0.7 : 1,
+                }}>
+                  <span style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
+                  <span style={{ fontSize: 12, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.role}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{r.invoiceCount}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={r.revenue}/></span>
+                  <span className="font-mono" style={{ fontSize: 12, color: r.profit >= 0 ? '#16A34A' : '#DC2626' }}><Bhd v={r.profit}/></span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{r.repairCount}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={r.repairCharge}/></span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#FF8730' }}>{r.purchaseCount}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={r.purchaseSpend}/></span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0E9F6E' }}>{r.transferCount}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#A855F7' }}>{r.consignCount}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#DC2626' }}>{r.returnCount}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#EAB308' }}>{r.debtCount}</span>
+                </div>
+              ))
+            )}
           </Card>
         </div>
       )}

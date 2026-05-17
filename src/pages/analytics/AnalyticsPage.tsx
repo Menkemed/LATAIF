@@ -711,8 +711,12 @@ export function AnalyticsPage() {
       }
     } catch { /* ignore */ }
 
-    // Phase 4 — Bank Transfers (Cash↔Bank). Plan §Banking §10
+    // Phase 4 — Bank Transfers (Cash ↔ Bank ↔ Benefit). Plan §Banking §10
+    // Cash- und Bank-Bilanzen müssen alle 6 Richtungen kennen — Benefit-Transfers
+    // verschieben Geld von/in Cash bzw. Bank, sonst kippt die Liquid-Summe.
     let cashToBank = 0, bankToCash = 0;
+    let cashToBenefit = 0, benefitToCash = 0;
+    let bankToBenefit = 0, benefitToBank = 0;
     try {
       const btRows = qry(
         `SELECT direction, COALESCE(SUM(amount),0) as total FROM bank_transfers WHERE branch_id = ? GROUP BY direction`,
@@ -720,8 +724,14 @@ export function AnalyticsPage() {
       );
       for (const r of btRows) {
         const t = (r.total as number) || 0;
-        if (r.direction === 'CASH_TO_BANK') cashToBank += t;
-        else if (r.direction === 'BANK_TO_CASH') bankToCash += t;
+        switch (r.direction) {
+          case 'CASH_TO_BANK':    cashToBank    += t; break;
+          case 'BANK_TO_CASH':    bankToCash    += t; break;
+          case 'CASH_TO_BENEFIT': cashToBenefit += t; break;
+          case 'BENEFIT_TO_CASH': benefitToCash += t; break;
+          case 'BANK_TO_BENEFIT': bankToBenefit += t; break;
+          case 'BENEFIT_TO_BANK': benefitToBank += t; break;
+        }
       }
     } catch { /* ignore */ }
 
@@ -766,17 +776,17 @@ export function AnalyticsPage() {
 
     const cashBalance = openingCash + cashReceived + borrowedInCash + debtRepaidToUsCash
                       + repairCashIn + consignSaleCash + orderDepositCash + purchaseRefundCash
-                      + partnerInvestCash + bankToCash + agentSettleCash
+                      + partnerInvestCash + bankToCash + benefitToCash + agentSettleCash
                       - lentOutCash - debtRepaidByUsCash - taxPaidFromCash - productEkCash
                       - repairCashOut - consignPayoutCash
                       - purchasePaidCash - expenseCash - salesRefundCash
-                      - partnerWithdrawCash - cashToBank;
+                      - partnerWithdrawCash - cashToBank - cashToBenefit;
     const bankBalance = openingBank + bankReceived + cardNetToBank + borrowedInBank + debtRepaidToUsBank
                       + repairBankIn + consignSaleBank + orderDepositBank + purchaseRefundBank
-                      + partnerInvestBank + cashToBank + agentSettleBank
+                      + partnerInvestBank + cashToBank + benefitToBank + agentSettleBank
                       - lentOutBank - debtRepaidByUsBank - taxPaidFromBank - productEkBank
                       - repairBankOut - consignPayoutBank - salesRefundBank
-                      - partnerWithdrawBank - bankToCash
+                      - partnerWithdrawBank - bankToCash - bankToBenefit
                       - purchasePaidBank - expenseBank;
     const totalLiquid = cashBalance + bankBalance;
 
@@ -887,7 +897,7 @@ export function AnalyticsPage() {
       salesRefundCash, salesRefundBank,
       partnerInvestCash, partnerInvestBank,
       partnerWithdrawCash, partnerWithdrawBank,
-      cashToBank, bankToCash,
+      cashToBank, bankToCash, cashToBenefit, benefitToCash, bankToBenefit, benefitToBank,
       repairCashIn, repairBankIn, repairCashOut, repairBankOut,
       consignSaleCash, consignSaleBank, consignPayoutCash, consignPayoutBank,
       agentSettleCash, agentSettleBank,
@@ -1471,7 +1481,7 @@ export function AnalyticsPage() {
                 {(finance.salesRefundCash + finance.salesRefundBank) > 0 && <TableRow label="Customer refunds (Sales returns)" value={`- ${fmtDec(finance.salesRefundCash + finance.salesRefundBank, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.partnerInvestCash + finance.partnerInvestBank) > 0 && <TableRow label="Partner investments (in)" value={`+ ${fmtDec(finance.partnerInvestCash + finance.partnerInvestBank, 2)} BHD`} color="#7EAA6E" />}
                 {(finance.partnerWithdrawCash + finance.partnerWithdrawBank) > 0 && <TableRow label="Partner withdrawals / profit share (out)" value={`- ${fmtDec(finance.partnerWithdrawCash + finance.partnerWithdrawBank, 2)} BHD`} color="#AA6E6E" />}
-                {(finance.cashToBank + finance.bankToCash) > 0 && <TableRow label="Internal Cash↔Bank transfers" value={`${fmtDec(finance.cashToBank + finance.bankToCash, 2)} BHD (neutral)`} color="#6B7280" />}
+                {(finance.cashToBank + finance.bankToCash + finance.cashToBenefit + finance.benefitToCash + finance.bankToBenefit + finance.benefitToBank) > 0 && <TableRow label="Internal Cash ↔ Bank ↔ Benefit transfers" value={`${fmtDec(finance.cashToBank + finance.bankToCash + finance.cashToBenefit + finance.benefitToCash + finance.bankToBenefit + finance.benefitToBank, 2)} BHD (neutral)`} color="#6B7280" />}
                 {(finance.repairCashIn + finance.repairBankIn) > 0 && <TableRow label="Repair charges received" value={`+ ${fmtDec(finance.repairCashIn + finance.repairBankIn, 2)} BHD`} color="#7EAA6E" />}
                 {(finance.repairCashOut + finance.repairBankOut) > 0 && <TableRow label="Repair internal costs paid" value={`- ${fmtDec(finance.repairCashOut + finance.repairBankOut, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.consignSaleCash + finance.consignSaleBank) > 0 && <TableRow label="Consignment sales received" value={`+ ${fmtDec(finance.consignSaleCash + finance.consignSaleBank, 2)} BHD`} color="#7EAA6E" />}

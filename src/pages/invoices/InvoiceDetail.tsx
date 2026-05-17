@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { ArrowLeft, Edit3, Save, FileText, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Edit3, Save, FileText, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2, ExternalLink, ChevronDown } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 
 // Butterfly icon as inline SVG — renders reliably in all webviews (no emoji font dependency).
 const Butterfly = ({ size = 14, style }: { size?: number; style?: React.CSSProperties }) => (
@@ -12,9 +13,13 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
+import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
+import { formatInvoiceDisplay, formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { Input } from '@/components/ui/Input';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
+import { StaffSelect } from '@/components/employees/StaffSelect';
 import { useProductStore } from '@/stores/productStore';
 import { useRepairStore } from '@/stores/repairStore';
 import type { PaymentMethod } from '@/core/models/types';
@@ -28,9 +33,10 @@ import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtDate(iso?: string): string {
@@ -48,9 +54,11 @@ const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
 export function InvoiceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
   const { invoices, loadInvoices, updateInvoice, rewriteInvoiceLines, recordPayment, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
+  const { employees, loadEmployees } = useEmployeeStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { repairs, loadRepairs, updateStatus: updateRepairStatus } = useRepairStore();
   const perm = usePermission();
@@ -70,6 +78,8 @@ export function InvoiceDetail() {
 
   // Payments-Manage Modal
   const [paymentsModal, setPaymentsModal] = useState(false);
+  // 2026-05-17: Default offen, damit User sofort sieht wann/wieviel bezahlt wurde.
+  const [paidExpanded, setPaidExpanded] = useState(true);
 
   // Sales Return state
   const { returns: salesReturns, loadReturns: loadSalesReturns, createReturn: createSalesReturn, refundReturn: refundSalesReturn,
@@ -77,28 +87,31 @@ export function InvoiceDetail() {
   const { creditNotes, loadCreditNotes } = useCreditNoteStore();
   const [showReturn, setShowReturn] = useState(false);
   const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number }>>({});
-  const [returnRefundMethod, setReturnRefundMethod] = useState<'cash' | 'bank' | 'card' | 'credit' | 'other'>('bank');
+  const [returnRefundMethod, setReturnRefundMethod] = useState<'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other'>('bank');
   const [returnDisposition, setReturnDisposition] = useState<ProductDisposition>('IN_STOCK');
   const [returnNotes, setReturnNotes] = useState('');
   const [returnReason, setReturnReason] = useState('');
+  const [returnStaffId, setReturnStaffId] = useState<string>('');
   const [returnRefundNow, setReturnRefundNow] = useState(true); // Toggle: Refund sofort oder offen lassen
 
   // Plan §Returns Fix — Refund-Payment-Modal statt window.prompt()
   const [refundPayModal, setRefundPayModal] = useState<{ returnId: string; outstanding: number } | null>(null);
   const [refundPayAmount, setRefundPayAmount] = useState('');
-  const [refundPayMethod, setRefundPayMethod] = useState<'cash' | 'bank' | 'card' | 'credit' | 'other'>('bank');
+  const [refundPayMethod, setRefundPayMethod] = useState<'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other'>('bank');
 
   // Payment modal
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('bank_transfer');
+  // 2026-05-16 — Pending payment that will trigger Final → Number-Type-Dialog.
+  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ amount: number; method: PaymentMethod } | null>(null);
 
   // Cancel confirm
   const [confirmCancel, setConfirmCancel] = useState(false);
-  const [cancelRefundMethod, setCancelRefundMethod] = useState<'cash' | 'bank'>('bank');
+  const [cancelRefundMethod, setCancelRefundMethod] = useState<'cash' | 'bank' | 'benefit'>('bank');
 
-  useEffect(() => { loadInvoices(); loadCustomers(); loadProducts(); loadCategories(); loadSalesReturns(); loadCreditNotes(); loadRepairs(); }, [loadInvoices, loadCustomers, loadProducts, loadCategories, loadSalesReturns, loadCreditNotes, loadRepairs]);
+  useEffect(() => { loadInvoices(); loadCustomers(); loadProducts(); loadCategories(); loadSalesReturns(); loadCreditNotes(); loadRepairs(); loadEmployees(); }, [loadInvoices, loadCustomers, loadProducts, loadCategories, loadSalesReturns, loadCreditNotes, loadRepairs, loadEmployees]);
 
   // Derived status label — industry-standard naming (SAP/Xero/QuickBooks):
   // CANCELLED → Cancelled
@@ -130,6 +143,17 @@ export function InvoiceDetail() {
   }, [invoice, searchParams, setSearchParams]);
   const customer = useMemo(() => invoice ? customers.find(c => c.id === invoice.customerId) : null, [invoice, customers]);
 
+  // 2026-05-17: Hero-Linksspalte zeigt Produkt-Bilder (Mosaic-Grid) statt
+  // generischem FileText-Icon. Erstes Bild pro invoice_line — Reihenfolge
+  // wie Lines. Wenn KEINE Line ein Bild hat, wird die linke Spalte ganz
+  // ausgeblendet und das Hero geht auf eine Spalte volle Breite.
+  const lineImages = useMemo<string[]>(() => {
+    if (!invoice) return [];
+    return invoice.lines
+      .map(l => products.find(p => p.id === l.productId)?.images?.[0])
+      .filter((src): src is string => !!src);
+  }, [invoice, products]);
+
   useEffect(() => {
     if (invoice) {
       setEditNotes(invoice.notes || '');
@@ -138,6 +162,21 @@ export function InvoiceDetail() {
       setEditCustomerId(invoice.customerId);
     }
   }, [invoice]);
+
+  // Plan §Repair §Pickup-from-Invoice (User-Spec): wenn diese Invoice an Repairs
+  // gekoppelt ist (auch eine Bulk-Invoice mit mehreren), voll bezahlt + mind. einer
+  // noch nicht abgeholt → "Mark as Picked Up"-Button setzt ALLE verbundenen Repairs
+  // gleichzeitig auf picked_up — Repair-Dashboard sieht das automatisch (gleicher Store).
+  // ACHTUNG: Hooks MUESSEN vor dem early-return stehen (React Hook Rules) — sonst
+  // "Rendered more hooks than during the previous render" beim Async-Invoice-Load.
+  const linkedRepairs = useMemo(
+    () => repairs.filter(r => r.invoiceId === invoice?.id),
+    [repairs, invoice?.id],
+  );
+  const pendingRepairs = useMemo(
+    () => linkedRepairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled' && r.status !== 'returned' && r.status !== 'CANCELLED' && r.status !== 'DELIVERED'),
+    [linkedRepairs],
+  );
 
   if (!invoice) {
     return (
@@ -159,18 +198,6 @@ export function InvoiceDetail() {
   const canRecordPayment = !isDraft && !isCancelled && !isPaid && !isReturned && remaining > 0.005;
   const canCancel = !isCancelled && !isPaid && !isReturned;
 
-  // Plan §Repair §Pickup-from-Invoice (User-Spec): wenn diese Invoice an Repairs
-  // gekoppelt ist (auch eine Bulk-Invoice mit mehreren), voll bezahlt + mind. einer
-  // noch nicht abgeholt → "Mark as Picked Up"-Button setzt ALLE verbundenen Repairs
-  // gleichzeitig auf picked_up — Repair-Dashboard sieht das automatisch (gleicher Store).
-  const linkedRepairs = useMemo(
-    () => repairs.filter(r => r.invoiceId === invoice.id),
-    [repairs, invoice.id],
-  );
-  const pendingRepairs = useMemo(
-    () => linkedRepairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled' && r.status !== 'returned' && r.status !== 'CANCELLED' && r.status !== 'DELIVERED'),
-    [linkedRepairs],
-  );
   const canMarkRepairPickedUp = pendingRepairs.length > 0 && isPaid;
 
   function handleSaveEdit() {
@@ -367,6 +394,7 @@ export function InvoiceDetail() {
         productDisposition: returnDisposition,
         reason: returnReason || undefined,
         notes: returnNotes || undefined,
+        staffId: returnStaffId || undefined,
         lines: included,
       });
       // Plan §Returns: Refund optional sofort durchführen oder offen lassen.
@@ -384,10 +412,26 @@ export function InvoiceDetail() {
   }
 
   function handleRecordPayment() {
-    if (!id) return;
+    if (!id || !invoice) return;
     const amount = parseFloat(paymentAmount);
     if (isNaN(amount) || amount <= 0) return;
+    // Wird die Invoice mit dieser Zahlung final? → Number-Type-Dialog vorher.
+    const willGoFinal = invoice.status !== 'FINAL' && (invoice.paidAmount + amount) >= invoice.grossAmount - 0.005;
+    if (willGoFinal) {
+      setPendingFinalPayment({ amount, method: paymentMethod });
+      return;
+    }
     recordPayment(id, amount, paymentMethod);
+    setPaymentOpen(false);
+    setPaymentAmount('');
+    setPaymentMethod('bank_transfer');
+  }
+
+  function executeFinalPayment(specialMark: boolean) {
+    const pending = pendingFinalPayment;
+    setPendingFinalPayment(null);
+    if (!id || !pending) return;
+    recordPayment(id, pending.amount, pending.method, undefined, specialMark);
     setPaymentOpen(false);
     setPaymentAmount('');
     setPaymentMethod('bank_transfer');
@@ -418,8 +462,8 @@ export function InvoiceDetail() {
     if (remaining > 0) summaryLines.push({ label: 'Due', value: `${fmt(remaining)} BHD`, bold: true });
 
     downloadPdf({
-      title: invoice.invoiceNumber,
-      number: invoice.invoiceNumber,
+      title: formatInvoiceDisplayShort(invoice),
+      number: formatInvoiceDisplayShort(invoice),
       date: fmtDate(invoice.issuedAt || invoice.createdAt),
       subtitle: `Due: ${fmtDate(invoice.dueAt)}`,
       customer: customer ? { name: `${customer.firstName} ${customer.lastName}`, company: customer.company, phone: customer.phone } : undefined,
@@ -463,7 +507,7 @@ export function InvoiceDetail() {
     rows.push(`,,,,,,,,Gross Revenue,${invoice.grossAmount.toFixed(3)}`);
 
     const csv = [header, ...rows].join('\n');
-    exportCsv(`${invoice.invoiceNumber}_VAT.csv`, csv);
+    exportCsv(`${formatInvoiceDisplayShort(invoice).replace(/[^A-Za-z0-9.\-_]/g, '_')}_VAT.csv`, csv);
   }
 
   function openPaymentModal() {
@@ -488,17 +532,17 @@ export function InvoiceDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/invoices')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
           >
-            <ArrowLeft size={16} /> Invoices
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
@@ -645,18 +689,46 @@ export function InvoiceDetail() {
           </Card>
         )}
 
-        {/* Hero */}
-        <div className="animate-fade-in" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>
-          {/* Icon */}
-          <div className="rounded-xl flex items-center justify-center"
-            style={{ height: 400, background: '#F2F7FA', border: '1px solid #E5E9EE' }}>
-            <FileText size={64} strokeWidth={0.8} style={{ color: '#6B7280' }} />
-          </div>
+        {/* Hero — 2-Spalten (Bilder | Daten) wenn Produkt-Bilder vorhanden,
+            sonst 1-Spalten volle Breite. Bild-Grid: 1=full, 2=1x2, 3-4=2x2, ≥5=2x3 mit "+N more". */}
+        <div className="animate-fade-in" style={{
+          display: 'grid',
+          gridTemplateColumns: lineImages.length > 0 ? '1fr 1fr' : '1fr',
+          gap: 32, marginBottom: 40,
+        }}>
+          {lineImages.length > 0 && (
+            <div className="rounded-xl"
+              style={{
+                height: 400, background: '#F2F7FA', border: '1px solid #E5E9EE',
+                overflow: 'hidden',
+                display: 'grid',
+                gridTemplateColumns: lineImages.length === 1 ? '1fr' : '1fr 1fr',
+                gridTemplateRows: lineImages.length <= 2 ? '1fr' : lineImages.length <= 4 ? '1fr 1fr' : '1fr 1fr 1fr',
+                gap: 2,
+              }}>
+              {lineImages.slice(0, 6).map((src, i) => {
+                const isLast = i === 5 && lineImages.length > 6;
+                return (
+                  <div key={i} style={{ position: 'relative', overflow: 'hidden', background: '#FFFFFF' }}>
+                    <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    {isLast && (
+                      <div style={{
+                        position: 'absolute', inset: 0,
+                        background: 'rgba(15,15,16,0.55)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: '#FFFFFF', fontSize: 18, fontWeight: 600,
+                      }}>+{lineImages.length - 5} more</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Key Info */}
           <div>
             <span className="text-overline">INVOICE</span>
-            <h1 className="font-display" style={{ fontSize: 32, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>{invoice.invoiceNumber}</h1>
+            <h1 className="font-display" style={{ fontSize: 32, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>{formatInvoiceDisplayShort(invoice)}</h1>
             {customer && (
               <span style={{ fontSize: 15, color: '#4B5563', display: 'block', marginTop: 8 }}>
                 {customer.firstName} {customer.lastName}{customer.company ? ` \u2014 ${customer.company}` : ''}
@@ -703,7 +775,7 @@ export function InvoiceDetail() {
             <div style={{ marginTop: 28, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">NET AMOUNT</span>
-                <span className="font-display" style={{ fontSize: 20, color: '#4B5563' }}>{fmt(invoice.netAmount)} BHD</span>
+                <span className="font-display" style={{ fontSize: 20, color: '#4B5563' }}><Bhd v={invoice.netAmount}/> BHD</span>
               </div>
               {invoice.taxSchemeSnapshot === 'mixed' ? (
                 <>
@@ -715,13 +787,13 @@ export function InvoiceDetail() {
                       {marginLines.length > 0 && (
                         <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
                           <span className="text-overline" style={{ fontSize: 10 }}>VAT MARGIN SCHEME ({marginLines.length} items)</span>
-                          <span className="font-mono" style={{ fontSize: 14, color: '#AA956E' }}>{fmt(marginLines.reduce((s, l) => s + l.vatAmount, 0))} BHD</span>
+                          <span className="font-mono" style={{ fontSize: 14, color: '#AA956E' }}><Bhd v={marginLines.reduce((s, l) => s + l.vatAmount, 0)}/> BHD</span>
                         </div>
                       )}
                       {standardLines.length > 0 && (
                         <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
                           <span className="text-overline" style={{ fontSize: 10 }}>VAT STANDARD 10% ({standardLines.length} items)</span>
-                          <span className="font-mono" style={{ fontSize: 14, color: '#AA956E' }}>{fmt(standardLines.reduce((s, l) => s + l.vatAmount, 0))} BHD</span>
+                          <span className="font-mono" style={{ fontSize: 14, color: '#AA956E' }}><Bhd v={standardLines.reduce((s, l) => s + l.vatAmount, 0)}/> BHD</span>
                         </div>
                       )}
                       {exemptLines.length > 0 && (
@@ -734,7 +806,7 @@ export function InvoiceDetail() {
                   })()}
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                     <span className="text-overline">TOTAL VAT</span>
-                    <span className="font-mono" style={{ fontSize: 16, color: '#AA956E' }}>{fmt(invoice.vatAmount)} BHD</span>
+                    <span className="font-mono" style={{ fontSize: 16, color: '#AA956E' }}><Bhd v={invoice.vatAmount}/> BHD</span>
                   </div>
                 </>
               ) : (
@@ -742,32 +814,95 @@ export function InvoiceDetail() {
                   <span className="text-overline">
                     {invoice.taxSchemeSnapshot === 'MARGIN' ? 'VAT (MARGIN SCHEME)' : invoice.taxSchemeSnapshot === 'VAT_10' ? `VAT (${invoice.vatRateSnapshot}%)` : 'VAT (ZERO)'}
                   </span>
-                  <span className="font-mono" style={{ fontSize: 16, color: '#AA956E' }}>{fmt(invoice.vatAmount)} BHD</span>
+                  <span className="font-mono" style={{ fontSize: 16, color: '#AA956E' }}><Bhd v={invoice.vatAmount}/> BHD</span>
                 </div>
               )}
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">GROSS TOTAL</span>
-                <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(invoice.grossAmount)} BHD</span>
+                <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}><Bhd v={invoice.grossAmount}/> BHD</span>
               </div>
               <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 10, marginTop: 4 }}>
                 {creditedTotal > 0 && (
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
                     <span className="text-overline" style={{ color: '#FF8730' }}>CREDITED (CN)</span>
-                    <span className="font-mono" style={{ fontSize: 14, color: '#FF8730' }}>−{fmt(creditedTotal)} BHD</span>
+                    <span className="font-mono" style={{ fontSize: 14, color: '#FF8730' }}>−<Bhd v={creditedTotal}/> BHD</span>
                   </div>
                 )}
-                <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
-                  <span className="text-overline">PAID</span>
-                  <span className="font-mono" style={{ fontSize: 16, color: '#7EAA6E' }}>{fmt(invoice.paidAmount)} BHD</span>
-                </div>
+                {(() => {
+                  const payList = id ? getInvoicePayments(id) : [];
+                  const hasPayments = payList.length > 0;
+                  return (
+                    <div style={{ marginBottom: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => hasPayments && setPaidExpanded(v => !v)}
+                        disabled={!hasPayments}
+                        style={{
+                          width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                          background: 'transparent', border: 'none', padding: 0,
+                          cursor: hasPayments ? 'pointer' : 'default',
+                        }}
+                        title={hasPayments ? (paidExpanded ? 'Hide payment breakdown' : 'Show payment breakdown') : ''}
+                      >
+                        <span className="flex items-center" style={{ gap: 6 }}>
+                          <span className="text-overline">PAID</span>
+                          {hasPayments && (
+                            <ChevronDown size={11} color="#6B7280"
+                              style={{ transform: paidExpanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s' }} />
+                          )}
+                        </span>
+                        <span className="font-mono" style={{ fontSize: 16, color: '#7EAA6E' }}><Bhd v={invoice.paidAmount}/> BHD</span>
+                      </button>
+                      {hasPayments && paidExpanded && (
+                        <div style={{
+                          marginTop: 8, padding: '6px 10px',
+                          background: '#F9FAFB', borderRadius: 6,
+                          border: '1px solid #E5E9EE',
+                        }}>
+                          {payList.map(p => {
+                            const methodLabel = ({
+                              cash: 'Cash', bank: 'Bank', bank_transfer: 'Bank Transfer',
+                              card: 'Card', benefit: 'Benefit', crypto: 'Crypto', other: 'Other',
+                            } as Record<string, string>)[p.method] || p.method;
+                            return (
+                              <div key={p.id} className="flex justify-between items-center"
+                                style={{ padding: '6px 0', borderBottom: '1px solid #EEF0F2' }}>
+                                <div className="flex items-center" style={{ gap: 8, minWidth: 0 }}>
+                                  <span style={{ fontSize: 11, color: '#4B5563' }}>{fmtDate(p.receivedAt)}</span>
+                                  <span style={{
+                                    padding: '1px 7px', borderRadius: 999,
+                                    fontSize: 9, fontWeight: 500,
+                                    background: 'rgba(110,138,170,0.1)', color: '#6E8AAA',
+                                    border: '1px solid rgba(110,138,170,0.25)',
+                                    textTransform: 'uppercase', letterSpacing: '0.04em',
+                                  }}>{methodLabel}</span>
+                                  {p.notes && <span style={{ fontSize: 10, color: '#9CA3AF', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.notes}</span>}
+                                </div>
+                                <span className="font-mono" style={{ fontSize: 12, color: '#16A34A' }}>+<Bhd v={p.amount}/> BHD</span>
+                              </div>
+                            );
+                          })}
+                          {perm.canRecordPayments && (
+                            <div style={{ paddingTop: 6, textAlign: 'right' }}>
+                              <button onClick={() => setPaymentsModal(true)} className="cursor-pointer"
+                                style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 10, padding: 0 }}>
+                                Manage payments →
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div className="flex justify-between items-baseline">
                   <span className="text-overline">REMAINING</span>
-                  <span className="font-mono" style={{ fontSize: 16, color: remaining > 0 ? '#AA6E6E' : '#7EAA6E' }}>{fmt(Math.max(0, remaining))} BHD</span>
+                  <span className="font-mono" style={{ fontSize: 16, color: remaining > 0 ? '#AA6E6E' : '#7EAA6E' }}><Bhd v={Math.max(0, remaining)}/> BHD</span>
                 </div>
                 {(invoice.tipAmount || 0) > 0 && (
                   <div className="flex justify-between items-baseline" style={{ marginTop: 6 }}>
                     <span className="text-overline" style={{ color: '#0F0F10' }}>TIP</span>
-                    <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(invoice.tipAmount || 0)} BHD</span>
+                    <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}><Bhd v={invoice.tipAmount || 0}/> BHD</span>
                   </div>
                 )}
               </div>
@@ -791,13 +926,13 @@ export function InvoiceDetail() {
                     {marginLines.length > 0 && (
                       <div className="flex justify-between" style={{ fontSize: 11, marginTop: 4 }}>
                         <span style={{ color: '#6B7280' }}>Margin Scheme ({marginLines.length} items)</span>
-                        <span className="font-mono" style={{ color: '#AA956E' }}>{fmt(marginVat)} BHD VAT</span>
+                        <span className="font-mono" style={{ color: '#AA956E' }}><Bhd v={marginVat}/> BHD VAT</span>
                       </div>
                     )}
                     {standardLines.length > 0 && (
                       <div className="flex justify-between" style={{ fontSize: 11, marginTop: 4 }}>
                         <span style={{ color: '#6B7280' }}>Standard VAT ({standardLines.length} items)</span>
-                        <span className="font-mono" style={{ color: '#AA956E' }}>{fmt(standardVat)} BHD VAT</span>
+                        <span className="font-mono" style={{ color: '#AA956E' }}><Bhd v={standardVat}/> BHD VAT</span>
                       </div>
                     )}
                   </>
@@ -822,6 +957,8 @@ export function InvoiceDetail() {
                 const lineQty = Math.max(1, line.quantity || 1);
                 const fullyReturned = returnedQty >= lineQty;
                 const partiallyReturned = returnedQty > 0 && returnedQty < lineQty;
+                const lineProduct = products.find(p => p.id === line.productId);
+                const lineSpecs = getProductSpecs(lineProduct, categories);
                 return (
                 <div key={line.id} style={{
                   padding: '12px 0',
@@ -830,7 +967,7 @@ export function InvoiceDetail() {
                   marginLeft: -8, marginRight: -8, paddingLeft: 8, paddingRight: 8, borderRadius: 6,
                 }}>
                   <div className="flex justify-between items-start" style={{ marginBottom: 6 }}>
-                    <div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
                       <span style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500, textDecoration: fullyReturned ? 'line-through' : 'none', textDecorationColor: '#DC2626' }}>
                         {(line.quantity || 1) > 1 && (
                           <span className="font-mono" style={{
@@ -855,8 +992,24 @@ export function InvoiceDetail() {
                         </span>
                       )}
                       {line.description && <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginTop: 2 }}>{line.description}</span>}
+                      {/* Produkt-Specs (Brand/Model/SKU/Color/Karat/Size/...) — dass der
+                          User sofort sieht WAS verkauft wurde, nicht nur den Namen. */}
+                      {lineSpecs.length > 0 && (
+                        <div style={{
+                          display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                          columnGap: 16, rowGap: 1,
+                          marginTop: 4, fontSize: 10, color: '#444',
+                        }}>
+                          {lineSpecs.map((s, i) => (
+                            <div key={i} style={{ display: 'flex', gap: 4, lineHeight: 1.4 }}>
+                              <span style={{ color: '#9CA3AF' }}>{s.label}:</span>
+                              <span style={{ color: '#374151', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    <span className="font-mono" style={{ fontSize: 13, color: fullyReturned ? '#6B7280' : '#0F0F10', whiteSpace: 'nowrap', textDecoration: fullyReturned ? 'line-through' : 'none' }}>{fmt(line.lineTotal)} BHD</span>
+                    <span className="font-mono" style={{ fontSize: 13, color: fullyReturned ? '#6B7280' : '#0F0F10', whiteSpace: 'nowrap', textDecoration: fullyReturned ? 'line-through' : 'none', marginLeft: 12 }}><Bhd v={line.lineTotal}/> BHD</span>
                   </div>
                   <div className="flex items-center gap-4" style={{ fontSize: 11, color: '#6B7280' }}>
                     <span style={{
@@ -866,11 +1019,11 @@ export function InvoiceDetail() {
                       border: `1px solid ${line.taxScheme === 'MARGIN' ? 'rgba(170,149,110,0.2)' : line.taxScheme === 'VAT_10' ? 'rgba(110,138,170,0.2)' : 'rgba(107,107,115,0.2)'}`,
                       textTransform: 'uppercase',
                     }}>{line.taxScheme === 'MARGIN' ? 'Margin' : line.taxScheme === 'VAT_10' ? 'Std 10%' : 'Exempt'}</span>
-                    <span>Unit: <span className="font-mono" style={{ color: '#4B5563' }}>{fmt(line.unitPrice)}</span></span>
+                    <span>Unit: <span className="font-mono" style={{ color: '#4B5563' }}><Bhd v={line.unitPrice}/></span></span>
                     {line.taxScheme === 'MARGIN' && (
-                      <span>Margin: <span className="font-mono" style={{ color: '#4B5563' }}>{fmt(line.unitPrice - line.purchasePriceSnapshot)}</span></span>
+                      <span>Margin: <span className="font-mono" style={{ color: '#4B5563' }}><Bhd v={line.unitPrice - line.purchasePriceSnapshot}/></span></span>
                     )}
-                    <span>VAT: <span className="font-mono" style={{ color: '#AA956E' }}>{fmt(line.vatAmount)}</span></span>
+                    <span>VAT: <span className="font-mono" style={{ color: '#AA956E' }}><Bhd v={line.vatAmount}/></span></span>
                   </div>
                 </div>
                 );
@@ -884,7 +1037,7 @@ export function InvoiceDetail() {
             <Card>
               <span className="text-overline" style={{ marginBottom: 16 }}>DETAILS</span>
               <div style={{ marginTop: 16 }}>
-                {renderField('Invoice Number', invoice.invoiceNumber)}
+                {renderField('Invoice Number', formatInvoiceDisplay(invoice))}
                 {renderField('Status', <StatusDot status={invoice.status} label={derivedInvoiceLabel(invoice)} />)}
                 {renderField('Issued', fmtDate(invoice.issuedAt))}
                 {editing ? (
@@ -895,6 +1048,17 @@ export function InvoiceDetail() {
                   renderField('Due', fmtDate(invoice.dueAt))
                 )}
                 {renderField('Created', fmtDate(invoice.createdAt))}
+                {invoice.staffId && renderField('Staff',
+                  (() => {
+                    const e = employees.find(x => x.id === invoice.staffId);
+                    return e ? (
+                      <span style={{ cursor: 'pointer', color: '#3D7FFF', textDecoration: 'underline' }}
+                        onClick={() => navigate(`/employees/${e.id}`)}>
+                        {e.name}{e.role ? ` · ${e.role}` : ''}
+                      </span>
+                    ) : '—';
+                  })()
+                )}
                 {invoice.offerId && renderField('Linked Offer', invoice.offerId.slice(0, 8) + '...')}
 
                 {editing ? (
@@ -924,23 +1088,24 @@ export function InvoiceDetail() {
                 <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                   <span style={{ fontSize: 13, color: '#6B7280' }}>Purchase Snapshot</span>
                   <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}>
-                    {invoice.purchasePriceSnapshot != null ? `${fmt(invoice.purchasePriceSnapshot)} BHD` : '\u2014'}
+                    {invoice.purchasePriceSnapshot != null ? <><Bhd v={invoice.purchasePriceSnapshot}/> BHD</> : '\u2014'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                   <span style={{ fontSize: 13, color: '#6B7280' }}>Sale Snapshot</span>
                   <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>
-                    {invoice.salePriceSnapshot != null ? `${fmt(invoice.salePriceSnapshot)} BHD` : '\u2014'}
+                    {invoice.salePriceSnapshot != null ? <><Bhd v={invoice.salePriceSnapshot}/> BHD</> : '\u2014'}
                   </span>
                 </div>
                 <div className="flex justify-between items-center" style={{ padding: '10px 0' }}>
                   <span style={{ fontSize: 13, color: '#6B7280' }}>Margin</span>
                   <span className="font-mono" style={{ fontSize: 15, color: (invoice.marginSnapshot || 0) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                    {invoice.marginSnapshot != null ? `${fmt(invoice.marginSnapshot)} BHD` : '\u2014'}
+                    {invoice.marginSnapshot != null ? <><Bhd v={invoice.marginSnapshot}/> BHD</> : '\u2014'}
                   </span>
                 </div>
               </div>
             </Card>
+
           </div>
         </div>
 
@@ -973,15 +1138,15 @@ export function InvoiceDetail() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16, padding: '12px 14px', background: '#F7F5EE', borderRadius: 8 }}>
                   <div>
                     <span style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Return Amount</span>
-                    <div className="font-mono" style={{ fontSize: 16, color: '#0F0F10', marginTop: 2 }}>{fmt(sum.totalReturned)} BHD</div>
+                    <div className="font-mono" style={{ fontSize: 16, color: '#0F0F10', marginTop: 2 }}><Bhd v={sum.totalReturned}/> BHD</div>
                   </div>
                   <div>
                     <span style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Refund Paid</span>
-                    <div className="font-mono" style={{ fontSize: 16, color: '#7EAA6E', marginTop: 2 }}>{fmt(sum.totalRefundPaid)} BHD</div>
+                    <div className="font-mono" style={{ fontSize: 16, color: '#7EAA6E', marginTop: 2 }}><Bhd v={sum.totalRefundPaid}/> BHD</div>
                   </div>
                   <div>
                     <span style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Outstanding Refund</span>
-                    <div className="font-mono" style={{ fontSize: 16, color: sum.outstandingRefund > 0 ? '#DC2626' : '#6B7280', marginTop: 2 }}>{fmt(sum.outstandingRefund)} BHD</div>
+                    <div className="font-mono" style={{ fontSize: 16, color: sum.outstandingRefund > 0 ? '#DC2626' : '#6B7280', marginTop: 2 }}><Bhd v={sum.outstandingRefund}/> BHD</div>
                   </div>
                 </div>
                 {/* Per-Return Details */}
@@ -1036,10 +1201,10 @@ export function InvoiceDetail() {
                             </span>
                           </div>
                           <div style={{ textAlign: 'right' }}>
-                            <span className="font-mono" style={{ fontSize: 14, color: '#DC2626' }}>−{fmt(r.totalAmount)} BHD</span>
+                            <span className="font-mono" style={{ fontSize: 14, color: '#DC2626' }}>−<Bhd v={r.totalAmount}/> BHD</span>
                             {r.refundPaidAmount > 0 && (
                               <span style={{ fontSize: 11, color: '#7EAA6E', display: 'block', marginTop: 2 }}>
-                                Paid: {fmt(r.refundPaidAmount)} {r.refundMethod ? `(${r.refundMethod})` : ''}
+                                Paid: <Bhd v={r.refundPaidAmount}/> {r.refundMethod ? `(${r.refundMethod})` : ''}
                               </span>
                             )}
                           </div>
@@ -1056,14 +1221,14 @@ export function InvoiceDetail() {
                         {/* Action — Record Refund Payment (Plan §Returns Fix: Modal statt window.prompt) */}
                         {outstanding > 0 && perm.canRecordPayments && r.refundStatus !== 'REFUNDED' && (
                           <div className="flex gap-2 items-center" style={{ marginTop: 8 }}>
-                            <span style={{ fontSize: 11, color: '#DC2626' }}>Outstanding: <span className="font-mono">{fmt(outstanding)} BHD</span></span>
+                            <span style={{ fontSize: 11, color: '#DC2626' }}>Outstanding: <span className="font-mono"><Bhd v={outstanding}/> BHD</span></span>
                             <button onClick={() => {
                               // Industry-Standard: Cash-Refund max = was Customer tatsächlich gezahlt hat.
                               const customerPaid = invoice.paidAmount || 0;
                               const cappedDefault = Math.min(outstanding, customerPaid);
                               setRefundPayModal({ returnId: r.id, outstanding: cappedDefault });
                               setRefundPayAmount(cappedDefault.toFixed(3));
-                              setRefundPayMethod((r.refundMethod as 'cash' | 'bank' | 'card' | 'credit' | 'other') || 'bank');
+                              setRefundPayMethod((r.refundMethod as 'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other') || 'bank');
                             }}
                               className="cursor-pointer" style={{ padding: '4px 10px', fontSize: 11, border: '1px solid #7EAA6E', color: '#7EAA6E', borderRadius: 4, background: 'none' }}>
                               Record Refund Payment
@@ -1081,7 +1246,7 @@ export function InvoiceDetail() {
       </div>
 
       {/* Edit Lines Modal */}
-      <Modal open={linesModal} onClose={() => setLinesModal(false)} title={`Edit Lines — ${invoice.invoiceNumber}`} width={1000}>
+      <Modal open={linesModal} onClose={() => setLinesModal(false)} title={`Edit Lines — ${formatInvoiceDisplayShort(invoice)}`} width={1000}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <p style={{ fontSize: 12, color: '#6B7280' }}>
             Klick auf den Produktnamen → anderes Produkt auswählen. Quantity nur sichtbar bei Produkten mit Lager &gt; 1. Tax + Total werden live nach Schema neu berechnet. Alle Änderungen werden geloggt.
@@ -1172,7 +1337,7 @@ export function InvoiceDetail() {
                     <option value="VAT_10">VAT 10%</option>
                     <option value="ZERO">Zero</option>
                   </select>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(l.lineTotal)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={l.lineTotal}/></span>
                   <button onClick={() => setLineDraft(d => d.filter((_, i) => i !== idx))}
                     title="Diese Zeile entfernen"
                     className="cursor-pointer transition-all"
@@ -1196,9 +1361,9 @@ export function InvoiceDetail() {
           </div>
           <div className="flex justify-between items-center" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <span style={{ fontSize: 12, color: '#6B7280' }}>
-              Net: <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(lineDraft.reduce((s, l) => s + (Number(l.unitPrice) || 0) * Math.max(1, Number(l.quantity) || 1), 0))}</span>
-              {' · '}VAT: <span className="font-mono" style={{ color: '#AA956E' }}>{fmt(lineDraft.reduce((s, l) => s + (Number(l.vatAmount) || 0) * Math.max(1, Number(l.quantity) || 1), 0))}</span>
-              {' · '}Gross: <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(lineDraft.reduce((s, l) => s + (Number(l.lineTotal) || 0), 0))}</span> BHD
+              Net: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={lineDraft.reduce((s, l) => s + (Number(l.unitPrice) || 0) * Math.max(1, Number(l.quantity) || 1), 0)}/></span>
+              {' · '}VAT: <span className="font-mono" style={{ color: '#AA956E' }}><Bhd v={lineDraft.reduce((s, l) => s + (Number(l.vatAmount) || 0) * Math.max(1, Number(l.quantity) || 1), 0)}/></span>
+              {' · '}Gross: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={lineDraft.reduce((s, l) => s + (Number(l.lineTotal) || 0), 0)}/></span> BHD
             </span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={() => setLinesModal(false)}>Cancel</Button>
@@ -1209,7 +1374,7 @@ export function InvoiceDetail() {
       </Modal>
 
       {/* Manage Payments Modal */}
-      <Modal open={paymentsModal} onClose={() => setPaymentsModal(false)} title={`Payments — ${invoice.invoiceNumber}`} width={680}>
+      <Modal open={paymentsModal} onClose={() => setPaymentsModal(false)} title={`Payments — ${formatInvoiceDisplayShort(invoice)}`} width={680}>
         {(() => {
           const list = id ? getInvoicePayments(id) : [];
           if (list.length === 0) {
@@ -1262,7 +1427,7 @@ export function InvoiceDetail() {
       <Modal open={paymentOpen} onClose={() => setPaymentOpen(false)} title="Record Payment" width={440}>
         <div style={{ marginBottom: 20 }}>
           <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 16 }}>
-            Outstanding: <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(remaining)} BHD</span>
+            Outstanding: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={remaining}/> BHD</span>
           </p>
           <Input
             label="AMOUNT (BHD)"
@@ -1301,7 +1466,7 @@ export function InvoiceDetail() {
       {/* Cancel Confirmation Modal — Plan §Sales §14 */}
       <Modal open={confirmCancel} onClose={() => setConfirmCancel(false)} title="Cancel Invoice" width={460}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 12 }}>
-          Cancel invoice <strong style={{ color: '#0F0F10' }}>{invoice.invoiceNumber}</strong>?
+          Cancel invoice <strong style={{ color: '#0F0F10' }}>{formatInvoiceDisplayShort(invoice)}</strong>?
         </p>
         <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12, color: '#4B5563', marginBottom: 16 }}>
           <div style={{ marginBottom: 6 }}>• Products will be released back to IN_STOCK ({invoice.lines.length} item{invoice.lines.length > 1 ? 's' : ''}).</div>
@@ -1315,14 +1480,14 @@ export function InvoiceDetail() {
           <div style={{ marginBottom: 20 }}>
             <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>REFUND METHOD</span>
             <div className="flex gap-2">
-              {(['cash', 'bank'] as const).map(m => (
+              {(['cash', 'bank', 'benefit'] as const).map(m => (
                 <button key={m} onClick={() => setCancelRefundMethod(m)}
                   className="cursor-pointer rounded" style={{
                     padding: '6px 14px', fontSize: 12,
                     border: `1px solid ${cancelRefundMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: cancelRefundMethod === m ? '#0F0F10' : '#6B7280',
                     background: cancelRefundMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
+                  }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Benefit'}</button>
               ))}
             </div>
           </div>
@@ -1336,7 +1501,7 @@ export function InvoiceDetail() {
       {/* Delete Confirmation */}
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Invoice" width={400}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
-          Permanently delete <strong style={{ color: '#0F0F10' }}>{invoice.invoiceNumber}</strong>? This cannot be undone.
+          Permanently delete <strong style={{ color: '#0F0F10' }}>{formatInvoiceDisplayShort(invoice)}</strong>? This cannot be undone.
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
@@ -1353,7 +1518,7 @@ export function InvoiceDetail() {
           <p>Manama, Bahrain</p>
         </div>
         <div className="receipt-meta">
-          <div><span>Invoice:</span><span>{invoice.invoiceNumber}</span></div>
+          <div><span>Invoice:</span><span>{formatInvoiceDisplayShort(invoice)}</span></div>
           <div><span>Date:</span><span>{fmtDate(invoice.issuedAt || invoice.createdAt)}</span></div>
           {customer && <div><span>Client:</span><span>{customer.firstName} {customer.lastName}</span></div>}
         </div>
@@ -1384,7 +1549,7 @@ export function InvoiceDetail() {
                 <div key={line.id} className="receipt-line" style={{ flexDirection: 'column' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span className="receipt-line-name">{getProductName(line.productId)}</span>
-                    <span>{fmt(line.lineTotal)} BHD</span>
+                    <span><Bhd v={line.lineTotal}/> BHD</span>
                   </div>
                   {SpecsGrid}
                 </div>
@@ -1394,12 +1559,12 @@ export function InvoiceDetail() {
               <div key={line.id} className="receipt-line" style={{ flexDirection: 'column' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span className="receipt-line-name">{getProductName(line.productId)}</span>
-                  <span>{fmt(line.lineTotal)} BHD</span>
+                  <span><Bhd v={line.lineTotal}/> BHD</span>
                 </div>
                 {SpecsGrid}
                 <div style={{ fontSize: '9px', color: '#888', display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                  <span>Net: {fmt(line.unitPrice)}</span>
-                  <span>VAT 10%: {fmt(line.vatAmount)}</span>
+                  <span>Net: <Bhd v={line.unitPrice}/></span>
+                  <span>VAT 10%: <Bhd v={line.vatAmount}/></span>
                 </div>
               </div>
             );
@@ -1411,12 +1576,12 @@ export function InvoiceDetail() {
             const stdVat = stdLines.reduce((s, l) => s + l.vatAmount, 0);
             const hasStandard = stdLines.length > 0;
             return <>
-              {hasStandard && <div><span>VAT (10%):</span><span>{fmt(stdVat)} BHD</span></div>}
+              {hasStandard && <div><span>VAT (10%):</span><span><Bhd v={stdVat}/> BHD</span></div>}
             </>;
           })()}
-          <div className="receipt-grand-total"><span>TOTAL:</span><span>{fmt(invoice.grossAmount)} BHD</span></div>
-          {invoice.paidAmount > 0 && <div><span>Paid:</span><span>{fmt(invoice.paidAmount)} BHD</span></div>}
-          {remaining > 0 && <div><span>Due:</span><span>{fmt(remaining)} BHD</span></div>}
+          <div className="receipt-grand-total"><span>TOTAL:</span><span><Bhd v={invoice.grossAmount}/> BHD</span></div>
+          {invoice.paidAmount > 0 && <div><span>Paid:</span><span><Bhd v={invoice.paidAmount}/> BHD</span></div>}
+          {remaining > 0 && <div><span>Due:</span><span><Bhd v={remaining}/> BHD</span></div>}
         </div>
         <div className="receipt-footer">
           <p>Thank you for your business</p>
@@ -1428,7 +1593,7 @@ export function InvoiceDetail() {
         onClose={() => setShowHistory(false)}
         entityType="invoices"
         entityId={invoice.id}
-        title={`History · ${invoice.invoiceNumber}`}
+        title={`History · ${formatInvoiceDisplayShort(invoice)}`}
       />
 
       {/* Plan §Returns Fix — Refund Payment Modal (statt browserprompt) */}
@@ -1438,7 +1603,7 @@ export function InvoiceDetail() {
             <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
               <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>OUTSTANDING</span>
               <div className="font-mono" style={{ fontSize: 18, color: '#DC2626' }}>
-                {fmt(refundPayModal.outstanding)} BHD
+                <Bhd v={refundPayModal.outstanding}/> BHD
               </div>
             </div>
             <Input required label="AMOUNT (BHD)" type="number" step="0.001"
@@ -1447,9 +1612,9 @@ export function InvoiceDetail() {
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
               <div className="flex gap-2 flex-wrap" style={{ marginTop: 6 }}>
-                {(['cash', 'bank', 'card', 'credit', 'other'] as const).map(m => {
+                {(['cash', 'bank', 'card', 'benefit', 'credit', 'other'] as const).map(m => {
                   const active = refundPayMethod === m;
-                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'card' ? 'Card' : m === 'credit' ? 'Credit' : 'Other';
+                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : m === 'credit' ? 'Credit' : 'Other';
                   return (
                     <button key={m} type="button" onClick={() => setRefundPayMethod(m)}
                       className="cursor-pointer rounded"
@@ -1492,7 +1657,7 @@ export function InvoiceDetail() {
                 <div key={r.id} className="flex justify-between" style={{ fontSize: 12, padding: '4px 0' }}>
                   <span className="font-mono" style={{ color: '#0F0F10' }}>{r.returnNumber}</span>
                   <span style={{ color: '#6B7280' }}>{r.status}</span>
-                  <span className="font-mono" style={{ color: '#DC2626' }}>{fmt(r.totalAmount)} BHD</span>
+                  <span className="font-mono" style={{ color: '#DC2626' }}><Bhd v={r.totalAmount}/> BHD</span>
                 </div>
               ))}
             </div>
@@ -1545,7 +1710,7 @@ export function InvoiceDetail() {
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10', minWidth: 0, width: '100%' }} />
                   <input type="number" step="0.01" value={r.unitPrice} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10', minWidth: 0, width: '100%' }} />
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(r.quantity * r.unitPrice)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={r.quantity * r.unitPrice}/></span>
                 </div>
               );
             })}
@@ -1555,9 +1720,9 @@ export function InvoiceDetail() {
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND METHOD</span>
               <div className="flex gap-2" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                {(['cash', 'bank', 'card', 'credit', 'other'] as const).map(m => {
+                {(['cash', 'bank', 'card', 'benefit', 'credit', 'other'] as const).map(m => {
                   const active = returnRefundMethod === m;
-                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : m === 'card' ? 'Card' : m === 'credit' ? 'Credit Note' : 'Other';
+                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : m === 'credit' ? 'Credit Note' : 'Other';
                   return (
                     <button key={m} onClick={() => setReturnRefundMethod(m)} className="cursor-pointer rounded"
                       style={{ padding: '7px 14px', fontSize: 12,
@@ -1609,6 +1774,7 @@ export function InvoiceDetail() {
           <Input label="REASON FOR RETURN (optional)" placeholder="z.B. defekt, falsche Ware, Reklamation"
             value={returnReason} onChange={e => setReturnReason(e.target.value)} />
           <Input label="ADDITIONAL NOTES" placeholder="interne Vermerke" value={returnNotes} onChange={e => setReturnNotes(e.target.value)} />
+          <StaffSelect value={returnStaffId} onChange={setReturnStaffId} helper="Who handled this return (optional)." />
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND TIMING</span>
             <div className="flex gap-2">
@@ -1643,12 +1809,12 @@ export function InvoiceDetail() {
               <div style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
                 <div className="flex justify-between" style={{ marginBottom: 6 }}>
                   <span style={{ fontSize: 14, color: '#6B7280' }}>Return Total</span>
-                  <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}>{fmt(returnTotal)} BHD</span>
+                  <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}><Bhd v={returnTotal}/> BHD</span>
                 </div>
                 {returnTotal > 0 && (
                   <div style={{ fontSize: 11, color: '#6B7280', lineHeight: 1.6, padding: '8px 10px', background: '#F2F7FA', borderRadius: 6, marginTop: 8 }}>
-                    <div className="flex justify-between"><span>Cash refund (back to customer)</span><span className="font-mono" style={{ color: cashRefund > 0 ? '#DC2626' : '#0F0F10' }}>{fmt(cashRefund)} BHD</span></div>
-                    <div className="flex justify-between" style={{ marginTop: 2 }}><span>Receivable cancellation (Credit Note)</span><span className="font-mono" style={{ color: receivableCancel > 0 ? '#FF8730' : '#0F0F10' }}>{fmt(receivableCancel)} BHD</span></div>
+                    <div className="flex justify-between"><span>Cash refund (back to customer)</span><span className="font-mono" style={{ color: cashRefund > 0 ? '#DC2626' : '#0F0F10' }}><Bhd v={cashRefund}/> BHD</span></div>
+                    <div className="flex justify-between" style={{ marginTop: 2 }}><span>Receivable cancellation (Credit Note)</span><span className="font-mono" style={{ color: receivableCancel > 0 ? '#FF8730' : '#0F0F10' }}><Bhd v={receivableCancel}/> BHD</span></div>
                     {customerPaid === 0 && returnTotal > 0 && (
                       <div style={{ marginTop: 6, color: '#FF8730', fontStyle: 'italic' }}>
                         ℹ Customer hasn't paid yet — no cash flows back, only the receivable is cancelled via Credit Note.
@@ -1656,7 +1822,7 @@ export function InvoiceDetail() {
                     )}
                     {customerPaid > 0 && cashRefund === 0 && returnTotal > 0 && (
                       <div style={{ marginTop: 6, color: '#FF8730', fontStyle: 'italic' }}>
-                        ℹ Customer still owes {fmt(owedAfterReturn - customerPaid)} BHD after the return — no cash refund, only Credit Note offsets the receivable.
+                        ℹ Customer still owes <Bhd v={owedAfterReturn - customerPaid}/> BHD after the return — no cash refund, only Credit Note offsets the receivable.
                       </div>
                     )}
                     {cashRefund > 0 && cashRefund < returnTotal && (
@@ -1677,6 +1843,17 @@ export function InvoiceDetail() {
           </div>
         </div>
       </Modal>
+
+      <NumberTypeDialog
+        open={!!pendingFinalPayment}
+        variant={(() => {
+          const n = invoice?.invoiceNumber || '';
+          return n.startsWith('RPINV-') || n.startsWith('RINV-') || n.startsWith('SRINV-') ? 'repair' : 'sales';
+        })()}
+        title="Final Number Type"
+        onCancel={() => setPendingFinalPayment(null)}
+        onConfirm={executeFinalPayment}
+      />
     </div>
   );
 }

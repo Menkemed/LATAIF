@@ -6,12 +6,14 @@
 //
 // Layout: Kategorie-Chips → Brand/Name/SKU → dyn. Attribute → Condition →
 // Scope → AI Identify → Photos → Tax-Scheme + Storage → Notes → Save/Cancel.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Save } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
+import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { useProductStore } from '@/stores/productStore';
 import type { Product, Category, TaxScheme } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
@@ -41,12 +43,37 @@ export interface NewProductModalProps {
 export function NewProductModal({
   open, onClose, onSubmit, initial, title, submitLabel, hint, hideFields,
 }: NewProductModalProps) {
-  const { categories, loadCategories, nextAvailableSku } = useProductStore();
+  const { products, categories, loadCategories, nextAvailableSku, isSkuTaken, findPossibleDuplicates } = useProductStore();
   const [form, setForm] = useState<Partial<Product>>({});
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  const [skuError, setSkuError] = useState(false);
+  const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
+  const lastCheckedFp = useRef('');
+  const lastDismissedFp = useRef('');
 
   useEffect(() => { loadCategories(); }, [loadCategories]);
+
+  // Live Duplicate Detection — siehe WatchList für die Mechanik.
+  const attrs = form.attributes || {};
+  const fp = [
+    form.brand, form.name, form.sku,
+    attrs.reference_number, attrs.serial_number,
+    attrs.weight, attrs.karat, attrs.item_type,
+  ].map(v => String(v ?? '').trim().toUpperCase()).join('|');
+  useEffect(() => {
+    if (!open) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
+    if (duplicateMatches.length > 0) return;
+    if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim()) return;
+    if (fp === lastCheckedFp.current) return;
+    if (fp === lastDismissedFp.current) return;
+    const t = setTimeout(() => {
+      lastCheckedFp.current = fp;
+      const possible = findPossibleDuplicates(form);
+      if (possible.length > 0) setDuplicateMatches(possible);
+    }, 800);
+    return () => clearTimeout(t);
+  }, [fp, open, duplicateMatches.length, form, findPossibleDuplicates]);
 
   // Reset form when opening (or when initial changes)
   useEffect(() => {
@@ -66,12 +93,55 @@ export function NewProductModal({
     setForm(p => ({ ...p, attributes: { ...(p.attributes || {}), [key]: value } }));
   }
 
+  function validateForm(): string[] {
+    // Strikte Validierung — Pflichtfelder müssen ausgefüllt sein, sonst muss
+    // der User später nochmal im Edit ran (User-Feedback 2026-05-17).
+    const missing: string[] = [];
+    if (!form.categoryId) missing.push('Category');
+    if (!form.brand?.trim()) missing.push('Brand');
+    if (!form.name?.trim()) missing.push('Name');
+    // Condition ist optional (2026-05-17) — kein Required-Check mehr.
+    if (selectedCat) {
+      for (const attr of selectedCat.attributes) {
+        if (!attr.required) continue;
+        if (attr.dependsOn) {
+          const dep = form.attributes?.[attr.dependsOn.key];
+          if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) continue;
+        }
+        const v = form.attributes?.[attr.key];
+        if (attr.type === 'number') {
+          if (typeof v !== 'number' || isNaN(v) || v === 0) missing.push(attr.label);
+        } else if (attr.type === 'boolean') {
+          if (v === undefined || v === null) missing.push(attr.label);
+        } else {
+          if (!String(v ?? '').trim()) missing.push(attr.label);
+        }
+      }
+    }
+    return missing;
+  }
+
   function handleSubmit() {
-    // Quick-Capture-Regel (User-Spec, gleich wie Collection > New Item):
-    // vom Handy soll ein Foto-only-Save möglich sein, Brand/Name dürfen leer
-    // bleiben und werden später im Edit-Modus ergänzt. Nur die Kategorie ist
-    // technisch nötig (steuert dyn. Felder + Filter).
+    // Strikte Validierung: alle Pflichtfelder müssen ausgefüllt sein.
     if (!form.categoryId) return;
+    const missing = validateForm();
+    if (missing.length > 0) {
+      alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
+      return;
+    }
+    if (form.sku && isSkuTaken(form.sku)) { setSkuError(true); return; }
+    setSkuError(false);
+    // Score-basierte Duplicate Detection (nicht-blockierend).
+    const possible = findPossibleDuplicates(form);
+    if (possible.length > 0) {
+      setDuplicateMatches(possible);
+      return;
+    }
+    onSubmit(form);
+  }
+
+  function confirmCreateAnyway() {
+    setDuplicateMatches([]);
     onSubmit(form);
   }
 
@@ -123,9 +193,7 @@ export function NewProductModal({
 
         {/* SKU + (optional) Quantity */}
         <div style={{ display: 'grid', gridTemplateColumns: hideFields?.quantity ? '1fr' : '2fr 1fr', gap: 16 }}>
-          <Input label="SKU / REFERENCE" placeholder="Internal reference"
-            value={form.sku || ''}
-            onChange={e => setForm(p => ({ ...p, sku: e.target.value }))} />
+          <SkuInput value={form.sku || ''} onChange={v => { setForm(p => ({ ...p, sku: v })); if (skuError) setSkuError(false); }} />
           {!hideFields?.quantity && (
             <Input label="QUANTITY" type="number" placeholder="1"
               value={form.quantity || 1}
@@ -139,9 +207,15 @@ export function NewProductModal({
             <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
               {selectedCat.attributes.map(attr => {
+                // Conditional Visibility (dependsOn) — gleiche Logik wie WatchList.
+                if (attr.dependsOn) {
+                  const dep = form.attributes?.[attr.dependsOn.key];
+                  if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) return null;
+                }
+                const isWide = attr.type === 'select' && (attr.options?.length || 0) >= 8;
                 if (attr.type === 'select' && attr.options) {
                   return (
-                    <div key={attr.key}>
+                    <div key={attr.key} style={{ gridColumn: isWide ? '1 / -1' : 'auto' }}>
                       <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
                         {attr.label.toUpperCase()}
                         {attr.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
@@ -182,7 +256,7 @@ export function NewProductModal({
         {selectedCat && selectedCat.conditionOptions.length > 0 && (
           <div>
             <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
-              CONDITION <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
+              CONDITION
             </span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
               {selectedCat.conditionOptions.map(cond => (
@@ -277,6 +351,19 @@ export function NewProductModal({
                       updated.attributes = attrs;
                       return updated;
                     });
+                    // Sofortige Duplicate-Detection direkt nach AI-Erkennung —
+                    // siehe WatchList für Begründung. Kandidat aus result bauen,
+                    // da setForm async ist.
+                    const candidate: Partial<Product> = {
+                      categoryId: form.categoryId,
+                      brand: result.brand || form.brand,
+                      name: result.name || form.name,
+                      sku: form.sku || (result.sku ? nextAvailableSku(result.sku) : undefined),
+                      attributes: { ...(form.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
+                      images: form.images,
+                    };
+                    const possible = findPossibleDuplicates(candidate);
+                    if (possible.length > 0) setDuplicateMatches(possible);
                   } catch (e) { alert(String(e)); }
                   finally { setAiBusy(false); }
                 }}
@@ -357,6 +444,39 @@ export function NewProductModal({
           </Button>
         </div>
       </div>
+
+      <DuplicateWarningModal
+        open={duplicateMatches.length > 0}
+        matches={duplicateMatches}
+        candidate={form}
+        onCancel={() => { lastDismissedFp.current = fp; setDuplicateMatches([]); }}
+        onCreateAnyway={confirmCreateAnyway}
+        onCopyDetails={(id) => {
+          const src = products.find(p => p.id === id);
+          if (!src) return;
+          const srcAttrs = { ...(src.attributes || {}) } as Record<string, unknown>;
+          delete srcAttrs.serial_number; delete srcAttrs.serialNo;
+          setForm(f => ({
+            ...f,
+            brand: src.brand,
+            name: src.name,
+            categoryId: src.categoryId,
+            condition: src.condition,
+            taxScheme: src.taxScheme,
+            plannedSalePrice: src.plannedSalePrice,
+            minSalePrice: src.minSalePrice,
+            maxSalePrice: src.maxSalePrice,
+            storageLocation: src.storageLocation,
+            scopeOfDelivery: [...(src.scopeOfDelivery || [])],
+            notes: src.notes,
+            images: (f.images && f.images.length > 0) ? f.images : [...(src.images || [])],
+            attributes: { ...(f.attributes || {}), ...srcAttrs } as typeof f.attributes,
+          }));
+          setSelectedCat(categories.find(c => c.id === src.categoryId) || null);
+          lastDismissedFp.current = fp;
+          setDuplicateMatches([]);
+        }}
+      />
     </Modal>
   );
 }

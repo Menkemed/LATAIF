@@ -27,7 +27,7 @@ function safePost(label: string, fn: () => void): void {
   }
 }
 
-export type BankAccount = 'cash' | 'bank';
+export type BankAccount = 'cash' | 'bank' | 'benefit';
 
 // Plan §Banking §5: 9 canonical types. REFUND wird per `flow` in 'in'/'out' unterschieden.
 export type BankTransactionType =
@@ -61,11 +61,11 @@ export interface BankTransaction {
 interface BankingStore {
   transfers: BankTransfer[];
   loadTransfers: () => void;
-  createTransfer: (data: { amount: number; direction: 'CASH_TO_BANK' | 'BANK_TO_CASH'; transferDate?: string; notes?: string }) => BankTransfer;
+  createTransfer: (data: { amount: number; direction: BankTransfer['direction']; transferDate?: string; notes?: string }) => BankTransfer;
   deleteTransfer: (id: string) => void;
   getTotals: () => { cashToBank: number; bankToCash: number };
   getTransactions: () => BankTransaction[];
-  getBalances: () => { cash: number; bank: number };
+  getBalances: () => { cash: number; bank: number; benefit: number };
 }
 
 function rowToTransfer(row: Record<string, unknown>): BankTransfer {
@@ -73,7 +73,7 @@ function rowToTransfer(row: Record<string, unknown>): BankTransfer {
     id: row.id as string,
     branchId: row.branch_id as string,
     amount: (row.amount as number) || 0,
-    direction: (row.direction as 'CASH_TO_BANK' | 'BANK_TO_CASH') || 'CASH_TO_BANK',
+    direction: (row.direction as BankTransfer['direction']) || 'CASH_TO_BANK',
     transferDate: row.transfer_date as string,
     notes: row.notes as string | undefined,
     createdAt: row.created_at as string,
@@ -81,10 +81,34 @@ function rowToTransfer(row: Record<string, unknown>): BankTransfer {
   };
 }
 
+// Maps each BankTransfer.direction → {from, to} BankAccount.
+// Single source of truth for parsing direction strings (kept in sync with
+// TRANSFER_DIRECTION_MAP in ledger/posting.ts).
+const TRANSFER_FLOW: Record<BankTransfer['direction'], { from: BankAccount; to: BankAccount; label: string }> = {
+  CASH_TO_BANK:    { from: 'cash',    to: 'bank',    label: 'Cash → Bank'    },
+  BANK_TO_CASH:    { from: 'bank',    to: 'cash',    label: 'Bank → Cash'    },
+  CASH_TO_BENEFIT: { from: 'cash',    to: 'benefit', label: 'Cash → Benefit' },
+  BENEFIT_TO_CASH: { from: 'benefit', to: 'cash',    label: 'Benefit → Cash' },
+  BANK_TO_BENEFIT: { from: 'bank',    to: 'benefit', label: 'Bank → Benefit' },
+  BENEFIT_TO_BANK: { from: 'benefit', to: 'bank',    label: 'Benefit → Bank' },
+};
+
+export function transferFlow(direction: BankTransfer['direction']) {
+  return TRANSFER_FLOW[direction] || TRANSFER_FLOW.CASH_TO_BANK;
+}
+
+export function transferDirectionFor(from: BankAccount, to: BankAccount): BankTransfer['direction'] | null {
+  for (const [dir, flow] of Object.entries(TRANSFER_FLOW)) {
+    if (flow.from === from && flow.to === to) return dir as BankTransfer['direction'];
+  }
+  return null;
+}
+
 function accountFor(method: string | null | undefined): BankAccount {
   if (!method) return 'bank';
   const m = String(method).toLowerCase();
   if (m === 'cash') return 'cash';
+  if (m === 'benefit') return 'benefit';
   // card, bank, bank_transfer, crypto → bank
   return 'bank';
 }
@@ -150,7 +174,9 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     let cashToBank = 0, bankToCash = 0;
     for (const t of get().transfers) {
       if (t.direction === 'CASH_TO_BANK') cashToBank += t.amount;
-      else bankToCash += t.amount;
+      else if (t.direction === 'BANK_TO_CASH') bankToCash += t.amount;
+      // benefit-Richtungen werden im neuen TRANSFER-Block einzeln gezählt;
+      // hier nur die zwei Legacy-Felder, damit Analytics-Page kompatibel bleibt.
     }
     return { cashToBank, bankToCash };
   },
@@ -317,37 +343,24 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       });
     }
 
-    // TRANSFER: cash↔bank (two legs so they balance)
+    // TRANSFER: cash ↔ bank ↔ benefit (two legs so they balance)
     const transfers = get().transfers;
     for (const t of transfers) {
       const tCreated = t.createdAt || t.transferDate;
-      if (t.direction === 'CASH_TO_BANK') {
-        txs.push({
-          id: `tf-${t.id}-out`, date: t.transferDate, createdAt: tCreated, type: 'TRANSFER',
-          account: 'cash', amount: t.amount, flow: 'out',
-          relatedModule: 'transfer', relatedEntityId: t.id,
-          description: 'Transfer Cash → Bank',
-        });
-        txs.push({
-          id: `tf-${t.id}-in`, date: t.transferDate, createdAt: tCreated, type: 'TRANSFER',
-          account: 'bank', amount: t.amount, flow: 'in',
-          relatedModule: 'transfer', relatedEntityId: t.id,
-          description: 'Transfer Cash → Bank',
-        });
-      } else {
-        txs.push({
-          id: `tf-${t.id}-out`, date: t.transferDate, createdAt: tCreated, type: 'TRANSFER',
-          account: 'bank', amount: t.amount, flow: 'out',
-          relatedModule: 'transfer', relatedEntityId: t.id,
-          description: 'Transfer Bank → Cash',
-        });
-        txs.push({
-          id: `tf-${t.id}-in`, date: t.transferDate, createdAt: tCreated, type: 'TRANSFER',
-          account: 'cash', amount: t.amount, flow: 'in',
-          relatedModule: 'transfer', relatedEntityId: t.id,
-          description: 'Transfer Bank → Cash',
-        });
-      }
+      const flow = transferFlow(t.direction);
+      const desc = `Transfer ${flow.label}`;
+      txs.push({
+        id: `tf-${t.id}-out`, date: t.transferDate, createdAt: tCreated, type: 'TRANSFER',
+        account: flow.from, amount: t.amount, flow: 'out',
+        relatedModule: 'transfer', relatedEntityId: t.id,
+        description: desc,
+      });
+      txs.push({
+        id: `tf-${t.id}-in`, date: t.transferDate, createdAt: tCreated, type: 'TRANSFER',
+        account: flow.to, amount: t.amount, flow: 'in',
+        relatedModule: 'transfer', relatedEntityId: t.id,
+        description: desc,
+      });
     }
 
     // CONSIGNOR PAYOUT (Plan §Commission §8): du schuldest Besitzer, Auszahlung ist Outflow.
@@ -546,12 +559,13 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
 
   getBalances: () => {
     const txs = get().getTransactions();
-    let cash = 0, bank = 0;
+    let cash = 0, bank = 0, benefit = 0;
     for (const t of txs) {
       const sign = t.flow === 'in' ? 1 : -1;
       if (t.account === 'cash') cash += sign * t.amount;
+      else if (t.account === 'benefit') benefit += sign * t.amount;
       else bank += sign * t.amount;
     }
-    return { cash, bank };
+    return { cash, bank, benefit };
   },
 }));

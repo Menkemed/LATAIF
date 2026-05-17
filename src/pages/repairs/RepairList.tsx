@@ -12,12 +12,15 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useSupplierStore } from '@/stores/supplierStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { getLotsWithPurchaseNumbers, formatLotLabel } from '@/core/lots/lot-queries';
 import type { Repair, RepairStatus } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtDate(iso: string | undefined): string {
@@ -63,6 +66,8 @@ const PAY_STYLE = {
 export function RepairList() {
   const navigate = useNavigate();
   const { repairs, loadRepairs, createRepair, updateStatus, createCombinedRepairInvoice } = useRepairStore();
+  const { employees, loadEmployees } = useEmployeeStore();
+  const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
   const { customers, loadCustomers } = useCustomerStore();
   const { categories, loadCategories, products, loadProducts } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
@@ -70,6 +75,7 @@ export function RepairList() {
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState<RepairStatus | ''>('');
   const [filterCustomerId, setFilterCustomerId] = useState<string>('');
+  const [filterStaffId, setFilterStaffId] = useState<string>('');
   const [sortDate, setSortDate] = useState<'desc' | 'asc'>('desc');
   const [searchQuery, setSearchQuery] = useState('');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
@@ -84,7 +90,7 @@ export function RepairList() {
   });
   const [searchParams, setSearchParams] = useSearchParams();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); }, [loadRepairs, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers]);
+  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); loadEmployees(); }, [loadRepairs, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers, loadEmployees]);
 
   const supplierOptions = useMemo(() => suppliers
     .filter(s => s.active)
@@ -212,13 +218,14 @@ export function RepairList() {
     }
     if (filterStatus) r = r.filter(rep => rep.status === filterStatus);
     if (filterCustomerId) r = r.filter(rep => rep.customerId === filterCustomerId);
+    if (filterStaffId) r = r.filter(rep => rep.staffId === filterStaffId);
     const sorted = [...r].sort((a, b) => {
       const ad = a.receivedAt || a.createdAt || '';
       const bd = b.receivedAt || b.createdAt || '';
       return sortDate === 'desc' ? bd.localeCompare(ad) : ad.localeCompare(bd);
     });
     return sorted;
-  }, [repairs, searchQuery, filterStatus, filterCustomerId, sortDate, customers]);
+  }, [repairs, searchQuery, filterStatus, filterCustomerId, filterStaffId, sortDate, customers]);
 
   function openNew() {
     setForm({ repairScope: 'CUSTOMER', repairType: 'internal', taxScheme: 'VAT_10', itemAttributes: {} });
@@ -240,6 +247,10 @@ export function RepairList() {
     } else {
       if (!form.customerId) return;
     }
+    // External/Hybrid: Workshop-Supplier ist Pflicht — sonst lässt sich der
+    // Workshop-Expense bei "Ready" keinem Lieferanten zuordnen und die A/P-Bilanz
+    // platzt (Repair postet ohne supplier_id ins Ledger).
+    if ((form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId) return;
     const effectiveInternalCost =
       (form.repairType === 'external' || form.repairType === 'hybrid')
         ? (form.internalCost || form.estimatedCost || 0)
@@ -335,6 +346,30 @@ export function RepairList() {
             Clear
           </button>
         )}
+        {employees.length > 0 && (
+          <div style={{ minWidth: 200 }}>
+            <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>FILTER BY STAFF</span>
+            <select
+              value={filterStaffId}
+              onChange={e => setFilterStaffId(e.target.value)}
+              style={{
+                width: '100%', padding: '8px 10px', fontSize: 13,
+                border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10',
+              }}
+            >
+              <option value="">All staff</option>
+              {employees.filter(e => e.employmentStatus !== 'inactive').map(emp => (
+                <option key={emp.id} value={emp.id}>{emp.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        {filterStaffId && (
+          <button onClick={() => setFilterStaffId('')} className="cursor-pointer"
+            style={{ padding: '5px 10px', fontSize: 11, color: '#6B7280', background: 'none', border: 'none', borderRadius: 999 }}>
+            Clear
+          </button>
+        )}
         <div style={{ flex: 1 }} />
         <div className="flex gap-1">
           {[{ v: 'desc' as const, label: 'Newest' }, { v: 'asc' as const, label: 'Oldest' }].map(o => (
@@ -381,7 +416,13 @@ export function RepairList() {
         const next = (rep.repairScope === 'OWN' && rawNext?.status === 'picked_up') ? undefined : rawNext;
         const itemLabel = [rep.itemBrand, rep.itemModel].filter(Boolean).join(' ');
         const eligible = isEligibleForBulk(rep);
-        const showInvoiceShortcut = eligible;
+        // Create Invoice Shortcut bleibt auch nach Pick-up sichtbar, solange noch
+        // keine Invoice verknuepft ist und ein Charge anfaellt — Kunde kann nach
+        // Abholung trotzdem noch fakturiert werden (z.B. spaetere Zahlung).
+        const showInvoiceShortcut =
+          (rep.status === 'ready' || rep.status === 'picked_up') &&
+          !rep.invoiceId &&
+          (rep.chargeToCustomer || 0) > 0;
         const checked = validSelectedIds.has(rep.id);
         const statusStyle = REPAIR_STATUS_STYLE[rep.status] ?? { label: rep.status, fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' };
         const payStyle = getPaymentStyle(rep);
@@ -484,11 +525,11 @@ export function RepairList() {
             <div style={{ textAlign: 'right' }}>
               {rep.chargeToCustomer != null ? (
                 <>
-                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(rep.chargeToCustomer)}</span>
+                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={rep.chargeToCustomer}/></span>
                   <span style={{ fontSize: 10, color: '#9CA3AF', marginLeft: 3 }}>BHD</span>
                   {rep.margin != null && (
                     <div className="font-mono" style={{ fontSize: 11, color: rep.margin >= 0 ? '#7EAA6E' : '#AA6E6E', marginTop: 2 }}>
-                      {rep.margin >= 0 ? '+' : ''}{fmt(rep.margin)}
+                      {rep.margin >= 0 ? '+' : ''}<Bhd v={rep.margin}/>
                     </div>
                   )}
                 </>
@@ -503,20 +544,24 @@ export function RepairList() {
                 <button
                   onClick={(e) => handleQuickInvoice(e, rep.id)}
                   title="Create Invoice from this repair"
+                  // Konsistenz zum Approval-Modul: lila gefüllter Primary-Style.
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 4,
-                    padding: '4px 10px', fontSize: 11, borderRadius: 999,
+                    padding: '4px 10px', fontSize: 11, borderRadius: 4,
                     border: '1px solid #715DE3',
-                    color: '#715DE3',
-                    background: 'transparent',
+                    color: '#FFFFFF',
+                    background: '#715DE3',
+                    fontWeight: 500,
                     cursor: 'pointer',
                     transition: 'all 0.15s',
                   }}
                   onMouseEnter={e => {
-                    e.currentTarget.style.background = 'rgba(113,93,227,0.10)';
+                    e.currentTarget.style.background = '#5B3DCC';
+                    e.currentTarget.style.borderColor = '#5B3DCC';
                   }}
                   onMouseLeave={e => {
-                    e.currentTarget.style.background = 'transparent';
+                    e.currentTarget.style.background = '#715DE3';
+                    e.currentTarget.style.borderColor = '#715DE3';
                   }}
                 >
                   <FileText size={11} /> Create Invoice
@@ -705,6 +750,7 @@ export function RepairList() {
                   setForm({
                     ...form,
                     productId: pid || undefined,
+                    lotId: undefined,            // Reset Lot-Auswahl bei Produktwechsel
                     itemBrand: p?.brand,
                     itemModel: p?.name,
                     itemReference: p?.sku,
@@ -715,17 +761,59 @@ export function RepairList() {
               {form.productId && (() => {
                 const p = products.find(pp => pp.id === form.productId);
                 if (!p) return null;
+                // Stock-Lots Phase 5d — User waehlt explizit welcher Lot den
+                // Repair-Cost kapitalisiert. Bei nur 1 aktivem Lot ist die Wahl
+                // implizit (kein Picker noetig); bei 0 Lots Hinweis auf FIFO-Fallback.
+                const lots = getLotsWithPurchaseNumbers(form.productId!);
                 return (
-                  <div style={{ marginTop: 10, padding: '10px 12px', background: '#F2F7FA', borderRadius: 6, border: '1px solid #E5E9EE', fontSize: 12 }}>
-                    <div style={{ color: '#0F0F10' }}>{p.brand} {p.name}</div>
-                    <div className="font-mono" style={{ color: '#6B7280', marginTop: 2 }}>
-                      Current cost: {p.purchasePrice.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD
-                      {p.sku ? ` · ${p.sku}` : ''}
+                  <>
+                    <div style={{ marginTop: 10, padding: '10px 12px', background: '#F2F7FA', borderRadius: 6, border: '1px solid #E5E9EE', fontSize: 12 }}>
+                      <div style={{ color: '#0F0F10' }}>{p.brand} {p.name}</div>
+                      <div className="font-mono" style={{ color: '#6B7280', marginTop: 2 }}>
+                        Current cost: {p.purchasePrice.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD
+                        {p.sku ? ` · ${p.sku}` : ''}
+                      </div>
+                      <div style={{ color: '#6B7280', marginTop: 4, fontSize: 11 }}>
+                        Repair-Kosten werden bei Status „Ready" auf den gewaehlten Stock-Lot addiert.
+                      </div>
                     </div>
-                    <div style={{ color: '#6B7280', marginTop: 4, fontSize: 11 }}>
-                      Repair-Kosten werden bei Status „Ready" auf den Product Cost addiert.
-                    </div>
-                  </div>
+
+                    {lots.length > 1 && (
+                      <div style={{ marginTop: 12 }}>
+                        <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>STOCK LOT (welcher Bestand wird repariert?)</span>
+                        <select
+                          value={form.lotId || ''}
+                          onChange={e => setForm({ ...form, lotId: e.target.value || undefined })}
+                          style={{
+                            width: '100%', padding: '8px 10px', fontSize: 13,
+                            border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF',
+                          }}
+                        >
+                          <option value="">Auto (oldest active lot — FIFO)</option>
+                          {lots.map(l => (
+                            <option key={l.id} value={l.id}>
+                              {formatLotLabel(l, l.purchaseNumber || undefined)}
+                            </option>
+                          ))}
+                        </select>
+                        <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                          {form.lotId
+                            ? 'Repair-Cost wird auf den gewaehlten Lot kapitalisiert.'
+                            : 'Auto-Modus: Repair-Cost geht auf den aeltesten aktiven Lot (= naechster FIFO-Sale).'}
+                        </p>
+                      </div>
+                    )}
+                    {lots.length === 1 && (
+                      <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+                        Nur ein aktiver Lot vorhanden — wird automatisch verwendet ({formatLotLabel(lots[0], lots[0].purchaseNumber || undefined)}).
+                      </p>
+                    )}
+                    {lots.length === 0 && (
+                      <p style={{ fontSize: 11, color: '#AA956E', marginTop: 8 }}>
+                        Keine aktiven Lots fuer dieses Produkt — Repair-Cost wird nur auf product.purchase_price addiert (Legacy-Pfad).
+                      </p>
+                    )}
+                  </>
                 );
               })()}
             </div>
@@ -776,7 +864,7 @@ export function RepairList() {
               <span className="text-overline" style={{ marginBottom: 12 }}>EXTERNAL REPAIR · WORKSHOP / GOLDSMITH</span>
               <div style={{ marginTop: 12 }}>
                 <SearchSelect
-                  label="SUPPLIER"
+                  label="SUPPLIER *"
                   placeholder="Search workshop / goldsmith..."
                   options={supplierOptions}
                   value={form.workshopSupplierId || ''}
@@ -786,6 +874,11 @@ export function RepairList() {
                   className="cursor-pointer transition-colors"
                   style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
                 >+ New Supplier</button>
+                {!form.workshopSupplierId && (
+                  <p style={{ fontSize: 11, color: '#DC2626', marginTop: 8 }}>
+                    Pflichtfeld bei {form.repairType === 'external' ? 'External' : 'Hybrid'}-Repair — bitte Workshop / Goldsmith auswählen.
+                  </p>
+                )}
                 <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
                   Workshop Fee wird bei Status „Ready" automatisch als Expense gebucht und beim Supplier als offene Forderung (Payable) geführt.
                 </p>
@@ -851,7 +944,7 @@ export function RepairList() {
                     fontSize: 13, display: 'flex', justifyContent: 'space-between',
                   }}>
                     <span style={{ color: '#6B7280' }}>Cost added to product on Ready</span>
-                    <span style={{ color: '#0F0F10' }}>{fmt(totalCost)} BHD</span>
+                    <span style={{ color: '#0F0F10' }}><Bhd v={totalCost}/> BHD</span>
                   </div>
                 );
               })()
@@ -870,7 +963,7 @@ export function RepairList() {
                       <span style={{ color: '#6B7280' }}>
                         Estimated Margin{form.repairType === 'hybrid' && ` (charge − internal − workshop)`}
                       </span>
-                      <span style={{ color: margin >= 0 ? '#7EAA6E' : '#AA6E6E' }}>{fmt(margin)} BHD</span>
+                      <span style={{ color: margin >= 0 ? '#7EAA6E' : '#AA6E6E' }}><Bhd v={margin}/> BHD</span>
                     </div>
                   );
                 })()}
@@ -883,7 +976,33 @@ export function RepairList() {
             )}
           </div>
 
-          <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value })} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value })} />
+            <div>
+              <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>STAFF</span>
+              {activeEmployees.length === 0 ? (
+                <span style={{ fontSize: 12, color: '#6B7280' }}>
+                  No employees yet. <a href="/employees" style={{ color: '#3D7FFF' }}>Add one</a>.
+                </span>
+              ) : (
+                <select
+                  value={form.staffId || ''}
+                  onChange={e => setForm({ ...form, staffId: e.target.value || undefined })}
+                  style={{
+                    width: '100%', padding: '10px 12px', fontSize: 13,
+                    border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10',
+                  }}
+                >
+                  <option value="">— Unassigned —</option>
+                  {activeEmployees.map(emp => (
+                    <option key={emp.id} value={emp.id}>
+                      {emp.name}{emp.role ? ` · ${emp.role}` : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          </div>
 
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>NOTES</span>
@@ -904,7 +1023,13 @@ export function RepairList() {
 
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate}>Create Repair</Button>
+            <Button
+              variant="primary"
+              onClick={handleCreate}
+              disabled={(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId}
+            >
+              Create Repair
+            </Button>
           </div>
         </div>
       </Modal>

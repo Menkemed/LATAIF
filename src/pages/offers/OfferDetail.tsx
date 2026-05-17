@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Save, Trash2, Plus, X, FileText, Download, Sparkles } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -13,18 +14,22 @@ import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-format';
+import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
+import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import type { TaxScheme } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 export function OfferDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/offers');
   const { offers, loadOffers, updateOffer, updateOfferLine, addOfferLine, removeOfferLine, deleteOffer } = useOfferStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -33,6 +38,8 @@ export function OfferDetail() {
   const [editing, setEditing] = useState(false);
   const [formNotes, setFormNotes] = useState('');
   const [showVatConfirm, setShowVatConfirm] = useState(false);
+  // 2026-05-16 — Nach VAT-Confirm fragen wir noch Normal vs Special Final.
+  const [pendingPerLine, setPendingPerLine] = useState<Record<string, TaxScheme> | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [formValidUntil, setFormValidUntil] = useState('');
   const [formCustomerId, setFormCustomerId] = useState('');
@@ -118,7 +125,15 @@ export function OfferDetail() {
   function handleConfirmCreateInvoice(perLine: Record<string, TaxScheme>) {
     setShowVatConfirm(false);
     if (!id) return;
-    const invoice = createInvoiceFromOffer(id, perLine);
+    // Step 2: Number-Type-Dialog vor dem eigentlichen Convert.
+    setPendingPerLine(perLine);
+  }
+
+  function handleNumberTypeConfirm(special: boolean) {
+    const perLine = pendingPerLine;
+    setPendingPerLine(null);
+    if (!id || !perLine) return;
+    const invoice = createInvoiceFromOffer(id, perLine, undefined, special);
     if (invoice) {
       navigate(`/invoices/${invoice.id}`);
     }
@@ -151,11 +166,16 @@ export function OfferDetail() {
 
   function handleAddLine(product: typeof products[0]) {
     if (!id) return;
+    // Phase 7 — Cost-Basis fuer Margin-Scheme/VAT-Calc kommt aus dem FIFO-Lot
+    // (= naechster Sale-Cost), nicht aus product.purchase_price. Bei Multi-Lot
+    // ist purchase_price irrefuehrend; bei keinem Lot Fallback.
+    const fifo = deriveProductCostFromLots(product.id);
+    const costBasis = fifo ? fifo.fifoCost : product.purchasePrice;
     addOfferLine(id, {
       productId: product.id,
       unitPrice: product.plannedSalePrice || product.purchasePrice,
       taxScheme: product.taxScheme,
-      purchasePrice: product.purchasePrice,
+      purchasePrice: costBasis,
     });
     setShowAddLine(false);
   }
@@ -176,17 +196,17 @@ export function OfferDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/offers')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
           >
-            <ArrowLeft size={16} /> Offers
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
@@ -241,7 +261,7 @@ export function OfferDetail() {
           )}
           <div className="flex items-center gap-4" style={{ marginTop: 12 }}>
             <StatusDot status={offer.status} />
-            <span className="font-display" style={{ fontSize: 24, color: '#0F0F10' }}>{fmt(offer.total)} BHD</span>
+            <span className="font-display" style={{ fontSize: 24, color: '#0F0F10' }}><Bhd v={offer.total}/> BHD</span>
           </div>
         </div>
 
@@ -311,7 +331,7 @@ export function OfferDetail() {
                     })()}
                     {outOfRange && (
                       <span style={{ fontSize: 10, color: '#AA6E6E', display: 'block', marginTop: 2 }}>
-                        Price outside range ({fmt(product.minSalePrice || 0)} — {fmt(product.plannedSalePrice || 0)})
+                        Price outside range (<Bhd v={product.minSalePrice || 0}/> — <Bhd v={product.plannedSalePrice || 0}/>)
                       </span>
                     )}
                   </div>
@@ -327,9 +347,9 @@ export function OfferDetail() {
                       style={{ minWidth: 0, width: '100%', textAlign: 'right', padding: '2px 6px', fontSize: 13, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }}
                     />
                   ) : (
-                    <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(line.unitPrice)}</span>
+                    <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={line.unitPrice}/></span>
                   )}
-                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(line.lineTotal)}</span>
+                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={line.lineTotal}/></span>
                   {canEdit && (
                     <button onClick={() => handleRemoveLine(line.id)}
                       className="cursor-pointer transition-colors flex items-center justify-center"
@@ -349,7 +369,7 @@ export function OfferDetail() {
               <div style={{ marginTop: 16, padding: '16px 0 0', borderTop: '1px solid #E5E9EE' }}>
                 <div className="flex justify-between" style={{ fontSize: 16, paddingTop: 10 }}>
                   <span style={{ color: '#0F0F10', fontWeight: 500 }}>Total</span>
-                  <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}>{fmt(offer.total)} BHD</span>
+                  <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}><Bhd v={offer.total}/> BHD</span>
                 </div>
               </div>
             )}
@@ -488,6 +508,13 @@ export function OfferDetail() {
         onConfirm={handleConfirmCreateInvoice}
       />
 
+      <NumberTypeDialog
+        open={!!pendingPerLine}
+        variant="sales"
+        onCancel={() => setPendingPerLine(null)}
+        onConfirm={handleNumberTypeConfirm}
+      />
+
       {/* Delete confirmation modal */}
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Offer" width={400}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
@@ -517,7 +544,7 @@ export function OfferDetail() {
                   <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.brand} {p.name}</span>
                   {p.sku && <span className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginLeft: 8 }}>{p.sku}</span>}
                 </div>
-                <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}>{fmt(p.plannedSalePrice || p.purchasePrice)} BHD</span>
+                <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}><Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD</span>
               </div>
             </div>
           ))}

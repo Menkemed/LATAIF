@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { v4 as uuid } from 'uuid';
 import {
   Building2, Receipt, Tags, GitBranch, Users, Hash, AlertTriangle,
-  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe,
+  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -14,11 +14,13 @@ import { query, currentBranchId } from '@/core/db/helpers';
 import { useProductStore } from '@/stores/productStore';
 import { useAuthStore } from '@/stores/authStore';
 import { usePermission } from '@/hooks/usePermission';
+import { COUNTRIES, type CountryCode } from '@/core/contacts/country-codes';
+import { useCountryCodesStore } from '@/core/contacts/country-codes-store';
 import type { Category, CategoryAttribute, AttributeType, UserRole } from '@/core/models/types';
 
 // ── Constants ──
 
-type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'ai' | 'sync' | 'updates' | 'danger';
+type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'danger';
 
 interface TabDef {
   key: TabKey;
@@ -35,6 +37,7 @@ const TABS: TabDef[] = [
   { key: 'users', label: 'Users', icon: <Users size={16} /> },
   { key: 'numbering', label: 'Number Ranges', icon: <Hash size={16} /> },
   { key: 'language', label: 'Language', icon: <Globe size={16} /> },
+  { key: 'phone', label: 'Country Codes', icon: <Phone size={16} /> },
   { key: 'ai', label: 'AI / OpenAI', icon: <Sparkles size={16} /> },
   { key: 'sync', label: 'Sync / Server', icon: <Cloud size={16} /> },
   { key: 'updates', label: 'Updates', icon: <Cloud size={16} /> },
@@ -1445,6 +1448,201 @@ function LanguageTab() {
 }
 
 // ═══════════════════════════════════════════════════════════
+// COUNTRY CODES TAB — Erweiterung der PhoneInput-Country-Liste.
+// Built-in Laender sind read-only; eigene Eintraege werden in der `settings`
+// Tabelle (key: contacts.custom_countries) persistiert.
+// ═══════════════════════════════════════════════════════════
+
+function CountryCodesTab() {
+  const customCountries = useCountryCodesStore(s => s.customCountries);
+  const loaded = useCountryCodesStore(s => s.loaded);
+  const load = useCountryCodesStore(s => s.load);
+  const addCountry = useCountryCodesStore(s => s.add);
+  const updateCountry = useCountryCodesStore(s => s.update);
+  const removeCountry = useCountryCodesStore(s => s.remove);
+
+  useEffect(() => { if (!loaded) load(); }, [loaded, load]);
+
+  const [showForm, setShowForm] = useState(false);
+  const [editIso, setEditIso] = useState<string | null>(null);
+  const [form, setForm] = useState<CountryCode>({ iso: '', dial: '', label: '', flag: '', example: '', maxLength: undefined });
+  const [error, setError] = useState('');
+
+  function reset() {
+    setForm({ iso: '', dial: '', label: '', flag: '', example: '', maxLength: undefined });
+    setEditIso(null);
+    setError('');
+  }
+  function openNew() {
+    reset();
+    setShowForm(true);
+  }
+  function openEdit(c: CountryCode) {
+    setForm({ ...c });
+    setEditIso(c.iso);
+    setError('');
+    setShowForm(true);
+  }
+  function closeForm() {
+    setShowForm(false);
+    reset();
+  }
+
+  function validate(): string | null {
+    const iso = form.iso.trim().toUpperCase();
+    const dial = form.dial.trim();
+    const label = form.label.trim();
+    const flag = form.flag.trim();
+    if (!/^[A-Z]{2}$/.test(iso)) return 'ISO must be 2 uppercase letters (e.g. OM, EG, IN).';
+    if (!/^\+\d{1,4}$/.test(dial)) return 'Dial code must start with "+" followed by 1–4 digits (e.g. +968).';
+    if (!label) return 'Label is required.';
+    if (!flag) return 'Flag emoji is required (paste from emojipedia).';
+
+    const builtinClash = COUNTRIES.some(b => b.iso === iso);
+    if (builtinClash) return `ISO "${iso}" already exists as a built-in country.`;
+    const customClash = customCountries.some(c => c.iso === iso && c.iso !== editIso);
+    if (customClash) return `ISO "${iso}" is already used by another custom country.`;
+    return null;
+  }
+
+  function handleSave() {
+    const err = validate();
+    if (err) { setError(err); return; }
+    const cleaned: CountryCode = {
+      iso: form.iso.trim().toUpperCase(),
+      dial: form.dial.trim(),
+      label: form.label.trim(),
+      flag: form.flag.trim(),
+      example: form.example?.trim() || undefined,
+      maxLength: form.maxLength && form.maxLength > 0 ? Number(form.maxLength) : undefined,
+    };
+    if (editIso && editIso !== cleaned.iso) {
+      // ISO has changed → remove old, add new (uncommon but valid).
+      removeCountry(editIso);
+      addCountry(cleaned);
+    } else if (editIso) {
+      updateCountry(editIso, cleaned);
+    } else {
+      addCountry(cleaned);
+    }
+    closeForm();
+  }
+
+  function handleDelete(iso: string) {
+    if (!confirm(`Remove "${iso}"? Existing phone numbers stored with this code will still be readable but displayed under the default country.`)) return;
+    removeCountry(iso);
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '32px 32px 0', maxWidth: 760 }}>
+      <Card>
+        <h2 style={{ fontSize: 16, color: '#0F0F10', marginBottom: 8 }}>Country Codes</h2>
+        <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 16, lineHeight: 1.5 }}>
+          The PhoneInput dropdown shows these countries when creating/editing clients, suppliers, agents, partners, and employees.
+          Built-in countries are read-only. Add your own to extend the list.
+        </p>
+
+        {/* Built-in list */}
+        <div style={{ marginBottom: 20 }}>
+          <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>BUILT-IN ({COUNTRIES.length})</span>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            {COUNTRIES.map(c => (
+              <div key={c.iso} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '8px 12px', background: '#F2F7FA', borderRadius: 6,
+                border: '1px solid #E5E9EE', fontSize: 13,
+              }}>
+                <span style={{ fontSize: 16 }}>{c.flag}</span>
+                <span style={{ flex: 1, color: '#0F0F10' }}>{c.label}</span>
+                <span className="font-mono" style={{ fontSize: 12, color: '#6B7280' }}>{c.dial}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Custom list + add */}
+        <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+          <span className="text-overline">CUSTOM ({customCountries.length})</span>
+          <Button variant="primary" onClick={openNew}><Plus size={12} /> Add Country</Button>
+        </div>
+
+        {customCountries.length === 0 && (
+          <div style={{ padding: '24px', textAlign: 'center', fontSize: 13, color: '#6B7280',
+                       border: '1px dashed #D5D9DE', borderRadius: 8 }}>
+            No custom countries yet. Click "Add Country" to extend the list.
+          </div>
+        )}
+
+        {customCountries.map(c => (
+          <div key={c.iso} className="flex items-center" style={{
+            gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', fontSize: 13,
+          }}>
+            <span style={{ fontSize: 18 }}>{c.flag}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ color: '#0F0F10' }}>{c.label}</div>
+              <div style={{ fontSize: 11, color: '#6B7280' }}>
+                <span className="font-mono">{c.dial}</span>
+                <span style={{ marginLeft: 8 }}>· {c.iso}</span>
+                {c.example && <span style={{ marginLeft: 8 }}>· e.g. {c.example}</span>}
+                {c.maxLength && <span style={{ marginLeft: 8 }}>· max {c.maxLength} digits</span>}
+              </div>
+            </div>
+            <button onClick={() => openEdit(c)}
+              className="cursor-pointer"
+              style={{ padding: '6px 10px', fontSize: 12, color: '#4B5563',
+                       background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6 }}>
+              <Pencil size={12} />
+            </button>
+            <button onClick={() => handleDelete(c.iso)}
+              className="cursor-pointer"
+              style={{ padding: '6px 10px', fontSize: 12, color: '#DC2626',
+                       background: 'transparent', border: '1px solid rgba(220,38,38,0.30)', borderRadius: 6 }}>
+              <Trash2 size={12} />
+            </button>
+          </div>
+        ))}
+      </Card>
+
+      {/* Add/Edit Modal */}
+      <Modal open={showForm} onClose={closeForm} title={editIso ? `Edit ${editIso}` : 'Add Country Code'} width={480}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {error && (
+            <div style={{ padding: '10px 12px', background: 'rgba(220,38,38,0.06)',
+                         border: '1px solid rgba(220,38,38,0.30)', borderRadius: 8,
+                         fontSize: 12, color: '#DC2626' }}>{error}</div>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <Input required label="FLAG" placeholder="🇴🇲"
+              value={form.flag} onChange={e => setForm({ ...form, flag: e.target.value })} />
+            <Input required label="ISO (2 letters)" placeholder="OM"
+              value={form.iso} onChange={e => setForm({ ...form, iso: e.target.value.toUpperCase() })} />
+            <Input required label="DIAL CODE" placeholder="+968"
+              value={form.dial} onChange={e => setForm({ ...form, dial: e.target.value })} />
+          </div>
+          <Input required label="LABEL" placeholder="Oman"
+            value={form.label} onChange={e => setForm({ ...form, label: e.target.value })} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Input label="EXAMPLE (optional)" placeholder="9xxxxxxx"
+              value={form.example || ''} onChange={e => setForm({ ...form, example: e.target.value })} />
+            <Input label="MAX DIGITS (optional)" type="number" placeholder="8"
+              value={form.maxLength ?? ''} onChange={e => setForm({ ...form, maxLength: parseInt(e.target.value) || undefined })} />
+          </div>
+          <p style={{ fontSize: 11, color: '#6B7280', lineHeight: 1.5 }}>
+            Find values: ISO at <span className="font-mono">en.wikipedia.org/wiki/ISO_3166-1_alpha-2</span>,
+            dial code at <span className="font-mono">en.wikipedia.org/wiki/List_of_country_calling_codes</span>,
+            flag emoji at <span className="font-mono">emojipedia.org/flags</span>.
+          </p>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={closeForm}>Cancel</Button>
+            <Button variant="primary" onClick={handleSave}>{editIso ? 'Save' : 'Add Country'}</Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
 // AI TAB
 // ═══════════════════════════════════════════════════════════
 
@@ -2042,6 +2240,7 @@ export function SettingsPage() {
       case 'users': return <UsersTab />;
       case 'numbering': return <NumberRangesTab />;
       case 'language': return <LanguageTab />;
+      case 'phone': return <CountryCodesTab />;
       case 'ai': return <AiTab />;
       case 'sync': return <SyncTab />;
       case 'updates': return <UpdatesTab />;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, XCircle, ShoppingBag, MessageCircle, Download, Plus } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -18,11 +19,14 @@ import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
 import type { Order, OrderLine, OrderStatus, Product, TaxScheme } from '@/core/models/types';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
+import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
+import { Bhd } from '@/components/ui/Bhd';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 
 function fmt(v: number | undefined | null): string {
-  if (v === undefined || v === null) return '0';
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (v === undefined || v === null) return '0.000';
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 const STATUS_FLOW: OrderStatus[] = ['pending', 'arrived', 'notified', 'completed'];
@@ -40,6 +44,7 @@ function statusLabel(s: OrderStatus): string {
 export function OrderDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -61,6 +66,8 @@ export function OrderDetail() {
   const [payNote, setPayNote] = useState('');
   const [showInvoiceVatConfirm, setShowInvoiceVatConfirm] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  // 2026-05-16 — Pending action waiting for Number-Type selection.
+  const [pendingNumberAction, setPendingNumberAction] = useState<((special: boolean) => Promise<void>) | null>(null);
   const { paymentsByOrder, loadPayments, addPayment, deletePayment } = useOrderPaymentStore();
   const { createDirectInvoice, invoices, loadInvoices } = useInvoiceStore();
   const perm = usePermission();
@@ -237,7 +244,8 @@ export function OrderDetail() {
     const orderLines = getOrderLines(id);
     const allPersisted = orderLines.length > 0 && orderLines.every(l => !!l.taxScheme);
     if (allPersisted) {
-      await convertWithPersistedSchemes(orderLines);
+      // Number-Type-Dialog vor Convert.
+      setPendingNumberAction(() => async (special: boolean) => convertWithPersistedSchemes(orderLines, special));
       return;
     }
 
@@ -251,7 +259,9 @@ export function OrderDetail() {
         attributes: order.attributes || {},
         purchasePrice: order.supplierPrice || 0,
         plannedSalePrice: order.agreedPrice,
-        stockStatus: 'sold',
+        // Plan §Sales §Partial-Payment-Reservation: Produkt startet 'in_stock',
+        // der Invoice-Create-Flow setzt es auf 'reserved' (PARTIAL) bzw. 'sold' (FINAL).
+        stockStatus: 'in_stock',
         taxScheme: 'MARGIN',
         sourceType: 'OWN',
         supplierName: order.supplierName,
@@ -268,7 +278,7 @@ export function OrderDetail() {
   // (siehe OrderCreate.unitNetFromGross), daher: lineNet = unitPrice × qty,
   // dann vatEngine.calculateNet → vat + gross. Keine Doppelbesteuerung möglich,
   // weil wir nicht erneut auf einen schon-gross-Wert rechnen.
-  async function convertWithPersistedSchemes(orderLines: OrderLine[]) {
+  async function convertWithPersistedSchemes(orderLines: OrderLine[], specialMark: boolean = false) {
     if (!id || !order) return;
 
     const invoiceLineInputs: Array<{
@@ -289,7 +299,8 @@ export function OrderDetail() {
           attributes: order.attributes || {},
           purchasePrice: 0,
           plannedSalePrice: ol.unitPrice * Math.max(1, ol.quantity),
-          stockStatus: 'sold',
+          // Plan §Sales §Partial-Payment-Reservation — wie oben.
+          stockStatus: 'in_stock',
           taxScheme: ol.taxScheme!,
           sourceType: 'OWN',
           notes: `From order ${order.orderNumber}`,
@@ -316,6 +327,10 @@ export function OrderDetail() {
       order.customerId,
       invoiceLineInputs,
       `Final invoice for order ${order.orderNumber}`,
+      undefined,
+      undefined,
+      undefined,
+      specialMark,
     );
     updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
@@ -331,6 +346,11 @@ export function OrderDetail() {
   // Gross == ursprünglicher agreedPrice.
   async function handleConfirmFinalInvoice(perLine: Record<string, TaxScheme>) {
     setShowInvoiceVatConfirm(false);
+    // Nach VAT-Confirm — Number-Type-Dialog vor dem Create.
+    setPendingNumberAction(() => async (special: boolean) => executeLegacyFinalInvoice(perLine, special));
+  }
+
+  async function executeLegacyFinalInvoice(perLine: Record<string, TaxScheme>, specialMark: boolean) {
     const prod = productForConvert;
     if (!id || !order || !prod) return;
     const grossAgreed = order.agreedPrice || totalPaid;
@@ -353,6 +373,10 @@ export function OrderDetail() {
         lineTotal: calc.grossAmount,
       }],
       `Final invoice for order ${order.orderNumber}`,
+      undefined,
+      undefined,
+      undefined,
+      specialMark,
     );
     updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
@@ -371,17 +395,17 @@ export function OrderDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/orders')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
           >
-            <ArrowLeft size={16} /> Orders
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
@@ -495,17 +519,17 @@ export function OrderDetail() {
             <div style={{ marginTop: 28, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">AGREED PRICE</span>
-                <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(order.agreedPrice)} BHD</span>
+                <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}><Bhd v={order.agreedPrice}/> BHD</span>
               </div>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">TOTAL PAID</span>
                 <span className="font-display" style={{ fontSize: 20, color: fullyPaid ? '#7EAA6E' : '#AA956E' }}>
-                  {fmt(totalPaid)} BHD
+                  <Bhd v={totalPaid}/> BHD
                 </span>
               </div>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">REMAINING</span>
-                <span className="font-mono" style={{ fontSize: 16, color: remaining <= 0 ? '#7EAA6E' : '#4B5563' }}>{fmt(Math.max(0, remaining))} BHD</span>
+                <span className="font-mono" style={{ fontSize: 16, color: remaining <= 0 ? '#7EAA6E' : '#4B5563' }}><Bhd v={Math.max(0, remaining)}/> BHD</span>
               </div>
             </div>
 
@@ -665,7 +689,7 @@ export function OrderDetail() {
                   {renderField('Supplier', order.supplierName)}
                   {renderField('Supplier Price', order.supplierPrice !== undefined ? `${fmt(order.supplierPrice)} BHD` : undefined)}
                   {renderField('Expected Margin', order.expectedMargin !== undefined
-                    ? <span className="font-mono" style={{ color: (order.expectedMargin || 0) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>{fmt(order.expectedMargin)} BHD</span>
+                    ? <span className="font-mono" style={{ color: (order.expectedMargin || 0) >= 0 ? '#7EAA6E' : '#AA6E6E' }}><Bhd v={order.expectedMargin}/> BHD</span>
                     : undefined)}
                 </>
               )}
@@ -740,7 +764,7 @@ export function OrderDetail() {
                   {payments.map(p => (
                     <div key={p.id} style={{ display: 'contents' }}>
                       <span style={{ fontSize: 13, color: '#0F0F10', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{p.paidAt}</span>
-                      <span className="font-mono" style={{ fontSize: 13, color: '#7EAA6E', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{fmt(p.amount)} BHD</span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#7EAA6E', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}><Bhd v={p.amount}/> BHD</span>
                       <span style={{ fontSize: 13, color: '#4B5563', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{p.method?.replace('_', ' ') || '\u2014'}</span>
                       <span style={{ fontSize: 12, color: '#6B7280', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>{p.note || '\u2014'}</span>
                       <button onClick={() => handleDownloadReceipt(p)}
@@ -762,7 +786,7 @@ export function OrderDetail() {
                 return (
                   <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(110,138,170,0.06)', borderRadius: 8, border: '1px solid rgba(110,138,170,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                     <span style={{ fontSize: 13, color: '#4B5563' }}>
-                      Already converted &mdash; <span className="font-mono" style={{ color: '#0F0F10' }}>{linkedInvoice?.invoiceNumber || 'Invoice'}</span>
+                      Already converted &mdash; <span className="font-mono" style={{ color: '#0F0F10' }}>{linkedInvoice ? formatInvoiceDisplayShort(linkedInvoice) : 'Invoice'}</span>
                     </span>
                     <Button variant="secondary" onClick={() => navigate(`/invoices/${order.invoiceId}`)}>See Invoice</Button>
                   </div>
@@ -771,10 +795,10 @@ export function OrderDetail() {
                 <div style={{ marginTop: 16, padding: '12px 14px', background: 'rgba(126,170,110,0.06)', borderRadius: 8, border: '1px solid rgba(126,170,110,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                   <span style={{ fontSize: 13, color: '#7EAA6E' }}>
                     {linkedProduct
-                      ? 'Order completed. Convert to a final invoice.'
-                      : 'Order completed. A product entry will be created automatically when you convert.'}
+                      ? 'Order completed. Create the final invoice.'
+                      : 'Order completed. A product entry will be created automatically with the invoice.'}
                   </span>
-                  <Button variant="primary" onClick={handleCreateFinalInvoice}>Convert to Invoice</Button>
+                  <Button variant="primary" onClick={handleCreateFinalInvoice}>Create Invoice</Button>
                 </div>
               )}
             </Card>
@@ -853,7 +877,7 @@ export function OrderDetail() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 8, flexWrap: 'wrap' }}>
-              {['cash', 'bank_transfer', 'card', 'cheque'].map(m => (
+              {['cash', 'bank_transfer', 'card', 'benefit', 'cheque'].map(m => (
                 <button key={m} onClick={() => setPayMethod(m)}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
@@ -923,6 +947,17 @@ export function OrderDetail() {
         onCancel={() => setShowInvoiceVatConfirm(false)}
         onConfirm={handleConfirmFinalInvoice}
         title="Create Final Invoice"
+      />
+
+      <NumberTypeDialog
+        open={!!pendingNumberAction}
+        variant="sales"
+        onCancel={() => setPendingNumberAction(null)}
+        onConfirm={(special) => {
+          const act = pendingNumberAction;
+          setPendingNumberAction(null);
+          if (act) void act(special);
+        }}
       />
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Order" width={400}>

@@ -1,14 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle, ChevronDown, BarChart3, PieChart, Receipt } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { useProductStore } from '@/stores/productStore';
+import { useInvoiceStore } from '@/stores/invoiceStore';
+import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
+import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
+import { query } from '@/core/db/helpers';
 import { usePermission } from '@/hooks/usePermission';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { printHangtag } from '@/core/pdf/hangtag';
@@ -17,13 +25,16 @@ import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { products, categories, loadProducts, loadCategories, updateProduct, deleteProduct, nextAvailableSku } = useProductStore();
+  const goBack = useGoBack('/collection');
+  const { products, categories, loadProducts, loadCategories, updateProduct, deleteProduct, nextAvailableSku, isSkuTaken } = useProductStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
+  const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Product>>({});
@@ -33,10 +44,11 @@ export function ProductDetail() {
   const [aiBusy, setAiBusy] = useState(false);
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [lotsExpanded, setLotsExpanded] = useState(true);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const perm = usePermission();
 
-  useEffect(() => { loadCategories(); loadProducts(); loadRepairs(); }, [loadCategories, loadProducts, loadRepairs]);
+  useEffect(() => { loadCategories(); loadProducts(); loadRepairs(); loadInvoices(); loadPurchases(); }, [loadCategories, loadProducts, loadRepairs, loadInvoices, loadPurchases]);
 
   // Plan §Repair §Own-Item: alle Repairs die mit diesem Produkt verlinkt sind —
   // werden in einer eigenen Section unten angezeigt (Cost-Historie + Issue + Datum).
@@ -48,6 +60,144 @@ export function ProductDetail() {
   );
 
   const product = useMemo(() => products.find(p => p.id === id), [products, id]);
+
+  // Phase 6 — Stock-Lots fuer Display: zeigt alle aktiven Lots mit Source-Purchase
+  // + Supplier in eigener Card. Macht sichtbar dass das Produkt mehrere Kaufpreise
+  // und/oder mehrere Lieferanten hatte.
+  const productLots = useMemo(() => {
+    if (!id) return [];
+    const lots = getLotsWithPurchaseNumbers(id);
+    // Defensive (2026-05-17): Bei nicht-verfügbaren Produkt-Status ist jeder
+    // Lot-Bestand konzeptionell ungültig (Daten-Inkonsistenz möglich). Die Card
+    // wird ausgeblendet, damit kein "Available"-Badge bei verkauften Items steht.
+    const p = products.find(pp => pp.id === id);
+    if (p && ['sold', 'reserved', 'consignment_reserved'].includes(p.stockStatus)) {
+      return [];
+    }
+    return lots;
+  }, [id, products]);
+
+  // Aggregat-KPIs ueber alle aktiven Lots — fuer die Tile-Reihe oberhalb der
+  // Stock-Lots-Card. Quantity = Summe Restbestaende, Total Cost = sum(unitCost*qty),
+  // Cost Range = min/max unitCost, Average = gewichtetes Mittel.
+  const lotKpis = useMemo(() => {
+    if (productLots.length === 0) return null;
+    let qty = 0, totalCost = 0, min = Infinity, max = 0;
+    for (const l of productLots) {
+      qty += l.qtyRemaining;
+      totalCost += l.unitCost * l.qtyRemaining;
+      if (l.unitCost < min) min = l.unitCost;
+      if (l.unitCost > max) max = l.unitCost;
+    }
+    return {
+      qty,
+      totalCost,
+      minCost: min === Infinity ? 0 : min,
+      maxCost: max,
+      avgCost: qty > 0 ? totalCost / qty : 0,
+      hasRange: min !== max,
+    };
+  }, [productLots]);
+
+  // Sales-History: echte Sales (FINAL = bezahlt, PARTIAL = mit Anzahlung).
+  // DRAFT/CANCELLED/RETURNED ausgeblendet — entweder kein Commitment oder
+  // schon storniert. PARTIAL → FINAL ist dieselbe invoice_id, also keine
+  // Doppelung — die Zeile aendert nur Status + Nummer.
+  // Reihenfolge: neueste zuerst.
+  const productSales = useMemo(() => {
+    if (!id) return [] as Array<{
+      invoiceId: string; invoiceNumber: string; status: string; specialMark: boolean;
+      issuedAt: string; customerName: string;
+      unitPrice: number; quantity: number; lineTotal: number;
+    }>;
+    const rows = query(
+      `SELECT i.id AS inv_id, i.invoice_number, i.status, i.special_mark, i.issued_at,
+              c.first_name, c.last_name,
+              il.unit_price, il.quantity, il.line_total
+         FROM invoice_lines il
+         JOIN invoices i ON i.id = il.invoice_id
+         LEFT JOIN customers c ON c.id = i.customer_id
+        WHERE il.product_id = ?
+          AND i.status IN ('FINAL', 'PARTIAL')
+        ORDER BY i.issued_at DESC, i.created_at DESC`,
+      [id]
+    );
+    return rows.map(r => ({
+      invoiceId: r.inv_id as string,
+      invoiceNumber: r.invoice_number as string,
+      status: (r.status as string) || '',
+      specialMark: Number(r.special_mark) === 1,
+      issuedAt: (r.issued_at as string) || '',
+      customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || '—',
+      unitPrice: Number(r.unit_price) || 0,
+      quantity: Number(r.quantity) || 1,
+      lineTotal: Number(r.line_total) || 0,
+    }));
+    // Dep auf `invoices` damit Status-Updates (PARTIAL→FINAL via recordPayment)
+    // den re-query triggern und die Zeile in der Tabelle aktualisieren.
+  }, [id, invoices]);
+
+  // Purchase History — alle Purchases die dieses Produkt enthalten.
+  // DRAFT/CANCELLED ausgeblendet (kein Commitment bzw. storniert).
+  // Reihenfolge: neueste zuerst (purchase_date DESC).
+  const productPurchases = useMemo(() => {
+    if (!id) return [] as Array<{
+      purchaseId: string; purchaseNumber: string; status: string;
+      purchaseDate: string; supplierName: string;
+      unitPrice: number; quantity: number; lineTotal: number;
+    }>;
+    const rows = query(
+      `SELECT p.id AS pur_id, p.purchase_number, p.status, p.purchase_date,
+              s.name AS supplier_name,
+              pl.unit_price, pl.quantity, pl.line_total
+         FROM purchase_lines pl
+         JOIN purchases p ON p.id = pl.purchase_id
+         LEFT JOIN suppliers s ON s.id = p.supplier_id
+        WHERE pl.product_id = ?
+          AND p.status NOT IN ('DRAFT', 'CANCELLED')
+        ORDER BY p.purchase_date DESC, p.created_at DESC`,
+      [id]
+    );
+    return rows.map(r => ({
+      purchaseId: r.pur_id as string,
+      purchaseNumber: r.purchase_number as string,
+      status: (r.status as string) || '',
+      purchaseDate: (r.purchase_date as string) || '',
+      supplierName: (r.supplier_name as string) || '—',
+      unitPrice: Number(r.unit_price) || 0,
+      quantity: Number(r.quantity) || 1,
+      lineTotal: Number(r.line_total) || 0,
+    }));
+    // Dep auf `purchases` damit Status-Updates (UNPAID→PAID via recordPayment)
+    // den re-query triggern und die Zeile in der Tabelle aktualisieren.
+  }, [id, purchases]);
+
+  // Provenance-Fallback: products.supplier_name / paid_from sind Legacy-Spalten,
+  // die nur beim INITIAL anlegen via "New Item"-Form gesetzt werden. Wird das
+  // Produkt spaeter ueber "Existing Product" in weiteren Purchases verwendet,
+  // bleibt diese Spalte leer — aber die Info liegt am Lot → Purchase → Supplier /
+  // purchase_payments.method. Hier sammeln wir die distinct Werte ueber ALLE
+  // aktiven Lots; wenn nur einer existiert, zeigen wir den. Sonst joinen wir
+  // (z.B. "Swiss Watch LLC, Souq Trader") — damit der User sieht woher die
+  // Charge tatsaechlich kommt.
+  const lotProvenance = useMemo(() => {
+    if (!id) return { supplier: null as string | null, paidFrom: null as string | null };
+    const rows = query(
+      `SELECT DISTINCT s.name AS supplier_name, pp.method AS paid_method
+         FROM stock_lots sl
+         LEFT JOIN purchases p ON p.id = sl.purchase_id
+         LEFT JOIN suppliers s ON s.id = p.supplier_id
+         LEFT JOIN purchase_payments pp ON pp.purchase_id = sl.purchase_id
+        WHERE sl.product_id = ? AND sl.status != 'CANCELLED'`,
+      [id]
+    );
+    const suppliers = Array.from(new Set(rows.map(r => (r.supplier_name as string | null) || '').filter(Boolean)));
+    const methods = Array.from(new Set(rows.map(r => (r.paid_method as string | null) || '').filter(Boolean)));
+    return {
+      supplier: suppliers.length > 0 ? suppliers.join(', ') : null,
+      paidFrom: methods.length > 0 ? methods.map(m => m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m).join(', ') : null,
+    };
+  }, [id, products]);
   // Im Edit-Mode: Kategorie aus form.categoryId → Felder passen sich live an.
   // Im Read-Mode: Kategorie aus product.categoryId.
   const category = useMemo(() => {
@@ -109,6 +259,11 @@ export function ProductDetail() {
     // nicht im Edit-Mode. validate() läuft nur noch für visuelle Inline-Hints —
     // Save geht immer durch. Vom Handy soll man jederzeit teil-speichern können,
     // Details kommen wenn sie kommen.
+    // EINZIGE Ausnahme: SKU-Duplikate werden hart geblockt (Datenintegrität).
+    if (form.sku && isSkuTaken(form.sku, id)) {
+      setErrors({ ...validate(), sku: 'Diese SKU / Reference ist bereits vergeben.' });
+      return;
+    }
     setErrors(validate());
     const margin = form.plannedSalePrice ? form.plannedSalePrice - (form.purchasePrice || 0) : undefined;
     updateProduct(id, {
@@ -146,17 +301,17 @@ export function ProductDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/collection')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
           >
-            <ArrowLeft size={16} /> Collection
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
@@ -392,7 +547,7 @@ export function ProductDetail() {
                 <div id="field-name">
                   <Input label="NAME / MODEL *" value={form.name || ''} error={errors.name} onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
                 </div>
-                <Input label="SKU / REFERENCE" value={form.sku || ''} onChange={e => setForm({ ...form, sku: e.target.value })} />
+                <SkuInput value={form.sku || ''} onChange={v => { setForm({ ...form, sku: v }); if (errors.sku) setErrors({ ...errors, sku: '' }); }} excludeProductId={id} />
                 <Input label="QUANTITY (STÜCKZAHL)" type="number" min="0"
                   value={form.quantity ?? 1}
                   onChange={e => setForm({ ...form, quantity: Math.max(0, Number(e.target.value) || 0) })} />
@@ -418,13 +573,20 @@ export function ProductDetail() {
                 {product.sku && <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', display: 'block', marginTop: 8 }}>{product.sku}</span>}
                 <div className="flex items-center gap-4" style={{ marginTop: 12, flexWrap: 'wrap' }}>
                   <StatusDot status={product.stockStatus} />
-                  {(product.quantity || 1) > 1 && (
-                    <span className="font-mono" style={{
-                      fontSize: 12, color: '#AA956E',
-                      padding: '3px 10px', border: '1px solid rgba(170,149,110,0.4)',
-                      borderRadius: 999,
-                    }}>x {product.quantity}</span>
-                  )}
+                  {(() => {
+                    // Phase 7: Stueck-Anzahl aus aktiven Lots (echte verfuegbare Stuecke),
+                    // Fallback auf legacy product.quantity wenn keine Lots existieren.
+                    const lotQty = productLots.reduce((s, l) => s + l.qtyRemaining, 0);
+                    const qty = lotQty > 0 ? lotQty : (product.quantity || 1);
+                    if (qty <= 1) return null;
+                    return (
+                      <span className="font-mono" style={{
+                        fontSize: 12, color: '#AA956E',
+                        padding: '3px 10px', border: '1px solid rgba(170,149,110,0.4)',
+                        borderRadius: 999,
+                      }}>x {qty}</span>
+                    );
+                  })()}
                   {product.condition && <span style={{ fontSize: 13, color: '#4B5563' }}>{product.condition}</span>}
                 </div>
               </>
@@ -445,24 +607,24 @@ export function ProductDetail() {
                 <>
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                     <span className="text-overline">PURCHASE PRICE</span>
-                    <span className="font-display" style={{ fontSize: 20, color: '#4B5563' }}>{fmt(product.purchasePrice)} BHD</span>
+                    <span className="font-display" style={{ fontSize: 20, color: '#4B5563' }}><Bhd v={product.purchasePrice}/> BHD</span>
                   </div>
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                     <span className="text-overline">ASKING PRICE</span>
-                    <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(product.plannedSalePrice || 0)} BHD</span>
+                    <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}><Bhd v={product.plannedSalePrice || 0}/> BHD</span>
                   </div>
                   {product.minSalePrice && product.minSalePrice > 0 && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">MIN SALE PRICE</span>
                       <span className="font-mono" style={{ fontSize: 14, color: '#AA956E' }}>
-                        {fmt(product.minSalePrice)} BHD
+                        <Bhd v={product.minSalePrice}/> BHD
                       </span>
                     </div>
                   )}
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                     <span className="text-overline">EXPECTED MARGIN</span>
                     <span className="font-mono" style={{ fontSize: 16, color: (product.expectedMargin || 0) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                      {fmt(product.expectedMargin || 0)} BHD
+                      <Bhd v={product.expectedMargin || 0}/> BHD
                     </span>
                   </div>
                 </>
@@ -488,17 +650,295 @@ export function ProductDetail() {
                 <>
                   <div className="flex justify-between" style={{ fontSize: 12 }}>
                     <span style={{ color: '#6B7280' }}>VAT Liability</span>
-                    <span className="font-mono" style={{ color: '#AA956E' }}>{fmt(taxCalc.vatLiability)} BHD</span>
+                    <span className="font-mono" style={{ color: '#AA956E' }}><Bhd v={taxCalc.vatLiability}/> BHD</span>
                   </div>
                   <div className="flex justify-between" style={{ fontSize: 12, marginTop: 2 }}>
                     <span style={{ color: '#6B7280' }}>Net Profit</span>
-                    <span className="font-mono" style={{ color: taxCalc.netProfit >= 0 ? '#7EAA6E' : '#AA6E6E' }}>{fmt(taxCalc.netProfit)} BHD</span>
+                    <span className="font-mono" style={{ color: taxCalc.netProfit >= 0 ? '#7EAA6E' : '#AA6E6E' }}><Bhd v={taxCalc.netProfit}/> BHD</span>
                   </div>
                 </>
               )}
             </div>
           </div>
         </div>
+
+        {/* Lot-Aggregat-KPIs: Quantity / Total Cost / Cost Range / Average Cost */}
+        {!editing && lotKpis && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+            <Card style={{ padding: 14 }}>
+              <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
+                <div style={{ width: 24, height: 24, borderRadius: 6, background: '#F3EEFF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Package size={12} color="#7E5BEF" />
+                </div>
+                <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.04em' }}>Quantity in Stock</span>
+              </div>
+              <div style={{ fontSize: 22, fontWeight: 600, color: '#0F0F10' }}>{lotKpis.qty}</div>
+              <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>piece{lotKpis.qty === 1 ? '' : 's'}</div>
+            </Card>
+            <Card style={{ padding: 14 }}>
+              <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
+                <div style={{ width: 24, height: 24, borderRadius: 6, background: '#F3EEFF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Tag size={12} color="#7E5BEF" />
+                </div>
+                <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.04em' }}>Total Stock Cost</span>
+              </div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: '#0F0F10' }}><Bhd v={lotKpis.totalCost}/></div>
+              <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>BHD</div>
+            </Card>
+            <Card style={{ padding: 14 }}>
+              <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
+                <div style={{ width: 24, height: 24, borderRadius: 6, background: '#F3EEFF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <BarChart3 size={12} color="#7E5BEF" />
+                </div>
+                <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.04em' }}>Cost Range</span>
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#0F0F10', lineHeight: 1.2 }}>
+                {lotKpis.hasRange ? (<><Bhd v={lotKpis.minCost}/> – <Bhd v={lotKpis.maxCost}/></>) : <Bhd v={lotKpis.minCost}/>}
+              </div>
+              <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>BHD</div>
+            </Card>
+            <Card style={{ padding: 14 }}>
+              <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
+                <div style={{ width: 24, height: 24, borderRadius: 6, background: '#F3EEFF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <PieChart size={12} color="#7E5BEF" />
+                </div>
+                <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.04em' }}>Average Cost</span>
+              </div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: '#0F0F10' }}><Bhd v={lotKpis.avgCost}/></div>
+              <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>BHD</div>
+            </Card>
+          </div>
+        )}
+
+        {/* Stock Lots — collapsible Card (Sidebar-Style) mit Supplier-Provenance pro Lot */}
+        {!editing && productLots.length > 0 && (
+          <Card style={{ marginBottom: 32, padding: 0, overflow: 'hidden' }}>
+            <button
+              type="button"
+              onClick={() => setLotsExpanded(v => !v)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '10px 14px',
+                background: 'transparent',
+                border: 'none',
+                borderBottom: lotsExpanded ? '1px solid #E5E9EE' : 'none',
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <div style={{ width: 22, height: 22, borderRadius: 6, background: '#F3EEFF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Package size={12} color="#7E5BEF" />
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Stock Lots</span>
+                <span style={{ fontSize: 11, color: '#9CA3AF' }}>({productLots.length})</span>
+              </div>
+              <ChevronDown
+                size={14}
+                color="#6B7280"
+                style={{ transform: lotsExpanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s' }}
+              />
+            </button>
+            {lotsExpanded && (
+              <>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                    <thead>
+                      <tr style={{ background: '#FAFBFC' }}>
+                        <th style={{ textAlign: 'left', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Purchase Ref</th>
+                        <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Date</th>
+                        <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Supplier</th>
+                        <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Qty</th>
+                        <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Unit Cost</th>
+                        <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Total Cost</th>
+                        <th style={{ textAlign: 'center', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {productLots.map(l => {
+                        const clickable = !!l.purchaseId;
+                        const total = l.unitCost * l.qtyRemaining;
+                        const statusLabel = l.status === 'ACTIVE' ? 'Available' : l.status === 'EXHAUSTED' ? 'Sold Out' : 'Cancelled';
+                        const statusBg = l.status === 'ACTIVE' ? '#ECFDF5' : l.status === 'EXHAUSTED' ? '#F3F4F6' : '#FEF2F2';
+                        const statusFg = l.status === 'ACTIVE' ? '#047857' : l.status === 'EXHAUSTED' ? '#6B7280' : '#B91C1C';
+                        const statusBorder = l.status === 'ACTIVE' ? '#A7F3D0' : l.status === 'EXHAUSTED' ? '#D5D9DE' : '#FECACA';
+                        return (
+                          <tr
+                            key={l.id}
+                            onClick={() => clickable && navigate(`/purchases/${l.purchaseId}`)}
+                            title={clickable ? `Open purchase ${l.purchaseNumber || ''}` : 'No purchase linked'}
+                            style={{
+                              borderTop: '1px solid #F3F4F6',
+                              cursor: clickable ? 'pointer' : 'default',
+                              transition: 'background 0.12s',
+                            }}
+                            onMouseEnter={e => { if (clickable) e.currentTarget.style.background = '#FAFBFC'; }}
+                            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                          >
+                            <td style={{ padding: '8px 14px', color: '#0F0F10', fontFamily: 'monospace', fontSize: 11 }}>{l.purchaseNumber || '—'}</td>
+                            <td style={{ padding: '8px 10px', color: '#4B5563' }}>{l.acquiredAt}</td>
+                            <td style={{ padding: '8px 10px', color: '#0F0F10' }}>{l.supplierName || <span style={{ color: '#9CA3AF' }}>— no supplier</span>}</td>
+                            <td style={{ padding: '8px 10px', textAlign: 'right', color: '#4B5563' }}>{l.qtyRemaining}</td>
+                            <td style={{ padding: '8px 10px', textAlign: 'right', color: '#0F0F10', fontFamily: 'monospace' }}>{fmt(l.unitCost)}</td>
+                            <td style={{ padding: '8px 10px', textAlign: 'right', color: '#0F0F10', fontFamily: 'monospace' }}>{fmt(total)}</td>
+                            <td style={{ padding: '8px 14px', textAlign: 'center' }}>
+                              <span style={{
+                                display: 'inline-block', padding: '2px 8px',
+                                fontSize: 10, fontWeight: 500,
+                                borderRadius: 999,
+                                background: statusBg, color: statusFg, border: `1px solid ${statusBorder}`,
+                              }}>{statusLabel}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{ padding: '6px 14px', fontSize: 10, color: '#9CA3AF', textAlign: 'center', borderTop: '1px solid #F3F4F6', background: '#FAFBFC' }}>
+                  {productLots.length} lot{productLots.length === 1 ? '' : 's'}
+                </div>
+              </>
+            )}
+          </Card>
+        )}
+
+        {/* Sales History — alle Invoices mit diesem Produkt, neueste zuerst.
+            Klick auf Zeile öffnet die Invoice. */}
+        {!editing && productSales.length > 0 && (
+          <Card style={{ marginBottom: 32, padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '10px 14px', borderBottom: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ width: 22, height: 22, borderRadius: 6, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Receipt size={12} color="#3D7FFF" />
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Sales History</span>
+              <span style={{ fontSize: 11, color: '#9CA3AF' }}>({productSales.length})</span>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: '#FAFBFC' }}>
+                    <th style={{ textAlign: 'left', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Invoice</th>
+                    <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Date</th>
+                    <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Customer</th>
+                    <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Qty</th>
+                    <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Unit Price</th>
+                    <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Total</th>
+                    <th style={{ textAlign: 'center', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productSales.map(s => {
+                    const labelMap: Record<string, { label: string; bg: string; fg: string; border: string }> = {
+                      FINAL:     { label: 'Paid',           bg: '#ECFDF5', fg: '#047857', border: '#A7F3D0' },
+                      PARTIAL:   { label: 'Partially Paid', bg: '#FFF7ED', fg: '#9A3412', border: '#FED7AA' },
+                      DRAFT:     { label: 'Draft',          bg: '#F3F4F6', fg: '#6B7280', border: '#D5D9DE' },
+                      CANCELLED: { label: 'Cancelled',      bg: '#FEF2F2', fg: '#B91C1C', border: '#FECACA' },
+                      RETURNED:  { label: 'Returned',       bg: '#F3EEFF', fg: '#6D28D9', border: '#DDD6FE' },
+                    };
+                    const meta = labelMap[s.status] || { label: s.status, bg: '#F3F4F6', fg: '#6B7280', border: '#D5D9DE' };
+                    const dateOnly = s.issuedAt ? s.issuedAt.split('T')[0] : '—';
+                    return (
+                      <tr key={s.invoiceId}
+                        onClick={() => navigate(`/invoices/${s.invoiceId}`)}
+                        title={`Open invoice ${s.invoiceNumber}`}
+                        style={{ borderTop: '1px solid #F3F4F6', cursor: 'pointer', transition: 'background 0.12s' }}
+                        onMouseEnter={e => { e.currentTarget.style.background = '#FAFBFC'; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+                        <td style={{ padding: '8px 14px', color: '#3D7FFF', fontFamily: 'monospace', fontSize: 11 }}>{formatInvoiceDisplayShort(s) || s.invoiceNumber}</td>
+                        <td style={{ padding: '8px 10px', color: '#4B5563' }}>{dateOnly}</td>
+                        <td style={{ padding: '8px 10px', color: '#0F0F10' }}>{s.customerName}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', color: '#4B5563' }}>{s.quantity}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', color: '#0F0F10', fontFamily: 'monospace' }}>{fmt(s.unitPrice)}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', color: '#0F0F10', fontFamily: 'monospace' }}>{fmt(s.lineTotal)}</td>
+                        <td style={{ padding: '8px 14px', textAlign: 'center' }}>
+                          <span style={{
+                            display: 'inline-block', padding: '2px 8px',
+                            fontSize: 10, fontWeight: 500, borderRadius: 999,
+                            background: meta.bg, color: meta.fg, border: `1px solid ${meta.border}`,
+                          }}>{meta.label}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ padding: '6px 14px', fontSize: 10, color: '#9CA3AF', textAlign: 'center', borderTop: '1px solid #F3F4F6', background: '#FAFBFC' }}>
+              {productSales.length} invoice{productSales.length === 1 ? '' : 's'}
+            </div>
+          </Card>
+        )}
+
+        {/* Purchase History — alle Purchases mit diesem Produkt, neueste zuerst.
+            Klick auf Zeile öffnet die Purchase. */}
+        {!editing && productPurchases.length > 0 && (
+          <Card style={{ marginBottom: 32, padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '10px 14px', borderBottom: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ width: 22, height: 22, borderRadius: 6, background: '#F0FDF4', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Tag size={12} color="#16A34A" />
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Purchase History</span>
+              <span style={{ fontSize: 11, color: '#9CA3AF' }}>({productPurchases.length})</span>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: '#FAFBFC' }}>
+                    <th style={{ textAlign: 'left', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Purchase</th>
+                    <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Date</th>
+                    <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Supplier</th>
+                    <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Qty</th>
+                    <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Unit Cost</th>
+                    <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Total</th>
+                    <th style={{ textAlign: 'center', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productPurchases.map(p => {
+                    const labelMap: Record<string, { label: string; bg: string; fg: string; border: string }> = {
+                      PAID:           { label: 'Paid',           bg: '#ECFDF5', fg: '#047857', border: '#A7F3D0' },
+                      PARTIALLY_PAID: { label: 'Partially Paid', bg: '#FFF7ED', fg: '#9A3412', border: '#FED7AA' },
+                      UNPAID:         { label: 'Unpaid',         bg: '#FEF2F2', fg: '#B91C1C', border: '#FECACA' },
+                      DRAFT:          { label: 'Draft',          bg: '#F3F4F6', fg: '#6B7280', border: '#D5D9DE' },
+                      CANCELLED:      { label: 'Cancelled',      bg: '#FEF2F2', fg: '#B91C1C', border: '#FECACA' },
+                    };
+                    const meta = labelMap[p.status] || { label: p.status, bg: '#F3F4F6', fg: '#6B7280', border: '#D5D9DE' };
+                    const dateOnly = p.purchaseDate ? p.purchaseDate.split('T')[0] : '—';
+                    return (
+                      <tr key={p.purchaseId}
+                        onClick={() => navigate(`/purchases/${p.purchaseId}`)}
+                        title={`Open purchase ${p.purchaseNumber}`}
+                        style={{ borderTop: '1px solid #F3F4F6', cursor: 'pointer', transition: 'background 0.12s' }}
+                        onMouseEnter={e => { e.currentTarget.style.background = '#FAFBFC'; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+                        <td style={{ padding: '8px 14px', color: '#16A34A', fontFamily: 'monospace', fontSize: 11 }}>{p.purchaseNumber}</td>
+                        <td style={{ padding: '8px 10px', color: '#4B5563' }}>{dateOnly}</td>
+                        <td style={{ padding: '8px 10px', color: '#0F0F10' }}>{p.supplierName}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', color: '#4B5563' }}>{p.quantity}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', color: '#0F0F10', fontFamily: 'monospace' }}>{fmt(p.unitPrice)}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', color: '#0F0F10', fontFamily: 'monospace' }}>{fmt(p.lineTotal)}</td>
+                        <td style={{ padding: '8px 14px', textAlign: 'center' }}>
+                          <span style={{
+                            display: 'inline-block', padding: '2px 8px',
+                            fontSize: 10, fontWeight: 500, borderRadius: 999,
+                            background: meta.bg, color: meta.fg, border: `1px solid ${meta.border}`,
+                          }}>{meta.label}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ padding: '6px 14px', fontSize: 10, color: '#9CA3AF', textAlign: 'center', borderTop: '1px solid #F3F4F6', background: '#FAFBFC' }}>
+              {productPurchases.length} purchase{productPurchases.length === 1 ? '' : 's'}
+            </div>
+          </Card>
+        )}
 
         {/* Details Grid */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
@@ -610,9 +1050,9 @@ export function ProductDetail() {
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>PAID FROM</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {([null, 'cash', 'bank'] as const).map(opt => {
+                      {([null, 'cash', 'bank', 'benefit'] as const).map(opt => {
                         const active = (form.paidFrom ?? null) === opt;
-                        const label = opt === null ? 'None' : opt === 'cash' ? 'Cash' : 'Bank';
+                        const label = opt === null ? 'None' : opt === 'cash' ? 'Cash' : opt === 'bank' ? 'Bank' : 'Benefit';
                         return (
                           <button key={String(opt)} type="button" onClick={() => setForm({ ...form, paidFrom: opt })}
                             className="cursor-pointer rounded transition-all duration-200"
@@ -650,13 +1090,26 @@ export function ProductDetail() {
                       </div>
                     </div>
                   )}
-                  {renderField('Quantity', `${product.quantity || 1} ${(product.quantity || 1) === 1 ? 'piece' : 'pieces'}`)}
+                  {(() => {
+                    // Phase 7: echte Stueck-Anzahl aus Lots; legacy product.quantity nur als Hinweis
+                    // wenn beide existieren und voneinander abweichen (Daten-Skew sichtbar machen).
+                    const lotQty = productLots.reduce((s, l) => s + l.qtyRemaining, 0);
+                    const legacyQty = product.quantity || 1;
+                    const display = lotQty > 0 ? lotQty : legacyQty;
+                    const label = `${display} ${display === 1 ? 'piece' : 'pieces'}`;
+                    const suffix = lotQty > 0 && lotQty !== legacyQty
+                      ? ` (across ${productLots.length} lot${productLots.length === 1 ? '' : 's'})`
+                      : '';
+                    return renderField('Quantity', label + suffix);
+                  })()}
                   {renderField('Condition', product.condition)}
                   {renderField('Storage', product.storageLocation)}
                   {renderField('Source', product.sourceType === 'OWN' ? 'Own' : product.sourceType === 'CONSIGNMENT' ? 'Consignment' : 'Agent')}
-                  {renderField('Supplier', product.supplierName)}
+                  {renderField('Supplier', product.supplierName || lotProvenance.supplier || undefined)}
                   {renderField('Purchase Source', product.purchaseSource)}
-                  {renderField('Paid From', product.paidFrom ? (product.paidFrom === 'cash' ? 'Cash' : 'Bank') : undefined)}
+                  {renderField('Paid From', product.paidFrom
+                    ? (product.paidFrom === 'cash' ? 'Cash' : 'Bank')
+                    : (lotProvenance.paidFrom || undefined))}
                   {renderField('Purchase Date', product.purchaseDate)}
                   {renderField('Days in Stock', product.daysInStock !== undefined ? `${product.daysInStock} days` : undefined)}
                   {product.notes && (

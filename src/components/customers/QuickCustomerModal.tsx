@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
+import { PhoneInput } from '@/components/ui/PhoneInput';
+import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
+import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { useCustomerStore } from '@/stores/customerStore';
 
 interface Props {
@@ -11,7 +14,7 @@ interface Props {
 }
 
 export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
-  const { createCustomer } = useCustomerStore();
+  const { createCustomer, customers, loadCustomers } = useCustomerStore();
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
@@ -20,9 +23,20 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
   const [personalId, setPersonalId] = useState('');
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => { if (open) loadCustomers(); }, [open, loadCustomers]);
+
   function reset() {
     setFirstName(''); setLastName(''); setPhone(''); setWhatsapp(''); setVatAccountNumber(''); setPersonalId('');
   }
+
+  // Duplicate-Check live waehrend der Eingabe.
+  const duplicateMatches = useMemo(() => {
+    if (!firstName.trim() && !lastName.trim() && !phone && !whatsapp) return [];
+    return findSimilarContacts(
+      { firstName: firstName.trim(), lastName: lastName.trim(), phone, whatsapp },
+      customers,
+    );
+  }, [firstName, lastName, phone, whatsapp, customers]);
 
   function handleSave() {
     if (!firstName.trim() && !lastName.trim()) {
@@ -56,17 +70,26 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
       width={460}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {duplicateMatches.length > 0 && (
+          <DuplicateWarningBanner
+            matches={duplicateMatches}
+            entityLabel="client"
+            onSelectMatch={c => { onCreated(c.id); reset(); onClose(); }}
+          />
+        )}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Input label="FIRST NAME" value={firstName} onChange={e => setFirstName(e.target.value)} autoFocus />
           <Input label="LAST NAME" value={lastName} onChange={e => setLastName(e.target.value)} />
         </div>
-        <Input label="PHONE" placeholder="+973..." value={phone} onChange={e => setPhone(e.target.value)} />
-        <Input label="WHATSAPP" placeholder="+973..." value={whatsapp} onChange={e => setWhatsapp(e.target.value)} />
+        <PhoneInput label="PHONE" value={phone} onChange={setPhone} />
+        <PhoneInput label="WHATSAPP" value={whatsapp} onChange={setWhatsapp} />
         <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={personalId} onChange={e => setPersonalId(e.target.value)} />
         <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={vatAccountNumber} onChange={e => setVatAccountNumber(e.target.value)} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => { reset(); onClose(); }}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>Create & Select</Button>
+          <Button variant="primary" onClick={handleSave} disabled={saving}>
+            {duplicateMatches.length > 0 ? 'Create anyway' : 'Create & Select'}
+          </Button>
         </div>
       </div>
     </Modal>

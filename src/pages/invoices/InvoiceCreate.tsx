@@ -2,29 +2,37 @@
 // Sections: Customer / Products / Tax / Pricing / Payment / Invoice Type / Summary / Actions.
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams, useParams } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Save, Printer, X, Phone } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Save, Printer, X, Phone, ChevronDown } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
 import { vatEngine } from '@/core/tax/vat-engine';
+import { getLotsWithPurchaseNumbers, formatLotLabel, getStockAggregates, type StockLot } from '@/core/lots/lot-queries';
+import { Bhd } from '@/components/ui/Bhd';
+import { getProductSpecs } from '@/core/utils/product-format';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
-type Method = 'cash' | 'bank_transfer' | 'card';
+type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
 
 interface DraftLine {
   productId: string;
   scheme: Scheme;
   quantity: number;
   unitPrice: number; // Netto pro Stück
+  lotId?: string;    // Phase 3 — explizite Lot-Auswahl pro Line; auto bei Pick.
 }
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function calcLine(unitPrice: number, qty: number, purchasePrice: number, scheme: 'VAT_10' | 'ZERO' | 'MARGIN', vatRate: number) {
@@ -45,14 +53,17 @@ function unitNetFromGross(gross: number, qty: number, scheme: 'VAT_10' | 'ZERO' 
 
 export function InvoiceCreate() {
   const navigate = useNavigate();
+  const goBack = useGoBack('/invoices');
   const [searchParams] = useSearchParams();
   const { id: editId } = useParams<{ id: string }>();
   const isEditMode = !!editId;
   const { invoices, loadInvoices, createDirectInvoice, recordPayment, updateInvoice, rewriteInvoiceLines, getInvoicePayments } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { employees, loadEmployees } = useEmployeeStore();
+  const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
 
-  useEffect(() => { loadCustomers(); loadProducts(); loadCategories(); if (isEditMode) loadInvoices(); }, [loadCustomers, loadProducts, loadCategories, loadInvoices, isEditMode]);
+  useEffect(() => { loadCustomers(); loadProducts(); loadCategories(); loadEmployees(); if (isEditMode) loadInvoices(); }, [loadCustomers, loadProducts, loadCategories, loadEmployees, loadInvoices, isEditMode]);
 
   const editInvoice = useMemo(() => isEditMode ? invoices.find(i => i.id === editId) : undefined, [isEditMode, editId, invoices]);
 
@@ -64,11 +75,15 @@ export function InvoiceCreate() {
   ]);
   // Local string state per line for editable Total — preserves trailing zeros while typing.
   const [lineTotalDrafts, setLineTotalDrafts] = useState<Record<number, string>>({});
+  const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
   const [paymentMethod, setPaymentMethod] = useState<Method>('cash');
   const [paidAmount, setPaidAmount] = useState<number>(0);
   const [notes, setNotes] = useState('');
+  const [staffId, setStaffId] = useState<string>('');
   const [error, setError] = useState('');
   const [hydrated, setHydrated] = useState(!isEditMode);
+  // 2026-05-16 — Number-Type-Dialog: erscheint wenn die Rechnung als FINAL gespeichert wird.
+  const [numberDialog, setNumberDialog] = useState<{ thenPrint: boolean } | null>(null);
   const [originalPaid, setOriginalPaid] = useState<number>(0);
 
   // Edit-Modus: einmalig Invoice + Lines + Payments in Form laden.
@@ -76,6 +91,7 @@ export function InvoiceCreate() {
     if (!isEditMode || !editInvoice || hydrated) return;
     setCustomerId(editInvoice.customerId);
     setNotes(editInvoice.notes || '');
+    setStaffId(editInvoice.staffId || '');
     if (editInvoice.issuedAt) setIssuedDate(editInvoice.issuedAt.slice(0, 10));
     const invLines = (editInvoice.lines || []).map(l => {
       const p = products.find(pp => pp.id === l.productId);
@@ -96,7 +112,7 @@ export function InvoiceCreate() {
     const payments = getInvoicePayments(editInvoice.id);
     if (payments.length > 0) {
       const m = payments[payments.length - 1].method as Method;
-      if (m === 'cash' || m === 'bank_transfer' || m === 'card') setPaymentMethod(m);
+      if (m === 'cash' || m === 'bank_transfer' || m === 'card' || m === 'benefit') setPaymentMethod(m);
     }
     setHydrated(true);
   }, [isEditMode, editInvoice, hydrated, products, getInvoicePayments]);
@@ -107,26 +123,48 @@ export function InvoiceCreate() {
     label: `${c.firstName} ${c.lastName}${c.company ? ` — ${c.company}` : ''}`,
     subtitle: c.phone,
   })), [customers]);
-  const productOptions = useMemo(() => products
-    .filter(p => p.stockStatus !== 'sold')
-    .map(p => ({
-      id: p.id,
-      label: `${p.brand} ${p.name}`,
-      subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${p.quantity || 1}`,
-      meta: p.sku,
-    })), [products]);
+  const productOptions = useMemo(() => {
+    // Plan §Sales §Partial-Payment-Reservation: 'reserved' / 'consignment_reserved'
+    // = schon auf einer PARTIAL-Invoice, darf nicht ein zweites Mal verkauft werden.
+    // 'sold' analog.
+    const visible = products.filter(p =>
+      p.stockStatus !== 'sold' &&
+      p.stockStatus !== 'reserved' &&
+      p.stockStatus !== 'consignment_reserved'
+    );
+    // Phase 7: "stock N" zeigt Lot-Total (echte verfuegbare Stuecke) statt
+    // legacy product.quantity. Eine Query fuer alle Produkte (Bulk).
+    const agg = getStockAggregates(visible.map(p => p.id));
+    return visible.map(p => {
+      const stock = agg.get(p.id)?.totalQty ?? (p.quantity || 1);
+      return {
+        id: p.id,
+        label: `${p.brand} ${p.name}`,
+        subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${stock}`,
+        meta: p.sku,
+      };
+    });
+  }, [products]);
 
   // Pro Zeile: aufgelöstes Scheme + Berechnung (Memo via direkter map)
+  // Phase 3 — Cost-Snapshot kommt aus dem ausgewaehlten Lot statt aus
+  // products.purchase_price. Wenn kein Lot existiert (Legacy-Produkte vor
+  // Backfill / direkt erstellt) faellt es auf product.purchasePrice zurueck.
   const computed = lines.map(l => {
     const product = products.find(p => p.id === l.productId);
     if (!product) {
-      return { product: undefined, scheme: 'VAT_10' as const, vatRate: 10, net: 0, vat: 0, internalVat: 0, gross: 0 };
+      return { product: undefined, lots: [] as Array<StockLot & { purchaseNumber: string | null }>,
+        selectedLot: null as (StockLot & { purchaseNumber: string | null }) | null,
+        scheme: 'VAT_10' as const, vatRate: 10, net: 0, vat: 0, internalVat: 0, gross: 0 };
     }
+    const lots = getLotsWithPurchaseNumbers(product.id);
+    const selectedLot = lots.find(lot => lot.id === l.lotId) || lots[0] || null;
+    const costBasis = selectedLot ? selectedLot.unitCost : (product.purchasePrice || 0);
     const resolved = (l.scheme === 'auto' ? (product.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') : l.scheme);
     const vatRate = resolved === 'ZERO' ? 0 : 10;
-    const calc = calcLine(l.unitPrice, l.quantity, product.purchasePrice || 0, resolved, vatRate);
+    const calc = calcLine(l.unitPrice, l.quantity, costBasis, resolved, vatRate);
     return {
-      product, scheme: resolved, vatRate,
+      product, lots, selectedLot, scheme: resolved, vatRate,
       net: calc.netAmount, vat: calc.vatAmount,
       internalVat: calc.internalVatAmount || 0, // MARGIN: VAT auf Profit (intern, nicht customer-sichtbar)
       gross: calc.grossAmount,
@@ -146,8 +184,12 @@ export function InvoiceCreate() {
   function pickProductForLine(idx: number, productId: string) {
     const p = products.find(pp => pp.id === productId);
     if (!p) return;
+    // Phase 3 — beim Produktwechsel direkt aeltesten Lot auto-picken (FIFO),
+    // damit der Cost-Snapshot deterministisch ist und User nicht extra klicken muss.
+    const lots = getLotsWithPurchaseNumbers(productId);
     updateLine(idx, {
       productId,
+      lotId: lots[0]?.id,
       unitPrice: p.plannedSalePrice ?? p.purchasePrice ?? 0,
     });
   }
@@ -175,13 +217,32 @@ export function InvoiceCreate() {
     const v = validate();
     if (v) { setError(v); return; }
 
+    // Wird die Rechnung mit diesem Save final?
+    //   Create:  paidAmount >= total
+    //   Edit:    bisher nicht final + neues paid >= total
+    const goingFinal = total > 0 && paidAmount >= total - 0.005 && (
+      !isEditMode || (editInvoice && editInvoice.status !== 'FINAL')
+    );
+    if (goingFinal) {
+      setNumberDialog({ thenPrint });
+      return;
+    }
+    performSave(thenPrint, false);
+  }
+
+  function performSave(thenPrint: boolean, specialMark: boolean) {
     const payload = lines.map((l, i) => {
       const c = computed[i];
+      // Phase 3 — Cost-Snapshot kommt vom ausgewaehlten Lot, NICHT mehr vom
+      // (potentiell veralteten) products.purchase_price. Fallback fuer Legacy-
+      // Produkte ohne Lot bleibt das Produkt-Feld.
+      const costSnapshot = c.selectedLot ? c.selectedLot.unitCost : (c.product?.purchasePrice || 0);
       return {
         productId: l.productId,
+        lotId: c.selectedLot?.id,
         quantity: Math.max(1, l.quantity),
         unitPrice: c.net / Math.max(1, l.quantity), // Netto pro Stück (für Detail-View)
-        purchasePrice: c.product?.purchasePrice || 0,
+        purchasePrice: costSnapshot,
         taxScheme: c.scheme,
         vatRate: c.vatRate,
         vatAmount: c.vat,
@@ -193,11 +254,11 @@ export function InvoiceCreate() {
       // Edit-Modus: Customer/Notes/Datum updaten, Lines neu schreiben (recomputed totals),
       // Delta-Payment buchen falls paidAmount erhöht wurde.
       const issuedIso = `${issuedDate}T00:00:00.000Z`;
-      updateInvoice(editInvoice.id, { customerId, notes: notes || undefined, issuedAt: issuedIso });
+      updateInvoice(editInvoice.id, { customerId, notes: notes || undefined, issuedAt: issuedIso, staffId: staffId || undefined });
       rewriteInvoiceLines(editInvoice.id, payload);
       const delta = paidAmount - originalPaid;
       if (delta > 0.001) {
-        recordPayment(editInvoice.id, delta, paymentMethod);
+        recordPayment(editInvoice.id, delta, paymentMethod, undefined, specialMark);
       }
       if (thenPrint) {
         navigate(`/invoices/${editInvoice.id}?print=1`);
@@ -207,11 +268,11 @@ export function InvoiceCreate() {
       return;
     }
 
-    const inv = createDirectInvoice(customerId, payload, notes || undefined, issuedDate);
+    const inv = createDirectInvoice(customerId, payload, notes || undefined, issuedDate, undefined, staffId || undefined, specialMark);
     if (!inv) { setError('Failed to create invoice'); return; }
 
     if (paidAmount > 0) {
-      recordPayment(inv.id, paidAmount, paymentMethod);
+      recordPayment(inv.id, paidAmount, paymentMethod, undefined, specialMark);
     }
 
     if (thenPrint) {
@@ -223,17 +284,17 @@ export function InvoiceCreate() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 80px', maxWidth: 1100 }}>
+      <div style={{ padding: '32px 48px 80px', maxWidth: 1500 }}>
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
           <div>
-            <button onClick={() => navigate(isEditMode && editInvoice ? `/invoices/${editInvoice.id}` : '/invoices')}
+            <button onClick={goBack}
               className="flex items-center gap-2 cursor-pointer transition-colors"
               style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13, marginBottom: 8 }}>
-              <ArrowLeft size={16} /> {isEditMode ? 'Invoice' : 'Invoices'}
+              <ArrowLeft size={16} /> Back
             </button>
             <h1 className="font-display" style={{ fontSize: 30, color: '#0F0F10', lineHeight: 1.2 }}>
-              {isEditMode ? `Edit Invoice ${editInvoice?.invoiceNumber || ''}` : 'Direct Sale'}
+              {isEditMode ? `Edit Invoice ${editInvoice ? formatInvoiceDisplayShort(editInvoice) : ''}` : 'Direct Sale'}
             </h1>
             <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>
               {isEditMode ? 'Alle Felder bearbeitbar — Speichern überschreibt die Rechnung.' : 'Customer, products, tax, payment — all on one page.'}
@@ -302,10 +363,11 @@ export function InvoiceCreate() {
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'minmax(0,2fr) minmax(0,0.9fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
+                gridTemplateColumns: '28px minmax(0,4fr) minmax(0,0.9fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
                 gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
                 fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
               }}>
+                <span></span>
                 <span>Product</span>
                 <span>Category</span>
                 <span>Tax Scheme</span>
@@ -318,12 +380,31 @@ export function InvoiceCreate() {
               {lines.map((l, idx) => {
                 const c = computed[idx];
                 const cat = c.product ? categories.find(cc => cc.id === c.product?.categoryId) : undefined;
+                const lineSpecs = c.product ? getProductSpecs(c.product, categories) : [];
+                const expanded = !!expandedLines[idx];
                 return (
-                  <div key={idx} style={{
+                <div key={idx} style={{ borderBottom: '1px solid #E5E9EE' }}>
+                  <div style={{
                     display: 'grid',
-                    gridTemplateColumns: 'minmax(0,2fr) minmax(0,0.9fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
-                    gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
+                    gridTemplateColumns: '28px minmax(0,4fr) minmax(0,0.9fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
+                    gap: 10, padding: '10px 12px', alignItems: 'center',
                   }}>
+                    {/* Chevron VOR dem Produkt — nur klickbar wenn Produkt gewaehlt und Specs vorhanden */}
+                    {c.product && lineSpecs.length > 0 ? (
+                      <button onClick={() => setExpandedLines(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                        title={expanded ? 'Details ausblenden' : 'Produkt-Details anzeigen'}
+                        className="cursor-pointer"
+                        style={{
+                          width: 28, height: 28, borderRadius: 6,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          background: expanded ? 'rgba(126,91,239,0.1)' : 'transparent',
+                          border: '1px solid ' + (expanded ? 'rgba(126,91,239,0.3)' : '#D5D9DE'),
+                          color: expanded ? '#7E5BEF' : '#6B7280',
+                          padding: 0,
+                        }}>
+                        <ChevronDown size={14} style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }} />
+                      </button>
+                    ) : <span />}
                     <div style={{ minWidth: 0 }}>
                       <SearchSelect
                         placeholder="Pick product..."
@@ -331,6 +412,31 @@ export function InvoiceCreate() {
                         value={l.productId}
                         onChange={pid => pickProductForLine(idx, pid)}
                       />
+                      {/* Phase 3 — Lot-Picker wenn mehrere ACTIVE Lots fuer das Produkt
+                          existieren. Single-Lot bleibt unsichtbar (UX wie bisher). */}
+                      {c.lots.length > 1 && (
+                        <select
+                          value={l.lotId || c.selectedLot?.id || ''}
+                          onChange={e => updateLine(idx, { lotId: e.target.value })}
+                          title="Pick which stock lot (charge) is being sold"
+                          style={{
+                            marginTop: 6, padding: '5px 7px', fontSize: 11,
+                            border: '1px solid #D5D9DE', borderRadius: 4, background: '#FFFFFF',
+                            width: '100%', color: '#4B5563',
+                          }}
+                        >
+                          {c.lots.map(lot => (
+                            <option key={lot.id} value={lot.id}>
+                              {formatLotLabel(lot, lot.purchaseNumber || undefined)}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {c.lots.length === 1 && c.selectedLot && (
+                        <div style={{ marginTop: 4, fontSize: 10, color: '#9CA3AF' }}>
+                          Lot · {c.selectedLot.unitCost.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD cost
+                        </div>
+                      )}
                     </div>
                     <span style={{ fontSize: 12, color: cat ? cat.color : '#6B7280', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {cat?.name || '—'}
@@ -348,17 +454,17 @@ export function InvoiceCreate() {
                       className="font-mono"
                       style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
                     <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {fmt(c.net / Math.max(1, l.quantity))}
+                      <Bhd v={c.net / Math.max(1, l.quantity)}/>
                     </span>
                     {c.scheme === 'MARGIN' ? (
                       <span className="font-mono" title="Internal VAT liability on margin (not shown to customer)"
                         style={{ padding: '8px 10px', fontSize: 13, color: '#FF8730', background: 'rgba(255,135,48,0.06)', border: '1px solid rgba(255,135,48,0.25)', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {fmt(c.internalVat)}
+                        <Bhd v={c.internalVat}/>
                         <span style={{ fontSize: 9, color: '#FF8730', marginLeft: 4, opacity: 0.7 }}>int</span>
                       </span>
                     ) : (
                       <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {fmt(c.vat)}
+                        <Bhd v={c.vat}/>
                       </span>
                     )}
                     <input type="text" inputMode="decimal"
@@ -374,23 +480,68 @@ export function InvoiceCreate() {
                       className="font-mono"
                       style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #0F0F10', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%', fontWeight: 600 }} />
                     <button onClick={() => removeLine(idx)}
-                      disabled={lines.length === 1}
-                      title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}
-                      className="cursor-pointer transition-all"
-                      style={{
-                        width: 36, height: 36, borderRadius: 10,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        background: lines.length === 1 ? 'rgba(220,38,38,0.05)' : 'rgba(220,38,38,0.10)',
-                        border: '1px solid ' + (lines.length === 1 ? 'rgba(220,38,38,0.15)' : 'rgba(220,38,38,0.30)'),
-                        color: '#DC2626',
-                        opacity: lines.length === 1 ? 0.4 : 1,
-                        cursor: lines.length === 1 ? 'not-allowed' : 'pointer',
-                      }}
-                      onMouseEnter={e => { if (lines.length > 1) { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; } }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
-                      <Trash2 size={16} strokeWidth={2} />
-                    </button>
+                        disabled={lines.length === 1}
+                        title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}
+                        className="cursor-pointer transition-all"
+                        style={{
+                          width: 36, height: 36, borderRadius: 10,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          background: lines.length === 1 ? 'rgba(220,38,38,0.05)' : 'rgba(220,38,38,0.10)',
+                          border: '1px solid ' + (lines.length === 1 ? 'rgba(220,38,38,0.15)' : 'rgba(220,38,38,0.30)'),
+                          color: '#DC2626',
+                          opacity: lines.length === 1 ? 0.4 : 1,
+                          cursor: lines.length === 1 ? 'not-allowed' : 'pointer',
+                        }}
+                        onMouseEnter={e => { if (lines.length > 1) { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; } }}
+                        onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
+                        <Trash2 size={16} strokeWidth={2} />
+                      </button>
                   </div>
+                  {/* Expanded Product-Detail-Panel — Specs-Grid + Image */}
+                  {expanded && c.product && (
+                    <div style={{
+                      padding: '14px 16px 16px',
+                      background: '#FAFBFC',
+                      borderTop: '1px solid #E5E9EE',
+                      display: 'grid',
+                      gridTemplateColumns: c.product.images?.length ? '100px 1fr' : '1fr',
+                      gap: 18,
+                      alignItems: 'start',
+                    }}>
+                      {c.product.images?.length ? (
+                        <div style={{
+                          width: 100, height: 100, borderRadius: 10,
+                          background: '#FFFFFF', border: '1px solid #E5E9EE',
+                          overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <img src={c.product.images[0]} alt={c.product.name}
+                            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                        </div>
+                      ) : null}
+                      <div>
+                        <div style={{ marginBottom: 8 }}>
+                          <span style={{ fontSize: 11, color: '#9CA3AF', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Produkt-Specs</span>
+                        </div>
+                        <div style={{
+                          display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                          columnGap: 18, rowGap: 8,
+                        }}>
+                          {lineSpecs.map((s, i) => (
+                            <div key={i} style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 9, color: '#9CA3AF', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 2 }}>{s.label}</div>
+                              <div style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</div>
+                            </div>
+                          ))}
+                        </div>
+                        {c.scheme === 'MARGIN' && (
+                          <div style={{ marginTop: 10, fontSize: 10, color: '#AA956E' }}>
+                            Tax-Scheme „Margin Scheme" applied: VAT 0% on Margin.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 );
               })}
             </div>
@@ -408,19 +559,19 @@ export function InvoiceCreate() {
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NET (SUM)</span>
                 <div className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}>
-                  {fmt(subtotal)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={subtotal}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>VAT</span>
                 <div className="font-display" style={{ fontSize: 22, color: '#AA956E' }}>
-                  {fmt(totalVat)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={totalVat}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>TOTAL</span>
                 <div className="font-display" style={{ fontSize: 26, color: '#C6A36D' }}>
-                  {fmt(total)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={total}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
             </div>
@@ -439,6 +590,7 @@ export function InvoiceCreate() {
                     { id: 'cash', label: 'Cash' },
                     { id: 'bank_transfer', label: 'Bank' },
                     { id: 'card', label: 'Card' },
+                    { id: 'benefit', label: 'Benefit' },
                   ] as const).map(m => {
                     const active = paymentMethod === m.id;
                     return (
@@ -470,20 +622,20 @@ export function InvoiceCreate() {
             </div>
             {isEditMode && (
               <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 6, fontSize: 12, color: '#7A6B4F' }}>
-                Bisher gezahlt: <strong>{fmt(originalPaid)} BHD</strong>. Wenn du den Betrag erhöhst, wird die Differenz als neue Zahlung gebucht. Bestehende Zahlungen werden nicht überschrieben — für detailliertes Payment-Management nutze die Detail-Seite.
+                Bisher gezahlt: <strong><Bhd v={originalPaid}/> BHD</strong>. Wenn du den Betrag erhöhst, wird die Differenz als neue Zahlung gebucht. Bestehende Zahlungen werden nicht überschrieben — für detailliertes Payment-Management nutze die Detail-Seite.
               </div>
             )}
             <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                 <span className="text-overline">PAID</span>
                 <div className="font-mono" style={{ fontSize: 17, color: '#7EAA6E', marginTop: 4 }}>
-                  {fmt(paidAmount)} BHD
+                  <Bhd v={paidAmount}/> BHD
                 </div>
               </div>
               <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                 <span className="text-overline">REMAINING</span>
                 <div className="font-mono" style={{ fontSize: 17, color: remaining > 0 ? '#AA956E' : '#7EAA6E', marginTop: 4 }}>
-                  {fmt(remaining)} BHD
+                  <Bhd v={remaining}/> BHD
                 </div>
               </div>
             </div>
@@ -510,8 +662,35 @@ export function InvoiceCreate() {
           </Card>
         </div>
 
-        {/* Notes */}
-        <div style={{ marginTop: 16 }}>
+        {/* Staff + Notes */}
+        <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'minmax(0,0.7fr) minmax(0,1.3fr)', gap: 16 }}>
+          <Card>
+            <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>STAFF</span>
+            {activeEmployees.length === 0 ? (
+              <span style={{ fontSize: 12, color: '#6B7280' }}>
+                No employees yet. <a href="/employees" style={{ color: '#3D7FFF' }}>Add one</a> to track who closed this sale.
+              </span>
+            ) : (
+              <select
+                value={staffId}
+                onChange={e => setStaffId(e.target.value)}
+                style={{
+                  width: '100%', padding: '10px 12px', fontSize: 13,
+                  border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10',
+                }}
+              >
+                <option value="">— Unassigned —</option>
+                {activeEmployees.map(emp => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.name}{emp.role ? ` · ${emp.role}` : ''}
+                  </option>
+                ))}
+              </select>
+            )}
+            <span style={{ display: 'block', marginTop: 6, fontSize: 11, color: '#6B7280' }}>
+              Who closed this sale (optional).
+            </span>
+          </Card>
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>NOTES (OPTIONAL)</span>
             <textarea value={notes} onChange={e => setNotes(e.target.value)}
@@ -526,23 +705,23 @@ export function InvoiceCreate() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 16, marginTop: 12 }}>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>SUBTOTAL</div>
-              <div className="font-mono" style={{ fontSize: 16, color: '#FFFFFF' }}>{fmt(subtotal)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 16, color: '#FFFFFF' }}><Bhd v={subtotal}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>VAT</div>
-              <div className="font-mono" style={{ fontSize: 16, color: '#C6A36D' }}>{fmt(totalVat)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 16, color: '#C6A36D' }}><Bhd v={totalVat}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>TOTAL</div>
-              <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}>{fmt(total)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}><Bhd v={total}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>PAID</div>
-              <div className="font-mono" style={{ fontSize: 16, color: '#7EAA6E' }}>{fmt(paidAmount)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 16, color: '#7EAA6E' }}><Bhd v={paidAmount}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>REMAINING</div>
-              <div className="font-mono" style={{ fontSize: 16, color: remaining > 0 ? '#AA956E' : '#7EAA6E' }}>{fmt(remaining)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 16, color: remaining > 0 ? '#AA956E' : '#7EAA6E' }}><Bhd v={remaining}/> BHD</div>
             </div>
           </div>
         </div>
@@ -566,6 +745,17 @@ export function InvoiceCreate() {
 
       <QuickCustomerModal open={showQuickCustomer} onClose={() => setShowQuickCustomer(false)}
         onCreated={(id) => { loadCustomers(); setCustomerId(id); }} />
+
+      <NumberTypeDialog
+        open={!!numberDialog}
+        variant="sales"
+        onCancel={() => setNumberDialog(null)}
+        onConfirm={(special) => {
+          const ctx = numberDialog;
+          setNumberDialog(null);
+          if (ctx) performSave(ctx.thenPrint, special);
+        }}
+      />
     </div>
   );
 }

@@ -26,6 +26,7 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+import { restoreLot, syncProductQuantity } from '@/core/lots/lot-queries';
 import type { CreditNote } from '@/core/models/types';
 
 // Wenn sich CN.cash_refund_amount oder refund_method nach erstem Posting aendert,
@@ -72,14 +73,23 @@ function repostCreditNoteFromCnId(cnId: string, occurredAt: string): void {
 
 // Disposition auf Produkt anwenden (Plan §Returns §6 + §Commission §13).
 // Wird in createReturn aufgerufen — Ware ist physisch zurück, Status muss reflektieren.
+//
+// Phase 5 — Lot-Logik je Disposition:
+//   - IN_STOCK: invoice_line.lot_id finden + restoreLot(qty). Originaler Cost-Provenance bleibt.
+//   - KEEP_AS_OWN: NEUEN Lot an unitPrice (= Sale-Preis als Acquisition-Cost). Originaler Lot
+//     bleibt EXHAUSTED — die Ware ist effektiv "verkauft & zurueckgekauft".
+//   - RETURN_TO_OWNER / WRITE_OFF / UNDER_REPAIR: kein Lot-Restore (Ware nicht im Verkauf-Bestand).
 function applyDisposition(
   db: ReturnType<typeof getDatabase>,
-  lines: Array<{ productId?: string; quantity: number; unitPrice: number }>,
+  lines: Array<{ productId?: string; quantity: number; unitPrice: number; invoiceLineId?: string }>,
   disposition: ProductDisposition,
   now: string,
+  branchId: string,
 ): void {
   for (const line of lines) {
     if (!line.productId) continue;
+    const qty = Math.max(1, line.quantity || 1);
+
     if (disposition === 'RETURN_TO_OWNER') {
       // Plan §Commission §13 A — Ware verlässt System, Consignment auf RETURNED_TO_OWNER.
       db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, line.productId]);
@@ -100,16 +110,36 @@ function applyDisposition(
          WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK')`,
         [now, line.productId]
       );
+      // Phase 5 — neuer Lot an Sale-Preis als Acquisition-Cost.
+      // Den alten (verkauften) Lot lassen wir EXHAUSTED — wirtschaftlich korrekt:
+      // Die Ware war verkauft, jetzt haben wir sie zum unitPrice "zurueckgekauft".
+      if (line.unitPrice && line.unitPrice > 0) {
+        db.run(
+          `INSERT INTO stock_lots
+             (id, branch_id, product_id, purchase_id, purchase_line_id,
+              unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
+           VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, 'ACTIVE', ?, ?)`,
+          [uuid(), branchId, line.productId, line.unitPrice, qty, qty, now.split('T')[0], now]
+        );
+      }
+      // Phase 7 Sync: products.quantity aus den jetzt korrekten Lots.
+      syncProductQuantity(line.productId);
     } else if (disposition === 'IN_STOCK') {
-      // Quantity-aware Restock.
-      const qty = Math.max(1, line.quantity || 1);
+      // Stock-Status + last_updated; quantity wird unten durch syncProductQuantity gesetzt.
       db.run(
-        `UPDATE products SET
-           quantity = COALESCE(quantity, 0) + ?,
-           stock_status = 'in_stock',
-           updated_at = ? WHERE id = ?`,
-        [qty, now, line.productId]
+        `UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
+        [now, line.productId]
       );
+      // Phase 5 — Original-Lot der Sale-Line wieder freigeben (qty zurueckgeben).
+      // So bleibt Cost-Provenance erhalten: Wenn die Ware spaeter neu verkauft
+      // wird, kommt der korrekte alte Cost-Snapshot raus.
+      if (line.invoiceLineId) {
+        const ilRows = query(`SELECT lot_id FROM invoice_lines WHERE id = ?`, [line.invoiceLineId]);
+        const lotId = (ilRows[0]?.lot_id as string | null) || null;
+        if (lotId) restoreLot(lotId, qty);
+      }
+      // Phase 7 Sync — products.quantity = Σ qty_remaining; ersetzt das frueher manuelle Increment.
+      syncProductQuantity(line.productId);
     } else {
       const newStatus = disposition === 'UNDER_REPAIR' ? 'in_repair'
         : disposition === 'WRITE_OFF' ? 'sold'
@@ -129,19 +159,55 @@ function revertDisposition(
 ): void {
   for (const line of lines) {
     if (!line.productId) continue;
+    const qty = Math.max(1, line.quantity || 1);
+
     if (disposition === 'IN_STOCK') {
-      const qty = Math.max(1, line.quantity || 1);
       db.run(
-        `UPDATE products SET
-           quantity = MAX(0, COALESCE(quantity, 0) - ?),
-           stock_status = 'sold',
-           updated_at = ? WHERE id = ?`,
-        [qty, now, line.productId]
+        `UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`,
+        [now, line.productId]
       );
+      // Phase 5 — den per applyDisposition restored Lot wieder konsumieren.
+      // Lot.qty_remaining wird um qty reduziert; bei 0 → EXHAUSTED. Spiegelt
+      // die Sale-Konsumption der Original-Invoice-Line.
+      if (line.invoiceLineId) {
+        const ilRows = query(`SELECT lot_id FROM invoice_lines WHERE id = ?`, [line.invoiceLineId]);
+        const lotId = (ilRows[0]?.lot_id as string | null) || null;
+        if (lotId) {
+          db.run(
+            `UPDATE stock_lots
+                SET qty_remaining = MAX(0, qty_remaining - ?),
+                    status = CASE WHEN qty_remaining - ? <= 0 THEN 'EXHAUSTED' ELSE status END
+              WHERE id = ?`,
+            [qty, qty, lotId]
+          );
+        }
+      }
+      // Phase 7 Sync — products.quantity aus Lots ableiten (ersetzt manuelles Decrement).
+      syncProductQuantity(line.productId);
     } else if (disposition === 'UNDER_REPAIR' || disposition === 'WRITE_OFF') {
       db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
-    } else if (disposition === 'KEEP_AS_OWN' || disposition === 'RETURN_TO_OWNER') {
-      // Nicht voll reversibel (purchase_price/source_type Snapshot fehlt). Manueller Cleanup nötig.
+    } else if (disposition === 'KEEP_AS_OWN') {
+      // Phase 5 — den per applyDisposition synthetisch erzeugten Lot cancellen.
+      // Match: branchId implizit via product_id, purchase_id/line_id NULL, plus
+      // Restbestand > 0 (sonst wuerden wir bereits konsumierte Spuren ausloeschen).
+      // Wir cancellen den juengsten passenden Lot.
+      db.run(
+        `UPDATE stock_lots
+            SET status = 'CANCELLED'
+          WHERE id IN (
+            SELECT id FROM stock_lots
+              WHERE product_id = ? AND purchase_id IS NULL AND status = 'ACTIVE'
+                AND qty_remaining = qty_total
+              ORDER BY created_at DESC, id DESC LIMIT 1
+          )`,
+        [line.productId]
+      );
+      console.warn(`[Return] reverted KEEP_AS_OWN for product ${line.productId} — purchase_price/source_type still need manual cleanup`);
+      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
+      // Phase 7 Sync — products.quantity aus den verbleibenden Lots.
+      syncProductQuantity(line.productId);
+    } else if (disposition === 'RETURN_TO_OWNER') {
+      // Nicht voll reversibel (Consignment-Status zurueck war auf RETURNED_TO_OWNER).
       console.warn(`[Return] cannot fully revert ${disposition} disposition for product ${line.productId} — manual cleanup may be needed`);
       db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
     }
@@ -197,6 +263,7 @@ interface SalesReturnStore {
     productDisposition?: ProductDisposition;
     reason?: string;
     notes?: string;
+    staffId?: string;
     lines: Array<{
       invoiceLineId: string;
       productId?: string;
@@ -244,6 +311,7 @@ function rowToReturn(row: Record<string, unknown>): SalesReturn {
     reason: (row.reason as string | null) || undefined,
     notes: row.notes as string | undefined,
     lines: [],
+    staffId: (row.staff_id as string) || undefined,
     createdAt: row.created_at as string,
     createdBy: row.created_by as string | undefined,
   };
@@ -335,11 +403,11 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     db.run(
       `INSERT INTO sales_returns (id, branch_id, return_number, invoice_id, customer_id, status, total_amount,
         vat_corrected, return_date, refund_method, refund_amount, refund_paid_amount, refund_status,
-        product_disposition, reason, notes, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 'REQUESTED', ?, ?, ?, ?, 0, 0, 'PENDING_REFUND', ?, ?, ?, ?, ?)`,
+        product_disposition, reason, notes, staff_id, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, 'REQUESTED', ?, ?, ?, ?, 0, 0, 'PENDING_REFUND', ?, ?, ?, ?, ?, ?)`,
       [id, branchId, returnNumber, input.invoiceId, customerId, total, vatCorrected, returnDate,
        input.refundMethod || null, disposition,
-       input.reason || null, input.notes || null, now, userId]
+       input.reason || null, input.notes || null, input.staffId || null, now, userId]
     );
 
     const stmt = db.prepare(
@@ -352,7 +420,7 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     stmt.free();
 
     // Plan 2026-05 §C: Disposition beim Anlegen anwenden — Ware ist physisch retour.
-    applyDisposition(db, input.lines, disposition, now);
+    applyDisposition(db, input.lines, disposition, now, branchId);
 
     saveDatabase();
     trackInsert('sales_returns', id, { returnNumber, invoiceId: input.invoiceId, total });

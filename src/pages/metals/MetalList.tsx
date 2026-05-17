@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/Input';
 import { useMetalStore } from '@/stores/metalStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { PreciousMetal, MetalType, MetalKarat, MetalStatus } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 // ── Purity factors ──
 const PURITY: Record<string, number> = {
@@ -31,7 +32,7 @@ const STATUS_FILTERS: { value: MetalStatus | ''; label: string }[] = [
 ];
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtWeight(v: number): string {
@@ -303,17 +304,17 @@ export function MetalList() {
 
             {/* Purchase */}
             <div style={{ textAlign: 'right' }}>
-              <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(purchase)}</span>
+              <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}><Bhd v={purchase}/></span>
               <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 3 }}>BHD</span>
             </div>
 
             {/* Melt Value */}
             <div style={{ textAlign: 'right' }}>
-              <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(melt)}</span>
+              <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}><Bhd v={melt}/></span>
               <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 3 }}>BHD</span>
               {purchase > 0 && (
                 <div className="font-mono" style={{ fontSize: 11, color: diff >= 0 ? '#7EAA6E' : '#AA6E6E', marginTop: 2 }}>
-                  {diff >= 0 ? '+' : ''}{fmt(diff)}
+                  {diff >= 0 ? '+' : ''}<Bhd v={diff}/>
                 </div>
               )}
             </div>
@@ -437,7 +438,7 @@ export function MetalList() {
               fontSize: 13, display: 'flex', justifyContent: 'space-between',
             }}>
               <span style={{ color: '#6B7280' }}>Melt Value (at current spot)</span>
-              <span style={{ color: '#0F0F10' }}>{fmt(formMeltValue)} BHD</span>
+              <span style={{ color: '#0F0F10' }}><Bhd v={formMeltValue}/> BHD</span>
             </div>
           )}
 
@@ -494,7 +495,7 @@ export function MetalList() {
                 {sellTarget.metalType} {sellTarget.karat || ''} · {fmtWeight(sellTarget.weightGrams)}g
               </div>
               <div className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-                Melt value: {fmt(calcMeltValue(sellTarget.weightGrams, sellTarget.karat, getSpotForType(sellTarget.metalType)))} BHD
+                Melt value: <Bhd v={calcMeltValue(sellTarget.weightGrams, sellTarget.karat, getSpotForType(sellTarget.metalType))}/> BHD
                 {sellTarget.purchaseTotal ? ` · Purchase: ${fmt(sellTarget.purchaseTotal)} BHD` : ''}
               </div>
             </div>
@@ -508,7 +509,7 @@ export function MetalList() {
             />
             {sellTarget.purchaseTotal && parseFloat(sellPrice) > 0 && (
               <div style={{ fontSize: 12, color: (parseFloat(sellPrice) - sellTarget.purchaseTotal) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                Margin: {fmt(parseFloat(sellPrice) - sellTarget.purchaseTotal)} BHD
+                Margin: <Bhd v={parseFloat(sellPrice) - sellTarget.purchaseTotal}/> BHD
               </div>
             )}
             <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
@@ -528,7 +529,7 @@ export function MetalList() {
                 {meltTarget.metalType} {meltTarget.karat || ''} · {fmtWeight(meltTarget.weightGrams)}g
               </div>
               <div className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-                Current melt value: {fmt(calcMeltValue(meltTarget.weightGrams, meltTarget.karat, getSpotForType(meltTarget.metalType)))} BHD
+                Current melt value: <Bhd v={calcMeltValue(meltTarget.weightGrams, meltTarget.karat, getSpotForType(meltTarget.metalType))}/> BHD
               </div>
             </div>
             <p style={{ fontSize: 13, color: '#4B5563' }}>

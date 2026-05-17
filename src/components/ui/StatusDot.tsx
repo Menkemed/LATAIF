@@ -4,6 +4,7 @@ const colorMap: Record<string, string> = {
   offered: '#AA956E',
   sold: '#6B7280',
   consignment: '#6E8AAA',
+  consignment_reserved: '#0F0F10',
   draft: '#6B7280',
   sent: '#6E8AAA',
   viewed: '#AA956E',

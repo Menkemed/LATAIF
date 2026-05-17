@@ -6,13 +6,17 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { PhoneInput } from '@/components/ui/PhoneInput';
+import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
+import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Partner } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 type TxKind = 'INVESTMENT' | 'WITHDRAWAL' | 'PROFIT_DISTRIBUTION';
@@ -28,7 +32,7 @@ export function PartnersPage() {
   // Tx modal
   const [txModal, setTxModal] = useState<{ partnerId: string; kind: TxKind } | null>(null);
   const [txAmount, setTxAmount] = useState('');
-  const [txMethod, setTxMethod] = useState<'cash' | 'bank'>('bank');
+  const [txMethod, setTxMethod] = useState<'cash' | 'bank' | 'benefit'>('bank');
   const [txDate, setTxDate] = useState(new Date().toISOString().split('T')[0]);
   const [txNotes, setTxNotes] = useState('');
   const [historyId, setHistoryId] = useState<string | null>(null);
@@ -57,6 +61,12 @@ export function PartnersPage() {
     setShowNewPartner(false);
     setPartnerForm({});
   }
+
+  // Duplicate-Check fuer New Partner Modal
+  const partnerDuplicateMatches = useMemo(() => {
+    if (!showNewPartner) return [];
+    return findSimilarContacts({ name: partnerForm.name, phone: partnerForm.phone }, partners);
+  }, [showNewPartner, partnerForm.name, partnerForm.phone, partners]);
 
   function handleTx() {
     if (!txModal) return;
@@ -101,19 +111,19 @@ export function PartnersPage() {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, marginBottom: 16 }}>
                 <div>
                   <span style={{ fontSize: 11, color: '#6B7280' }}>Invested</span>
-                  <div className="font-mono" style={{ fontSize: 14, color: '#16A34A' }}>{fmt(p.totalInvested || 0)}</div>
+                  <div className="font-mono" style={{ fontSize: 14, color: '#16A34A' }}><Bhd v={p.totalInvested || 0}/></div>
                 </div>
                 <div>
                   <span style={{ fontSize: 11, color: '#6B7280' }}>Withdrawn</span>
-                  <div className="font-mono" style={{ fontSize: 14, color: '#DC2626' }}>{fmt(p.totalWithdrawn || 0)}</div>
+                  <div className="font-mono" style={{ fontSize: 14, color: '#DC2626' }}><Bhd v={p.totalWithdrawn || 0}/></div>
                 </div>
                 <div>
                   <span style={{ fontSize: 11, color: '#6B7280' }}>Profit share</span>
-                  <div className="font-mono" style={{ fontSize: 14, color: '#16A34A' }}>{fmt(p.totalProfitShare || 0)}</div>
+                  <div className="font-mono" style={{ fontSize: 14, color: '#16A34A' }}><Bhd v={p.totalProfitShare || 0}/></div>
                 </div>
                 <div>
                   <span style={{ fontSize: 11, color: '#6B7280' }}>Balance</span>
-                  <div className="font-mono" style={{ fontSize: 14, color: (p.balance || 0) >= 0 ? '#0F0F10' : '#DC2626' }}>{fmt(p.balance || 0)}</div>
+                  <div className="font-mono" style={{ fontSize: 14, color: (p.balance || 0) >= 0 ? '#0F0F10' : '#DC2626' }}><Bhd v={p.balance || 0}/></div>
                 </div>
               </div>
 
@@ -138,7 +148,7 @@ export function PartnersPage() {
                       <div className="flex items-center gap-2">
                         <span style={{
                           color: t.type === 'WITHDRAWAL' ? '#DC2626' : '#16A34A',
-                        }}>{t.type === 'WITHDRAWAL' ? '−' : '+'}{fmt(t.amount)} BHD</span>
+                        }}>{t.type === 'WITHDRAWAL' ? '−' : '+'}<Bhd v={t.amount}/> BHD</span>
                         <button onClick={() => deleteTransaction(t.id)} className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }}>×</button>
                       </div>
                     </div>
@@ -153,15 +163,20 @@ export function PartnersPage() {
       {/* New Partner */}
       <Modal open={showNewPartner} onClose={() => setShowNewPartner(false)} title="New Partner" width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {partnerDuplicateMatches.length > 0 && (
+            <DuplicateWarningBanner matches={partnerDuplicateMatches} entityLabel="partner" />
+          )}
           <Input required label="NAME" placeholder="Partner full name" value={partnerForm.name || ''} onChange={e => setPartnerForm({ ...partnerForm, name: e.target.value })} autoFocus />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Input label="PHONE" value={partnerForm.phone || ''} onChange={e => setPartnerForm({ ...partnerForm, phone: e.target.value })} />
+            <PhoneInput label="PHONE" value={partnerForm.phone || ''} onChange={v => setPartnerForm({ ...partnerForm, phone: v })} />
             <Input label="EMAIL" value={partnerForm.email || ''} onChange={e => setPartnerForm({ ...partnerForm, email: e.target.value })} />
           </div>
           <Input required label="PROFIT SHARE (%)" type="number" step="0.01" placeholder="0" value={partnerForm.sharePercentage ?? ''} onChange={e => setPartnerForm({ ...partnerForm, sharePercentage: parseFloat(e.target.value) || 0 })} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewPartner(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreatePartner} disabled={!partnerForm.name}>Create Partner</Button>
+            <Button variant="primary" onClick={handleCreatePartner} disabled={!partnerForm.name}>
+              {partnerDuplicateMatches.length > 0 ? 'Create anyway' : 'Create Partner'}
+            </Button>
           </div>
         </div>
       </Modal>
@@ -178,7 +193,7 @@ export function PartnersPage() {
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>
-              {(['cash', 'bank'] as const).map(m => {
+              {(['cash', 'bank', 'benefit'] as const).map(m => {
                 const active = txMethod === m;
                 return (
                   <button key={m} onClick={() => setTxMethod(m)} className="cursor-pointer rounded"
@@ -186,7 +201,7 @@ export function PartnersPage() {
                       border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                    }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
+                    }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Benefit'}</button>
                 );
               })}
             </div>
@@ -212,7 +227,7 @@ export function PartnersPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <Input required label="NAME" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Input label="PHONE" value={editForm.phone || ''} onChange={e => setEditForm({ ...editForm, phone: e.target.value })} />
+            <PhoneInput label="PHONE" value={editForm.phone || ''} onChange={v => setEditForm({ ...editForm, phone: v })} />
             <Input label="EMAIL" value={editForm.email || ''} onChange={e => setEditForm({ ...editForm, email: e.target.value })} />
           </div>
           <Input required label="SHARE %" type="number" value={editForm.sharePercentage ?? ''}

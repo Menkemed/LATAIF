@@ -36,7 +36,7 @@ export type AIBlock =
 
 // ── Helpers ─────────────────────────────────────────────────
 
-function fmt(n: number, decimals = 2): string {
+function fmt(n: number, decimals = 3): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 function pct(n: number): string { return `${(n).toFixed(1)}%`; }

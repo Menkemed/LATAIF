@@ -2,19 +2,23 @@
 // Sections: Supplier / Items / Pricing / Initial Payment / Notes / Summary / Actions.
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Save, X, Edit3 } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Save, X, Edit3, ChevronDown } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { NewProductModal } from '@/components/products/NewProductModal';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useProductStore } from '@/stores/productStore';
+import { StaffSelect } from '@/components/employees/StaffSelect';
 import type { Product } from '@/core/models/types';
+import { getProductSpecs } from '@/core/utils/product-format';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 interface DraftLine {
@@ -36,6 +40,7 @@ interface DraftLine {
 
 export function PurchaseCreate() {
   const navigate = useNavigate();
+  const goBack = useGoBack('/purchases');
   const [searchParams] = useSearchParams();
   const { createPurchase } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
@@ -49,8 +54,9 @@ export function PurchaseCreate() {
     { mode: 'new', brand: '', name: '', sku: '', categoryId: categories[0]?.id || '', quantity: 1, unitPrice: 0 },
   ]);
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank'>('bank');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'benefit'>('bank');
   const [notes, setNotes] = useState('');
+  const [staffId, setStaffId] = useState<string>('');
   const [error, setError] = useState('');
   // Plan §Purchase §Tax: Vorsteuer-Scheme für die ganze Purchase. Default ZERO
   // (Backward-Compat); bei VAT_10 wird vat_amount per Line dekomponiert.
@@ -58,6 +64,7 @@ export function PurchaseCreate() {
 
   // Plan §Purchase §New-Item: Modal für volle Item-Erfassung (shared NewProductModal)
   const [newItemModalIdx, setNewItemModalIdx] = useState<number | null>(null);
+  const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
 
   const supplier = useMemo(() => suppliers.find(s => s.id === supplierId), [suppliers, supplierId]);
   const supplierOptions = useMemo(() => suppliers.map(s => ({
@@ -196,6 +203,7 @@ export function PurchaseCreate() {
       supplierId,
       purchaseDate,
       notes: notes || undefined,
+      staffId: staffId || undefined,
       lines: payload,
       initialPayment: paymentAmount > 0 ? { amount: paymentAmount, method: paymentMethod } : undefined,
     });
@@ -209,14 +217,14 @@ export function PurchaseCreate() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 80px', maxWidth: 1100 }}>
+      <div style={{ padding: '32px 48px 80px', maxWidth: 1500 }}>
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
           <div>
-            <button onClick={() => navigate('/purchases')}
+            <button onClick={goBack}
               className="flex items-center gap-2 cursor-pointer transition-colors"
               style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13, marginBottom: 8 }}>
-              <ArrowLeft size={16} /> Purchases
+              <ArrowLeft size={16} /> Back
             </button>
             <h1 className="font-display" style={{ fontSize: 30, color: '#0F0F10', lineHeight: 1.2 }}>New Purchase</h1>
             <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>Supplier, items, payment — all on one page.</p>
@@ -262,10 +270,11 @@ export function PurchaseCreate() {
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8 }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: '110px minmax(0,2.2fr) minmax(0,0.9fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                gridTemplateColumns: '28px 110px minmax(0,4fr) minmax(0,0.9fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
                 gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
                 fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
               }}>
+                <span></span>
                 <span>Source</span>
                 <span>Product</span>
                 <span>SKU</span>
@@ -274,12 +283,33 @@ export function PurchaseCreate() {
                 <span style={{ textAlign: 'right' }}>Line Total</span>
                 <span></span>
               </div>
-              {lines.map((l, idx) => (
-                <div key={idx} style={{
-                  display: 'grid',
-                  gridTemplateColumns: '110px minmax(0,2.2fr) minmax(0,0.9fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
-                  gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
-                }}>
+              {lines.map((l, idx) => {
+                const lineProduct = l.mode === 'existing' && l.productId ? products.find(p => p.id === l.productId) : undefined;
+                const lineSpecs = lineProduct ? getProductSpecs(lineProduct, categories) : [];
+                const expanded = !!expandedLines[idx];
+                return (
+                <div key={idx} style={{ borderBottom: '1px solid #E5E9EE' }}>
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: '28px 110px minmax(0,4fr) minmax(0,0.9fr) 60px minmax(0,1fr) minmax(0,1fr) 44px',
+                    gap: 10, padding: '10px 12px', alignItems: 'center',
+                  }}>
+                  {/* Chevron VOR Source — nur klickbar wenn Existing-Product mit Specs */}
+                  {lineProduct && lineSpecs.length > 0 ? (
+                    <button onClick={() => setExpandedLines(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                      title={expanded ? 'Details ausblenden' : 'Produkt-Details anzeigen'}
+                      className="cursor-pointer"
+                      style={{
+                        width: 28, height: 28, borderRadius: 6,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: expanded ? 'rgba(126,91,239,0.1)' : 'transparent',
+                        border: '1px solid ' + (expanded ? 'rgba(126,91,239,0.3)' : '#D5D9DE'),
+                        color: expanded ? '#7E5BEF' : '#6B7280',
+                        padding: 0,
+                      }}>
+                      <ChevronDown size={14} style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }} />
+                    </button>
+                  ) : <span />}
                   {/* Source toggle — bei „New Item" öffnet sich automatisch das Modal */}
                   <select value={l.mode}
                     onChange={e => {
@@ -353,25 +383,66 @@ export function PurchaseCreate() {
                   <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {fmt((l.quantity || 0) * (l.unitPrice || 0))}
                   </span>
-                  <button onClick={() => removeLine(idx)}
-                    disabled={lines.length === 1}
-                    title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}
-                    className="cursor-pointer transition-all"
-                    style={{
-                      width: 36, height: 36, borderRadius: 10,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: lines.length === 1 ? 'rgba(220,38,38,0.05)' : 'rgba(220,38,38,0.10)',
-                      border: '1px solid ' + (lines.length === 1 ? 'rgba(220,38,38,0.15)' : 'rgba(220,38,38,0.30)'),
-                      color: '#DC2626',
-                      opacity: lines.length === 1 ? 0.4 : 1,
-                      cursor: lines.length === 1 ? 'not-allowed' : 'pointer',
-                    }}
-                    onMouseEnter={e => { if (lines.length > 1) { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; } }}
-                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
-                    <Trash2 size={16} strokeWidth={2} />
-                  </button>
+                    <button onClick={() => removeLine(idx)}
+                      disabled={lines.length === 1}
+                      title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}
+                      className="cursor-pointer transition-all"
+                      style={{
+                        width: 36, height: 36, borderRadius: 10,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: lines.length === 1 ? 'rgba(220,38,38,0.05)' : 'rgba(220,38,38,0.10)',
+                        border: '1px solid ' + (lines.length === 1 ? 'rgba(220,38,38,0.15)' : 'rgba(220,38,38,0.30)'),
+                        color: '#DC2626',
+                        opacity: lines.length === 1 ? 0.4 : 1,
+                        cursor: lines.length === 1 ? 'not-allowed' : 'pointer',
+                      }}
+                      onMouseEnter={e => { if (lines.length > 1) { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; } }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
+                      <Trash2 size={16} strokeWidth={2} />
+                    </button>
+                  </div>
+                {/* Expanded Product-Detail-Panel — Specs-Grid + Image */}
+                {expanded && lineProduct && (
+                  <div style={{
+                    padding: '14px 16px 16px',
+                    background: '#FAFBFC',
+                    borderTop: '1px solid #E5E9EE',
+                    display: 'grid',
+                    gridTemplateColumns: lineProduct.images?.length ? '100px 1fr' : '1fr',
+                    gap: 18,
+                    alignItems: 'start',
+                  }}>
+                    {lineProduct.images?.length ? (
+                      <div style={{
+                        width: 100, height: 100, borderRadius: 10,
+                        background: '#FFFFFF', border: '1px solid #E5E9EE',
+                        overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <img src={lineProduct.images[0]} alt={lineProduct.name}
+                          style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                      </div>
+                    ) : null}
+                    <div>
+                      <div style={{ marginBottom: 8 }}>
+                        <span style={{ fontSize: 11, color: '#9CA3AF', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Produkt-Specs</span>
+                      </div>
+                      <div style={{
+                        display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                        columnGap: 18, rowGap: 8,
+                      }}>
+                        {lineSpecs.map((s, i) => (
+                          <div key={i} style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 9, color: '#9CA3AF', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 2 }}>{s.label}</div>
+                            <div style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
                 </div>
-              ))}
+                );
+              })}
             </div>
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
               „New Item&quot; öffnet ein Pop-up zum vollen Erfassen (Kategorie, Attribute, Photos, Tax-Scheme) — wie Collection &gt; New Item.
@@ -409,19 +480,19 @@ export function PurchaseCreate() {
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NET</span>
                 <div className="font-display" style={{ fontSize: 20, color: '#0F0F10' }}>
-                  {fmt(subtotal)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={subtotal}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>INPUT VAT</span>
                 <div className="font-display" style={{ fontSize: 20, color: inputVat > 0 ? '#AA956E' : '#6B7280' }}>
-                  {fmt(inputVat)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={inputVat}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>TOTAL (PAID TO SUPPLIER)</span>
                 <div className="font-display" style={{ fontSize: 24, color: '#C6A36D' }}>
-                  {fmt(total)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={total}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
             </div>
@@ -438,7 +509,7 @@ export function PurchaseCreate() {
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
                 <div className="flex gap-2" style={{ marginTop: 6 }}>
-                  {(['cash', 'bank'] as const).map(m => {
+                  {(['cash', 'bank', 'benefit'] as const).map(m => {
                     const active = paymentMethod === m;
                     return (
                       <button key={m} type="button" onClick={() => setPaymentMethod(m)}
@@ -447,7 +518,7 @@ export function PurchaseCreate() {
                           border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                           color: active ? '#0F0F10' : '#6B7280',
                           background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                        }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
+                        }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Benefit'}</button>
                     );
                   })}
                 </div>
@@ -468,8 +539,11 @@ export function PurchaseCreate() {
           </Card>
         </div>
 
-        {/* Notes */}
-        <div style={{ marginTop: 16 }}>
+        {/* Staff + Notes */}
+        <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'minmax(0,0.7fr) minmax(0,1.3fr)', gap: 16 }}>
+          <Card>
+            <StaffSelect value={staffId} onChange={setStaffId} helper="Who handled this purchase (optional)." />
+          </Card>
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>NOTES (OPTIONAL)</span>
             <textarea value={notes} onChange={e => setNotes(e.target.value)}
@@ -484,15 +558,15 @@ export function PurchaseCreate() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginTop: 12 }}>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>TOTAL</div>
-              <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}>{fmt(total)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}><Bhd v={total}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>PAID</div>
-              <div className="font-mono" style={{ fontSize: 18, color: '#7EAA6E' }}>{fmt(paymentAmount)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 18, color: '#7EAA6E' }}><Bhd v={paymentAmount}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>REMAINING</div>
-              <div className="font-mono" style={{ fontSize: 18, color: remaining > 0 ? '#AA956E' : '#7EAA6E' }}>{fmt(remaining)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 18, color: remaining > 0 ? '#AA956E' : '#7EAA6E' }}><Bhd v={remaining}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>METHOD</div>

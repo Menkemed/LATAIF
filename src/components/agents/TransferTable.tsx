@@ -11,14 +11,16 @@ import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { useAgentStore } from '@/stores/agentStore';
 import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import type { AgentTransfer, Invoice } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
@@ -27,30 +29,33 @@ function fmt(v: number): string {
 //   invoice paid≈gross  → settled
 //   invoice 0<paid<gross → partial   (orange "Partially Paid")
 //   invoice paid≈0      → sold       (= verkauft, Geld noch nicht da)
-// Für Transfers OHNE Invoice (Legacy-Settle-Pfad) bleibt der gespeicherte Status
-// die Wahrheit, ergänzt um settlementStatus für partial-Markierung.
-type TransferDisplayStatus = 'transferred' | 'sold' | 'partial' | 'settled' | 'returned';
+// Sold-Transfer ohne Invoice = "unpaid" (Forderung steht aber noch nicht
+// formal in der Buchhaltung, erst Create Invoice macht den Eintrag sauber).
+// Mit Invoice leitet sich der Display-Status komplett aus dem Invoice-Zahlungsstand ab.
+type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned';
 
 function deriveTransferDisplayStatus(t: AgentTransfer, invoice?: Invoice): TransferDisplayStatus {
   if (t.status === 'returned') return 'returned';
   if (t.status === 'transferred') return 'transferred';
-  // sold / settled
   if (t.invoiceId && invoice) {
     const paid = invoice.paidAmount || 0;
     const gross = invoice.grossAmount || 0;
     if (gross > 0 && paid >= gross - 0.005) return 'settled';
     if (paid > 0.005) return 'partial';
-    return 'sold';
+    return 'unpaid';
   }
+  // sold ohne Invoice = unpaid (Forderung wartet auf Create Invoice).
+  // Legacy-Felder settlementStatus bleiben für historische Daten respektiert,
+  // aber im neuen Flow sollten sie nicht mehr verwendet werden.
   if (t.settlementStatus === 'paid') return 'settled';
   if (t.settlementStatus === 'partial') return 'partial';
-  return t.status === 'settled' ? 'settled' : 'sold';
+  return 'unpaid';
 }
 
 const STATUS_FILTERS: { value: '' | TransferDisplayStatus; label: string }[] = [
   { value: '', label: 'All' },
   { value: 'transferred', label: 'On Approval' },
-  { value: 'sold', label: 'Sold' },
+  { value: 'unpaid', label: 'Unpaid' },
   { value: 'partial', label: 'Partially Paid' },
   { value: 'settled', label: 'Settled' },
   { value: 'returned', label: 'Returned' },
@@ -64,7 +69,7 @@ interface TransferTableProps {
 
 export function TransferTable({ transfers, showAgentColumn = true, emptyMessage }: TransferTableProps) {
   const navigate = useNavigate();
-  const { agents, transfers: allTransfers, markTransferSold, markTransferReturned, markTransferSettled,
+  const { agents, transfers: allTransfers, markTransferSold, markTransferReturned,
     convertTransferToInvoice, convertTransfersToInvoice, undoTransferInvoiceConvert, updateTransfer, deleteTransfer } = useAgentStore();
   const { products } = useProductStore();
   const { customers, createCustomer } = useCustomerStore();
@@ -75,12 +80,6 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
   // Sold
   const [soldModal, setSoldModal] = useState<string | null>(null);
   const [soldPrice, setSoldPrice] = useState(0);
-
-  // Settle
-  const [settleModal, setSettleModal] = useState<string | null>(null);
-  const [settleMethod, setSettleMethod] = useState<'cash' | 'bank'>('cash');
-  const [settleAmount, setSettleAmount] = useState<string>('');
-  const [settlePartial, setSettlePartial] = useState(false);
 
   // Convert (single)
   const [convertModal, setConvertModal] = useState<string | null>(null);
@@ -274,12 +273,15 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
   }
 
   // Spalten-Layout — Checkbox vorne, Agent-Spalte optional (in Detail-Page redundant).
+  // "OUR PRICE" zeigt den ursprünglich vereinbarten agentPrice — bleibt sichtbar
+  // auch nachdem Sold den AMOUNT auf actualSalePrice hochzieht; so ist die Differenz
+  // zwischen Vereinbart und Tatsächlich auf einen Blick zu sehen.
   const gridCols = showAgentColumn
-    ? '36px 90px minmax(0,1fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.4fr)'
-    : '36px 90px minmax(0,1fr) minmax(0,1.6fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.4fr)';
+    ? '36px 90px minmax(0,1fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.4fr)'
+    : '36px 90px minmax(0,1fr) minmax(0,1.6fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.8fr) minmax(0,1.4fr)';
   const headers = showAgentColumn
-    ? ['', 'DATE', 'DOCUMENT', 'AGENT', 'ITEM', 'AMOUNT', 'PAID', 'OUTSTANDING', 'STATUS', 'ACTIONS']
-    : ['', 'DATE', 'DOCUMENT', 'ITEM', 'AMOUNT', 'PAID', 'OUTSTANDING', 'STATUS', 'ACTIONS'];
+    ? ['', 'DATE', 'DOCUMENT', 'AGENT', 'ITEM', 'OUR PRICE', 'AMOUNT', 'PAID', 'OUTSTANDING', 'STATUS', 'ACTIONS']
+    : ['', 'DATE', 'DOCUMENT', 'ITEM', 'OUR PRICE', 'AMOUNT', 'PAID', 'OUTSTANDING', 'STATUS', 'ACTIONS'];
 
   return (
     <div>
@@ -294,7 +296,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
           <div style={{ fontSize: 12, color: '#0F0F10' }}>
             <strong>{validSelectedIds.size} sold transfer(s)</strong> selected
             {sameAgent ? (
-              <> · combined settlement <span className="font-mono">{fmt(selectedTotal)} BHD</span></>
+              <> · combined settlement <span className="font-mono"><Bhd v={selectedTotal}/> BHD</span></>
             ) : (
               <span style={{ color: '#DC2626', marginLeft: 8 }}>
                 · all selections must be from the same approval / agent
@@ -350,7 +352,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             : (t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0));
         const outstanding = Math.max(0, amount - paid);
         const date = (t.transferredAt || t.createdAt || '').split('T')[0];
-        const docLabel = linkedInvoice ? `${t.transferNumber} → ${linkedInvoice.invoiceNumber}` : t.transferNumber;
+        const docLabel = linkedInvoice ? `${t.transferNumber} → ${formatInvoiceDisplayShort(linkedInvoice)}` : t.transferNumber;
         const eligible = isEligibleForBulk(t);
         const checked = validSelectedIds.has(t.id);
         return (
@@ -374,9 +376,10 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {product ? `${product.brand} ${product.name}` : '—'}
             </span>
-            <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{fmt(amount)}</span>
-            <span className="font-mono" style={{ fontSize: 12, color: paid > 0 ? '#7EAA6E' : '#6B7280' }}>{fmt(paid)}</span>
-            <span className="font-mono" style={{ fontSize: 12, color: outstanding > 0 ? '#AA6E6E' : '#6B7280' }}>{fmt(outstanding)}</span>
+            <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }} title="Originally agreed price (Our Price)"><Bhd v={t.agentPrice || 0}/></span>
+            <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={amount}/></span>
+            <span className="font-mono" style={{ fontSize: 12, color: paid > 0 ? '#7EAA6E' : '#6B7280' }}><Bhd v={paid}/></span>
+            <span className="font-mono" style={{ fontSize: 12, color: outstanding > 0 ? '#AA6E6E' : '#6B7280' }}><Bhd v={outstanding}/></span>
             <StatusDot status={deriveTransferDisplayStatus(t, linkedInvoice)} />
             <div className="flex gap-1 flex-wrap">
               {t.status === 'transferred' && (
@@ -387,20 +390,13 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Return</button>
                 </>
               )}
-              {(t.status === 'sold' || t.status === 'settled') && outstanding > 0 && (
-                <button onClick={() => {
-                  setSettleModal(t.id); setSettleMethod('cash');
-                  setSettlePartial(false);
-                  setSettleAmount(String(outstanding.toFixed(2)));
-                }}
-                  className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #0F0F10', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
-                  {paid > 0 ? 'Receive More' : 'Settle'}
-                </button>
-              )}
               {(t.status === 'sold' || t.status === 'settled') && !t.invoiceId && (
+                // Sold ohne Invoice = Unpaid. Einziger Folge-Schritt: Create Invoice.
+                // Direkt-Settle-Pfad ist abgeschafft — Zahlungen laufen exklusiv über die Invoice.
                 <button onClick={() => openConvertModal(t.id)}
-                  className="cursor-pointer flex items-center gap-1" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #715DE3', color: '#715DE3', borderRadius: 4, background: 'none' }}>
-                  <FileText size={11} /> Convert to Invoice
+                  className="cursor-pointer flex items-center gap-1"
+                  style={{ padding: '4px 10px', fontSize: 11, border: '1px solid #715DE3', color: '#FFFFFF', borderRadius: 4, background: '#715DE3', fontWeight: 500 }}>
+                  <FileText size={11} /> Create Invoice
                 </button>
               )}
               {t.invoiceId && (() => {
@@ -438,10 +434,28 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
         );
       })}
 
-      {/* Sold Modal */}
-      <Modal open={!!soldModal} onClose={() => setSoldModal(null)} title="Record Sale" width={400}>
+      {/* Sold Modal — User-Spec: tatsächlicher Verkaufspreis darf vom Our Price abweichen.
+          z.B. Our Price 285.000, tatsächlich verkauft 280.000 → das System speichert
+          den Actual-Wert, ohne den ursprünglichen Our Price zu überschreiben. */}
+      <Modal open={!!soldModal} onClose={() => setSoldModal(null)} title="Record Sale" width={420}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input required label="SALE PRICE (BHD)" type="number" value={soldPrice || ''} onChange={e => setSoldPrice(Number(e.target.value))} />
+          {soldModal && (() => {
+            const t = findTransfer(soldModal);
+            if (!t) return null;
+            const ourPrice = t.agentPrice || 0;
+            return (
+              <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
+                <div className="flex justify-between">
+                  <span style={{ color: '#6B7280' }}>Our Price (vereinbart)</span>
+                  <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={ourPrice}/> BHD</span>
+                </div>
+              </div>
+            );
+          })()}
+          <Input required label="ACTUAL SALE PRICE (BHD)" type="number"
+            placeholder="Tatsächlich verkauft — darf abweichen"
+            value={soldPrice || ''}
+            onChange={e => setSoldPrice(Number(e.target.value))} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={() => {
@@ -451,96 +465,10 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
         </div>
       </Modal>
 
-      {/* Settle Modal */}
-      <Modal open={!!settleModal} onClose={() => setSettleModal(null)} title="Settle with Agent" width={420}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {settleModal && (() => {
-            const t = findTransfer(settleModal);
-            if (!t) return null;
-            const linkedInv = t.invoiceId ? invoices.find(i => i.id === t.invoiceId) : undefined;
-            const amount = linkedInv ? linkedInv.grossAmount : ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0);
-            const prevPaid = linkedInv
-              ? (linkedInv.paidAmount || 0)
-              : (t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0);
-            const remaining = Math.max(0, amount - prevPaid);
-            return (
-              <>
-                {linkedInv && (
-                  <div style={{
-                    padding: '8px 12px', borderRadius: 8, background: 'rgba(113,93,227,0.06)',
-                    border: '1px solid rgba(113,93,227,0.25)', fontSize: 11, color: '#4B5563', lineHeight: 1.5,
-                  }}>
-                    <strong style={{ color: '#0F0F10' }}>Wird in Invoice {linkedInv.invoiceNumber} gebucht.</strong>
-                    {' '}Kein zweiter Topf — sobald die Invoice bezahlt ist, ist auch der Transfer fertig.
-                  </div>
-                )}
-                <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
-                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
-                    <span style={{ color: '#6B7280' }}>Total</span>
-                    <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(amount)} BHD</span>
-                  </div>
-                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
-                    <span style={{ color: '#6B7280' }}>Already Paid</span>
-                    <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(prevPaid)} BHD</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span style={{ color: '#6B7280' }}>Remaining</span>
-                    <span className="font-mono" style={{ color: '#DC2626' }}>{fmt(remaining)} BHD</span>
-                  </div>
-                </div>
-              </>
-            );
-          })()}
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAYMENT TYPE</span>
-            <div className="flex gap-2">
-              {[{ id: false, label: 'Full Payment' }, { id: true, label: 'Partial Payment' }].map(o => (
-                <button key={String(o.id)} onClick={() => setSettlePartial(o.id)}
-                  className="cursor-pointer rounded"
-                  style={{ padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${settlePartial === o.id ? '#0F0F10' : '#D5D9DE'}`,
-                    color: settlePartial === o.id ? '#0F0F10' : '#6B7280',
-                    background: settlePartial === o.id ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{o.label}</button>
-              ))}
-            </div>
-          </div>
-          {settlePartial && (
-            <Input required label="AMOUNT (BHD)" type="number" value={settleAmount}
-              onChange={e => setSettleAmount(e.target.value)} />
-          )}
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>RECEIVED INTO</span>
-            <div className="flex gap-2">
-              {(['cash', 'bank'] as const).map(m => (
-                <button key={m} onClick={() => setSettleMethod(m)}
-                  className="cursor-pointer rounded transition-all"
-                  style={{ padding: '8px 16px', fontSize: 13,
-                    border: `1px solid ${settleMethod === m ? '#0F0F10' : '#D5D9DE'}`,
-                    color: settleMethod === m ? '#0F0F10' : '#6B7280',
-                    background: settleMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
-              ))}
-            </div>
-            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-              Der Agent zahlt uns aus — Geld kommt rein.
-            </p>
-          </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setSettleModal(null)}>Cancel</Button>
-            <Button variant="primary" onClick={() => {
-              if (!settleModal) return;
-              const amt = settlePartial ? parseFloat(settleAmount) : undefined;
-              if (settlePartial && (!amt || amt <= 0)) return;
-              markTransferSettled(settleModal, amt, settleMethod);
-              setSettleModal(null);
-            }}>Confirm</Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* Convert Modal */}
-      <Modal open={!!convertModal} onClose={() => setConvertModal(null)} title="Convert Transfer to Invoice" width={460}>
+      {/* Create Invoice Modal — vorher "Convert Transfer to Invoice".
+          Sold-Transfer ohne Invoice bekommt eine echte Invoice. Ab da
+          läuft Payment + VAT + Customer-Outstanding über die Invoice. */}
+      <Modal open={!!convertModal} onClose={() => setConvertModal(null)} title="Create Invoice from Transfer" width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {convertModal && (() => {
             const t = findTransfer(convertModal);
@@ -560,7 +488,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                   </div>
                   <div className="flex justify-between">
                     <span style={{ color: '#6B7280' }}>Settlement (Forderung)</span>
-                    <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(settlement)} BHD</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={settlement}/> BHD</span>
                   </div>
                 </div>
                 <p style={{ fontSize: 12, color: '#6B7280' }}>
@@ -615,31 +543,8 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
       {/* Edit Transfer Modal */}
       <Modal open={!!editTransfer} onClose={() => setEditTransfer(null)} title={`Edit Transfer — ${editTransfer?.transferNumber || ''}`} width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Input required label="AGENT PRICE (BHD)" type="number" value={editTransferForm.agentPrice ?? ''}
+          <Input required label="OUR PRICE (BHD)" type="number" value={editTransferForm.agentPrice ?? ''}
             onChange={e => setEditTransferForm({ ...editTransferForm, agentPrice: Number(e.target.value) || 0 })} />
-          <Input label="MINIMUM PRICE (BHD)" type="number" value={editTransferForm.minimumPrice ?? ''}
-            onChange={e => setEditTransferForm({ ...editTransferForm, minimumPrice: Number(e.target.value) || undefined })} />
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>COMMISSION TYPE</span>
-            <div className="flex gap-2">
-              {(['percent', 'fixed'] as const).map(t => (
-                <button key={t} onClick={() => setEditTransferForm({ ...editTransferForm, commissionType: t })}
-                  className="cursor-pointer rounded"
-                  style={{ padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${(editTransferForm.commissionType ?? 'percent') === t ? '#0F0F10' : '#D5D9DE'}`,
-                    color: (editTransferForm.commissionType ?? 'percent') === t ? '#0F0F10' : '#6B7280',
-                    background: (editTransferForm.commissionType ?? 'percent') === t ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{t === 'percent' ? 'Percent' : 'Fixed'}</button>
-              ))}
-            </div>
-          </div>
-          {(editTransferForm.commissionType ?? 'percent') === 'percent' ? (
-            <Input required label="COMMISSION %" type="number" value={editTransferForm.commissionRate ?? ''}
-              onChange={e => setEditTransferForm({ ...editTransferForm, commissionRate: Number(e.target.value) || 0 })} />
-          ) : (
-            <Input required label="COMMISSION FIXED (BHD)" type="number" value={editTransferForm.commissionValue ?? ''}
-              onChange={e => setEditTransferForm({ ...editTransferForm, commissionValue: Number(e.target.value) || 0 })} />
-          )}
           <Input label="RETURN BY (DATE)" type="date" value={(editTransferForm.returnBy || '').split('T')[0]}
             onChange={e => setEditTransferForm({ ...editTransferForm, returnBy: e.target.value })} />
           <div>
@@ -689,7 +594,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                   </div>
                   <div className="flex justify-between">
                     <span style={{ color: '#6B7280' }}>Combined Settlement</span>
-                    <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(selectedTotal)} BHD</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={selectedTotal}/> BHD</span>
                   </div>
                 </div>
 
@@ -707,7 +612,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                           {product ? `${product.brand} ${product.name}` : '—'}
                         </span>
                         <span className="font-mono" style={{ color: '#0F0F10' }}>
-                          {fmt(t.settlementAmount || 0)} BHD
+                          <Bhd v={t.settlementAmount || 0}/> BHD
                         </span>
                       </div>
                     );

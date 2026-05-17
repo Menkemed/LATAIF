@@ -1,20 +1,28 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { ArrowUpRight, ArrowDownLeft, HandCoins, Plus, Wallet, Building2, Trash2 } from 'lucide-react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  ArrowUpRight, ArrowDownLeft, HandCoins, Plus, Wallet, Building2, Trash2, Smartphone,
+  AlertTriangle, Calendar, Clock, Download, FileText, X,
+} from 'lucide-react';
+import { StaffSelect } from '@/components/employees/StaffSelect';
+import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { useDebtStore } from '@/stores/debtStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Debt, DebtDirection, CashSource } from '@/core/models/types';
-import { canonicalLoanStatus } from '@/core/models/types';
+import { canonicalLoanStatus, isLoanGiven } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtDate(iso?: string): string {
@@ -36,10 +44,94 @@ function isPartial(d: Debt): boolean {
   return canonicalLoanStatus(d.status, d.amount, d.paidAmount) === 'PARTIALLY_REPAID';
 }
 
+// ── Aging (spiegelt receivables.ts) ───────────────────────────
+type AgeBucket = 'current' | '1-30' | '31-60' | '60+';
+
+function computeDaysOverdue(dueAt: string | null | undefined, issuedAt: string | undefined): number {
+  // Wenn kein Faelligkeitsdatum gesetzt ist, gilt der Loan als nicht ueberfaellig (current).
+  // Issuedauer wird optional angezeigt aber nicht fuer Aging gewertet — sonst waere jeder
+  // Loan ohne dueDate sofort ueberfaellig was nicht stimmt.
+  if (!dueAt) return 0;
+  const due = new Date(dueAt).getTime();
+  if (Number.isNaN(due)) return 0;
+  const now = Date.now();
+  return Math.floor((now - due) / (1000 * 60 * 60 * 24));
+  // issuedAt wird hier ignoriert; vorgesehen fuer ein spaeteres Aging "by issue date"-Mode falls gewuenscht.
+  void issuedAt;
+}
+
+function bucketFor(days: number): AgeBucket {
+  if (days <= 0) return 'current';
+  if (days <= 30) return '1-30';
+  if (days <= 60) return '31-60';
+  return '60+';
+}
+
+const BUCKET_META: Record<AgeBucket, { label: string; fg: string; bg: string }> = {
+  'current': { label: 'Current',    fg: '#16A34A', bg: 'rgba(22,163,74,0.08)' },
+  '1-30':    { label: '1–30 days',  fg: '#FF8730', bg: 'rgba(255,135,48,0.10)' },
+  '31-60':   { label: '31–60 days', fg: '#DC2626', bg: 'rgba(220,38,38,0.08)' },
+  '60+':     { label: '60+ days',   fg: '#7F1D1D', bg: 'rgba(127,29,29,0.10)' },
+};
+
+function ageLabel(daysOverdue: number, hasDue: boolean): { text: string; color: string } {
+  if (daysOverdue > 0) return { text: `${daysOverdue} days overdue`, color: daysOverdue > 60 ? '#7F1D1D' : daysOverdue > 30 ? '#DC2626' : '#FF8730' };
+  if (daysOverdue === 0) return { text: hasDue ? 'Due today' : 'No due date', color: hasDue ? '#FF8730' : '#6B7280' };
+  return { text: hasDue ? `in ${Math.abs(daysOverdue)} days` : 'No due date', color: '#6B7280' };
+}
+
+// ── Direction-Meta (Pill-Farben analog Receivables-Sources) ────
+const DIRECTION_META: Record<'GIVEN' | 'TAKEN', { label: string; fg: string; bg: string }> = {
+  GIVEN: { label: 'Loan Given', fg: '#16A34A', bg: 'rgba(22,163,74,0.10)' },
+  TAKEN: { label: 'Loan Taken', fg: '#DC2626', bg: 'rgba(220,38,38,0.08)' },
+};
+
+interface DebtRow {
+  debt: Debt;
+  direction: 'GIVEN' | 'TAKEN';
+  remaining: number;
+  daysOverdue: number;
+  bucket: AgeBucket;
+  customerName: string;
+}
+
+function downloadCsv(rows: DebtRow[]) {
+  const header = ['Direction', 'Loan #', 'Counterparty', 'Issued', 'Due', 'Days Overdue', 'Amount (BHD)', 'Paid (BHD)', 'Remaining (BHD)', 'Status'];
+  const lines = [header.join(',')];
+  for (const r of rows) {
+    const d = r.debt;
+    const status = canonicalLoanStatus(d.status, d.amount, d.paidAmount);
+    const cells = [
+      DIRECTION_META[r.direction].label,
+      d.loanNumber || d.id,
+      `"${(r.customerName || '').replace(/"/g, '""')}"`,
+      (d.createdAt || '').split('T')[0],
+      d.dueDate ? d.dueDate.split('T')[0] : '',
+      String(r.daysOverdue),
+      d.amount.toFixed(3),
+      d.paidAmount.toFixed(3),
+      r.remaining.toFixed(3),
+      status,
+    ];
+    lines.push(cells.join(','));
+  }
+  const csv = lines.join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `debts-${new Date().toISOString().split('T')[0]}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export function DebtsPage() {
+  const navigate = useNavigate();
   const { debts, loadDebts, createDebt, updateDebt, deleteDebt,
           paymentsByDebt, loadPaymentsForDebt, recordDebtPayment } = useDebtStore();
   const { customers, loadCustomers } = useCustomerStore();
+  const { loadEmployees } = useEmployeeStore();
+  const [overdueOnly, setOverdueOnly] = useState(false);
 
   // Plan §Filter — Dashboard-Klick übergibt ?direction=MONEY_GIVEN/MONEY_RECEIVED → in lokalen Filter mappen.
   const [searchParams, setSearchParams] = useSearchParams();
@@ -72,6 +164,7 @@ export function DebtsPage() {
     source: 'cash' as CashSource,
     dueDate: '',
     notes: '',
+    staffId: '',
   });
 
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -86,7 +179,7 @@ export function DebtsPage() {
     counterparty: '', amount: '', dueDate: '', notes: '', source: 'cash',
   });
 
-  useEffect(() => { loadDebts(); loadCustomers(); }, [loadDebts, loadCustomers]);
+  useEffect(() => { loadDebts(); loadCustomers(); loadEmployees(); }, [loadDebts, loadCustomers, loadEmployees]);
 
   useEffect(() => {
     if (detailId) {
@@ -102,29 +195,75 @@ export function DebtsPage() {
 
   // URL-Param: /debts?customer=:id → nur Loans dieses Kunden anzeigen.
   const customerFilter = searchParams.get('customer') || '';
+  const staffFilter = searchParams.get('staff') || '';
 
-  const filtered = useMemo(() => {
+  // Rich rows: jede Debt wird zu einer DebtRow mit Aging-Werten angereichert.
+  // Filter-Reihenfolge: customer/staff (URL) -> direction/status (Filter-Pills) -> overdue -> search.
+  const filtered: DebtRow[] = useMemo(() => {
     let r = debts;
     if (customerFilter) r = r.filter(d => d.customerId === customerFilter);
+    if (staffFilter) r = r.filter(d => d.staffId === staffFilter);
     if (filter === 'open') r = r.filter(isOpen);
     else if (filter === 'settled') r = r.filter(isSettled);
     else if (filter === 'partial') r = r.filter(isPartial);
-    else if (filter === 'we_lend') r = r.filter(d => d.direction === 'we_lend');
-    else if (filter === 'we_borrow') r = r.filter(d => d.direction === 'we_borrow');
+    else if (filter === 'we_lend') r = r.filter(d => isLoanGiven(d.direction));
+    else if (filter === 'we_borrow') r = r.filter(d => !isLoanGiven(d.direction));
     if (search) r = r.filter(d => matchesDeep(d, search, [getCustomer(d.customerId)]));
-    return r;
-  }, [debts, filter, search, customers, customerFilter]);
+    const rows: DebtRow[] = r.map(d => {
+      const remaining = Math.max(0, d.amount - d.paidAmount);
+      const daysOverdue = computeDaysOverdue(d.dueDate, d.createdAt);
+      const cust = getCustomer(d.customerId);
+      return {
+        debt: d,
+        direction: isLoanGiven(d.direction) ? 'GIVEN' : 'TAKEN',
+        remaining,
+        daysOverdue,
+        bucket: bucketFor(daysOverdue),
+        customerName: cust ? `${cust.firstName} ${cust.lastName}`.trim() : (d.counterparty || '—'),
+      };
+    });
+    const finalRows = overdueOnly ? rows.filter(x => x.daysOverdue > 0 && isOpen(x.debt)) : rows;
+    // Sort: am staerksten ueberfaellig zuerst, dann nach remaining desc.
+    finalRows.sort((a, b) => {
+      if (b.daysOverdue !== a.daysOverdue) return b.daysOverdue - a.daysOverdue;
+      return b.remaining - a.remaining;
+    });
+    return finalRows;
+  }, [debts, filter, search, customers, customerFilter, staffFilter, overdueOnly]);
 
-  // KPIs
-  const openLent = debts.filter(d => d.direction === 'we_lend' && isOpen(d))
+  // KPIs — robust gegen Legacy-Direction ('we_lend'/'we_borrow') und kanonische ('MONEY_GIVEN'/'MONEY_RECEIVED').
+  const openLent = debts.filter(d => isLoanGiven(d.direction) && isOpen(d))
                         .reduce((s, d) => s + (d.amount - d.paidAmount), 0);
-  const openBorrowed = debts.filter(d => d.direction === 'we_borrow' && isOpen(d))
+  const openBorrowed = debts.filter(d => !isLoanGiven(d.direction) && isOpen(d))
                             .reduce((s, d) => s + (d.amount - d.paidAmount), 0);
+
+  // Aging-Buckets (nur OPEN/PARTIAL; settled raus, sonst zaehlt repaid quasi "current" mit).
+  const openRowsAll: DebtRow[] = useMemo(() => debts
+    .filter(isOpen)
+    .map(d => {
+      const remaining = Math.max(0, d.amount - d.paidAmount);
+      const daysOverdue = computeDaysOverdue(d.dueDate, d.createdAt);
+      return { debt: d, direction: isLoanGiven(d.direction) ? 'GIVEN' as const : 'TAKEN' as const,
+               remaining, daysOverdue, bucket: bucketFor(daysOverdue),
+               customerName: getCustomer(d.customerId)?.firstName || d.counterparty || '' };
+    }), [debts, customers]);
+  const buckets = useMemo(() => {
+    const out: Record<AgeBucket, { total: number; count: number }> = {
+      current: { total: 0, count: 0 },
+      '1-30':   { total: 0, count: 0 },
+      '31-60':  { total: 0, count: 0 },
+      '60+':    { total: 0, count: 0 },
+    };
+    for (const r of openRowsAll) { out[r.bucket].total += r.remaining; out[r.bucket].count++; }
+    return out;
+  }, [openRowsAll]);
+  const totalOpen = openRowsAll.reduce((s, r) => s + r.remaining, 0);
+  const overdueN = openRowsAll.filter(r => r.daysOverdue > 0).length;
 
   function resetForm() {
     setForm({
       direction: 'we_lend', counterparty: '', customerId: '',
-      amount: '', source: 'cash', dueDate: '', notes: '',
+      amount: '', source: 'cash', dueDate: '', notes: '', staffId: '',
     });
   }
 
@@ -149,6 +288,7 @@ export function DebtsPage() {
       source: form.source,
       dueDate: form.dueDate || undefined,
       notes: form.notes.trim() || undefined,
+      staffId: form.staffId || undefined,
     });
     setShowNew(false);
     resetForm();
@@ -171,119 +311,290 @@ export function DebtsPage() {
   return (
     <PageLayout
       title="Debts"
-      subtitle={`${debts.length} entries \u00b7 open: ${debts.filter(isOpen).length}`}
+      subtitle={`${openRowsAll.length} open \u00b7 ${overdueN} overdue \u00b7 ${fmt(totalOpen)} BHD total`}
       showSearch onSearch={setSearch} searchPlaceholder="Search counterparty, notes..."
       actions={
-        <Button variant="primary" onClick={() => setShowNew(true)}><Plus size={14} /> New Debt</Button>
+        <div className="flex items-center gap-2">
+          <StaffFilterPill />
+          <button
+            onClick={() => downloadCsv(filtered)}
+            className="flex items-center gap-2 cursor-pointer transition-colors"
+            style={{
+              padding: '8px 14px', fontSize: 13, color: '#4B5563',
+              background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 8,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = '#F2F7FA')}
+            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+          >
+            <Download size={14} /> Export CSV
+          </button>
+          <Button variant="primary" onClick={() => setShowNew(true)}><Plus size={14} /> New Debt</Button>
+        </div>
       }
     >
-      {/* KPI Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
-        <div style={{ padding: '16px 20px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
-          <div className="flex items-center gap-2" style={{ marginBottom: 6 }}>
-            <ArrowUpRight size={14} style={{ color: '#AA956E' }} />
-            <span className="text-overline">OWED TO US</span>
-          </div>
-          <div className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}>{fmt(openLent)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span></div>
-        </div>
-        <div style={{ padding: '16px 20px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
-          <div className="flex items-center gap-2" style={{ marginBottom: 6 }}>
-            <ArrowDownLeft size={14} style={{ color: '#AA6E6E' }} />
-            <span className="text-overline">WE OWE</span>
-          </div>
-          <div className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}>{fmt(openBorrowed)} <span style={{ fontSize: 13, color: '#6B7280' }}>BHD</span></div>
-        </div>
+      {/* ── Aging buckets (über alle OPEN debts) ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+        {(['current', '1-30', '31-60', '60+'] as AgeBucket[]).map(b => {
+          const meta = BUCKET_META[b];
+          const data = buckets[b];
+          return (
+            <Card key={b}>
+              <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: meta.fg, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>{meta.label}</span>
+                <div style={{
+                  width: 30, height: 30, borderRadius: 8, background: meta.bg,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', color: meta.fg,
+                }}>
+                  {b === 'current' ? <Clock size={14} /> : <AlertTriangle size={14} />}
+                </div>
+              </div>
+              <div className="font-display" style={{ fontSize: 24, color: '#0F0F10', lineHeight: 1.1 }}>
+                <Bhd v={data.total}/> <span style={{ fontSize: 11, color: '#6B7280' }}>BHD</span>
+              </div>
+              <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+                {data.count} {data.count === 1 ? 'loan' : 'loans'}
+              </div>
+            </Card>
+          );
+        })}
       </div>
 
-      {/* Filter pills */}
-      <div className="flex gap-2" style={{ marginBottom: 16 }}>
+      {/* ── Filter bar (Direction- + Status-Chips + Overdue Toggle + Reset) ── */}
+      <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', marginBottom: 16 }}>
+        <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', marginRight: 4 }}>Direction</span>
         {([
-          { id: 'all', label: 'All' },
-          { id: 'open', label: 'Open' },
-          { id: 'partial', label: 'Partially Repaid' },
-          { id: 'settled', label: 'Repaid' },
-          { id: 'we_lend', label: 'We Lend' },
-          { id: 'we_borrow', label: 'We Borrow' },
-        ] as { id: Filter; label: string }[]).map(f => (
-          <button key={f.id} onClick={() => setFilter(f.id)}
-            className="cursor-pointer" style={{
-              padding: '6px 14px', fontSize: 11, borderRadius: 999, border: 'none',
-              background: filter === f.id ? 'rgba(15,15,16,0.08)' : 'transparent',
-              color: filter === f.id ? '#0F0F10' : '#6B7280',
-            }}>{f.label}</button>
-        ))}
+          { id: 'we_lend' as Filter,   dirKey: 'GIVEN' as const },
+          { id: 'we_borrow' as Filter, dirKey: 'TAKEN' as const },
+        ]).map(({ id, dirKey }) => {
+          const meta = DIRECTION_META[dirKey];
+          const active = filter === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setFilter(active ? 'all' : id)}
+              className="cursor-pointer transition-all duration-150"
+              style={{
+                padding: '5px 12px', fontSize: 12, borderRadius: 999, fontWeight: 500,
+                color: active ? meta.fg : '#6B7280',
+                background: active ? meta.bg : 'transparent',
+                border: `1px solid ${active ? meta.fg + '40' : '#D5D9DE'}`,
+              }}
+            >
+              {meta.label}
+            </button>
+          );
+        })}
+        <span style={{ width: 1, height: 18, background: '#E5E9EE', margin: '0 6px' }} />
+        <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', marginRight: 4 }}>Status</span>
+        {([
+          { id: 'open' as Filter,    label: 'Open' },
+          { id: 'partial' as Filter, label: 'Partial' },
+          { id: 'settled' as Filter, label: 'Repaid' },
+        ]).map(({ id, label }) => {
+          const active = filter === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setFilter(active ? 'all' : id)}
+              className="cursor-pointer transition-all duration-150"
+              style={{
+                padding: '5px 12px', fontSize: 12, borderRadius: 999, fontWeight: 500,
+                color: active ? '#0F0F10' : '#6B7280',
+                background: active ? 'rgba(15,15,16,0.08)' : 'transparent',
+                border: `1px solid ${active ? 'rgba(15,15,16,0.20)' : '#D5D9DE'}`,
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+        <button
+          onClick={() => setOverdueOnly(v => !v)}
+          className="cursor-pointer transition-all duration-150"
+          style={{
+            padding: '5px 12px', fontSize: 12, borderRadius: 999, fontWeight: 500,
+            color: overdueOnly ? '#DC2626' : '#6B7280',
+            background: overdueOnly ? 'rgba(220,38,38,0.08)' : 'transparent',
+            border: `1px solid ${overdueOnly ? 'rgba(220,38,38,0.40)' : '#D5D9DE'}`,
+            marginLeft: 4,
+          }}
+        >
+          {overdueOnly ? '✓ ' : ''}Overdue only
+        </button>
+        {(filter !== 'all' || overdueOnly || search) && (
+          <button
+            onClick={() => { setFilter('all'); setOverdueOnly(false); setSearch(''); }}
+            className="cursor-pointer flex items-center gap-1"
+            style={{
+              padding: '5px 10px', fontSize: 11, color: '#6B7280', background: 'transparent',
+              border: 'none', marginLeft: 'auto',
+            }}
+          >
+            <X size={12} /> Reset
+          </button>
+        )}
       </div>
 
-      {/* Table Header */}
-      <div style={{ display: 'grid', gridTemplateColumns: '36px minmax(0,1.6fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,0.8fr) 80px', gap: 12, padding: '0 12px 10px' }}>
-        {['', 'COUNTERPARTY', 'SOURCE', 'AMOUNT', 'PAID', 'REMAINING', 'DUE', 'STATUS'].map(h => (
-          <span key={h} className="text-overline">{h}</span>
-        ))}
+      {/* ── Table header ── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,1fr)',
+        gap: 16, padding: '0 16px 12px',
+      }}>
+        <span className="text-overline">DUE / AGE</span>
+        <span className="text-overline">DIRECTION</span>
+        <span className="text-overline">REFERENCE</span>
+        <span className="text-overline">COUNTERPARTY</span>
+        <span className="text-overline">ISSUED</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
+        <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>OUTSTANDING</span>
       </div>
       <div style={{ borderTop: '1px solid #E5E9EE' }} />
 
       {filtered.length === 0 && (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
           <HandCoins size={40} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 16px' }} />
-          <p style={{ fontSize: 14, color: '#6B7280' }}>No debts match this filter.</p>
+          <p style={{ fontSize: 14, color: '#6B7280' }}>
+            {debts.length === 0 ? 'No debts yet. Add your first loan.' : 'No debts match this filter.'}
+          </p>
         </div>
       )}
 
-      {filtered.map(d => {
-        const remaining = Math.max(0, d.amount - d.paidAmount);
+      {filtered.map(row => {
+        const d = row.debt;
         const settled = isSettled(d);
-        const isWeLend = d.direction === 'we_lend';
-        const cust = getCustomer(d.customerId);
+        const meta = DIRECTION_META[row.direction];
+        const age = ageLabel(row.daysOverdue, !!d.dueDate);
         return (
-          <div key={d.id}
+          <div
+            key={d.id}
             className="cursor-pointer transition-colors"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,1fr)',
+              gap: 16, padding: '14px 16px', alignItems: 'center',
+              borderBottom: '1px solid rgba(229,225,214,0.6)',
+            }}
             onClick={() => setDetailId(d.id)}
             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            style={{
-              display: 'grid', gridTemplateColumns: '36px minmax(0,1.6fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,0.8fr) 80px',
-              gap: 12, padding: '14px 12px', alignItems: 'center',
-              borderBottom: '1px solid #E5E9EE',
+          >
+            {/* DUE / AGE */}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: settled ? '#7EAA6E' : age.color, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {settled ? 'Repaid' : age.text}
+              </div>
+              <div className="flex items-center gap-1" style={{ fontSize: 10, color: '#6B7280', marginTop: 2 }}>
+                <Calendar size={10} /> {d.dueDate ? fmtDate(d.dueDate) : '—'}
+              </div>
+            </div>
+
+            {/* DIRECTION */}
+            <div style={{ minWidth: 0 }}>
+              <span style={{
+                padding: '3px 10px', fontSize: 11, borderRadius: 999, fontWeight: 500,
+                color: meta.fg, background: meta.bg, border: `1px solid ${meta.fg}30`,
+                whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4,
+              }}>
+                {row.direction === 'GIVEN' ? <ArrowUpRight size={11} /> : <ArrowDownLeft size={11} />}
+                {meta.label}
+              </span>
+              <div className="flex items-center gap-1" style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4 }}>
+                {d.source === 'cash' ? <Wallet size={10} /> : d.source === 'bank' ? <Building2 size={10} /> : <Smartphone size={10} />}
+                {d.source === 'cash' ? 'Cash' : d.source === 'bank' ? 'Bank' : 'Benefit'}
+              </div>
+            </div>
+
+            {/* REFERENCE (Loan number) */}
+            <div style={{ minWidth: 0 }}>
+              <span className="font-mono" style={{
+                fontSize: 13, color: '#3D7FFF', textDecoration: 'underline',
+                textUnderlineOffset: 3, textDecorationColor: 'rgba(61,127,255,0.30)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                display: 'inline-block',
+              }}>
+                {d.loanNumber || d.id.slice(0, 8)}
+              </span>
+              {d.notes && (
+                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {d.notes}
+                </div>
+              )}
+            </div>
+
+            {/* COUNTERPARTY */}
+            <div style={{ minWidth: 0 }}>
+              {d.customerId ? (
+                <span
+                  onClick={(e) => { e.stopPropagation(); navigate(`/clients/${d.customerId}`); }}
+                  className="cursor-pointer"
+                  style={{
+                    fontSize: 14, color: '#0F0F10',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    display: 'block',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = '#3D7FFF'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = '#0F0F10'; }}
+                >
+                  {row.customerName}
+                </span>
+              ) : (
+                <span style={{ fontSize: 14, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
+                  {row.customerName}
+                </span>
+              )}
+            </div>
+
+            {/* ISSUED */}
+            <div style={{ fontSize: 12, color: '#4B5563', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {fmtDate(d.createdAt)}
+            </div>
+
+            {/* AMOUNT */}
+            <div className="font-mono" style={{ textAlign: 'right', fontSize: 13, color: '#6B7280', minWidth: 0, overflow: 'hidden' }}>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={d.amount}/></div>
+              {d.paidAmount > 0 && (
+                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>
+                  paid <Bhd v={d.paidAmount}/>
+                </div>
+              )}
+            </div>
+
+            {/* OUTSTANDING */}
+            <div className="font-mono" style={{
+              textAlign: 'right', fontSize: 14, fontWeight: 600,
+              color: settled ? '#7EAA6E' : (row.daysOverdue > 0 ? '#DC2626' : '#0F0F10'),
+              minWidth: 0, overflow: 'hidden',
             }}>
-            <div className="flex items-center justify-center" title={isWeLend ? 'We lend' : 'We borrow'}
-              style={{ width: 28, height: 28, borderRadius: 8,
-                       background: isWeLend ? 'rgba(170,149,110,0.08)' : 'rgba(220,38,38,0.08)' }}>
-              {isWeLend
-                ? <ArrowUpRight size={14} style={{ color: '#AA956E' }} />
-                : <ArrowDownLeft size={14} style={{ color: '#AA6E6E' }} />}
-            </div>
-            <div>
-              <div style={{ fontSize: 13, color: '#0F0F10' }}>
-                {cust ? `${cust.firstName} ${cust.lastName}` : d.counterparty || '—'}
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {settled ? '—' : <Bhd v={row.remaining}/>}
               </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 2 }}>
-                {d.loanNumber && (
-                  <span className="font-mono" style={{ fontSize: 10, color: '#6B7280', padding: '1px 6px', border: '1px solid #D5D9DE', borderRadius: 4 }}>
-                    {d.loanNumber}
-                  </span>
-                )}
-                {d.notes && <span style={{ fontSize: 11, color: '#6B7280', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.notes}</span>}
-              </div>
+              <div style={{ fontSize: 10, color: '#9CA3AF', fontWeight: 400, marginTop: 2 }}>BHD</div>
             </div>
-            <div className="flex items-center gap-1" style={{ fontSize: 12, color: '#4B5563' }}>
-              {d.source === 'cash' ? <Wallet size={12} /> : <Building2 size={12} />}
-              {d.source === 'cash' ? 'Cash' : 'Bank'}
-            </div>
-            <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(d.amount)}</span>
-            <span className="font-mono" style={{ fontSize: 13, color: d.paidAmount > 0 ? '#7EAA6E' : '#6B7280' }}>{fmt(d.paidAmount)}</span>
-            <span className="font-mono" style={{ fontSize: 13, color: settled ? '#7EAA6E' : '#AA956E' }}>
-              {settled ? '—' : fmt(remaining)}
-            </span>
-            <span style={{ fontSize: 12, color: '#6B7280' }}>{fmtDate(d.dueDate)}</span>
-            <span style={{
-              padding: '3px 10px', fontSize: 11, borderRadius: 999,
-              color: settled ? '#7EAA6E' : '#0F0F10',
-              background: settled ? 'rgba(126,170,110,0.08)' : 'rgba(15,15,16,0.08)',
-              textAlign: 'center',
-            }}>{settled ? 'Repaid' : (isPartial(d) ? 'Partial' : 'Open')}</span>
           </div>
         );
       })}
+
+      {/* ── Footer total ── */}
+      {filtered.length > 0 && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,1fr)',
+          gap: 16, padding: '20px 16px 8px',
+          borderTop: '2px solid #E5E9EE', marginTop: 8,
+        }}>
+          <div style={{ gridColumn: 'span 5', fontSize: 12, color: '#6B7280', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <FileText size={14} />
+            Showing {filtered.length} of {debts.length} debts · Given <Bhd v={openLent}/> · Taken <Bhd v={openBorrowed}/> BHD open
+          </div>
+          <div className="font-mono" style={{ textAlign: 'right', fontSize: 13, color: '#6B7280' }}>
+            <Bhd v={filtered.reduce((s, r) => s + r.debt.amount, 0)}/>
+          </div>
+          <div className="font-mono" style={{ textAlign: 'right', fontSize: 16, fontWeight: 600, color: '#0F0F10' }}>
+            <Bhd v={filtered.reduce((s, r) => s + r.remaining, 0)}/> <span style={{ fontSize: 11, color: '#6B7280', fontWeight: 400 }}>BHD</span>
+          </div>
+        </div>
+      )}
 
       {/* New Debt Modal */}
       <Modal open={showNew} onClose={() => { setShowNew(false); resetForm(); }} title="New Debt" width={540}>
@@ -336,7 +647,7 @@ export function DebtsPage() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>{form.direction === 'we_lend' ? 'PAID FROM' : 'RECEIVED INTO'}</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {(['cash', 'bank'] as CashSource[]).map(s => (
+              {(['cash', 'bank', 'benefit'] as CashSource[]).map(s => (
                 <button key={s} onClick={() => setForm(f => ({ ...f, source: s }))}
                   className="cursor-pointer rounded flex items-center gap-2" style={{
                     padding: '8px 18px', fontSize: 12,
@@ -344,8 +655,8 @@ export function DebtsPage() {
                     color: form.source === s ? '#0F0F10' : '#6B7280',
                     background: form.source === s ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
-                  {s === 'cash' ? <Wallet size={12} /> : <Building2 size={12} />}
-                  {s === 'cash' ? 'Cash' : 'Bank'}
+                  {s === 'cash' ? <Wallet size={12} /> : s === 'bank' ? <Building2 size={12} /> : <Smartphone size={12} style={{ color: '#FF8730' }} />}
+                  {s === 'cash' ? 'Cash' : s === 'bank' ? 'Bank' : 'Benefit'}
                 </button>
               ))}
             </div>
@@ -354,6 +665,9 @@ export function DebtsPage() {
           <Input label="NOTES (optional)"
             value={form.notes}
             onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
+
+          <StaffSelect value={form.staffId} onChange={(id) => setForm(f => ({ ...f, staffId: id }))}
+            helper="Who handled this loan/debt (optional)." />
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setShowNew(false); resetForm(); }}>Cancel</Button>
@@ -370,15 +684,15 @@ export function DebtsPage() {
             <div style={{ padding: '14px 18px', background: '#F2F7FA', borderRadius: 10, border: '1px solid #E5E9EE' }}>
               <div className="flex justify-between" style={{ fontSize: 12, marginBottom: 4 }}>
                 <span style={{ color: '#6B7280' }}>Original amount</span>
-                <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(detail.amount)} BHD</span>
+                <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={detail.amount}/> BHD</span>
               </div>
               <div className="flex justify-between" style={{ fontSize: 12, marginBottom: 4 }}>
                 <span style={{ color: '#6B7280' }}>Paid so far</span>
-                <span className="font-mono" style={{ color: '#7EAA6E' }}>{fmt(detail.paidAmount)} BHD</span>
+                <span className="font-mono" style={{ color: '#7EAA6E' }}><Bhd v={detail.paidAmount}/> BHD</span>
               </div>
               <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 6, borderTop: '1px solid #E5E9EE', marginTop: 6 }}>
                 <span style={{ color: '#0F0F10' }}>Remaining</span>
-                <span className="font-mono" style={{ color: isSettled(detail) ? '#7EAA6E' : '#AA6E6E' }}>{fmt(detailRemaining)} BHD</span>
+                <span className="font-mono" style={{ color: isSettled(detail) ? '#7EAA6E' : '#AA6E6E' }}><Bhd v={detailRemaining}/> BHD</span>
               </div>
               {detail.dueDate && (
                 <div className="flex justify-between" style={{ fontSize: 11, marginTop: 8, color: '#6B7280' }}>
@@ -404,7 +718,7 @@ export function DebtsPage() {
                     <span style={{ color: '#4B5563' }}>{fmtDate(p.paidAt)}</span>
                     {p.notes && <span style={{ color: '#6B7280' }}>· {p.notes}</span>}
                   </div>
-                  <span className="font-mono" style={{ color: '#7EAA6E' }}>{fmt(p.amount)} BHD</span>
+                  <span className="font-mono" style={{ color: '#7EAA6E' }}><Bhd v={p.amount}/> BHD</span>
                 </div>
               ))}
             </div>
@@ -424,7 +738,7 @@ export function DebtsPage() {
                 <div style={{ marginTop: 10 }}>
                   <span className="text-overline" style={{ marginBottom: 6 }}>{detail.direction === 'we_lend' ? 'RECEIVED INTO' : 'PAID FROM'}</span>
                   <div className="flex gap-2" style={{ marginTop: 8 }}>
-                    {(['cash', 'bank'] as CashSource[]).map(s => (
+                    {(['cash', 'bank', 'benefit'] as CashSource[]).map(s => (
                       <button key={s} onClick={() => setPaySource(s)}
                         className="cursor-pointer rounded flex items-center gap-2" style={{
                           padding: '6px 14px', fontSize: 12,
@@ -479,14 +793,14 @@ export function DebtsPage() {
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>SOURCE</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {(['cash', 'bank'] as CashSource[]).map(s => (
+                      {(['cash', 'bank', 'benefit'] as CashSource[]).map(s => (
                         <button key={s} onClick={() => setEditForm({ ...editForm, source: s })}
                           className="cursor-pointer rounded"
                           style={{ padding: '6px 14px', fontSize: 12,
                             border: `1px solid ${editForm.source === s ? '#0F0F10' : '#D5D9DE'}`,
                             color: editForm.source === s ? '#0F0F10' : '#6B7280',
                             background: editForm.source === s ? 'rgba(15,15,16,0.06)' : 'transparent',
-                          }}>{s === 'cash' ? 'Cash' : 'Bank'}</button>
+                          }}>{s === 'cash' ? 'Cash' : s === 'bank' ? 'Bank' : 'Benefit'}</button>
                       ))}
                     </div>
                   </div>

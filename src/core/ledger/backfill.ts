@@ -28,12 +28,17 @@ import {
   postTaxPayment,
   postMetalPayment,
   postAgentSettlementPayment,
+  postAgentSettlementPaymentReversed,
+  postAgentTransferSold,
   postConsignmentPayout,
   hasLedgerEntries,
   hasReversalFor,
+  reverseSource,
+  reverseTransaction,
 } from '@/core/ledger/posting';
 import { canonicalLoanDirection } from '@/core/models/types';
 import { query } from '@/core/db/helpers';
+import { getDatabase, saveDatabase } from '@/core/db/database';
 import type {
   Invoice, InvoiceLine, Purchase, PurchaseLine, Expense,
   BankTransfer, Debt, CreditNote, Payment, PaymentMethod,
@@ -540,9 +545,10 @@ export function backfillMetalPayments(branchId: string): BackfillResult {
 export function backfillAgentSettlementPayments(branchId: string): BackfillResult {
   const res = emptyResult('agent_settlement_payments');
   const rows = query(
-    `SELECT asp.*, at.agent_id
+    `SELECT asp.*, at.agent_id, ag.customer_id
      FROM agent_settlement_payments asp
      JOIN agent_transfers at ON at.id = asp.transfer_id
+     JOIN agents ag ON ag.id = at.agent_id
      WHERE at.branch_id = ?`,
     [branchId]
   );
@@ -551,7 +557,8 @@ export function backfillAgentSettlementPayments(branchId: string): BackfillResul
     const id = r.id as string;
     if (hasLedgerEntries('AGENT_SETTLEMENT', id)) { res.skipped++; continue; }
     const method = (r.method as 'cash' | 'bank') || 'cash';
-    const agentId = (r.agent_id as string) || undefined;
+    const customerId = (r.customer_id as string) || '';
+    if (!customerId) { res.skipped++; continue; }
     safeStep(res, `agent-settle ${id.slice(0, 8)}`, () => {
       postAgentSettlementPayment(
         {
@@ -559,8 +566,267 @@ export function backfillAgentSettlementPayments(branchId: string): BackfillResul
           amount: Number(r.amount || 0), method,
           paidAt: r.paid_at as string,
         },
-        agentId
+        customerId
       );
+    });
+  }
+  return res;
+}
+
+// ── Cleanup: Verwaiste AGENT_TRANSFER_SOLD / AGENT_SETTLEMENT-Posts ─────────
+//
+// Wenn ein Transfer früher (vor dem deleteTransfer-Fix) gelöscht wurde, ohne
+// dass die zugehörigen Ledger-Posts reverst wurden, hängt die AR-Forderung
+// noch im Customer-Ledger und das Outstanding zeigt einen falschen Wert.
+// Diese Funktion findet Original-Posts ohne dazugehörigen Transfer-Datensatz
+// und reverst sie. Idempotent: bereits reversierte Posts werden geskippt.
+
+export function cleanupOrphanedAgentTransferLedger(branchId: string): BackfillResult {
+  const res = emptyResult('agent_ledger_orphan_cleanup');
+
+  // 1. Verwaiste AGENT_TRANSFER_SOLD-Posts: source_id kein passender agent_transfer.
+  const orphanedSold = query(
+    `SELECT DISTINCT le.source_id
+     FROM ledger_entries le
+     LEFT JOIN agent_transfers at ON at.id = le.source_id
+     WHERE le.source_module = 'AGENT_TRANSFER_SOLD'
+       AND le.reverses_entry_id IS NULL
+       AND le.branch_id = ?
+       AND at.id IS NULL`,
+    [branchId]
+  );
+
+  // 2. Verwaiste AGENT_SETTLEMENT-Posts: source_id kein passendes agent_settlement_payment.
+  const orphanedSettle = query(
+    `SELECT DISTINCT le.source_id
+     FROM ledger_entries le
+     LEFT JOIN agent_settlement_payments asp ON asp.id = le.source_id
+     WHERE le.source_module = 'AGENT_SETTLEMENT'
+       AND le.reverses_entry_id IS NULL
+       AND le.branch_id = ?
+       AND asp.id IS NULL`,
+    [branchId]
+  );
+
+  res.total = orphanedSold.length + orphanedSettle.length;
+
+  for (const r of orphanedSold) {
+    const sourceId = r.source_id as string;
+    if (hasReversalFor('AGENT_TRANSFER_SOLD', sourceId)) { res.skipped++; continue; }
+    safeStep(res, `orphan-sold ${sourceId.slice(0, 8)}`, () => {
+      reverseSource('AGENT_TRANSFER_SOLD', sourceId, new Date().toISOString());
+    });
+  }
+
+  for (const r of orphanedSettle) {
+    const sourceId = r.source_id as string;
+    if (hasReversalFor('AGENT_SETTLEMENT', sourceId)) { res.skipped++; continue; }
+    safeStep(res, `orphan-settle ${sourceId.slice(0, 8)}`, () => {
+      reverseSource('AGENT_SETTLEMENT', sourceId, new Date().toISOString());
+    });
+  }
+
+  // 3. Phantom AGENT_SETTLEMENT-Migration-Posts: Cash↔AR-Buchungen, die durch
+  // migrateLegacyAgentSettlements entstanden sind, deren zugehöriger
+  // AGENT_TRANSFER_SOLD aber nachträglich reversed wurde (Convert/Returned).
+  // Erkennung: AR-Bein (CREDIT) eines AGENT_SETTLEMENT, das selbst nicht
+  // reversed ist und dessen Transfer (aus metadata.transferId) keinen aktiven
+  // Sold-Post mehr hat.
+  const phantomCandidates = query(
+    `SELECT le.id, le.transaction_id, le.source_id, le.metadata_json
+     FROM ledger_entries le
+     WHERE le.source_module = 'AGENT_SETTLEMENT'
+       AND le.account = 'ACCOUNTS_RECEIVABLE'
+       AND le.direction = 'CREDIT'
+       AND le.branch_id = ?
+       AND le.reverses_entry_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM ledger_entries x WHERE x.reverses_entry_id = le.id)`,
+    [branchId]
+  );
+
+  for (const r of phantomCandidates) {
+    const txId = r.transaction_id as string;
+    const meta = (r.metadata_json as string) || '';
+    let transferId: string | null = null;
+    try {
+      const m = JSON.parse(meta);
+      if (m && typeof m.transferId === 'string') transferId = m.transferId;
+    } catch { /* ignore */ }
+    if (!transferId) { res.skipped++; continue; }
+
+    // Aktiven Sold-Post suchen (nicht reversed AND nicht zurück-reversed)
+    const activeSold = query(
+      `SELECT 1 FROM ledger_entries le
+       WHERE le.source_module = 'AGENT_TRANSFER_SOLD'
+         AND le.source_id = ?
+         AND le.direction = 'DEBIT'
+         AND le.account = 'ACCOUNTS_RECEIVABLE'
+         AND le.reverses_entry_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM ledger_entries x WHERE x.reverses_entry_id = le.id)
+       LIMIT 1`,
+      [transferId]
+    );
+    if (activeSold.length > 0) { res.skipped++; continue; } // Sold ist aktiv → Settle ist legitim
+
+    res.total++;
+    safeStep(res, `phantom-settle-tx ${txId.slice(0, 8)}`, () => {
+      reverseTransaction(txId, new Date().toISOString());
+    });
+  }
+
+  return res;
+}
+
+// ── Cleanup: Verwaiste Consignment-Post-Sale-Return Credit Notes ─────────────
+//
+// Bug-Repair 2026-05: Vor dem Fix in markReturnedAfterSale wurde bei einem
+// Post-Sale-Return einer unbezahlten Consignment-Invoice eine CN mit
+// hardcoded `cash_refund_amount = totalAmount` gepostet. Wenn die Invoice
+// danach gecancelt wurde (cancelSale), wurde NUR die Invoice-Buchung reverst —
+// die CN-Buchung blieb aktiv und erzeugt phantom CASH-/REVENUE-Bewegungen.
+// Erkennung: CN mit `Consignment post-sale return`-Reason, deren Invoice CANCELLED ist.
+// Fix: CN-Ledger reversen, dann CN- + Sales-Return-Records loeschen.
+
+export function cleanupOrphanedConsignmentReturnCN(branchId: string): BackfillResult {
+  const res = emptyResult('consignment_return_cn_cleanup');
+
+  const orphanCns = query(
+    `SELECT cn.id, cn.sales_return_id
+     FROM credit_notes cn
+     JOIN invoices i ON i.id = cn.invoice_id
+     WHERE cn.branch_id = ?
+       AND cn.reason LIKE 'Consignment post-sale return%'
+       AND i.status = 'CANCELLED'`,
+    [branchId]
+  );
+
+  res.total = orphanCns.length;
+
+  for (const r of orphanCns) {
+    const cnId = r.id as string;
+    const srId = r.sales_return_id as string | undefined;
+    safeStep(res, `orphan-cn ${cnId.slice(0, 8)}`, () => {
+      if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
+        reverseSource('CREDIT_NOTE', cnId, new Date().toISOString());
+      }
+      const db = getDatabase();
+      if (srId) {
+        db.run(`DELETE FROM sales_return_lines WHERE return_id = ?`, [srId]);
+        db.run(`DELETE FROM sales_returns WHERE id = ?`, [srId]);
+      }
+      db.run(`DELETE FROM credit_notes WHERE id = ?`, [cnId]);
+      saveDatabase();
+    });
+  }
+
+  return res;
+}
+
+// ── Migration: Legacy AGENT_SETTLEMENT (Cash↔Revenue) → neu (Cash↔AR) ───────
+//
+// Vor der Sold→AR-Umstellung postete postAgentSettlementPayment direkt
+// `DEBIT CASH/BANK ↔ CREDIT REVENUE` (kein AR-Cycle). Mit dem neuen Flow
+// (AGENT_TRANSFER_SOLD → AR↔REVENUE) erzeugen alte Settlements jetzt
+// Doppel-Revenue + nicht-reduziertes AR. Diese Migration:
+//   1. Findet alle AGENT_SETTLEMENT-Buchungen mit altem REVENUE-Bein
+//      (= Cash↔Revenue-Logik), die noch keine Reversal haben.
+//   2. Reverst die alte Buchung.
+//   3. Postet sie neu mit der Cash↔AR-Logik (counterparty CUSTOMER).
+// Idempotent: bereits migrierte Payments werden geskippt.
+
+export function migrateLegacyAgentSettlements(branchId: string): BackfillResult {
+  const res = emptyResult('agent_settle_legacy_migrate');
+  const rows = query(
+    `SELECT asp.id as payment_id, asp.transfer_id, asp.amount, asp.method, asp.paid_at,
+            ag.customer_id
+     FROM agent_settlement_payments asp
+     JOIN agent_transfers at ON at.id = asp.transfer_id
+     JOIN agents ag ON ag.id = at.agent_id
+     WHERE at.branch_id = ?`,
+    [branchId]
+  );
+  res.total = rows.length;
+  for (const r of rows) {
+    const id = r.payment_id as string;
+    const customerId = (r.customer_id as string) || '';
+    if (!customerId) { res.skipped++; continue; }
+
+    // Alt-Logik erkennen: Original-Buchung enthält REVENUE-Bein.
+    const hasRevenueLeg = query(
+      `SELECT 1 FROM ledger_entries
+       WHERE source_module = 'AGENT_SETTLEMENT' AND source_id = ?
+         AND account = 'REVENUE' AND reverses_entry_id IS NULL
+       LIMIT 1`,
+      [id]
+    ).length > 0;
+    if (!hasRevenueLeg) { res.skipped++; continue; }
+
+    // Schon reverst → entweder schon migriert (alte Reversal + neue Post mit
+    // gleichem sourceId koexistieren) oder anderweitig storniert. Skip.
+    if (hasReversalFor('AGENT_SETTLEMENT', id)) { res.skipped++; continue; }
+
+    // Schutz: wenn der zugehörige AGENT_TRANSFER_SOLD-Post bereits reversed
+    // wurde (Convert-to-Invoice oder markTransferReturned), dürfen wir die
+    // Settle nicht als Cash↔AR neu posten — sonst entsteht ein dauerhaft
+    // negativer AR-Saldo für diesen Customer ohne passenden Sold-Debit.
+    // Bug-Repro: Sara Al-Dosari, 2026-05-08 — 2 converted Transfers, deren
+    // Settles via Migration phantom-AR-Credits erzeugten, die das Open
+    // Receivable verfälschten.
+    const transferIdRaw = r.transfer_id as string;
+    const soldHasReversal = hasReversalFor('AGENT_TRANSFER_SOLD', transferIdRaw);
+    const soldHasOriginal = hasLedgerEntries('AGENT_TRANSFER_SOLD', transferIdRaw);
+    if (soldHasReversal || !soldHasOriginal) { res.skipped++; continue; }
+
+    const method = (r.method as 'cash' | 'bank') || 'cash';
+    const amount = Number(r.amount || 0);
+    const paidAt = r.paid_at as string;
+
+    safeStep(res, `agent-settle-migrate ${id.slice(0, 8)}`, () => {
+      // 1. Alte Cash↔Revenue-Buchung reversen.
+      postAgentSettlementPaymentReversed(id);
+      // 2. Neu posten mit Cash↔AR-Logik. Wichtig: der hasLedgerEntries-Check
+      //    in der normalen Settle-Funktion würde hier skippen (Original-Entries
+      //    existieren noch). Wir rufen postAgentSettlementPayment direkt — das
+      //    ergibt ein zweites Original-Set, das die saubere Logik trägt.
+      postAgentSettlementPayment(
+        { id, transferId: r.transfer_id as string, amount, method, paidAt },
+        customerId
+      );
+    });
+  }
+  return res;
+}
+
+// ── Agent Transfer Sold ───────────────────────────────────────
+//
+// Für jeden sold/settled Transfer ohne invoiceId: AGENT_TRANSFER_SOLD posten
+// (DEBIT AR ↔ CREDIT REVENUE, counterparty = CUSTOMER). Damit erscheinen
+// historische Forderungen aus Approval-Verkäufen im Customer-Ledger.
+// Convert-to-Invoice-Transfers werden ausgenommen, da deren Forderung über
+// die Invoice läuft.
+
+export function backfillAgentTransferSold(branchId: string): BackfillResult {
+  const res = emptyResult('agent_transfers_sold');
+  const rows = query(
+    `SELECT at.id, at.settlement_amount, at.actual_sale_price, at.agent_price, at.sold_at, ag.customer_id
+     FROM agent_transfers at
+     JOIN agents ag ON ag.id = at.agent_id
+     WHERE at.branch_id = ?
+       AND at.invoice_id IS NULL
+       AND at.status IN ('sold','settled')`,
+    [branchId]
+  );
+  res.total = rows.length;
+  for (const r of rows) {
+    const id = r.id as string;
+    if (hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) { res.skipped++; continue; }
+    const customerId = (r.customer_id as string) || '';
+    if (!customerId) { res.skipped++; continue; }
+    const amount = Number(r.settlement_amount ?? r.actual_sale_price ?? r.agent_price ?? 0);
+    if (amount <= 0) { res.skipped++; continue; }
+    const soldAt = (r.sold_at as string) || new Date().toISOString();
+    safeStep(res, `agent-sold ${id.slice(0, 8)}`, () => {
+      postAgentTransferSold({ transferId: id, amount, soldAt }, customerId);
     });
   }
   return res;
@@ -619,7 +885,16 @@ export function backfillAll(branchId: string): BackfillResult[] {
     backfillPartnerTransactions(branchId),
     backfillTaxPayments(branchId),
     backfillMetalPayments(branchId),
+    // Reihenfolge wichtig:
+    //   0. Verwaiste Ledger-Posts gelöschter Transfers reversen (AR aufräumen).
+    //   1. Sold-Forderung posten (AR aufbauen).
+    //   2. Alte Cash↔Revenue-Settles auf neue Cash↔AR umbauen (reduzieren AR).
+    //   3. Fehlende Settles ohne Ledger-Eintrag nachposten (Cash↔AR).
+    cleanupOrphanedAgentTransferLedger(branchId),
+    backfillAgentTransferSold(branchId),
+    migrateLegacyAgentSettlements(branchId),
     backfillAgentSettlementPayments(branchId),
     backfillConsignmentPayouts(branchId),
+    cleanupOrphanedConsignmentReturnCN(branchId),
   ];
 }

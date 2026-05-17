@@ -14,6 +14,7 @@ import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseR
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
+import { syncProductQuantity } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
@@ -38,6 +39,7 @@ interface PurchaseInput {
   supplierId: string;
   purchaseDate?: string;
   notes?: string;
+  staffId?: string;
   lines: Array<{
     productId?: string;       // if omitted → new product is created
     // Plan §Purchase §New-Item: bei „New" wird das Produkt mit voller
@@ -98,6 +100,7 @@ function rowToPurchase(row: Record<string, unknown>): Purchase {
     notes: row.notes as string | undefined,
     lines: [],
     payments: [],
+    staffId: (row.staff_id as string) || undefined,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
@@ -280,10 +283,10 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     const paid = input.initialPayment?.amount || 0;
     db.run(
       `INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, status, total_amount, paid_amount, remaining_amount,
-        purchase_date, notes, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        purchase_date, notes, staff_id, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, purchaseNumber, input.supplierId, status, total, paid, total - paid,
-       purchaseDate, input.notes || null, now, now, userId]
+       purchaseDate, input.notes || null, input.staffId || null, now, now, userId]
     );
 
     // Insert lines (inkl. Input-VAT-Felder)
@@ -295,6 +298,30 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount]);
     }
     lineStmt.free();
+
+    // Phase 2 — Stock-Lots: Pro Purchase-Line ein Lot mit dem TATSAECHLICHEN
+    // Einkaufspreis dieser Charge. Existing-Item-Purchase legt einen frischen
+    // Lot an, ohne den alten Lot/products.purchase_price zu beruehren — damit
+    // bleibt der Cost-Snapshot fuer noch nicht verkaufte alte Stuecke korrekt.
+    const lotStmt = db.prepare(
+      `INSERT INTO stock_lots
+         (id, branch_id, product_id, purchase_id, purchase_line_id,
+          unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`
+    );
+    const affectedProductIds = new Set<string>();
+    for (const l of lineRecords) {
+      if (!l.productId || l.qty <= 0) continue;
+      // unit_cost = GROSS pro Stueck (Cash-Out an Supplier). Identische Basis wie
+      // products.purchase_price heute, damit Phase 4 (Cost-Snapshot aus Lot) das
+      // bestehende Margin-Verhalten 1:1 abloest, nur eben pro-Lot statt global.
+      lotStmt.run([uuid(), branchId, l.productId, id, l.id,
+        l.unitPrice, l.qty, l.qty, purchaseDate, now]);
+      affectedProductIds.add(l.productId);
+    }
+    lotStmt.free();
+    // Phase 7 Sync: products.quantity = Σ lot.qty_remaining
+    for (const pid of affectedProductIds) syncProductQuantity(pid);
 
     // Initial payment (if any)
     let initialPaymentId: string | null = null;
@@ -385,7 +412,20 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     const now = new Date().toISOString();
     const p = get().getPurchase(id);
     if (!p) return;
+    // Phase 7 Sync: betroffene Produkt-IDs VOR dem Cancel sammeln, damit wir
+    // products.quantity nachher korrekt aus den verbleibenden ACTIVE Lots ableiten koennen.
+    const affectedRows = query(
+      `SELECT DISTINCT product_id FROM stock_lots WHERE purchase_id = ?`,
+      [id]
+    );
+    const affectedProductIds = affectedRows.map(r => r.product_id as string);
     db.run(`UPDATE purchases SET status = 'CANCELLED', updated_at = ? WHERE id = ?`, [now, id]);
+    // Phase 2 — Lots dieser Purchase soft-cancellen. Audit-Trail bleibt; kuenftige
+    // Sales-Picker filtern status='CANCELLED' raus (Phase 3). Bereits verkaufte
+    // Pieces (invoice_lines.lot_id) bleiben verknuepft — der historische
+    // Cost-Snapshot ist Eigentum der Invoice, nicht des Lots.
+    db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE purchase_id = ?`, [id]);
+    for (const pid of affectedProductIds) syncProductQuantity(pid);
     saveDatabase();
     trackStatusChange('purchases', id, p.status, 'CANCELLED');
     get().loadPurchases();
@@ -402,7 +442,19 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
   deletePurchase: (id) => {
     const db = getDatabase();
+    // Phase 7 Sync: betroffene Produkte VOR Cancel/Delete sammeln.
+    const affectedRows = query(
+      `SELECT DISTINCT product_id FROM stock_lots WHERE purchase_id = ?`,
+      [id]
+    );
+    const affectedProductIds = affectedRows.map(r => r.product_id as string);
+    // Lots cleanen — Schema hat ON DELETE SET NULL, sonst bleiben orphaned Lots
+    // mit purchase_id=NULL stehen und tauchen weiter als verkaufbar auf.
+    // Bereits verkaufte Lots (invoice_lines.lot_id gesetzt) duerfen nicht weg —
+    // soft-cancel statt hart loeschen, damit Cost-Snapshot-Audit erhalten bleibt.
+    db.run(`UPDATE stock_lots SET status = 'CANCELLED', purchase_id = NULL, purchase_line_id = NULL WHERE purchase_id = ?`, [id]);
     db.run(`DELETE FROM purchases WHERE id = ?`, [id]);
+    for (const pid of affectedProductIds) syncProductQuantity(pid);
     saveDatabase();
     trackDelete('purchases', id);
     get().loadPurchases();

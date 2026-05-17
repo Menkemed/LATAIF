@@ -48,10 +48,19 @@ const typeColors: Record<ResultType, string> = {
   production: '#7B4AAA',
 };
 
-// Document prefix → destination
+// Document prefix → destination.
+// 2026-05-16 — Invoices haben 6 Prefixe (4 Final-Counter + 2 Partial-Counter):
+//   PINV / INV / SINV   (Sales: Partial / Final Normal / Final Special)
+//   RPINV / RINV / SRINV (Repair: Partial / Final Normal / Final Special)
+// Wichtig: Spezifischere Prefixe (SINV, SRINV, RPINV, RINV) MUESSEN vor den
+// allgemeineren (INV) stehen — find() returnt erstes Match.
 const DOC_PREFIX_MAP: { prefix: string; type: ResultType; table: string; numberCol: string; linkFn: (id: string) => string; hasDetail: boolean }[] = [
-  { prefix: 'PINV', type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
-  { prefix: 'INV',  type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
+  { prefix: 'SRINV', type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
+  { prefix: 'RPINV', type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
+  { prefix: 'RINV',  type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
+  { prefix: 'SINV',  type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
+  { prefix: 'PINV',  type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
+  { prefix: 'INV',   type: 'invoice', table: 'invoices', numberCol: 'invoice_number', linkFn: (id) => `/invoices/${id}`, hasDetail: true },
   { prefix: 'OFF',  type: 'offer', table: 'offers', numberCol: 'offer_number', linkFn: (id) => `/offers/${id}`, hasDetail: true },
   { prefix: 'PUR',  type: 'purchase', table: 'purchases', numberCol: 'purchase_number', linkFn: (id) => `/purchases/${id}`, hasDetail: true },
   { prefix: 'PRET', type: 'purchase_return', table: 'purchase_returns', numberCol: 'return_number', linkFn: () => `/purchases`, hasDetail: false },

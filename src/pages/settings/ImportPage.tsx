@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Upload, FileSpreadsheet, Check, AlertTriangle, X } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { read, utils } from 'xlsx';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -64,6 +65,7 @@ function fmt(v: number): string {
 
 export function ImportPage() {
   const navigate = useNavigate();
+  const goBack = useGoBack('/collection');
   const { createProduct, categories, loadCategories, loadProducts } = useProductStore();
   const [step, setStep] = useState<'upload' | 'preview' | 'importing' | 'done'>('upload');
   const [rawRows, setRawRows] = useState<RawRow[]>([]);
@@ -345,13 +347,13 @@ export function ImportPage() {
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/collection')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
           >
-            <ArrowLeft size={16} /> Collection
+            <ArrowLeft size={16} /> Back
           </button>
         </div>
 

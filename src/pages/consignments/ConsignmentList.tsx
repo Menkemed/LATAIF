@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { FileText } from 'lucide-react';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
@@ -9,18 +9,24 @@ import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
+import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { StaffSelect } from '@/components/employees/StaffSelect';
+import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
+import { Bhd } from '@/components/ui/Bhd';
 
 // SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
 // fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
 function fmt(v: number | null | undefined): string {
-  return (v ?? 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtPct(v: number | null | undefined): string {
@@ -33,21 +39,31 @@ export function ConsignmentList() {
   const navigate = useNavigate();
   const {
     consignments, loadConsignments, createConsignment,
-    markSold, markPaidOut, markReturned,
+    recordSale, markPaidOut, markReturned,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts, categories, loadCategories, createProduct, nextAvailableSku } = useProductStore();
+  const { products, loadProducts, categories, loadCategories, createProduct, nextAvailableSku, isSkuTaken, findPossibleDuplicates } = useProductStore();
+  const { loadEmployees } = useEmployeeStore();
+  const [searchParams] = useSearchParams();
+  const staffFilter = searchParams.get('staff') || '';
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('');
   const [showNew, setShowNew] = useState(false);
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
-  const [commissionType, setCommissionType] = useState<'percent' | 'fixed' | 'consignor_fixed'>('percent');
-  const [soldSaleMethod, setSoldSaleMethod] = useState<'cash' | 'bank'>('cash');
+  // Plan 2026-05 §Consignment-Refactor: nur noch 2 Modelle.
+  //  'percent'           — Commission % to us
+  //  'consignor_fixed'   — Agreed Price + Excess to us (Consignor garantiert agreedPrice)
+  const [commissionType, setCommissionType] = useState<'percent' | 'consignor_fixed'>('percent');
 
   // Quick-action modals
   const [soldModal, setSoldModal] = useState<string | null>(null);
   const [soldPrice, setSoldPrice] = useState('');
+  const [soldBuyerId, setSoldBuyerId] = useState<string>('');
+  const [soldDate, setSoldDate] = useState<string>('');
+  const [soldNotes, setSoldNotes] = useState<string>('');
+  const [soldAckShortfall, setSoldAckShortfall] = useState(false);
+  const [showQuickBuyer, setShowQuickBuyer] = useState(false);
   const [paidModal, setPaidModal] = useState<string | null>(null);
   const [paidMethod, setPaidMethod] = useState('bank_transfer');
   const [paidRef, setPaidRef] = useState('');
@@ -61,6 +77,7 @@ export function ConsignmentList() {
     expiryDate: '',
     notes: '',
     consignorSearch: '',
+    staffId: '',
   });
 
   // Plan §Consignment §New: Das Produkt wird beim Anlegen NEU erfasst (Kundenware), nicht
@@ -72,13 +89,38 @@ export function ConsignmentList() {
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
   });
   const [aiBusy, setAiBusy] = useState(false);
+  const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
+  const lastCheckedFp = useRef('');
+  const lastDismissedFp = useRef('');
 
   useEffect(() => {
     loadConsignments();
     loadCustomers();
     loadProducts();
     loadCategories();
-  }, [loadConsignments, loadCustomers, loadProducts, loadCategories]);
+    loadEmployees();
+  }, [loadConsignments, loadCustomers, loadProducts, loadCategories, loadEmployees]);
+
+  // Live Duplicate Detection für Consignment-Produkt — siehe WatchList.
+  const consignAttrs = productForm.attributes || {};
+  const consignFp = [
+    productForm.brand, productForm.name, productForm.sku,
+    consignAttrs.reference_number, consignAttrs.serial_number,
+    consignAttrs.weight, consignAttrs.karat, consignAttrs.item_type,
+  ].map(v => String(v ?? '').trim().toUpperCase()).join('|');
+  useEffect(() => {
+    if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
+    if (duplicateMatches.length > 0) return;
+    if (!productForm.brand?.trim() && !productForm.name?.trim() && !productForm.sku?.trim()) return;
+    if (consignFp === lastCheckedFp.current) return;
+    if (consignFp === lastDismissedFp.current) return;
+    const t = setTimeout(() => {
+      lastCheckedFp.current = consignFp;
+      const possible = findPossibleDuplicates(productForm);
+      if (possible.length > 0) setDuplicateMatches(possible);
+    }, 800);
+    return () => clearTimeout(t);
+  }, [consignFp, showNew, duplicateMatches.length, productForm, findPossibleDuplicates]);
 
   // Lookup helpers
   const getCustomer = (id: string) => customers.find(c => c.id === id);
@@ -88,11 +130,12 @@ export function ConsignmentList() {
   const filtered = useMemo(() => {
     let r = consignments;
     if (statusFilter) r = r.filter(c => c.status === statusFilter);
+    if (staffFilter) r = r.filter(c => c.staffId === staffFilter);
     if (search) {
       r = r.filter(c => matchesDeep(c, search, [getCustomer(c.consignorId), getProduct(c.productId)]));
     }
     return r;
-  }, [consignments, statusFilter, search, customers, products]);
+  }, [consignments, statusFilter, search, customers, products, staffFilter]);
 
   // Stats
   const activeCount = consignments.filter(c => c.status === 'active').length;
@@ -111,17 +154,18 @@ export function ConsignmentList() {
   , [consignments]);
 
 
-  // Live calculation
+  // Live calculation (Vorschau bei Verkauf zum Agreed Price)
   const agreedNum = Number(form.agreedPrice) || 0;
   const rateNum = Number(form.commissionRate) || 0;
   let commission: number; let payout: number;
   if (commissionType === 'consignor_fixed') {
-    payout = rateNum;
-    commission = Math.max(0, agreedNum - payout);
-  } else if (commissionType === 'fixed') {
-    commission = rateNum;
-    payout = agreedNum - commission;
+    // Model 2: Consignor gets Agreed Price, we keep amount above.
+    // Bei „Sold to Agreed Price"-Vorschau ist die Marge 0 — Excess entsteht erst
+    // wenn tatsächlicher Verkaufspreis > agreed.
+    payout = agreedNum;
+    commission = 0;
   } else {
+    // Model 1: Commission % to us
     commission = agreedNum * (rateNum / 100);
     payout = agreedNum - commission;
   }
@@ -130,7 +174,7 @@ export function ConsignmentList() {
     setForm({
       consignorId: '',
       agreedPrice: '', minimumPrice: '', commissionRate: '15',
-      expiryDate: '', notes: '', consignorSearch: '',
+      expiryDate: '', notes: '', consignorSearch: '', staffId: '',
     });
     const firstCat = categories[0] || null;
     setSelectedCat(firstCat);
@@ -149,9 +193,8 @@ export function ConsignmentList() {
   }
 
   function handleCreate() {
-    // Quick-Capture-Regel (User-Spec): Pflicht ist nur Consignor + Kategorie.
-    // Brand/Name dürfen leer bleiben — vom Handy soll ein Foto-only-Save möglich
-    // sein, Details kommen später im Edit-Modus.
+    // Strikte Validierung (2026-05-17): alle Pflichtfelder müssen ausgefüllt
+    // sein, sonst muss der User später nochmal im Edit ran.
     if (!form.consignorId) {
       alert('Please select a consignor first.');
       return;
@@ -160,7 +203,47 @@ export function ConsignmentList() {
       alert('Please select a category first.');
       return;
     }
+    const missing: string[] = [];
+    if (!productForm.brand?.trim()) missing.push('Brand');
+    if (!productForm.name?.trim()) missing.push('Name');
+    // Condition ist optional (2026-05-17) — kein Required-Check mehr.
+    if (selectedCat) {
+      for (const attr of selectedCat.attributes) {
+        if (!attr.required) continue;
+        if (attr.dependsOn) {
+          const dep = productForm.attributes?.[attr.dependsOn.key];
+          if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) continue;
+        }
+        const v = productForm.attributes?.[attr.key];
+        if (attr.type === 'number') {
+          if (typeof v !== 'number' || isNaN(v) || v === 0) missing.push(attr.label);
+        } else if (attr.type === 'boolean') {
+          if (v === undefined || v === null) missing.push(attr.label);
+        } else {
+          if (!String(v ?? '').trim()) missing.push(attr.label);
+        }
+      }
+    }
+    if (!form.agreedPrice || Number(form.agreedPrice) <= 0) missing.push('Agreed Price');
+    if (missing.length > 0) {
+      alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
+      return;
+    }
+    // SKU-Duplicate hart blocken (Datenintegrität).
+    if (productForm.sku && isSkuTaken(productForm.sku)) {
+      alert('Diese SKU / Reference ist bereits vergeben. Bitte eine andere Nummer verwenden.');
+      return;
+    }
+    // Score-basierte Duplicate Detection (nicht-blockierend).
+    const possible = findPossibleDuplicates(productForm);
+    if (possible.length > 0) {
+      setDuplicateMatches(possible);
+      return;
+    }
+    doCreate();
+  }
 
+  function doCreate() {
     // Snapshot der Form-Daten BEVOR React was reseted — die DB-Saves laufen
     // gleich in einem Defer-Tick, da darf das Form schon weg sein.
     const snapshot = {
@@ -171,6 +254,7 @@ export function ConsignmentList() {
       commissionRate: form.commissionRate,
       expiryDate: form.expiryDate,
       notes: form.notes,
+      staffId: form.staffId,
       commissionType,
     };
 
@@ -180,9 +264,10 @@ export function ConsignmentList() {
     // (Photos, Inputs, AI-Identify-Box) und unter Tauri/sql.js wirkt das wie
     // ein Hänger / führt zur weißen Seite.
     setShowNew(false);
+    setDuplicateMatches([]);
     setForm({
       consignorId: '', agreedPrice: '', minimumPrice: '',
-      commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '',
+      commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '', staffId: '',
     });
     setProductForm({
       condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [],
@@ -209,10 +294,12 @@ export function ConsignmentList() {
           agreedPrice: snapshot.agreedPrice ? Number(snapshot.agreedPrice) : 0,
           minimumPrice: snapshot.minimumPrice ? Number(snapshot.minimumPrice) : undefined,
           commissionType: snapshot.commissionType,
-          commissionValue: rateVal,
+          // Model 2 (consignor_fixed): kein separates commission_value — agreedPrice IST der Payout.
+          // Model 1 (percent): commissionRate = % to us.
           commissionRate: snapshot.commissionType === 'percent' ? rateVal : 0,
           expiryDate: snapshot.expiryDate || undefined,
           notes: snapshot.notes || undefined,
+          staffId: snapshot.staffId || undefined,
         });
       } catch (err) {
         console.error('[Consignment] create failed:', err);
@@ -221,11 +308,52 @@ export function ConsignmentList() {
     }, 0);
   }
 
-  function handleMarkSold() {
-    if (!soldModal || !soldPrice) return;
-    markSold(soldModal, Number(soldPrice), undefined, soldSaleMethod);
-    setSoldModal(null);
-    setSoldPrice('');
+  // Sold-Flow Validierung: nur Model 2 + sale < agreed verlangt Acknowledge.
+  // Bei Model 1 ist der Sale-Preis frei wählbar (Margin geht entsprechend mit).
+  // Zusätzlich: Buyer != Consignor (sonst wäre es ein Return, kein Sale).
+  const soldValidation = useMemo(() => {
+    const empty = { needsAck: false, agreed: 0, shortfall: 0, buyerIsConsignor: false };
+    if (!soldModal) return empty;
+    const con = consignments.find(c => c.id === soldModal);
+    if (!con) return empty;
+    const isAgreedExcess = con.commissionType === 'consignor_fixed';
+    const sp = Number(soldPrice) || 0;
+    const agreed = con.agreedPrice || 0;
+    const buyerIsConsignor = !!soldBuyerId && soldBuyerId === con.consignorId;
+    if (isAgreedExcess && sp > 0 && sp < agreed) {
+      return { needsAck: true, agreed, shortfall: agreed - sp, buyerIsConsignor };
+    }
+    return { ...empty, agreed, buyerIsConsignor };
+  }, [soldModal, soldPrice, soldBuyerId, consignments]);
+
+  function handleRecordSale() {
+    if (!soldModal || !soldPrice || !soldBuyerId) return;
+    if (soldValidation.buyerIsConsignor) {
+      alert('Buyer cannot be the same as the consignor. Use "Return" if the consignor is taking the item back.');
+      return;
+    }
+    if (soldValidation.needsAck && !soldAckShortfall) {
+      alert('Please confirm the consignor-loss shortfall before saving.');
+      return;
+    }
+    try {
+      recordSale(soldModal, {
+        salePrice: Number(soldPrice),
+        buyerId: soldBuyerId,
+        saleDate: soldDate || new Date().toISOString().split('T')[0],
+        notes: soldNotes || undefined,
+        acknowledgeShortfall: soldAckShortfall,
+      });
+      // Modal schließen + Form reset
+      setSoldModal(null);
+      setSoldPrice('');
+      setSoldBuyerId('');
+      setSoldDate('');
+      setSoldNotes('');
+      setSoldAckShortfall(false);
+    } catch (e) {
+      alert(`Sale failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   function handleMarkPaid() {
@@ -251,6 +379,7 @@ export function ConsignmentList() {
       showSearch onSearch={setSearch} searchPlaceholder="Search by number, consignor, product..."
       actions={
         <div className="flex items-center gap-3">
+          <StaffFilterPill />
           <div className="flex gap-1" style={{ marginRight: 4 }}>
             {statusFilters.map(sf => (
               <button key={sf.value} onClick={() => setStatusFilter(sf.value)}
@@ -278,7 +407,7 @@ export function ConsignmentList() {
               Outstanding Consignor Payouts
             </div>
             <div style={{ fontSize: 18, fontWeight: 400, color: '#AA6E6E' }}>
-              {fmt(outstandingPayouts)} BHD <span style={{ fontSize: 12, color: '#6B7280', fontWeight: 400 }}>· {outstandingCount} consignment{outstandingCount > 1 ? 's' : ''} sold, not yet paid out</span>
+              <Bhd v={outstandingPayouts}/> BHD <span style={{ fontSize: 12, color: '#6B7280', fontWeight: 400 }}>· {outstandingCount} consignment{outstandingCount > 1 ? 's' : ''} sold, not yet paid out</span>
             </div>
           </div>
           <button onClick={() => setStatusFilter('sold')} className="cursor-pointer"
@@ -339,14 +468,14 @@ export function ConsignmentList() {
                       </div>
                     </td>
                     <td style={{ padding: '14px 18px' }}>
-                      <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(con.agreedPrice)}</span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={con.agreedPrice}/></span>
                       <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>BHD</span>
                     </td>
                     <td style={{ padding: '14px 18px' }}>
                       <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmtPct(con.commissionRate)}%</span>
                       {con.commissionAmount != null && (
                         <span className="font-mono" style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 2 }}>
-                          {fmt(con.commissionAmount)} BHD
+                          <Bhd v={con.commissionAmount}/> BHD
                         </span>
                       )}
                     </td>
@@ -358,7 +487,15 @@ export function ConsignmentList() {
                         {con.status === 'active' && (
                           <>
                             <button
-                              onClick={() => { setSoldModal(con.id); setSoldPrice(String(con.agreedPrice)); }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSoldModal(con.id);
+                                setSoldPrice(String(con.agreedPrice || ''));
+                                setSoldBuyerId('');
+                                setSoldDate(new Date().toISOString().split('T')[0]);
+                                setSoldNotes('');
+                                setSoldAckShortfall(false);
+                              }}
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 6,
@@ -369,7 +506,7 @@ export function ConsignmentList() {
                               onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D9DE'; }}
                             >Sold</button>
                             <button
-                              onClick={() => markReturned(con.id)}
+                              onClick={(e) => { e.stopPropagation(); markReturned(con.id); }}
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 6,
@@ -381,9 +518,23 @@ export function ConsignmentList() {
                             >Return</button>
                           </>
                         )}
-                        {con.status === 'sold' && (
+                        {con.status === 'sold' && con.invoiceId && (
                           <button
-                            onClick={() => setPaidModal(con.id)}
+                            onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${con.invoiceId}`); }}
+                            title="Open buyer invoice"
+                            className="cursor-pointer flex items-center gap-1"
+                            style={{
+                              padding: '4px 10px', fontSize: 11, borderRadius: 4,
+                              border: '1px solid #715DE3', color: '#FFFFFF',
+                              background: '#715DE3', fontWeight: 500,
+                            }}>
+                            <FileText size={11} /> Invoice
+                          </button>
+                        )}
+                        {con.status === 'sold' && !con.invoiceId && (
+                          // Legacy sold consignments (vor Refactor) — alter Pay-Out-Pfad bleibt verfügbar.
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setPaidModal(con.id); }}
                             className="cursor-pointer transition-all duration-200"
                             style={{
                               padding: '4px 10px', fontSize: 11, borderRadius: 6,
@@ -392,7 +543,7 @@ export function ConsignmentList() {
                             }}
                             onMouseEnter={e => { e.currentTarget.style.background = 'rgba(15,15,16,0.08)'; e.currentTarget.style.borderColor = '#0F0F10'; }}
                             onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D9DE'; }}
-                          >Pay Out</button>
+                          >Pay Out (legacy)</button>
                         )}
                       </div>
                     </td>
@@ -474,9 +625,8 @@ export function ConsignmentList() {
                 onChange={e => setProductForm(p => ({ ...p, name: e.target.value }))} />
             </div>
             <div style={{ marginTop: 16 }}>
-              <Input label="SKU / REFERENCE" placeholder="Internal reference"
-                value={productForm.sku || ''}
-                onChange={e => setProductForm(p => ({ ...p, sku: e.target.value }))} />
+              <SkuInput value={productForm.sku || ''}
+                onChange={v => setProductForm(p => ({ ...p, sku: v }))} />
             </div>
 
             {/* Dynamische Kategorie-Attribute */}
@@ -485,9 +635,14 @@ export function ConsignmentList() {
                 <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
                   {selectedCat.attributes.map(attr => {
+                    if (attr.dependsOn) {
+                      const dep = productForm.attributes?.[attr.dependsOn.key];
+                      if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) return null;
+                    }
+                    const isWide = attr.type === 'select' && (attr.options?.length || 0) >= 8;
                     if (attr.type === 'select' && attr.options) {
                       return (
-                        <div key={attr.key}>
+                        <div key={attr.key} style={{ gridColumn: isWide ? '1 / -1' : 'auto' }}>
                           <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
                             {attr.label.toUpperCase()}
                             {attr.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
@@ -528,7 +683,7 @@ export function ConsignmentList() {
             {selectedCat && selectedCat.conditionOptions.length > 0 && (
               <div style={{ marginTop: 16 }}>
                 <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
-                  CONDITION <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
+                  CONDITION
                 </span>
                 <div className="flex gap-2" style={{ marginTop: 8 }}>
                   {selectedCat.conditionOptions.map(cond => (
@@ -631,6 +786,17 @@ export function ConsignmentList() {
                         if (result.estimatedValue && !form.agreedPrice) {
                           setForm(prev => ({ ...prev, agreedPrice: String(result.estimatedValue) }));
                         }
+                        // Sofortige Duplicate-Detection direkt nach AI-Erkennung.
+                        const candidate: Partial<Product> = {
+                          categoryId: productForm.categoryId,
+                          brand: result.brand || productForm.brand,
+                          name: result.name || productForm.name,
+                          sku: productForm.sku || (result.sku ? nextAvailableSku(result.sku) : undefined),
+                          attributes: { ...(productForm.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
+                          images: productForm.images,
+                        };
+                        const possible = findPossibleDuplicates(candidate);
+                        if (possible.length > 0) setDuplicateMatches(possible);
                       } catch (e) { alert(String(e)); }
                       finally { setAiBusy(false); }
                     }}
@@ -687,7 +853,7 @@ export function ConsignmentList() {
             <div style={{ marginTop: 16 }}>
               <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>PAYOUT MODEL</span>
               <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
-                {(['percent', 'fixed', 'consignor_fixed'] as const).map(t => (
+                {(['percent', 'consignor_fixed'] as const).map(t => (
                   <button key={t} onClick={() => setCommissionType(t)}
                     className="cursor-pointer rounded transition-all duration-200"
                     style={{
@@ -696,35 +862,29 @@ export function ConsignmentList() {
                       color: commissionType === t ? '#0F0F10' : '#6B7280',
                       background: commissionType === t ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>
-                    {t === 'percent' ? 'Commission % to us'
-                      : t === 'fixed' ? 'Commission fixed to us'
-                      : 'Fixed payout to consignor'}
+                    {t === 'percent' ? 'Commission % to us' : 'Agreed Price + Excess to us'}
                   </button>
                 ))}
               </div>
               <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
                 {commissionType === 'consignor_fixed'
-                  ? 'Consignor gets a fixed BHD amount when sold — our margin is whatever is above it.'
-                  : commissionType === 'fixed'
-                  ? 'We keep a fixed BHD amount as commission — consignor gets the rest.'
-                  : 'We keep a percentage of the sale price — consignor gets the rest.'}
+                  ? 'Consignor gets the Agreed Price guaranteed — anything we sell above goes to us. Below agreed creates a Consignor-Loss expense.'
+                  : 'We keep a percentage of the actual sale price — consignor gets the rest.'}
               </p>
             </div>
-            <div style={{ marginTop: 16 }}>
-              <Input
-                label={
-                  commissionType === 'percent' ? 'COMMISSION RATE (%)'
-                  : commissionType === 'fixed' ? 'COMMISSION AMOUNT (BHD)'
-                  : 'PAYOUT TO CONSIGNOR (BHD)'
-                }
-                type="number"
-                placeholder={commissionType === 'percent' ? '15' : '0'}
-                value={form.commissionRate}
-                onChange={e => setForm({ ...form, commissionRate: e.target.value })} />
-            </div>
+            {commissionType === 'percent' && (
+              <div style={{ marginTop: 16 }}>
+                <Input
+                  label="COMMISSION RATE (%)"
+                  type="number"
+                  placeholder="15"
+                  value={form.commissionRate}
+                  onChange={e => setForm({ ...form, commissionRate: e.target.value })} />
+              </div>
+            )}
 
             {/* Live Calculation */}
-            {agreedNum > 0 && rateNum > 0 && (
+            {agreedNum > 0 && (commissionType === 'consignor_fixed' || rateNum > 0) && (
               <div className="rounded font-mono" style={{
                 marginTop: 16, padding: 16, background: '#F2F7FA',
                 border: '1px solid #E5E9EE', fontSize: 13,
@@ -733,22 +893,26 @@ export function ConsignmentList() {
                   IF SOLD AT AGREED PRICE
                 </div>
                 <div className="flex justify-between" style={{ marginTop: 10 }}>
-                  <span style={{ color: '#6B7280' }}>Commission {commissionType === 'percent' ? `(${fmtPct(rateNum)}%)` : '(fixed)'}</span>
-                  <span style={{ color: '#0F0F10' }}>{fmt(commission)} BHD</span>
+                  <span style={{ color: '#6B7280' }}>
+                    {commissionType === 'percent' ? `Commission (${fmtPct(rateNum)}%)` : 'Our margin (excess)'}
+                  </span>
+                  <span style={{ color: '#0F0F10' }}><Bhd v={commission}/> BHD</span>
                 </div>
                 <div className="flex justify-between" style={{ marginTop: 8 }}>
                   <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
-                  <span style={{ color: '#7EAA6E' }}>{fmt(payout)} BHD</span>
+                  <span style={{ color: '#7EAA6E' }}><Bhd v={payout}/> BHD</span>
                 </div>
               </div>
             )}
           </div>
 
           {/* Expiry & Notes */}
-          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input label="EXPIRY DATE" type="date"
               value={form.expiryDate}
               onChange={e => setForm({ ...form, expiryDate: e.target.value })} />
+            <StaffSelect value={form.staffId} onChange={(id) => setForm({ ...form, staffId: id })}
+              helper="Who took the item in (optional)." />
           </div>
           <div>
             <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
@@ -784,29 +948,51 @@ export function ConsignmentList() {
         onCreated={(id) => { loadCustomers(); setForm(f => ({ ...f, consignorId: id })); }}
       />
 
-      {/* ── Mark Sold Modal ── */}
-      <Modal open={!!soldModal} onClose={() => setSoldModal(null)} title="Mark as Sold" width={440}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
-            value={soldPrice}
-            onChange={e => setSoldPrice(e.target.value)} />
+      {/* ── Record Sale Modal (Plan 2026-05) ── */}
+      <Modal open={!!soldModal} onClose={() => { setSoldModal(null); setSoldAckShortfall(false); }} title="Record Sale" width={500}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          {/* Buyer-Picker */}
+          <div>
+            <SearchSelect
+              label="BUYER"
+              placeholder="Search clients..."
+              options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
+              value={soldBuyerId}
+              onChange={id => setSoldBuyerId(id)}
+            />
+            <button onClick={() => setShowQuickBuyer(true)}
+              className="cursor-pointer transition-colors"
+              style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
+            >+ New Client</button>
+          </div>
+
+          {/* Sale Price */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
+              value={soldPrice}
+              onChange={e => { setSoldPrice(e.target.value); setSoldAckShortfall(false); }} />
+            <Input label="SALE DATE" type="date"
+              value={soldDate}
+              onChange={e => setSoldDate(e.target.value)} />
+          </div>
+
+          {/* Live-Vorschau Payout / Profit */}
           {Number(soldPrice) > 0 && soldModal && (() => {
             const con = consignments.find(c => c.id === soldModal);
             if (!con) return null;
             const sp = Number(soldPrice);
+            const isAgreedExcess = con.commissionType === 'consignor_fixed';
             let comm: number; let po: number;
-            if (con.commissionType === 'consignor_fixed') {
-              po = con.commissionValue || 0;
-              comm = Math.max(0, sp - po);
-            } else if (con.commissionType === 'fixed') {
-              comm = con.commissionValue || 0;
-              po = sp - comm;
+            if (isAgreedExcess) {
+              const agreed = con.agreedPrice || 0;
+              po = agreed;                          // volle Garantie
+              comm = sp - agreed;                   // kann negativ werden = Loss
             } else {
-              comm = sp * (con.commissionRate / 100);
+              comm = sp * ((con.commissionRate || 0) / 100);
               po = sp - comm;
             }
-            const modelLabel = con.commissionType === 'consignor_fixed' ? 'Our margin'
-              : con.commissionType === 'fixed' ? 'Commission (fixed)'
+            const modelLabel = isAgreedExcess
+              ? `Our margin (above agreed ${fmt(con.agreedPrice)} BHD)`
               : `Commission (${fmtPct(con.commissionRate)}%)`;
             return (
               <div className="rounded font-mono" style={{
@@ -814,35 +1000,100 @@ export function ConsignmentList() {
               }}>
                 <div className="flex justify-between" style={{ marginBottom: 8 }}>
                   <span style={{ color: '#6B7280' }}>{modelLabel}</span>
-                  <span style={{ color: '#0F0F10' }}>{fmt(comm)} BHD</span>
+                  <span style={{ color: comm < 0 ? '#DC2626' : '#0F0F10' }}><Bhd v={comm}/> BHD</span>
                 </div>
                 <div className="flex justify-between">
                   <span style={{ color: '#6B7280' }}>Payout to consignor</span>
-                  <span style={{ color: '#7EAA6E' }}>{fmt(po)} BHD</span>
+                  <span style={{ color: '#7EAA6E' }}><Bhd v={po}/> BHD</span>
                 </div>
               </div>
             );
           })()}
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SALE RECEIVED IN</span>
-            <div className="flex gap-2" style={{ marginTop: 6 }}>
-              {(['cash', 'bank'] as const).map(m => (
-                <button key={m} onClick={() => setSoldSaleMethod(m)}
-                  className="cursor-pointer rounded transition-all"
-                  style={{ padding: '8px 16px', fontSize: 13,
-                    border: `1px solid ${soldSaleMethod === m ? '#0F0F10' : '#D5D9DE'}`,
-                    color: soldSaleMethod === m ? '#0F0F10' : '#6B7280',
-                    background: soldSaleMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
-              ))}
+
+          {/* Buyer == Consignor — Hard-Block (logischer Fehler, kein Verkauf an sich selbst) */}
+          {soldValidation.buyerIsConsignor && (
+            <div style={{
+              padding: '12px 14px', borderRadius: 8,
+              background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.40)',
+              fontSize: 12, color: '#DC2626',
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                Buyer cannot be the same as the consignor
+              </div>
+              <div style={{ color: '#7A2A2A' }}>
+                If the consignor is taking the item back, use <strong>Return</strong> instead — no invoice/purchase needed.
+              </div>
             </div>
+          )}
+
+          {/* Shortfall-Warning + Acknowledge-Checkbox */}
+          {soldValidation.needsAck && (
+            <div style={{
+              padding: '12px 14px', borderRadius: 8,
+              background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
+              fontSize: 12, color: '#DC2626',
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                ⚠ Sale <Bhd v={soldValidation.shortfall}/> BHD below agreed price
+              </div>
+              <div style={{ marginBottom: 10, color: '#7A2A2A' }}>
+                Consignor will still receive the full agreed <Bhd v={soldValidation.agreed}/> BHD —
+                the <Bhd v={soldValidation.shortfall}/> BHD difference will be recorded as
+                a <strong>Consignor Loss</strong> expense.
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 12 }}>
+                <input type="checkbox"
+                  checked={soldAckShortfall}
+                  onChange={e => setSoldAckShortfall(e.target.checked)} />
+                <span>I confirm — record this shortfall as Consignor Loss</span>
+              </label>
+            </div>
+          )}
+
+          {/* Notes */}
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES (OPTIONAL)</span>
+            <textarea
+              placeholder="Reference, payment terms, …"
+              value={soldNotes}
+              onChange={e => setSoldNotes(e.target.value)}
+              className="w-full"
+              style={{
+                background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6,
+                padding: '8px 10px', fontSize: 13, color: '#0F0F10',
+                resize: 'vertical', minHeight: 50,
+              }}
+            />
           </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>
-            <Button variant="primary" onClick={handleMarkSold} disabled={!soldPrice}>Confirm Sale</Button>
+
+          <div style={{
+            padding: '10px 12px', borderRadius: 6,
+            background: '#F2F7FA', border: '1px solid #E5E9EE',
+            fontSize: 11, color: '#6B7280', lineHeight: 1.4,
+          }}>
+            On save: <strong>Auto-Invoice</strong> created for buyer · <strong>Auto-Purchase</strong> created
+            for consignor (as supplier) · payment via /invoices &amp; /purchases.
+          </div>
+
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => { setSoldModal(null); setSoldAckShortfall(false); }}>Cancel</Button>
+            <Button variant="primary" onClick={handleRecordSale}
+              disabled={
+                !soldPrice ||
+                !soldBuyerId ||
+                soldValidation.buyerIsConsignor ||
+                (soldValidation.needsAck && !soldAckShortfall)
+              }
+            >Confirm Sale</Button>
           </div>
         </div>
       </Modal>
+
+      <QuickCustomerModal
+        open={showQuickBuyer}
+        onClose={() => setShowQuickBuyer(false)}
+        onCreated={(id) => { loadCustomers(); setSoldBuyerId(id); }}
+      />
 
       {/* ── Mark Paid Out Modal ── */}
       <Modal open={!!paidModal} onClose={() => setPaidModal(null)} title="Pay Out Consignor" width={440}>
@@ -861,7 +1112,7 @@ export function ConsignmentList() {
                 </div>
                 <div className="flex justify-between">
                   <span style={{ color: '#6B7280' }}>Payout Amount</span>
-                  <span style={{ color: '#7EAA6E' }}>{fmt(con.payoutAmount || 0)} BHD</span>
+                  <span style={{ color: '#7EAA6E' }}><Bhd v={con.payoutAmount || 0}/> BHD</span>
                 </div>
               </div>
             );
@@ -869,7 +1120,7 @@ export function ConsignmentList() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>PAYMENT METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {['bank_transfer', 'cash', 'card'].map(m => (
+              {['bank_transfer', 'cash', 'card', 'benefit'].map(m => (
                 <button key={m} onClick={() => setPaidMethod(m)}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
@@ -877,7 +1128,7 @@ export function ConsignmentList() {
                     border: `1px solid ${paidMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: paidMethod === m ? '#0F0F10' : '#6B7280',
                     background: paidMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{m === 'bank_transfer' ? 'Bank Transfer' : m === 'cash' ? 'Cash' : 'Card'}</button>
+                  }}>{m === 'bank_transfer' ? 'Bank Transfer' : m === 'cash' ? 'Cash' : m === 'card' ? 'Card' : 'Benefit'}</button>
               ))}
             </div>
           </div>
@@ -890,6 +1141,39 @@ export function ConsignmentList() {
           </div>
         </div>
       </Modal>
+
+      <DuplicateWarningModal
+        open={duplicateMatches.length > 0}
+        matches={duplicateMatches}
+        candidate={productForm}
+        onCancel={() => { lastDismissedFp.current = consignFp; setDuplicateMatches([]); }}
+        onCreateAnyway={doCreate}
+        onPickExisting={(id) => { setDuplicateMatches([]); setShowNew(false); navigate(`/collection/${id}`); }}
+        onCopyDetails={(id) => {
+          const src = products.find(p => p.id === id);
+          if (!src) return;
+          const srcAttrs = { ...(src.attributes || {}) } as Record<string, unknown>;
+          delete srcAttrs.serial_number; delete srcAttrs.serialNo;
+          setProductForm(f => ({
+            ...f,
+            brand: src.brand,
+            name: src.name,
+            categoryId: src.categoryId,
+            condition: src.condition,
+            taxScheme: src.taxScheme,
+            plannedSalePrice: src.plannedSalePrice,
+            minSalePrice: src.minSalePrice,
+            maxSalePrice: src.maxSalePrice,
+            scopeOfDelivery: [...(src.scopeOfDelivery || [])],
+            notes: src.notes,
+            images: (f.images && f.images.length > 0) ? f.images : [...(src.images || [])],
+            attributes: { ...(f.attributes || {}), ...srcAttrs } as typeof f.attributes,
+          }));
+          setSelectedCat(categories.find(c => c.id === src.categoryId) || null);
+          lastDismissedFp.current = consignFp;
+          setDuplicateMatches([]);
+        }}
+      />
     </PageLayout>
   );
 }

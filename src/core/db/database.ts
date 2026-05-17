@@ -243,39 +243,119 @@ function runMigrations(database: Database): void {
     `ALTER TABLE orders ADD COLUMN tax_amount REAL DEFAULT 0`,
     `ALTER TABLE orders ADD COLUMN payment_method TEXT`,
     `ALTER TABLE orders ADD COLUMN fully_paid INTEGER DEFAULT 0`,
-    // Gold-Jewelry-Kategorien um Item Type + Color Type erweitern (User-Vorgabe).
-    `UPDATE categories SET attributes = '[
+    // GOLD_JEWELRY — 2026-05-17: umbenannt "Gold-Diamond Jewellery"; karat + color_type
+    // kombiniert; +Bar/Coin (item_type), +Silver (karat); Diamond Weight neben Weight.
+    `UPDATE categories SET name = 'Gold-Diamond Jewellery', condition_options = '["Pre-Owned","Vintage"]', attributes = '[
       {"key":"weight","label":"Weight","type":"number","unit":"g","required":true,"showInList":true},
-      {"key":"karat","label":"Karat","type":"select","options":["24K","22K","21K","18K","14K","9K"],"required":true,"showInList":true},
-      {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch"],"required":true,"showInList":true},
-      {"key":"color_type","label":"Color","type":"select","options":["Yellow Gold","Rose Gold","White Gold","Two-Tone"],"required":true,"showInList":true},
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
+      {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch","Bar","Coin"],"required":true,"showInList":true},
+      {"key":"karat","label":"Karat & Color","type":"select","options":["24K Yellow","22K Yellow","21K Yellow","18K Yellow","18K Rose","18K White","18K Mix","14K Yellow","14K Rose","14K White","14K Mix","Silver"],"required":true,"showInList":true},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-gold-jewelry'`,
-    // BRANDED_GOLD_JEWELRY — schlank: ohne Model/Serial/Cert/Box.
+    // 2026-05-17: 9K auch aus Gold-Diamond Jewellery entfernt — bestehende 9K-Produkte
+    // auf 14K (gleiche Farbe) hochmigrieren.
+    `UPDATE products SET attributes = json_set(attributes, '$.karat',
+      REPLACE(json_extract(attributes, '$.karat'), '9K ', '14K ')
+    )
+    WHERE category_id = 'cat-gold-jewelry'
+      AND json_extract(attributes, '$.karat') LIKE '9K %'`,
+    // Bestehende Produkte mit condition="New" auf "Pre-Owned" umstellen.
+    `UPDATE products SET condition = 'Pre-Owned' WHERE category_id = 'cat-gold-jewelry' AND condition = 'New'`,
+    // Backfill: bestehende Produkte — alten karat (z.B. "18K") + color_type
+    // (z.B. "Yellow Gold") zu einem Wert kombinieren ("18K Yellow"). Idempotent —
+    // wirkt nur wenn karat noch im alten Format ohne Color-Suffix ist.
+    `UPDATE products SET attributes = json_set(
+      attributes,
+      '$.karat',
+      json_extract(attributes, '$.karat') || ' ' ||
+        CASE json_extract(attributes, '$.color_type')
+          WHEN 'Yellow Gold' THEN 'Yellow'
+          WHEN 'Rose Gold'   THEN 'Rose'
+          WHEN 'White Gold'  THEN 'White'
+          WHEN 'Two-Tone'    THEN 'Mix'
+          ELSE 'Yellow'
+        END
+    )
+    WHERE category_id = 'cat-gold-jewelry'
+      AND json_extract(attributes, '$.karat') IN ('24K','22K','21K','18K','14K','9K')`,
+    // Pure-Gold-Sonderfall: 24K/22K/21K nur Yellow erlaubt — wenn der alte color_type
+    // was anderes war (Rose/White/Mix), auf Yellow korrigieren.
+    `UPDATE products SET attributes = json_set(attributes, '$.karat', '24K Yellow')
+      WHERE category_id = 'cat-gold-jewelry'
+        AND json_extract(attributes, '$.karat') LIKE '24K %'
+        AND json_extract(attributes, '$.karat') != '24K Yellow'`,
+    `UPDATE products SET attributes = json_set(attributes, '$.karat', '22K Yellow')
+      WHERE category_id = 'cat-gold-jewelry'
+        AND json_extract(attributes, '$.karat') LIKE '22K %'
+        AND json_extract(attributes, '$.karat') != '22K Yellow'`,
+    `UPDATE products SET attributes = json_set(attributes, '$.karat', '21K Yellow')
+      WHERE category_id = 'cat-gold-jewelry'
+        AND json_extract(attributes, '$.karat') LIKE '21K %'
+        AND json_extract(attributes, '$.karat') != '21K Yellow'`,
+    // color_type-Schlüssel entfernen — Info ist jetzt in karat.
+    `UPDATE products SET attributes = json_remove(attributes, '$.color_type')
+      WHERE category_id = 'cat-gold-jewelry'
+        AND json_extract(attributes, '$.color_type') IS NOT NULL`,
+    // BRANDED_GOLD_JEWELRY — 2026-05-17: karat + color_type kombiniert.
     `UPDATE categories SET attributes = '[
       {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch"],"required":true,"showInList":true},
-      {"key":"color_type","label":"Color","type":"select","options":["Yellow Gold","Rose Gold","White Gold","Two-Tone"],"required":true,"showInList":true},
       {"key":"size","label":"Size","type":"text","required":true,"showInList":true},
-      {"key":"karat","label":"Karat","type":"select","options":["24K","22K","21K","18K","14K","9K"],"required":true,"showInList":true},
+      {"key":"karat","label":"Karat & Color","type":"select","options":["24K Yellow","22K Yellow","21K Yellow","18K Yellow","18K Rose","18K White","18K Mix","14K Yellow","14K Rose","14K White","14K Mix","Silver"],"required":true,"showInList":true},
       {"key":"weight","label":"Weight","type":"number","unit":"g","required":false,"showInList":true},
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-branded-gold-jewelry'`,
-    // ORIGINAL_GOLD_JEWELRY — size optional, plus Model/Serial/Year optional.
+    // ORIGINAL_GOLD_JEWELRY — 2026-05-17: karat + color_type kombiniert.
     `UPDATE categories SET attributes = '[
       {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch"],"required":true,"showInList":true},
-      {"key":"color_type","label":"Color","type":"select","options":["Yellow Gold","Rose Gold","White Gold","Two-Tone"],"required":true,"showInList":true},
       {"key":"size","label":"Size","type":"text","required":false,"showInList":true},
-      {"key":"karat","label":"Karat","type":"select","options":["24K","22K","21K","18K","14K","9K"],"required":true,"showInList":true},
+      {"key":"karat","label":"Karat & Color","type":"select","options":["24K Yellow","22K Yellow","21K Yellow","18K Yellow","18K Rose","18K White","18K Mix","14K Yellow","14K Rose","14K White","14K Mix","Silver"],"required":true,"showInList":true},
       {"key":"weight","label":"Weight","type":"number","unit":"g","required":false,"showInList":true},
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
-      {"key":"model_name","label":"Model Name","type":"text","required":false,"showInList":true},
       {"key":"model_number","label":"Model Number","type":"text","required":false,"showInList":false},
       {"key":"serial_number","label":"Serial Number","type":"text","required":false,"showInList":false},
       {"key":"year","label":"Year","type":"number","required":false,"showInList":false},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-original-gold-jewelry'`,
+    // 2026-05-17: 9K aus Branded + Original entfernt — bestehende 9K-Produkte
+    // auf 14K (gleiche Farbe) hochmigrieren, damit der Wert wieder in den Optionen liegt.
+    `UPDATE products SET attributes = json_set(attributes, '$.karat',
+      REPLACE(json_extract(attributes, '$.karat'), '9K ', '14K ')
+    )
+    WHERE category_id IN ('cat-branded-gold-jewelry', 'cat-original-gold-jewelry')
+      AND json_extract(attributes, '$.karat') LIKE '9K %'`,
+    // Backfill für beide Kategorien: alten karat + color_type kombinieren.
+    `UPDATE products SET attributes = json_set(
+      attributes,
+      '$.karat',
+      json_extract(attributes, '$.karat') || ' ' ||
+        CASE json_extract(attributes, '$.color_type')
+          WHEN 'Yellow Gold' THEN 'Yellow'
+          WHEN 'Rose Gold'   THEN 'Rose'
+          WHEN 'White Gold'  THEN 'White'
+          WHEN 'Two-Tone'    THEN 'Mix'
+          ELSE 'Yellow'
+        END
+    )
+    WHERE category_id IN ('cat-branded-gold-jewelry', 'cat-original-gold-jewelry')
+      AND json_extract(attributes, '$.karat') IN ('24K','22K','21K','18K','14K','9K')`,
+    // Pure-Gold-Sonderfall: 24K/22K/21K → erzwungen Yellow.
+    `UPDATE products SET attributes = json_set(attributes, '$.karat', '24K Yellow')
+      WHERE category_id IN ('cat-branded-gold-jewelry', 'cat-original-gold-jewelry')
+        AND json_extract(attributes, '$.karat') LIKE '24K %'
+        AND json_extract(attributes, '$.karat') != '24K Yellow'`,
+    `UPDATE products SET attributes = json_set(attributes, '$.karat', '22K Yellow')
+      WHERE category_id IN ('cat-branded-gold-jewelry', 'cat-original-gold-jewelry')
+        AND json_extract(attributes, '$.karat') LIKE '22K %'
+        AND json_extract(attributes, '$.karat') != '22K Yellow'`,
+    `UPDATE products SET attributes = json_set(attributes, '$.karat', '21K Yellow')
+      WHERE category_id IN ('cat-branded-gold-jewelry', 'cat-original-gold-jewelry')
+        AND json_extract(attributes, '$.karat') LIKE '21K %'
+        AND json_extract(attributes, '$.karat') != '21K Yellow'`,
+    // color_type entfernen — Info ist jetzt in karat.
+    `UPDATE products SET attributes = json_remove(attributes, '$.color_type')
+      WHERE category_id IN ('cat-branded-gold-jewelry', 'cat-original-gold-jewelry')
+        AND json_extract(attributes, '$.color_type') IS NOT NULL`,
     // ORIGINAL_GOLD_JEWELRY — Included-Auswahl ohne Appraisal/Pouch.
     `UPDATE categories SET scope_options = '["Box","Certificate"]' WHERE id = 'cat-original-gold-jewelry'`,
     // ACCESSORY — Box/Papers raus aus Attributen (sind im Included-Multi-Select).
@@ -287,21 +367,140 @@ function runMigrations(database: Database): void {
       {"key":"model_number","label":"Model No","type":"text","required":false,"showInList":false},
       {"key":"serial_number","label":"Serial No","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-accessory'`,
-    // WATCH — Diamonds + Strap Type optional.
+    // WATCH — 2026-05-17: "New" aus Condition entfernt (Unworn ist die korrekte Bezeichnung).
+    `UPDATE categories SET condition_options = '["Unworn","Pre-Owned","Vintage"]' WHERE id = 'cat-watch'`,
+    // Bestehende Watch-Produkte mit condition="New" auf "Unworn" umstellen.
+    `UPDATE products SET condition = 'Unworn' WHERE category_id = 'cat-watch' AND condition = 'New'`,
+    // WATCH — 2026-05-17: material erweitert + Diamonds/Description sortiert + Ref/Serial/Bezel optional.
     `UPDATE categories SET attributes = '[
-      {"key":"reference_number","label":"Reference Number","type":"text","required":true,"showInList":true},
-      {"key":"model","label":"Model / Name","type":"text","required":true,"showInList":true},
+      {"key":"reference_number","label":"Reference Number","type":"text","required":false,"showInList":true},
       {"key":"case_diameter_mm","label":"Case Diameter","type":"number","unit":"mm","required":true,"showInList":true},
-      {"key":"serial_number","label":"Serial Number","type":"text","required":true,"showInList":true},
+      {"key":"serial_number","label":"Serial Number","type":"text","required":false,"showInList":true},
       {"key":"dial","label":"Dial","type":"text","required":true,"showInList":false},
-      {"key":"bezel","label":"Bezel","type":"text","required":true,"showInList":false},
-      {"key":"material","label":"Material","type":"select","options":["Steel","Gold","Rose Gold","White Gold","Two-Tone","Titanium","Plated"],"required":true,"showInList":true},
+      {"key":"bezel","label":"Bezel","type":"text","required":false,"showInList":false},
       {"key":"diamonds","label":"Diamonds","type":"boolean","required":false,"showInList":false},
+      {"key":"material","label":"Material","type":"select","options":["Steel","Solid Gold","Two-Tone Steel/Gold","Platinum","Titanium","Ceramic","Bronze","Carbon","DLC Steel","Plated","Ceramic & Steel","Ceramic & Gold","Titanium & Gold","Titanium & Ceramic"],"required":true,"showInList":true},
+      {"key":"karat_color","label":"Karat & Color","type":"select","options":["18K Yellow","18K Rose","18K White","14K Yellow","14K Rose","14K White","9K Yellow","9K Rose"],"required":true,"showInList":true,"dependsOn":{"key":"material","valueIncludes":["Solid Gold","Two-Tone Steel/Gold","Ceramic & Gold","Titanium & Gold"]}},
+      {"key":"description","label":"Description","type":"text","required":false,"showInList":false},
       {"key":"strap_type","label":"Strap Type","type":"select","options":["Leather","Rubber"],"required":false,"showInList":false},
       {"key":"movement","label":"Movement / Caliber","type":"text","required":false,"showInList":false},
-      {"key":"year","label":"Year","type":"number","required":false,"showInList":false},
-      {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
+      {"key":"year","label":"Year","type":"number","required":false,"showInList":false}
     ]' WHERE id = 'cat-watch'`,
+    // Remap altes Material auf neue Optionen (idempotent):
+    // alt "Gold"      → "Solid Gold"
+    // alt "Rose Gold" → "Solid Gold" + karat_color "18K Rose"
+    // alt "White Gold"→ "Solid Gold" + karat_color "18K White"
+    // alt "Two-Tone"  → "Two-Tone Steel/Gold"
+    // alt "Steel" / "Platinum" / "Titanium" / "Ceramic" / "Bronze" / "Plated" bleiben gleich.
+    `UPDATE products
+      SET attributes = json_set(
+        json_set(attributes, '$.material', 'Solid Gold'),
+        '$.karat_color',
+        COALESCE(json_extract(attributes, '$.karat_color'), '18K Yellow')
+      )
+      WHERE category_id = 'cat-watch'
+        AND json_extract(attributes, '$.material') = 'Gold'`,
+    `UPDATE products
+      SET attributes = json_set(
+        json_set(attributes, '$.material', 'Solid Gold'),
+        '$.karat_color',
+        COALESCE(json_extract(attributes, '$.karat_color'), '18K Rose')
+      )
+      WHERE category_id = 'cat-watch'
+        AND json_extract(attributes, '$.material') = 'Rose Gold'`,
+    `UPDATE products
+      SET attributes = json_set(
+        json_set(attributes, '$.material', 'Solid Gold'),
+        '$.karat_color',
+        COALESCE(json_extract(attributes, '$.karat_color'), '18K White')
+      )
+      WHERE category_id = 'cat-watch'
+        AND json_extract(attributes, '$.material') = 'White Gold'`,
+    `UPDATE products
+      SET attributes = json_set(
+        json_set(attributes, '$.material', 'Two-Tone Steel/Gold'),
+        '$.karat_color',
+        COALESCE(json_extract(attributes, '$.karat_color'), '18K Yellow')
+      )
+      WHERE category_id = 'cat-watch'
+        AND json_extract(attributes, '$.material') = 'Two-Tone'`,
+    // Backfill: bestehende Watch-Produkte deren universal-`name` leer ist,
+    // bekommen `attributes.model` als Name übernommen (idempotent — wirkt nur
+    // einmal pro Produkt, weil danach name != '').
+    `UPDATE products SET name = json_extract(attributes, '$.model')
+      WHERE category_id = 'cat-watch'
+        AND (name IS NULL OR name = '')
+        AND json_extract(attributes, '$.model') IS NOT NULL
+        AND json_extract(attributes, '$.model') != ''`,
+    // SPARE_PART — 2026-05-17: Box ergänzt; Material nach Karat+Color differenziert
+    // plus Steel/Gold-Bicolor-Varianten.
+    `UPDATE categories SET attributes = '[
+      {"key":"part_type","label":"Part Type","type":"select","options":["Dial","Bezel","Links","Crown","Strap","Buckle","Caseback","Movement","Crystal","Box","Other"],"required":true,"showInList":true},
+      {"key":"material","label":"Material","type":"select","options":["Steel","18K YG","18K RG","18K WG","14K YG","14K RG","14K WG","Steel/18K YG","Steel/18K RG","Steel/18K WG","Steel/14K YG","Steel/14K RG","Steel/14K WG"],"required":true,"showInList":true},
+      {"key":"original_or_copy","label":"Original or Copy","type":"select","options":["Original","Copy"],"required":true,"showInList":true},
+      {"key":"description","label":"Description","type":"text","required":true,"showInList":false}
+    ]' WHERE id = 'cat-spare-part'`,
+    // Backfill alter material-Werte → neue Options. 18K/14K → YG (Yellow als Default);
+    // Two-Tone → Steel/18K YG; 9K wird auf 14K YG mapped.
+    `UPDATE products SET attributes = json_set(attributes, '$.material', '18K YG')
+      WHERE category_id = 'cat-spare-part' AND json_extract(attributes, '$.material') = '18K'`,
+    `UPDATE products SET attributes = json_set(attributes, '$.material', '14K YG')
+      WHERE category_id = 'cat-spare-part' AND json_extract(attributes, '$.material') = '14K'`,
+    `UPDATE products SET attributes = json_set(attributes, '$.material', '14K YG')
+      WHERE category_id = 'cat-spare-part' AND json_extract(attributes, '$.material') = '9K'`,
+    `UPDATE products SET attributes = json_set(attributes, '$.material', 'Steel/18K YG')
+      WHERE category_id = 'cat-spare-part' AND json_extract(attributes, '$.material') = 'Two-Tone'`,
+    // Backfill: bestehende Spare-Part-Produkte — wenn `attributes.karat` einer
+    // der neuen Material-Optionen entspricht, in `material` übernehmen
+    // (überschreibt das alte Free-Text `material` nur wenn karat valide ist).
+    // Idempotent: nach erstem Run ist karat zwar noch da, wirkt aber identisch.
+    `UPDATE products
+      SET attributes = json_set(
+        attributes,
+        '$.material',
+        json_extract(attributes, '$.karat')
+      )
+      WHERE category_id = 'cat-spare-part'
+        AND json_extract(attributes, '$.karat') IN ('Steel', 'Two-Tone', '18K', '14K', '9K')`,
+    // Old free-text material das nicht in den neuen Optionen ist: in description anhängen,
+    // damit die Info nicht verloren geht. Nur wenn material nach dem karat-Backfill
+    // immer noch ein NICHT-valider Wert ist.
+    `UPDATE products
+      SET attributes = json_set(
+        attributes,
+        '$.description',
+        COALESCE(json_extract(attributes, '$.description'), '') ||
+          CASE WHEN COALESCE(json_extract(attributes, '$.description'), '') = '' THEN '' ELSE ' · ' END ||
+          'Material (legacy): ' || json_extract(attributes, '$.material')
+      )
+      WHERE category_id = 'cat-spare-part'
+        AND json_extract(attributes, '$.material') IS NOT NULL
+        AND json_extract(attributes, '$.material') != ''
+        AND json_extract(attributes, '$.material') NOT IN ('Steel', 'Two-Tone', '18K', '14K', '9K')
+        AND COALESCE(json_extract(attributes, '$.description'), '') NOT LIKE '%Material (legacy):%'`,
+    // Material aufräumen wenn nicht in den neuen Optionen — User wählt neu.
+    `UPDATE products
+      SET attributes = json_remove(attributes, '$.material')
+      WHERE category_id = 'cat-spare-part'
+        AND json_extract(attributes, '$.material') IS NOT NULL
+        AND json_extract(attributes, '$.material') NOT IN ('Steel', 'Two-Tone', '18K', '14K', '9K')`,
+    // Karat-Schlüssel entfernen — Daten sind jetzt in material (oder ignoriert).
+    `UPDATE products
+      SET attributes = json_remove(attributes, '$.karat')
+      WHERE category_id = 'cat-spare-part'
+        AND json_extract(attributes, '$.karat') IS NOT NULL`,
+    // Backfill: Spare-Part-Produkte ohne `name` bekommen `attributes.model`.
+    `UPDATE products SET name = json_extract(attributes, '$.model')
+      WHERE category_id = 'cat-spare-part'
+        AND (name IS NULL OR name = '')
+        AND json_extract(attributes, '$.model') IS NOT NULL
+        AND json_extract(attributes, '$.model') != ''`,
+    // Backfill: Original-Gold-Jewelry-Produkte ohne `name` bekommen `attributes.model_name`.
+    `UPDATE products SET name = json_extract(attributes, '$.model_name')
+      WHERE category_id = 'cat-original-gold-jewelry'
+        AND (name IS NULL OR name = '')
+        AND json_extract(attributes, '$.model_name') IS NOT NULL
+        AND json_extract(attributes, '$.model_name') != ''`,
 
     // ── Phase 0: Foundation per Boss Plan ──
 
@@ -770,6 +969,266 @@ function runMigrations(database: Database): void {
       next_no     INTEGER NOT NULL DEFAULT 1,
       updated_at  TEXT NOT NULL
     )`,
+
+    // ── Recurring Expense Templates ──
+    // Wiederkehrende Fixkosten (Miete, Gehalt, Strom, etc.). Ein Template
+    // erzeugt monatlich am `day_of_month` (1..31, am Monatsende geclampt) eine
+    // konkrete Expense via Generator. `last_generated_period` ('YYYY-MM') sorgt
+    // fuer Idempotenz — Catch-up holt fehlende Monate seit Start auto nach.
+    `CREATE TABLE IF NOT EXISTS recurring_expense_templates (
+      id                    TEXT PRIMARY KEY,
+      branch_id             TEXT NOT NULL REFERENCES branches(id),
+      category              TEXT NOT NULL,
+      amount                REAL NOT NULL,
+      payment_method        TEXT NOT NULL DEFAULT 'bank',
+      pay_now_default       INTEGER NOT NULL DEFAULT 0,    -- 0 = PENDING (Payable), 1 = sofort PAID
+      description           TEXT,
+      day_of_month          INTEGER NOT NULL DEFAULT 1,
+      start_date            TEXT NOT NULL,                  -- YYYY-MM-DD
+      end_date              TEXT,                           -- YYYY-MM-DD; NULL = unbefristet
+      active                INTEGER NOT NULL DEFAULT 1,
+      last_generated_period TEXT,                           -- letzter erzeugter Monat als 'YYYY-MM'
+      supplier_id           TEXT REFERENCES suppliers(id),
+      created_at            TEXT NOT NULL,
+      updated_at            TEXT NOT NULL,
+      created_by            TEXT REFERENCES users(id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_recurring_exp_branch_active ON recurring_expense_templates(branch_id, active)`,
+
+    // Generierte Expense-Instanz traegt FK aufs Template (NULL = manuell erstellt).
+    `ALTER TABLE expenses ADD COLUMN recurring_template_id TEXT REFERENCES recurring_expense_templates(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_expenses_recurring_template ON expenses(recurring_template_id)`,
+
+    // ── Employees ──
+    // Mitarbeiter-Stammdaten (separat von users — nicht jeder Mitarbeiter braucht
+    // einen Login). Optionaler `user_id` Link wenn der Mitarbeiter auch Login hat.
+    `CREATE TABLE IF NOT EXISTS employees (
+      id                  TEXT PRIMARY KEY,
+      branch_id           TEXT NOT NULL REFERENCES branches(id),
+      name                TEXT NOT NULL,
+      role                TEXT,                   -- 'Sales', 'Repair Tech', 'Manager', 'Admin', etc. (free text)
+      employment_status   TEXT NOT NULL DEFAULT 'active',  -- 'active', 'on_leave', 'inactive'
+      base_salary         REAL,                   -- monatliches Base-Gehalt (BHD), optional
+      phone               TEXT,
+      email               TEXT,
+      notes               TEXT,
+      user_id             TEXT REFERENCES users(id),  -- optional: verknuepfter Login-User
+      created_at          TEXT NOT NULL,
+      updated_at          TEXT NOT NULL,
+      created_by          TEXT REFERENCES users(id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_employees_branch_status ON employees(branch_id, employment_status)`,
+    `CREATE INDEX IF NOT EXISTS idx_employees_user ON employees(user_id)`,
+
+    // Salary-Expenses koppeln per employee_id; Pflichtfeld nur in der UI
+    // (Schema NULL-fähig, damit Bestands-Salary-Expenses ohne Migration weiterleben).
+    `ALTER TABLE expenses ADD COLUMN employee_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_expenses_employee ON expenses(employee_id)`,
+
+    // Recurring-Template kann ein Salary-Template sein → traegt employee_id durch.
+    `ALTER TABLE recurring_expense_templates ADD COLUMN employee_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_recurring_exp_employee ON recurring_expense_templates(employee_id)`,
+
+    // ── Staff-Feld auf Domain-Records (Wave 2) ──
+    // EIN einheitliches Feld pro Record: welcher Mitarbeiter den Vorgang gemacht hat.
+    // Separat von audit `created_by` (= eingeloggter User) damit der Owner auch
+    // Records "im Namen von Ahmed" anlegen kann.
+    `ALTER TABLE invoices ADD COLUMN staff_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_invoices_staff ON invoices(staff_id)`,
+    `ALTER TABLE repairs ADD COLUMN staff_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_repairs_staff ON repairs(staff_id)`,
+
+    // Wave-4 — Staff-Feld auf weiteren Domain-Tabellen.
+    `ALTER TABLE purchases ADD COLUMN staff_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_purchases_staff ON purchases(staff_id)`,
+    `ALTER TABLE agent_transfers ADD COLUMN staff_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_agent_transfers_staff ON agent_transfers(staff_id)`,
+    `ALTER TABLE consignments ADD COLUMN staff_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_consignments_staff ON consignments(staff_id)`,
+    `ALTER TABLE sales_returns ADD COLUMN staff_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_sales_returns_staff ON sales_returns(staff_id)`,
+    `ALTER TABLE debts ADD COLUMN staff_id TEXT REFERENCES employees(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_debts_staff ON debts(staff_id)`,
+
+    // Stock-Lots (Phase 1) — pro Purchase-Line ein Lot mit eigenem unit_cost,
+    // damit Sales den korrekten Cost-Snapshot ziehen koennen statt das einzige
+    // products.purchase_price-Feld zu ueberschreiben.
+    `CREATE TABLE IF NOT EXISTS stock_lots (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      product_id TEXT NOT NULL REFERENCES products(id),
+      purchase_id TEXT REFERENCES purchases(id) ON DELETE SET NULL,
+      purchase_line_id TEXT REFERENCES purchase_lines(id) ON DELETE SET NULL,
+      unit_cost REAL NOT NULL,
+      qty_total REAL NOT NULL,
+      qty_remaining REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      acquired_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_stock_lots_product ON stock_lots(product_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_stock_lots_purchase ON stock_lots(purchase_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_stock_lots_purchase_line ON stock_lots(purchase_line_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_stock_lots_status ON stock_lots(status)`,
+    `ALTER TABLE invoice_lines ADD COLUMN lot_id TEXT REFERENCES stock_lots(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_invoice_lines_lot ON invoice_lines(lot_id)`,
+
+    // Repair-Lot-Verknuepfung (Weg A Phase 5d Refinement) — User waehlt
+    // explizit welchen Lot der OWN-Item-Repair kapitalisiert. Fallback: aeltester
+    // ACTIVE Lot des Produkts (FIFO-konsistent).
+    `ALTER TABLE repairs ADD COLUMN lot_id TEXT REFERENCES stock_lots(id)`,
+    `CREATE INDEX IF NOT EXISTS idx_repairs_lot ON repairs(lot_id)`,
+
+    // 2026-05-16 — Optischer Marker fuer Final-Invoices ("Special" vs "Normal").
+    // 1 = Special (Display mit Punkt-Praefix: `.000021` / `.Repair-000021`),
+    // 0/NULL = Normal (`000021` / `Repair-000021`). Reine Anzeige; keine
+    // Buchungslogik aendert sich. User waehlt beim Convert/Finalize.
+    `ALTER TABLE invoices ADD COLUMN special_mark INTEGER DEFAULT 0`,
+
+    // 2026-05-16 — Backfill stock_status fuer Consignment-Produkte die VOR dem
+    // Partial-Payment-Reservation-Fix verkauft wurden. Damals hat recordSale
+    // sofort 'sold' gesetzt, auch wenn die Invoice noch PARTIAL war. Jetzt:
+    // wenn die linked Invoice nicht FINAL ist (oder CANCELLED, RETURNED, ...),
+    // setzen wir das Produkt zurueck auf 'consignment_reserved' damit es im
+    // UI korrekt als "noch nicht voll bezahlt" angezeigt wird.
+    `UPDATE products SET stock_status = 'consignment_reserved'
+       WHERE source_type = 'CONSIGNMENT'
+         AND stock_status = 'sold'
+         AND EXISTS (
+           SELECT 1 FROM consignments c
+             JOIN invoices i ON i.id = c.invoice_id
+            WHERE c.product_id = products.id
+              AND i.status NOT IN ('FINAL', 'CANCELLED', 'RETURNED')
+         )`,
+    // Analog fuer OWN-Produkte: wenn aktuell 'sold', aber irgendeine Invoice-
+    // Line nicht-FINAL — zurueck auf 'reserved'. Greift nur fuer Produkte mit
+    // mind. einer Invoice (sonst ist 'sold' Legacy/Manual und bleibt).
+    `UPDATE products SET stock_status = 'reserved'
+       WHERE source_type != 'CONSIGNMENT'
+         AND stock_status = 'sold'
+         AND EXISTS (
+           SELECT 1 FROM invoice_lines il
+             JOIN invoices i ON i.id = il.invoice_id
+            WHERE il.product_id = products.id
+              AND i.status NOT IN ('FINAL', 'CANCELLED', 'RETURNED')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM invoice_lines il2
+             JOIN invoices i2 ON i2.id = il2.invoice_id
+            WHERE il2.product_id = products.id
+              AND i2.status = 'FINAL'
+         )`,
+
+    // 2026-05-16 — Backfill Cost fuer Consignment-Produkte mit purchase_price=0.
+    // Reihenfolge (am genauesten zuerst):
+    //   1. stock_lot.unit_cost — vom Auto-Purchase gesetzt, gueltig auch nach
+    //      EXHAUSTED weil das LOT bestehen bleibt (nur qty_remaining = 0).
+    //   2. consignment.payout_amount — fuer SOLD/PAID_OUT Consignments wo der
+    //      tatsaechliche Payout bekannt ist.
+    //   3. agreed_price * (1 - commission_rate/100) — Estimate fuer ACTIVE
+    //      Consignments ohne Sale.
+    //   4. consignor_fixed → agreed_price (Garantie an Consignor).
+    // Greift nur bei aktuell 0, ueberschreibt nie echte Daten.
+    `UPDATE products SET purchase_price = COALESCE(
+       (SELECT sl.unit_cost FROM stock_lots sl
+          WHERE sl.product_id = products.id AND sl.status != 'CANCELLED'
+          ORDER BY sl.acquired_at DESC LIMIT 1),
+       (SELECT CASE
+          WHEN c.status IN ('sold', 'paid_out') AND COALESCE(c.payout_amount, 0) > 0 THEN c.payout_amount
+          WHEN COALESCE(c.commission_type, 'percent') = 'consignor_fixed' THEN c.agreed_price
+          ELSE c.agreed_price * (1.0 - COALESCE(c.commission_rate, 15) / 100.0)
+        END
+        FROM consignments c
+        WHERE c.product_id = products.id
+        ORDER BY c.created_at DESC LIMIT 1)
+     )
+     WHERE source_type = 'CONSIGNMENT'
+       AND COALESCE(purchase_price, 0) = 0
+       AND EXISTS (
+         SELECT 1 FROM consignments c2 WHERE c2.product_id = products.id
+       )`,
+
+    // ───────────────────────────────────────────────────────────────
+    // 2026-05-17 — Stock-Lot Reconciliation
+    // Bug-Symptom: Produkte mit stock_status='sold' zeigen stock_lots noch
+    // als ACTIVE/Available, weil ältere FINAL/PARTIAL invoice_lines kein
+    // lot_id Link hatten (entstanden vor Lot-System-Fertigstellung 2026-05-11).
+    //
+    // Schritt 1: Orphan invoice_lines (lot_id IS NULL) für FINAL/PARTIAL Invoices
+    // an den ersten verfügbaren Lot des Produkts hängen (FIFO).
+    // ───────────────────────────────────────────────────────────────
+    `UPDATE invoice_lines
+       SET lot_id = (
+         SELECT id FROM stock_lots
+         WHERE product_id = invoice_lines.product_id
+           AND status != 'CANCELLED'
+         ORDER BY acquired_at ASC, id ASC
+         LIMIT 1
+       )
+     WHERE lot_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM invoices i
+         WHERE i.id = invoice_lines.invoice_id
+           AND i.status IN ('FINAL', 'PARTIAL')
+       )
+       AND EXISTS (
+         SELECT 1 FROM stock_lots sl
+         WHERE sl.product_id = invoice_lines.product_id
+           AND sl.status != 'CANCELLED'
+       )`,
+
+    // Schritt 2: qty_remaining + status pro Lot aus der Wahrheit zurückrechnen.
+    //   consumed = SUM(invoice_lines.quantity)         (FINAL/PARTIAL)
+    //   returned = SUM(sales_return_lines.quantity)    (über invoice_lines.lot_id verlinkt)
+    //   qty_remaining = MAX(0, qty_total - consumed + returned)
+    //   status = EXHAUSTED falls qty_remaining = 0, sonst ACTIVE
+    // CANCELLED Lots bleiben CANCELLED.
+    `UPDATE stock_lots
+       SET qty_remaining = MAX(0,
+             qty_total
+             - COALESCE((
+                 SELECT SUM(il.quantity) FROM invoice_lines il
+                 JOIN invoices i ON i.id = il.invoice_id
+                 WHERE il.lot_id = stock_lots.id
+                   AND i.status IN ('FINAL', 'PARTIAL')
+               ), 0)
+             + COALESCE((
+                 SELECT SUM(srl.quantity) FROM sales_return_lines srl
+                 JOIN invoice_lines il2 ON il2.id = srl.invoice_line_id
+                 WHERE il2.lot_id = stock_lots.id
+               ), 0)
+           ),
+           status = CASE
+             WHEN qty_total
+                  - COALESCE((
+                      SELECT SUM(il.quantity) FROM invoice_lines il
+                      JOIN invoices i ON i.id = il.invoice_id
+                      WHERE il.lot_id = stock_lots.id
+                        AND i.status IN ('FINAL', 'PARTIAL')
+                    ), 0)
+                  + COALESCE((
+                      SELECT SUM(srl.quantity) FROM sales_return_lines srl
+                      JOIN invoice_lines il2 ON il2.id = srl.invoice_line_id
+                      WHERE il2.lot_id = stock_lots.id
+                    ), 0)
+                  <= 0 THEN 'EXHAUSTED'
+             ELSE 'ACTIVE'
+           END
+     WHERE status != 'CANCELLED'`,
+
+    // Schritt 3: products.quantity nachziehen (Phase 7 Sync).
+    `UPDATE products
+       SET quantity = COALESCE((
+         SELECT SUM(qty_remaining)
+         FROM stock_lots
+         WHERE product_id = products.id
+           AND status != 'CANCELLED'
+           AND qty_remaining > 0
+       ), products.quantity)
+     WHERE EXISTS (
+       SELECT 1 FROM stock_lots sl
+       WHERE sl.product_id = products.id
+     )`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
@@ -1011,6 +1470,189 @@ function migrateCategoriesToV3(database: Database): void {
   }
 }
 
+// Stock-Lots Backfill (Phase 1) — einmalig:
+//  - jede non-CANCELLED purchase_line wird ein Lot mit qty_total = quantity, unit_cost = unit_price
+//  - jede invoice_line in non-CANCELLED Invoices wird FIFO an das aelteste passende Lot gehaengt;
+//    qty_remaining wird entsprechend reduziert (clamp bei 0)
+// Idempotent via settings-Flag 'migration.stock_lots_backfill_v1'.
+function backfillStockLots(database: Database): void {
+  try {
+    const flag = database.exec(
+      `SELECT value FROM settings WHERE key = 'migration.stock_lots_backfill_v1'`
+    );
+    const alreadyApplied = flag.length > 0 && flag[0].values.length > 0 && flag[0].values[0][0] === '1';
+    if (alreadyApplied) return;
+
+    const now = new Date().toISOString();
+
+    // Clean-Slate fuer Re-Runs: ein vorheriger Migrationsversuch konnte Lots
+    // anlegen aber das Flag nicht setzen (z.B. SQL-Fehler in Schritt 2).
+    // Da ohne Flag noch nichts produktiv Lots benutzt, koennen wir hier safe leeren.
+    database.run(`UPDATE invoice_lines SET lot_id = NULL WHERE lot_id IS NOT NULL`);
+    database.run(`DELETE FROM stock_lots`);
+
+    // 1) Lots aus bestehenden purchase_lines (nur Purchases mit Produkt-Bezug, nicht CANCELLED).
+    const lineRes = database.exec(
+      `SELECT pl.id, pl.purchase_id, pl.product_id, pl.quantity, pl.unit_price,
+              p.purchase_date, p.branch_id, p.status
+         FROM purchase_lines pl
+         JOIN purchases p ON p.id = pl.purchase_id
+        WHERE pl.product_id IS NOT NULL
+          AND p.status != 'CANCELLED'`
+    );
+    let lotsCreated = 0;
+    if (lineRes.length > 0) {
+      for (const row of lineRes[0].values) {
+        const [lineId, purchaseId, productId, quantity, unitPrice, purchaseDate, branchId] = row as [
+          string, string, string, number, number, string | null, string, string,
+        ];
+        const lotId = uuid();
+        const qty = Number(quantity) || 0;
+        if (qty <= 0) continue;
+        database.run(
+          `INSERT INTO stock_lots
+             (id, branch_id, product_id, purchase_id, purchase_line_id,
+              unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+          [lotId, branchId, productId, purchaseId, lineId,
+           Number(unitPrice) || 0, qty, qty, purchaseDate || now, now]
+        );
+        lotsCreated++;
+      }
+    }
+
+    // 2) invoice_lines an Lots haengen (FIFO nach acquired_at, dann id) und qty_remaining reduzieren.
+    //    Nur fuer non-CANCELLED Invoices. Greedy: Pro invoice_line das aelteste Lot, das noch
+    //    ausreicht; sonst irgendein aelteste mit qty_remaining > 0; sonst irgendeinen Lot fuer
+    //    das Produkt (Fallback fuer historische Inkonsistenzen).
+    const ilRes = database.exec(
+      `SELECT il.id, il.product_id, COALESCE(il.quantity, 1) AS qty
+         FROM invoice_lines il
+         JOIN invoices i ON i.id = il.invoice_id
+        WHERE il.lot_id IS NULL
+          AND i.status != 'CANCELLED'
+        ORDER BY i.issued_at ASC, i.created_at ASC, il.position ASC`
+    );
+    let linesLinked = 0;
+    let linesUnmatched = 0;
+    if (ilRes.length > 0) {
+      for (const row of ilRes[0].values) {
+        const [ilId, productId, qtyRaw] = row as [string, string, number];
+        const qty = Number(qtyRaw) || 1;
+
+        // erst Lot suchen das den vollen Bedarf deckt
+        let lotRes = database.exec(
+          `SELECT id, qty_remaining FROM stock_lots
+            WHERE product_id = ? AND status = 'ACTIVE' AND qty_remaining >= ?
+            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+          [productId, qty]
+        );
+        // Fallback: irgendein Lot mit Restbestand
+        if (lotRes.length === 0 || lotRes[0].values.length === 0) {
+          lotRes = database.exec(
+            `SELECT id, qty_remaining FROM stock_lots
+              WHERE product_id = ? AND status = 'ACTIVE' AND qty_remaining > 0
+              ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+            [productId]
+          );
+        }
+        // Letzter Fallback: irgendein Lot fuer das Produkt (auch wenn leer) — historische Daten.
+        if (lotRes.length === 0 || lotRes[0].values.length === 0) {
+          lotRes = database.exec(
+            `SELECT id, qty_remaining FROM stock_lots
+              WHERE product_id = ?
+              ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+            [productId]
+          );
+        }
+
+        if (lotRes.length === 0 || lotRes[0].values.length === 0) {
+          linesUnmatched++;
+          continue;
+        }
+
+        const [lotId, lotRem] = lotRes[0].values[0] as [string, number];
+        const newRem = Math.max(0, Number(lotRem) - qty);
+        const newStatus = newRem <= 0 ? 'EXHAUSTED' : 'ACTIVE';
+        database.run(`UPDATE invoice_lines SET lot_id = ? WHERE id = ?`, [lotId, ilId]);
+        database.run(
+          `UPDATE stock_lots SET qty_remaining = ?, status = ? WHERE id = ?`,
+          [newRem, newStatus, lotId]
+        );
+        linesLinked++;
+      }
+    }
+
+    database.run(
+      `INSERT INTO settings (branch_id, key, value, category, updated_at)
+       VALUES ('branch-main', 'migration.stock_lots_backfill_v1', '1', 'migration', ?)
+       ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [now]
+    );
+
+    console.info(
+      `[Migration] stock_lots backfill v1: ${lotsCreated} Lots erzeugt, ` +
+      `${linesLinked} invoice_lines verknuepft, ${linesUnmatched} ohne Lot (historisch).`
+    );
+  } catch (err) {
+    console.warn('[Migration] stock_lots backfill failed:', err);
+  }
+}
+
+// Phase 7 Reconcile — syncronisiert products.quantity einmalig mit Σ qty_remaining
+// aus den Lots. Behebt den Daten-Skew bei Produkten die mehrere Purchases bekommen haben
+// ohne dass der Legacy products.quantity hochgezogen wurde. Idempotent via Flag.
+function reconcileProductQuantities(database: Database): void {
+  try {
+    const flag = database.exec(
+      `SELECT value FROM settings WHERE key = 'migration.product_quantity_reconcile_v1'`
+    );
+    const alreadyApplied = flag.length > 0 && flag[0].values.length > 0 && flag[0].values[0][0] === '1';
+    if (alreadyApplied) return;
+
+    const before = database.exec(
+      `SELECT COUNT(*) FROM products p
+        WHERE EXISTS (SELECT 1 FROM stock_lots sl
+                       WHERE sl.product_id = p.id
+                         AND sl.status != 'CANCELLED'
+                         AND sl.qty_remaining > 0)
+          AND p.quantity != (SELECT COALESCE(SUM(sl.qty_remaining), 0)
+                               FROM stock_lots sl
+                              WHERE sl.product_id = p.id
+                                AND sl.status != 'CANCELLED'
+                                AND sl.qty_remaining > 0)`
+    );
+    const driftedCount = before.length > 0 ? Number(before[0].values[0][0]) || 0 : 0;
+
+    database.run(
+      `UPDATE products
+          SET quantity = (
+            SELECT COALESCE(SUM(qty_remaining), 0)
+              FROM stock_lots
+             WHERE stock_lots.product_id = products.id
+               AND stock_lots.status != 'CANCELLED'
+               AND stock_lots.qty_remaining > 0
+          )
+        WHERE id IN (
+          SELECT DISTINCT product_id FROM stock_lots
+           WHERE status != 'CANCELLED' AND qty_remaining > 0
+        )`
+    );
+
+    const now = new Date().toISOString();
+    database.run(
+      `INSERT INTO settings (branch_id, key, value, category, updated_at)
+       VALUES ('branch-main', 'migration.product_quantity_reconcile_v1', '1', 'migration', ?)
+       ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [now]
+    );
+
+    console.info(`[Migration] product_quantity reconcile v1: ${driftedCount} Produkte angepasst.`);
+  } catch (err) {
+    console.warn('[Migration] product_quantity reconcile failed:', err);
+  }
+}
+
 export async function initDatabase(): Promise<Database> {
   if (db) return db;
 
@@ -1024,6 +1666,8 @@ export async function initDatabase(): Promise<Database> {
       runMigrations(db);
       migrateCategoriesToV2(db);
       migrateCategoriesToV3(db);
+      backfillStockLots(db);
+      reconcileProductQuantities(db);
     } catch (err) {
       console.warn('DB load failed, creating fresh:', err);
       db = new SQL.Database();
@@ -1032,6 +1676,8 @@ export async function initDatabase(): Promise<Database> {
       await seedFreshDatabase(db);
       migrateCategoriesToV2(db);
       migrateCategoriesToV3(db);
+      backfillStockLots(db);
+      reconcileProductQuantities(db);
     }
   } else {
     db = new SQL.Database();
@@ -1044,6 +1690,8 @@ export async function initDatabase(): Promise<Database> {
       await seedFreshDatabase(db);
     }
     migrateCategoriesToV2(db);
+    backfillStockLots(db);
+    reconcileProductQuantities(db);
   }
 
   return db;

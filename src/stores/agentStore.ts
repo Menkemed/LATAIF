@@ -11,6 +11,8 @@ import { vatEngine } from '@/core/tax/vat-engine';
 import {
   postAgentSettlementPayment,
   postAgentSettlementPaymentReversed,
+  postAgentTransferSold,
+  postAgentTransferSoldReversed,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -36,6 +38,13 @@ interface AgentStore {
   createTransfer: (data: Partial<AgentTransfer>) => AgentTransfer;
   updateTransfer: (id: string, data: Partial<AgentTransfer>) => void;
   markTransferSold: (id: string, actualPrice: number, buyerInfo?: string) => void;
+  // Vereinfachtes Approval-Flow (User-Spec): vom Customer ausgehend einen
+  // Agent-Account finden oder anlegen. Im neuen Flow ist "Approval" =
+  // automatisch erzeugter Account pro Customer beim ersten Transfer.
+  findOrCreateAgentForCustomer: (customerId: string) => Agent;
+  // Zentrale Transfer-Erzeugung aus Customer-Sicht: legt bei Bedarf den Agent
+  // an, dann den Transfer (ohne Commission). Nutzt unter der Haube createTransfer.
+  createTransferForCustomer: (data: { customerId: string; productId: string; ourPrice: number; returnBy?: string; notes?: string; staffId?: string }) => AgentTransfer;
   markTransferReturned: (id: string) => void;
   // Plan §Agent §4: Teilzahlungen. Wenn amount < settlementAmount → status='partial'.
   markTransferSettled: (id: string, amount?: number, method?: 'cash' | 'bank') => void;
@@ -95,6 +104,7 @@ function rowToTransfer(row: Record<string, unknown>): AgentTransfer {
     settlementPaidAmount: (row.settlement_paid_amount as number | undefined) ?? 0,
     settlementStatus: (row.settlement_status as AgentTransfer['settlementStatus']) || 'pending',
     notes: row.notes as string | undefined,
+    staffId: (row.staff_id as string) || undefined,
     createdAt: row.created_at as string, updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
   };
@@ -192,12 +202,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       `INSERT INTO agent_transfers (id, branch_id, transfer_number, agent_id, product_id,
         agent_price, minimum_price, commission_rate, commission_type, commission_value,
         status, transferred_at, return_by,
-        notes, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'transferred', ?, ?, ?, ?, ?, ?)`,
+        notes, staff_id, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'transferred', ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, transferNumber, data.agentId, data.productId,
        data.agentPrice || 0, data.minimumPrice || null, data.commissionRate || 10,
        data.commissionType || 'percent', data.commissionValue ?? null,
-       now, data.returnBy || null, data.notes || null, now, now, userId]
+       now, data.returnBy || null, data.notes || null, data.staffId || null, now, now, userId]
     );
     saveDatabase();
     trackInsert('agent_transfers', id, { agentId: data.agentId, productId: data.productId });
@@ -221,9 +231,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       settlementPaidAmount: 'settlement_paid_amount',
       settlementStatus: 'settlement_status',
       notes: 'notes', soldAt: 'sold_at', returnedAt: 'returned_at', settledAt: 'settled_at',
+      staffId: 'staff_id',
     };
     for (const [k, v] of Object.entries(data)) {
-      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v); }
+      const col = map[k];
+      if (col) {
+        fields.push(`${col} = ?`);
+        // sql.js akzeptiert kein `undefined` als Bind-Wert — explizit auf null casten,
+        // sonst: "Wrong API use: tried to bind a value of an unknown type (undefined)".
+        values.push(v === undefined ? null : v);
+      }
     }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);
@@ -236,15 +253,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   markTransferSold: (id, actualPrice, buyerInfo) => {
     const transfer = get().getTransfer(id);
     if (!transfer) return;
-    const commission = transfer.commissionType === 'fixed'
-      ? (transfer.commissionValue || 0)
-      : actualPrice * (transfer.commissionRate / 100);
-    const settlement = actualPrice - commission;
+    // Vereinfachter Flow (User-Spec): Commission-Logik entfernt. Settlement = actualPrice.
+    // Der actualPrice darf vom ourPrice (= agentPrice) abweichen — z.B. tatsächlicher
+    // Verkauf 280k bei vereinbarten 285k.
+    const settlement = actualPrice;
     const now = new Date().toISOString();
 
     get().updateTransfer(id, {
       status: 'sold', actualSalePrice: actualPrice, buyerInfo,
-      commissionAmount: commission, settlementAmount: settlement, soldAt: now,
+      commissionAmount: 0, settlementAmount: settlement, soldAt: now,
     });
 
     // Update product
@@ -257,7 +274,21 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
          last_sale_price = ?, updated_at = ? WHERE id = ?`,
       [actualPrice, now, transfer.productId]);
     saveDatabase();
-    eventBus.emit('agent_transfer.sold', 'agent_transfer', id, { actualPrice, commission });
+
+    // ZIEL.md §3a — Sold-Forderung ans zentrale Ledger.
+    // counterparty = CUSTOMER (über agent.customerId), damit Customer-Detail
+    // und Dashboard das Outstanding sehen — sonst lebt die Forderung nur im
+    // Domain-Modul und ist im Customer-Ledger unsichtbar.
+    const agent = get().getAgent(transfer.agentId);
+    const customerId = agent?.customerId;
+    if (customerId) {
+      safePost(`postAgentTransferSold(${id})`, () => {
+        if (hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) return;
+        postAgentTransferSold({ transferId: id, amount: settlement, soldAt: now }, customerId);
+      });
+    }
+
+    eventBus.emit('agent_transfer.sold', 'agent_transfer', id, { actualPrice });
   },
 
   markTransferReturned: (id) => {
@@ -269,6 +300,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // Plan §Product §5: zurück zu OWN wenn Ware vom Agent zurückkommt
     db.run(`UPDATE products SET stock_status = 'in_stock', source_type = 'OWN', updated_at = ? WHERE id = ?`, [now, transfer.productId]);
     saveDatabase();
+
+    // ZIEL.md §3a — falls der Transfer schon im Ledger als sold gepostet war,
+    // reversen wir die Forderung. Defensiv: trifft nur zu wenn ein returned
+    // Pfad nach sold genutzt würde.
+    safePost(`postAgentTransferSoldReversed(${id}) [returned]`, () => {
+      if (!hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) return;
+      if (hasReversalFor('AGENT_TRANSFER_SOLD', id)) return;
+      postAgentTransferSoldReversed(id, now);
+    });
+
     eventBus.emit('agent_transfer.returned', 'agent_transfer', id, {});
   },
 
@@ -312,13 +353,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       trackInsert('agent_settlement_payments', payId, { transferId: id, amount: paidNow, method: settleMethod });
 
       // ZIEL.md §3a — Settlement-Cashflow ans Ledger.
-      safePost(`postAgentSettlementPayment(${payId})`, () => {
-        if (hasLedgerEntries('AGENT_SETTLEMENT', payId)) return;
-        postAgentSettlementPayment(
-          { id: payId, transferId: id, amount: paidNow, method: settleMethod, paidAt: paidDate },
-          t.agentId
-        );
-      });
+      // counterparty = CUSTOMER (via agent.customerId), damit AR korrekt reduziert
+      // wird — gleicher Counterparty wie der vorherige AGENT_TRANSFER_SOLD-Post.
+      const settleAgent = get().getAgent(t.agentId);
+      const settleCustomerId = settleAgent?.customerId;
+      if (settleCustomerId) {
+        safePost(`postAgentSettlementPayment(${payId})`, () => {
+          if (hasLedgerEntries('AGENT_SETTLEMENT', payId)) return;
+          postAgentSettlementPayment(
+            { id: payId, transferId: id, amount: paidNow, method: settleMethod, paidAt: paidDate },
+            settleCustomerId
+          );
+        });
+      }
     }
 
     get().updateTransfer(id, {
@@ -352,10 +399,35 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   deleteTransfer: (id) => {
     const db = getDatabase();
     const transfer = get().getTransfer(id);
+    const now = new Date().toISOString();
+
+    // Produkt zurück in Stock wenn nur transferred war.
     if (transfer && transfer.status === 'transferred') {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
-        [new Date().toISOString(), transfer.productId]);
+        [now, transfer.productId]);
     }
+
+    // ZIEL.md §3a — Ledger-Buchungen aufräumen, sonst bleibt die AR-Forderung
+    // (counterparty CUSTOMER) im Customer-Outstanding stehen obwohl der Transfer
+    // weg ist. Reihenfolge unabhängig: Sold und Settlement sind separate sourceIds.
+    safePost(`postAgentTransferSoldReversed(${id}) [delete]`, () => {
+      if (!hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) return;
+      if (hasReversalFor('AGENT_TRANSFER_SOLD', id)) return;
+      postAgentTransferSoldReversed(id, now);
+    });
+
+    // Alle Settlement-Payments dieses Transfers reversen.
+    const settlePayments = get().getSettlementPayments(id);
+    for (const sp of settlePayments) {
+      safePost(`postAgentSettlementPaymentReversed(${sp.id}) [delete]`, () => {
+        if (!hasLedgerEntries('AGENT_SETTLEMENT', sp.id)) return;
+        if (hasReversalFor('AGENT_SETTLEMENT', sp.id)) return;
+        postAgentSettlementPaymentReversed(sp.id);
+      });
+    }
+
+    // Settlement-Payment-Rows löschen, sonst würde ein Backfill sie wieder reposten.
+    db.run(`DELETE FROM agent_settlement_payments WHERE transfer_id = ?`, [id]);
     db.run(`DELETE FROM agent_transfers WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('agent_transfers', id);
@@ -417,6 +489,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (agent && !agent.customerId) {
       get().updateAgent(transfer.agentId, { customerId });
     }
+
+    // ZIEL.md §3a — bestehenden AGENT_TRANSFER_SOLD-Post reversen, sonst doppelter
+    // AR-Eintrag (einmal vom Sold + einmal von der frisch erstellten Invoice).
+    safePost(`postAgentTransferSoldReversed(${transferId}) [convert]`, () => {
+      if (!hasLedgerEntries('AGENT_TRANSFER_SOLD', transferId)) return;
+      if (hasReversalFor('AGENT_TRANSFER_SOLD', transferId)) return;
+      postAgentTransferSoldReversed(transferId);
+    });
 
     // Plan §Agent §Settle+Invoice: bestehende Settle-Payments in die neue
     // Invoice migrieren, sonst zählen sie weiter parallel und Banking
@@ -524,6 +604,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const db = getDatabase();
     for (const t of ts) {
       get().updateTransfer(t.id, { invoiceId: invoice.id });
+
+      // ZIEL.md §3a — bestehenden AGENT_TRANSFER_SOLD-Post reversen, sonst
+      // doppelter AR-Eintrag pro Transfer.
+      safePost(`postAgentTransferSoldReversed(${t.id}) [bulk-convert]`, () => {
+        if (!hasLedgerEntries('AGENT_TRANSFER_SOLD', t.id)) return;
+        if (hasReversalFor('AGENT_TRANSFER_SOLD', t.id)) return;
+        postAgentTransferSoldReversed(t.id);
+      });
+
       const sps = get().getSettlementPayments(t.id);
       if (sps.length > 0) {
         // ZIEL.md §3a — vor invoice_payments-Posting die alten AGENT_SETTLEMENT-Buchungen reversen.
@@ -559,6 +648,50 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       eventBus.emit('agent_transfer.invoice_created', 'agent_transfer', t.id, { invoiceId: invoice.id, bulk: true });
     }
     return invoice;
+  },
+
+  // Auto-Account-Anlage (User-Spec): vom Customer aus einen Agent-Account
+  // finden oder anlegen. Ein Customer hat 0..1 Agent-Account.
+  findOrCreateAgentForCustomer: (customerId) => {
+    if (!customerId) throw new Error('customerId is required.');
+    const existing = get().agents.find(a => a.customerId === customerId);
+    if (existing) {
+      // Ist der Agent inaktiv (nach voller Settlement-History), reaktivieren —
+      // ein neuer Transfer macht den Account wieder lebendig.
+      if (!existing.active) get().updateAgent(existing.id, { active: true });
+      return existing;
+    }
+    const customer = useCustomerStore.getState().customers.find(c => c.id === customerId);
+    if (!customer) throw new Error('Customer not found.');
+    const fullName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim()
+      || customer.firstName || customer.lastName || 'Client';
+    return get().createAgent({
+      name: fullName,
+      company: customer.company,
+      phone: customer.phone,
+      whatsapp: customer.whatsapp,
+      email: customer.email,
+      customerId: customer.id,
+      // Commission-Logik wurde entfernt — der gespeicherte Wert ist nur ein
+      // Default-Stub, damit DB-NOT-NULL-Constraints (commission_rate REAL) tragen.
+      commissionRate: 0,
+    });
+  },
+
+  createTransferForCustomer: ({ customerId, productId, ourPrice, returnBy, notes, staffId }) => {
+    const agent = get().findOrCreateAgentForCustomer(customerId);
+    return get().createTransfer({
+      agentId: agent.id,
+      productId,
+      agentPrice: ourPrice,
+      returnBy,
+      notes,
+      staffId,
+      // Commission-Logik wurde entfernt — Stub-Werte, damit DB-Spalten gefüllt sind.
+      commissionType: 'percent',
+      commissionRate: 0,
+      commissionValue: 0,
+    });
   },
 
   undoTransferInvoiceConvert: (transferId) => {

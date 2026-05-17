@@ -1,17 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText, RotateCcw } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useExpenseStore } from '@/stores/expenseStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { useProductStore } from '@/stores/productStore';
 import { SearchSelect } from '@/components/ui/SearchSelect';
@@ -22,7 +26,7 @@ import type { Repair, RepairStatus } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 // Plan §Repair §6: RECEIVED → IN_PROGRESS → (SENT_TO_WORKSHOP if external) → READY → DELIVERED.
@@ -67,20 +71,24 @@ function getNextStatus(current: RepairStatus, repairType?: string, scope?: 'CUST
 export function RepairDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/repairs');
   const { repairs, loadRepairs, updateRepair, updateStatus, deleteRepair } = useRepairStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { expenses, loadExpenses } = useExpenseStore();
+  const { employees, loadEmployees } = useEmployeeStore();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Repair>>({});
+  // 2026-05-16 — Number-Type-Dialog vor Repair→Invoice Convert.
+  const [numberDialogOpen, setNumberDialogOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const perm = usePermission();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadExpenses(); }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadExpenses]);
+  useEffect(() => { loadRepairs(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadExpenses(); loadEmployees(); }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadExpenses, loadEmployees]);
 
   const supplierOptions = useMemo(() => suppliers
     .filter(s => s.active)
@@ -169,13 +177,20 @@ export function RepairDetail() {
         return;
       }
     }
+    // Number-Type-Dialog vor dem eigentlichen Create.
+    setNumberDialogOpen(true);
+  }
+
+  async function executeRepairInvoiceCreate(specialMark: boolean) {
+    setNumberDialogOpen(false);
+    if (!repair || !id || !customer) return;
     const { getOrCreateRepairServiceProductId } = await import('@/stores/repairStore');
     const { currentBranchId: getBranch } = await import('@/core/db/helpers');
     let branchId: string;
     try { branchId = getBranch(); } catch { branchId = 'branch-main'; }
     const productId = getOrCreateRepairServiceProductId(branchId);
 
-    const grossCharge = repair.chargeToCustomer;
+    const grossCharge = repair.chargeToCustomer!;
     const scheme = repair.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10';
     const rate = scheme === 'VAT_10' ? 10 : 0;
     // chargeToCustomer ist gross-incl-VAT. Bei VAT_10 → Net = gross/1.1.
@@ -196,6 +211,8 @@ export function RepairDetail() {
       `Repair Service · ${repair.repairNumber}${repair.issueDescription ? ' · ' + repair.issueDescription : ''}`,
       undefined,
       'repair',
+      undefined,
+      specialMark,
     );
     if (invoice) {
       updateRepair(id, { invoiceId: invoice.id });
@@ -205,6 +222,8 @@ export function RepairDetail() {
 
   function handleSave() {
     if (!id) return;
+    // External/Hybrid: Workshop-Supplier ist Pflicht — siehe RepairList.handleCreate.
+    if ((form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId) return;
     // Internal cost mirrors actual (or estimated if actual not yet set) unless explicitly overridden.
     // Bei Hybrid ist der Fallback aber nicht erlaubt: dort ist estimatedCost = Workshop Fee
     // (separate Größe), und darf nicht in internalCost gespiegelt werden — sonst doppelt
@@ -308,23 +327,29 @@ export function RepairDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/repairs')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
           >
-            <ArrowLeft size={16} /> Repairs
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
               <>
                 <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...repair }); }}>Cancel</Button>
-                <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
+                <Button
+                  variant="primary"
+                  onClick={handleSave}
+                  disabled={(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId}
+                >
+                  <Save size={14} /> Save
+                </Button>
               </>
             ) : (
               <>
@@ -551,7 +576,7 @@ export function RepairDetail() {
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>INTERNAL PAID FROM</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {([null, 'cash', 'bank'] as const).map(o => {
+                      {([null, 'cash', 'bank', 'benefit'] as const).map(o => {
                         const active = (form.internalPaidFrom ?? null) === o;
                         return (
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, internalPaidFrom: o })}
@@ -560,7 +585,7 @@ export function RepairDetail() {
                               border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                               color: active ? '#0F0F10' : '#6B7280',
                               background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                            }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : 'Bank'}</button>
+                            }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : o === 'bank' ? 'Bank' : 'Benefit'}</button>
                         );
                       })}
                     </div>
@@ -568,7 +593,7 @@ export function RepairDetail() {
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>CUSTOMER PAID WITH</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {([null, 'cash', 'bank'] as const).map(o => {
+                      {([null, 'cash', 'bank', 'benefit'] as const).map(o => {
                         const active = (form.customerPaidFrom ?? null) === o;
                         return (
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, customerPaidFrom: o })}
@@ -577,7 +602,7 @@ export function RepairDetail() {
                               border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                               color: active ? '#0F0F10' : '#6B7280',
                               background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                            }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : 'Bank'}</button>
+                            }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : o === 'bank' ? 'Bank' : 'Benefit'}</button>
                         );
                       })}
                     </div>
@@ -590,23 +615,23 @@ export function RepairDetail() {
                       <span className="text-overline">
                         {repair.repairType === 'hybrid' ? 'WORKSHOP FEE / EXTERNAL COST' : 'ESTIMATED COST'}
                       </span>
-                      <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}>{fmt(repair.estimatedCost)} BHD</span>
+                      <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.estimatedCost}/> BHD</span>
                     </div>
                   )}
                   {repair.actualCost != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">ACTUAL COST</span>
-                      <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}>{fmt(repair.actualCost)} BHD</span>
+                      <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.actualCost}/> BHD</span>
                     </div>
                   )}
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                     <span className="text-overline">INTERNAL COST</span>
-                    <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}>{fmt(repair.internalCost)} BHD</span>
+                    <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.internalCost}/> BHD</span>
                   </div>
                   {repair.chargeToCustomer != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">CHARGE TO CUSTOMER</span>
-                      <span className="font-display" style={{ fontSize: 20, color: '#0F0F10' }}>{fmt(repair.chargeToCustomer)} BHD</span>
+                      <span className="font-display" style={{ fontSize: 20, color: '#0F0F10' }}><Bhd v={repair.chargeToCustomer}/> BHD</span>
                     </div>
                   )}
                   {repair.customerPaidFrom && (
@@ -625,7 +650,7 @@ export function RepairDetail() {
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">MARGIN / PROFIT</span>
                       <span className="font-mono" style={{ fontSize: 16, color: margin >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                        {fmt(margin)} BHD
+                        <Bhd v={margin}/> BHD
                       </span>
                     </div>
                   )}
@@ -660,12 +685,19 @@ export function RepairDetail() {
                   </div>
                   {/* Plan §Repair §Workshop-as-Supplier: Picker statt Free-Text. */}
                   <SearchSelect
-                    label="WORKSHOP / GOLDSMITH (SUPPLIER)"
+                    label={(form.repairType === 'external' || form.repairType === 'hybrid')
+                      ? 'WORKSHOP / GOLDSMITH (SUPPLIER) *'
+                      : 'WORKSHOP / GOLDSMITH (SUPPLIER)'}
                     placeholder="Search supplier..."
                     options={supplierOptions}
                     value={form.workshopSupplierId || ''}
                     onChange={sid => setForm({ ...form, workshopSupplierId: sid || undefined })}
                   />
+                  {(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId && (
+                    <p style={{ fontSize: 11, color: '#DC2626', marginTop: -4 }}>
+                      Pflichtfeld bei {form.repairType === 'external' ? 'External' : 'Hybrid'}-Repair.
+                    </p>
+                  )}
                   <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value || undefined })} />
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>DIAGNOSIS</span>
@@ -715,6 +747,17 @@ export function RepairDetail() {
                   {repair.completedAt && renderField('Completed', new Date(repair.completedAt).toLocaleDateString())}
                   {repair.pickedUpAt && renderField('Picked Up', new Date(repair.pickedUpAt).toLocaleDateString())}
                   {repair.estimatedReady && renderField('Estimated Ready', new Date(repair.estimatedReady).toLocaleDateString())}
+                  {repair.staffId && renderField('Staff',
+                    (() => {
+                      const e = employees.find(x => x.id === repair.staffId);
+                      return e ? (
+                        <span style={{ cursor: 'pointer', color: '#3D7FFF', textDecoration: 'underline' }}
+                          onClick={() => navigate(`/employees/${e.id}`)}>
+                          {e.name}{e.role ? ` · ${e.role}` : ''}
+                        </span>
+                      ) : '—';
+                    })()
+                  )}
                   {repair.diagnosis && (
                     <div style={{ marginTop: 16 }}>
                       <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Diagnosis</span>
@@ -863,6 +906,13 @@ export function RepairDetail() {
         entityType="repairs"
         entityId={repair.id}
         title={`History · ${repair.repairNumber}`}
+      />
+
+      <NumberTypeDialog
+        open={numberDialogOpen}
+        variant="repair"
+        onCancel={() => setNumberDialogOpen(false)}
+        onConfirm={executeRepairInvoiceCreate}
       />
     </div>
   );

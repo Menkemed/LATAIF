@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ShoppingBag, FileText, CheckCircle2 } from 'lucide-react';
+import { ShoppingBag, FileText } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
@@ -14,9 +14,10 @@ import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { OrderStatus, OrderPaymentStatus } from '@/core/models/types';
 import { deriveOrderPaymentStatus } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 function fmtDate(iso?: string): string {
   if (!iso) return '—';
@@ -54,7 +55,7 @@ const PAYMENT_STATUS_STYLE: Record<OrderPaymentStatus, { fg: string; bg: string 
 const FILTER_STATUSES: (OrderStatus | '')[] = ['', 'pending', 'arrived', 'notified', 'completed', 'cancelled'];
 
 // Spalten: Date | Order# | Client | Phone | Total | Paid | Remaining | Payment | Order Status | (Convert-Action)
-const GRID_COLUMNS = 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.2fr) minmax(0,1.2fr) 28px';
+const GRID_COLUMNS = 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,1.4fr)';
 
 export function OrderList() {
   const navigate = useNavigate();
@@ -161,9 +162,9 @@ export function OrderList() {
         </div>
       }
     >
-      {/* Spalten-Header — Plan §Order Übersicht: Date | # | Client | Phone | Total | Paid | Remaining | Payment | Order | (Convert) */}
+      {/* Spalten-Header — Plan §Order Übersicht: Date | # | Client | Phone | Total | Paid | Remaining | Payment | Order | Actions */}
       <div style={{ display: 'grid', gridTemplateColumns: GRID_COLUMNS, gap: 12, padding: '0 12px 10px' }}>
-        {['DATE', 'ORDER #', 'CLIENT', 'PHONE', 'TOTAL', 'PAID', 'REMAINING', 'PAYMENT', 'ORDER STATUS', ''].map((h, i) => (
+        {['DATE', 'ORDER #', 'CLIENT', 'PHONE', 'TOTAL', 'PAID', 'REMAINING', 'PAYMENT', 'ORDER STATUS', 'ACTIONS'].map((h, i) => (
           <span key={i} className="text-overline">{h}</span>
         ))}
       </div>
@@ -225,17 +226,17 @@ export function OrderList() {
 
             {/* Total */}
             <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>
-              {total > 0 ? fmt(total) : '—'}
+              {total > 0 ? <Bhd v={total}/> : '—'}
             </span>
 
             {/* Paid */}
             <span className="font-mono" style={{ fontSize: 13, color: paymentStatus === 'PAID' ? '#16A34A' : '#4B5563' }}>
-              {paid > 0 ? fmt(paid) : '—'}
+              {paid > 0 ? <Bhd v={paid}/> : '—'}
             </span>
 
             {/* Remaining */}
             <span className="font-mono" style={{ fontSize: 13, color: remaining > 0.005 ? '#DC2626' : '#9CA3AF' }}>
-              {remaining > 0.005 ? fmt(remaining) : '—'}
+              {remaining > 0.005 ? <Bhd v={remaining}/> : '—'}
             </span>
 
             {/* Payment Status + Pay Button */}
@@ -266,38 +267,36 @@ export function OrderList() {
               {ORDER_STATUS_LABELS[orderStatus] || orderStatus}
             </span>
 
-            {/* Convert-to-Invoice Action: nur bei completed.
-                Wenn schon konvertiert → CheckCircle mit Link zur Invoice. */}
-            {(() => {
-              if (order.invoiceId) {
-                const invNum = invMap.get(order.invoiceId);
-                return (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${order.invoiceId}`); }}
-                    title={invNum ? `Already converted — ${invNum}` : 'See Invoice'}
-                    className="cursor-pointer"
-                    style={{ background: 'none', border: 'none', padding: 4, color: '#16A34A', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                  >
-                    <CheckCircle2 size={16} />
-                  </button>
-                );
-              }
-              if (orderStatus === 'completed') {
-                return (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); navigate(`/orders/${order.id}`); }}
-                    title="Convert to Invoice"
-                    className="cursor-pointer transition-colors"
-                    style={{ background: 'none', border: 'none', padding: 4, color: '#0F0F10', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                    onMouseEnter={e => (e.currentTarget.style.color = '#7EAA6E')}
-                    onMouseLeave={e => (e.currentTarget.style.color = '#0F0F10')}
-                  >
-                    <FileText size={16} />
-                  </button>
-                );
-              }
-              return <span />;
-            })()}
+            {/* Create-Invoice Action: nur bei completed.
+                Wenn schon konvertiert → View-Invoice-Button. Design synchron zu
+                TransferTable Create-Invoice (lila gefüllt) für Konsistenz. */}
+            <div className="flex gap-1 flex-wrap" onClick={(e) => e.stopPropagation()}>
+              {order.invoiceId ? (
+                <button
+                  onClick={() => navigate(`/invoices/${order.invoiceId}`)}
+                  title={`Already invoiced — ${invMap.get(order.invoiceId) || 'View Invoice'}`}
+                  className="cursor-pointer flex items-center gap-1"
+                  style={{
+                    padding: '4px 10px', fontSize: 11, border: '1px solid #715DE3',
+                    color: '#715DE3', borderRadius: 4, background: 'rgba(113,93,227,0.06)',
+                  }}
+                >
+                  <FileText size={11} /> View Invoice
+                </button>
+              ) : orderStatus === 'completed' ? (
+                <button
+                  onClick={() => navigate(`/orders/${order.id}`)}
+                  title="Create Invoice from this order"
+                  className="cursor-pointer flex items-center gap-1"
+                  style={{
+                    padding: '4px 10px', fontSize: 11, border: '1px solid #715DE3',
+                    color: '#FFFFFF', borderRadius: 4, background: '#715DE3', fontWeight: 500,
+                  }}
+                >
+                  <FileText size={11} /> Create Invoice
+                </button>
+              ) : null}
+            </div>
           </div>
         );
       })}

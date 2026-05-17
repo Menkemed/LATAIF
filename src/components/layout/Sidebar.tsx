@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Users, Package, FileText,
@@ -6,8 +6,12 @@ import {
   Wrench, Handshake, UserCheck, ShoppingCart, FolderOpen,
   HandCoins, Sparkles, Truck, Wallet, Landmark, UserPlus, Factory, FileMinus, CreditCard,
 } from 'lucide-react';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
+
+// localStorage-Key fuer expanded-Group-Persistence. Speichert ein JSON-Array
+// von Group-Labels, die der User offen lassen will.
+const SIDEBAR_EXPANDED_KEY = 'lataif.sidebar.expandedGroups';
 
 interface NavItem { to: string; label: string; icon: typeof LayoutDashboard; tone?: 'blue' | 'purple' | 'green' | 'orange' | 'pink' | 'cyan' }
 interface NavGroup { label?: string; items: NavItem[] }
@@ -41,14 +45,16 @@ const navGroups: NavGroup[] = [
     items: [
       { to: '/expenses', label: 'Expenses', icon: Wallet, tone: 'orange' },
       { to: '/banking', label: 'Banking', icon: Landmark, tone: 'blue' },
-      { to: '/debts', label: 'Debts', icon: HandCoins, tone: 'pink' },
+      { to: '/receivables', label: 'Receivables', icon: FileText, tone: 'green' },
       { to: '/payables', label: 'Payables', icon: CreditCard, tone: 'purple' },
+      { to: '/debts', label: 'Debts', icon: HandCoins, tone: 'pink' },
     ],
   },
   { label: 'DOCUMENTS', items: [{ to: '/documents', label: 'Documents', icon: FolderOpen, tone: 'cyan' }] },
   {
     label: 'BUSINESS MANAGEMENT',
     items: [
+      { to: '/employees', label: 'Employees', icon: Users, tone: 'cyan' },
       { to: '/partners', label: 'Partners', icon: UserPlus, tone: 'purple' },
       { to: '/tasks', label: 'Tasks', icon: CheckSquare, tone: 'green' },
     ],
@@ -81,6 +87,61 @@ export function Sidebar() {
   const location = useLocation();
   const { session, branches, logout, switchBranch } = useAuthStore();
   const [branchOpen, setBranchOpen] = useState(false);
+
+  // Group-Collapse: speichert nur die EXPANDED Labels. Default = leer = alle zu.
+  // Hydration aus localStorage einmal beim Mount.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(SIDEBAR_EXPANDED_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr.filter(x => typeof x === 'string'));
+      }
+    } catch {}
+    return new Set();
+  });
+
+  // Persistenz bei jeder Aenderung.
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_EXPANDED_KEY, JSON.stringify(Array.from(expandedGroups)));
+    } catch {}
+  }, [expandedGroups]);
+
+  // Welche Gruppe enthaelt die aktuelle Route? Die wird automatisch als "open" behandelt,
+  // damit der User immer den Kontext sieht wo er gerade steht.
+  const activeGroupLabel = useMemo(() => {
+    for (const g of navGroups) {
+      if (!g.label) continue;
+      const hit = g.items.some(it => it.to === '/' ? location.pathname === '/' : location.pathname.startsWith(it.to));
+      if (hit) return g.label;
+    }
+    return null;
+  }, [location.pathname]);
+
+  function isGroupOpen(label: string): boolean {
+    if (label === activeGroupLabel) return true;
+    return expandedGroups.has(label);
+  }
+
+  function toggleGroup(label: string) {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  }
+
+  // Alle Gruppen mit Label — fuer Bulk-Toggle (Expand-/Collapse-All).
+  const allLabels = useMemo(
+    () => navGroups.map(g => g.label).filter((l): l is string => !!l),
+    []
+  );
+  const allExpanded = allLabels.every(l => expandedGroups.has(l));
+  function toggleAll() {
+    setExpandedGroups(allExpanded ? new Set() : new Set(allLabels));
+  }
 
   const userName = session?.user.name || 'User';
   const userInitials = userName.split(' ').map(n => n[0]).join('').slice(0, 2);
@@ -142,49 +203,107 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-3 overflow-y-auto">
-        {navGroups.map((group, gi) => (
-          <div key={gi} style={{ marginBottom: group.label ? 6 : 0 }}>
-            {group.label && (
-              <span style={{ display: 'block', fontSize: 9, letterSpacing: '0.10em', color: '#9CA3AF', padding: '14px 14px 4px', fontWeight: 600 }}>
-                {group.label}
-              </span>
-            )}
-            {group.items.map(({ to, label, icon: Icon, tone = 'purple' }) => {
-              const isActive = to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
-              const fg = TONE_FG[tone];
-              const bg = TONE_BG[tone];
-              return (
-                <NavLink
-                  key={to} to={to}
-                  className="relative flex items-center gap-3 rounded-lg transition-all"
+        {navGroups.map((group, gi) => {
+          // Gruppen ohne Label (z.B. Dashboard) sind nicht kollapsierbar.
+          const collapsible = !!group.label;
+          const open = collapsible ? isGroupOpen(group.label!) : true;
+          const isActiveGroup = group.label === activeGroupLabel;
+          return (
+            <div key={gi} style={{ marginBottom: group.label ? 6 : 0 }}>
+              {group.label && (
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(group.label!)}
+                  className="cursor-pointer transition-colors"
                   style={{
-                    padding: '8px 10px',
-                    fontSize: 13,
-                    fontWeight: isActive ? 600 : 500,
-                    color: isActive ? '#0F0F10' : '#4B5563',
-                    background: isActive ? '#F2F7FA' : 'transparent',
-                    margin: '1px 0',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    width: '100%', padding: '10px 14px 6px',
+                    background: 'transparent', border: 'none', textAlign: 'left',
+                    fontSize: 9, letterSpacing: '0.10em',
+                    color: isActiveGroup ? '#0F0F10' : '#9CA3AF',
+                    fontWeight: 600, textTransform: 'none',
                   }}
-                  onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = '#F8FAFC'; }}
-                  onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                  onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
+                  onMouseLeave={e => (e.currentTarget.style.color = isActiveGroup ? '#0F0F10' : '#9CA3AF')}
+                  aria-expanded={open}
+                  aria-controls={`sidebar-group-${gi}`}
                 >
-                  <span style={{
-                    width: 28, height: 28, borderRadius: 8,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: bg, color: fg, flexShrink: 0,
-                  }}>
-                    <Icon size={15} strokeWidth={2} />
-                  </span>
-                  <span>{label}</span>
-                </NavLink>
-              );
-            })}
-          </div>
-        ))}
+                  <span>{group.label}</span>
+                  <ChevronDown
+                    size={11}
+                    style={{
+                      transform: open ? 'rotate(0deg)' : 'rotate(-90deg)',
+                      transition: 'transform 0.18s ease',
+                      opacity: 0.7,
+                    }}
+                  />
+                </button>
+              )}
+              {open && (
+                <div id={`sidebar-group-${gi}`}>
+                  {group.items.map(({ to, label, icon: Icon, tone = 'purple' }) => {
+                    const isActive = to === '/' ? location.pathname === '/' : location.pathname.startsWith(to);
+                    const fg = TONE_FG[tone];
+                    const bg = TONE_BG[tone];
+                    return (
+                      <NavLink
+                        key={to} to={to}
+                        className="relative flex items-center gap-3 rounded-lg transition-all"
+                        style={{
+                          padding: '8px 10px',
+                          fontSize: 13,
+                          fontWeight: isActive ? 600 : 500,
+                          color: isActive ? '#0F0F10' : '#4B5563',
+                          background: isActive ? '#F2F7FA' : 'transparent',
+                          margin: '1px 0',
+                        }}
+                        onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = '#F8FAFC'; }}
+                        onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                      >
+                        <span style={{
+                          width: 28, height: 28, borderRadius: 8,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          background: bg, color: fg, flexShrink: 0,
+                        }}>
+                          <Icon size={15} strokeWidth={2} />
+                        </span>
+                        <span>{label}</span>
+                      </NavLink>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </nav>
 
       {/* Bottom */}
       <div className="px-3 pb-3" style={{ borderTop: '1px solid #E5E9EE', paddingTop: 8 }}>
+        {/* Expand/Collapse-all toggle */}
+        <button
+          type="button"
+          onClick={toggleAll}
+          title={allExpanded ? 'Collapse all groups' : 'Expand all groups'}
+          aria-label={allExpanded ? 'Collapse all groups' : 'Expand all groups'}
+          className="w-full flex items-center gap-3 rounded-lg transition-all cursor-pointer"
+          style={{
+            padding: '8px 10px', fontSize: 13, margin: '1px 0', fontWeight: 500,
+            color: '#4B5563', background: 'none', border: 'none', textAlign: 'left',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = '#F8FAFC'; e.currentTarget.style.color = '#0F0F10'; }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = '#4B5563'; }}
+        >
+          <span style={{
+            width: 28, height: 28, borderRadius: 8,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(107,114,128,0.10)', color: '#6B7280', flexShrink: 0,
+          }}>
+            {allExpanded ? <ChevronsDownUp size={15} strokeWidth={2} /> : <ChevronsUpDown size={15} strokeWidth={2} />}
+          </span>
+          <span>{allExpanded ? 'Collapse all' : 'Expand all'}</span>
+        </button>
+
         <NavLink
           to="/settings"
           className="flex items-center gap-3 rounded-lg transition-all"

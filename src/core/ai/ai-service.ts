@@ -328,40 +328,47 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
 }> = {
   'cat-watch': {
     name: 'WATCH',
-    required: ['reference_number', 'model', 'case_diameter_mm', 'serial_number', 'dial', 'bezel', 'material', 'diamonds', 'strap_type'],
-    optional: ['movement', 'year', 'description'],
-    conditionOptions: ['New', 'Unworn', 'Pre-Owned', 'Vintage'],
+    // 'model' attribute removed 2026-05-17 — Duplikat zum Universal-Feld name.
+    // karat_color hängt von material ab (Gold-Anteil) — vom Caller per dependsOn gefiltert.
+    // 2026-05-17: reference_number, serial_number, bezel optional (Vintage/Custom).
+    required: ['case_diameter_mm', 'dial', 'material', 'karat_color', 'diamonds', 'strap_type'],
+    optional: ['reference_number', 'serial_number', 'bezel', 'movement', 'year', 'description'],
+    conditionOptions: ['Unworn', 'Pre-Owned', 'Vintage'],
     scopeOptions: ['Box', 'Papers', 'Warranty Card', 'Extra Links', 'Pouch'],
     notes: [
       'reference_number = the EXACT factory reference (Rolex 4-7 chars like "126610LN", "16610", "126710BLRO"; Patek "5711/1A-010"; AP "15500ST.OO.1220ST.01"; Omega "310.30.42.50.01.001"). NEVER return brand-name or family-name as reference. Read crown engraving / between-lugs / caseback if visible.',
-      'model = full collector name including nickname when applicable (e.g. "Submariner Date \'Hulk\'", "GMT-Master II \'Pepsi\'", "Daytona \'Paul Newman\'", "Royal Oak Jumbo", "Nautilus 5711").',
+      // Model gehört in den Universal-`name`-Feld, nicht in attributes.
+      'NB: the full collector name (with nickname, e.g. "Submariner Date \'Hulk\'", "GMT-Master II \'Pepsi\'", "Daytona \'Paul Newman\'", "Royal Oak Jumbo", "Nautilus 5711") goes into the top-level "name" field, NOT into attributes.',
       'case_diameter_mm = case width in millimetres (number only, e.g. 36, 40, 41, 42). Estimate from proportions vs crown/lugs if not stated. Common sizes: Submariner 40-41, Datejust 36/41, Daytona 40, GMT 40, Nautilus 40, Royal Oak 39-41, AP Offshore 42-44, Speedmaster 42. NEVER guess wider than 50.',
-      'material ∈ {Steel, Gold, Rose Gold, White Gold, Two-Tone, Titanium, Plated}. strap_type ∈ {Leather, Rubber}. diamonds is boolean. movement = caliber if visible/known (e.g. "Cal. 3135", "Cal. 9461MC"). year = approximate production year (number).',
+      'material ∈ {Steel, Solid Gold, Two-Tone Steel/Gold, Platinum, Titanium, Ceramic, Bronze, Carbon, DLC Steel, Plated, Ceramic & Steel, Ceramic & Gold, Titanium & Gold, Titanium & Ceramic}. karat_color ∈ {18K Yellow, 18K Rose, 18K White, 14K Yellow, 14K Rose, 14K White, 9K Yellow, 9K Rose} — ONLY return this when material has a gold component (Solid Gold, Two-Tone Steel/Gold, Ceramic & Gold, Titanium & Gold); otherwise null. strap_type ∈ {Leather, Rubber}. diamonds is boolean. movement = caliber if visible/known (e.g. "Cal. 3135", "Cal. 9461MC"). year = approximate production year (number).',
     ].join(' '),
   },
   'cat-gold-jewelry': {
-    name: 'GOLD_JEWELRY',
-    required: ['weight', 'karat', 'item_type', 'color_type'],
+    name: 'GOLD_DIAMOND_JEWELRY',
+    // 2026-05-17: color_type integriert in karat (z.B. "18K Rose", "14K Mix"). Silver + Bar + Coin hinzu.
+    required: ['weight', 'karat', 'item_type'],
     optional: ['diamond_weight', 'description'],
-    conditionOptions: ['New', 'Pre-Owned', 'Vintage'],
+    conditionOptions: ['Pre-Owned', 'Vintage'],
     scopeOptions: ['Box', 'Certificate', 'Pouch'],
-    notes: 'weight in grams (number). karat ∈ {24K, 22K, 21K, 18K, 14K, 9K}. item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. color_type ∈ {Yellow Gold, Rose Gold, White Gold, Two-Tone}. diamond_weight in carats.',
+    notes: 'weight in grams (number). karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color into a single value (24K/22K/21K only exist in Yellow). Mix = Two-Tone. Silver for non-gold silver items. item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch, Bar, Coin} (Bar/Coin for investment-grade pieces). diamond_weight in carats.',
   },
   'cat-branded-gold-jewelry': {
     name: 'BRANDED_GOLD_JEWELRY',
-    required: ['item_type', 'color_type', 'size', 'karat'],
+    // 2026-05-17: color_type integriert in karat (z.B. "18K Rose", "14K Mix").
+    required: ['item_type', 'size', 'karat'],
     optional: ['weight', 'diamond_weight', 'model_number', 'serial_number', 'certificate', 'box', 'description'],
     conditionOptions: ['New', 'Pre-Owned', 'Vintage'],
     scopeOptions: ['Box', 'Certificate', 'Papers', 'Pouch', 'Receipt'],
-    notes: 'karat ∈ {24K, 22K, 21K, 18K, 14K, 9K}. item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. color_type ∈ {Yellow Gold, Rose Gold, White Gold, Two-Tone}. weight in grams (optional). certificate and box are booleans. size can be ring-size or "Small"/"Medium" etc.',
+    notes: 'karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color (Mix = Two-Tone; 24K/22K/21K only Yellow; Silver for non-gold). item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. weight in grams (optional). certificate and box are booleans. size can be ring-size or "Small"/"Medium" etc.',
   },
   'cat-original-gold-jewelry': {
     name: 'ORIGINAL_GOLD_JEWELRY',
-    required: ['item_type', 'color_type', 'size', 'karat'],
+    // 2026-05-17: color_type integriert in karat.
+    required: ['item_type', 'size', 'karat'],
     optional: ['weight', 'diamond_weight', 'description'],
     conditionOptions: ['New', 'Pre-Owned', 'Vintage', 'Antique'],
     scopeOptions: ['Box', 'Certificate', 'Appraisal', 'Pouch'],
-    notes: 'karat ∈ {24K, 22K, 21K, 18K, 14K, 9K}. item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. color_type ∈ {Yellow Gold, Rose Gold, White Gold, Two-Tone}. weight in grams (optional). For antique/heritage include provenance in description.',
+    notes: 'karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color (Mix = Two-Tone; 24K/22K/21K only Yellow; Silver for non-gold). item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. weight in grams (optional). For antique/heritage include provenance in description.',
   },
   'cat-accessory': {
     name: 'ACCESSORY',
@@ -373,11 +380,13 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
   },
   'cat-spare-part': {
     name: 'SPARE_PART',
-    required: ['model', 'part_type', 'material', 'original_or_copy', 'description'],
-    optional: ['karat'],
+    // 'model' attribute removed 2026-05-17 — gehört in den Universal-`name`-Feld.
+    // 'karat' integriert in `material` als Select.
+    required: ['part_type', 'material', 'original_or_copy', 'description'],
+    optional: [],
     conditionOptions: ['New', 'Pre-Owned', 'Refurbished'],
     scopeOptions: ['Packaging'],
-    notes: 'part_type ∈ {Dial, Bezel, Links, Crown, Strap, Buckle, Caseback, Movement, Crystal, Other}. original_or_copy ∈ {Original, Copy}. karat optional (only if gold part).',
+    notes: 'The compatible model/family (e.g. "Rolex Submariner Dial", "AP Royal Oak Strap") goes into the top-level "name" field. part_type ∈ {Dial, Bezel, Links, Crown, Strap, Buckle, Caseback, Movement, Crystal, Box, Other}. material ∈ {Steel, 18K YG, 18K RG, 18K WG, 14K YG, 14K RG, 14K WG, Steel/18K YG, Steel/18K RG, Steel/18K WG, Steel/14K YG, Steel/14K RG, Steel/14K WG} — YG/RG/WG = Yellow/Rose/White Gold; Steel/<gold> = Bicolor (e.g. Rolesor links). original_or_copy ∈ {Original, Copy}.',
   },
 };
 
@@ -422,13 +431,13 @@ Your task: identify this ${spec.name} item with EXTREME specificity and research
      - Cartier: "WSSA0030", "W31044M7", "WGNM0017"
      - Vacheron / Lange / IWC / JLC: 4-7 digit numerics often with letters ("4500V/110A-B128", "IW371417", "Q1378420")
      - If you genuinely cannot read it, return null — do NOT fabricate.
-  2. **model** (the exact collector name): include the family AND the nickname/variant (e.g. "Submariner Date 'Hulk'", "GMT-Master II 'Pepsi'", "Daytona 'Panda'", "Royal Oak Jumbo Extra-Thin", "Nautilus 5711/1A 'Tiffany'"). NEVER just "Submariner" — always specify the variant.
+  2. **name** (top-level, NOT in attributes — the exact collector name): include the family AND the nickname/variant (e.g. "Submariner Date 'Hulk'", "GMT-Master II 'Pepsi'", "Daytona 'Panda'", "Royal Oak Jumbo Extra-Thin", "Nautilus 5711/1A 'Tiffany'"). NEVER just "Submariner" — always specify the variant.
   3. **case_diameter_mm**: case width in mm. If the watch is identified, use the canonical factory size (Submariner 41 modern / 40 pre-2020, Datejust 36 or 41, Daytona 40, GMT 40, Nautilus 5711 = 40, Royal Oak Jumbo = 39, AP Offshore = 42, Speedmaster Pro = 42, Tank Solo medium = 31x27). Otherwise estimate from proportions (lugs/crown). Never default to "40" without basis.
   4. Plus: caliber/movement, year range, complications (chronograph, GMT, moonphase, day-date, perpetual calendar), dial color + indices, bezel material, strap type.
 - For branded jewelry: maker, collection, variant, metal, stones
 - For unbranded gold: weight (estimate from image), karat (estimate), craft style
 - For accessories: maker, collection, leather/material, hardware, edition
-- For spare parts: compatible model, generation, original vs aftermarket
+- For spare parts: put the compatible model/family into the top-level "name" field; include generation, original vs aftermarket
 - Research current market value in BHD (1 BHD ≈ 2.65 USD). Provide realistic mid-market price for Bahrain/GCC.
 - Purchase price estimate: what a dealer might pay (usually 60-75% of market value)
 - Min/Max sale price: reasonable floor/ceiling for our resale
@@ -465,7 +474,7 @@ Respond with JSON ONLY, no markdown. Structure:
 Set fields to null/empty ONLY if truly indeterminable. Never guess serial numbers. For numeric fields (weight, karat numerical like "18K"→18, caseSize, year, price) return numbers, not strings. For booleans (diamonds, box, papers, certificate) return true/false. For selects return the exact string from the allowed options.`;
 
   const watchExtra = params.categoryId === 'cat-watch'
-    ? '\n\nFor this WATCH, the three CRITICAL fields are reference_number (exact factory ref like "126610LN", not "Submariner"), model (full collector name including nickname like "Submariner Date \'Hulk\'"), and case_diameter_mm (numeric mm of the case). Look carefully at: dial bottom text, caseback engravings, between-lugs marking, crown engraving, papers/box if visible. If you cannot read the reference, infer it from dial config + bezel + case + hands combination. Never return a family name as the reference.'
+    ? '\n\nFor this WATCH, the three CRITICAL fields are reference_number (exact factory ref like "126610LN", not "Submariner"), the top-level "name" field (full collector name including nickname like "Submariner Date \'Hulk\'" — NOT inside attributes), and case_diameter_mm (numeric mm of the case). Look carefully at: dial bottom text, caseback engravings, between-lugs marking, crown engraving, papers/box if visible. If you cannot read the reference, infer it from dial config + bezel + case + hands combination. Never return a family name as the reference.'
     : '';
 
   const userContent: any[] = [];

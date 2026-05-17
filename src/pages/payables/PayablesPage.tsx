@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { AlertTriangle, Calendar, Clock, Download, ExternalLink, FileText, X } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
 import {
   usePayablesStore, payablesTotal, overdueCount, bucketTotals,
   PAYABLE_TYPE_LABELS, PAYABLE_TYPE_COLORS,
@@ -10,7 +11,7 @@ import {
 } from '@/stores/payablesStore';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 function fmtDate(iso?: string): string {
   if (!iso) return '—';
@@ -146,7 +147,7 @@ export function PayablesPage() {
                 </div>
               </div>
               <div className="font-display" style={{ fontSize: 24, color: '#0F0F10', lineHeight: 1.1 }}>
-                {fmt(data.total)} <span style={{ fontSize: 11, color: '#6B7280' }}>BHD</span>
+                <Bhd v={data.total}/> <span style={{ fontSize: 11, color: '#6B7280' }}>BHD</span>
               </div>
               <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
                 {data.count} {data.count === 1 ? 'item' : 'items'}
@@ -320,10 +321,10 @@ export function PayablesPage() {
 
             {/* AMOUNT (gross original) */}
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 13, color: '#6B7280', minWidth: 0, overflow: 'hidden' }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(row.totalAmount)}</div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={row.totalAmount}/></div>
               {row.paidAmount > 0 && (
                 <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>
-                  paid {fmt(row.paidAmount)}
+                  paid <Bhd v={row.paidAmount}/>
                 </div>
               )}
             </div>
@@ -334,7 +335,7 @@ export function PayablesPage() {
               color: row.daysOverdue > 0 ? '#DC2626' : '#0F0F10',
               minWidth: 0, overflow: 'hidden',
             }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(row.outstanding)}</div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={row.outstanding}/></div>
               <div style={{ fontSize: 10, color: '#9CA3AF', fontWeight: 400, marginTop: 2 }}>BHD</div>
             </div>
           </div>

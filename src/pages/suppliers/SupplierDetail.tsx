@@ -2,8 +2,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Building2, Edit3, Save, Trash2 } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
 import { KPICard } from '@/components/ui/KPICard';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -14,7 +16,7 @@ import { query } from '@/core/db/helpers';
 import type { Supplier } from '@/core/models/types';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtDate(iso?: string): string {
@@ -25,6 +27,7 @@ function fmtDate(iso?: string): string {
 export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/suppliers');
   const { suppliers, loadSuppliers, updateSupplier, deleteSupplier, getLedger } = useSupplierStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const [editing, setEditing] = useState(false);
@@ -141,13 +144,13 @@ export function SupplierDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/suppliers')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}>
-            <ArrowLeft size={16} /> Suppliers
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
@@ -233,9 +236,9 @@ export function SupplierDetail() {
                   onClick={() => navigate(`/purchases/${p.id}`)}>
                   <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{p.purchaseNumber}</span>
                   <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(p.purchaseDate)}</span>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.totalAmount)}</span>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.paidAmount)}</span>
-                  <span className="font-mono" style={{ fontSize: 12, color: p.remainingAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.remainingAmount)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={p.totalAmount}/></span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={p.paidAmount}/></span>
+                  <span className="font-mono" style={{ fontSize: 12, color: p.remainingAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={p.remainingAmount}/></span>
                   <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{p.status}</span>
                 </div>
               ))}
@@ -264,8 +267,8 @@ export function SupplierDetail() {
                       <span className="font-mono" style={{ fontSize: 12, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: e.repairId ? 'pointer' : 'default' }}>{e.expenseNumber}</span>
                       <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description}</span>
                       <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(e.expenseDate)}</span>
-                      <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(e.amount)}</span>
-                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(e.paidAmount)}</span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.amount}/></span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.paidAmount}/></span>
                       <span style={{
                         fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE',
                         color: e.status === 'PAID' ? '#16A34A' : remaining > 0 ? '#DC2626' : '#6B7280',
@@ -298,7 +301,7 @@ export function SupplierDetail() {
                   <div key={p.id} style={{ display: 'contents' }}>
                     <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{p.purchaseNumber}</span>
                     <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(p.paidAt)}</span>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(p.amount)}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={p.amount}/></span>
                     <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{p.method}</span>
                     <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#6B7280' }}>{p.reference || '\u2014'}</span>
                   </div>
@@ -325,7 +328,7 @@ export function SupplierDetail() {
                   <div key={r.id} style={{ display: 'contents' }}>
                     <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{r.returnNumber}</span>
                     <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(r.returnDate)}</span>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#DC2626', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmt(r.totalAmount)}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#DC2626', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={r.totalAmount}/></span>
                     <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{r.refundMethod || '\u2014'}</span>
                     <span style={{ fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: '#4B5563' }}>{r.status}</span>
                   </div>

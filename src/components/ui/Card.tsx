@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, type CSSProperties, useState } from 'react';
 
 interface CardProps {
   children: ReactNode;
@@ -6,9 +6,10 @@ interface CardProps {
   hoverable?: boolean;
   onClick?: () => void;
   noPadding?: boolean;
+  style?: CSSProperties;
 }
 
-export function Card({ children, className = '', hoverable = false, onClick, noPadding = false }: CardProps) {
+export function Card({ children, className = '', hoverable = false, onClick, noPadding = false, style }: CardProps) {
   const [hovered, setHovered] = useState(false);
 
   return (
@@ -23,6 +24,8 @@ export function Card({ children, className = '', hoverable = false, onClick, noP
         transform: hovered && hoverable ? 'translateY(-2px)' : 'translateY(0)',
         boxShadow: hovered && hoverable ? '0 8px 24px rgba(15,15,16,0.06)' : 'none',
         overflow: 'hidden',
+        // Caller-overrides last so marginBottom/padding/etc. tatsaechlich wirken.
+        ...style,
       }}
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}

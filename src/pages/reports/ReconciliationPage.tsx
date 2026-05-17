@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
 import { Button } from '@/components/ui/Button';
 import { query, currentBranchId } from '@/core/db/helpers';
 import {
@@ -397,10 +398,10 @@ export function ReconciliationPage() {
                       <div style={{ fontWeight: 500 }}>{r.label}</div>
                       <div style={{ fontSize: 11, color: '#9CA3AF', fontFamily: 'monospace' }}>{r.account}</div>
                     </td>
-                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}>{fmt(r.ledger)}</td>
-                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}>{fmt(r.domain)}</td>
+                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}><Bhd v={r.ledger}/></td>
+                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}><Bhd v={r.domain}/></td>
                     <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right', color: ok ? '#9CA3AF' : '#DC2626', fontWeight: ok ? 400 : 600 }}>
-                      {fmt(d)}
+                      <Bhd v={d}/>
                     </td>
                     <td style={{ padding: 10, textAlign: 'center' }}>
                       <span style={{ fontSize: 16 }}>{ok ? '✓' : '✗'}</span>
@@ -440,9 +441,9 @@ export function ReconciliationPage() {
                   <tr key={s.source} style={{ borderTop: '1px solid #E5E9EE' }}>
                     <td style={{ padding: 10, fontFamily: 'monospace' }}>{s.source}</td>
                     <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}>{s.count}</td>
-                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}>{fmt(s.totalDebit)}</td>
-                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}>{fmt(s.totalCredit)}</td>
-                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right', color: balanced ? '#9CA3AF' : '#DC2626' }}>{fmt(delta)}</td>
+                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}><Bhd v={s.totalDebit}/></td>
+                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right' }}><Bhd v={s.totalCredit}/></td>
+                    <td style={{ padding: 10, fontFamily: 'monospace', textAlign: 'right', color: balanced ? '#9CA3AF' : '#DC2626' }}><Bhd v={delta}/></td>
                   </tr>
                 );
               })}
@@ -501,7 +502,7 @@ export function ReconciliationPage() {
                       {o.sourceId.slice(0, 8)}…{o.sourceId.slice(-4)}
                     </td>
                     <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right' }}>{o.count}</td>
-                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right' }}>{fmt(o.totalAmount)}</td>
+                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right' }}><Bhd v={o.totalAmount}/></td>
                   </tr>
                 ))}
               </tbody>
@@ -532,9 +533,9 @@ export function ReconciliationPage() {
                   <tr key={b.transactionId} style={{ borderTop: '1px solid #E5E9EE' }}>
                     <td style={{ padding: 8, fontFamily: 'monospace' }}>{b.transactionId.slice(0, 8)}…</td>
                     <td style={{ padding: 8, fontFamily: 'monospace' }}>{b.sourceModule}/{b.sourceId.slice(0, 6)}</td>
-                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right' }}>{fmt(b.debit)}</td>
-                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right' }}>{fmt(b.credit)}</td>
-                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right', color: '#DC2626' }}>{fmt(b.diff)}</td>
+                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right' }}><Bhd v={b.debit}/></td>
+                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right' }}><Bhd v={b.credit}/></td>
+                    <td style={{ padding: 8, fontFamily: 'monospace', textAlign: 'right', color: '#DC2626' }}><Bhd v={b.diff}/></td>
                   </tr>
                 ))}
               </tbody>

@@ -7,9 +7,11 @@ import { Card } from '@/components/ui/Card';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import { Bhd } from '@/components/ui/Bhd';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 function fmtDate(iso?: string): string {
   if (!iso) return '\u2014';
@@ -78,14 +80,14 @@ export function CreditNoteList() {
                 <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cn.creditNoteNumber}</span>
                 <span style={{ fontSize: 12, color: '#4B5563' }}>{fmtDate(cn.issuedAt)}</span>
                 <span className="font-mono" style={{ fontSize: 11, color: '#3D7FFF', display: 'inline-flex', alignItems: 'center', gap: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {inv?.invoiceNumber || cn.invoiceId.slice(0, 8)}
+                  {inv ? formatInvoiceDisplayShort(inv) : cn.invoiceId.slice(0, 8)}
                   <ExternalLink size={10} style={{ opacity: 0.5 }} />
                 </span>
                 <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {cust ? `${cust.firstName} ${cust.lastName}`.trim() || cust.company || '\u2014' : '\u2014'}
                 </span>
-                <span className="font-mono" style={{ fontSize: 13, color: cn.cashRefundAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right' }}>{fmt(cn.cashRefundAmount)}</span>
-                <span className="font-mono" style={{ fontSize: 13, color: cn.receivableCancelAmount > 0 ? '#FF8730' : '#6B7280', textAlign: 'right' }}>{fmt(cn.receivableCancelAmount)}</span>
+                <span className="font-mono" style={{ fontSize: 13, color: cn.cashRefundAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right' }}><Bhd v={cn.cashRefundAmount}/></span>
+                <span className="font-mono" style={{ fontSize: 13, color: cn.receivableCancelAmount > 0 ? '#FF8730' : '#6B7280', textAlign: 'right' }}><Bhd v={cn.receivableCancelAmount}/></span>
               </div>
             );
           })}

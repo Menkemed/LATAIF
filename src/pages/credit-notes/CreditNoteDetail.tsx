@@ -3,6 +3,7 @@
 import { useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Download, Trash2, ExternalLink } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
@@ -11,10 +12,12 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useProductStore } from '@/stores/productStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
-import { formatProductMultiLine } from '@/core/utils/product-format';
+import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-format';
+import { Bhd } from '@/components/ui/Bhd';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 function fmtDate(iso?: string): string {
   if (!iso) return '\u2014';
@@ -24,6 +27,7 @@ function fmtDate(iso?: string): string {
 export function CreditNoteDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/credit-notes');
   const { creditNotes, loadCreditNotes, deleteCreditNote } = useCreditNoteStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
@@ -59,7 +63,7 @@ export function CreditNoteDetail() {
       title: `Credit Note ${cn.creditNoteNumber}`,
       number: cn.creditNoteNumber,
       date: fmtDate(cn.issuedAt),
-      subtitle: `Reference Invoice: ${inv?.invoiceNumber || cn.invoiceId}`,
+      subtitle: `Reference Invoice: ${inv ? formatInvoiceDisplayShort(inv) : cn.invoiceId}`,
       customer: cust ? { name: `${cust.firstName} ${cust.lastName}`.trim(), company: cust.company, phone: cust.phone } : undefined,
       type: 'credit_note', // eigener Type: Header-Label "CREDIT NOTE", orange Akzentfarbe
       sections: [
@@ -73,7 +77,7 @@ export function CreditNoteDetail() {
         ]},
         ...(cn.reason ? [{ title: 'Reason', lines: [{ label: cn.reason, value: '' }] }] : []),
       ],
-      footer: `This Credit Note credits Invoice ${inv?.invoiceNumber || cn.invoiceId}. Original invoice remains on record.`,
+      footer: `This Credit Note credits Invoice ${inv ? formatInvoiceDisplayShort(inv) : cn.invoiceId}. Original invoice remains on record.`,
     });
   }
 
@@ -86,13 +90,13 @@ export function CreditNoteDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1100 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/credit-notes')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}>
-            <ArrowLeft size={16} /> Credit Notes
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={handleDownload}><Download size={14} /> Download PDF</Button>
@@ -107,7 +111,7 @@ export function CreditNoteDetail() {
           <div className="flex items-center gap-3" style={{ marginTop: 8, fontSize: 13, color: '#6B7280' }}>
             <span>Issued {fmtDate(cn.issuedAt)}</span>
             <span>·</span>
-            <span>Total credit <span className="font-mono" style={{ color: '#DC2626', fontWeight: 600 }}>{fmt(cn.totalAmount)} BHD</span></span>
+            <span>Total credit <span className="font-mono" style={{ color: '#DC2626', fontWeight: 600 }}><Bhd v={cn.totalAmount}/> BHD</span></span>
           </div>
         </div>
 
@@ -116,14 +120,14 @@ export function CreditNoteDetail() {
           <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
             <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>TOTAL CREDIT</span>
             <div className="font-display" style={{ fontSize: 26, color: '#0F0F10', lineHeight: 1.1 }}>
-              {fmt(cn.totalAmount)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+              <Bhd v={cn.totalAmount}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
             </div>
             <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>Reverses part of original invoice</div>
           </div>
           <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
             <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>CASH REFUND</span>
             <div className="font-display" style={{ fontSize: 26, color: cn.cashRefundAmount > 0 ? '#DC2626' : '#6B7280', lineHeight: 1.1 }}>
-              {fmt(cn.cashRefundAmount)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+              <Bhd v={cn.cashRefundAmount}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
             </div>
             <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
               {cn.refundMethod ? `Via ${cn.refundMethod}` : 'No cash flow yet'}
@@ -132,7 +136,7 @@ export function CreditNoteDetail() {
           <div style={{ padding: '20px 22px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12 }}>
             <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>RECEIVABLE CANCELLED</span>
             <div className="font-display" style={{ fontSize: 26, color: cn.receivableCancelAmount > 0 ? '#FF8730' : '#6B7280', lineHeight: 1.1 }}>
-              {fmt(cn.receivableCancelAmount)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+              <Bhd v={cn.receivableCancelAmount}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
             </div>
             <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>Customer no longer owes this</div>
           </div>
@@ -147,17 +151,32 @@ export function CreditNoteDetail() {
                 <div>
                   {ret.lines.map(rl => {
                     const p = products.find(pp => pp.id === rl.productId);
+                    const specs = p ? getProductSpecs(p, categories) : [];
                     return (
-                      <div key={rl.id} className="flex justify-between" style={{ padding: '12px 0', borderBottom: '1px solid #E5E9EE' }}>
+                      <div key={rl.id} className="flex justify-between items-start" style={{ padding: '12px 0', borderBottom: '1px solid #E5E9EE' }}>
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {p ? `${p.brand} ${p.name}` : 'Item'}
                           </div>
+                          {specs.length > 0 && (
+                            <div style={{
+                              display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                              columnGap: 14, rowGap: 1,
+                              marginTop: 4, fontSize: 10, color: '#444',
+                            }}>
+                              {specs.map((s, i) => (
+                                <div key={i} style={{ display: 'flex', gap: 4, lineHeight: 1.4 }}>
+                                  <span style={{ color: '#9CA3AF' }}>{s.label}:</span>
+                                  <span style={{ color: '#374151', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                           <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
-                            Qty {rl.quantity} \u00d7 {fmt(rl.unitPrice)} BHD
+                            Qty {rl.quantity} \u00d7 <Bhd v={rl.unitPrice}/> BHD
                           </div>
                         </div>
-                        <span className="font-mono" style={{ fontSize: 13, color: '#DC2626' }}>−{fmt(rl.quantity * rl.unitPrice)} BHD</span>
+                        <span className="font-mono" style={{ fontSize: 13, color: '#DC2626' }}>−<Bhd v={rl.quantity * rl.unitPrice}/> BHD</span>
                       </div>
                     );
                   })}
@@ -189,7 +208,7 @@ export function CreditNoteDetail() {
                     style={{ fontSize: 13, color: '#3D7FFF', textDecoration: 'none' }}
                     onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
                     onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}>
-                    {inv.invoiceNumber}
+                    {formatInvoiceDisplayShort(inv)}
                     <ExternalLink size={11} style={{ opacity: 0.5 }} />
                   </Link>
                 ) : <span style={{ fontSize: 13, color: '#6B7280' }}>{cn.invoiceId.slice(0, 12)}\u2026</span>}

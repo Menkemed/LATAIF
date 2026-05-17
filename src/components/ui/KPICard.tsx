@@ -8,6 +8,7 @@ interface KPICardProps {
   icon?: ReactNode;
   accent?: 'blue' | 'purple' | 'green' | 'orange' | 'urgent' | 'none';
   onClick?: () => void;
+  tooltip?: string;
 }
 
 // Plan §Design v2 — moderner SaaS-Look:
@@ -15,7 +16,7 @@ interface KPICardProps {
 // - Icon links oben in farbiger Box
 // - Große Zahl mit kleiner Decimal/Unit
 // - Trend-Pill (grün hoch / rot runter) wenn trend gegeben
-export function KPICard({ label, value, unit, trend, icon, accent = 'none', onClick }: KPICardProps) {
+export function KPICard({ label, value, unit, trend, icon, accent = 'none', onClick, tooltip }: KPICardProps) {
   // Zahl formatieren mit Decimal-Differenzierung (5,567.00 → 5,567 + .00)
   const numString = typeof value === 'number'
     ? value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
@@ -42,6 +43,7 @@ export function KPICard({ label, value, unit, trend, icon, accent = 'none', onCl
   return (
     <div
       className={`cx-card ${onClick ? 'cursor-pointer' : ''}`}
+      title={tooltip}
       style={{
         background: '#FFFFFF',
         border: accent === 'urgent' ? '1px solid rgba(220,38,38,0.25)' : '1px solid #E5E9EE',

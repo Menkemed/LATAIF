@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, Save, X, Phone } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
@@ -13,12 +14,14 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { vatEngine } from '@/core/tax/vat-engine';
+import { getStockAggregates } from '@/core/lots/lot-queries';
 import type { OrderStatus } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 interface DraftLine {
@@ -51,6 +54,7 @@ const STATUS_LABELS: Record<OrderStatus, string> = {
 
 export function OrderCreate() {
   const navigate = useNavigate();
+  const goBack = useGoBack('/orders');
   const { createOrder } = useOrderStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts } = useProductStore();
@@ -67,7 +71,7 @@ export function OrderCreate() {
   // and decimal points while user types (e.g. "5500.50" stays as typed).
   const [lineTotalDrafts, setLineTotalDrafts] = useState<Record<number, string>>({});
   const [depositAmount, setDepositAmount] = useState<number>(0);
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'card'>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'card' | 'benefit'>('cash');
   const [fullyPaid, setFullyPaid] = useState(false);
   const [expectedDelivery, setExpectedDelivery] = useState('');
   const [status, setStatus] = useState<OrderStatus>('pending');
@@ -86,13 +90,24 @@ export function OrderCreate() {
     subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD`,
   })), [products]);
 
+  // Phase 7 — Lot-Aggregate fuer alle in lines referenzierten Produkte cachen,
+  // damit Cost-Basis fuer Margin-Scheme aus dem FIFO-Lot kommt (= naechster Sale-Cost)
+  // statt aus dem irrefuehrenden single product.purchase_price.
+  const lotAgg = useMemo(() => {
+    const ids = lines.map(l => l.productId).filter((x): x is string => Boolean(x));
+    return getStockAggregates(ids);
+  }, [lines]);
+
   // Pro Zeile auflösen: Scheme + VAT + Net + Gross (genau wie Invoice).
   const computed = lines.map(l => {
     const product = l.productId ? products.find(p => p.id === l.productId) : undefined;
     const fallbackScheme: 'VAT_10' | 'ZERO' | 'MARGIN' = (product?.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') || 'MARGIN';
     const resolved = l.scheme === 'auto' ? fallbackScheme : l.scheme;
     const vatRate = resolved === 'ZERO' ? 0 : 10;
-    const purchase = product?.purchasePrice || 0;
+    const agg = product ? lotAgg.get(product.id) : undefined;
+    // FIFO-Cost wenn aktive Lots vorhanden — sonst product.purchase_price-Fallback.
+    // (weightedAvg = totalValue / totalQty; reicht hier als Margin-Vorschau)
+    const purchase = agg && agg.totalQty > 0 ? agg.weightedAvg : (product?.purchasePrice || 0);
     const calc = calcLine(l.unitPrice, l.quantity, purchase, resolved, vatRate);
     return {
       product, scheme: resolved, vatRate,
@@ -202,14 +217,14 @@ export function OrderCreate() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 80px', maxWidth: 1100 }}>
+      <div style={{ padding: '32px 48px 80px', maxWidth: 1500 }}>
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
           <div>
-            <button onClick={() => navigate('/orders')}
+            <button onClick={goBack}
               className="flex items-center gap-2 cursor-pointer transition-colors"
               style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13, marginBottom: 8 }}>
-              <ArrowLeft size={16} /> Orders
+              <ArrowLeft size={16} /> Back
             </button>
             <h1 className="font-display" style={{ fontSize: 30, color: '#0F0F10', lineHeight: 1.2 }}>New Order</h1>
             <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>Complete order with customer, items, pricing, and payment.</p>
@@ -304,17 +319,17 @@ export function OrderCreate() {
                       className="font-mono"
                       style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
                     <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {fmt(c.net / Math.max(1, l.quantity))}
+                      <Bhd v={c.net / Math.max(1, l.quantity)}/>
                     </span>
                     {c.scheme === 'MARGIN' ? (
                       <span className="font-mono" title="Internal VAT liability on margin (not shown to customer)"
                         style={{ padding: '8px 10px', fontSize: 13, color: '#FF8730', background: 'rgba(255,135,48,0.06)', border: '1px solid rgba(255,135,48,0.25)', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {fmt(c.internalVat)}
+                        <Bhd v={c.internalVat}/>
                         <span style={{ fontSize: 9, color: '#FF8730', marginLeft: 4, opacity: 0.7 }}>int</span>
                       </span>
                     ) : (
                       <span className="font-mono" style={{ padding: '8px 10px', fontSize: 13, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4, textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {fmt(c.vat)}
+                        <Bhd v={c.vat}/>
                       </span>
                     )}
                     <input type="text" inputMode="decimal"
@@ -369,19 +384,19 @@ export function OrderCreate() {
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NET (SUM)</span>
                 <div className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}>
-                  {fmt(subtotal)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={subtotal}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>VAT</span>
                 <div className="font-display" style={{ fontSize: 22, color: '#AA956E' }}>
-                  {fmt(totalVat)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={totalVat}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>TOTAL</span>
                 <div className="font-display" style={{ fontSize: 26, color: '#C6A36D' }}>
-                  {fmt(total)} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+                  <Bhd v={total}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 </div>
               </div>
             </div>
@@ -400,7 +415,7 @@ export function OrderCreate() {
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAYMENT METHOD</span>
                 <div className="flex gap-2" style={{ marginTop: 6 }}>
-                  {(['cash', 'bank', 'card'] as const).map(m => {
+                  {(['cash', 'bank', 'card', 'benefit'] as const).map(m => {
                     const active = paymentMethod === m;
                     return (
                       <button key={m} type="button" onClick={() => setPaymentMethod(m)}
@@ -409,7 +424,7 @@ export function OrderCreate() {
                           border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                           color: active ? '#0F0F10' : '#6B7280',
                           background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                        }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Card'}</button>
+                        }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'card' ? 'Card' : 'Benefit'}</button>
                     );
                   })}
                 </div>
@@ -477,15 +492,15 @@ export function OrderCreate() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginTop: 12 }}>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>AGREED PRICE</div>
-              <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}>{fmt(total)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}><Bhd v={total}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>DEPOSIT</div>
-              <div className="font-mono" style={{ fontSize: 18, color: '#7EAA6E' }}>{fmt(fullyPaid ? total : depositAmount)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 18, color: '#7EAA6E' }}><Bhd v={fullyPaid ? total : depositAmount}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>REMAINING</div>
-              <div className="font-mono" style={{ fontSize: 18, color: remaining > 0 ? '#AA956E' : '#7EAA6E' }}>{fmt(remaining)} BHD</div>
+              <div className="font-mono" style={{ fontSize: 18, color: remaining > 0 ? '#AA956E' : '#7EAA6E' }}><Bhd v={remaining}/> BHD</div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>METHOD</div>

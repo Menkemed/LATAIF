@@ -7,11 +7,14 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
+import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { PurchaseStatus } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 type StatusFilter = '' | PurchaseStatus;
@@ -20,10 +23,12 @@ export function PurchaseList() {
   const navigate = useNavigate();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
+  const { loadEmployees } = useEmployeeStore();
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<StatusFilter>((searchParams.get('filter') as StatusFilter) || '');
+  const staffFilter = searchParams.get('staff') || '';
 
   useEffect(() => {
     const current = (searchParams.get('filter') as StatusFilter) || '';
@@ -34,14 +39,15 @@ export function PurchaseList() {
     }
   }, [filter, searchParams, setSearchParams]);
 
-  useEffect(() => { loadPurchases(); loadSuppliers(); }, [loadPurchases, loadSuppliers]);
+  useEffect(() => { loadPurchases(); loadSuppliers(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadEmployees]);
 
   const filtered = useMemo(() => {
     let r = purchases;
     if (filter) r = r.filter(p => p.status === filter);
+    if (staffFilter) r = r.filter(p => p.staffId === staffFilter);
     if (search) r = r.filter(p => matchesDeep(p, search, [suppliers.find(s => s.id === p.supplierId)]));
     return r;
-  }, [purchases, search, filter, suppliers]);
+  }, [purchases, search, filter, suppliers, staffFilter]);
 
   const totalOutstanding = purchases
     .filter(p => p.status !== 'CANCELLED')
@@ -61,6 +67,7 @@ export function PurchaseList() {
       showSearch onSearch={setSearch} searchPlaceholder="Search purchase # or supplier..."
       actions={
         <div className="flex gap-2 items-center">
+          <StaffFilterPill />
           <div className="flex gap-1" style={{ marginRight: 4 }}>
             {(['', 'DRAFT', 'UNPAID', 'PARTIALLY_PAID', 'PAID', 'CANCELLED'] as StatusFilter[]).map(s => (
               <button key={s || 'all'} onClick={() => setFilter(s)}
@@ -113,9 +120,9 @@ export function PurchaseList() {
                 <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{p.purchaseNumber}</span>
                 <span style={{ fontSize: 12, color: '#4B5563' }}>{p.purchaseDate}</span>
                 <span style={{ fontSize: 13, color: '#0F0F10' }}>{s?.name || '—'}</span>
-                <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(p.totalAmount)}</span>
-                <span className="font-mono" style={{ fontSize: 13, color: '#16A34A' }}>{fmt(p.paidAmount)}</span>
-                <span className="font-mono" style={{ fontSize: 13, color: p.remainingAmount > 0 ? '#DC2626' : '#6B7280' }}>{fmt(p.remainingAmount)}</span>
+                <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={p.totalAmount}/></span>
+                <span className="font-mono" style={{ fontSize: 13, color: '#16A34A' }}><Bhd v={p.paidAmount}/></span>
+                <span className="font-mono" style={{ fontSize: 13, color: p.remainingAmount > 0 ? '#DC2626' : '#6B7280' }}><Bhd v={p.remainingAmount}/></span>
                 <span style={{ fontSize: 11, color: statusColors[p.status] }}>{p.status}</span>
               </div>
             );

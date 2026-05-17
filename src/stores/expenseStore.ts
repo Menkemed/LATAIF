@@ -37,7 +37,7 @@ interface ExpenseStore {
   updateExpense: (id: string, data: Partial<Expense>) => void;
   deleteExpense: (id: string) => void;
   // Plan §Expenses §Pay-Later — Teilzahlung nachträglich.
-  recordExpensePayment: (id: string, amount: number, method: 'cash' | 'bank', date?: string, note?: string) => void;
+  recordExpensePayment: (id: string, amount: number, method: 'cash' | 'bank' | 'benefit', date?: string, note?: string) => void;
   getExpensePayments: (id: string) => ExpensePayment[];
   getTotalsByCategory: () => Record<ExpenseCategory, number>;
   getMonthlyTotal: (year: number, month: number) => number;
@@ -51,13 +51,15 @@ function rowToExpense(row: Record<string, unknown>): Expense {
     category: (row.category as ExpenseCategory) || 'Miscellaneous',
     amount: (row.amount as number) || 0,
     paidAmount: (row.paid_amount as number) || 0,
-    paymentMethod: (row.payment_method as 'cash' | 'bank') || 'cash',
+    paymentMethod: (row.payment_method as 'cash' | 'bank' | 'benefit') || 'cash',
     expenseDate: row.expense_date as string,
     description: row.description as string | undefined,
     relatedModule: row.related_module as string | undefined,
     relatedEntityId: row.related_entity_id as string | undefined,
     supplierId: row.supplier_id as string | undefined,
     status: (row.status as 'PENDING' | 'PAID' | 'CANCELLED') || 'PAID',
+    recurringTemplateId: (row.recurring_template_id as string) || undefined,
+    employeeId: (row.employee_id as string) || undefined,
     createdAt: row.created_at as string,
     createdBy: row.created_by as string | undefined,
   };
@@ -68,7 +70,7 @@ function rowToExpensePayment(row: Record<string, unknown>): ExpensePayment {
     id: row.id as string,
     expenseId: row.expense_id as string,
     amount: (row.amount as number) || 0,
-    method: (row.method as 'cash' | 'bank') || 'cash',
+    method: (row.method as 'cash' | 'bank' | 'benefit') || 'cash',
     paidAt: row.paid_at as string,
     note: (row.note as string | null) || undefined,
     createdAt: row.created_at as string,
@@ -127,14 +129,22 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     const method = data.paymentMethod || 'cash';
     const expenseDate = data.expenseDate || now.split('T')[0];
 
+    // Salary-Validierung: category='Salary' verlangt employeeId. Andere
+    // Kategorien duerfen keine employeeId tragen (UI sollte sie nicht senden).
+    if (data.category === 'Salary' && !data.employeeId) {
+      throw new Error('Salary expenses require an employee. Pick an employee or change the category.');
+    }
+
     db.run(
       `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
-        expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        expense_date, description, related_module, related_entity_id, supplier_id, status, recurring_template_id,
+        employee_id, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, expenseNumber, data.category || 'Miscellaneous', amount, initialPaid,
        method, expenseDate,
        data.description || null, data.relatedModule || null, data.relatedEntityId || null,
-       data.supplierId || null, status, now, userId]
+       data.supplierId || null, status, data.recurringTemplateId || null,
+       data.employeeId || null, now, userId]
     );
 
     // Audit-Trail: Initial-Zahlung als expense_payments-Eintrag (falls > 0).
@@ -188,6 +198,7 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
       expenseDate: 'expense_date', description: 'description',
       relatedModule: 'related_module', relatedEntityId: 'related_entity_id',
       supplierId: 'supplier_id',
+      employeeId: 'employee_id',
       status: 'status',
     };
     for (const [k, v] of Object.entries(data)) {

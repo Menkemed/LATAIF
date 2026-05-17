@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Package } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -7,17 +7,21 @@ import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
+import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { printMultipleHangtags } from '@/core/pdf/hangtag';
 import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { getStockAggregates, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
 import ExcelJS from 'exceljs';
 import type { Product, TaxScheme, StockStatus, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 // Echtes .xlsx via ExcelJS — Bilder werden als binary in xl/media/ eingebettet
@@ -27,6 +31,10 @@ function fmt(v: number): string {
 async function exportProductsToExcel(items: Product[], categories: Category[]) {
   const today = new Date().toISOString().split('T')[0];
   const cat = (id: string) => categories.find(c => c.id === id)?.name || '';
+  // Phase 7 — Lot-Aggregat einmal vorab fuer alle exportierten Produkte ziehen,
+  // damit Total-Row + per-row "Purchase Price" das echte Bestands-Mittel zeigen
+  // (statt single product.purchase_price).
+  const lotAgg = getStockAggregates(items.map(p => p.id));
 
   const wb = new ExcelJS.Workbook();
   wb.creator = 'LATAIF';
@@ -42,6 +50,9 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
     { header: 'Quantity',                 key: 'qty',      width: 9,  style: { numFmt: '#,##0' } },
     { header: 'Condition',                key: 'cond',     width: 12 },
     { header: 'Purchase Price (BHD)',     key: 'pp',       width: 16, style: { numFmt: '#,##0.000' } },
+    { header: 'Cost Range (BHD)',         key: 'ppRange',  width: 18 },
+    { header: 'Stock Value (BHD)',        key: 'stockVal', width: 16, style: { numFmt: '#,##0.000' } },
+    { header: 'Lots',                     key: 'lots',     width: 8,  style: { numFmt: '#,##0' } },
     { header: 'Planned Sale Price (BHD)', key: 'spp',      width: 18, style: { numFmt: '#,##0.000' } },
     { header: 'Min Sale (BHD)',           key: 'min',      width: 14, style: { numFmt: '#,##0.000' } },
     { header: 'Max Sale (BHD)',           key: 'max',      width: 14, style: { numFmt: '#,##0.000' } },
@@ -71,15 +82,20 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
   // Data-Rows + Image-Embedding.
   for (let i = 0; i < items.length; i++) {
     const p = items[i];
+    const a = lotAgg.get(p.id);
+    const fmt3 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
     const row = ws.addRow({
       image:    '', // Platzhalter — Bild wird via addImage über die Zelle gelegt.
       sku:      p.sku || '',
       brand:    p.brand,
       name:     p.name,
       category: cat(p.categoryId),
-      qty:      p.quantity || 1,
+      qty:      a ? a.totalQty : (p.quantity || 1),
       cond:     p.condition || '',
-      pp:       p.purchasePrice,
+      pp:       a ? a.weightedAvg : p.purchasePrice,
+      ppRange:  a && a.lotCount > 1 ? `${fmt3(a.minCost)}–${fmt3(a.maxCost)}` : '',
+      stockVal: a ? a.totalValue : p.purchasePrice * (p.quantity || 1),
+      lots:     a ? a.lotCount : 1,
       spp:      p.plannedSalePrice ?? '',
       min:      p.minSalePrice ?? '',
       max:      p.maxSalePrice ?? '',
@@ -121,17 +137,21 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
     }
   }
 
-  // Totals-Row (nur OWN, in_stock).
+  // Totals-Row (nur OWN, in_stock). Stock Value kommt aus stock_lots wenn vorhanden.
   const ownInStock = items.filter(p =>
     (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
   );
-  const totalQty = ownInStock.reduce((s, p) => s + (p.quantity || 1), 0);
-  const totalEK  = ownInStock.reduce((s, p) => s + p.purchasePrice * (p.quantity || 1), 0);
-  const totalVK  = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * (p.quantity || 1), 0);
+  let totalQty = 0, totalEK = 0;
+  for (const p of ownInStock) {
+    const a = lotAgg.get(p.id);
+    if (a) { totalQty += a.totalQty; totalEK += a.totalValue; }
+    else   { totalQty += p.quantity || 1; totalEK += p.purchasePrice * (p.quantity || 1); }
+  }
+  const totalVK = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * (p.quantity || 1), 0);
 
   const totalRow = ws.addRow({
     image: '', sku: '', brand: '', name: 'TOTAL (OWN · In Stock)', category: '',
-    qty: totalQty, cond: '', pp: totalEK, spp: totalVK,
+    qty: totalQty, cond: '', pp: '', ppRange: '', stockVal: totalEK, lots: '', spp: totalVK,
   });
   totalRow.height = 22;
   totalRow.eachCell(cell => {
@@ -151,28 +171,45 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
 }
 
 // Per-card price toggle: each product card holds its own Cost/Asking state.
-function CardPrice({ product }: { product: Product }) {
+// Phase 7: bei Multi-Lot zeigt die Cost-Ansicht den Total-Wert mit Range-Untertitel,
+// statt nur den single product.purchase_price (irrefuehrend bei Qty 2 / 2 Preisen).
+function CardPrice({ product, lot }: { product: Product; lot?: LotAggregate }) {
   const [mode, setMode] = useState<'cost' | 'asking'>('cost');
-  const value = mode === 'cost' ? product.purchasePrice : (product.plannedSalePrice || product.purchasePrice);
+  const multiLot = lot && lot.lotCount > 1;
+  let mainValue: number;
+  if (mode === 'asking') {
+    mainValue = product.plannedSalePrice || product.purchasePrice;
+  } else if (lot) {
+    mainValue = multiLot ? lot.totalValue : lot.weightedAvg;
+  } else {
+    mainValue = product.purchasePrice;
+  }
   return (
-    <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
-      <span className="font-display" style={{ fontSize: 18, color: '#0F0F10' }}>{fmt(value)}</span>
-      <span style={{ fontSize: 10, color: '#6B7280' }}>BHD</span>
-      <div className="flex" onClick={(e) => { e.stopPropagation(); }}
-        style={{ border: '1px solid #E5E9EE', borderRadius: 999, padding: 1 }}>
-        {(['cost', 'asking'] as const).map(m => (
-          <button key={m} onClick={(e) => { e.stopPropagation(); setMode(m); }}
-            className="cursor-pointer transition-all"
-            style={{
-              padding: '2px 8px', borderRadius: 999, fontSize: 9, border: 'none',
-              background: mode === m ? '#0F0F10' : 'transparent',
-              color: mode === m ? '#FFFFFF' : '#6B7280',
-              textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 500,
-            }}>
-            {m === 'cost' ? 'Cost' : 'Asking'}
-          </button>
-        ))}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+        <span className="font-display" style={{ fontSize: 18, color: '#0F0F10' }}><Bhd v={mainValue}/></span>
+        <span style={{ fontSize: 10, color: '#6B7280' }}>BHD{mode === 'cost' && multiLot ? ' · total' : ''}</span>
+        <div className="flex" onClick={(e) => { e.stopPropagation(); }}
+          style={{ border: '1px solid #E5E9EE', borderRadius: 999, padding: 1 }}>
+          {(['cost', 'asking'] as const).map(m => (
+            <button key={m} onClick={(e) => { e.stopPropagation(); setMode(m); }}
+              className="cursor-pointer transition-all"
+              style={{
+                padding: '2px 8px', borderRadius: 999, fontSize: 9, border: 'none',
+                background: mode === m ? '#0F0F10' : 'transparent',
+                color: mode === m ? '#FFFFFF' : '#6B7280',
+                textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 500,
+              }}>
+              {m === 'cost' ? 'Cost' : 'Asking'}
+            </button>
+          ))}
+        </div>
       </div>
+      {mode === 'cost' && multiLot && (
+        <span style={{ fontSize: 10, color: '#AA956E' }}>
+          {lot!.lotCount} Lots · <Bhd v={lot!.minCost}/>–<Bhd v={lot!.maxCost}/> BHD
+        </span>
+      )}
     </div>
   );
 }
@@ -183,33 +220,75 @@ export function WatchList() {
     products, categories, loadProducts, loadCategories, createProduct,
     searchQuery, setSearchQuery, filterCategory, setFilterCategory,
     filterStatus, setFilterStatus, getStockValue, nextAvailableSku,
+    isSkuTaken, findPossibleDuplicates,
   } = useProductStore();
   const [showNew, setShowNew] = useState(false);
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // 2026-05-16 — Ownership-Filter: Default 'own' (eigene Ware), zusaetzlich
+  // 'consignment' (nur Kommissionsware) und 'all' (alles). Filtert ueber
+  // product.sourceType, damit auch bereits verkaufte Consignment-Items
+  // korrekt zugeordnet bleiben.
+  const [filterOwnership, setFilterOwnership] = useState<'own' | 'consignment' | 'all'>('own');
   const [form, setForm] = useState<Partial<Product>>({
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
   });
+  // Duplicate Detection — Matches werden gefüllt, wenn handleCreate ein
+  // mögliches Duplikat erkennt; User entscheidet "Cancel" oder "Create anyway".
+  const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
+  // Live-Duplicate-Check beim Tippen — Debounce 800ms. Refs verhindern
+  // Wiederöffnen für dieselbe Eingabe nach Cancel.
+  const lastCheckedFp = useRef('');
+  const lastDismissedFp = useRef('');
 
   useEffect(() => { loadCategories(); loadProducts(); }, [loadCategories, loadProducts]);
 
+  // Live Duplicate Detection — sobald Brand/Name/SKU/Ref/Serial sich
+  // stabilisieren (800ms ohne Eingabe), öffnet das Side-by-Side automatisch.
+  // Reset wenn das Modal gar nicht offen ist (showNew = false).
+  const attrs = form.attributes || {};
+  const fp = [
+    form.brand, form.name, form.sku,
+    attrs.reference_number, attrs.serial_number,
+    attrs.weight, attrs.karat, attrs.item_type,
+  ].map(v => String(v ?? '').trim().toUpperCase()).join('|');
+  useEffect(() => {
+    if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
+    if (duplicateMatches.length > 0) return;
+    if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim()) return;
+    if (fp === lastCheckedFp.current) return;
+    if (fp === lastDismissedFp.current) return;
+    const t = setTimeout(() => {
+      lastCheckedFp.current = fp;
+      const possible = findPossibleDuplicates(form);
+      if (possible.length > 0) setDuplicateMatches(possible);
+    }, 800);
+    return () => clearTimeout(t);
+  }, [fp, showNew, duplicateMatches.length, form, findPossibleDuplicates]);
+
   const filtered = useMemo(() => {
-    // Consignment items + interne Service-Produkte (Repair Service) sind aus der
-    // Inventory-View ausgeblendet. Service-Produkte haben categoryId='cat-repair-service-*'.
-    let r = products.filter(p =>
-      p.stockStatus !== 'consignment' &&
-      !(p.categoryId || '').startsWith('cat-repair-service')
-    );
+    // Interne Service-Produkte (Repair Service) sind immer ausgeblendet.
+    // Service-Produkte haben categoryId='cat-repair-service-*'.
+    let r = products.filter(p => !(p.categoryId || '').startsWith('cat-repair-service'));
+    // Ownership-Filter (Plan §Commission §5): trennt eigene Ware (OWN) von
+    // Kommissionsware (CONSIGNMENT). 'all' zeigt beides zusammen.
+    if (filterOwnership === 'own') {
+      r = r.filter(p => p.sourceType !== 'CONSIGNMENT');
+    } else if (filterOwnership === 'consignment') {
+      r = r.filter(p => p.sourceType === 'CONSIGNMENT');
+    }
     if (searchQuery) {
       r = r.filter(p => matchesDeep(p, searchQuery, [categories.find(c => c.id === p.categoryId)]));
     }
     if (filterCategory) r = r.filter(p => p.categoryId === filterCategory);
     if (filterStatus) r = r.filter(p => p.stockStatus === filterStatus);
     return r;
-  }, [products, searchQuery, filterCategory, filterStatus, categories]);
+  }, [products, searchQuery, filterCategory, filterStatus, filterOwnership, categories]);
 
   const stock = useMemo(() => getStockValue(), [products, getStockValue]);
+  // Phase 7 — Lot-Aggregat einmal pro Render fuer alle sichtbaren Produkte.
+  const lotAgg = useMemo(() => getStockAggregates(filtered.map(p => p.id)), [filtered]);
   const getCat = (id: string) => categories.find(c => c.id === id);
 
   function openNew(cat?: Category) {
@@ -222,12 +301,66 @@ export function WatchList() {
     setShowNew(true);
   }
 
+  function validateForm(): Record<string, string> {
+    // Strikte Validierung — alle mit `*` markierten Felder müssen ausgefüllt sein,
+    // sonst muss der User später nochmal im Edit ran. Foto bleibt optional.
+    const errs: Record<string, string> = {};
+    if (!form.categoryId) errs.categoryId = 'Required';
+    if (!form.brand?.trim()) errs.brand = 'Required';
+    if (!form.name?.trim()) errs.name = 'Required';
+    // Condition ist optional (2026-05-17) — kein Required-Check mehr.
+    if (selectedCat) {
+      for (const attr of selectedCat.attributes) {
+        if (!attr.required) continue;
+        // Conditional Attribute übersprungen, wenn Abhängigkeit nicht erfüllt.
+        if (attr.dependsOn) {
+          const dep = form.attributes?.[attr.dependsOn.key];
+          if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) continue;
+        }
+        const v = form.attributes?.[attr.key];
+        const errKey = `attr_${attr.key}`;
+        if (attr.type === 'number') {
+          if (typeof v !== 'number' || isNaN(v) || v === 0) errs[errKey] = 'Required';
+        } else if (attr.type === 'boolean') {
+          if (v === undefined || v === null) errs[errKey] = 'Required';
+        } else {
+          if (!String(v ?? '').trim()) errs[errKey] = 'Required';
+        }
+      }
+    }
+    return errs;
+  }
+
   function handleCreate() {
-    // Quick-Capture-Mode: keine harte Validierung beim Anlegen.
-    // Per User-Regel: vom Handy soll ein Foto-only-Save möglich sein, Details kommen später im Edit-Modus.
-    // Die `*`-Marker bleiben als visueller Hinweis; sie BLOCKIEREN aber nicht.
+    // Strikte Validierung: alle Pflichtfelder müssen ausgefüllt sein.
+    const errs = validateForm();
+    if (form.sku && isSkuTaken(form.sku)) {
+      errs.sku = 'Diese SKU / Reference ist bereits vergeben.';
+    }
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
+      // Scroll zum ersten Fehler
+      const first = Object.keys(errs)[0];
+      const el = document.getElementById(`new-field-${first}`) || document.getElementById(`new-field-${first.replace(/^attr_/, 'attr_')}`);
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    // Score-basierte Duplicate Detection (nicht-blockierend): wenn ähnliche
+    // Items im Bestand existieren, Modal zeigen — User kann trotzdem anlegen.
+    const possible = findPossibleDuplicates(form);
+    if (possible.length > 0) {
+      setDuplicateMatches(possible);
+      return;
+    }
     createProduct(form);
     setErrors({});
+    setShowNew(false);
+  }
+
+  function confirmCreateAnyway() {
+    createProduct(form);
+    setErrors({});
+    setDuplicateMatches([]);
     setShowNew(false);
   }
 
@@ -238,10 +371,29 @@ export function WatchList() {
   return (
     <PageLayout
       title="Collection"
-      subtitle={`${stock.count} items in stock \u00b7 ${fmt(stock.purchaseTotal)} BHD`}
+      subtitle={
+        filterOwnership === 'consignment'
+          ? `${filtered.length} consignment item${filtered.length === 1 ? '' : 's'}`
+          : filterOwnership === 'all'
+            ? `${filtered.length} item${filtered.length === 1 ? '' : 's'} (own + consignment)`
+            : `${stock.count} items in stock \u00b7 ${fmt(stock.purchaseTotal)} BHD`
+      }
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by brand, name, SKU..."
       actions={
         <div className="flex items-center gap-3">
+          {/* Ownership Filter \u2014 Own / Consignment / All */}
+          <div className="flex gap-1" style={{ marginRight: 4 }}>
+            {(['own', 'consignment', 'all'] as const).map(o => (
+              <button key={o} onClick={() => setFilterOwnership(o)}
+                className="cursor-pointer transition-all duration-200"
+                style={{
+                  padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                  border: `1px solid ${filterOwnership === o ? '#0F0F10' : 'transparent'}`,
+                  color: filterOwnership === o ? '#0F0F10' : '#6B7280',
+                  background: filterOwnership === o ? 'rgba(15,15,16,0.06)' : 'transparent',
+                }}>{o === 'own' ? 'Own' : o === 'consignment' ? 'Consignment' : 'All'}</button>
+            ))}
+          </div>
           {/* Category Filter */}
           <div className="flex gap-1" style={{ marginRight: 4 }}>
             <button onClick={() => setFilterCategory('')}
@@ -343,21 +495,27 @@ export function WatchList() {
                   {attrText && <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 4 }}>{attrText}</span>}
                   <div className="flex items-center justify-between" style={{ marginTop: 16, gap: 8 }}>
                     <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
-                      <CardPrice product={p} />
-                      {(p.quantity || 1) > 1 && (
-                        <span className="font-mono" style={{
-                          fontSize: 11, color: '#AA956E',
-                          padding: '2px 8px', border: '1px solid rgba(170,149,110,0.4)',
-                          borderRadius: 999,
-                        }}>x {p.quantity}</span>
-                      )}
+                      <CardPrice product={p} lot={lotAgg.get(p.id)} />
+                      {(() => {
+                        // Phase 7: Stueck-Badge zeigt Lot-Total (echte verfuegbare Stuecke)
+                        // statt product.quantity (Legacy-Feld, oft nicht synchron).
+                        const qty = lotAgg.get(p.id)?.totalQty ?? (p.quantity || 1);
+                        if (qty <= 1) return null;
+                        return (
+                          <span className="font-mono" style={{
+                            fontSize: 11, color: '#AA956E',
+                            padding: '2px 8px', border: '1px solid rgba(170,149,110,0.4)',
+                            borderRadius: 999,
+                          }}>x {qty}</span>
+                        );
+                      })()}
                     </div>
                     <StatusDot status={p.stockStatus} />
                   </div>
                   {p.expectedMargin !== undefined && p.expectedMargin > 0 && (
                     <div className="flex items-center justify-between" style={{ marginTop: 8, fontSize: 12 }}>
                       <span style={{ color: '#6B7280' }}>Margin</span>
-                      <span className="font-mono" style={{ color: '#7EAA6E' }}>{fmt(p.expectedMargin)} BHD</span>
+                      <span className="font-mono" style={{ color: '#7EAA6E' }}><Bhd v={p.expectedMargin}/> BHD</span>
                     </div>
                   )}
                 </div>
@@ -371,14 +529,13 @@ export function WatchList() {
       <Modal open={showNew} onClose={() => { setShowNew(false); setErrors({}); }} title="New Item" width={660}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxHeight: '65vh', overflowY: 'auto', paddingRight: 4 }}>
 
-          {/* Quick-Capture hint */}
+          {/* Required-fields hint */}
           <div style={{
             padding: '8px 12px', borderRadius: 8,
             background: '#F2F7FA', border: '1px solid #E5E9EE',
             color: '#6B7280', fontSize: 12, lineHeight: 1.5,
           }}>
-            <strong style={{ color: '#0F0F10' }}>Quick capture:</strong> Save with just a photo — you can complete details in Edit mode later.
-            Fields marked with <span style={{ color: '#DC2626' }}>*</span> are recommended.
+            Fields marked with <span style={{ color: '#DC2626' }}>*</span> are required. Add a photo and click <strong style={{ color: '#0F0F10' }}>AI Identify</strong> to auto-fill most fields.
           </div>
 
           {/* Category Selector */}
@@ -421,7 +578,7 @@ export function WatchList() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20 }}>
-            <Input label="SKU / REFERENCE" placeholder="Internal reference" value={form.sku || ''} onChange={e => setForm({ ...form, sku: e.target.value })} />
+            <SkuInput value={form.sku || ''} onChange={v => setForm({ ...form, sku: v })} />
             <Input label="QUANTITY" type="number" placeholder="1" value={form.quantity || 1}
               onChange={e => setForm({ ...form, quantity: Math.max(1, Number(e.target.value) || 1) })} />
           </div>
@@ -432,11 +589,20 @@ export function WatchList() {
               <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
                 {selectedCat.attributes.map(attr => {
+                  // Conditional Visibility (dependsOn): nur rendern, wenn die
+                  // Abhängigkeit erfüllt ist. Erlaubt z.B. Karat-Feld nur bei Gold-Material.
+                  if (attr.dependsOn) {
+                    const dep = form.attributes?.[attr.dependsOn.key];
+                    if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) return null;
+                  }
                   const errKey = `attr_${attr.key}`;
                   const hasErr = !!errors[errKey];
+                  // Selects mit vielen Chips (≥8) bekommen volle Grid-Breite,
+                  // damit die Höhenungleichheit nicht zu Gaps in der Nachbar-Spalte führt.
+                  const isWide = attr.type === 'select' && (attr.options?.length || 0) >= 8;
                   if (attr.type === 'select' && attr.options) {
                     return (
-                      <div key={attr.key} id={`new-field-${errKey}`} style={{ padding: hasErr ? 8 : 0, border: hasErr ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+                      <div key={attr.key} id={`new-field-${errKey}`} style={{ padding: hasErr ? 8 : 0, border: hasErr ? '1px solid #DC2626' : 'none', borderRadius: 8, gridColumn: isWide ? '1 / -1' : 'auto' }}>
                         <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
                           {attr.label.toUpperCase()}
                           {attr.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
@@ -475,12 +641,11 @@ export function WatchList() {
             </div>
           )}
 
-          {/* Condition */}
+          {/* Condition — optional (2026-05-17). */}
           {selectedCat && selectedCat.conditionOptions.length > 0 && (
-            <div id="new-field-condition" style={{ padding: errors.condition ? 8 : 0, border: errors.condition ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+            <div id="new-field-condition">
               <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
                 CONDITION
-                <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>
               </span>
               <div className="flex gap-2" style={{ marginTop: 8 }}>
                 {selectedCat.conditionOptions.map(cond => (
@@ -583,6 +748,20 @@ export function WatchList() {
                         updated.attributes = attrs;
                         return updated;
                       });
+                      // Sofortige Duplicate-Detection mit den frisch extrahierten
+                      // Feldern — User sieht direkt nach AI-Identify, ob das Item
+                      // schon im Bestand ist (Bild + Details Seite an Seite).
+                      // setForm ist async; wir bauen den Kandidaten manuell aus result.
+                      const candidate: Partial<Product> = {
+                        categoryId: form.categoryId,
+                        brand: result.brand || form.brand,
+                        name: result.name || form.name,
+                        sku: form.sku || (result.sku ? nextAvailableSku(result.sku) : undefined),
+                        attributes: { ...(form.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
+                        images: form.images,
+                      };
+                      const possible = findPossibleDuplicates(candidate);
+                      if (possible.length > 0) setDuplicateMatches(possible);
                     } catch (e) { alert(String(e)); }
                     finally { setAiBusy(false); }
                   }}
@@ -620,7 +799,7 @@ export function WatchList() {
               }}>
                 <span style={{ color: '#6B7280' }}>Expected Margin</span>
                 <span style={{ color: (form.plannedSalePrice - form.purchasePrice) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                  {fmt(form.plannedSalePrice - form.purchasePrice)} BHD ({((form.plannedSalePrice - form.purchasePrice) / form.purchasePrice * 100).toFixed(1)}%)
+                  <Bhd v={form.plannedSalePrice - form.purchasePrice}/> BHD ({((form.plannedSalePrice - form.purchasePrice) / form.purchasePrice * 100).toFixed(1)}%)
                 </span>
               </div>
             )}
@@ -653,9 +832,9 @@ export function WatchList() {
             <div>
               <span className="text-overline" style={{ marginBottom: 8 }}>PAID FROM</span>
               <div className="flex gap-2" style={{ marginTop: 8 }}>
-                {([null, 'cash', 'bank'] as const).map(opt => {
+                {([null, 'cash', 'bank', 'benefit'] as const).map(opt => {
                   const active = (form.paidFrom ?? null) === opt;
-                  const label = opt === null ? 'None' : opt === 'cash' ? 'Cash' : 'Bank';
+                  const label = opt === null ? 'None' : opt === 'cash' ? 'Cash' : opt === 'bank' ? 'Bank' : 'Benefit';
                   return (
                     <button key={String(opt)} type="button" onClick={() => setForm({ ...form, paidFrom: opt })}
                       className="cursor-pointer rounded transition-all duration-200"
@@ -676,7 +855,7 @@ export function WatchList() {
               fontSize: 12, color: '#6B7280', display: 'flex', justifyContent: 'space-between',
             }}>
               <span>Will deduct from {form.paidFrom === 'cash' ? 'Cash' : 'Bank'}</span>
-              <span style={{ color: '#AA6E6E' }}>− {fmt(form.purchasePrice)} BHD</span>
+              <span style={{ color: '#AA6E6E' }}>− <Bhd v={form.purchasePrice}/> BHD</span>
             </div>
           ) : null}
 
@@ -686,6 +865,43 @@ export function WatchList() {
           </div>
         </div>
       </Modal>
+
+      <DuplicateWarningModal
+        open={duplicateMatches.length > 0}
+        matches={duplicateMatches}
+        candidate={form}
+        onCancel={() => { lastDismissedFp.current = fp; setDuplicateMatches([]); }}
+        onCreateAnyway={confirmCreateAnyway}
+        onPickExisting={(id) => { setDuplicateMatches([]); setShowNew(false); navigate(`/collection/${id}`); }}
+        onCopyDetails={(id) => {
+          const src = products.find(p => p.id === id);
+          if (!src) return;
+          // Stamm-Daten übernehmen — SKU/Serial/Purchase bleiben leer,
+          // weil das physisch ein anderes Stück ist. Bild nur kopieren, wenn
+          // der User noch keins selbst hochgeladen hat (Quick-Capture-Pfad).
+          const srcAttrs = { ...(src.attributes || {}) } as Record<string, unknown>;
+          delete srcAttrs.serial_number; delete srcAttrs.serialNo;
+          setForm(f => ({
+            ...f,
+            brand: src.brand,
+            name: src.name,
+            categoryId: src.categoryId,
+            condition: src.condition,
+            taxScheme: src.taxScheme,
+            plannedSalePrice: src.plannedSalePrice,
+            minSalePrice: src.minSalePrice,
+            maxSalePrice: src.maxSalePrice,
+            storageLocation: src.storageLocation,
+            scopeOfDelivery: [...(src.scopeOfDelivery || [])],
+            notes: src.notes,
+            images: (f.images && f.images.length > 0) ? f.images : [...(src.images || [])],
+            attributes: { ...(f.attributes || {}), ...srcAttrs } as typeof f.attributes,
+          }));
+          setSelectedCat(categories.find(c => c.id === src.categoryId) || null);
+          lastDismissedFp.current = fp;
+          setDuplicateMatches([]);
+        }}
+      />
     </PageLayout>
   );
 }

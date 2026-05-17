@@ -26,6 +26,10 @@ export type LedgerAccount =
   | 'CASH'
   | 'BANK'
   | 'CARD_CLEARING'
+  // Benefit: BenefitPay App-Transfers (BHD), eigenes Asset-Konto.
+  // Separat von Bank ausgewiesen, damit App-Zahlungen vom regulären
+  // Banking unterschieden werden können.
+  | 'BENEFIT'
   | 'ACCOUNTS_RECEIVABLE'
   | 'ACCOUNTS_PAYABLE'
   | 'REVENUE'
@@ -68,6 +72,7 @@ export type SourceModule =
   | 'LOAN_PAYMENT'
   | 'REPAIR_PAYMENT'
   | 'AGENT_SETTLEMENT'
+  | 'AGENT_TRANSFER_SOLD'
   | 'CONSIGNMENT_PAYOUT'
   | 'METAL_PAYMENT'
   | 'BANK_TRANSFER'
@@ -283,6 +288,9 @@ function cashAccountFor(method: PaymentMethod): LedgerAccount {
     case 'cash':          return 'CASH';
     case 'bank_transfer': return 'BANK';
     case 'card':          return 'CARD_CLEARING';
+    // Benefit: BenefitPay App-Transfer, eigenes Konto separat von Bank.
+    // Banking-Page zeigt Cash/Bank/Benefit als drei getrennte Balance-Cards.
+    case 'benefit':       return 'BENEFIT';
     default:              return 'BANK';
   }
 }
@@ -586,6 +594,125 @@ export function postInvoiceCancelled(invoice: Invoice): PostingResult {
   return reverseSource('INVOICE', invoice.id, new Date().toISOString());
 }
 
+// ── Reverse-by-Transaction ────────────────────────────────────
+//
+// Spiegelt eine konkrete Transaktion (transaction_id), egal welche
+// (sourceModule, sourceId) sie hat. Wird gebraucht, wenn mehrere
+// Transactions denselben source_id teilen (z.B. Migration: Original-Cash↔Revenue
+// + neue Cash↔AR-Buchung mit gleicher source_id) und reverseSource()
+// wegen hasReversalFor-Check blockt.
+//
+// Anders als reverseSource: kein source-weiter Reversal-Check, dafür ein
+// strikter Check, dass GENAU diese transaction_id noch unreversed ist.
+
+export function reverseTransaction(transactionId: string, occurredAt: string): PostingResult {
+  const db = getDatabase();
+  const r = db.exec(
+    `SELECT id, account, direction, amount, counterparty_type, counterparty_id,
+            source_module, source_id, source_line_id,
+            tax_scheme_snapshot, vat_rate_snapshot, currency,
+            reverses_entry_id
+     FROM ledger_entries
+     WHERE transaction_id = ?`,
+    [transactionId]
+  );
+  if (r.length === 0 || r[0].values.length === 0) {
+    throw new Error(`reverseTransaction: no entries for ${transactionId}`);
+  }
+  const cols = r[0].columns;
+  const idIdx = cols.indexOf('id');
+  const accIdx = cols.indexOf('account');
+  const dirIdx = cols.indexOf('direction');
+  const amtIdx = cols.indexOf('amount');
+  const ctIdx = cols.indexOf('counterparty_type');
+  const ciIdx = cols.indexOf('counterparty_id');
+  const smIdx = cols.indexOf('source_module');
+  const siIdx = cols.indexOf('source_id');
+  const slIdx = cols.indexOf('source_line_id');
+  const tsIdx = cols.indexOf('tax_scheme_snapshot');
+  const vrIdx = cols.indexOf('vat_rate_snapshot');
+  const curIdx = cols.indexOf('currency');
+  const revIdx = cols.indexOf('reverses_entry_id');
+
+  // Eine Tx ist hier per Definition als Reversal zu betrachten, wenn die Tx
+  // selbst nur Reversal-Entries enthält. Wenn ein Mix (was nicht passieren
+  // sollte), reversen wir die unreversed Original-Zeilen.
+  const rows = r[0].values.filter(row => row[revIdx] === null);
+  if (rows.length === 0) {
+    throw new Error(`reverseTransaction: ${transactionId} has no original entries to reverse`);
+  }
+
+  // Prüfen, dass keine dieser Original-Zeilen bereits eine Reversal hat.
+  for (const row of rows) {
+    const origId = row[idIdx] as string;
+    const existing = query(
+      `SELECT 1 FROM ledger_entries WHERE reverses_entry_id = ? LIMIT 1`,
+      [origId]
+    );
+    if (existing.length > 0) {
+      throw new Error(`reverseTransaction: entry ${origId} already reversed`);
+    }
+  }
+
+  const branchId = currentBranchId();
+  const userId = currentUserId();
+  const recordedAt = new Date().toISOString();
+  const newTxId = uuid();
+  const nos = reserveEntryNos(branchId, rows.length);
+  const currency = (rows[0][curIdx] as string) ?? 'BHD';
+
+  db.run('BEGIN');
+  try {
+    const entryIds: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const newId = uuid();
+      entryIds.push(newId);
+      const flipped = (row[dirIdx] as string) === 'DEBIT' ? 'CREDIT' : 'DEBIT';
+      db.run(
+        `INSERT INTO ledger_entries (
+          id, branch_id, tenant_id, entry_no, transaction_id,
+          occurred_at, recorded_at,
+          account, direction, amount, currency,
+          counterparty_type, counterparty_id,
+          source_module, source_id, source_line_id,
+          reverses_entry_id, tax_scheme_snapshot, vat_rate_snapshot,
+          metadata_json, created_by, created_at
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newId,
+          branchId,
+          nos[i],
+          newTxId,
+          occurredAt,
+          recordedAt,
+          row[accIdx],
+          flipped,
+          row[amtIdx],
+          currency,
+          row[ctIdx],
+          row[ciIdx],
+          row[smIdx],
+          row[siIdx],
+          row[slIdx],
+          row[idIdx],
+          row[tsIdx],
+          row[vrIdx],
+          JSON.stringify({ reversal: true, reverseTx: transactionId }),
+          userId,
+          recordedAt,
+        ]
+      );
+    }
+    db.run('COMMIT');
+    saveDatabase();
+    return { transactionId: newTxId, entryIds };
+  } catch (err) {
+    db.run('ROLLBACK');
+    throw err;
+  }
+}
+
 // ── Purchase (received goods) ─────────────────────────────────
 //
 // Pro Line:
@@ -817,12 +944,21 @@ export function postExpenseCancelled(expense: Expense): PostingResult {
 
 // ── Bank Transfer (internal: cash ↔ bank) ─────────────────────
 //
-// CASH_TO_BANK:  DEBIT BANK / CREDIT CASH
-// BANK_TO_CASH:  DEBIT CASH / CREDIT BANK
+// X_TO_Y: DEBIT Y / CREDIT X (Empfangskonto soll, Quellkonto haben)
+// 6 Richtungen über CASH ↔ BANK ↔ BENEFIT.
 //
 // Source ist BANK_TRANSFER — Cashflow-Reports können diese Quelle filtern,
 // damit innerbetriebliche Verschiebungen nicht als externe Geldflüsse zählen.
 // Counterparty: INTERNAL.
+
+const TRANSFER_DIRECTION_MAP: Record<BankTransfer['direction'], { dr: LedgerAccount; cr: LedgerAccount }> = {
+  CASH_TO_BANK:    { dr: 'BANK',    cr: 'CASH'    },
+  BANK_TO_CASH:    { dr: 'CASH',    cr: 'BANK'    },
+  CASH_TO_BENEFIT: { dr: 'BENEFIT', cr: 'CASH'    },
+  BENEFIT_TO_CASH: { dr: 'CASH',    cr: 'BENEFIT' },
+  BANK_TO_BENEFIT: { dr: 'BENEFIT', cr: 'BANK'    },
+  BENEFIT_TO_BANK: { dr: 'BANK',    cr: 'BENEFIT' },
+};
 
 export function postBankTransfer(transfer: BankTransfer): PostingResult {
   const amount = ROUND(transfer.amount);
@@ -830,10 +966,10 @@ export function postBankTransfer(transfer: BankTransfer): PostingResult {
     throw new Error(`postBankTransfer: amount must be > 0 (got ${transfer.amount})`);
   }
   const occurredAt = transfer.transferDate ?? transfer.createdAt;
-  const fromTo: { dr: LedgerAccount; cr: LedgerAccount } =
-    transfer.direction === 'CASH_TO_BANK'
-      ? { dr: 'BANK', cr: 'CASH' }
-      : { dr: 'CASH', cr: 'BANK' };
+  const fromTo = TRANSFER_DIRECTION_MAP[transfer.direction];
+  if (!fromTo) {
+    throw new Error(`postBankTransfer: unknown direction ${transfer.direction}`);
+  }
 
   return postEntries(
     [
@@ -1326,6 +1462,60 @@ export function postMetalPaymentReversed(paymentId: string): PostingResult {
 // Match bestehende bankingStore-Klassifizierung (SALES_IN). Kein VAT-Split —
 // wenn das gewünscht ist, MUSS Convert-to-Invoice genutzt werden.
 
+// AGENT_TRANSFER_SOLD: Beim "Sold"-Klick auf einen Approval-Transfer entsteht
+// eine Forderung gegen den verknüpften Customer. Sichtbar im Customer-Ledger
+// (customerBalance) und damit auch in Customer-Detail-KPIs / Dashboard.
+// VAT-frei (informelle Forderung) — wenn formale VAT-Rechnung gewünscht ist,
+// muss Convert-to-Invoice genutzt werden (siehe convertTransferToInvoice).
+//
+//   DEBIT  ACCOUNTS_RECEIVABLE  by amount  (counterparty: CUSTOMER)
+//   CREDIT REVENUE              by amount  (counterparty: CUSTOMER)
+
+export interface AgentTransferSoldLike {
+  transferId: string;
+  amount: number;
+  soldAt: string;
+}
+
+export function postAgentTransferSold(transfer: AgentTransferSoldLike, customerId: string): PostingResult {
+  const amount = ROUND(transfer.amount);
+  if (amount <= 0) {
+    throw new Error(`postAgentTransferSold: amount must be > 0 (got ${transfer.amount})`);
+  }
+  if (!customerId) {
+    throw new Error('postAgentTransferSold: customerId required to post receivable.');
+  }
+  return postEntries(
+    [
+      {
+        account: 'ACCOUNTS_RECEIVABLE',
+        direction: 'DEBIT',
+        amount,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: { transferId: transfer.transferId },
+      },
+      {
+        account: 'REVENUE',
+        direction: 'CREDIT',
+        amount,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: { transferId: transfer.transferId },
+      },
+    ],
+    {
+      occurredAt: transfer.soldAt,
+      sourceModule: 'AGENT_TRANSFER_SOLD',
+      sourceId: transfer.transferId,
+    }
+  );
+}
+
+export function postAgentTransferSoldReversed(transferId: string, occurredAt?: string): PostingResult {
+  return reverseSource('AGENT_TRANSFER_SOLD', transferId, occurredAt || new Date().toISOString());
+}
+
 export interface AgentSettlementPaymentLike {
   id: string;
   transferId: string;
@@ -1334,29 +1524,39 @@ export interface AgentSettlementPaymentLike {
   paidAt: string;
 }
 
-export function postAgentSettlementPayment(payment: AgentSettlementPaymentLike, agentId?: string): PostingResult {
+// AGENT_SETTLEMENT: Cash/Bank-Eingang vom Agent — reduziert die offene Forderung
+// (counterparty: CUSTOMER). Greift nur sauber, wenn vorher AGENT_TRANSFER_SOLD
+// gepostet wurde. Für historische Settlements ohne Sold-Post: Backfill über
+// backfill.ts: AGENT_TRANSFER_SOLD posted dann nachträglich die fehlende Forderung.
+//
+//   DEBIT  CASH/BANK            by amount
+//   CREDIT ACCOUNTS_RECEIVABLE  by amount  (counterparty: CUSTOMER)
+
+export function postAgentSettlementPayment(payment: AgentSettlementPaymentLike, customerId: string): PostingResult {
   const amount = ROUND(payment.amount);
   if (amount <= 0) {
     throw new Error(`postAgentSettlementPayment: amount must be > 0 (got ${payment.amount})`);
   }
+  if (!customerId) {
+    throw new Error('postAgentSettlementPayment: customerId required to reduce receivable.');
+  }
   const cashAcc: LedgerAccount = payment.method === 'cash' ? 'CASH' : 'BANK';
-  const cpType: CounterpartyType | undefined = agentId ? 'AGENT' : undefined;
   return postEntries(
     [
       {
         account: cashAcc,
         direction: 'DEBIT',
         amount,
-        counterpartyType: cpType,
-        counterpartyId: agentId,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
         metadata: { transferId: payment.transferId, method: payment.method },
       },
       {
-        account: 'REVENUE',
+        account: 'ACCOUNTS_RECEIVABLE',
         direction: 'CREDIT',
         amount,
-        counterpartyType: cpType,
-        counterpartyId: agentId,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
         metadata: { transferId: payment.transferId, method: payment.method },
       },
     ],

@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ArrowLeft, Edit3, Phone, MessageCircle, Mail, Save, Trash2, Sparkles,
-  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, AlertTriangle,
+  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle,
 } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { VIPBadge } from '@/components/ui/VIPBadge';
@@ -18,10 +19,9 @@ import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
 import { query } from '@/core/db/helpers';
 import type { Customer, VIPLevel, SalesStage, CustomerType } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
-}
 function fmtDate(iso?: string | null): string {
   if (!iso) return '\u2014';
   return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -38,8 +38,8 @@ const TYPES: { value: CustomerType; label: string }[] = [
 ];
 
 type PaymentEntry =
-  | { type: 'payment'; id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceId: string }
-  | { type: 'refund'; id: string; amount: number; method: string; receivedAt: string; returnNumber: string; invoiceId: string; invoiceNumber: string; creditNoteId?: string };
+  | { type: 'payment'; id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; invoiceId: string }
+  | { type: 'refund'; id: string; amount: number; method: string; receivedAt: string; returnNumber: string; invoiceId: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; creditNoteId?: string };
 
 // Merged payment + refund history sorted by date descending.
 function useCustomerPayments(customerId: string | undefined): PaymentEntry[] {
@@ -47,7 +47,7 @@ function useCustomerPayments(customerId: string | undefined): PaymentEntry[] {
     if (!customerId) return [];
     try {
       const payRows = query(
-        `SELECT p.id, p.amount, p.method, p.received_at, p.notes, i.invoice_number, i.id AS invoice_id
+        `SELECT p.id, p.amount, p.method, p.received_at, p.notes, i.invoice_number, i.status, i.special_mark, i.id AS invoice_id
          FROM payments p JOIN invoices i ON i.id = p.invoice_id
          WHERE i.customer_id = ?
          ORDER BY p.received_at DESC`,
@@ -61,12 +61,14 @@ function useCustomerPayments(customerId: string | undefined): PaymentEntry[] {
         receivedAt: (r.received_at as string) || '',
         notes: (r.notes as string | null) || undefined,
         invoiceNumber: r.invoice_number as string,
+        invoiceStatus: (r.status as string) || '',
+        invoiceSpecialMark: Number(r.special_mark) === 1,
         invoiceId: r.invoice_id as string,
       }));
 
       const refundRows = query(
         `SELECT sr.id, sr.return_number, sr.refund_paid_amount, sr.refund_method,
-                sr.refund_paid_date, sr.invoice_id, i.invoice_number,
+                sr.refund_paid_date, sr.invoice_id, i.invoice_number, i.status, i.special_mark,
                 cn.id AS cn_id
          FROM sales_returns sr
          JOIN invoices i ON i.id = sr.invoice_id
@@ -84,6 +86,8 @@ function useCustomerPayments(customerId: string | undefined): PaymentEntry[] {
         returnNumber: r.return_number as string,
         invoiceId: r.invoice_id as string,
         invoiceNumber: r.invoice_number as string,
+        invoiceStatus: (r.status as string) || '',
+        invoiceSpecialMark: Number(r.special_mark) === 1,
         creditNoteId: (r.cn_id as string | null) || undefined,
       }));
 
@@ -98,6 +102,7 @@ function MethodIcon({ method }: { method: string }) {
   const m = method.toLowerCase();
   if (m.includes('cash')) return <Banknote size={14} style={{ color: '#16A34A' }} />;
   if (m.includes('bank')) return <Building2 size={14} style={{ color: '#3D7FFF' }} />;
+  if (m.includes('benefit')) return <Smartphone size={14} style={{ color: '#FF8730' }} />;
   if (m.includes('card')) return <CreditCard size={14} style={{ color: '#715DE3' }} />;
   return <Wallet size={14} style={{ color: '#6B7280' }} />;
 }
@@ -105,6 +110,7 @@ function MethodIcon({ method }: { method: string }) {
 export function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/clients');
   const { customers, loadCustomers, updateCustomer, deleteCustomer, getCustomerStats } = useCustomerStore();
   const { loadReturns: loadSalesReturns, getCustomerRefundPayable } = useSalesReturnStore();
   const { products, loadProducts } = useProductStore();
@@ -199,7 +205,7 @@ export function CustomerDetail() {
   }
 
   const initials = `${(customer.firstName || '').charAt(0)}${(customer.lastName || '').charAt(0)}`.toUpperCase() || '?';
-  const stats = id ? getCustomerStats(id) : { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0 };
+  const stats = id ? getCustomerStats(id) : { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0, openTransferCount: 0 };
   const refundPayable = id ? getCustomerRefundPayable(id) : 0;
   const marginPct = stats.revenue > 0 ? (stats.profit / stats.revenue) * 100 : 0;
   const lastOrderInvoice = customerInvoices[0];
@@ -234,7 +240,7 @@ export function CustomerDetail() {
 
   // —— Helper: KPI Card with right-side icon
   function KpiCard({ label, value, hint, icon, iconBg, valueColor }:
-    { label: string; value: string; hint?: string; icon: React.ReactNode; iconBg: string; valueColor?: string }) {
+    { label: string; value: number; hint?: string; icon: React.ReactNode; iconBg: string; valueColor?: string }) {
     return (
       <Card>
         <div className="flex items-start justify-between" style={{ marginBottom: 4 }}>
@@ -244,7 +250,7 @@ export function CustomerDetail() {
           </div>
         </div>
         <div className="font-display" style={{ fontSize: 26, color: valueColor || '#0F0F10', lineHeight: 1.1, marginTop: 4 }}>
-          {value} <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+          <Bhd v={value}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
         </div>
         {hint && <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>{hint}</div>}
       </Card>
@@ -253,16 +259,16 @@ export function CustomerDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header — Back + Action Buttons */}
         <div className="flex items-center justify-between" style={{ marginBottom: 24 }}>
-          <button onClick={() => navigate('/clients')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}>
-            <ArrowLeft size={16} /> Clients
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
@@ -490,20 +496,25 @@ export function CustomerDetail() {
               gridTemplateColumns: refundPayable > 0 ? 'repeat(4, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))',
               gap: 16, marginTop: 24,
             }}>
-              <KpiCard label="Outstanding Invoices" value={fmt(stats.invoiceOutstanding)}
-                hint={`${stats.openInvoiceCount} ${stats.openInvoiceCount === 1 ? 'Invoice' : 'Invoices'}`}
+              <KpiCard label="Open Receivables" value={stats.invoiceOutstanding}
+                hint={(() => {
+                  const parts: string[] = [];
+                  if (stats.openInvoiceCount > 0) parts.push(`${stats.openInvoiceCount} ${stats.openInvoiceCount === 1 ? 'invoice' : 'invoices'}`);
+                  if (stats.openTransferCount > 0) parts.push(`${stats.openTransferCount} ${stats.openTransferCount === 1 ? 'approval sale' : 'approval sales'}`);
+                  return parts.length > 0 ? parts.join(' · ') : 'No open items';
+                })()}
                 icon={<Receipt size={18} style={{ color: '#DC2626' }} />} iconBg="rgba(220,38,38,0.10)"
                 valueColor={stats.invoiceOutstanding > 0 ? '#DC2626' : '#0F0F10'} />
-              <KpiCard label="Loans / Other Receivable" value={fmt(stats.loanOutstanding)}
+              <KpiCard label="Loans / Other Receivable" value={stats.loanOutstanding}
                 hint={`${stats.openLoanCount} ${stats.openLoanCount === 1 ? 'Loan' : 'Loans'}`}
                 icon={<FileMinus size={18} style={{ color: '#FF8730' }} />} iconBg="rgba(255,135,48,0.10)"
                 valueColor={stats.loanOutstanding > 0 ? '#FF8730' : '#0F0F10'} />
-              <KpiCard label="Total Receivable" value={fmt(stats.outstanding)}
+              <KpiCard label="Total Receivable" value={stats.outstanding}
                 hint="Total Outstanding"
                 icon={<Wallet size={18} style={{ color: '#3D7FFF' }} />} iconBg="rgba(61,127,255,0.10)"
                 valueColor={stats.outstanding > 0 ? '#3D7FFF' : '#0F0F10'} />
               {refundPayable > 0 && (
-                <KpiCard label="Refund Payable" value={fmt(refundPayable)}
+                <KpiCard label="Refund Payable" value={refundPayable}
                   hint="We owe customer"
                   icon={<Wallet size={18} style={{ color: '#DC2626' }} />} iconBg="rgba(220,38,38,0.10)"
                   valueColor="#DC2626" />
@@ -512,10 +523,10 @@ export function CustomerDetail() {
 
             {/* REVENUE / PROFIT ROW */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
-              <KpiCard label="Total Revenue" value={fmt(stats.revenue)}
+              <KpiCard label="Total Revenue" value={stats.revenue}
                 hint="All time"
                 icon={<BarChart3 size={18} style={{ color: '#16A34A' }} />} iconBg="rgba(22,163,74,0.10)" />
-              <KpiCard label="Total Profit" value={fmt(stats.profit)}
+              <KpiCard label="Total Profit" value={stats.profit}
                 hint={`${marginPct.toFixed(1)}% Margin`}
                 icon={<TrendingUp size={18} style={{ color: '#16A34A' }} />} iconBg="rgba(22,163,74,0.10)"
                 valueColor={stats.profit >= 0 ? '#0F0F10' : '#DC2626'} />
@@ -558,11 +569,11 @@ export function CustomerDetail() {
                           onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.02)')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                           <span style={{ color: '#4B5563' }}>{fmtDate(inv.issuedAt || inv.createdAt)}</span>
-                          <span className="font-mono" style={{ color: '#3D7FFF' }}>{inv.invoiceNumber}</span>
-                          <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(inv.grossAmount)} BHD</span>
-                          <span className="font-mono" style={{ color: '#4B5563' }}>{fmt(inv.paidAmount)} BHD</span>
+                          <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort(inv)}</span>
+                          <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={inv.grossAmount}/> BHD</span>
+                          <span className="font-mono" style={{ color: '#4B5563' }}><Bhd v={inv.paidAmount}/> BHD</span>
                           <span>{invoiceStatusPill(inv, remaining, cnCancel)}</span>
-                          <span className="font-mono" style={{ textAlign: 'right', color: remaining > 0 ? '#DC2626' : '#16A34A' }}>{fmt(remaining)} BHD</span>
+                          <span className="font-mono" style={{ textAlign: 'right', color: remaining > 0 ? '#DC2626' : '#16A34A' }}><Bhd v={remaining}/> BHD</span>
                         </div>
                       );
                     })}
@@ -594,7 +605,7 @@ export function CustomerDetail() {
                     gap: 12, padding: '14px 0', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)', fontSize: 13,
                   }}>
                     <span style={{ color: '#4B5563' }}>{fmtDate(d.createdAt)}</span>
-                    <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(d.amount)} BHD</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={d.amount}/> BHD</span>
                     <span style={{ color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.notes || defaultNote}</span>
                     <span><span style={{ padding: '3px 12px', fontSize: 11, borderRadius: 999, color: fg, background: bg, border: `1px solid ${fg}30` }}>{label}</span></span>
                     <span style={{ color: '#6B7280' }}>{d.dueDate ? fmtDate(d.dueDate) : '\u2014'}</span>
@@ -696,16 +707,16 @@ export function CustomerDetail() {
                     }}>
                       <span style={{ color: '#4B5563' }}>{fmtDate(p.receivedAt)}</span>
                       {p.type === 'payment' ? (
-                        <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(p.amount)} BHD</span>
+                        <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={p.amount}/> BHD</span>
                       ) : (
-                        <span className="font-mono" style={{ color: '#DC2626' }}>{'-'}{fmt(p.amount)} BHD</span>
+                        <span className="font-mono" style={{ color: '#DC2626' }}>{'-'}<Bhd v={p.amount}/> BHD</span>
                       )}
                       <span className="flex items-center gap-2" style={{ color: '#4B5563', textTransform: 'capitalize' }}>
                         <MethodIcon method={p.method} /> {p.method.replace('_', ' ')}
                       </span>
                       {p.type === 'payment' ? (
                         <Link to={`/invoices/${p.invoiceId}`} style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>
-                          Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{p.invoiceNumber}</span>
+                          Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort({ invoiceNumber: p.invoiceNumber, status: p.invoiceStatus, specialMark: p.invoiceSpecialMark })}</span>
                         </Link>
                       ) : (
                         <Link to={`/invoices/${p.invoiceId}`} style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>
@@ -768,7 +779,7 @@ export function CustomerDetail() {
                   )}
                   {(customer.budgetMin || customer.budgetMax) && (
                     <div style={{ marginTop: 12, fontSize: 12, color: '#6B7280' }}>
-                      Budget: {fmt(customer.budgetMin || 0)} \u2013 {fmt(customer.budgetMax || 0)} BHD
+                      Budget: <Bhd v={customer.budgetMin || 0}/> \u2013 <Bhd v={customer.budgetMax || 0}/> BHD
                     </div>
                   )}
                 </Card>
@@ -788,7 +799,7 @@ export function CustomerDetail() {
                             <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{p.brand}</span>
                             <div style={{ fontSize: 13, color: '#0F0F10' }}>{p.name}</div>
                           </div>
-                          <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(p.plannedSalePrice || p.purchasePrice)} BHD</span>
+                          <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD</span>
                         </div>
                       ))}
                     </div>

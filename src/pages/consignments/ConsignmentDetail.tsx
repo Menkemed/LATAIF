@@ -1,19 +1,29 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, Save, Trash2, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Edit3, Save, Trash2, AlertTriangle, FileText, Receipt, ShoppingBag, Package } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { SearchSelect } from '@/components/ui/SearchSelect';
+import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useInvoiceStore } from '@/stores/invoiceStore';
+import { usePurchaseStore } from '@/stores/purchaseStore';
+import { useExpenseStore } from '@/stores/expenseStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
+import { Bhd } from '@/components/ui/Bhd';
+import { getProductSpecs } from '@/core/utils/product-format';
+import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 
 function fmt(v: number | null | undefined): string {
-  return (v ?? 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtPct(v: number | null | undefined): string {
@@ -31,12 +41,17 @@ function daysUntil(dateStr: string): number {
 export function ConsignmentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/consignments');
   const {
     consignments, loadConsignments, updateConsignment,
-    markSold, markPaidOut, markReturned, markReturnedAfterSale, deleteConsignment,
+    recordSale, cancelSale, markPaidOut, markReturned, markReturnedAfterSale, deleteConsignment,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts } = useProductStore();
+  const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
+  const { purchases, loadPurchases } = usePurchaseStore();
+  const { expenses, loadExpenses } = useExpenseStore();
+  const { employees, loadEmployees } = useEmployeeStore();
 
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<{
@@ -51,21 +66,32 @@ export function ConsignmentDetail() {
   const [soldModal, setSoldModal] = useState(false);
   const [soldPrice, setSoldPrice] = useState('');
   const [soldBuyer, setSoldBuyer] = useState('');
+  const [soldDate, setSoldDate] = useState('');
+  const [soldNotes, setSoldNotes] = useState('');
+  const [soldAck, setSoldAck] = useState(false);
   const [paidModal, setPaidModal] = useState(false);
   const [paidMethod, setPaidMethod] = useState('bank_transfer');
   const [paidRef, setPaidRef] = useState('');
   const [returnModal, setReturnModal] = useState(false);
   const [postSaleReturnModal, setPostSaleReturnModal] = useState(false);
   const [postSaleDisposition, setPostSaleDisposition] = useState<'RETURN_TO_OWNER' | 'KEEP_AS_OWN'>('RETURN_TO_OWNER');
+  const [cancelSaleModal, setCancelSaleModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  // 2026-05-16 — Number-Type-Dialog vor Auto-Invoice.
+  const [numberDialogOpen, setNumberDialogOpen] = useState(false);
   const perm = usePermission();
 
   useEffect(() => {
     loadConsignments();
     loadCustomers();
     loadProducts();
-  }, [loadConsignments, loadCustomers, loadProducts]);
+    loadCategories();
+    loadInvoices();
+    loadPurchases();
+    loadExpenses();
+    loadEmployees();
+  }, [loadConsignments, loadCustomers, loadProducts, loadCategories, loadInvoices, loadPurchases, loadExpenses, loadEmployees]);
 
   const consignment = useMemo(
     () => consignments.find(c => c.id === id),
@@ -86,6 +112,23 @@ export function ConsignmentDetail() {
     () => consignment?.buyerId ? customers.find(c => c.id === consignment.buyerId) : null,
     [consignment, customers],
   );
+
+  // Linked records (für Sold-Card Anzeige).
+  // WICHTIG: useMemo MUSS vor dem `if (!consignment) return ...` stehen — sonst
+  // springt die Hook-Anzahl zwischen Renders und React explodiert mit
+  // "Rendered more hooks than during the previous render".
+  const linkedPurchase = useMemo(() => {
+    if (!consignment) return null;
+    if (consignment.status !== 'sold' && consignment.status !== 'paid_out') return null;
+    return purchases.find(p => (p.notes || '').includes(consignment.consignmentNumber)) || null;
+  }, [purchases, consignment]);
+  const linkedLossExpense = useMemo(() => {
+    if (!consignment) return null;
+    if (consignment.status !== 'sold' && consignment.status !== 'paid_out') return null;
+    return expenses.find(e =>
+      e.relatedModule === 'consignment' && e.relatedEntityId === consignment.id && e.category === 'ConsignorLoss'
+    ) || null;
+  }, [expenses, consignment]);
 
   // Sync form when consignment loads
   useEffect(() => {
@@ -118,10 +161,23 @@ export function ConsignmentDetail() {
   const editCommission = editAgreed * (editRate / 100);
   const editPayout = editAgreed - editCommission;
 
-  // Sale modal calculations
+  // Sale modal calculations (Plan 2026-05 §Consignment-Refactor)
   const salePriceNum = Number(soldPrice) || 0;
-  const saleCommission = salePriceNum * (consignment.commissionRate / 100);
-  const salePayout = salePriceNum - saleCommission;
+  const isAgreedExcess = consignment.commissionType === 'consignor_fixed';
+  let saleCommission: number; let salePayout: number;
+  if (isAgreedExcess) {
+    salePayout = consignment.agreedPrice;          // Garantie
+    saleCommission = salePriceNum - consignment.agreedPrice;  // kann negativ sein = Loss
+  } else {
+    saleCommission = salePriceNum * (consignment.commissionRate / 100);
+    salePayout = salePriceNum - saleCommission;
+  }
+  const saleNeedsAck = isAgreedExcess && salePriceNum > 0 && salePriceNum < consignment.agreedPrice;
+  const saleShortfall = saleNeedsAck ? consignment.agreedPrice - salePriceNum : 0;
+  const buyerIsConsignor = !!soldBuyer && soldBuyer === consignment.consignorId;
+
+  // Linked invoice (no useMemo needed — simple lookup, can stay after early return).
+  const linkedInvoice = consignment.invoiceId ? invoices.find(i => i.id === consignment.invoiceId) : null;
 
   function handleSave() {
     if (!id) return;
@@ -135,12 +191,36 @@ export function ConsignmentDetail() {
     setEditing(false);
   }
 
-  function handleMarkSold() {
-    if (!id || !soldPrice) return;
-    markSold(id, Number(soldPrice), soldBuyer || undefined);
-    setSoldModal(false);
-    setSoldPrice('');
-    setSoldBuyer('');
+  function handleRecordSale() {
+    if (!id || !soldPrice || !soldBuyer) return;
+    if (buyerIsConsignor) {
+      alert('Buyer cannot be the same as the consignor. Use "Return" if the consignor is taking the item back.');
+      return;
+    }
+    if (saleNeedsAck && !soldAck) {
+      alert('Please confirm the consignor-loss shortfall before saving.');
+      return;
+    }
+    setNumberDialogOpen(true);
+  }
+
+  function executeRecordSale(specialMark: boolean) {
+    if (!id) return;
+    try {
+      recordSale(id, {
+        salePrice: Number(soldPrice),
+        buyerId: soldBuyer,
+        saleDate: soldDate || new Date().toISOString().split('T')[0],
+        notes: soldNotes || undefined,
+        acknowledgeShortfall: soldAck,
+        specialMark,
+      });
+      setNumberDialogOpen(false);
+      setSoldModal(false);
+      setSoldPrice(''); setSoldBuyer(''); setSoldDate(''); setSoldNotes(''); setSoldAck(false);
+    } catch (e) {
+      alert(`Sale failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   function handleMarkPaid() {
@@ -163,19 +243,20 @@ export function ConsignmentDetail() {
     setPostSaleReturnModal(false);
   }
 
+  function handleCancelSale() {
+    if (!id) return;
+    try {
+      cancelSale(id);
+      setCancelSaleModal(false);
+    } catch (e) {
+      alert(`Cancel Sale failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   function handleDelete() {
     if (!id) return;
     deleteConsignment(id);
     navigate('/consignments');
-  }
-
-  function renderField(label: string, value: React.ReactNode) {
-    return (
-      <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
-        <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
-        <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>
-      </div>
-    );
   }
 
   const consignorName = consignor
@@ -188,17 +269,17 @@ export function ConsignmentDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/consignments')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer transition-colors"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
             onMouseEnter={e => (e.currentTarget.style.color = '#0F0F10')}
             onMouseLeave={e => (e.currentTarget.style.color = '#6B7280')}
           >
-            <ArrowLeft size={16} /> Consignments
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {editing ? (
@@ -211,15 +292,45 @@ export function ConsignmentDetail() {
                 {consignment.status === 'active' && perm.canManageConsignments && (
                   <>
                     <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>
-                    <Button variant="primary" onClick={() => { setSoldPrice(String(consignment.agreedPrice)); setSoldModal(true); }}>Mark as Sold</Button>
+                    <Button variant="primary" onClick={() => {
+                      setSoldPrice(String(consignment.agreedPrice || ''));
+                      setSoldBuyer('');
+                      setSoldDate(new Date().toISOString().split('T')[0]);
+                      setSoldNotes('');
+                      setSoldAck(false);
+                      setSoldModal(true);
+                    }}>Record Sale</Button>
                     <Button variant="ghost" onClick={() => setReturnModal(true)}>Return</Button>
                   </>
                 )}
                 {consignment.status === 'sold' && perm.canManageConsignments && (
                   <>
-                    <Button variant="primary" onClick={() => setPaidModal(true)}>Pay Out</Button>
+                    {/* Plan 2026-05: Bezahlung läuft jetzt über die linked Invoice/Purchase.
+                        Pay-Out-Button nur noch für Legacy-Consignments (kein invoiceId). */}
+                    {!consignment.invoiceId && (
+                      <Button variant="primary" onClick={() => setPaidModal(true)}>Pay Out (legacy)</Button>
+                    )}
+                    {consignment.invoiceId && linkedInvoice && (
+                      <Button variant="primary" onClick={() => navigate(`/invoices/${consignment.invoiceId}`)}>
+                        <FileText size={14} /> Buyer Invoice
+                      </Button>
+                    )}
+                    {linkedPurchase && (
+                      <Button variant="secondary" onClick={() => navigate(`/purchases/${linkedPurchase.id}`)}>
+                        <ShoppingBag size={14} /> Consignor Purchase
+                      </Button>
+                    )}
                     <Button variant="ghost" onClick={() => setPostSaleReturnModal(true)}>Post-Sale Return</Button>
+                    {/* Cancel Sale: nur für neuen Flow (mit invoiceId). Reverst alle 3 Records. */}
+                    {consignment.invoiceId && (
+                      <Button variant="ghost" onClick={() => setCancelSaleModal(true)}>Cancel Sale</Button>
+                    )}
                   </>
+                )}
+                {/* Post-Sale-Return ist schon gelaufen, aber noch ungereinigte Auto-Records:
+                    Cancel-Sale erlaubt jetzt ein nachträgliches Cleanup auch im 'returned'-State. */}
+                {consignment.status === 'returned' && consignment.invoiceId && perm.canManageConsignments && (
+                  <Button variant="ghost" onClick={() => setCancelSaleModal(true)}>Cancel Sale (cleanup)</Button>
                 )}
                 {consignment.status === 'paid_out' && perm.canManageConsignments && (
                   <Button variant="ghost" onClick={() => setPostSaleReturnModal(true)}>Post-Sale Return</Button>
@@ -235,19 +346,71 @@ export function ConsignmentDetail() {
 
           {/* Key Info */}
           <div>
-            <span className="text-overline">{consignment.consignmentNumber}</span>
-            <h1 className="font-display" style={{ fontSize: 32, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>
-              {productLabel}
-            </h1>
-            {product?.sku && (
-              <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', display: 'block', marginTop: 8 }}>{product.sku}</span>
-            )}
-            <div className="flex items-center gap-4" style={{ marginTop: 12 }}>
-              <StatusDot status={consignment.status} />
-              {consignment.payoutStatus !== 'pending' && consignment.status !== 'active' && (
-                <StatusDot status={consignment.payoutStatus} label={`Payout: ${consignment.payoutStatus.replace(/_/g, ' ')}`} />
+            {/* Image + Title side-by-side */}
+            <div className="flex items-start gap-4" style={{ minWidth: 0 }}>
+              {product?.images && product.images.length > 0 ? (
+                <img
+                  src={product.images[0]}
+                  alt={productLabel}
+                  className="cursor-pointer"
+                  onClick={() => product && navigate(`/collection/${product.id}`)}
+                  style={{
+                    width: 96, height: 96, borderRadius: 10,
+                    objectFit: 'cover', flexShrink: 0,
+                    border: '1px solid #E5E9EE', background: '#F2F7FA',
+                  }}
+                />
+              ) : (
+                <div
+                  className={product ? 'cursor-pointer' : ''}
+                  onClick={() => product && navigate(`/collection/${product.id}`)}
+                  style={{
+                    width: 96, height: 96, borderRadius: 10,
+                    background: '#F2F7FA', border: '1px solid #E5E9EE',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    flexShrink: 0,
+                  }}>
+                  <Package size={28} strokeWidth={1.2} style={{ color: '#9CA3AF' }} />
+                </div>
               )}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <span className="text-overline font-mono">{consignment.consignmentNumber}</span>
+                <h1 className="font-display" style={{ fontSize: 28, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>
+                  {productLabel}
+                </h1>
+                {product?.sku && (
+                  <span className="font-mono" style={{ fontSize: 12, color: '#4B5563', display: 'block', marginTop: 6 }}>{product.sku}</span>
+                )}
+                <div className="flex items-center gap-3" style={{ marginTop: 10, flexWrap: 'wrap' }}>
+                  <StatusDot status={consignment.status} />
+                  {consignment.payoutStatus !== 'pending' && consignment.status !== 'active' && (
+                    <StatusDot status={consignment.payoutStatus} label={`Payout: ${consignment.payoutStatus.replace(/_/g, ' ')}`} />
+                  )}
+                </div>
+              </div>
             </div>
+
+            {(() => {
+              // Specs-Grid (Item Type, Color, Karat, Size, Condition, ...) — damit
+              // sofort sichtbar ist WAS in Consignment ist (nicht nur Brand+Name).
+              // SKU wird oben unter dem Titel separat angezeigt — hier ausblenden.
+              const specs = product ? getProductSpecs(product, categories, { includeSku: false }) : [];
+              if (specs.length === 0) return null;
+              return (
+                <div style={{
+                  display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                  columnGap: 16, rowGap: 4,
+                  marginTop: 14, fontSize: 11,
+                }}>
+                  {specs.map((s, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 6, minWidth: 0 }}>
+                      <span style={{ color: '#9CA3AF' }}>{s.label}:</span>
+                      <span style={{ color: '#374151', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
 
             {/* Expiry Warning */}
             {expiryWarning && (
@@ -265,29 +428,50 @@ export function ConsignmentDetail() {
               </div>
             )}
 
-            {/* Consignor */}
-            <div style={{ marginTop: 24, padding: '14px 16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
-              <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Consignor</span>
-              <span style={{ fontSize: 15, color: '#0F0F10', display: 'block', marginTop: 4 }}>{consignorName}</span>
-              {consignor?.company && (
-                <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginTop: 2 }}>{consignor.company}</span>
-              )}
-            </div>
-
-            {/* Dates */}
-            <div style={{ marginTop: 16, padding: '12px 14px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
-              <div className="flex justify-between" style={{ fontSize: 12 }}>
-                <span style={{ color: '#6B7280' }}>Agreement Date</span>
-                <span style={{ color: '#0F0F10' }}>{consignment.agreementDate}</span>
-              </div>
-              {consignment.expiryDate && (
-                <div className="flex justify-between" style={{ fontSize: 12, marginTop: 6 }}>
-                  <span style={{ color: '#6B7280' }}>Expiry Date</span>
-                  <span style={{ color: expiryWarning ? (expiryDays! <= 0 ? '#AA6E6E' : '#0F0F10') : '#0F0F10' }}>
-                    {consignment.expiryDate}
-                  </span>
+            {/* Consignor + Dates – combined meta box */}
+            <div style={{ marginTop: 18, padding: '14px 16px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
+                <div className="flex justify-between items-start">
+                  <span style={{ color: '#6B7280' }}>Consignor</span>
+                  <div style={{ textAlign: 'right' }}>
+                    {consignor ? (
+                      <span
+                        className="cursor-pointer"
+                        onClick={() => navigate(`/clients/${consignor.id}`)}
+                        style={{ color: '#3D7FFF', textDecoration: 'underline' }}
+                      >{consignorName}</span>
+                    ) : (
+                      <span style={{ color: '#0F0F10' }}>{consignorName}</span>
+                    )}
+                    {consignor?.company && (
+                      <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 2 }}>{consignor.company}</span>
+                    )}
+                  </div>
                 </div>
-              )}
+                <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Agreement Date</span><span style={{ color: '#0F0F10' }}>{consignment.agreementDate}</span></div>
+                {consignment.expiryDate && (
+                  <div className="flex justify-between">
+                    <span style={{ color: '#6B7280' }}>Expiry Date</span>
+                    <span style={{ color: expiryWarning ? (expiryDays! <= 0 ? '#AA6E6E' : '#0F0F10') : '#0F0F10' }}>
+                      {consignment.expiryDate}
+                    </span>
+                  </div>
+                )}
+                {consignment.staffId && (() => {
+                  const e = employees.find(x => x.id === consignment.staffId);
+                  if (!e) return null;
+                  return (
+                    <div className="flex justify-between">
+                      <span style={{ color: '#6B7280' }}>Staff</span>
+                      <span
+                        className="cursor-pointer"
+                        onClick={() => navigate(`/employees/${e.id}`)}
+                        style={{ color: '#3D7FFF', textDecoration: 'underline' }}
+                      >{e.name}{e.role ? ` · ${e.role}` : ''}</span>
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
           </div>
 
@@ -315,11 +499,11 @@ export function ConsignmentDetail() {
                     </div>
                     <div className="flex justify-between" style={{ marginTop: 10 }}>
                       <span style={{ color: '#6B7280' }}>Commission ({fmtPct(editRate)}%)</span>
-                      <span style={{ color: '#0F0F10' }}>{fmt(editCommission)} BHD</span>
+                      <span style={{ color: '#0F0F10' }}><Bhd v={editCommission}/> BHD</span>
                     </div>
                     <div className="flex justify-between" style={{ marginTop: 8 }}>
                       <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
-                      <span style={{ color: '#7EAA6E' }}>{fmt(editPayout)} BHD</span>
+                      <span style={{ color: '#7EAA6E' }}><Bhd v={editPayout}/> BHD</span>
                     </div>
                   </div>
                 )}
@@ -341,12 +525,12 @@ export function ConsignmentDetail() {
                 <div style={{ marginBottom: 20 }}>
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                     <span className="text-overline">AGREED PRICE</span>
-                    <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}>{fmt(consignment.agreedPrice)} BHD</span>
+                    <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}><Bhd v={consignment.agreedPrice}/> BHD</span>
                   </div>
                   {consignment.minimumPrice != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">MINIMUM PRICE</span>
-                      <span className="font-display" style={{ fontSize: 18, color: '#4B5563' }}>{fmt(consignment.minimumPrice)} BHD</span>
+                      <span className="font-display" style={{ fontSize: 18, color: '#4B5563' }}><Bhd v={consignment.minimumPrice}/> BHD</span>
                     </div>
                   )}
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
@@ -361,20 +545,78 @@ export function ConsignmentDetail() {
                     <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 12 }}>Sale Breakdown</span>
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span style={{ fontSize: 13, color: '#6B7280' }}>Sale Price</span>
-                      <span className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}>{fmt(consignment.salePrice)} BHD</span>
+                      <span className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}><Bhd v={consignment.salePrice}/> BHD</span>
                     </div>
                     <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
-                      <span style={{ color: '#6B7280' }}>Commission ({fmtPct(consignment.commissionRate)}%)</span>
-                      <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(consignment.commissionAmount || 0)} BHD</span>
+                      <span style={{ color: '#6B7280' }}>
+                        {isAgreedExcess ? `Our margin (above agreed)` : `Commission (${fmtPct(consignment.commissionRate)}%)`}
+                      </span>
+                      <span className="font-mono" style={{ color: (consignment.commissionAmount || 0) < 0 ? '#DC2626' : '#0F0F10' }}>
+                        <Bhd v={consignment.commissionAmount || 0}/> BHD
+                      </span>
                     </div>
                     <div className="flex justify-between" style={{ fontSize: 13, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
                       <span style={{ color: '#6B7280' }}>Payout Amount</span>
-                      <span className="font-mono" style={{ color: '#7EAA6E', fontSize: 16 }}>{fmt(consignment.payoutAmount || 0)} BHD</span>
+                      <span className="font-mono" style={{ color: '#7EAA6E', fontSize: 16 }}><Bhd v={consignment.payoutAmount || 0}/> BHD</span>
                     </div>
                     {buyer && (
                       <div className="flex justify-between" style={{ fontSize: 13, marginTop: 8 }}>
                         <span style={{ color: '#6B7280' }}>Buyer</span>
                         <span style={{ color: '#0F0F10' }}>{buyer.firstName} {buyer.lastName}</span>
+                      </div>
+                    )}
+
+                    {/* Linked Records — Plan 2026-05: Sold-Flow erzeugt Invoice + Purchase
+                        (+ optional Consignor-Loss-Expense). Click-Through für Bezahlung. */}
+                    {(linkedInvoice || linkedPurchase || linkedLossExpense) && (
+                      <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                        <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 10 }}>Linked Records</span>
+                        {linkedInvoice && (
+                          <button onClick={() => navigate(`/invoices/${linkedInvoice.id}`)}
+                            className="cursor-pointer flex items-center justify-between w-full"
+                            style={{
+                              padding: '8px 10px', marginBottom: 6, fontSize: 12,
+                              borderRadius: 6, border: '1px solid #E5E9EE', background: 'transparent',
+                            }}>
+                            <span className="flex items-center gap-2" style={{ color: '#0F0F10' }}>
+                              <FileText size={13} style={{ color: '#715DE3' }} /> Buyer Invoice
+                              <span className="font-mono" style={{ color: '#3D7FFF', marginLeft: 4 }}>{formatInvoiceDisplayShort(linkedInvoice)}</span>
+                            </span>
+                            <span className="font-mono" style={{ color: linkedInvoice.paidAmount >= linkedInvoice.grossAmount ? '#16A34A' : '#DC2626' }}>
+                              <Bhd v={linkedInvoice.grossAmount - linkedInvoice.paidAmount}/> BHD remaining
+                            </span>
+                          </button>
+                        )}
+                        {linkedPurchase && (
+                          <button onClick={() => navigate(`/purchases/${linkedPurchase.id}`)}
+                            className="cursor-pointer flex items-center justify-between w-full"
+                            style={{
+                              padding: '8px 10px', marginBottom: 6, fontSize: 12,
+                              borderRadius: 6, border: '1px solid #E5E9EE', background: 'transparent',
+                            }}>
+                            <span className="flex items-center gap-2" style={{ color: '#0F0F10' }}>
+                              <ShoppingBag size={13} style={{ color: '#FF8730' }} /> Consignor Purchase
+                              <span className="font-mono" style={{ color: '#3D7FFF', marginLeft: 4 }}>{linkedPurchase.purchaseNumber}</span>
+                            </span>
+                            <span className="font-mono" style={{ color: (linkedPurchase.paidAmount || 0) >= linkedPurchase.totalAmount ? '#16A34A' : '#FF8730' }}>
+                              <Bhd v={linkedPurchase.totalAmount - (linkedPurchase.paidAmount || 0)}/> BHD owed
+                            </span>
+                          </button>
+                        )}
+                        {linkedLossExpense && (
+                          <button onClick={() => navigate('/expenses')}
+                            className="cursor-pointer flex items-center justify-between w-full"
+                            style={{
+                              padding: '8px 10px', fontSize: 12,
+                              borderRadius: 6, border: '1px solid rgba(220,38,38,0.20)', background: 'rgba(220,38,38,0.04)',
+                            }}>
+                            <span className="flex items-center gap-2" style={{ color: '#DC2626' }}>
+                              <Receipt size={13} /> Consignor Loss Expense
+                              <span className="font-mono" style={{ marginLeft: 4 }}>{linkedLossExpense.expenseNumber}</span>
+                            </span>
+                            <span className="font-mono" style={{ color: '#DC2626' }}><Bhd v={linkedLossExpense.amount}/> BHD</span>
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -391,7 +633,7 @@ export function ConsignmentDetail() {
                     {consignment.payoutMethod && (
                       <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
                         <span style={{ color: '#6B7280' }}>Method</span>
-                        <span style={{ color: '#0F0F10' }}>{consignment.payoutMethod === 'bank_transfer' ? 'Bank Transfer' : consignment.payoutMethod === 'cash' ? 'Cash' : 'Card'}</span>
+                        <span style={{ color: '#0F0F10' }}>{consignment.payoutMethod === 'bank_transfer' ? 'Bank Transfer' : consignment.payoutMethod === 'cash' ? 'Cash' : consignment.payoutMethod === 'benefit' ? 'Benefit' : 'Card'}</span>
                       </div>
                     )}
                     {consignment.payoutDate && (
@@ -418,12 +660,18 @@ export function ConsignmentDetail() {
                       IF SOLD AT AGREED PRICE
                     </div>
                     <div className="flex justify-between" style={{ marginTop: 10 }}>
-                      <span style={{ color: '#6B7280' }}>Commission ({fmtPct(consignment.commissionRate)}%)</span>
-                      <span style={{ color: '#0F0F10' }}>{fmt(consignment.agreedPrice * (consignment.commissionRate / 100))} BHD</span>
+                      <span style={{ color: '#6B7280' }}>
+                        {isAgreedExcess ? 'Our margin (excess above agreed)' : `Commission (${fmtPct(consignment.commissionRate)}%)`}
+                      </span>
+                      <span style={{ color: '#0F0F10' }}>
+                        <Bhd v={isAgreedExcess ? 0 : consignment.agreedPrice * (consignment.commissionRate / 100)}/> BHD
+                      </span>
                     </div>
                     <div className="flex justify-between" style={{ marginTop: 8 }}>
                       <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
-                      <span style={{ color: '#7EAA6E' }}>{fmt(consignment.agreedPrice - consignment.agreedPrice * (consignment.commissionRate / 100))} BHD</span>
+                      <span style={{ color: '#7EAA6E' }}>
+                        <Bhd v={isAgreedExcess ? consignment.agreedPrice : consignment.agreedPrice - consignment.agreedPrice * (consignment.commissionRate / 100)}/> BHD
+                      </span>
                     </div>
                   </div>
                 )}
@@ -432,85 +680,125 @@ export function ConsignmentDetail() {
           </div>
         </div>
 
-        {/* Details Grid */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-          {/* Product Info */}
+        {/* Internal Notes — schlank, nur was nicht schon im Hero steht */}
+        {(consignment.notes || (consignment.status === 'active' && editing && perm.canManageConsignments)) && (
           <Card>
-            <span className="text-overline" style={{ marginBottom: 16 }}>PRODUCT</span>
-            <div style={{ marginTop: 16 }}>
-              {renderField('Brand', product?.brand)}
-              {renderField('Name', product?.name)}
-              {renderField('SKU', product?.sku)}
-              {renderField('Stock Status', product?.stockStatus ? product.stockStatus.replace(/_/g, ' ') : undefined)}
-              {product?.condition && renderField('Condition', product.condition)}
-            </div>
-          </Card>
-
-          {/* Consignment Details */}
-          <Card>
-            <span className="text-overline" style={{ marginBottom: 16 }}>DETAILS</span>
-            <div style={{ marginTop: 16 }}>
-              {renderField('Number', <span className="font-mono">{consignment.consignmentNumber}</span>)}
-              {renderField('Status', <StatusDot status={consignment.status} />)}
-              {renderField('Agreement Date', consignment.agreementDate)}
-              {consignment.expiryDate && renderField('Expiry Date', consignment.expiryDate)}
-              {renderField('Payout Status', <StatusDot status={consignment.payoutStatus} />)}
-              {consignment.invoiceId && renderField('Invoice', <span className="font-mono">{consignment.invoiceId}</span>)}
-              {consignment.notes && (
-                <div style={{ marginTop: 16 }}>
-                  <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Notes</span>
-                  <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6 }}>{consignment.notes}</p>
-                </div>
-              )}
-            </div>
-
-            {/* Delete button (only active, only in edit mode) */}
+            {consignment.notes && (
+              <>
+                <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>NOTES</span>
+                <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6, margin: 0, whiteSpace: 'pre-wrap' }}>{consignment.notes}</p>
+              </>
+            )}
             {consignment.status === 'active' && editing && perm.canManageConsignments && (
-              <div className="flex gap-2" style={{ marginTop: 20 }}>
+              <div className="flex gap-2" style={{ marginTop: consignment.notes ? 20 : 0 }}>
                 <Button variant="danger" onClick={() => setConfirmDelete(true)}>
                   <Trash2 size={14} /> Delete Consignment
                 </Button>
               </div>
             )}
           </Card>
-        </div>
+        )}
       </div>
 
-      {/* ── Mark as Sold Modal ── */}
-      <Modal open={soldModal} onClose={() => setSoldModal(false)} title="Mark as Sold" width={440}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
-            value={soldPrice}
-            onChange={e => setSoldPrice(e.target.value)} />
-          <Input label="BUYER (OPTIONAL)" placeholder="Customer ID or name..."
+      {/* ── Record Sale Modal (Plan 2026-05) ── */}
+      <Modal open={soldModal} onClose={() => setSoldModal(false)} title="Record Sale" width={500}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <SearchSelect
+            label="BUYER"
+            placeholder="Search clients..."
+            options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
             value={soldBuyer}
-            onChange={e => setSoldBuyer(e.target.value)} />
+            onChange={id => setSoldBuyer(id)}
+          />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
+              value={soldPrice}
+              onChange={e => { setSoldPrice(e.target.value); setSoldAck(false); }} />
+            <Input label="SALE DATE" type="date"
+              value={soldDate}
+              onChange={e => setSoldDate(e.target.value)} />
+          </div>
           {salePriceNum > 0 && (
             <div className="rounded font-mono" style={{
               padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
             }}>
               <div className="flex justify-between" style={{ marginBottom: 8 }}>
-                <span style={{ color: '#6B7280' }}>Commission ({fmtPct(consignment.commissionRate)}%)</span>
-                <span style={{ color: '#0F0F10' }}>{fmt(saleCommission)} BHD</span>
+                <span style={{ color: '#6B7280' }}>
+                  {isAgreedExcess ? `Our margin (above agreed ${fmt(consignment.agreedPrice)})` : `Commission (${fmtPct(consignment.commissionRate)}%)`}
+                </span>
+                <span style={{ color: saleCommission < 0 ? '#DC2626' : '#0F0F10' }}><Bhd v={saleCommission}/> BHD</span>
               </div>
               <div className="flex justify-between">
-                <span style={{ color: '#6B7280' }}>Payout</span>
-                <span style={{ color: '#7EAA6E' }}>{fmt(salePayout)} BHD</span>
+                <span style={{ color: '#6B7280' }}>Payout to consignor</span>
+                <span style={{ color: '#7EAA6E' }}><Bhd v={salePayout}/> BHD</span>
               </div>
-              {consignment.minimumPrice != null && salePriceNum < consignment.minimumPrice && (
-                <div className="flex items-center gap-2" style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
-                  <AlertTriangle size={12} style={{ color: '#AA6E6E' }} />
-                  <span style={{ fontSize: 11, color: '#AA6E6E' }}>Below minimum price of {fmt(consignment.minimumPrice)} BHD</span>
-                </div>
-              )}
             </div>
           )}
-          <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
+          {buyerIsConsignor && (
+            <div style={{
+              padding: '12px 14px', borderRadius: 8,
+              background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.40)',
+              fontSize: 12, color: '#DC2626',
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Buyer cannot be the same as the consignor</div>
+              <div style={{ color: '#7A2A2A' }}>
+                If the consignor is taking the item back, use <strong>Return</strong> instead — no invoice/purchase needed.
+              </div>
+            </div>
+          )}
+          {saleNeedsAck && (
+            <div style={{
+              padding: '12px 14px', borderRadius: 8,
+              background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
+              fontSize: 12, color: '#DC2626',
+            }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                ⚠ Sale <Bhd v={saleShortfall}/> BHD below agreed price
+              </div>
+              <div style={{ marginBottom: 10, color: '#7A2A2A' }}>
+                Consignor still receives <Bhd v={consignment.agreedPrice}/> BHD —
+                the <Bhd v={saleShortfall}/> BHD difference will be recorded as a <strong>Consignor Loss</strong> expense.
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 12 }}>
+                <input type="checkbox" checked={soldAck} onChange={e => setSoldAck(e.target.checked)} />
+                <span>I confirm — record this shortfall as Consignor Loss</span>
+              </label>
+            </div>
+          )}
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES (OPTIONAL)</span>
+            <textarea
+              placeholder="Reference, payment terms, …"
+              value={soldNotes}
+              onChange={e => setSoldNotes(e.target.value)}
+              className="w-full"
+              style={{
+                background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6,
+                padding: '8px 10px', fontSize: 13, color: '#0F0F10', resize: 'vertical', minHeight: 50,
+              }}
+            />
+          </div>
+          <div style={{
+            padding: '10px 12px', borderRadius: 6, background: '#F2F7FA',
+            border: '1px solid #E5E9EE', fontSize: 11, color: '#6B7280', lineHeight: 1.4,
+          }}>
+            On save: <strong>Auto-Invoice</strong> for buyer · <strong>Auto-Purchase</strong> for consignor (as supplier).
+          </div>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleMarkSold} disabled={!soldPrice}>Confirm Sale</Button>
+            <Button variant="primary" onClick={handleRecordSale}
+              disabled={!soldPrice || !soldBuyer || buyerIsConsignor || (saleNeedsAck && !soldAck)}
+            >Confirm Sale</Button>
           </div>
         </div>
       </Modal>
+
+      <NumberTypeDialog
+        open={numberDialogOpen}
+        variant="sales"
+        onCancel={() => setNumberDialogOpen(false)}
+        onConfirm={executeRecordSale}
+      />
 
       {/* ── Pay Out Modal ── */}
       <Modal open={paidModal} onClose={() => setPaidModal(false)} title="Pay Out Consignor" width={440}>
@@ -524,13 +812,13 @@ export function ConsignmentDetail() {
             </div>
             <div className="flex justify-between">
               <span style={{ color: '#6B7280' }}>Payout Amount</span>
-              <span style={{ color: '#7EAA6E' }}>{fmt(consignment.payoutAmount || 0)} BHD</span>
+              <span style={{ color: '#7EAA6E' }}><Bhd v={consignment.payoutAmount || 0}/> BHD</span>
             </div>
           </div>
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>PAYMENT METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {['bank_transfer', 'cash', 'card'].map(m => (
+              {['bank_transfer', 'cash', 'card', 'benefit'].map(m => (
                 <button key={m} onClick={() => setPaidMethod(m)}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
@@ -538,7 +826,7 @@ export function ConsignmentDetail() {
                     border: `1px solid ${paidMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                     color: paidMethod === m ? '#0F0F10' : '#6B7280',
                     background: paidMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{m === 'bank_transfer' ? 'Bank Transfer' : m === 'cash' ? 'Cash' : 'Card'}</button>
+                  }}>{m === 'bank_transfer' ? 'Bank Transfer' : m === 'cash' ? 'Cash' : m === 'card' ? 'Card' : 'Benefit'}</button>
               ))}
             </div>
           </div>
@@ -588,7 +876,7 @@ export function ConsignmentDetail() {
               background: postSaleDisposition === 'KEEP_AS_OWN' ? 'rgba(15,15,16,0.06)' : 'transparent',
             }}>
             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>B · Keep as Own</div>
-            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Bleibt bei dir. source_type → OWN, purchase_price = sale_price ({fmt(consignment.salePrice || 0)} BHD).</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Bleibt bei dir. source_type → OWN, purchase_price = sale_price (<Bhd v={consignment.salePrice || 0}/> BHD).</div>
           </button>
         </div>
         <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12, color: '#4B5563', marginBottom: 16 }}>
@@ -597,6 +885,38 @@ export function ConsignmentDetail() {
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setPostSaleReturnModal(false)}>Cancel</Button>
           <Button variant="primary" onClick={handlePostSaleReturn}>Confirm Return</Button>
+        </div>
+      </Modal>
+
+      {/* ── Cancel Sale Confirmation Modal ── */}
+      <Modal open={cancelSaleModal} onClose={() => setCancelSaleModal(false)} title="Cancel Sale" width={500}>
+        <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 12, lineHeight: 1.5 }}>
+          This will <strong style={{ color: '#0F0F10' }}>fully reverse</strong> the sale of <strong>{productLabel}</strong>:
+        </p>
+        <ul style={{ fontSize: 13, color: '#4B5563', marginBottom: 16, paddingLeft: 18, lineHeight: 1.7 }}>
+          {linkedInvoice && (
+            <li>Buyer Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort(linkedInvoice)}</span> → <strong>CANCELLED</strong> (AR cleared)</li>
+          )}
+          {linkedPurchase && (
+            <li>Consignor Purchase <span className="font-mono" style={{ color: '#3D7FFF' }}>{linkedPurchase.purchaseNumber}</span> → <strong>CANCELLED</strong> (AP cleared)</li>
+          )}
+          {linkedLossExpense && (
+            <li>Consignor-Loss-Expense <span className="font-mono" style={{ color: '#DC2626' }}>{linkedLossExpense.expenseNumber}</span> → <strong>CANCELLED</strong></li>
+          )}
+          <li>Consignment <strong>{consignment.consignmentNumber}</strong> → status back to <strong>active</strong>, sale data cleared</li>
+          <li>Product <strong>{productLabel}</strong> → stock_status back to <strong>consignment</strong></li>
+        </ul>
+        <div style={{
+          padding: '10px 12px', borderRadius: 6,
+          background: 'rgba(255,135,48,0.06)', border: '1px solid rgba(255,135,48,0.30)',
+          fontSize: 12, color: '#7A4A20', marginBottom: 16, lineHeight: 1.5,
+        }}>
+          Use this when the sale was a mistake (wrong buyer, wrong price, buyer = consignor).
+          For a normal post-sale return where the customer brings the item back, use <strong>Post-Sale Return</strong> instead.
+        </div>
+        <div className="flex justify-end gap-3">
+          <Button variant="ghost" onClick={() => setCancelSaleModal(false)}>Keep Sale</Button>
+          <Button variant="danger" onClick={handleCancelSale}>Cancel Sale</Button>
         </div>
       </Modal>
 

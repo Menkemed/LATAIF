@@ -25,15 +25,17 @@ interface CustomerStore {
   //  Revenue     = Σ payments.amount − Σ sales_returns.refund_paid_amount   (was reinkam minus was raus ging)
   //  Profit      = Σ payment·margin/gross − Σ refund·margin/gross           (anteilig zum Cash-Anteil)
   //  Outstanding = Σ (gross − paid) PARTIAL/DRAFT Invoices + offene we_lend Loans
+  //                + offene Approval-Sold-Transfers (counterparty CUSTOMER im Ledger)
   getCustomerStats: (customerId: string) => {
     revenue: number;
     profit: number;
-    outstanding: number;            // total receivable = invoices + open loans
-    invoiceOutstanding: number;     // only from invoices
+    outstanding: number;            // total receivable = invoices + loans + transfers
+    invoiceOutstanding: number;     // AR-Saldo aus dem Ledger (Invoice + Approval-Sold)
     loanOutstanding: number;        // only from we_lend debts
     invoiceCount: number;
     openInvoiceCount: number;
     openLoanCount: number;
+    openTransferCount: number;      // offene Approval-Sold-Transfers ohne Invoice-Convert
   };
 }
 
@@ -314,6 +316,20 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
         [customerId]
       );
 
+      // Approval-Transfers: offene Sold-Forderungen ohne Invoice-Convert.
+      // Reduziert um bisherige Settle-Payments — wenn settlementPaidAmount < settlementAmount
+      // ist die Forderung noch offen.
+      const transferRow = query(
+        `SELECT COUNT(*) AS cnt
+         FROM agent_transfers at
+         JOIN agents ag ON ag.id = at.agent_id
+         WHERE ag.customer_id = ?
+           AND at.invoice_id IS NULL
+           AND at.status IN ('sold','settled')
+           AND COALESCE(at.settlement_amount, 0) - COALESCE(at.settlement_paid_amount, 0) > 0.005`,
+        [customerId]
+      );
+
       // Loans: offene we_lend-Beträge — Raten leben in debt_payments (Subselect).
       const loanRow = query(
         `SELECT COALESCE(SUM(d.amount - COALESCE(p.total_paid, 0)), 0) AS open_lent,
@@ -335,6 +351,7 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       const invoiceOutstanding = Math.max(0, customerBalance(customerId));
       const loanOpen = Math.max(0, Number(loanRow[0]?.open_lent || 0));
       const loanCount = Number(loanRow[0]?.cnt || 0);
+      const openTransferCount = Number(transferRow[0]?.cnt || 0);
 
       return {
         // User-Spec: Revenue darf negativ werden wenn Refund > Zahlungen — Kunde hat
@@ -348,9 +365,10 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
         invoiceCount: Number(cntRow[0]?.cnt || 0),
         openInvoiceCount: Number(o.open_cnt || 0),
         openLoanCount: loanCount,
+        openTransferCount,
       };
     } catch {
-      return { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0 };
+      return { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0, openTransferCount: 0 };
     }
   },
 }));

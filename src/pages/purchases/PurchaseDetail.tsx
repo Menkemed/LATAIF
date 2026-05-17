@@ -2,18 +2,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, CreditCard, XCircle, RotateCcw } from 'lucide-react';
+import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useProductStore } from '@/stores/productStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { PurchaseStatus } from '@/core/models/types';
+import { getProductSpecs } from '@/core/utils/product-format';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 const STATUS_COLORS: Record<PurchaseStatus, string> = {
@@ -24,13 +28,15 @@ const STATUS_COLORS: Record<PurchaseStatus, string> = {
 export function PurchaseDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const goBack = useGoBack('/purchases');
   const { purchases, loadPurchases, addPayment, cancelPurchase, createReturn, confirmReturn, returns, loadReturns } = usePurchaseStore();
+  const { employees, loadEmployees } = useEmployeeStore();
   const { suppliers, loadSuppliers, getLedger } = useSupplierStore();
-  const { products, loadProducts } = useProductStore();
+  const { products, loadProducts, categories, loadCategories } = useProductStore();
 
   const [showPayment, setShowPayment] = useState(false);
   const [payAmount, setPayAmount] = useState('');
-  const [payMethod, setPayMethod] = useState<'cash' | 'bank' | 'credit'>('bank');
+  const [payMethod, setPayMethod] = useState<'cash' | 'bank' | 'benefit' | 'credit'>('bank');
   const [payRef, setPayRef] = useState('');
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -38,10 +44,10 @@ export function PurchaseDetail() {
   // Return state
   const [showReturn, setShowReturn] = useState(false);
   const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number }>>({});
-  const [returnMethod, setReturnMethod] = useState<'cash' | 'bank' | 'credit'>('bank');
+  const [returnMethod, setReturnMethod] = useState<'cash' | 'bank' | 'benefit' | 'credit'>('bank');
   const [returnNotes, setReturnNotes] = useState('');
 
-  useEffect(() => { loadPurchases(); loadSuppliers(); loadReturns(); loadProducts(); }, [loadPurchases, loadSuppliers, loadReturns, loadProducts]);
+  useEffect(() => { loadPurchases(); loadSuppliers(); loadReturns(); loadProducts(); loadCategories(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadReturns, loadProducts, loadCategories, loadEmployees]);
 
   const purchase = useMemo(() => purchases.find(p => p.id === id), [purchases, id]);
   const supplier = useMemo(() => purchase ? suppliers.find(s => s.id === purchase.supplierId) : undefined, [purchase, suppliers]);
@@ -118,15 +124,15 @@ export function PurchaseDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
-      <div style={{ padding: '32px 48px 64px', maxWidth: 1200 }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate('/purchases')}
+          <button onClick={goBack}
             className="flex items-center gap-2 cursor-pointer"
             style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 13 }}
           >
-            <ArrowLeft size={16} /> Purchases
+            <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
             {canPay && <Button variant="primary" onClick={() => setShowPayment(true)}><CreditCard size={14} /> Add Payment</Button>}
@@ -153,16 +159,16 @@ export function PurchaseDetail() {
           <Card>
             <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 8 }}>
               <span style={{ color: '#6B7280' }}>Total</span>
-              <span className="font-mono" style={{ color: '#0F0F10' }}>{fmt(purchase.totalAmount)} BHD</span>
+              <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={purchase.totalAmount}/> BHD</span>
             </div>
             <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 8 }}>
               <span style={{ color: '#6B7280' }}>Paid</span>
-              <span className="font-mono" style={{ color: '#16A34A' }}>{fmt(purchase.paidAmount)} BHD</span>
+              <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={purchase.paidAmount}/> BHD</span>
             </div>
             <div className="flex justify-between" style={{ fontSize: 15, paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
               <span style={{ color: '#0F0F10' }}>Outstanding (Payable)</span>
               <span className="font-mono" style={{ color: purchase.remainingAmount > 0 ? '#DC2626' : '#6B7280', fontWeight: 500 }}>
-                {fmt(purchase.remainingAmount)} BHD
+                <Bhd v={purchase.remainingAmount}/> BHD
               </span>
             </div>
           </Card>
@@ -186,15 +192,37 @@ export function PurchaseDetail() {
                 <span key={h} className="text-overline" style={{ fontSize: 10 }}>{h}</span>
               ))}
             </div>
-            {purchase.lines.map(l => (
-              <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.6fr 1fr 1fr', gap: 12, padding: '10px 0', borderBottom: '1px solid rgba(229,225,214,0.5)', alignItems: 'center' }}>
-                <span style={{ fontSize: 13, color: '#0F0F10' }}>{getProductName(l.productId)}</span>
-                <span style={{ fontSize: 12, color: '#6B7280' }}>{l.description || '—'}</span>
-                <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }}>{l.quantity}</span>
-                <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}>{fmt(l.unitPrice)}</span>
-                <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmt(l.lineTotal)}</span>
-              </div>
-            ))}
+            {purchase.lines.map(l => {
+              const lineProduct = products.find(p => p.id === l.productId);
+              const lineSpecs = getProductSpecs(lineProduct, categories);
+              return (
+                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.6fr 1fr 1fr', gap: 12, padding: '10px 0', borderBottom: '1px solid rgba(229,225,214,0.5)', alignItems: 'start' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ fontSize: 13, color: '#0F0F10' }}>{getProductName(l.productId)}</span>
+                    {/* Specs-Grid (Brand/Model/SKU/Color/Karat/Size/...) — dass der User
+                        sofort sieht WAS gekauft wurde, nicht nur den Namen. */}
+                    {lineSpecs.length > 0 && (
+                      <div style={{
+                        display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                        columnGap: 16, rowGap: 1,
+                        marginTop: 4, fontSize: 10, color: '#444',
+                      }}>
+                        {lineSpecs.map((s, i) => (
+                          <div key={i} style={{ display: 'flex', gap: 4, lineHeight: 1.4 }}>
+                            <span style={{ color: '#9CA3AF' }}>{s.label}:</span>
+                            <span style={{ color: '#374151', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <span style={{ fontSize: 12, color: '#6B7280' }}>{l.description || '—'}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }}>{l.quantity}</span>
+                  <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}><Bhd v={l.unitPrice}/></span>
+                  <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={l.lineTotal}/></span>
+                </div>
+              );
+            })}
           </div>
         </Card></div>
 
@@ -212,7 +240,7 @@ export function PurchaseDetail() {
                     <span style={{ fontSize: 11, color: '#6B7280', marginLeft: 10 }}>{p.method.toUpperCase()}</span>
                     {p.reference && <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 10 }}>Ref: {p.reference}</span>}
                   </div>
-                  <span className="font-mono" style={{ fontSize: 13, color: '#16A34A' }}>{fmt(p.amount)} BHD</span>
+                  <span className="font-mono" style={{ fontSize: 13, color: '#16A34A' }}><Bhd v={p.amount}/> BHD</span>
                 </div>
               ))}
             </div>
@@ -232,9 +260,9 @@ export function PurchaseDetail() {
                     <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 10 }}>{r.returnDate}</span>
                   </div>
                   <div className="flex gap-4">
-                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>−{fmt(r.totalAmount)}</span>
+                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>−<Bhd v={r.totalAmount}/></span>
                     {r.refundAmount > 0 && (
-                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A' }}>refund {fmt(r.refundAmount)} {r.refundMethod}</span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A' }}>refund <Bhd v={r.refundAmount}/> {r.refundMethod}</span>
                     )}
                   </div>
                 </div>
@@ -242,6 +270,20 @@ export function PurchaseDetail() {
             </div>
           </Card></div>
         )}
+
+        {purchase.staffId && (() => {
+          const e = employees.find(x => x.id === purchase.staffId);
+          return (
+            <div style={{ marginTop: 20 }}><Card>
+              <span className="text-overline">STAFF</span>
+              <p
+                style={{ fontSize: 13, color: '#3D7FFF', marginTop: 8, cursor: 'pointer', textDecoration: 'underline' }}
+                onClick={() => e && navigate(`/employees/${e.id}`)}>
+                {e ? `${e.name}${e.role ? ` · ${e.role}` : ''}` : '—'}
+              </p>
+            </Card></div>
+          );
+        })()}
 
         {purchase.notes && (
           <div style={{ marginTop: 20 }}><Card>
@@ -259,7 +301,7 @@ export function PurchaseDetail() {
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>
-              {(['cash', 'bank', 'credit'] as const).map(m => {
+              {(['cash', 'bank', 'benefit', 'credit'] as const).map(m => {
                 const active = payMethod === m;
                 const disabled = m === 'credit' && supplierLedger.creditBalance <= 0;
                 return (
@@ -271,13 +313,13 @@ export function PurchaseDetail() {
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                       opacity: disabled ? 0.5 : 1,
                       cursor: disabled ? 'not-allowed' : 'pointer',
-                    }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : `Credit (${fmt(supplierLedger.creditBalance)})`}</button>
+                    }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'benefit' ? 'Benefit' : `Credit (${fmt(supplierLedger.creditBalance)})`}</button>
                 );
               })}
             </div>
             {payMethod === 'credit' && (
               <p style={{ fontSize: 11, color: '#AA956E', marginTop: 6 }}>
-                Available supplier credit: <span className="font-mono">{fmt(supplierLedger.creditBalance)} BHD</span>
+                Available supplier credit: <span className="font-mono"><Bhd v={supplierLedger.creditBalance}/> BHD</span>
               </p>
             )}
           </div>
@@ -311,7 +353,7 @@ export function PurchaseDetail() {
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   <input type="number" step="0.01" value={r.unitPrice} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{fmt(r.quantity * r.unitPrice)}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={r.quantity * r.unitPrice}/></span>
                 </div>
               );
             })}
@@ -320,7 +362,7 @@ export function PurchaseDetail() {
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND METHOD (if paid)</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>
-              {(['cash', 'bank', 'credit'] as const).map(m => {
+              {(['cash', 'bank', 'benefit', 'credit'] as const).map(m => {
                 const active = returnMethod === m;
                 return (
                   <button key={m} onClick={() => setReturnMethod(m)} className="cursor-pointer rounded"
@@ -328,7 +370,7 @@ export function PurchaseDetail() {
                       border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                    }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Supplier Credit'}</button>
+                    }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'benefit' ? 'Benefit' : 'Supplier Credit'}</button>
                 );
               })}
             </div>
@@ -338,7 +380,7 @@ export function PurchaseDetail() {
 
           <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <span style={{ fontSize: 14, color: '#6B7280' }}>Return Total</span>
-            <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}>{fmt(returnTotal)} BHD</span>
+            <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}><Bhd v={returnTotal}/> BHD</span>
           </div>
 
           <div className="flex justify-end gap-3">

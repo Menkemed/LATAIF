@@ -25,6 +25,9 @@ import { DocumentList } from '@/pages/documents/DocumentList';
 import { TaskList } from '@/pages/tasks/TaskList';
 import { AnalyticsPage } from '@/pages/analytics/AnalyticsPage';
 import { DebtsPage } from '@/pages/debts/DebtsPage';
+import { ReceivablesPage } from '@/pages/receivables/ReceivablesPage';
+import { EmployeeList } from '@/pages/employees/EmployeeList';
+import { EmployeeDetail } from '@/pages/employees/EmployeeDetail';
 import { AIPage } from '@/pages/ai/AIPage';
 import { CreditNoteList } from '@/pages/credit-notes/CreditNoteList';
 import { CreditNoteDetail } from '@/pages/credit-notes/CreditNoteDetail';
@@ -128,6 +131,16 @@ export default function App() {
     };
   }, []);
 
+  // Recurring-Expense Generator: catch-up bei jedem Session-Wechsel / App-Start.
+  // Laeuft erst nachdem session vorliegt (currentBranchId greift auf Session zu).
+  useEffect(() => {
+    if (!dbReady || !session) return;
+    import('@/stores/recurringExpenseStore').then(m => {
+      try { m.useRecurringExpenseStore.getState().runDueGenerator(); }
+      catch (e) { console.warn('[recurring-expense] startup generator failed:', e); }
+    });
+  }, [dbReady, session?.branchId]);
+
   if (!dbReady) {
     return (
       <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#F2F7FA' }}>
@@ -179,6 +192,9 @@ export default function App() {
           <Route path="/tasks" element={<TaskList />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
           <Route path="/debts" element={<DebtsPage />} />
+          <Route path="/receivables" element={<ReceivablesPage />} />
+          <Route path="/employees" element={<EmployeeList />} />
+          <Route path="/employees/:id" element={<EmployeeDetail />} />
           <Route path="/suppliers" element={<SupplierList />} />
           <Route path="/suppliers/:id" element={<SupplierDetail />} />
           <Route path="/purchases" element={<PurchaseList />} />

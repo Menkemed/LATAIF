@@ -1,23 +1,28 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { VIPBadge } from '@/components/ui/VIPBadge';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { PhoneInput } from '@/components/ui/PhoneInput';
+import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
+import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { useCustomerStore } from '@/stores/customerStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Customer, VIPLevel } from '@/core/models/types';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', 'Vacheron Constantin', 'A. Lange & Sohne', 'Omega', 'Cartier'];
 
 export function CustomerList() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { customers, loadCustomers, createCustomer, searchQuery, setSearchQuery, getCustomerStats } = useCustomerStore();
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState<Partial<Customer>>({
@@ -26,10 +31,28 @@ export function CustomerList() {
 
   useEffect(() => { loadCustomers(); }, [loadCustomers]);
 
+  // ?filter=outstanding → nur Kunden mit offener AR (Invoice + Approval-Sold + Consignment-Sold).
+  // Spiegelt den Dashboard-RECEIVABLES-Klick-Pfad: User soll genau die Kunden sehen,
+  // deren AR-Balance in die Dashboard-Summe einfliesst.
+  const filterMode = searchParams.get('filter') || '';
+
   const filtered = useMemo(() => {
-    if (!searchQuery) return customers;
-    return customers.filter(c => matchesDeep(c, searchQuery));
-  }, [customers, searchQuery]);
+    let r = customers;
+    if (searchQuery) r = r.filter(c => matchesDeep(c, searchQuery));
+    if (filterMode === 'outstanding') {
+      r = r.filter(c => {
+        const s = getCustomerStats(c.id);
+        return (s.invoiceOutstanding || 0) > 0.005;
+      });
+    }
+    return r;
+  }, [customers, searchQuery, filterMode, getCustomerStats]);
+
+  function clearFilter() {
+    const next = new URLSearchParams(searchParams);
+    next.delete('filter');
+    setSearchParams(next, { replace: true });
+  }
 
   function handleCreate() {
     if (!form.firstName || !form.lastName) return;
@@ -38,13 +61,41 @@ export function CustomerList() {
     setForm({ country: 'BH', language: 'en', vipLevel: 0, customerType: 'collector', salesStage: 'lead', preferences: [] });
   }
 
+  // Duplicate-Check live waehrend der Eingabe im New-Client-Modal.
+  const duplicateMatches = useMemo(() => {
+    if (!showNew) return [];
+    return findSimilarContacts(
+      { firstName: form.firstName, lastName: form.lastName, phone: form.phone, whatsapp: form.whatsapp },
+      customers,
+    );
+  }, [showNew, form.firstName, form.lastName, form.phone, form.whatsapp, customers]);
+
   return (
     <PageLayout
       title="Clients"
-      subtitle={`${customers.length} clients`}
+      subtitle={filterMode === 'outstanding'
+        ? `${filtered.length} client${filtered.length === 1 ? '' : 's'} with outstanding receivables`
+        : `${customers.length} clients`}
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search clients..."
       actions={<Button variant="primary" onClick={() => setShowNew(true)}>New Client</Button>}
     >
+      {filterMode === 'outstanding' && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '10px 16px', marginBottom: 12,
+          background: 'rgba(255,135,48,0.08)',
+          border: '1px solid rgba(255,135,48,0.25)',
+          borderRadius: 6,
+          fontSize: 13, color: '#0F0F10',
+        }}>
+          <span>Showing only clients with open receivables (invoices, approval-sold, consignment-sold)</span>
+          <button onClick={clearFilter}
+            style={{ fontSize: 12, color: '#3D7FFF', background: 'transparent', border: 'none', cursor: 'pointer' }}>
+            ✕ Clear filter
+          </button>
+        </div>
+      )}
+
       {/* Table Header */}
       <div
         style={{
@@ -107,19 +158,19 @@ export function CustomerList() {
               {(c.preferences || []).join(', ') || '\u2014'}
             </div>
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: '#0F0F10', minWidth: 0, overflow: 'hidden' }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(stats.revenue)}</div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={stats.revenue}/></div>
               <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {stats.invoiceCount} invoice{stats.invoiceCount !== 1 ? 's' : ''}
               </div>
             </div>
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.profit >= 0 ? '#7EAA6E' : '#AA6E6E', minWidth: 0, overflow: 'hidden' }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt(stats.profit)}</div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={stats.profit}/></div>
               <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {stats.revenue > 0 ? `${((stats.profit / stats.revenue) * 100).toFixed(1)}% margin` : '—'}
               </div>
             </div>
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.outstanding > 0 ? '#AA6E6E' : '#6B7280', minWidth: 0, overflow: 'hidden' }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.outstanding > 0 ? fmt(stats.outstanding) : '\u2014'}</div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.outstanding > 0 ? <Bhd v={stats.outstanding}/> : '\u2014'}</div>
               {stats.openInvoiceCount > 0 && (
                 <div
                   onClick={e => { e.stopPropagation(); navigate(`/invoices?customer=${c.id}`); }}
@@ -135,6 +186,13 @@ export function CustomerList() {
       {/* New Client Modal */}
       <Modal open={showNew} onClose={() => setShowNew(false)} title="New Client" width={560}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {duplicateMatches.length > 0 && (
+            <DuplicateWarningBanner
+              matches={duplicateMatches}
+              entityLabel="client"
+              onSelectMatch={c => { setShowNew(false); navigate(`/clients/${c.id}`); }}
+            />
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
             <Input required label="FIRST NAME" placeholder="Ahmed" value={form.firstName || ''} onChange={e => setForm({ ...form, firstName: e.target.value })} />
             <Input required label="LAST NAME" placeholder="Al-Khalifa" value={form.lastName || ''} onChange={e => setForm({ ...form, lastName: e.target.value })} />
@@ -142,8 +200,8 @@ export function CustomerList() {
           <Input label="COMPANY" placeholder="Company name" value={form.company || ''} onChange={e => setForm({ ...form, company: e.target.value })} />
           <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-            <Input label="PHONE" placeholder="+973 3xxx xxxx" value={form.phone || ''} onChange={e => setForm({ ...form, phone: e.target.value })} />
-            <Input label="WHATSAPP" placeholder="+973 3xxx xxxx" value={form.whatsapp || ''} onChange={e => setForm({ ...form, whatsapp: e.target.value })} />
+            <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
+            <PhoneInput label="WHATSAPP" value={form.whatsapp || ''} onChange={v => setForm({ ...form, whatsapp: v })} />
           </div>
           <Input label="EMAIL" placeholder="email@example.com" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
           <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR VAT export" value={form.vatAccountNumber || ''} onChange={e => setForm({ ...form, vatAccountNumber: e.target.value })} />
@@ -204,7 +262,9 @@ export function CustomerList() {
 
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate}>Create Client</Button>
+            <Button variant="primary" onClick={handleCreate}>
+              {duplicateMatches.length > 0 ? 'Create anyway' : 'Create Client'}
+            </Button>
           </div>
         </div>
       </Modal>

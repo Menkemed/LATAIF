@@ -24,6 +24,7 @@ const NATURAL_DEBIT: Set<LedgerAccount> = new Set([
   'CASH',
   'BANK',
   'CARD_CLEARING',
+  'BENEFIT',
   'ACCOUNTS_RECEIVABLE',
   'INVENTORY',
   'COGS',
@@ -92,6 +93,13 @@ export function customerBalance(customerId: string, branchId?: string): number {
     counterpartyType: 'CUSTOMER',
     counterpartyId: customerId,
   });
+}
+
+// Summe aller offenen Forderungen (Invoices + Approval-Sold etc.) — direkt
+// aus dem zentralen Ledger. Dashboard-RECEIVABLES nutzt das, damit auch
+// Sold-Transfers ohne Invoice in der Cashflow-KPI erscheinen.
+export function totalReceivables(branchId?: string): number {
+  return Math.max(0, balanceOf('ACCOUNTS_RECEIVABLE', { branchId }));
 }
 
 // ── Supplier-Saldo (offene Verbindlichkeit) ───────────────────

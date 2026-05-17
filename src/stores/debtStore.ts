@@ -52,6 +52,7 @@ function rowToDebt(row: Record<string, unknown>, paidAmount: number): Debt {
     dueDate: (row.due_date as string | null) || undefined,
     notes: (row.notes as string | null) || undefined,
     status: (row.status as DebtStatus) || 'OPEN',
+    staffId: (row.staff_id as string | null) || undefined,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     settledAt: (row.settled_at as string | null) || undefined,
@@ -162,12 +163,12 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
 
     db.run(
       `INSERT INTO debts (id, branch_id, loan_number, direction, counterparty, customer_id, amount, source,
-        due_date, notes, status, created_at, updated_at, settled_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+        due_date, notes, status, staff_id, created_at, updated_at, settled_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
       [
         id, branchId, loanNumber, debt.direction, debt.counterparty, debt.customerId || null,
         debt.amount, debt.source, debt.dueDate || null, debt.notes || null,
-        debt.status, now, now, createdBy,
+        debt.status, data.staffId || null, now, now, createdBy,
       ],
     );
 

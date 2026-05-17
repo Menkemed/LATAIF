@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type { Product, Category, StockStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
+import { getStockAggregates } from '@/core/lots/lot-queries';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 
@@ -31,6 +32,18 @@ interface ProductStore {
   // Gibt vollen SKU zurück, z.B. "RLX-SUB-042". Vermeidet Duplikate über alle Produkte (auch sold).
   nextAvailableSku: (prefix: string) => string;
   skuExists: (sku: string) => boolean;
+  /** True wenn sku bereits in einem anderen Produkt (ungleich excludeId) existiert. Case-insensitiv, getrimmt. */
+  isSkuTaken: (sku: string, excludeProductId?: string) => boolean;
+  /**
+   * Findet wahrscheinliche Duplikate zu einem geplanten neuen Produkt.
+   * Score-basiert: SKU/Serial-Treffer ≥100 (sicher), Brand+Name+Ref ≥60 (wahrscheinlich),
+   * Brand-only / Gold-Gewicht-Match ≥40 (ähnlich). Werte <40 werden gefiltert.
+   * Sortiert absteigend nach Score, max 5 Treffer.
+   */
+  findPossibleDuplicates: (
+    candidate: Partial<Product>,
+    excludeProductId?: string,
+  ) => Array<{ product: Product; score: number; reasons: string[] }>;
 }
 
 function rowToCategory(row: Record<string, unknown>): Category {
@@ -300,15 +313,27 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
   getStockValue: () => {
     // Plan §Commission §5 + §Dashboard §3.C: "Gesamtwert (nur OWN)".
-    // Stückzahl pro Produkt wird in Berechnung berücksichtigt (User-Wunsch).
+    // Stock-Lots Phase 7: Bestandswert kommt aus stock_lots (Σ qty_remaining * unit_cost),
+    // damit Multi-Lot-Produkte nicht den irreführenden single product.purchase_price benutzen.
+    // Fallback auf p.purchase_price * quantity nur wenn das Produkt keine aktiven Lots hat
+    // (Legacy-Daten vor Backfill / Produkte ohne Purchase-History).
     const inStock = get().products.filter(p =>
       (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
     );
-    return {
-      purchaseTotal: inStock.reduce((s, p) => s + p.purchasePrice * (p.quantity || 1), 0),
-      saleTotal: inStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * (p.quantity || 1), 0),
-      count: inStock.reduce((s, p) => s + (p.quantity || 1), 0),
-    };
+    const agg = getStockAggregates(inStock.map(p => p.id));
+    let purchaseTotal = 0, saleTotal = 0, count = 0;
+    for (const p of inStock) {
+      const a = agg.get(p.id);
+      if (a) {
+        purchaseTotal += a.totalValue;
+        count += a.totalQty;
+      } else {
+        purchaseTotal += p.purchasePrice * (p.quantity || 1);
+        count += p.quantity || 1;
+      }
+      saleTotal += (p.plannedSalePrice || 0) * (p.quantity || 1);
+    }
+    return { purchaseTotal, saleTotal, count };
   },
 
   getStockByCategory: () => {
@@ -316,15 +341,16 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const inStock = products.filter(p =>
       (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
     );
+    const agg = getStockAggregates(inStock.map(p => p.id));
     return categories.map(cat => {
       const items = inStock.filter(p => p.categoryId === cat.id);
-      return {
-        categoryId: cat.id,
-        name: cat.name,
-        color: cat.color,
-        count: items.reduce((s, p) => s + (p.quantity || 1), 0),
-        value: items.reduce((s, p) => s + p.purchasePrice * (p.quantity || 1), 0),
-      };
+      let count = 0, value = 0;
+      for (const p of items) {
+        const a = agg.get(p.id);
+        if (a) { count += a.totalQty; value += a.totalValue; }
+        else   { count += p.quantity || 1; value += p.purchasePrice * (p.quantity || 1); }
+      }
+      return { categoryId: cat.id, name: cat.name, color: cat.color, count, value };
     }).filter(c => c.count > 0);
   },
 
@@ -334,23 +360,194 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     return get().products.some(p => (p.sku || '').trim().toUpperCase() === needle);
   },
 
-  // Input-Prefix kann z.B. "RLX-SUB", "RLX-SUB-001" oder "RLX-SUB-042" sein.
-  // Wir extrahieren den Stamm (ohne letzte Nummer) und finden die nächste freie XXX-Nummer.
+  isSkuTaken: (sku, excludeProductId) => {
+    const t = (sku || '').trim();
+    if (!t) return false;
+    const needle = t.toUpperCase();
+    return get().products.some(p =>
+      p.id !== excludeProductId &&
+      (p.sku || '').trim().toUpperCase() === needle
+    );
+  },
+
+  // Universell: Findet die letzte Ziffernfolge am Ende und erhöht sie.
+  // Unterstützt jedes Format: "WATCH-0001", "GOLD-0005", "VC-0010",
+  // "CA/0007", "CA.0007", "ABC123", oder "ABC" (ohne Ziffern → "ABC-001").
+  // Sucht über alle bestehenden SKUs mit demselben Stamm und schlägt
+  // max(stem-num) + 1 vor (padded auf Original-Breite).
   nextAvailableSku: (prefix) => {
-    const clean = prefix.trim().toUpperCase();
-    // Entferne bestehende 3-stellige Zahl am Ende (z.B. "-001") — nimm nur den Stamm.
-    const stem = clean.replace(/-\d{1,4}$/, '');
-    const pattern = new RegExp('^' + stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-(\\d{1,4})$');
-    let maxNum = 0;
+    const clean = (prefix || '').trim().toUpperCase();
+    if (!clean) return '';
+    // Match: alles vor trailing-digits + trailing-digits
+    const m = clean.match(/^(.*?)(\d+)$/);
+    let stem: string;
+    let width: number;
+    let startNum: number;
+    if (m) {
+      stem = m[1];           // z.B. "WATCH-", "CA/", "CA.", "ABC"
+      startNum = parseInt(m[2], 10);
+      width = m[2].length;
+    } else {
+      stem = clean + '-';    // "ABC" → "ABC-001"
+      startNum = 0;
+      width = 3;
+    }
+    // Sammle alle existierenden SKUs + finde max num mit diesem Stamm.
+    const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp('^' + escaped + '(\\d+)$');
+    const existing = new Set<string>();
+    let maxNum = startNum;
     for (const p of get().products) {
       const s = (p.sku || '').trim().toUpperCase();
-      const m = s.match(pattern);
-      if (m) {
-        const n = parseInt(m[1], 10);
+      if (!s) continue;
+      existing.add(s);
+      const mm = s.match(pattern);
+      if (mm) {
+        const n = parseInt(mm[1], 10);
         if (!isNaN(n) && n > maxNum) maxNum = n;
       }
     }
-    const next = (maxNum + 1).toString().padStart(3, '0');
-    return `${stem}-${next}`;
+    // Suggest maxNum + 1; falls Pad-Width überlaufen würde, dynamisch erweitern.
+    let next = maxNum + 1;
+    let candidate = stem + String(next).padStart(width, '0');
+    // Safety: bei Kollision (z.B. Race) iterieren bis frei.
+    let safety = 0;
+    while (existing.has(candidate.toUpperCase()) && safety < 10000) {
+      next++;
+      candidate = stem + String(next).padStart(width, '0');
+      safety++;
+    }
+    return candidate;
+  },
+
+  // Duplicate Detection (Plan §Product §QuickCapture):
+  // Score-System — vergleicht ein Kandidaten-Produkt mit allen existierenden
+  // und gibt eine sortierte Liste mit Ähnlichkeitsscore + Begründung zurück.
+  // Quellen für Treffer:
+  //   • SKU / Serial / Reference exakt           → sehr sicher (100 / 100 / 80)
+  //   • Brand + Name exakt                       → wahrscheinlich (60)
+  //   • Brand + Name fuzzy (Levenshtein ≤2)      → ähnlich (40)
+  //   • Gold: weight (±0.5g) + karat + item_type → ähnlich (50)
+  //   • Branded: gleiche model_number            → wahrscheinlich (60)
+  //   • Brand-only                               → schwach (10)
+  // Threshold zum Anzeigen: ≥40.
+  findPossibleDuplicates: (candidate, excludeProductId) => {
+    const norm = (v: unknown) => String(v ?? '').trim().toUpperCase();
+    const cSku = norm(candidate.sku);
+    const cBrand = norm(candidate.brand);
+    const cName = norm(candidate.name);
+    const cCategory = candidate.categoryId || '';
+    const cAttrs = candidate.attributes || {};
+    const cSerial = norm(cAttrs.serial_number || cAttrs.serialNo);
+    const cRef = norm(cAttrs.reference_number || cAttrs.reference || cAttrs.referenceNo);
+    const cModelNo = norm(cAttrs.model_number);
+    const cWeight = Number(cAttrs.weight) || 0;
+    const cKarat = norm(cAttrs.karat);
+    const cItemType = norm(cAttrs.item_type);
+
+    // Liefert nur einen Wert für den Kandidaten zurück, wenn er nicht leer ist —
+    // damit "leer == leer" nicht fälschlich als Match gewertet wird.
+    const hasSku = !!cSku;
+    const hasSerial = !!cSerial;
+    const hasRef = !!cRef;
+    const hasBrand = !!cBrand;
+    const hasName = !!cName;
+    const hasModelNo = !!cModelNo;
+    const hasGoldFingerprint = cWeight > 0 && !!cKarat && !!cItemType;
+
+    // Levenshtein für fuzzy Brand+Name-Match.
+    function lev(a: string, b: string): number {
+      if (a === b) return 0;
+      if (!a.length) return b.length;
+      if (!b.length) return a.length;
+      const m = a.length, n = b.length;
+      const dp = new Array(n + 1).fill(0).map((_, i) => i);
+      for (let i = 1; i <= m; i++) {
+        let prev = dp[0]; dp[0] = i;
+        for (let j = 1; j <= n; j++) {
+          const tmp = dp[j];
+          dp[j] = a[i - 1] === b[j - 1]
+            ? prev
+            : 1 + Math.min(prev, dp[j], dp[j - 1]);
+          prev = tmp;
+        }
+      }
+      return dp[n];
+    }
+
+    const results: Array<{ product: Product; score: number; reasons: string[] }> = [];
+
+    for (const p of get().products) {
+      if (p.id === excludeProductId) continue;
+      let score = 0;
+      const reasons: string[] = [];
+
+      const pSku = norm(p.sku);
+      const pBrand = norm(p.brand);
+      const pName = norm(p.name);
+      const pAttrs = p.attributes || {};
+      const pSerial = norm(pAttrs.serial_number || pAttrs.serialNo);
+      const pRef = norm(pAttrs.reference_number || pAttrs.reference || pAttrs.referenceNo);
+      const pModelNo = norm(pAttrs.model_number);
+      const pWeight = Number(pAttrs.weight) || 0;
+      const pKarat = norm(pAttrs.karat);
+      const pItemType = norm(pAttrs.item_type);
+
+      // 1) SKU exakt
+      if (hasSku && cSku === pSku) {
+        score += 100;
+        reasons.push(`Same SKU (${p.sku})`);
+      }
+
+      // 2) Serial exakt
+      if (hasSerial && cSerial === pSerial) {
+        score += 100;
+        reasons.push(`Same Serial No (${pAttrs.serial_number || pAttrs.serialNo})`);
+      }
+
+      // 3) Reference exakt
+      if (hasRef && cRef === pRef) {
+        score += 80;
+        reasons.push(`Same Reference (${pAttrs.reference_number || pAttrs.reference || pAttrs.referenceNo})`);
+      }
+
+      // 4) Brand + Name
+      if (hasBrand && hasName && cBrand === pBrand && cName === pName) {
+        score += 60;
+        reasons.push(`Same Brand + Name`);
+      } else if (hasBrand && hasName && cBrand === pBrand) {
+        const d = lev(cName, pName);
+        if (d > 0 && d <= 2 && pName.length >= 3) {
+          score += 40;
+          reasons.push(`Similar Name ("${p.name}")`);
+        } else if (d > 2) {
+          // Nur Brand-Match — schwacher Hinweis.
+          score += 10;
+          reasons.push(`Same Brand`);
+        }
+      }
+
+      // 5) Branded Jewelry: gleiche model_number
+      if (hasModelNo && cModelNo === pModelNo) {
+        score += 60;
+        reasons.push(`Same Model No (${pAttrs.model_number})`);
+      }
+
+      // 6) Gold-Fingerprint: weight ±0.5g + same karat + same item_type
+      if (hasGoldFingerprint && pWeight > 0 && pKarat && pItemType
+          && cCategory === p.categoryId
+          && cKarat === pKarat && cItemType === pItemType
+          && Math.abs(cWeight - pWeight) <= 0.5) {
+        score += 50;
+        reasons.push(`Same ${pAttrs.item_type} · ${pAttrs.weight}g · ${pAttrs.karat}`);
+      }
+
+      if (score >= 40) {
+        results.push({ product: p, score, reasons });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, 5);
   },
 }));

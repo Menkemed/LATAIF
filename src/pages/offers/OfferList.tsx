@@ -13,9 +13,11 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
+import { Bhd } from '@/components/ui/Bhd';
 
 function fmt(v: number): string {
-  return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 export function OfferList() {
@@ -85,7 +87,10 @@ export function OfferList() {
     return selectedProductIds.map(id => {
       const p = products.find(pr => pr.id === id);
       if (!p) return null;
-      return { productId: p.id, unitPrice: linePrices[id] ?? p.plannedSalePrice ?? p.purchasePrice, purchasePrice: p.purchasePrice, taxScheme: p.taxScheme };
+      // Phase 7 — Cost-Basis fuer Margin-Scheme aus FIFO-Lot (= naechste Sale-Cost).
+      const fifo = deriveProductCostFromLots(p.id);
+      const costBasis = fifo ? fifo.fifoCost : p.purchasePrice;
+      return { productId: p.id, unitPrice: linePrices[id] ?? p.plannedSalePrice ?? p.purchasePrice, purchasePrice: costBasis, taxScheme: p.taxScheme };
     }).filter(Boolean) as { productId: string; unitPrice: number; purchasePrice: number; taxScheme: string }[];
   }, [selectedProductIds, products, linePrices]);
 
@@ -170,7 +175,7 @@ export function OfferList() {
               {customer ? `${customer.firstName} ${customer.lastName}` : '—'}
             </span>
             <span style={{ fontSize: 13, color: '#4B5563' }}>{offer.lines.length} items</span>
-            <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(offer.total)} BHD</span>
+            <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}><Bhd v={offer.total}/> BHD</span>
             <div className="flex items-center gap-2">
               <StatusDot status={offer.status} />
               {offer.status === 'draft' && (
@@ -246,7 +251,7 @@ export function OfferList() {
                         <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.brand} {p.name}</span>
                         {p.minSalePrice && p.minSalePrice > 0 && (
                           <span style={{ fontSize: 10, color: '#6B7280', display: 'block' }}>
-                            Min: {fmt(p.minSalePrice)} BHD{upperLimit ? ` · List: ${fmt(upperLimit)} BHD` : ''}
+                            Min: <Bhd v={p.minSalePrice}/> BHD{upperLimit ? ` · List: ${fmt(upperLimit)} BHD` : ''}
                           </span>
                         )}
                         {outOfRange && (
@@ -274,7 +279,7 @@ export function OfferList() {
                 <div style={{ paddingTop: 8, marginTop: 4 }}>
                   <div className="flex justify-between" style={{ fontSize: 15, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
                     <span style={{ color: '#0F0F10' }}>Total</span>
-                    <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}>{fmt(total.total)} BHD</span>
+                    <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}><Bhd v={total.total}/> BHD</span>
                   </div>
                 </div>
               </div>

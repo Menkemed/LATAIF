@@ -6,6 +6,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
+import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored } from '@/core/lots/lot-queries';
 import {
   postInvoiceIssued,
   postInvoicePayment,
@@ -32,11 +33,12 @@ interface InvoiceStore {
   loading: boolean;
   loadInvoices: () => void;
   getInvoice: (id: string) => Invoice | undefined;
-  createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>) => Invoice;
-  createDirectInvoice: (customerId: string, lines: { productId: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair') => Invoice;
+  createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>, staffId?: string, specialMark?: boolean) => Invoice;
+  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
-  rewriteInvoiceLines: (id: string, lines: { productId: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[]) => void;
-  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string) => void;
+  rewriteInvoiceLines: (id: string, lines: { productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[]) => void;
+  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean) => void;
+  setSpecialMark: (invoiceId: string, special: boolean) => void;
   // Plan §Edit: einzelne Payments später ändern oder löschen.
   updatePayment: (paymentId: string, invoiceId: string, data: { amount?: number; method?: string; notes?: string; receivedAt?: string }) => void;
   deletePayment: (paymentId: string, invoiceId: string) => void;
@@ -68,6 +70,8 @@ function rowToInvoice(row: Record<string, unknown>): Invoice {
     dueAt: row.due_at as string | undefined,
     notes: row.notes as string | undefined,
     lines: [],
+    staffId: (row.staff_id as string) || undefined,
+    specialMark: Number(row.special_mark) === 1,
     createdAt: row.created_at as string,
     createdBy: row.created_by as string | undefined,
   };
@@ -115,7 +119,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   // neue INV-Nummer zugewiesen (siehe recordPayment).
   getNextInvoiceNumber: () => getNextDocumentNumber('PINV'),
 
-  createInvoiceFromOffer: (offerId, perLineSchemes) => {
+  createInvoiceFromOffer: (offerId, perLineSchemes, staffId, specialMark) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -173,22 +177,58 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       `INSERT INTO invoices (id, branch_id, invoice_number, offer_id, customer_id, status, currency,
         net_amount, vat_rate_snapshot, vat_amount, gross_amount, tax_scheme_snapshot,
         purchase_price_snapshot, sale_price_snapshot, margin_snapshot,
-        paid_amount, issued_at, due_at, notes, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?)`,
+        paid_amount, issued_at, due_at, notes, staff_id, special_mark, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, invoiceNumber, offerId, offer.customer_id,
        sumNet, vatRate, sumVat, sumGross,
-       invoiceScheme, now, dueDate, offer.notes || null, now, now, userId]
+       invoiceScheme, now, dueDate, offer.notes || null, staffId || null, specialMark ? 1 : 0, now, now, userId]
     );
+
+    // Phase 3 — Offer→Invoice hat keine Lot-Info (Offers sind ohne Bestand).
+    // Auto-FIFO: aelteste ACTIVE Lot pro Produkt picken, Cost-Snapshot ueberschreiben
+    // mit lot.unit_cost falls Lot existiert (genauer als der von Offer mitgegebene
+    // Snapshot von products.purchase_price).
+    const lotsByProduct: Record<string, string | null> = {};
+    {
+      const productIds = [...new Set(lines.map(l => l.productId))];
+      for (const pid of productIds) {
+        const r = db.exec(
+          `SELECT id, unit_cost FROM stock_lots
+            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+          [pid]
+        );
+        const row = r[0]?.values?.[0];
+        lotsByProduct[pid] = row ? (row[0] as string) : null;
+      }
+    }
 
     const lineStmt = db.prepare(
       `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
-        vat_rate, tax_scheme, vat_amount, line_total, position)
-       VALUES (?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?)`
+        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
+       VALUES (?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const l of lines) {
-      lineStmt.run([uuid(), id, l.productId, l.unitPrice, l.purchasePrice, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, l.position]);
+      const lotId = lotsByProduct[l.productId] || null;
+      lineStmt.run([uuid(), id, l.productId, l.unitPrice, l.purchasePrice, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, l.position, lotId]);
     }
     lineStmt.free();
+
+    // Lots konsumieren (1 Stueck pro Line — Offer-Lines haben kein qty-Feld).
+    // Phase 7 Sync: betroffene Produkt-IDs sammeln und products.quantity nachziehen.
+    const productsToSync = new Set<string>();
+    for (const l of lines) {
+      const lotId = lotsByProduct[l.productId];
+      if (lotId) consumeLot(lotId, 1);
+      productsToSync.add(l.productId);
+    }
+    for (const pid of productsToSync) {
+      syncProductQuantity(pid);
+      // Plan §Sales §Partial-Payment-Reservation: Invoice startet als PARTIAL,
+      // also Produkt vorerst auf 'reserved' setzen. Voll-Zahlung → invoice.paid
+      // Handler markiert dann 'sold'.
+      reserveProductIfDepleted(pid);
+    }
 
     const margin = totalSale - totalPurchase;
     db.run(`UPDATE invoices SET purchase_price_snapshot = ?, sale_price_snapshot = ?, margin_snapshot = ? WHERE id = ?`,
@@ -229,7 +269,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     return get().getInvoice(id)!;
   },
 
-  createDirectInvoice: (customerId, lines, notes, issuedAtOverride, numbering) => {
+  createDirectInvoice: (customerId, lines, notes, issuedAtOverride, numbering, staffId, specialMark) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -253,12 +293,39 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const issuedDate = new Date(issuedAt);
     const dueDate = new Date(issuedDate.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
+    // Phase 4 — Auto-FIFO Lot-Pick fuer Caller die keinen explicit lotId mitgeben
+    // (agent settlement, repair invoices, order convert, consignment auto-sale).
+    // InvoiceCreate liefert lotId direkt; alle anderen profitieren von dieser Auto-Logik:
+    //   - Cost-Snapshot wird auf lot.unit_cost ueberschrieben (genauer als product.purchase_price)
+    //   - Lot.qty_remaining wird konsumiert
+    // Wenn kein Lot existiert (z.B. Consignment-Produkt bevor Auto-Purchase laeuft, oder
+    // Repair-Service-Produkt) bleibt der vom Caller mitgegebene purchasePrice unveraendert.
+    type ResolvedLine = typeof lines[number] & { _resolvedLotId: string | null; _resolvedCost: number };
+    const resolvedLines: ResolvedLine[] = lines.map(l => {
+      let lotId = l.lotId || null;
+      let cost = l.purchasePrice;
+      if (!lotId && l.productId) {
+        const r = db.exec(
+          `SELECT id, unit_cost FROM stock_lots
+            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+          [l.productId]
+        );
+        const row = r[0]?.values?.[0];
+        if (row) {
+          lotId = row[0] as string;
+          cost = Number(row[1]) || cost;
+        }
+      }
+      return { ...l, _resolvedLotId: lotId, _resolvedCost: cost };
+    });
+
     let netAmount = 0, totalVat = 0, totalPurchase = 0;
-    for (const l of lines) {
+    for (const l of resolvedLines) {
       const qty = Math.max(1, l.quantity || 1);
       netAmount += l.unitPrice * qty;
       totalVat += l.vatAmount;
-      totalPurchase += l.purchasePrice * qty;
+      totalPurchase += l._resolvedCost * qty;
     }
     const grossAmount = netAmount + totalVat;
     const margin = netAmount - totalPurchase;
@@ -271,23 +338,43 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       `INSERT INTO invoices (id, branch_id, invoice_number, customer_id, status, currency,
         net_amount, vat_rate_snapshot, vat_amount, gross_amount, tax_scheme_snapshot,
         purchase_price_snapshot, sale_price_snapshot, margin_snapshot,
-        paid_amount, issued_at, due_at, notes, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+        paid_amount, issued_at, due_at, notes, staff_id, special_mark, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, invoiceNumber, customerId,
        netAmount, lines[0]?.vatRate || 10, totalVat, grossAmount,
-       taxScheme, totalPurchase, netAmount, margin, issuedAt, dueDate, notes || null, now, now, userId]
+       taxScheme, totalPurchase, netAmount, margin, issuedAt, dueDate, notes || null, staffId || null, specialMark ? 1 : 0, now, now, userId]
     );
 
     const lineStmt = db.prepare(
       `INSERT INTO invoice_lines (id, invoice_id, product_id, quantity, unit_price, purchase_price_snapshot,
-        vat_rate, tax_scheme, vat_amount, line_total, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    lines.forEach((l, i) => {
+    resolvedLines.forEach((l, i) => {
       const qty = Math.max(1, l.quantity || 1);
-      lineStmt.run([uuid(), id, l.productId, qty, l.unitPrice, l.purchasePrice, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1]);
+      lineStmt.run([uuid(), id, l.productId, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
     });
     lineStmt.free();
+
+    // Phase 3 — Stock-Lot konsumieren. Der Cost-Snapshot in invoice_line.purchase_price_snapshot
+    // ist bereits gesetzt; hier reduzieren wir nur den Restbestand des Lots, damit kuenftige
+    // Sales nicht denselben Bestand doppelt verkaufen koennen.
+    // Phase 7 Sync: products.quantity nach Konsumption nachziehen.
+    const directProductsToSync = new Set<string>();
+    resolvedLines.forEach(l => {
+      if (l._resolvedLotId) {
+        const qty = Math.max(1, l.quantity || 1);
+        consumeLot(l._resolvedLotId, qty);
+      }
+      if (l.productId) directProductsToSync.add(l.productId);
+    });
+    for (const pid of directProductsToSync) {
+      syncProductQuantity(pid);
+      // Plan §Sales §Partial-Payment-Reservation: Invoice startet als PARTIAL,
+      // also Produkt vorerst auf 'reserved' setzen. Voll-Zahlung → invoice.paid
+      // Handler markiert dann 'sold'.
+      reserveProductIfDepleted(pid);
+    }
 
     saveDatabase();
     trackInsert('invoices', id, { invoiceNumber, customerId });
@@ -302,10 +389,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         grossAmount, taxSchemeSnapshot: taxScheme as InvoiceTaxScheme,
         purchasePriceSnapshot: totalPurchase, salePriceSnapshot: netAmount, marginSnapshot: margin,
         paidAmount: 0, issuedAt, notes,
-        lines: lines.map((l, i) => ({
+        lines: resolvedLines.map((l, i) => ({
           id: uuid(), invoiceId: id, productId: l.productId,
           quantity: Math.max(1, l.quantity || 1),
-          unitPrice: l.unitPrice, purchasePriceSnapshot: l.purchasePrice,
+          unitPrice: l.unitPrice, purchasePriceSnapshot: l._resolvedCost,
           vatRate: l.vatRate, taxScheme: l.taxScheme as TaxScheme,
           vatAmount: l.vatAmount, lineTotal: l.lineTotal, position: i + 1,
         })),
@@ -333,6 +420,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       purchasePriceSnapshot: 'purchase_price_snapshot',
       salePriceSnapshot: 'sale_price_snapshot', marginSnapshot: 'margin_snapshot',
       butterfly: 'butterfly',
+      staffId: 'staff_id',
     };
 
     for (const [k, v] of Object.entries(data)) {
@@ -350,6 +438,26 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     // Plan §8 #6 — bei Stornierung verknüpfte Auto-Expenses (Card-Fees etc.) als CANCELLED markieren.
     if (data.status === 'CANCELLED') {
+      // Phase 3 — Stock-Lots restoren: jede invoice_line gibt ihren Bestand zurueck.
+      // Phase 7 Sync: products.quantity nach Restore nachziehen.
+      const lotLines = db.exec(
+        `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
+        [id]
+      );
+      const cancelProductsToSync = new Set<string>();
+      if (lotLines.length > 0) {
+        for (const row of lotLines[0].values) {
+          const [lotId, productId, qty] = row as [string | null, string | null, number];
+          if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
+          if (productId) cancelProductsToSync.add(productId);
+        }
+      }
+      for (const pid of cancelProductsToSync) {
+        syncProductQuantity(pid);
+        // Stornierung: 'reserved' → 'in_stock' (war ja noch nicht 'sold').
+        unreserveProductIfRestored(pid);
+      }
+
       // Vor dem UPDATE Auto-Expenses fuer Reverse-Posting einsammeln (sonst sind sie nach
       // dem Cancel-UPDATE nicht mehr im richtigen Status fuer postExpenseCancelled).
       const linkedExpenses = query(
@@ -429,22 +537,82 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       );
     }
 
+    // Phase 3 — alte Lots restoren bevor wir DELETE machen, sonst geht der
+    // Bestand verloren. Pro alter invoice_line mit lot_id: qty zurueckgeben.
+    // Phase 7 Sync: betroffene Produkt-IDs sammeln (alte UND neue), am Ende einmal sync.
+    const rewriteProductsToSync = new Set<string>();
+    {
+      const oldLines = db.exec(
+        `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
+        [id]
+      );
+      if (oldLines.length > 0) {
+        for (const row of oldLines[0].values) {
+          const [lotId, productId, qty] = row as [string | null, string | null, number];
+          if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
+          if (productId) rewriteProductsToSync.add(productId);
+        }
+      }
+    }
+
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
+
+    // Phase 4 — Auto-FIFO Lot-Pick spiegelt createDirectInvoice. Caller (InvoiceCreate
+    // im Edit-Mode) liefert lotId; falls nicht, FIFO-Lot picken + lot.unit_cost als Cost.
+    type ResolvedRewriteLine = typeof lines[number] & { _resolvedLotId: string | null; _resolvedCost: number };
+    const resolvedLines: ResolvedRewriteLine[] = lines.map(l => {
+      let lotId = l.lotId || null;
+      let cost = l.purchasePrice;
+      if (!lotId && l.productId) {
+        const r = db.exec(
+          `SELECT id, unit_cost FROM stock_lots
+            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+          [l.productId]
+        );
+        const row = r[0]?.values?.[0];
+        if (row) {
+          lotId = row[0] as string;
+          cost = Number(row[1]) || cost;
+        }
+      }
+      return { ...l, _resolvedLotId: lotId, _resolvedCost: cost };
+    });
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0;
     const stmt = db.prepare(
       `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
-        vat_rate, tax_scheme, vat_amount, line_total, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    lines.forEach((l, i) => {
+    resolvedLines.forEach((l, i) => {
       const qty = Math.max(1, l.quantity || 1);
-      stmt.run([uuid(), id, l.productId, l.description || null, qty, l.unitPrice, l.purchasePrice, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1]);
+      stmt.run([uuid(), id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
       netAmount += l.unitPrice * qty;
       totalVat += l.vatAmount * qty;
-      totalPurchase += l.purchasePrice * qty;
+      totalPurchase += l._resolvedCost * qty;
     });
     stmt.free();
+
+    // Neue Lots konsumieren.
+    resolvedLines.forEach(l => {
+      if (l._resolvedLotId) {
+        const qty = Math.max(1, l.quantity || 1);
+        consumeLot(l._resolvedLotId, qty);
+      }
+      if (l.productId) rewriteProductsToSync.add(l.productId);
+    });
+    // Phase 7 Sync: products.quantity nach alter Restore + neuer Konsumption final nachziehen.
+    // Plan §Sales §Partial-Payment-Reservation: nach Rewrite zuerst entreservieren
+    // (Produkte die jetzt wieder qty>0 haben) und dann reservieren (Produkte die
+    // durch neue Lines auf 0 fallen). Reihenfolge wichtig: erst unreserve, dann reserve.
+    for (const pid of rewriteProductsToSync) syncProductQuantity(pid);
+    const invForRewrite = get().getInvoice(id);
+    const isStillUnpaid = !invForRewrite || invForRewrite.status !== 'FINAL';
+    for (const pid of rewriteProductsToSync) {
+      unreserveProductIfRestored(pid);
+      if (isStillUnpaid) reserveProductIfDepleted(pid);
+    }
 
     const grossAmount = netAmount + totalVat;
     const margin = netAmount - totalPurchase;
@@ -470,7 +638,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     get().loadInvoices();
   },
 
-  recordPayment: (invoiceId, amount, method, notes) => {
+  recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal) => {
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Payment amount must be a positive number.');
     }
@@ -550,17 +718,30 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       //   Sales:  PINV  → INV
       //   Repair: RPINV → RINV
       // So bleiben Repair-Rechnungen sauber in eigener Serie, parallel zur Sales-Logik.
+      // 2026-05-16 — Special-Mark wird beim Final-werden gesetzt; bestehende
+      // Partial-Marke bleibt sonst unangetastet.
+      const useSpecial = wasFullyPaid && inv.status !== 'FINAL'
+        ? (typeof specialMarkOnFinal === 'boolean' ? specialMarkOnFinal : !!inv.specialMark)
+        : !!inv.specialMark;
+      const nextSpecial = useSpecial ? 1 : 0;
+
+      // Beim Konvertieren PARTIAL → FINAL: neue Nummer aus dem passenden Zaehler.
+      //   Sales Normal:   INV-YYYY-NNNNNN
+      //   Sales Special:  SINV-YYYY-NNNNNN  (eigener Zaehler — laeuft 1,2,3,... parallel)
+      //   Repair Normal:  RINV-YYYY-NNNNNN
+      //   Repair Special: SRINV-YYYY-NNNNNN (eigener Zaehler)
       let newInvoiceNumber = inv.invoiceNumber;
       if (wasFullyPaid && inv.status !== 'FINAL') {
-        if (inv.invoiceNumber.startsWith('RPINV-')) {
-          newInvoiceNumber = getNextDocumentNumber('RINV');
+        const isRepair = inv.invoiceNumber.startsWith('RPINV-');
+        if (isRepair) {
+          newInvoiceNumber = getNextDocumentNumber(useSpecial ? 'SRINV' : 'RINV');
         } else {
-          newInvoiceNumber = getNextDocumentNumber('INV');
+          newInvoiceNumber = getNextDocumentNumber(useSpecial ? 'SINV' : 'INV');
         }
       }
 
-      db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, invoice_number = ?, updated_at = ? WHERE id = ?`,
-        [newPaid, tip, newStatus, newInvoiceNumber, now, invoiceId]);
+      db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, invoice_number = ?, special_mark = ?, updated_at = ? WHERE id = ?`,
+        [newPaid, tip, newStatus, newInvoiceNumber, nextSpecial, now, invoiceId]);
 
       if (prevStatus !== newStatus) {
         trackStatusChange('invoices', invoiceId, prevStatus, newStatus);
@@ -603,6 +784,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     get().loadInvoices();
   },
 
+  setSpecialMark: (invoiceId, special) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    db.run(`UPDATE invoices SET special_mark = ?, updated_at = ? WHERE id = ?`,
+      [special ? 1 : 0, now, invoiceId]);
+    saveDatabase();
+    trackUpdate('invoices', invoiceId, { specialMark: special });
+    get().loadInvoices();
+  },
+
   deleteInvoice: (id) => {
     const db = getDatabase();
     // Vor dem Cancel die Auto-Expenses fuer Reverse-Posting einsammeln.
@@ -618,7 +809,24 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
        WHERE related_module = 'invoice' AND related_entity_id = ? AND status != 'CANCELLED'`,
       [id]
     );
+    // Phase 3 — Stock-Lots restoren bevor invoice_lines weg sind.
+    // Phase 7 Sync: betroffene Produkte sammeln, am Ende sync.
+    const deleteProductsToSync = new Set<string>();
+    {
+      const lotLines = db.exec(
+        `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
+        [id]
+      );
+      if (lotLines.length > 0) {
+        for (const row of lotLines[0].values) {
+          const [lotId, productId, qty] = row as [string | null, string | null, number];
+          if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
+          if (productId) deleteProductsToSync.add(productId);
+        }
+      }
+    }
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
+    for (const pid of deleteProductsToSync) syncProductQuantity(pid);
     db.run(`DELETE FROM payments WHERE invoice_id = ?`, [id]);
     db.run(`DELETE FROM invoices WHERE id = ?`, [id]);
     saveDatabase();
