@@ -9,9 +9,6 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { useBankingStore, transferFlow, transferDirectionFor, type BankTransactionType, type BankAccount } from '@/stores/bankingStore';
 
-function fmt(v: number | null | undefined): string {
-  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
 
 const TYPE_LABELS: Record<BankTransactionType, string> = {
   SALES_IN: 'Sales',

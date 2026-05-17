@@ -19,9 +19,6 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import type { AgentTransfer, Invoice } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
 // einer Invoice zugeordnet ist, leiten wir den sichtbaren Status aus dem

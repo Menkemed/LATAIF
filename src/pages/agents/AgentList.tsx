@@ -22,9 +22,6 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import type { Agent } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
 
 interface NewTransferForm {
   customerId?: string;

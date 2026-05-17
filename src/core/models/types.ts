@@ -336,6 +336,7 @@ export type EventType =
   | 'repair.created' | 'repair.diagnosed' | 'repair.started' | 'repair.completed' | 'repair.ready' | 'repair.picked_up'
   // Consignment
   | 'consignment.created' | 'consignment.sold' | 'consignment.paid_out' | 'consignment.returned' | 'consignment.expired'
+  | 'consignment.sale_recorded' | 'consignment.sale_cancelled'
   // Agent
   | 'agent.created' | 'agent_transfer.created' | 'agent_transfer.sold' | 'agent_transfer.returned' | 'agent_transfer.settled' | 'agent_transfer.invoice_created' | 'agent_transfer.invoice_undone'
   // Order
@@ -690,7 +691,7 @@ export interface Order {
   depositPaid: boolean;
   depositDate?: string;
   remainingAmount?: number;
-  paymentMethod?: 'cash' | 'bank' | 'card';
+  paymentMethod?: 'cash' | 'bank' | 'card' | 'benefit';
   fullyPaid?: boolean;
   supplierName?: string;
   supplierPrice?: number;
@@ -819,7 +820,7 @@ export interface PurchasePayment {
   id: UUID;
   purchaseId: UUID;
   amount: number;
-  method: 'cash' | 'bank' | 'credit';
+  method: 'cash' | 'bank' | 'benefit' | 'credit';
   paidAt: string;
   reference?: string;
   note?: string;
@@ -868,7 +869,7 @@ export interface PurchaseReturn {
   status: PurchaseReturnStatus;
   totalAmount: number;
   returnDate: string;
-  refundMethod?: 'cash' | 'bank' | 'credit';
+  refundMethod?: 'cash' | 'bank' | 'benefit' | 'credit';
   refundAmount: number;
   notes?: string;
   lines: PurchaseReturnLine[];
@@ -907,7 +908,7 @@ export interface SalesReturn {
   totalAmount: number;          // Geschuldeter Refund (was zurückgezahlt werden muss)
   vatCorrected: number;
   returnDate: string;
-  refundMethod?: 'cash' | 'bank' | 'card' | 'credit' | 'other';
+  refundMethod?: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other';
   refundAmount: number;          // Legacy: Gesamtbetrag der Rückzahlung
   refundPaidAmount: number;      // Bereits tatsächlich gezahlt (kann partial sein)
   refundPaidDate?: string;
@@ -936,7 +937,7 @@ export interface CreditNote {
   vatAmount: number;               // VAT-Korrektur
   cashRefundAmount: number;        // Cash zurück (nur was Customer wirklich gezahlt hat)
   receivableCancelAmount: number;  // Forderungsstornierung (kein Cash)
-  refundMethod?: 'cash' | 'bank' | 'card' | 'credit' | 'other';
+  refundMethod?: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other';
   reason?: string;
   notes?: string;
   createdAt: string;
@@ -1024,7 +1025,7 @@ export interface PartnerTransaction {
   transactionNumber: string;
   type: PartnerTransactionType;
   amount: number;
-  method: 'cash' | 'bank';
+  method: 'cash' | 'bank' | 'benefit';
   transactionDate: string;
   notes?: string;
   // Plan §8 #8 — Payment-Status (cash auto PAID, bank startet PENDING bis Bestätigung).
@@ -1072,7 +1073,7 @@ export interface RecurringExpenseTemplate {
   branchId: UUID;
   category: ExpenseCategory;
   amount: number;
-  paymentMethod: 'cash' | 'bank';
+  paymentMethod: 'cash' | 'bank' | 'benefit';
   payNowDefault: boolean;       // false = generierte Expense bleibt PENDING (Payable)
   description?: string;
   dayOfMonth: number;           // 1..31 (am Monatsende auf letzten Tag geclampt)

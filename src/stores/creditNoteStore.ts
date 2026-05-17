@@ -32,7 +32,7 @@ interface CreditNoteStore {
     vatAmount: number;
     cashRefundAmount: number;
     receivableCancelAmount: number;
-    refundMethod?: 'cash' | 'bank' | 'card' | 'credit' | 'other';
+    refundMethod?: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other';
     reason?: string;
     notes?: string;
     issuedAt?: string;

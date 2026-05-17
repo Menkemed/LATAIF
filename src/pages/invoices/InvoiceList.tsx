@@ -20,9 +20,6 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import { query } from '@/core/db/helpers';
 import { Bhd } from '@/components/ui/Bhd';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
 function fmtDate(iso?: string): string {
   if (!iso) return '\u2014';
   return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });

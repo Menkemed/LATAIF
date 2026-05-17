@@ -33,9 +33,9 @@ interface PartnerStore {
   updatePartner: (id: string, data: Partial<Partner>) => void;
   deletePartner: (id: string) => void;
   // Transactions
-  recordInvestment: (partnerId: string, amount: number, method: 'cash' | 'bank', date?: string, notes?: string) => PartnerTransaction;
-  recordWithdrawal: (partnerId: string, amount: number, method: 'cash' | 'bank', date?: string, notes?: string) => PartnerTransaction;
-  recordProfitDistribution: (partnerId: string, amount: number, method: 'cash' | 'bank', date?: string, notes?: string) => PartnerTransaction;
+  recordInvestment: (partnerId: string, amount: number, method: 'cash' | 'bank' | 'benefit', date?: string, notes?: string) => PartnerTransaction;
+  recordWithdrawal: (partnerId: string, amount: number, method: 'cash' | 'bank' | 'benefit', date?: string, notes?: string) => PartnerTransaction;
+  recordProfitDistribution: (partnerId: string, amount: number, method: 'cash' | 'bank' | 'benefit', date?: string, notes?: string) => PartnerTransaction;
   // Plan §8 #8 — manuell bank-Transaktion als bezahlt markieren.
   markTransactionPaid: (id: string) => void;
   deleteTransaction: (id: string) => void;
@@ -220,7 +220,7 @@ function recordTx(
   partnerId: string,
   type: PartnerTransactionType,
   amount: number,
-  method: 'cash' | 'bank',
+  method: 'cash' | 'bank' | 'benefit',
   date: string | undefined,
   notes: string | undefined,
   get: () => PartnerStore

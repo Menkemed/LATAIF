@@ -259,7 +259,7 @@ interface SalesReturnStore {
   createReturn: (input: {
     invoiceId: string;
     returnDate?: string;
-    refundMethod?: 'cash' | 'bank' | 'card' | 'credit' | 'other';
+    refundMethod?: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other';
     productDisposition?: ProductDisposition;
     reason?: string;
     notes?: string;
@@ -275,7 +275,7 @@ interface SalesReturnStore {
   approveReturn: (id: string) => void;
   rejectReturn: (id: string) => void;
   refundReturn: (id: string, partialAmount?: number) => void;
-  recordRefundPayment: (returnId: string, amount: number, method: 'cash' | 'bank' | 'card' | 'credit' | 'other', date?: string) => void;
+  recordRefundPayment: (returnId: string, amount: number, method: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other', date?: string) => void;
   deleteReturn: (id: string) => void;
   getInvoiceReturnSummary: (invoiceId: string, invoiceGross: number, invoicePaid?: number) => {
     returns: SalesReturn[];
@@ -301,7 +301,7 @@ function rowToReturn(row: Record<string, unknown>): SalesReturn {
     totalAmount: (row.total_amount as number) || 0,
     vatCorrected: (row.vat_corrected as number) || 0,
     returnDate: row.return_date as string,
-    refundMethod: row.refund_method as 'cash' | 'bank' | 'card' | 'credit' | 'other' | undefined,
+    refundMethod: row.refund_method as 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other' | undefined,
     refundAmount: (row.refund_amount as number) || 0,
     refundPaidAmount: (row.refund_paid_amount as number) || 0,
     refundPaidDate: (row.refund_paid_date as string | null) || undefined,

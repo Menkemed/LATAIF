@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { ArrowLeft, Edit3, Save, FileText, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2, ExternalLink, ChevronDown } from 'lucide-react';
+import { ArrowLeft, Edit3, Save, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2, ExternalLink, ChevronDown } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 
 // Butterfly icon as inline SVG — renders reliably in all webviews (no emoji font dependency).

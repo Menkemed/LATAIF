@@ -17,7 +17,7 @@
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
-import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection } from '@/core/models/types';
+import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource } from '@/core/models/types';
 import { canonicalLoanDirection } from '@/core/models/types';
 
 // ── Kontenrahmen (siehe ZIEL.md §3a) ──────────────────────────
@@ -1088,8 +1088,10 @@ export function postOrderPaymentReversed(orderPaymentId: string): PostingResult 
 // Beim Repayment dreht sich die Cash-Bewegung um, und die jeweilige
 // Loan-Bilanz wird abgebaut.
 
-function loanCashAccountFor(source: 'cash' | 'bank'): LedgerAccount {
-  return source === 'cash' ? 'CASH' : 'BANK';
+function loanCashAccountFor(source: CashSource): LedgerAccount {
+  if (source === 'cash') return 'CASH';
+  if (source === 'benefit') return 'BENEFIT';
+  return 'BANK';
 }
 
 export function postLoanCreated(debt: Debt): PostingResult {
@@ -1263,7 +1265,7 @@ export interface PartnerTxLike {
   partnerId: string;
   type: PartnerTxKind;
   amount: number;
-  method: 'cash' | 'bank';
+  method: 'cash' | 'bank' | 'benefit';
   transactionDate: string;
   transactionNumber?: string;
 }
@@ -1273,7 +1275,7 @@ export function postPartnerTransaction(tx: PartnerTxLike): PostingResult {
   if (amount <= 0) {
     throw new Error(`postPartnerTransaction: amount must be > 0 (got ${tx.amount})`);
   }
-  const cashAcc: LedgerAccount = tx.method === 'cash' ? 'CASH' : 'BANK';
+  const cashAcc: LedgerAccount = tx.method === 'cash' ? 'CASH' : tx.method === 'benefit' ? 'BENEFIT' : 'BANK';
   const meta = { partnerTxNumber: tx.transactionNumber, type: tx.type };
 
   const entries: LedgerEntryInput[] =

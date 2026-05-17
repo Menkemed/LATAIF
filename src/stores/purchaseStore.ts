@@ -57,7 +57,7 @@ interface PurchaseInput {
     taxScheme?: 'ZERO' | 'VAT_10';
     vatRate?: number;          // 0 oder 10
   }>;
-  initialPayment?: { amount: number; method: 'cash' | 'bank'; reference?: string };
+  initialPayment?: { amount: number; method: 'cash' | 'bank' | 'benefit'; reference?: string };
 }
 
 interface PurchaseStore {
@@ -69,14 +69,14 @@ interface PurchaseStore {
   getPurchase: (id: string) => Purchase | undefined;
   getReturn: (id: string) => PurchaseReturn | undefined;
   createPurchase: (input: PurchaseInput) => Purchase;
-  addPayment: (purchaseId: string, amount: number, method: 'cash' | 'bank' | 'credit', reference?: string, note?: string) => void;
+  addPayment: (purchaseId: string, amount: number, method: 'cash' | 'bank' | 'benefit' | 'credit', reference?: string, note?: string) => void;
   cancelPurchase: (id: string) => void;
   deletePurchase: (id: string) => void;
   // Returns
   createReturn: (input: {
     purchaseId: string;
     returnDate?: string;
-    refundMethod?: 'cash' | 'bank' | 'credit';
+    refundMethod?: 'cash' | 'bank' | 'benefit' | 'credit';
     notes?: string;
     lines: Array<{ purchaseLineId: string; productId?: string; quantity: number; unitPrice: number }>;
   }) => PurchaseReturn;
@@ -146,7 +146,7 @@ function rowToReturn(row: Record<string, unknown>): PurchaseReturn {
     status: (row.status as PurchaseReturnStatus) || 'DRAFT',
     totalAmount: (row.total_amount as number) || 0,
     returnDate: row.return_date as string,
-    refundMethod: row.refund_method as 'cash' | 'bank' | 'credit' | undefined,
+    refundMethod: row.refund_method as 'cash' | 'bank' | 'benefit' | 'credit' | undefined,
     refundAmount: (row.refund_amount as number) || 0,
     notes: row.notes as string | undefined,
     lines: [],

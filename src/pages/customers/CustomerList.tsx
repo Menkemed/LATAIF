@@ -14,9 +14,6 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import type { Customer, VIPLevel } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
 
 const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', 'Vacheron Constantin', 'A. Lange & Sohne', 'Omega', 'Cartier'];
 

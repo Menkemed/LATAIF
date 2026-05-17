@@ -7,7 +7,6 @@ import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postConsignmentPayout, postCreditNote, hasLedgerEntries, hasReversalFor, reverseSource } from '@/core/ledger/posting';
 import type { CreditNote } from '@/core/models/types';
-import { useCustomerStore } from './customerStore';
 import { useSupplierStore } from './supplierStore';
 import { useInvoiceStore } from './invoiceStore';
 import { usePurchaseStore } from './purchaseStore';

@@ -16,9 +16,6 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
 
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
 
 export function AgentDetail() {
   const { id } = useParams<{ id: string }>();
