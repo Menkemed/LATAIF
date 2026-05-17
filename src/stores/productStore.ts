@@ -7,6 +7,7 @@ import { getStockAggregates } from '@/core/lots/lot-queries';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { computeImageHash, hashDistance, HASH_IDENTICAL_THRESHOLD, HASH_SIMILAR_THRESHOLD } from '@/core/utils/image-hash';
+import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
 
 interface ProductStore {
   products: Product[];
@@ -100,6 +101,15 @@ function rowToProduct(row: Record<string, unknown>): Product {
     notes: row.notes as string | undefined,
     images: JSON.parse((row.images as string) || '[]'),
     imageHash: (row.image_hash as string) || undefined,
+    imageDescription: (row.image_description as string) || undefined,
+    imageEmbedding: (() => {
+      const raw = row.image_embedding as string | null | undefined;
+      if (!raw) return undefined;
+      try {
+        const v = JSON.parse(raw);
+        return Array.isArray(v) && v.length > 0 ? v as number[] : undefined;
+      } catch { return undefined; }
+    })(),
     attributes: JSON.parse((row.attributes as string) || '{}'),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -107,15 +117,16 @@ function rowToProduct(row: Record<string, unknown>): Product {
   };
 }
 
-// Plan §Image-Duplicate-Detection — Lazy-Backfill.
-// Über alle Produkte mit Bild aber ohne image_hash: pHash berechnen und
-// persistieren. Batches von 5, kleine setTimeout-Pause zwischen Batches damit
-// der Main-Thread atmen kann. Idempotent — re-runs ignorieren bereits-gehashte.
+// Plan §Image-Duplicate-Detection — Lazy-Backfill (pHash, lokal, billig).
 let backfillRunning = false;
 function backfillImageHashes(products: Product[]): void {
   if (backfillRunning) return;
   const todo = products.filter(p => p.images.length > 0 && !p.imageHash);
-  if (todo.length === 0) return;
+  if (todo.length === 0) {
+    // pHash done — Embedding-Backfill kann starten (separate Queue, langsamer).
+    backfillEmbeddings(products);
+    return;
+  }
   backfillRunning = true;
   let i = 0;
   const BATCH = 5;
@@ -127,8 +138,6 @@ function backfillImageHashes(products: Product[]): void {
         try {
           getDatabase().run('UPDATE products SET image_hash = ? WHERE id = ?', [hash, p.id]);
           trackUpdate('products', p.id, { imageHash: hash });
-          // Local store mutate ohne loadProducts-Re-Query — wir wollen den
-          // Reload nicht 1x pro Item triggern. Nach der Schleife einmal speichern.
           p.imageHash = hash;
         } catch (err) { console.warn('[backfill] persist failed:', err); }
       } catch { /* broken image → skip silently */ }
@@ -139,11 +148,56 @@ function backfillImageHashes(products: Product[]): void {
     } else {
       try { saveDatabase(); } catch { /* */ }
       backfillRunning = false;
-      // Final reload — Store-State auf neuesten Stand mit Hashes.
       useProductStore.getState().loadProducts();
     }
   }
   setTimeout(processBatch, 100);
+}
+
+// Plan §AI-Embedding — Lazy-Backfill (Vision + Embedding API-Calls).
+// 1 Item pro Sekunde damit OpenAI-Rate-Limits nicht greifen und der Cashflow
+// (~$0.001/Item) für den User transparent bleibt. Nur wenn API-Key gesetzt ist.
+let embeddingBackfillRunning = false;
+function backfillEmbeddings(products: Product[]): void {
+  if (embeddingBackfillRunning) return;
+  if (!isAiConfigured()) return;
+  const todo = products.filter(p => p.images.length > 0 && (!p.imageEmbedding || p.imageEmbedding.length === 0));
+  if (todo.length === 0) return;
+  embeddingBackfillRunning = true;
+  let i = 0;
+  async function processNext() {
+    if (i >= todo.length) {
+      try { saveDatabase(); } catch { /* */ }
+      embeddingBackfillRunning = false;
+      useProductStore.getState().loadProducts();
+      return;
+    }
+    const p = todo[i++];
+    try {
+      const { description, embedding } = await computeImageEmbedding(p.images[0]);
+      try {
+        getDatabase().run(
+          'UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
+          [description, JSON.stringify(embedding), p.id],
+        );
+        trackUpdate('products', p.id, { imageDescription: description, imageEmbedding: embedding });
+        p.imageDescription = description;
+        p.imageEmbedding = embedding;
+      } catch (err) { console.warn('[embedding-backfill] persist failed:', err); }
+    } catch (err) {
+      console.warn('[embedding-backfill] compute failed for', p.id, err);
+      // Bei Quota-Fehler oder Netz-Problem stoppen — nicht weiterloopen.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/quota|429|401|403/i.test(msg)) {
+        console.warn('[embedding-backfill] giving up due to:', msg);
+        embeddingBackfillRunning = false;
+        return;
+      }
+    }
+    // 1s Pause zwischen API-Calls.
+    setTimeout(processNext, 1000);
+  }
+  setTimeout(processNext, 500);
 }
 
 function parseResults(results: { columns: string[]; values: unknown[][] }[]): Record<string, unknown>[] {
@@ -258,10 +312,12 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     trackInsert('products', id, { brand: product.brand, name: product.name, categoryId: product.categoryId, purchasePrice: product.purchasePrice });
     eventBus.emit('product.created', 'product', id, { brand: product.brand, name: product.name });
     get().loadProducts();
-    // pHash async im Hintergrund berechnen — blockt das Speichern nicht.
-    // Bei Fehler (broken image / Node-Env) still failen, ist optional.
+    // pHash + AI-Embedding async im Hintergrund. Beide Fire-and-Forget, blocken
+    // den Speicher-Pfad nicht. pHash ist instant (~30ms), AI-Embedding nimmt
+    // 2-5s (Vision-Call + Embedding-Call) und kostet ~$0.001/Item.
     if (product.images.length > 0) {
-      computeImageHash(product.images[0])
+      const imgUrl = product.images[0];
+      computeImageHash(imgUrl)
         .then(hash => {
           try {
             getDatabase().run('UPDATE products SET image_hash = ? WHERE id = ?', [hash, id]);
@@ -271,6 +327,23 @@ export const useProductStore = create<ProductStore>((set, get) => ({
           } catch (err) { console.warn('[productStore] image hash persist failed:', err); }
         })
         .catch(err => { console.warn('[productStore] image hash compute failed:', err); });
+      // AI-Embedding nur wenn API-Key konfiguriert ist; offline fällt das System
+      // auf den pHash zurück.
+      if (isAiConfigured()) {
+        computeImageEmbedding(imgUrl)
+          .then(({ description, embedding }) => {
+            try {
+              getDatabase().run(
+                'UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
+                [description, JSON.stringify(embedding), id],
+              );
+              saveDatabase();
+              trackUpdate('products', id, { imageDescription: description, imageEmbedding: embedding });
+              get().loadProducts();
+            } catch (err) { console.warn('[productStore] embedding persist failed:', err); }
+          })
+          .catch(err => { console.warn('[productStore] embedding compute failed:', err); });
+      }
     }
     return product;
   },
@@ -306,8 +379,11 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       fields.push('image_hash = ?');
       values.push((data as { imageHash?: string }).imageHash || null);
     } else if (data.images) {
-      // Bild geändert → alten Hash löschen, Backfill rechnet neu.
+      // Bild geändert → ALLE abgeleiteten Felder (pHash, AI-Description, AI-Embedding)
+      // invalidieren. Backfill rechnet sie nach.
       fields.push('image_hash = NULL');
+      fields.push('image_description = NULL');
+      fields.push('image_embedding = NULL');
     }
 
     fields.push('updated_at = ?'); values.push(now); values.push(id);
@@ -667,18 +743,40 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         reasons.push(`Same ${pAttrs.item_type} · ${pAttrs.weight}g · ${pAttrs.karat}`);
       }
 
-      // 7) Image-Hash (pHash). Hamming ≤6 = sehr ähnlich (gleiche Aufnahme),
-      // ≤12 = visuell ähnlich. Phone-Uploads sind oft das primäre Signal.
-      const cHash = (candidate as { imageHash?: string }).imageHash || '';
-      const pHash = p.imageHash || '';
-      if (cHash && pHash) {
-        const dist = hashDistance(cHash, pHash);
-        if (dist <= HASH_IDENTICAL_THRESHOLD) {
-          score += 80;
-          reasons.push(`Same photo (visual match)`);
-        } else if (dist <= HASH_SIMILAR_THRESHOLD) {
-          score += 40;
-          reasons.push(`Similar photo`);
+      // 7) Image-Signal: PRIMÄR via AI-Embedding (Cosine-Similarity), FALLBACK
+      // auf pHash wenn Embeddings nicht verfügbar (offline / kein API-Key).
+      // Embedding ist robust gegen Foto-Variation (Winkel, Licht, Crop);
+      // pHash fängt nur das gleiche Bild oder leichte Modifikationen.
+      const cEmb = (candidate as { imageEmbedding?: number[] }).imageEmbedding;
+      const pEmb = p.imageEmbedding;
+      let imageScored = false;
+      if (cEmb && cEmb.length > 0 && pEmb && pEmb.length > 0) {
+        const sim = cosineSimilarity(cEmb, pEmb);
+        if (sim >= EMBEDDING_SAME_THRESHOLD) {
+          score += 100;
+          reasons.push(`Same item (AI: ${sim.toFixed(2)})`);
+          imageScored = true;
+        } else if (sim >= EMBEDDING_SIMILAR_THRESHOLD) {
+          score += 60;
+          reasons.push(`Similar item (AI: ${sim.toFixed(2)})`);
+          imageScored = true;
+        }
+      }
+      if (!imageScored) {
+        // Fallback: pHash. Wird ausgewertet wenn Embedding fehlt oder Cosine
+        // unter SIMILAR_THRESHOLD lag — pHash kann den exakten-Bild-Fall trotzdem
+        // noch fangen.
+        const cHash = (candidate as { imageHash?: string }).imageHash || '';
+        const pHash = p.imageHash || '';
+        if (cHash && pHash) {
+          const dist = hashDistance(cHash, pHash);
+          if (dist <= HASH_IDENTICAL_THRESHOLD) {
+            score += 80;
+            reasons.push(`Same photo (pHash)`);
+          } else if (dist <= HASH_SIMILAR_THRESHOLD) {
+            score += 40;
+            reasons.push(`Similar photo (pHash)`);
+          }
         }
       }
 

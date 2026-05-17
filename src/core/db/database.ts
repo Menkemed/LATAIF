@@ -1233,6 +1233,12 @@ function runMigrations(database: Database): void {
     // Plan §Image-Duplicate-Detection — 16-stelliger Hex pHash (64 bit DCT).
     // Befüllt von createProduct/updateProduct + Lazy-Backfill in loadProducts.
     `ALTER TABLE products ADD COLUMN image_hash TEXT`,
+
+    // Plan §AI-Embedding — gpt-4o-mini Vision-Description + text-embedding-3-small
+    // Vektor (1536 Dim, JSON-serialisiert). Primärsignal für Image-Duplicate-
+    // Detection ab v0.1.32; pHash bleibt als Offline-Fallback.
+    `ALTER TABLE products ADD COLUMN image_description TEXT`,
+    `ALTER TABLE products ADD COLUMN image_embedding TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

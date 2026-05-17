@@ -18,6 +18,9 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Bhd } from '@/components/ui/Bhd';
 import { Package, ArrowRight, Plus } from 'lucide-react';
 import { useProductStore } from '@/stores/productStore';
+import { computeImageEmbedding, isAiConfigured } from '@/core/ai/ai-service';
+import { getDatabase, saveDatabase } from '@/core/db/database';
+import { trackUpdate } from '@/core/sync/track';
 import type { Product } from '@/core/models/types';
 
 interface PendingReview {
@@ -91,31 +94,71 @@ export function SyncDuplicateGuard() {
   const [actionBusy, setActionBusy] = useState(false);
 
   useEffect(() => {
-    function handle(ev: Event) {
+    async function handle(ev: Event) {
       const ce = ev as CustomEvent<{ ids: string[] }>;
       const ids = ce.detail?.ids || [];
       if (ids.length === 0) return;
+
+      // Phase 1: sofortiger Match mit dem was JETZT da ist (mind. pHash vom
+      // Phone). Modal kann früh aufgehen wenn pHash bereits Treffer findet.
+      // GLEICHZEITIG: für jedes Phone-Upload ohne Embedding einen priorisierten
+      // Compute-Job starten — sonst hängt das neue Item in der Backfill-Queue
+      // hinter alten Produkten.
+      const earlyReviews: PendingReview[] = [];
       const state = useProductStore.getState();
-      const reviews: PendingReview[] = [];
       for (const id of ids) {
         const incoming = state.products.find(p => p.id === id);
         if (!incoming) continue;
-        // Image-only-Modus für Phone-Uploads: Phone-User tippen oft falsche
-        // SKUs/Brands oder lassen sie leer. Photo ist das verlässliche Signal.
-        // Wenn das incoming-Item noch keinen Hash hat (z.B. wegen broken image
-        // auf Phone-Seite), fällt der Modus auf 'all' zurück.
-        const mode: 'all' | 'image-only' = incoming.imageHash ? 'image-only' : 'all';
+        const mode: 'all' | 'image-only' = incoming.imageHash || incoming.imageEmbedding ? 'image-only' : 'all';
         const matches = state.findPossibleDuplicates(incoming, id, { mode });
-        if (matches.length > 0) reviews.push({ incoming, matches });
+        if (matches.length > 0) earlyReviews.push({ incoming, matches });
+        // Priorisierter Embedding-Compute. Fire-and-forget; das Ergebnis landet
+        // via loadProducts() in Phase 2.
+        if (!incoming.imageEmbedding && incoming.images.length > 0 && isAiConfigured()) {
+          computeImageEmbedding(incoming.images[0])
+            .then(({ description, embedding }) => {
+              try {
+                getDatabase().run(
+                  'UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
+                  [description, JSON.stringify(embedding), incoming.id],
+                );
+                saveDatabase();
+                trackUpdate('products', incoming.id, { imageDescription: description, imageEmbedding: embedding });
+                useProductStore.getState().loadProducts();
+              } catch (err) { console.warn('[SyncGuard] embedding persist failed:', err); }
+            })
+            .catch(err => console.warn('[SyncGuard] embedding compute failed:', err));
+        }
       }
-      if (reviews.length > 0) {
+      if (earlyReviews.length > 0) {
         setQueue(prev => {
-          // Dedupe gegen bereits queue'te Reviews (gleiche incoming-ID).
           const known = new Set(prev.map(r => r.incoming.id));
-          const fresh = reviews.filter(r => !known.has(r.incoming.id));
-          return [...prev, ...fresh];
+          return [...prev, ...earlyReviews.filter(r => !known.has(r.incoming.id))];
         });
       }
+
+      // Phase 2: nach 4s nochmal scoren — bis dahin sollte das AI-Embedding
+      // berechnet sein (Auto-Compute in createProduct/applyUpsert hat 2-5s
+      // gebraucht). Re-Check mit Embedding-Power findet evtl. weitere Matches
+      // die pHash übersehen hat (unterschiedlicher Winkel, gleiches Item).
+      setTimeout(() => {
+        const lateState = useProductStore.getState();
+        const lateReviews: PendingReview[] = [];
+        for (const id of ids) {
+          const incoming = lateState.products.find(p => p.id === id);
+          if (!incoming) continue;
+          if (!incoming.imageEmbedding) continue; // immer noch kein Embedding → skip, war schon in Phase 1
+          const mode: 'all' | 'image-only' = 'image-only';
+          const matches = lateState.findPossibleDuplicates(incoming, id, { mode });
+          if (matches.length > 0) lateReviews.push({ incoming, matches });
+        }
+        if (lateReviews.length > 0) {
+          setQueue(prev => {
+            const known = new Set(prev.map(r => r.incoming.id));
+            return [...prev, ...lateReviews.filter(r => !known.has(r.incoming.id))];
+          });
+        }
+      }, 4000);
     }
     window.addEventListener('lataif:sync-products-inserted', handle as EventListener);
     return () => window.removeEventListener('lataif:sync-products-inserted', handle as EventListener);

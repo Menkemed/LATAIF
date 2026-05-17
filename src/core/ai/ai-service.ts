@@ -776,3 +776,92 @@ No markdown, no emojis, plain professional text.`,
 
   return response;
 }
+
+// ═══════════════════════════════════════════════════════════
+// Plan §Image-Duplicate-Detection (AI-Embedding)
+// ───────────────────────────────────────────────────────────
+// gpt-4o-mini Vision liefert eine produkt-spezifische Beschreibung; die wird
+// dann mit text-embedding-3-small in einen 1536-Dim-Vektor verwandelt. Zwei
+// Produkte werden via Cosine-Similarity verglichen — robust gegen Foto-
+// Variation (Winkel, Licht) im Gegensatz zu pHash.
+// ═══════════════════════════════════════════════════════════
+
+/** Beschreibt ein Produkt-Bild kompakt — speziell auf Identitäts-Merkmale fokussiert. */
+export async function describeProductImage(imageBase64: string): Promise<string> {
+  const key = getApiKey();
+  if (!key) throw new Error('No API key configured');
+  // gpt-4o-mini fuer Kosten — ist deutlich billiger als gpt-4o und kann
+  // Vision. Description zielt auf identifizierende Merkmale ab.
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: 'You describe luxury items (watches, jewelry, accessories) for visual duplicate detection. Output ONE compact paragraph (60-120 words) covering: type of item, brand if visible, dial/face color and layout, case/material color and finish, bezel/bracelet/strap details, dial markers/numbers/sub-dials, distinctive features (chronograph, GMT, date window position, complications), engravings or text visible, condition signals (scratches, wear). NO speculation about value or owner. NO meta-commentary like "this image shows".',
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Describe this item for visual duplicate detection.' },
+            { type: 'image_url', image_url: { url: imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}` } },
+          ],
+        },
+      ],
+      max_tokens: 220,
+      temperature: 0.1,
+      store: false,
+    }),
+  });
+  if (!res.ok) throw new Error(`describeProductImage failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return (data.choices[0]?.message?.content || '').trim();
+}
+
+/** Bettet einen Text in einen 1536-Dim-Vektor ein (text-embedding-3-small). */
+export async function embedText(text: string): Promise<number[]> {
+  const key = getApiKey();
+  if (!key) throw new Error('No API key configured');
+  if (!text || text.length === 0) throw new Error('embedText: empty text');
+  const res = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+    body: JSON.stringify({
+      model: 'text-embedding-3-small',
+      input: text.slice(0, 8000),
+      encoding_format: 'float',
+    }),
+  });
+  if (!res.ok) throw new Error(`embedText failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  const vec: number[] | undefined = data.data?.[0]?.embedding;
+  if (!Array.isArray(vec) || vec.length === 0) throw new Error('embedText: no embedding in response');
+  return vec;
+}
+
+/** End-to-end: Bild → Beschreibung → Embedding. Liefert {description, embedding}. */
+export async function computeImageEmbedding(imageBase64: string): Promise<{ description: string; embedding: number[] }> {
+  const description = await describeProductImage(imageBase64);
+  const embedding = await embedText(description);
+  return { description, embedding };
+}
+
+/** Cosine-Similarity zwischen zwei Vektoren. 1.0 = identisch, 0 = orthogonal, -1 = invers. */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Threshold-Konstanten. Locker (User-Wahl 2026-05-17): 0.80 = similar, 0.88 = same. */
+export const EMBEDDING_SAME_THRESHOLD = 0.88;
+export const EMBEDDING_SIMILAR_THRESHOLD = 0.80;
+

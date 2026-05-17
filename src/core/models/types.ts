@@ -113,6 +113,10 @@ export interface Product {
   images: string[];
   /** Plan §Image-Duplicate-Detection: perceptual hash des ersten Bildes (16-stelliger Hex / 64bit DCT-pHash). */
   imageHash?: string;
+  /** Plan §AI-Embedding: gpt-4o-mini Vision-Description des ersten Bildes (Cache fürs Embedding). */
+  imageDescription?: string;
+  /** Plan §AI-Embedding: text-embedding-3-small Vektor (1536 Dim) der Description. */
+  imageEmbedding?: number[];
   // Dynamic attributes (category-specific)
   attributes: Record<string, string | number | boolean | string[]>;
   createdAt: string;
