@@ -2009,6 +2009,10 @@ function DuplicatesTab() {
   const [pairs, setPairs] = useState<DuplicatePair[] | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [actionMsg, setActionMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  // Match-Modus: 'all' nutzt SKU/Serial/Ref/Brand/Name/Gold/Image; 'image-only'
+  // ignoriert alle Identitäts-Felder und matched ausschliesslich nach pHash.
+  // Image-only fängt z.B. doppelt fotografierte Items mit unterschiedlicher SKU.
+  const [matchMode, setMatchMode] = useState<'all' | 'image-only'>('all');
 
   function pairKey(a: Product, b: Product) {
     return [a.id, b.id].sort().join('|');
@@ -2024,7 +2028,7 @@ function DuplicatesTab() {
       const found: DuplicatePair[] = [];
       for (const p of products) {
         if (!p.id) continue;
-        const matches = findPossibleDuplicates(p, p.id);
+        const matches = findPossibleDuplicates(p, p.id, { mode: matchMode });
         for (const m of matches) {
           const key = pairKey(p, m.product);
           if (seen.has(key)) continue;
@@ -2072,8 +2076,21 @@ function DuplicatesTab() {
           <div>
             <h2 className="text-display-xs" style={{ color: '#0F0F10' }}>Doppelte Artikel finden</h2>
             <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4, maxWidth: 560 }}>
-              Scannt alle Produkte und zeigt mögliche Duplikate (gleiche SKU, Serial, Reference, Brand+Name, oder Gold-Fingerprint). Du entscheidest pro Treffer manuell — kein Auto-Merge.
+              Scannt alle Produkte und zeigt mögliche Duplikate. Du entscheidest pro Treffer manuell — kein Auto-Merge.
             </p>
+            <div className="flex items-center gap-2" style={{ marginTop: 12 }}>
+              <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5, marginRight: 4 }}>Match by</span>
+              {(['all', 'image-only'] as const).map(m => (
+                <button key={m} onClick={() => setMatchMode(m)}
+                  className="cursor-pointer transition-all duration-200"
+                  style={{
+                    padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                    border: `1px solid ${matchMode === m ? '#0F0F10' : '#D5D9DE'}`,
+                    color: matchMode === m ? '#0F0F10' : '#6B7280',
+                    background: matchMode === m ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
+                  }}>{m === 'all' ? 'All criteria (SKU + Brand + Photo …)' : 'Photo only'}</button>
+              ))}
+            </div>
           </div>
           <Button variant="primary" onClick={scan} disabled={scanning}>
             {scanning ? 'Scanning…' : pairs ? `Re-scan ${products.length} products` : `Scan ${products.length} products`}

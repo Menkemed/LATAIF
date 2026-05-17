@@ -44,6 +44,7 @@ interface ProductStore {
   findPossibleDuplicates: (
     candidate: Partial<Product>,
     excludeProductId?: string,
+    options?: { mode?: 'all' | 'image-only' },
   ) => Array<{ product: Product; score: number; reasons: string[] }>;
   /**
    * Plan §Sync-Duplicate: vereinigt zwei Produkte. Übernimmt qty von Source ins
@@ -548,7 +549,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   //   • Branded: gleiche model_number            → wahrscheinlich (60)
   //   • Brand-only                               → schwach (10)
   // Threshold zum Anzeigen: ≥40.
-  findPossibleDuplicates: (candidate, excludeProductId) => {
+  findPossibleDuplicates: (candidate, excludeProductId, options) => {
+    const mode = options?.mode || 'all';
     const norm = (v: unknown) => String(v ?? '').trim().toUpperCase();
     const cSku = norm(candidate.sku);
     const cBrand = norm(candidate.brand);
@@ -610,29 +612,35 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       const pKarat = norm(pAttrs.karat);
       const pItemType = norm(pAttrs.item_type);
 
+      // Mode 'image-only' skippt alle Identitäts-Felder (SKU/Serial/Ref/Brand/
+      // Name/Model/Gold-Fingerprint) — nur das pHash-Scoring weiter unten
+      // entscheidet. Genutzt z.B. vom SyncDuplicateGuard für Phone-Uploads,
+      // wo getippte SKU/Brand-Felder oft Müll oder zufällig sind.
+      const all = mode === 'all';
+
       // 1) SKU exakt
-      if (hasSku && cSku === pSku) {
+      if (all && hasSku && cSku === pSku) {
         score += 100;
         reasons.push(`Same SKU (${p.sku})`);
       }
 
       // 2) Serial exakt
-      if (hasSerial && cSerial === pSerial) {
+      if (all && hasSerial && cSerial === pSerial) {
         score += 100;
         reasons.push(`Same Serial No (${pAttrs.serial_number || pAttrs.serialNo})`);
       }
 
       // 3) Reference exakt
-      if (hasRef && cRef === pRef) {
+      if (all && hasRef && cRef === pRef) {
         score += 80;
         reasons.push(`Same Reference (${pAttrs.reference_number || pAttrs.reference || pAttrs.referenceNo})`);
       }
 
       // 4) Brand + Name
-      if (hasBrand && hasName && cBrand === pBrand && cName === pName) {
+      if (all && hasBrand && hasName && cBrand === pBrand && cName === pName) {
         score += 60;
         reasons.push(`Same Brand + Name`);
-      } else if (hasBrand && hasName && cBrand === pBrand) {
+      } else if (all && hasBrand && hasName && cBrand === pBrand) {
         const d = lev(cName, pName);
         if (d > 0 && d <= 2 && pName.length >= 3) {
           score += 40;
@@ -645,13 +653,13 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       }
 
       // 5) Branded Jewelry: gleiche model_number
-      if (hasModelNo && cModelNo === pModelNo) {
+      if (all && hasModelNo && cModelNo === pModelNo) {
         score += 60;
         reasons.push(`Same Model No (${pAttrs.model_number})`);
       }
 
       // 6) Gold-Fingerprint: weight ±0.5g + same karat + same item_type
-      if (hasGoldFingerprint && pWeight > 0 && pKarat && pItemType
+      if (all && hasGoldFingerprint && pWeight > 0 && pKarat && pItemType
           && cCategory === p.categoryId
           && cKarat === pKarat && cItemType === pItemType
           && Math.abs(cWeight - pWeight) <= 0.5) {

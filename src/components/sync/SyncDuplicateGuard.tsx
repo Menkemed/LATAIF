@@ -100,7 +100,12 @@ export function SyncDuplicateGuard() {
       for (const id of ids) {
         const incoming = state.products.find(p => p.id === id);
         if (!incoming) continue;
-        const matches = state.findPossibleDuplicates(incoming, id);
+        // Image-only-Modus für Phone-Uploads: Phone-User tippen oft falsche
+        // SKUs/Brands oder lassen sie leer. Photo ist das verlässliche Signal.
+        // Wenn das incoming-Item noch keinen Hash hat (z.B. wegen broken image
+        // auf Phone-Seite), fällt der Modus auf 'all' zurück.
+        const mode: 'all' | 'image-only' = incoming.imageHash ? 'image-only' : 'all';
+        const matches = state.findPossibleDuplicates(incoming, id, { mode });
         if (matches.length > 0) reviews.push({ incoming, matches });
       }
       if (reviews.length > 0) {
