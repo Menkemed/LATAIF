@@ -446,7 +446,18 @@ Your task: identify this ${spec.name} item with EXTREME specificity and research
         Tudor: BB Pro=39, BB58=39, BB GMT=41, BB36=36, BB41=41, BB54=37, Pelagos=42, Pelagos 39=39, Royal=28/34/38/41 per ref
      **(b) VISUAL PROPORTION** — if reference is NOT readable, measure from the photo: lug-to-lug span vs. wrist or strap width gives you ratio. Crown size, dial vs case ratio. State your visual evidence in the notes field. Confidence range ±1mm acceptable.
      **(c) NEVER DO**: do NOT default to 40, do NOT round to "40-41", do NOT skip the field. If you cannot decide, return null AND state in notes "case_diameter_mm: unclear — needs caliper measurement".
-     **(d) DISTINCTIVE 41 vs 36 GUIDE** (Datejust, the user's pain point): 41mm Datejust has visibly larger dial relative to lugs, crown looks proportionally smaller; 36mm has crown that takes 1/12 of case diameter visually, dial markers more compact, classic proportion. When in doubt — count dial markers vs case-edge gap.
+     **(d) RELATIVE GEOMETRY — MANDATORY** (measure these from the image, write the ratios as decimals in notes field):
+        - bezel_dial_ratio = bezel-outer-diameter / dial-opening-diameter. Sport models (Sub/GMT/Daytona) ~1.18-1.22; dress (Datejust 36) ~1.10-1.14; Datejust 41 ~1.12-1.15.
+        - crown_case_ratio = crown-diameter / case-diameter. 36mm DJ ~0.115-0.125 (visually prominent crown); 41mm DJ ~0.095-0.105 (smaller-looking crown); Submariner 40 ~0.095; AP Royal Oak ~0.085.
+        - lug_case_ratio = lug-tip-to-tip / case-diameter. Modern Rolex sport ~1.18-1.20; modern DJ ~1.20; Patek Nautilus 5711 ~1.20 (flat ears); AP Royal Oak ~1.27 (integrated bracelet); IWC Portugieser ~1.20.
+        - date_window_ratio = date-window-width / dial-radius. Rolex cyclops 3-o'clock ~0.18-0.22 (large magnified); Patek/AP unmagnified ~0.10-0.12.
+        Use these ratios as PRIMARY size-discriminator: if measured crown_case_ratio >= 0.115 → likely 36mm DJ, if <= 0.105 → likely 41mm DJ.
+     **(e) WRIST + STRAP CONTEXT — calibration anchors** (if visible, use as scale):
+        - On-wrist photo: average male wrist width = 17cm, female = 15cm. Measure watch case width as fraction of wrist width visible. E.g. case spans 45% of a 17cm wrist → ~38mm. Cross-check with model defaults.
+        - Strap-only / flat photo: standard lug widths by case size — 36mm case→ 20mm strap (Rolex DJ36 = 20mm), 40-41mm case → 20-21mm (Sub/GMT = 20mm, DJ41 = 21mm), Royal Oak Jumbo 39 = 21mm integrated. Measure strap width relative to case to derive case mm.
+        - Camera distance / perspective: if image is shot top-down (orthographic) the ratios above are reliable; if angled, dial appears compressed — account for foreshortening and prefer reference-derived size.
+        Write your chosen calibration anchor in notes ("scale anchor: 17cm wrist" or "scale anchor: 20mm strap").
+     **(f) DISTINCTIVE 41 vs 36 GUIDE** (Datejust pain point, summary): apply (d) + (e). 36mm DJ has visually prominent crown (crown_case_ratio ~0.12, classic dial-marker-to-edge gap), 41mm DJ has more-square dial-vs-bezel proportion (bezel_dial_ratio ~1.13) with proportionally smaller crown. Count 5-minute markers vs dial edge gap as tie-breaker.
   4. Plus: caliber/movement, year range, complications (chronograph, GMT, moonphase, day-date, perpetual calendar), dial color + indices, bezel material, strap type.
 - For branded jewelry: maker, collection, variant, metal, stones
 - For unbranded gold: weight (estimate from image), karat (estimate), craft style
