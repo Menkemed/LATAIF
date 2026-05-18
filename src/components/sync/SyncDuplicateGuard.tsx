@@ -28,6 +28,25 @@ interface PendingReview {
   matches: Array<{ product: Product; score: number; reasons: string[] }>;
 }
 
+/** Wenn die AI keinen SKU-Vorschlag liefert, bauen wir einen aus Brand-3-Letter
+ *  + Kategorie-3-Letter. Garantiert dass das Feld NIE leer bleibt nach
+ *  Mobile-Upload-Auto-Identify. nextAvailableSku haengt die Sequenz an. */
+function buildFallbackSkuSeed(brand?: string, categoryId?: string): string {
+  const brandCode = (brand || 'ITM').replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X');
+  const catCode = (() => {
+    switch (categoryId) {
+      case 'cat-watch': return 'WCH';
+      case 'cat-gold-jewelry': return 'GLD';
+      case 'cat-branded-gold-jewelry': return 'BGJ';
+      case 'cat-original-gold-jewelry': return 'OGJ';
+      case 'cat-accessory': return 'ACC';
+      case 'cat-spare-part': return 'PRT';
+      default: return 'GEN';
+    }
+  })();
+  return `${brandCode}-${catCode}-001`;
+}
+
 function scoreLabel(score: number): { text: string; color: string; bg: string } {
   if (score >= 100) return { text: 'Almost certainly duplicate', color: '#AA6E6E', bg: 'rgba(170,110,110,0.10)' };
   if (score >= 60)  return { text: 'Likely duplicate',           color: '#AA956E', bg: 'rgba(170,149,110,0.12)' };
@@ -190,7 +209,15 @@ export function SyncDuplicateGuard() {
             const patch: Partial<Product> = {};
             if (result.brand) patch.brand = result.brand;
             if (result.name) patch.name = result.name;
-            if (result.sku && !current.sku) patch.sku = store.nextAvailableSku(result.sku);
+            // SKU MANDATORY (2026-05-18): Mobile-Upload kommt mit sku=null/''/literal'null'.
+            // Wir behandeln alle drei als "leer" und fuellen mit AI-Vorschlag.
+            // Falls AI nichts liefert: Fallback aus Brand-Kuerzel + Kategorie + Sequenz.
+            const currentSkuRaw = String(current.sku ?? '').trim().toLowerCase();
+            const skuIsEmpty = !currentSkuRaw || currentSkuRaw === 'null' || currentSkuRaw === 'undefined';
+            if (skuIsEmpty) {
+              const seed = result.sku || buildFallbackSkuSeed(result.brand || current.brand, current.categoryId);
+              patch.sku = store.nextAvailableSku(seed);
+            }
             if (result.condition) patch.condition = result.condition;
             if (result.description) {
               patch.notes = current.notes ? `${current.notes}\n\n${result.description}` : result.description;

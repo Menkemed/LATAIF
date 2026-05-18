@@ -432,7 +432,21 @@ Your task: identify this ${spec.name} item with EXTREME specificity and research
      - Vacheron / Lange / IWC / JLC: 4-7 digit numerics often with letters ("4500V/110A-B128", "IW371417", "Q1378420")
      - If you genuinely cannot read it, return null — do NOT fabricate.
   2. **name** (top-level, NOT in attributes — the exact collector name): include the family AND the nickname/variant (e.g. "Submariner Date 'Hulk'", "GMT-Master II 'Pepsi'", "Daytona 'Panda'", "Royal Oak Jumbo Extra-Thin", "Nautilus 5711/1A 'Tiffany'"). NEVER just "Submariner" — always specify the variant.
-  3. **case_diameter_mm**: case width in mm. If the watch is identified, use the canonical factory size (Submariner 41 modern / 40 pre-2020, Datejust 36 or 41, Daytona 40, GMT 40, Nautilus 5711 = 40, Royal Oak Jumbo = 39, AP Offshore = 42, Speedmaster Pro = 42, Tank Solo medium = 31x27). Otherwise estimate from proportions (lugs/crown). Never default to "40" without basis.
+  3. **case_diameter_mm**: case width in mm — DETERMINED, NEVER GUESSED. Priority order:
+     **(a) REFERENCE-DRIVEN** — if you read a reference number, the size is FIXED by that reference. Apply this lookup table strictly:
+        Rolex: 116610LN/126610LN=40/41, 124060=41, 126613=41, 116710/126710=40, 116500/126500=40, 116500/126500=40, 116519=40, 126200=36, 126233/126234=36, 126331/126333/126334=41, 126710BLRO=40, 126281=36, 126331=41, 126301=41, 116200/116234=36, 178200/178240=31, 116000=36, 6541=36 (vintage), 6062=36 (vintage), 1601/1603=36, 1675=40, 5512/5513=40, 5500=34, 1500=34, 1700=36, GMT-Master II 126710=40, Day-Date 36mm=128238/118238/118208, Day-Date 40mm=228238/228239, Datejust 31=178274/178240/178344, Datejust 36=126200/126234/126233/116200/116234/116231, Datejust 41=126300/126301/126331/126333/126334/116300/116333/116334
+        Patek: 5711/1A=40, 5712/1A=40.5, 5990/1A=40.5, 5980/1A=40.5, 5167A=40, 5168G=42.2, 5740/1G=40, 6300=44.8, 5212A=40, 5170=39.4, 5524G=42, 5230=38.5
+        AP: 15500ST=41, 15400ST=41, 15300ST=39, 15202ST (Jumbo Extra-Thin)=39, 15703ST=42, 26331ST (Chrono)=41, 26240ST=41, 26715ST=37, 26579CE=42, 26420SR=41, Offshore 26170=42, Offshore 26470=42
+        Omega: Speedmaster Pro 311.30.42.30=42, Seamaster Diver 300m 210.30.42=42, Seamaster Aqua Terra 220.10.41=41 / 220.10.38=38 / 220.10.34=34, Constellation 131.10.39=39 / 131.10.36=36 / 131.10.29=29
+        Cartier: Tank Must Large=33.7x25.5, Tank Must Medium=31x27, Tank Must Small=28x22, Tank Solo Medium=31x27, Santos Medium=35.1x41.9, Santos Large=39.8x47.5, Panthere Medium=27, Panthere Large=27, Ballon Bleu 36=36 / 33=33 / 28=28, Roadster=37 (Medium)
+        IWC: Portugieser 7-Day=42.3 (IW500107), Portofino 40=40 (IW356501), Big Pilot 43=43 (IW501001/IW329301), Aquatimer 42=42, Mark XX=40
+        JLC: Reverso Tribute Small Seconds=45.6x27.4, Reverso Classic Medium=40x24.4, Master Ultra Thin Small Seconds 39=39 / 36=36 / 34=34, Polaris Date=42
+        Lange: Lange 1=38.5, Lange 1 Small=36.8, Saxonia Thin 37=37 / 39=39, Datograph=39 / 41=41, Odysseus=40.5
+        Vacheron: Patrimony 36=36 / 40=40 / 42=42, Overseas 41=41 / 35=35, Traditionnelle=38 / 39 / 40 / 41 / 42 / 44 (per ref)
+        Tudor: BB Pro=39, BB58=39, BB GMT=41, BB36=36, BB41=41, BB54=37, Pelagos=42, Pelagos 39=39, Royal=28/34/38/41 per ref
+     **(b) VISUAL PROPORTION** — if reference is NOT readable, measure from the photo: lug-to-lug span vs. wrist or strap width gives you ratio. Crown size, dial vs case ratio. State your visual evidence in the notes field. Confidence range ±1mm acceptable.
+     **(c) NEVER DO**: do NOT default to 40, do NOT round to "40-41", do NOT skip the field. If you cannot decide, return null AND state in notes "case_diameter_mm: unclear — needs caliper measurement".
+     **(d) DISTINCTIVE 41 vs 36 GUIDE** (Datejust, the user's pain point): 41mm Datejust has visibly larger dial relative to lugs, crown looks proportionally smaller; 36mm has crown that takes 1/12 of case diameter visually, dial markers more compact, classic proportion. When in doubt — count dial markers vs case-edge gap.
   4. Plus: caliber/movement, year range, complications (chronograph, GMT, moonphase, day-date, perpetual calendar), dial color + indices, bezel material, strap type.
 - For branded jewelry: maker, collection, variant, metal, stones
 - For unbranded gold: weight (estimate from image), karat (estimate), craft style
