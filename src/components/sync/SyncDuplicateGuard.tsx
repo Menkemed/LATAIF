@@ -18,7 +18,7 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Bhd } from '@/components/ui/Bhd';
 import { Package, ArrowRight, Plus } from 'lucide-react';
 import { useProductStore } from '@/stores/productStore';
-import { computeImageEmbedding, isAiConfigured } from '@/core/ai/ai-service';
+import { computeImageEmbedding, identifyProduct, isAiConfigured, type AiCategoryId } from '@/core/ai/ai-service';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { trackUpdate } from '@/core/sync/track';
 import type { Product } from '@/core/models/types';
@@ -99,66 +99,124 @@ export function SyncDuplicateGuard() {
       const ids = ce.detail?.ids || [];
       if (ids.length === 0) return;
 
-      // Phase 1: sofortiger Match mit dem was JETZT da ist (mind. pHash vom
-      // Phone). Modal kann früh aufgehen wenn pHash bereits Treffer findet.
-      // GLEICHZEITIG: für jedes Phone-Upload ohne Embedding einen priorisierten
-      // Compute-Job starten — sonst hängt das neue Item in der Backfill-Queue
-      // hinter alten Produkten.
-      const earlyReviews: PendingReview[] = [];
-      const state = useProductStore.getState();
+      // ═══════════════════════════════════════════════════════════
+      // Mobile-Upload Flow (2026-05-18 — rewrite):
+      // Phone-Items kommen mit Foto + ggf. Brand-String, KEINE SKU/Serial/Ref.
+      // Text-Match ist daher hinfaellig — wir entscheiden ausschliesslich per
+      // AI-Foto-Embedding ob ein Duplikat existiert.
+      //
+      // Schritt 1: Embeddings fuer alle eingehenden Items berechnen (AWAIT).
+      // Schritt 2: Cosine-Vergleich gegen bestehende Items (image-only mode).
+      //            Bei Treffer → User-Modal "Merge oder behalten?"
+      // Schritt 3: Wenn KEIN Duplikat → identifyProduct fuellt alle Felder.
+      //
+      // Ohne API-Key bricht das System graceful ab (keine Embeddings, kein
+      // Identify) — User behaelt das Roh-Item mit Brand/Foto.
+      // ═══════════════════════════════════════════════════════════
+
+      // ── Schritt 1: Embeddings sequentiell berechnen ─────────────────────
+      if (isAiConfigured()) {
+        const state0 = useProductStore.getState();
+        for (const id of ids) {
+          const incoming = state0.products.find(p => p.id === id);
+          if (!incoming) continue;
+          if (incoming.imageEmbedding && incoming.imageEmbedding.length > 0) continue;
+          if (!incoming.images || incoming.images.length === 0) continue;
+          try {
+            const { description, embedding } = await computeImageEmbedding(incoming.images[0]);
+            getDatabase().run(
+              'UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
+              [description, JSON.stringify(embedding), id],
+            );
+            saveDatabase();
+            trackUpdate('products', id, { imageDescription: description, imageEmbedding: embedding });
+          } catch (err) {
+            console.warn('[SyncGuard] embedding failed for', id, err);
+          }
+        }
+        useProductStore.getState().loadProducts();
+      }
+
+      // ── Schritt 2: Image-only Duplicate-Check ───────────────────────────
+      const stateAfterEmb = useProductStore.getState();
+      const reviews: PendingReview[] = [];
+      const duplicateFoundIds = new Set<string>();
       for (const id of ids) {
-        const incoming = state.products.find(p => p.id === id);
+        const incoming = stateAfterEmb.products.find(p => p.id === id);
         if (!incoming) continue;
-        const mode: 'all' | 'image-only' = incoming.imageHash || incoming.imageEmbedding ? 'image-only' : 'all';
-        const matches = state.findPossibleDuplicates(incoming, id, { mode });
-        if (matches.length > 0) earlyReviews.push({ incoming, matches });
-        // Priorisierter Embedding-Compute. Fire-and-forget; das Ergebnis landet
-        // via loadProducts() in Phase 2.
-        if (!incoming.imageEmbedding && incoming.images.length > 0 && isAiConfigured()) {
-          computeImageEmbedding(incoming.images[0])
-            .then(({ description, embedding }) => {
-              try {
-                getDatabase().run(
-                  'UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
-                  [description, JSON.stringify(embedding), incoming.id],
-                );
-                saveDatabase();
-                trackUpdate('products', incoming.id, { imageDescription: description, imageEmbedding: embedding });
-                useProductStore.getState().loadProducts();
-              } catch (err) { console.warn('[SyncGuard] embedding persist failed:', err); }
-            })
-            .catch(err => console.warn('[SyncGuard] embedding compute failed:', err));
+        if (!incoming.imageEmbedding || incoming.imageEmbedding.length === 0) continue;
+        const matches = stateAfterEmb.findPossibleDuplicates(incoming, id, { mode: 'image-only' });
+        if (matches.length > 0) {
+          reviews.push({ incoming, matches });
+          duplicateFoundIds.add(id);
         }
       }
-      if (earlyReviews.length > 0) {
+      if (reviews.length > 0) {
         setQueue(prev => {
           const known = new Set(prev.map(r => r.incoming.id));
-          return [...prev, ...earlyReviews.filter(r => !known.has(r.incoming.id))];
+          return [...prev, ...reviews.filter(r => !known.has(r.incoming.id))];
         });
       }
 
-      // Phase 2: nach 4s nochmal scoren — bis dahin sollte das AI-Embedding
-      // berechnet sein (Auto-Compute in createProduct/applyUpsert hat 2-5s
-      // gebraucht). Re-Check mit Embedding-Power findet evtl. weitere Matches
-      // die pHash übersehen hat (unterschiedlicher Winkel, gleiches Item).
-      setTimeout(() => {
-        const lateState = useProductStore.getState();
-        const lateReviews: PendingReview[] = [];
-        for (const id of ids) {
-          const incoming = lateState.products.find(p => p.id === id);
-          if (!incoming) continue;
-          if (!incoming.imageEmbedding) continue; // immer noch kein Embedding → skip, war schon in Phase 1
-          const mode: 'all' | 'image-only' = 'image-only';
-          const matches = lateState.findPossibleDuplicates(incoming, id, { mode });
-          if (matches.length > 0) lateReviews.push({ incoming, matches });
-        }
-        if (lateReviews.length > 0) {
-          setQueue(prev => {
-            const known = new Set(prev.map(r => r.incoming.id));
-            return [...prev, ...lateReviews.filter(r => !known.has(r.incoming.id))];
-          });
-        }
-      }, 4000);
+      // ── Schritt 3: AI Identify fuer Nicht-Duplikate ─────────────────────
+      if (!isAiConfigured()) return;
+      const validAiCats = new Set<string>([
+        'cat-watch', 'cat-gold-jewelry', 'cat-branded-gold-jewelry',
+        'cat-original-gold-jewelry', 'cat-accessory', 'cat-spare-part',
+      ]);
+      for (const id of ids) {
+        if (duplicateFoundIds.has(id)) continue;
+        const incoming = stateAfterEmb.products.find(p => p.id === id);
+        if (!incoming) continue;
+        if (!incoming.images || incoming.images.length === 0) continue;
+        if (!validAiCats.has(incoming.categoryId)) continue;
+        // Skip wenn schon AI-identifiziert (Name + Condition gefuellt).
+        const alreadyIdentified = !!incoming.condition && !!incoming.name && incoming.name.trim().length > 3;
+        if (alreadyIdentified) continue;
+
+        identifyProduct({
+          categoryId: incoming.categoryId as AiCategoryId,
+          imageBase64: incoming.images[0],
+          hints: {
+            brand: incoming.brand || undefined,
+            name: incoming.name || undefined,
+            reference: incoming.sku || undefined,
+          },
+        })
+          .then(result => {
+            const store = useProductStore.getState();
+            const current = store.products.find(p => p.id === id);
+            if (!current) return;
+            const patch: Partial<Product> = {};
+            if (result.brand) patch.brand = result.brand;
+            if (result.name) patch.name = result.name;
+            if (result.sku && !current.sku) patch.sku = store.nextAvailableSku(result.sku);
+            if (result.condition) patch.condition = result.condition;
+            if (result.description) {
+              patch.notes = current.notes ? `${current.notes}\n\n${result.description}` : result.description;
+            }
+            if (result.estimatedValue && !current.plannedSalePrice) patch.plannedSalePrice = result.estimatedValue;
+            if (result.taxScheme && !current.taxScheme) patch.taxScheme = result.taxScheme;
+            if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0
+                && (!current.scopeOfDelivery || current.scopeOfDelivery.length === 0)) {
+              patch.scopeOfDelivery = result.scopeOfDelivery;
+            }
+            const attrs = { ...(current.attributes || {}) } as Record<string, string | number | boolean | string[]>;
+            let attrsChanged = false;
+            for (const [k, v] of Object.entries(result.attributes || {})) {
+              if (v === null || v === undefined || v === '') continue;
+              if (attrs[k] === undefined || attrs[k] === '') {
+                attrs[k] = v as string | number | boolean | string[];
+                attrsChanged = true;
+              }
+            }
+            if (attrsChanged) patch.attributes = attrs;
+            if (Object.keys(patch).length === 0) return;
+            store.updateProduct(id, patch);
+            console.info('[SyncGuard] auto-identified', id, Object.keys(patch).join(','));
+          })
+          .catch(err => console.warn('[SyncGuard] auto-identify failed for', id, err));
+      }
     }
     window.addEventListener('lataif:sync-products-inserted', handle as EventListener);
     return () => window.removeEventListener('lataif:sync-products-inserted', handle as EventListener);

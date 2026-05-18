@@ -6,7 +6,9 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getStockAggregates } from '@/core/lots/lot-queries';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { computeImageHash } from '@/core/utils/image-hash';
+// pHash entfernt 2026-05-18 — Duplicate-Detection laeuft jetzt nur ueber
+// AI-Embedding + Text-Felder (SKU/Serial/Reference). image-hash.ts wird nicht
+// mehr importiert.
 import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
 
 interface ProductStore {
@@ -125,41 +127,11 @@ function rowToProduct(row: Record<string, unknown>): Product {
   };
 }
 
-// Plan §Image-Duplicate-Detection — Lazy-Backfill (pHash, lokal, billig).
-let backfillRunning = false;
+// 2026-05-18: Lazy-Backfill jetzt direkt auf Embeddings — pHash entfernt.
+// Funktion bleibt als Einstiegspunkt damit der Aufrufer (loadProducts) keine
+// Aenderung braucht; sie delegiert direkt an backfillEmbeddings.
 function backfillImageHashes(products: Product[]): void {
-  if (backfillRunning) return;
-  const todo = products.filter(p => p.images.length > 0 && !p.imageHash);
-  if (todo.length === 0) {
-    // pHash done — Embedding-Backfill kann starten (separate Queue, langsamer).
-    backfillEmbeddings(products);
-    return;
-  }
-  backfillRunning = true;
-  let i = 0;
-  const BATCH = 5;
-  async function processBatch() {
-    const slice = todo.slice(i, i + BATCH);
-    for (const p of slice) {
-      try {
-        const hash = await computeImageHash(p.images[0]);
-        try {
-          getDatabase().run('UPDATE products SET image_hash = ? WHERE id = ?', [hash, p.id]);
-          trackUpdate('products', p.id, { imageHash: hash });
-          p.imageHash = hash;
-        } catch (err) { console.warn('[backfill] persist failed:', err); }
-      } catch { /* broken image → skip silently */ }
-    }
-    i += BATCH;
-    if (i < todo.length) {
-      setTimeout(processBatch, 50);
-    } else {
-      try { saveDatabase(); } catch { /* */ }
-      backfillRunning = false;
-      useProductStore.getState().loadProducts();
-    }
-  }
-  setTimeout(processBatch, 100);
+  backfillEmbeddings(products);
 }
 
 // Plan §AI-Embedding — Lazy-Backfill (Vision + Embedding API-Calls).
@@ -320,23 +292,11 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     trackInsert('products', id, { brand: product.brand, name: product.name, categoryId: product.categoryId, purchasePrice: product.purchasePrice });
     eventBus.emit('product.created', 'product', id, { brand: product.brand, name: product.name });
     get().loadProducts();
-    // pHash + AI-Embedding async im Hintergrund. Beide Fire-and-Forget, blocken
-    // den Speicher-Pfad nicht. pHash ist instant (~30ms), AI-Embedding nimmt
-    // 2-5s (Vision-Call + Embedding-Call) und kostet ~$0.001/Item.
+    // 2026-05-18: pHash entfernt — nur noch AI-Embedding wird async im Hintergrund
+    // berechnet (2-5s, ~$0.001/Item). Ohne API-Key wird nichts mehr berechnet;
+    // Duplicate-Detection greift dann nur auf SKU/Serial/Brand+Reference zurueck.
     if (product.images.length > 0) {
       const imgUrl = product.images[0];
-      computeImageHash(imgUrl)
-        .then(hash => {
-          try {
-            getDatabase().run('UPDATE products SET image_hash = ? WHERE id = ?', [hash, id]);
-            saveDatabase();
-            trackUpdate('products', id, { imageHash: hash });
-            get().loadProducts();
-          } catch (err) { console.warn('[productStore] image hash persist failed:', err); }
-        })
-        .catch(err => { console.warn('[productStore] image hash compute failed:', err); });
-      // AI-Embedding nur wenn API-Key konfiguriert ist; offline fällt das System
-      // auf den pHash zurück.
       if (isAiConfigured()) {
         computeImageEmbedding(imgUrl)
           .then(({ description, embedding }) => {
