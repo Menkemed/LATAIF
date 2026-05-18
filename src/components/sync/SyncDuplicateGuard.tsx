@@ -363,10 +363,76 @@ export function SyncDuplicateGuard() {
     setActionBusy(true);
     try {
       mergeIntoExisting(incoming.id, existing.id);
+      // Learning-Signal: User hat confirmed dass beide Items dasselbe sind.
+      // Das existing-Item wird die Canonical Reference — markieren als bestaetigt.
+      if (!existing.aiConfirmedAt) {
+        useProductStore.getState().updateProduct(existing.id, {
+          aiConfirmedAt: new Date().toISOString(),
+        } as Partial<Product>);
+      }
       dequeue();
     } catch (e) {
       console.error('[SyncDuplicateGuard] merge failed:', e);
       alert(`Merge fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  // Watch-spezifisch (2026-05-18): "Daten uebernehmen" statt qty++.
+  // Jede Uhr hat eigene Serial → physisch eigene Item — wir kopieren nur die
+  // Modell-Daten (brand/name/reference/attributes ohne serial) damit der
+  // neue Eintrag schon vollstaendig identifiziert ist. Beide Items werden als
+  // aiConfirmed markiert (positiver Lern-Signal: User hat bestaetigt dass die
+  // AI-Erkennung des Modells stimmt).
+  function copyDetailsFromExisting() {
+    if (!incoming || !existing) { dequeue(); return; }
+    setActionBusy(true);
+    try {
+      const sourceAttrs = (existing.attributes || {}) as Record<string, unknown>;
+      const copiedAttrs: Record<string, string | number | boolean | string[]> = {};
+      for (const [k, v] of Object.entries(sourceAttrs)) {
+        if (k === 'serial_number' || k === 'serialNo') continue; // unique per piece
+        if (v === null || v === undefined || v === '') continue;
+        copiedAttrs[k] = v as string | number | boolean | string[];
+      }
+      // User-typed Werte am incoming sind staerker — nicht ueberschreiben.
+      const incomingAttrs = (incoming.attributes || {}) as Record<string, string | number | boolean | string[]>;
+      const finalAttrs: Record<string, string | number | boolean | string[]> = { ...copiedAttrs };
+      for (const [k, v] of Object.entries(incomingAttrs)) {
+        if (v !== null && v !== undefined && v !== '') finalAttrs[k] = v;
+      }
+      // Serial bleibt explizit leer (User trags selbst nach beim individuellen Item).
+      delete finalAttrs.serial_number;
+      delete finalAttrs.serialNo;
+
+      const store = useProductStore.getState();
+      const skuSeed = existing.sku || buildFallbackSkuSeed(existing.brand, existing.categoryId);
+      const nextSku = store.nextAvailableSku(skuSeed);
+
+      store.updateProduct(incoming.id, {
+        brand: existing.brand,
+        name: existing.name,
+        sku: nextSku,
+        condition: incoming.condition || existing.condition,
+        taxScheme: existing.taxScheme,
+        scopeOfDelivery: incoming.scopeOfDelivery?.length ? incoming.scopeOfDelivery : existing.scopeOfDelivery,
+        plannedSalePrice: incoming.plannedSalePrice || existing.plannedSalePrice,
+        attributes: finalAttrs,
+        aiConfirmedAt: new Date().toISOString(),
+      } as Partial<Product>);
+
+      // Existing wird die Canonical-Reference fuer dieses Modell.
+      if (!existing.aiConfirmedAt) {
+        store.updateProduct(existing.id, {
+          aiConfirmedAt: new Date().toISOString(),
+        } as Partial<Product>);
+      }
+
+      dequeue();
+    } catch (e) {
+      console.error('[SyncDuplicateGuard] copy-details failed:', e);
+      alert(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setActionBusy(false);
     }
@@ -492,18 +558,34 @@ export function SyncDuplicateGuard() {
           ))}
         </div>
 
-        {/* Footer */}
-        <div className="flex justify-end gap-3" style={{
-          paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap',
-        }}>
-          <Button variant="ghost" onClick={openExisting}>Bestehenden öffnen</Button>
-          <Button variant="secondary" onClick={keepAsNew} disabled={actionBusy}>
-            Ablehnen — als neu behalten
-          </Button>
-          <Button variant="primary" onClick={confirmMerge} disabled={actionBusy}>
-            <Plus size={14} /> Bestätigen — Menge erhöhen ({newQty})
-          </Button>
-        </div>
+        {/* Footer — Watches haben "Daten uebernehmen" statt qty-Merge weil
+            jede Uhr ihre eigene Serial hat (physisch eigene Items). Andere
+            Kategorien (Gold/Accessory/etc.) behalten Menge-Merge. */}
+        {incoming.categoryId === 'cat-watch' ? (
+          <div className="flex justify-end gap-3" style={{
+            paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap',
+          }}>
+            <Button variant="ghost" onClick={openExisting}>Bestehenden öffnen</Button>
+            <Button variant="secondary" onClick={keepAsNew} disabled={actionBusy}>
+              Ablehnen — als neu behalten
+            </Button>
+            <Button variant="primary" onClick={copyDetailsFromExisting} disabled={actionBusy}>
+              <Plus size={14} /> Daten übernehmen (ohne Serial)
+            </Button>
+          </div>
+        ) : (
+          <div className="flex justify-end gap-3" style={{
+            paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap',
+          }}>
+            <Button variant="ghost" onClick={openExisting}>Bestehenden öffnen</Button>
+            <Button variant="secondary" onClick={keepAsNew} disabled={actionBusy}>
+              Ablehnen — als neu behalten
+            </Button>
+            <Button variant="primary" onClick={confirmMerge} disabled={actionBusy}>
+              <Plus size={14} /> Bestätigen — Menge erhöhen ({newQty})
+            </Button>
+          </div>
+        )}
       </div>
     </Modal>
   );
