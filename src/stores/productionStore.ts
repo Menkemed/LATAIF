@@ -130,7 +130,7 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
       input.inputProductIds
     );
     for (const r of inputRows) {
-      let attrs: Record<string, unknown> = {};
+      let attrs: Record<string, string | number | boolean | string[]> = {};
       let imgs: string[] = [];
       try { attrs = JSON.parse((r.attributes as string) || '{}'); } catch { /* */ }
       try { imgs = JSON.parse((r.images as string) || '[]'); } catch { /* */ }

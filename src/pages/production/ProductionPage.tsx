@@ -15,7 +15,7 @@ import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { useProductionStore } from '@/stores/productionStore';
 import { useProductStore } from '@/stores/productStore';
 import { Bhd } from '@/components/ui/Bhd';
-import { formatProductOneLine, getProductSpecs } from '@/core/utils/product-format';
+import { getProductSpecs } from '@/core/utils/product-format';
 import type { Product, Category } from '@/core/models/types';
 
 function fmt(v: number): string {
