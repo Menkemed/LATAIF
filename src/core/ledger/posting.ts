@@ -17,7 +17,7 @@
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
-import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource } from '@/core/models/types';
+import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
 import { canonicalLoanDirection } from '@/core/models/types';
 
 // ── Kontenrahmen (siehe ZIEL.md §3a) ──────────────────────────
@@ -78,7 +78,8 @@ export type SourceModule =
   | 'BANK_TRANSFER'
   | 'PARTNER_TX'
   | 'TAX_PAYMENT'
-  | 'STOCK_ADJUST';
+  | 'STOCK_ADJUST'
+  | 'SCRAP_TRADE';
 
 export type CounterpartyType =
   | 'CUSTOMER'
@@ -1631,4 +1632,104 @@ export function postConsignmentPayout(payout: ConsignmentPayoutLike): PostingRes
 
 export function postConsignmentPayoutReversed(payoutId: string): PostingResult {
   return reverseSource('CONSIGNMENT_PAYOUT', payoutId, new Date().toISOString());
+}
+
+// ── Scrap Gold Quick Trade ───────────────────────────────────
+//
+// Brutto-Booking mit Spread-Income: Echte Cash-Bewegungen pro Split
+// gehen ins Ledger, dazu nur der Spread als REVENUE (bzw. EXPENSES_OPERATING
+// bei Verlust). So sind reale Cash-Flows in Banking sichtbar, und der
+// Profit-Report sieht nur den Spread, nicht den vollen Sale Price.
+//
+// Beispiel: Purchase 200 cash + 300 benefit (= 500), Sale 300 cash + 600 bank (= 900)
+//   DEBIT  CASH    300   (sale-split 1: vom Buyer)
+//   DEBIT  BANK    600   (sale-split 2: vom Buyer)
+//   CREDIT CASH    200   (purchase-split 1: zum Seller)
+//   CREDIT BENEFIT 300   (purchase-split 2: zum Seller)
+//   CREDIT REVENUE 400   (Spread)
+//
+// Bei Verlust (z.B. Purchase 1000, Sale 950):
+//   DEBIT  cash[sale-splits]
+//   DEBIT  EXPENSES_OPERATING (|spread|)
+//   CREDIT cash[purchase-splits]
+//
+// Bei Zero-Spread: nur Cash-Verschiebung, keine REVENUE-Zeile.
+
+export interface ScrapPaymentSplit {
+  method: ScrapPaymentMethod;
+  amount: number;
+}
+
+export interface ScrapTradePostInput {
+  id: string;
+  tradeDate: string;
+  paymentsOut: ScrapPaymentSplit[];   // zum Seller (Purchase)
+  paymentsIn: ScrapPaymentSplit[];    // vom Buyer (Sale)
+}
+
+function scrapCashAccountFor(method: ScrapPaymentMethod): LedgerAccount {
+  if (method === 'cash') return 'CASH';
+  if (method === 'benefit') return 'BENEFIT';
+  return 'BANK';
+}
+
+export function postScrapTrade(trade: ScrapTradePostInput): PostingResult | null {
+  const sumIn = trade.paymentsIn.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const sumOut = trade.paymentsOut.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const spread = ROUND(sumIn - sumOut);
+
+  const entries: LedgerEntryInput[] = [];
+
+  // Cash-IN-Splits (vom Buyer → unsere Konten)
+  for (const split of trade.paymentsIn) {
+    const amt = ROUND(split.amount);
+    if (amt <= 0) continue;
+    entries.push({
+      account: scrapCashAccountFor(split.method),
+      direction: 'DEBIT',
+      amount: amt,
+      metadata: { scrapTradeId: trade.id, kind: 'sale_in', method: split.method },
+    });
+  }
+
+  // Cash-OUT-Splits (zum Seller → aus unseren Konten)
+  for (const split of trade.paymentsOut) {
+    const amt = ROUND(split.amount);
+    if (amt <= 0) continue;
+    entries.push({
+      account: scrapCashAccountFor(split.method),
+      direction: 'CREDIT',
+      amount: amt,
+      metadata: { scrapTradeId: trade.id, kind: 'purchase_out', method: split.method },
+    });
+  }
+
+  // Spread als REVENUE (gain) bzw. EXPENSES_OPERATING (loss)
+  if (spread > EPSILON) {
+    entries.push({
+      account: 'REVENUE',
+      direction: 'CREDIT',
+      amount: spread,
+      metadata: { scrapTradeId: trade.id, kind: 'spread_income' },
+    });
+  } else if (spread < -EPSILON) {
+    entries.push({
+      account: 'EXPENSES_OPERATING',
+      direction: 'DEBIT',
+      amount: -spread,
+      metadata: { scrapTradeId: trade.id, kind: 'spread_loss' },
+    });
+  }
+
+  if (entries.length === 0) return null;
+
+  return postEntries(entries, {
+    occurredAt: trade.tradeDate,
+    sourceModule: 'SCRAP_TRADE',
+    sourceId: trade.id,
+  });
+}
+
+export function postScrapTradeReversed(tradeId: string): PostingResult {
+  return reverseSource('SCRAP_TRADE', tradeId, new Date().toISOString());
 }

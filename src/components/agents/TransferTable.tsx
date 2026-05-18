@@ -350,23 +350,30 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
         const outstanding = Math.max(0, amount - paid);
         const date = (t.transferredAt || t.createdAt || '').split('T')[0];
         const docLabel = linkedInvoice ? `${t.transferNumber} → ${formatInvoiceDisplayShort(linkedInvoice)}` : t.transferNumber;
+        const openTarget = `/transfers/${t.id}`;
         const eligible = isEligibleForBulk(t);
         const checked = validSelectedIds.has(t.id);
         return (
-          <div key={t.id} style={{
-            display: 'grid', gridTemplateColumns: gridCols,
-            gap: 12, padding: '12px', alignItems: 'center', borderBottom: '1px solid rgba(229,225,214,0.6)',
-            background: checked ? 'rgba(113,93,227,0.04)' : 'transparent',
-          }}>
-            <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <ClickableTransferRow
+            key={t.id}
+            onOpen={() => navigate(openTarget)}
+            checked={checked}
+            gridCols={gridCols}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              onClick={e => e.stopPropagation()}>
               {eligible ? (
                 <input type="checkbox" checked={checked} onChange={() => toggleSelect(t.id)}
+                  onClick={e => e.stopPropagation()}
                   title="Select for combined invoice"
                   style={{ cursor: 'pointer', width: 16, height: 16, accentColor: '#715DE3' }} />
               ) : null}
             </span>
             <span style={{ fontSize: 11, color: '#6B7280' }}>{date || '—'}</span>
-            <span className="font-mono" style={{ fontSize: 11, color: '#4B5563' }}>{docLabel}</span>
+            <span className="font-mono" style={{ fontSize: 11, color: '#715DE3', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+              title={`Open ${linkedInvoice ? 'invoice' : 'approval'}`}>
+              {docLabel}
+            </span>
             {showAgentColumn && (
               <span style={{ fontSize: 12, color: '#0F0F10' }}>{agent?.name || '—'}</span>
             )}
@@ -378,7 +385,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             <span className="font-mono" style={{ fontSize: 12, color: paid > 0 ? '#7EAA6E' : '#6B7280' }}><Bhd v={paid}/></span>
             <span className="font-mono" style={{ fontSize: 12, color: outstanding > 0 ? '#AA6E6E' : '#6B7280' }}><Bhd v={outstanding}/></span>
             <StatusDot status={deriveTransferDisplayStatus(t, linkedInvoice)} />
-            <div className="flex gap-1 flex-wrap">
+            <div className="flex gap-1 flex-wrap" onClick={e => e.stopPropagation()}>
               {t.status === 'transferred' && (
                 <>
                   <button onClick={() => { setSoldModal(t.id); setSoldPrice(t.agentPrice); }}
@@ -427,7 +434,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                 History
               </button>
             </div>
-          </div>
+          </ClickableTransferRow>
         );
       })}
 
@@ -676,6 +683,41 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
         entityId={historyTransferId || ''}
         title="Transfer History"
       />
+    </div>
+  );
+}
+
+// ── Klickbare Transfer-Zeile (Pattern wie ProductionRow) ────────────
+// 2026-05-18: User-Spec — die ganze Zeile soll klickbar sein. Inhalte
+// (Checkbox + Action-Buttons) stoppen propagation, damit Klicks dort die
+// Zeile nicht oeffnen. Hover-Background gibt visuelles Feedback.
+
+function ClickableTransferRow({
+  onOpen, checked, gridCols, children,
+}: {
+  onOpen: () => void;
+  checked: boolean;
+  gridCols: string;
+  children: React.ReactNode;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onClick={onOpen}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'grid',
+        gridTemplateColumns: gridCols,
+        gap: 12, padding: '12px', alignItems: 'center',
+        borderBottom: '1px solid rgba(229,225,214,0.6)',
+        cursor: 'pointer',
+        background: checked
+          ? 'rgba(113,93,227,0.04)'
+          : hovered ? '#F8FAFB' : 'transparent',
+      }}
+    >
+      {children}
     </div>
   );
 }

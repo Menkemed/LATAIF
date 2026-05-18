@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle, ChevronDown, BarChart3, PieChart, Receipt } from 'lucide-react';
+import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle, ChevronDown, BarChart3, PieChart, Receipt, Factory } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { Button } from '@/components/ui/Button';
@@ -71,7 +71,7 @@ export function ProductDetail() {
     // Lot-Bestand konzeptionell ungültig (Daten-Inkonsistenz möglich). Die Card
     // wird ausgeblendet, damit kein "Available"-Badge bei verkauften Items steht.
     const p = products.find(pp => pp.id === id);
-    if (p && ['sold', 'reserved', 'consignment_reserved'].includes(p.stockStatus)) {
+    if (p && ['sold', 'reserved', 'consignment_reserved', 'consumed'].includes(p.stockStatus)) {
       return [];
     }
     return lots;
@@ -171,6 +171,105 @@ export function ProductDetail() {
     // Dep auf `purchases` damit Status-Updates (UNPAID→PAID via recordPayment)
     // den re-query triggern und die Zeile in der Tabelle aktualisieren.
   }, [id, purchases]);
+
+  // Production-History (2026-05-18): Jedes Produkt — egal ob Input oder Output —
+  // soll zeigen welche PRD-Records es beruehren. Wir bauen pro PRD eine Zeile,
+  // teilen direction = 'input' (konsumiert) oder 'output' (entstanden aus), und
+  // listen die "andere Seite" (bei input: erzeugte Outputs, bei output: konsumierte
+  // Inputs) als Mini-Liste.
+  const productionHistory = useMemo(() => {
+    if (!id) return [] as Array<{
+      recordId: string; recordNumber: string; productionDate: string;
+      direction: 'input' | 'output';
+      value: number;                                    // input_value bzw. output_value dieser Zeile
+      counterpart: Array<{ productId: string; label: string; value: number }>;
+    }>;
+    const out: Array<{
+      recordId: string; recordNumber: string; productionDate: string;
+      direction: 'input' | 'output'; value: number;
+      counterpart: Array<{ productId: string; label: string; value: number }>;
+    }> = [];
+
+    // INPUT-Seite: dieses Produkt wurde in PRD X konsumiert.
+    const inputRows = query(
+      `SELECT pi.record_id, pi.input_value,
+              pr.record_number, pr.production_date
+         FROM production_inputs pi
+         JOIN production_records pr ON pr.id = pi.record_id
+        WHERE pi.product_id = ?
+        ORDER BY pr.production_date DESC, pr.created_at DESC`,
+      [id]
+    );
+    for (const r of inputRows) {
+      const recId = r.record_id as string;
+      // Gegenstuecke = die Outputs des selben Records
+      const counterRows = query(
+        `SELECT po.product_id, po.output_value, p.brand, p.name
+           FROM production_outputs po
+           LEFT JOIN products p ON p.id = po.product_id
+          WHERE po.record_id = ?`,
+        [recId]
+      );
+      out.push({
+        recordId: recId,
+        recordNumber: (r.record_number as string) || '—',
+        productionDate: (r.production_date as string) || '',
+        direction: 'input',
+        value: Number(r.input_value) || 0,
+        counterpart: counterRows.map(cr => ({
+          productId: (cr.product_id as string) || '',
+          label: [cr.brand, cr.name].filter(Boolean).join(' ').trim() || '(deleted)',
+          value: Number(cr.output_value) || 0,
+        })),
+      });
+    }
+
+    // OUTPUT-Seite: dieses Produkt ist in PRD X entstanden.
+    const outputRows = query(
+      `SELECT po.record_id, po.output_value,
+              pr.record_number, pr.production_date
+         FROM production_outputs po
+         JOIN production_records pr ON pr.id = po.record_id
+        WHERE po.product_id = ?
+        ORDER BY pr.production_date DESC, pr.created_at DESC`,
+      [id]
+    );
+    for (const r of outputRows) {
+      const recId = r.record_id as string;
+      // Gegenstuecke = die Inputs des selben Records (mit Snapshot-Fallback)
+      const counterRows = query(
+        `SELECT pi.product_id, pi.input_value, pi.product_snapshot, p.brand, p.name
+           FROM production_inputs pi
+           LEFT JOIN products p ON p.id = pi.product_id
+          WHERE pi.record_id = ?`,
+        [recId]
+      );
+      out.push({
+        recordId: recId,
+        recordNumber: (r.record_number as string) || '—',
+        productionDate: (r.production_date as string) || '',
+        direction: 'output',
+        value: Number(r.output_value) || 0,
+        counterpart: counterRows.map(cr => {
+          let label = [cr.brand, cr.name].filter(Boolean).join(' ').trim();
+          if (!label && cr.product_snapshot) {
+            try {
+              const s = JSON.parse(cr.product_snapshot as string);
+              label = [s.brand, s.name].filter(Boolean).join(' ').trim();
+            } catch { /* */ }
+          }
+          return {
+            productId: (cr.product_id as string) || '',
+            label: label || '(deleted)',
+            value: Number(cr.input_value) || 0,
+          };
+        }),
+      });
+    }
+
+    // Neueste zuerst
+    return out.sort((a, b) => (b.productionDate || '').localeCompare(a.productionDate || ''));
+  }, [id, products]);
 
   // Provenance-Fallback: products.supplier_name / paid_from sind Legacy-Spalten,
   // die nur beim INITIAL anlegen via "New Item"-Form gesetzt werden. Wird das
@@ -936,6 +1035,89 @@ export function ProductDetail() {
             </div>
             <div style={{ padding: '6px 14px', fontSize: 10, color: '#9CA3AF', textAlign: 'center', borderTop: '1px solid #F3F4F6', background: '#FAFBFC' }}>
               {productPurchases.length} purchase{productPurchases.length === 1 ? '' : 's'}
+            </div>
+          </Card>
+        )}
+
+        {/* Production-History — 2026-05-18: Input-Produkte (status=consumed) sowie
+            aus PRD entstandene Output-Produkte zeigen hier ihre PRD-Beteiligung.
+            Direction=input → "Consumed in PRD-X (→ produced Y, Z)".
+            Direction=output → "Created from PRD-X (← used input A, B)". */}
+        {!editing && productionHistory.length > 0 && (
+          <Card style={{ marginBottom: 32, padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '10px 14px', borderBottom: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ width: 22, height: 22, borderRadius: 6, background: '#FEF3C7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Factory size={12} color="#92400E" />
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Production History</span>
+              <span style={{ fontSize: 11, color: '#9CA3AF' }}>({productionHistory.length})</span>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: '#FAFBFC' }}>
+                    <th style={{ textAlign: 'left', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Record</th>
+                    <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Date</th>
+                    <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Role</th>
+                    <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Counterpart</th>
+                    <th style={{ textAlign: 'right', padding: '7px 14px', fontSize: 10, fontWeight: 500, color: '#6B7280', letterSpacing: '0.04em' }}>Value (BHD)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productionHistory.map((row, idx) => {
+                    const isInput = row.direction === 'input';
+                    const roleMeta = isInput
+                      ? { label: 'Consumed',  bg: '#FEF3C7', fg: '#92400E', border: '#FCD34D', prefix: '→' }
+                      : { label: 'Created',   bg: '#ECFDF5', fg: '#047857', border: '#A7F3D0', prefix: '←' };
+                    const dateOnly = row.productionDate ? row.productionDate.split('T')[0] : '—';
+                    return (
+                      <tr key={`${row.recordId}-${row.direction}-${idx}`}
+                        onClick={() => navigate(`/production/${row.recordId}`)}
+                        title={`Open production ${row.recordNumber}`}
+                        style={{ borderTop: '1px solid #F3F4F6', cursor: 'pointer', transition: 'background 0.12s' }}
+                        onMouseEnter={e => { e.currentTarget.style.background = '#FAFBFC'; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+                        <td style={{ padding: '8px 14px', color: '#92400E', fontFamily: 'monospace', fontSize: 11 }}>{row.recordNumber}</td>
+                        <td style={{ padding: '8px 10px', color: '#4B5563' }}>{dateOnly}</td>
+                        <td style={{ padding: '8px 10px' }}>
+                          <span style={{
+                            display: 'inline-block', padding: '2px 8px',
+                            fontSize: 10, fontWeight: 500, borderRadius: 999,
+                            background: roleMeta.bg, color: roleMeta.fg, border: `1px solid ${roleMeta.border}`,
+                          }}>{roleMeta.label}</span>
+                        </td>
+                        <td style={{ padding: '8px 10px', color: '#0F0F10', maxWidth: 320 }}>
+                          {row.counterpart.length === 0 ? (
+                            <span style={{ color: '#9CA3AF' }}>—</span>
+                          ) : (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              {row.counterpart.map((c, i) => (
+                                <span
+                                  key={i}
+                                  onClick={e => { if (c.productId) { e.stopPropagation(); navigate(`/collection/${c.productId}`); } }}
+                                  style={{
+                                    fontSize: 11, padding: '2px 8px', borderRadius: 999,
+                                    background: '#F2F7FA', color: '#4B5563', border: '1px solid #E5E9EE',
+                                    cursor: c.productId ? 'pointer' : 'default',
+                                  }}
+                                  title={c.productId ? 'Open product' : 'Counterpart product is no longer available'}
+                                >
+                                  <span style={{ color: '#9CA3AF', marginRight: 4 }}>{roleMeta.prefix}</span>
+                                  {c.label}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ padding: '8px 14px', textAlign: 'right', color: '#0F0F10', fontFamily: 'monospace' }}>{fmt(row.value)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ padding: '6px 14px', fontSize: 10, color: '#9CA3AF', textAlign: 'center', borderTop: '1px solid #F3F4F6', background: '#FAFBFC' }}>
+              {productionHistory.length} production record{productionHistory.length === 1 ? '' : 's'}
             </div>
           </Card>
         )}

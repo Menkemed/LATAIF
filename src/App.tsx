@@ -13,10 +13,15 @@ import { InvoiceCreate } from '@/pages/invoices/InvoiceCreate';
 import { InvoiceDetail } from '@/pages/invoices/InvoiceDetail';
 import { RepairList } from '@/pages/repairs/RepairList';
 import { RepairDetail } from '@/pages/repairs/RepairDetail';
+import { ScrapTradeList } from '@/pages/scrap-trades/ScrapTradeList';
+import { ScrapTradeNew } from '@/pages/scrap-trades/ScrapTradeNew';
+import { ScrapTradeDetail } from '@/pages/scrap-trades/ScrapTradeDetail';
 import { ConsignmentList } from '@/pages/consignments/ConsignmentList';
 import { ConsignmentDetail } from '@/pages/consignments/ConsignmentDetail';
+import { ConsignorDetail } from '@/pages/consignors/ConsignorDetail';
 import { AgentList } from '@/pages/agents/AgentList';
 import { AgentDetail } from '@/pages/agents/AgentDetail';
+import { TransferDetail } from '@/pages/agents/TransferDetail';
 import { MetalList } from '@/pages/metals/MetalList';
 import { OrderList } from '@/pages/orders/OrderList';
 import { OrderCreate } from '@/pages/orders/OrderCreate';
@@ -41,6 +46,7 @@ import { PurchaseDetail } from '@/pages/purchases/PurchaseDetail';
 import { BankingPage } from '@/pages/banking/BankingPage';
 import { PartnersPage } from '@/pages/partners/PartnersPage';
 import { ProductionPage } from '@/pages/production/ProductionPage';
+import { ProductionDetail } from '@/pages/production/ProductionDetail';
 import { BusinessReportsPage } from '@/pages/reports/BusinessReportsPage';
 import { ReconciliationPage } from '@/pages/reports/ReconciliationPage';
 import { BackfillPage } from '@/pages/reports/BackfillPage';
@@ -213,10 +219,15 @@ export default function App() {
           <Route path="/invoices/:id" element={<InvoiceDetail />} />
           <Route path="/repairs" element={<RepairList />} />
           <Route path="/repairs/:id" element={<RepairDetail />} />
+          <Route path="/scrap-trades" element={<ScrapTradeList />} />
+          <Route path="/scrap-trades/new" element={<ScrapTradeNew />} />
+          <Route path="/scrap-trades/:id" element={<ScrapTradeDetail />} />
           <Route path="/consignments" element={<ConsignmentList />} />
           <Route path="/consignments/:id" element={<ConsignmentDetail />} />
+          <Route path="/consignors/:id" element={<ConsignorDetail />} />
           <Route path="/agents" element={<AgentList />} />
           <Route path="/agents/:id" element={<AgentDetail />} />
+          <Route path="/transfers/:id" element={<TransferDetail />} />
           <Route path="/metals" element={<MetalList />} />
           <Route path="/orders" element={<OrderList />} />
           <Route path="/orders/new" element={<OrderCreate />} />
@@ -238,6 +249,7 @@ export default function App() {
           <Route path="/banking" element={<BankingPage />} />
           <Route path="/partners" element={<PartnersPage />} />
           <Route path="/production" element={<ProductionPage />} />
+          <Route path="/production/:id" element={<ProductionDetail />} />
           <Route path="/business-reports" element={<BusinessReportsPage />} />
           <Route path="/reconciliation" element={<ReconciliationPage />} />
           <Route path="/ledger-backfill" element={<BackfillPage />} />

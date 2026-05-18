@@ -540,6 +540,37 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       });
     }
 
+    // Scrap Gold Trade Payments — Split-Payments pro Trade. Jeder OUT-Split
+    // wird zu PURCHASE_OUT (Geld an Seller), jeder IN-Split zu SALES_IN
+    // (Geld vom Buyer). Excluded: cancelled trades.
+    const scrapPay = safeQuery('scrap_trade_payments',
+      `SELECT stp.id, stp.scrap_trade_id, stp.direction, stp.method, stp.amount, stp.created_at,
+              st.trade_number, st.trade_date, st.seller_name, st.buyer_name, st.status
+         FROM scrap_trade_payments stp
+         JOIN scrap_trades st ON st.id = stp.scrap_trade_id
+        WHERE st.branch_id = ? AND st.status != 'cancelled'`,
+      [branchId]
+    );
+    for (const p of scrapPay) {
+      const isOut = (p.direction as string) === 'OUT';
+      const counterparty = isOut ? (p.seller_name as string) : (p.buyer_name as string);
+      const date = (p.trade_date as string) || '';
+      txs.push({
+        id: `sgt-${p.id}`,
+        date,
+        createdAt: (p.created_at as string) || date,
+        type: isOut ? 'PURCHASE_OUT' : 'SALES_IN',
+        account: accountFor(p.method as string),
+        amount: (p.amount as number) || 0,
+        flow: isOut ? 'out' : 'in',
+        relatedModule: 'scrap_trade',
+        relatedEntityId: p.scrap_trade_id as string,
+        description: isOut
+          ? `Scrap purchase · ${p.trade_number || ''} · ${counterparty || ''}`
+          : `Scrap sale · ${p.trade_number || ''} · ${counterparty || ''}`,
+      });
+    }
+
     // Sort: primär nach Datum (neueste zuerst), sekundär nach Insert-Timestamp.
     // Fix 2026-05: date-Felder kommen aus verschiedenen DB-Spalten — manche sind
     // YYYY-MM-DD, manche voller ISO-String. Beim String-Compare würde '2026-05-06'

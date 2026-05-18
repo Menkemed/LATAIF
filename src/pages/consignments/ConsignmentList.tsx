@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { FileText } from 'lucide-react';
+import { FileText, Printer } from 'lucide-react';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -14,6 +14,9 @@ import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
+import { PrintItemsFilterModal } from '@/components/print/PrintItemsFilterModal';
+import { runConsignmentPrint } from '@/core/pdf/consignment-print-helpers';
+import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
@@ -49,7 +52,11 @@ export function ConsignmentList() {
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('');
+  // 2026-05-18: Approval-Style 2-Tab-Layout. 'consignors' zeigt Cards pro
+  // Customer mit aggregierten KPIs; 'items' bleibt die flache Tabelle wie zuvor.
+  const [tab, setTab] = useState<'consignors' | 'items'>('consignors');
   const [showNew, setShowNew] = useState(false);
+  const [showPrintAll, setShowPrintAll] = useState(false);
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   // Plan 2026-05 §Consignment-Refactor: nur noch 2 Modelle.
   //  'percent'           — Commission % to us
@@ -152,6 +159,60 @@ export function ConsignmentList() {
   const outstandingCount = useMemo(() =>
     consignments.filter(c => c.status === 'sold' && c.payoutStatus !== 'paid').length
   , [consignments]);
+
+  // 2026-05-18: Aggregat pro Consignor (Customer-Id). Zeigt fuer jede Person mit
+  // mind. einem Consignment Items-Held / Total Agreed / Total Sold / Outstanding.
+  // Status-Filter (Tab-Pills) wirkt hier nicht — die Cards listen *alle* Consignors
+  // unabhaengig vom gewaehlten Status-Pill. Search wirkt aber: matched gegen
+  // Consignor-Name (FN/LN/Company) + Items des Consignors.
+  type ConsignorAgg = {
+    customerId: string;
+    customer?: { firstName: string; lastName: string; company?: string; phone?: string; email?: string };
+    items: number;
+    agreed: number;
+    sold: number;
+    outstanding: number;
+    total: number;
+  };
+  const consignorAggregates = useMemo<ConsignorAgg[]>(() => {
+    const byId = new Map<string, ConsignorAgg>();
+    for (const c of consignments) {
+      const cid = c.consignorId;
+      let acc = byId.get(cid);
+      if (!acc) {
+        const cust = customers.find(cu => cu.id === cid);
+        acc = {
+          customerId: cid,
+          customer: cust ? { firstName: cust.firstName, lastName: cust.lastName, company: cust.company, phone: cust.phone, email: cust.email } : undefined,
+          items: 0, agreed: 0, sold: 0, outstanding: 0, total: 0,
+        };
+        byId.set(cid, acc);
+      }
+      acc.total++;
+      if (c.status === 'active') {
+        acc.items++;
+        acc.agreed += c.agreedPrice || 0;
+      }
+      if (c.status === 'sold') {
+        acc.sold += (c.salePrice ?? c.agreedPrice) || 0;
+        if (c.payoutStatus !== 'paid') {
+          acc.outstanding += c.payoutAmount || 0;
+        }
+      }
+    }
+    const list = Array.from(byId.values());
+    // Sortierung: aktive Items first, dann Total
+    list.sort((a, b) => (b.items - a.items) || (b.total - a.total));
+    // Search-Filter applied auf Consignor-Cards
+    const q = search.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(a => {
+      const name = a.customer ? `${a.customer.firstName} ${a.customer.lastName}`.toLowerCase() : '';
+      const comp = (a.customer?.company || '').toLowerCase();
+      const phone = (a.customer?.phone || '').toLowerCase();
+      return name.includes(q) || comp.includes(q) || phone.includes(q);
+    });
+  }, [consignments, customers, search]);
 
 
   // Live calculation (Vorschau bei Verkauf zum Agreed Price)
@@ -379,19 +440,26 @@ export function ConsignmentList() {
       showSearch onSearch={setSearch} searchPlaceholder="Search by number, consignor, product..."
       actions={
         <div className="flex items-center gap-3">
-          <StaffFilterPill />
-          <div className="flex gap-1" style={{ marginRight: 4 }}>
-            {statusFilters.map(sf => (
-              <button key={sf.value} onClick={() => setStatusFilter(sf.value)}
-                className="cursor-pointer transition-all duration-200"
-                style={{
-                  padding: '6px 12px', borderRadius: 999, fontSize: 12,
-                  border: `1px solid ${statusFilter === sf.value ? '#0F0F10' : 'transparent'}`,
-                  color: statusFilter === sf.value ? '#0F0F10' : '#6B7280',
-                  background: statusFilter === sf.value ? 'rgba(15,15,16,0.06)' : 'transparent',
-                }}>{sf.label}</button>
-            ))}
-          </div>
+          {tab === 'items' && <StaffFilterPill />}
+          {tab === 'items' && (
+            <div className="flex gap-1" style={{ marginRight: 4 }}>
+              {statusFilters.map(sf => (
+                <button key={sf.value} onClick={() => setStatusFilter(sf.value)}
+                  className="cursor-pointer transition-all duration-200"
+                  style={{
+                    padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                    border: `1px solid ${statusFilter === sf.value ? '#0F0F10' : 'transparent'}`,
+                    color: statusFilter === sf.value ? '#0F0F10' : '#6B7280',
+                    background: statusFilter === sf.value ? 'rgba(15,15,16,0.06)' : 'transparent',
+                  }}>{sf.label}</button>
+              ))}
+            </div>
+          )}
+          {tab === 'consignors' && (
+            <Button variant="ghost" onClick={() => setShowPrintAll(true)}>
+              <Printer size={14} /> Print All
+            </Button>
+          )}
           <Button variant="primary" onClick={openNew}>New Consignment</Button>
         </div>
       }
@@ -410,14 +478,81 @@ export function ConsignmentList() {
               <Bhd v={outstandingPayouts}/> BHD <span style={{ fontSize: 12, color: '#6B7280', fontWeight: 400 }}>· {outstandingCount} consignment{outstandingCount > 1 ? 's' : ''} sold, not yet paid out</span>
             </div>
           </div>
-          <button onClick={() => setStatusFilter('sold')} className="cursor-pointer"
+          <button onClick={() => { setTab('items'); setStatusFilter('sold'); }} className="cursor-pointer"
             style={{ fontSize: 12, padding: '6px 12px', borderRadius: 8, border: '1px solid #AA6E6E', background: 'transparent', color: '#AA6E6E' }}>
             View sold
           </button>
         </div>
       )}
 
-      {filtered.length === 0 ? (
+      {/* Tab Bar — Approval-Style: Consignors-Cards vs flache Items-Liste */}
+      <div className="flex gap-1" style={{ marginBottom: 24 }}>
+        {(['consignors', 'items'] as const).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className="cursor-pointer transition-all duration-200"
+            style={{
+              padding: '8px 20px', fontSize: 13, borderRadius: 6,
+              border: 'none', background: tab === t ? '#E5E9EE' : 'transparent',
+              color: tab === t ? '#0F0F10' : '#6B7280',
+            }}>{t === 'consignors' ? `Consignors (${consignorAggregates.length})` : `Items (${consignments.length})`}</button>
+        ))}
+      </div>
+
+      {tab === 'consignors' ? (
+        consignorAggregates.length === 0 ? (
+          <div style={{ padding: '80px 0', textAlign: 'center' }}>
+            <FileText size={40} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 16px' }} />
+            <p style={{ fontSize: 14, color: '#6B7280' }}>
+              {search ? 'No consignors match your search.' : 'No consignors yet.'}
+            </p>
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20 }}>
+            {consignorAggregates.map(agg => {
+              const fullName = agg.customer
+                ? `${agg.customer.firstName} ${agg.customer.lastName}`.trim() || '(unnamed)'
+                : '(deleted customer)';
+              const isActive = agg.items > 0;
+              return (
+                <Card key={agg.customerId} hoverable onClick={() => navigate(`/consignors/${agg.customerId}`)}>
+                  <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+                    <h3 style={{ fontSize: 16, color: '#0F0F10', fontWeight: 500 }}>{fullName}</h3>
+                    <span style={{ fontSize: 12, color: isActive ? '#7EAA6E' : '#6B7280' }}>
+                      {isActive ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  {agg.customer?.company && <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>{agg.customer.company}</p>}
+                  {agg.customer?.phone && <p style={{ fontSize: 12, color: '#4B5563', marginBottom: 4 }}>{agg.customer.phone}</p>}
+                  <div style={{ borderTop: '1px solid #E5E9EE', marginTop: 12, paddingTop: 12 }}>
+                    <div className="flex justify-between" style={{ fontSize: 12, marginBottom: 4 }}>
+                      <span style={{ color: '#6B7280' }}>Items Held</span>
+                      <span style={{ color: '#0F0F10' }}>{agg.items}</span>
+                    </div>
+                    <div className="flex justify-between" style={{ fontSize: 12 }}>
+                      <span style={{ color: '#6B7280' }}>Total Consignments</span>
+                      <span style={{ color: '#0F0F10' }}>{agg.total}</span>
+                    </div>
+                  </div>
+                  <div style={{ borderTop: '1px solid #E5E9EE', marginTop: 10, paddingTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Agreed Value</div>
+                      <div className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={agg.agreed}/> BHD</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Sold Value</div>
+                      <div className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={agg.sold}/> BHD</div>
+                    </div>
+                    <div style={{ gridColumn: '1 / -1' }}>
+                      <div style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Outstanding Payout</div>
+                      <div className="font-mono" style={{ fontSize: 13, color: agg.outstanding > 0 ? '#AA6E6E' : '#6B7280' }}><Bhd v={agg.outstanding}/> BHD</div>
+                    </div>
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        )
+      ) : filtered.length === 0 ? (
         <div style={{ padding: '80px 0', textAlign: 'center' }}>
           <FileText size={40} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 16px' }} />
           <p style={{ fontSize: 14, color: '#6B7280' }}>
@@ -457,7 +592,23 @@ export function ConsignmentList() {
                       <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{con.consignmentNumber}</span>
                     </td>
                     <td style={{ padding: '14px 18px' }}>
-                      <span style={{ fontSize: 13, color: '#0F0F10' }}>{custName}</span>
+                      {cust ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); navigate(`/consignors/${cust.id}`); }}
+                          title="Open consignor profile"
+                          className="cursor-pointer"
+                          style={{
+                            background: 'none', border: 'none', padding: 0,
+                            color: '#715DE3', fontSize: 13,
+                            textDecoration: 'underline', textDecorationStyle: 'dotted',
+                            textUnderlineOffset: 2, textAlign: 'left',
+                          }}
+                        >
+                          {custName}
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: 13, color: '#9CA3AF' }}>{custName}</span>
+                      )}
                     </td>
                     <td style={{ padding: '14px 18px' }}>
                       <div>
@@ -1093,6 +1244,26 @@ export function ConsignmentList() {
         open={showQuickBuyer}
         onClose={() => setShowQuickBuyer(false)}
         onCreated={(id) => { loadCustomers(); setSoldBuyerId(id); }}
+      />
+
+      <PrintItemsFilterModal
+        open={showPrintAll}
+        onClose={() => setShowPrintAll(false)}
+        kind="consignment"
+        scope="all"
+        contextLabel={`${consignorAggregates.length} consignor${consignorAggregates.length === 1 ? '' : 's'}`}
+        onConfirm={(filter: ItemListFilter) => {
+          const involvedConsignorIds = new Set(consignments.map(c => c.consignorId));
+          const consignors = customers.filter(c => involvedConsignorIds.has(c.id));
+          runConsignmentPrint({
+            filter,
+            scope: 'aggregate',
+            consignors,
+            consignments,
+            products,
+            categories,
+          });
+        }}
       />
 
       {/* ── Mark Paid Out Modal ── */}

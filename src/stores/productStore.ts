@@ -6,7 +6,7 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getStockAggregates } from '@/core/lots/lot-queries';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { computeImageHash, hashDistance, HASH_IDENTICAL_THRESHOLD, HASH_SIMILAR_THRESHOLD } from '@/core/utils/image-hash';
+import { computeImageHash } from '@/core/utils/image-hash';
 import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
 
 interface ProductStore {
@@ -46,7 +46,7 @@ interface ProductStore {
     candidate: Partial<Product>,
     excludeProductId?: string,
     options?: { mode?: 'all' | 'image-only' },
-  ) => Array<{ product: Product; score: number; reasons: string[] }>;
+  ) => Array<{ product: Product; score: number; reasons: string[]; matchClass: 'STRONG' | 'POSSIBLE' }>;
   /**
    * Plan §Sync-Duplicate: vereinigt zwei Produkte. Übernimmt qty von Source ins
    * Target, kopiert Source-Bild falls Target noch keins hat, löscht Source.
@@ -670,6 +670,26 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   //   • Brand-only                               → schwach (10)
   // Threshold zum Anzeigen: ≥40.
   findPossibleDuplicates: (candidate, excludeProductId, options) => {
+    // 2026-05-18 — Rewrite: pHash entfernt (User-Spec), strengere Schwellen,
+    // STRONG/POSSIBLE Match-Klassen damit Cluster nur via verlaesslicher Signale
+    // gebildet werden und schwache Hinweise nicht transitiv zusammenketten.
+    //
+    // Score-Klassen:
+    //   STRONG  (>=80) → sicheres Duplikat → bildet Cluster
+    //   POSSIBLE (60-79) → moeglich → nur Hinweis, kein Cluster
+    //   alles unter 60 → ignoriert
+    //
+    // Was zaehlt:
+    //   Same SKU                                              → 100 STRONG
+    //   Same Serial Number                                    → 100 STRONG
+    //   Same Reference Number + Same Brand                    →  90 STRONG
+    //   Same Model Number + Same Brand                        →  90 STRONG
+    //   AI-Embedding Cosine >= 0.88                            → 100 STRONG
+    //   Same Brand + Same Name (exact, beide >= 3 Zeichen)    →  60 POSSIBLE
+    //   AI-Embedding Cosine 0.80..0.87                         →  60 POSSIBLE
+    //   Gold-Fingerprint (weight+karat+itemType+category)     →  70 POSSIBLE
+    //   ───── alles andere wird ignoriert (pHash, Brand-only,
+    //         Fuzzy-Name, Reference ohne Brand-Match, ...)
     const mode = options?.mode || 'all';
     const norm = (v: unknown) => String(v ?? '').trim().toUpperCase();
     const cSku = norm(candidate.sku);
@@ -684,37 +704,18 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const cKarat = norm(cAttrs.karat);
     const cItemType = norm(cAttrs.item_type);
 
-    // Liefert nur einen Wert für den Kandidaten zurück, wenn er nicht leer ist —
-    // damit "leer == leer" nicht fälschlich als Match gewertet wird.
     const hasSku = !!cSku;
     const hasSerial = !!cSerial;
     const hasRef = !!cRef;
     const hasBrand = !!cBrand;
-    const hasName = !!cName;
+    const hasName = !!cName && cName.length >= 3;
     const hasModelNo = !!cModelNo;
     const hasGoldFingerprint = cWeight > 0 && !!cKarat && !!cItemType;
 
-    // Levenshtein für fuzzy Brand+Name-Match.
-    function lev(a: string, b: string): number {
-      if (a === b) return 0;
-      if (!a.length) return b.length;
-      if (!b.length) return a.length;
-      const m = a.length, n = b.length;
-      const dp = new Array(n + 1).fill(0).map((_, i) => i);
-      for (let i = 1; i <= m; i++) {
-        let prev = dp[0]; dp[0] = i;
-        for (let j = 1; j <= n; j++) {
-          const tmp = dp[j];
-          dp[j] = a[i - 1] === b[j - 1]
-            ? prev
-            : 1 + Math.min(prev, dp[j], dp[j - 1]);
-          prev = tmp;
-        }
-      }
-      return dp[n];
-    }
+    const POSSIBLE_THRESHOLD = 60;
+    const STRONG_THRESHOLD = 80;
 
-    const results: Array<{ product: Product; score: number; reasons: string[] }> = [];
+    const results: Array<{ product: Product; score: number; reasons: string[]; matchClass: 'STRONG' | 'POSSIBLE' }> = [];
 
     for (const p of get().products) {
       if (p.id === excludeProductId) continue;
@@ -732,104 +733,76 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       const pKarat = norm(pAttrs.karat);
       const pItemType = norm(pAttrs.item_type);
 
-      // Mode 'image-only' skippt alle Identitäts-Felder (SKU/Serial/Ref/Brand/
-      // Name/Model/Gold-Fingerprint) — nur das pHash-Scoring weiter unten
-      // entscheidet. Genutzt z.B. vom SyncDuplicateGuard für Phone-Uploads,
-      // wo getippte SKU/Brand-Felder oft Müll oder zufällig sind.
+      // Mode 'image-only' = nur AI-Embedding zaehlt. Wird vom SyncDuplicateGuard
+      // fuer Phone-Uploads benutzt wo Text-Felder oft Muell sind.
       const all = mode === 'all';
 
-      // 1) SKU exakt
-      if (all && hasSku && cSku === pSku) {
-        score += 100;
-        reasons.push(`Same SKU (${p.sku})`);
-      }
+      if (all) {
+        // STRONG-Signale (Score >= 80):
+        if (hasSku && cSku === pSku) {
+          score += 100;
+          reasons.push(`Same SKU (${p.sku})`);
+        }
+        if (hasSerial && cSerial === pSerial) {
+          score += 100;
+          reasons.push(`Same Serial No (${pAttrs.serial_number || pAttrs.serialNo})`);
+        }
+        // Reference + Brand zusammen: hochzuverlaessig (Reference allein war
+        // frueher 80 Punkte aber falsch positiv weil verschiedene Brands
+        // dieselbe "1234" haben koennen).
+        if (hasRef && hasBrand && cRef === pRef && cBrand === pBrand) {
+          score += 90;
+          reasons.push(`Same Brand + Reference (${pAttrs.reference_number || pAttrs.reference || pAttrs.referenceNo})`);
+        }
+        if (hasModelNo && hasBrand && cModelNo === pModelNo && cBrand === pBrand) {
+          score += 90;
+          reasons.push(`Same Brand + Model No (${pAttrs.model_number})`);
+        }
 
-      // 2) Serial exakt
-      if (all && hasSerial && cSerial === pSerial) {
-        score += 100;
-        reasons.push(`Same Serial No (${pAttrs.serial_number || pAttrs.serialNo})`);
-      }
+        // POSSIBLE-Signale (Score 60-79):
+        // Brand+Name exact ohne Reference: koennten echte Duplikate sein,
+        // koennten aber auch zwei verschiedene Items mit identischem Namen
+        // sein (z.B. zwei "Patek Nautilus" ohne Reference angegeben).
+        // Erscheint daher nur als Hinweis, nicht als sicherer Cluster.
+        if (hasBrand && hasName && cBrand === pBrand && cName === pName) {
+          score += 60;
+          reasons.push(`Same Brand + Name`);
+        }
 
-      // 3) Reference exakt
-      if (all && hasRef && cRef === pRef) {
-        score += 80;
-        reasons.push(`Same Reference (${pAttrs.reference_number || pAttrs.reference || pAttrs.referenceNo})`);
-      }
-
-      // 4) Brand + Name
-      if (all && hasBrand && hasName && cBrand === pBrand && cName === pName) {
-        score += 60;
-        reasons.push(`Same Brand + Name`);
-      } else if (all && hasBrand && hasName && cBrand === pBrand) {
-        const d = lev(cName, pName);
-        if (d > 0 && d <= 2 && pName.length >= 3) {
-          score += 40;
-          reasons.push(`Similar Name ("${p.name}")`);
-        } else if (d > 2) {
-          // Nur Brand-Match — schwacher Hinweis.
-          score += 10;
-          reasons.push(`Same Brand`);
+        // Gold-Fingerprint: weight ±0.5g + same karat + same item_type +
+        // same category. Bei Schmuck oft das einzige Identitaets-Signal.
+        if (hasGoldFingerprint && pWeight > 0 && pKarat && pItemType
+            && cCategory === p.categoryId
+            && cKarat === pKarat && cItemType === pItemType
+            && Math.abs(cWeight - pWeight) <= 0.5) {
+          score += 70;
+          reasons.push(`Same ${pAttrs.item_type} · ${pAttrs.weight}g · ${pAttrs.karat}`);
         }
       }
 
-      // 5) Branded Jewelry: gleiche model_number
-      if (all && hasModelNo && cModelNo === pModelNo) {
-        score += 60;
-        reasons.push(`Same Model No (${pAttrs.model_number})`);
-      }
-
-      // 6) Gold-Fingerprint: weight ±0.5g + same karat + same item_type
-      if (all && hasGoldFingerprint && pWeight > 0 && pKarat && pItemType
-          && cCategory === p.categoryId
-          && cKarat === pKarat && cItemType === pItemType
-          && Math.abs(cWeight - pWeight) <= 0.5) {
-        score += 50;
-        reasons.push(`Same ${pAttrs.item_type} · ${pAttrs.weight}g · ${pAttrs.karat}`);
-      }
-
-      // 7) Image-Signal: PRIMÄR via AI-Embedding (Cosine-Similarity), FALLBACK
-      // auf pHash wenn Embeddings nicht verfügbar (offline / kein API-Key).
-      // Embedding ist robust gegen Foto-Variation (Winkel, Licht, Crop);
-      // pHash fängt nur das gleiche Bild oder leichte Modifikationen.
+      // AI-Embedding: primaeres Bild-Signal. Robust gegen Winkel/Licht/Crop.
+      // pHash wurde explizit entfernt (User-Spec 2026-05-18) — die alte
+      // Hamming-Distance-Heuristik produzierte zu viele Falschalarme.
       const cEmb = (candidate as { imageEmbedding?: number[] }).imageEmbedding;
       const pEmb = p.imageEmbedding;
-      let imageScored = false;
       if (cEmb && cEmb.length > 0 && pEmb && pEmb.length > 0) {
         const sim = cosineSimilarity(cEmb, pEmb);
         if (sim >= EMBEDDING_SAME_THRESHOLD) {
           score += 100;
-          reasons.push(`Same item (AI: ${sim.toFixed(2)})`);
-          imageScored = true;
+          reasons.push(`Same item (AI photo match: ${sim.toFixed(2)})`);
         } else if (sim >= EMBEDDING_SIMILAR_THRESHOLD) {
           score += 60;
-          reasons.push(`Similar item (AI: ${sim.toFixed(2)})`);
-          imageScored = true;
-        }
-      }
-      if (!imageScored) {
-        // Fallback: pHash. Wird ausgewertet wenn Embedding fehlt oder Cosine
-        // unter SIMILAR_THRESHOLD lag — pHash kann den exakten-Bild-Fall trotzdem
-        // noch fangen.
-        const cHash = (candidate as { imageHash?: string }).imageHash || '';
-        const pHash = p.imageHash || '';
-        if (cHash && pHash) {
-          const dist = hashDistance(cHash, pHash);
-          if (dist <= HASH_IDENTICAL_THRESHOLD) {
-            score += 80;
-            reasons.push(`Same photo (pHash)`);
-          } else if (dist <= HASH_SIMILAR_THRESHOLD) {
-            score += 40;
-            reasons.push(`Similar photo (pHash)`);
-          }
+          reasons.push(`Similar photo (AI: ${sim.toFixed(2)})`);
         }
       }
 
-      if (score >= 40) {
-        results.push({ product: p, score, reasons });
+      if (score >= POSSIBLE_THRESHOLD) {
+        const matchClass: 'STRONG' | 'POSSIBLE' = score >= STRONG_THRESHOLD ? 'STRONG' : 'POSSIBLE';
+        results.push({ product: p, score, reasons, matchClass });
       }
     }
 
     results.sort((a, b) => b.score - a.score);
-    return results.slice(0, 5);
+    return results.slice(0, 8);
   },
 }));

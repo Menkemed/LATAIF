@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Package, FileText,
   Receipt, CheckSquare, BarChart3, Settings, LogOut, Building2,
   Wrench, Handshake, UserCheck, ShoppingCart, FolderOpen,
-  HandCoins, Sparkles, Truck, Wallet, Landmark, UserPlus, Factory, FileMinus, CreditCard,
+  HandCoins, Sparkles, Truck, Wallet, Landmark, UserPlus, Factory, FileMinus, CreditCard, Coins,
 } from 'lucide-react';
 import { ChevronDown, ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
@@ -39,7 +39,13 @@ const navGroups: NavGroup[] = [
     ],
   },
   { label: 'PRODUCTION', items: [{ to: '/production', label: 'Production', icon: Factory, tone: 'cyan' }] },
-  { label: 'SERVICES', items: [{ to: '/repairs', label: 'Repairs', icon: Wrench, tone: 'purple' }] },
+  {
+    label: 'SERVICES',
+    items: [
+      { to: '/repairs', label: 'Repairs', icon: Wrench, tone: 'purple' },
+      { to: '/scrap-trades', label: 'Scrap Gold', icon: Coins, tone: 'orange' },
+    ],
+  },
   {
     label: 'FINANCE',
     items: [

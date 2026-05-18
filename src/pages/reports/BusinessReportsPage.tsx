@@ -22,6 +22,7 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useDebtStore } from '@/stores/debtStore';
+import { useScrapTradeStore } from '@/stores/scrapTradeStore';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -142,12 +143,13 @@ export function BusinessReportsPage() {
   const { transfers, loadTransfers } = useAgentStore();
   const { consignments, loadConsignments } = useConsignmentStore();
   const { debts, loadDebts } = useDebtStore();
+  const { trades: scrapTrades, loadTrades: loadScrapTrades } = useScrapTradeStore();
 
   useEffect(() => {
     loadInvoices(); loadProducts(); loadCategories();
     loadExpenses(); loadSuppliers(); loadCustomers(); loadPartners(); loadPurchases(); loadSalesReturns();
-    loadEmployees(); loadRepairs(); loadTransfers(); loadConsignments(); loadDebts();
-  }, [loadInvoices, loadProducts, loadCategories, loadExpenses, loadSuppliers, loadCustomers, loadPartners, loadPurchases, loadSalesReturns, loadEmployees, loadRepairs, loadTransfers, loadConsignments, loadDebts]);
+    loadEmployees(); loadRepairs(); loadTransfers(); loadConsignments(); loadDebts(); loadScrapTrades();
+  }, [loadInvoices, loadProducts, loadCategories, loadExpenses, loadSuppliers, loadCustomers, loadPartners, loadPurchases, loadSalesReturns, loadEmployees, loadRepairs, loadTransfers, loadConsignments, loadDebts, loadScrapTrades]);
 
   // Plan §Reports §4+6: Zeitraum-Filter auf Invoice-Liste.
   const filteredInvoices = useMemo(() => {
@@ -239,6 +241,25 @@ export function BusinessReportsPage() {
     const margin = salesReport.gross > 0 ? (profit / salesReport.gross) * 100 : 0;
     return { profit, cost, margin };
   }, [filteredInvoices, salesReport.gross, categoryFilter, products, salesReturns, periodRange]);
+
+  // ── Scrap Gold Spread (Plan §Reports §B+): zählt nur completed Trades im Zeitraum.
+  // Spread (sale - purchase) wird als zusätzliches Income/Profit gezählt — niemals
+  // der volle Sale Price. Brutto-Cashflows liegen in der scrap_trade_payments-Tabelle
+  // (für Banking-View), aber Reports zeigen nur die Marge.
+  const scrapReport = useMemo(() => {
+    let spread = 0, weight = 0, count = 0, grossSale = 0, grossPurchase = 0;
+    for (const t of scrapTrades) {
+      if (t.status !== 'completed') continue;
+      const when = (t.tradeDate || '').slice(0, 10);
+      if (when && (when < periodRange.from.slice(0, 10) || when > periodRange.to.slice(0, 10))) continue;
+      spread += t.profit || 0;
+      weight += t.weightGrams || 0;
+      grossSale += t.salePrice || 0;
+      grossPurchase += t.purchasePrice || 0;
+      count++;
+    }
+    return { spread, weight, count, grossSale, grossPurchase };
+  }, [scrapTrades, periodRange]);
 
   // ── Tax Report (Plan §Reports §C)
   const taxReport = useMemo(() => {
@@ -666,10 +687,50 @@ export function BusinessReportsPage() {
       {active === 'profit' && (
         <div style={{ display: 'grid', gap: 16 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
-            <MetricCard label="GROSS PROFIT" value={`${fmt(profitReport.profit)} BHD`} />
-            <MetricCard label="TOTAL COST" value={`${fmt(profitReport.cost)} BHD`} />
+            <MetricCard
+              label="TOTAL PROFIT"
+              value={`${fmt(profitReport.profit + scrapReport.spread)} BHD`}
+              unit={scrapReport.count > 0 ? `incl. ${fmt(scrapReport.spread)} scrap` : undefined}
+            />
+            <MetricCard label="INVOICES COST" value={`${fmt(profitReport.cost)} BHD`} />
             <MetricCard label="MARGIN %" value={profitReport.margin.toFixed(1)} unit="%" />
           </div>
+
+          {scrapReport.count > 0 && (
+            <Card>
+              <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>
+                SCRAP GOLD INCOME · {scrapReport.count} trade{scrapReport.count === 1 ? '' : 's'} · {scrapReport.weight.toFixed(1)} g
+              </span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, fontSize: 12 }}>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Gross Purchase</div>
+                  <div style={{ fontWeight: 600 }}><Bhd v={scrapReport.grossPurchase} /> BHD</div>
+                </div>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Gross Sale</div>
+                  <div style={{ fontWeight: 600 }}><Bhd v={scrapReport.grossSale} /> BHD</div>
+                </div>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Spread (Income)</div>
+                  <div style={{ fontWeight: 600, color: scrapReport.spread >= 0 ? '#16A34A' : '#DC2626' }}>
+                    {scrapReport.spread >= 0 ? '+' : ''}<Bhd v={scrapReport.spread} /> BHD
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Margin</div>
+                  <div style={{ fontWeight: 600 }}>
+                    {scrapReport.grossSale > 0
+                      ? `${((scrapReport.spread / scrapReport.grossSale) * 100).toFixed(1)}%`
+                      : '—'}
+                  </div>
+                </div>
+              </div>
+              <div style={{ fontSize: 11, color: '#6B7280', marginTop: 10, fontStyle: 'italic' }}>
+                Nur der Spread (Sale − Purchase) zählt als Income — Brutto-Beträge sind nur Audit.
+              </div>
+            </Card>
+          )}
+
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>FINAL INVOICES (Profit per Invoice)</span>
             {invoices.filter(i => i.status === 'FINAL').slice(0, 20).map(i => (

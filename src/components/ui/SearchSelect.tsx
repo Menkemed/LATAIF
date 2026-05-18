@@ -204,11 +204,16 @@ interface SearchMultiSelectProps {
   value: string[];
   onChange: (ids: string[]) => void;
   disabled?: boolean;
+  /** Optional: rendert ein Preview-Panel (z.B. ProductHoverCard) neben dem
+   *  Dropdown wenn der User mit der Maus ueber eine Option faehrt. id ist
+   *  die opt.id der gerade gehoverten Zeile. */
+  renderPreview?: (id: string) => React.ReactNode;
 }
 
-export function SearchMultiSelect({ label, placeholder = 'Search and select...', options, value, onChange, disabled }: SearchMultiSelectProps) {
+export function SearchMultiSelect({ label, placeholder = 'Search and select...', options, value, onChange, disabled, renderPreview }: SearchMultiSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -313,11 +318,11 @@ export function SearchMultiSelect({ label, placeholder = 'Search and select...',
                   className="cursor-pointer transition-colors flex items-center gap-3"
                   style={{
                     padding: '8px 12px',
-                    background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                    background: sel ? 'rgba(15,15,16,0.06)' : (hoveredId === opt.id ? 'rgba(15,15,16,0.04)' : 'transparent'),
                   }}
                   onClick={() => toggle(opt.id)}
-                  onMouseEnter={e => { if (!sel) e.currentTarget.style.background = 'rgba(15,15,16,0.04)'; }}
-                  onMouseLeave={e => { if (!sel) e.currentTarget.style.background = 'transparent'; }}
+                  onMouseEnter={() => setHoveredId(opt.id)}
+                  onMouseLeave={() => setHoveredId(prev => prev === opt.id ? null : prev)}
                 >
                   <span style={{
                     width: 16, height: 16, borderRadius: 3, flexShrink: 0,
@@ -336,6 +341,37 @@ export function SearchMultiSelect({ label, placeholder = 'Search and select...',
             })}
           </div>
         </div>,
+        document.body
+      )}
+
+      {/* Preview-Panel — rechts neben dem Dropdown wenn Platz ist, sonst links.
+          Nutzt das gleiche pos-Objekt wie das Dropdown, anchored am Top. */}
+      {open && pos && hoveredId && renderPreview && createPortal(
+        (() => {
+          const PREVIEW_W = 320;
+          const dropdownLeft = Math.min(pos.left, window.innerWidth - Math.max(pos.width, 360) - 16);
+          const dropdownWidth = Math.max(pos.width, 360);
+          const spaceRight = window.innerWidth - (dropdownLeft + dropdownWidth) - 16;
+          const placeRight = spaceRight >= PREVIEW_W + 8;
+          const left = placeRight
+            ? dropdownLeft + dropdownWidth + 8
+            : Math.max(8, dropdownLeft - PREVIEW_W - 8);
+          return (
+            <div
+              style={{
+                position: 'fixed',
+                top: pos.openUp ? undefined : pos.top,
+                bottom: pos.openUp ? window.innerHeight - pos.top : undefined,
+                left,
+                width: PREVIEW_W,
+                zIndex: 100000,
+                pointerEvents: 'none',
+              }}
+            >
+              {renderPreview(hoveredId)}
+            </div>
+          );
+        })(),
         document.body
       )}
     </div>

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { UserCheck } from 'lucide-react';
+import { Printer, Search, UserCheck } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -14,6 +15,10 @@ import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { TransferTable } from '@/components/agents/TransferTable';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
+import { ProductHoverCard } from '@/components/products/ProductHoverCard';
+import { PrintItemsFilterModal } from '@/components/print/PrintItemsFilterModal';
+import { runApprovalPrint } from '@/core/pdf/agent-print-helpers';
+import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 import { useAgentStore } from '@/stores/agentStore';
 import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -34,7 +39,7 @@ interface NewTransferForm {
 
 export function AgentList() {
   const { agents, transfers, loadAgents, loadTransfers, updateAgent, deleteAgent, createTransferForCustomer } = useAgentStore();
-  const { products, loadProducts } = useProductStore();
+  const { products, categories, loadProducts, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { loadEmployees } = useEmployeeStore();
@@ -46,10 +51,25 @@ export function AgentList() {
   const [transferForm, setTransferForm] = useState<NewTransferForm>({});
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [editAgentForm, setEditAgentForm] = useState<Partial<Agent>>({});
+  const [showPrintAll, setShowPrintAll] = useState(false);
 
   const staffFilter = searchParams.get('staff') || '';
 
-  useEffect(() => { loadAgents(); loadTransfers(); loadProducts(); loadCustomers(); loadInvoices(); loadEmployees(); }, [loadAgents, loadTransfers, loadProducts, loadCustomers, loadInvoices, loadEmployees]);
+  useEffect(() => { loadAgents(); loadTransfers(); loadProducts(); loadCategories(); loadCustomers(); loadInvoices(); loadEmployees(); }, [loadAgents, loadTransfers, loadProducts, loadCategories, loadCustomers, loadInvoices, loadEmployees]);
+
+  // Transfer-Picker: Suche + Hover-Preview
+  const [transferSearch, setTransferSearch] = useState('');
+  const [transferHovered, setTransferHovered] = useState<{ id: string; rect: DOMRect } | null>(null);
+  const transferListRef = useRef<HTMLDivElement>(null);
+
+  // Reset Picker-State wenn das Modal aufgemacht / geschlossen wird, damit alte
+  // Hover-Karten + Search-Query nicht in die naechste Session leaken.
+  useEffect(() => {
+    if (!showNewTransfer) {
+      setTransferSearch('');
+      setTransferHovered(null);
+    }
+  }, [showNewTransfer]);
 
   // Duplicate-Check beim Edit (Name/Phone Aenderung) — Agent selbst ausschliessen.
   const agentDuplicateMatches = useMemo(() => {
@@ -75,6 +95,22 @@ export function AgentList() {
 
   const availableProducts = useMemo(() => products.filter(p => p.stockStatus === 'in_stock'), [products]);
 
+  // Search-Filter ueber Brand / Name / SKU / Reference / Serial / Material / Karat.
+  // Deep-Match damit auch Attribute-Werte (z.B. "5711/1A") greifen.
+  const filteredTransferProducts = useMemo(() => {
+    const q = transferSearch.trim().toLowerCase();
+    if (!q) return availableProducts;
+    return availableProducts.filter(p => {
+      const attrs = (p.attributes || {}) as Record<string, unknown>;
+      const hay = [
+        p.brand, p.name, p.sku, p.condition,
+        attrs.reference_number, attrs.serial_number, attrs.material,
+        attrs.karat, attrs.karat_color, attrs.weight, attrs.color, attrs.item_type,
+      ].map(v => String(v ?? '').toLowerCase()).join(' ');
+      return hay.includes(q);
+    });
+  }, [availableProducts, transferSearch]);
+
   function handleCreateTransfer() {
     if (!transferForm.customerId || !transferForm.productId || !transferForm.ourPrice) return;
     createTransferForCustomer({
@@ -96,6 +132,11 @@ export function AgentList() {
       actions={
         <div className="flex gap-2 items-center">
           {tab === 'transfers' && <StaffFilterPill />}
+          {tab === 'agents' && (
+            <Button variant="ghost" onClick={() => setShowPrintAll(true)}>
+              <Printer size={14} /> Print All
+            </Button>
+          )}
           <Button variant="primary" onClick={() => setShowNewTransfer(true)}>New Transfer</Button>
         </div>
       }
@@ -197,6 +238,25 @@ export function AgentList() {
         <TransferTable transfers={filteredTransfers} showAgentColumn />
       )}
 
+      <PrintItemsFilterModal
+        open={showPrintAll}
+        onClose={() => setShowPrintAll(false)}
+        kind="approval"
+        scope="all"
+        contextLabel={`${agents.length} agent${agents.length === 1 ? '' : 's'}`}
+        onConfirm={(filter: ItemListFilter) => {
+          runApprovalPrint({
+            filter,
+            scope: 'aggregate',
+            agents,
+            transfers,
+            invoices,
+            products,
+            categories,
+          });
+        }}
+      />
+
       {/* QuickCustomerModal — vom "+" im Transfer-Modal aufgerufen, um direkt
           einen neuen Customer anzulegen und ihn als Empfänger des Transfers
           auszuwählen. */}
@@ -234,20 +294,74 @@ export function AgentList() {
             </div>
           </div>
 
-          {/* Product Select */}
+          {/* Product Select — mit Suche + Hover-Preview-Card (2026-05-18) */}
           <div>
-            <span className="text-overline" style={{ marginBottom: 8 }}>ITEM</span>
-            <div style={{ maxHeight: 200, overflowY: 'auto', marginTop: 8 }}>
-              {availableProducts.map(p => (
-                <div key={p.id} onClick={() => setTransferForm({ ...transferForm, productId: p.id, ourPrice: p.plannedSalePrice || p.purchasePrice })}
-                  className="cursor-pointer rounded transition-colors" style={{
+            <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+              <span className="text-overline">ITEM</span>
+              <span style={{ fontSize: 10, color: '#9CA3AF' }}>
+                {filteredTransferProducts.length} / {availableProducts.length}
+              </span>
+            </div>
+            <div className="flex items-center gap-2" style={{
+              padding: '7px 10px', marginBottom: 6,
+              background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 6,
+            }}>
+              <Search size={13} style={{ color: '#6B7280', flexShrink: 0 }} />
+              <input
+                value={transferSearch}
+                onChange={e => setTransferSearch(e.target.value)}
+                placeholder="Search brand, name, SKU, reference, attributes..."
+                className="flex-1 outline-none"
+                style={{ background: 'transparent', border: 'none', fontSize: 12, color: '#0F0F10' }}
+                autoFocus={false}
+              />
+              {transferSearch && (
+                <button
+                  onClick={() => setTransferSearch('')}
+                  className="cursor-pointer"
+                  style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 11, padding: 0 }}
+                  title="Clear"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            <div
+              ref={transferListRef}
+              style={{ maxHeight: 220, overflowY: 'auto' }}
+              onMouseLeave={() => setTransferHovered(null)}
+            >
+              {filteredTransferProducts.length === 0 ? (
+                <div style={{ padding: '16px 10px', fontSize: 12, color: '#9CA3AF', textAlign: 'center' }}>
+                  {transferSearch ? 'No items match.' : 'No items in stock.'}
+                </div>
+              ) : filteredTransferProducts.map(p => (
+                <div
+                  key={p.id}
+                  onClick={() => setTransferForm({ ...transferForm, productId: p.id, ourPrice: p.plannedSalePrice || p.purchasePrice })}
+                  onMouseEnter={e => {
+                    setTransferHovered({ id: p.id, rect: (e.currentTarget as HTMLDivElement).getBoundingClientRect() });
+                  }}
+                  className="cursor-pointer rounded transition-colors"
+                  style={{
                     padding: '8px 10px', marginBottom: 2,
                     background: transferForm.productId === p.id ? 'rgba(15,15,16,0.06)' : 'transparent',
                     border: `1px solid ${transferForm.productId === p.id ? '#0F0F10' : 'transparent'}`,
                   }}>
-                  <div className="flex justify-between">
-                    <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.brand} {p.name}</span>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }}><Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD</span>
+                  <div className="flex justify-between items-center">
+                    <div style={{ minWidth: 0, flex: 1, paddingRight: 8 }}>
+                      <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {p.brand} {p.name}
+                      </div>
+                      {p.sku && (
+                        <div className="font-mono" style={{ fontSize: 10, color: '#9CA3AF', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {p.sku}
+                        </div>
+                      )}
+                    </div>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#4B5563', flexShrink: 0 }}>
+                      <Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD
+                    </span>
                   </div>
                 </div>
               ))}
@@ -271,6 +385,36 @@ export function AgentList() {
             </Button>
           </div>
         </div>
+
+        {/* Hover-Preview-Karte: anchored an der gehoverten Row, fixed positioning
+            via Portal damit overflow:hidden im Modal die Karte nicht abschneidet.
+            Bevorzugt rechts vom Modal, faellt nach links wenn kein Platz. */}
+        {showNewTransfer && transferHovered && createPortal(
+          (() => {
+            const product = availableProducts.find(p => p.id === transferHovered.id);
+            if (!product) return null;
+            const PREVIEW_W = 320;
+            const r = transferHovered.rect;
+            const spaceRight = window.innerWidth - r.right - 16;
+            const placeRight = spaceRight >= PREVIEW_W + 8;
+            const left = placeRight
+              ? r.right + 8
+              : Math.max(8, r.left - PREVIEW_W - 8);
+            const maxTop = window.innerHeight - 360;
+            const top = Math.max(16, Math.min(maxTop, r.top));
+            return (
+              <div style={{
+                position: 'fixed',
+                top, left, width: PREVIEW_W,
+                zIndex: 100001,
+                pointerEvents: 'none',
+              }}>
+                <ProductHoverCard product={product} categories={categories} />
+              </div>
+            );
+          })(),
+          document.body
+        )}
       </Modal>
 
       {/* Edit Agent Modal */}

@@ -4,17 +4,20 @@
 // Transfers-Tab in AgentList — durch Zustand-Store automatisch synchron).
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, History as HistoryIcon, Mail, Phone } from 'lucide-react';
+import { ArrowLeft, Edit3, History as HistoryIcon, Mail, Phone, Printer } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { TransferTable } from '@/components/agents/TransferTable';
+import { PrintItemsFilterModal } from '@/components/print/PrintItemsFilterModal';
 import { useAgentStore } from '@/stores/agentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
+import { runApprovalPrint } from '@/core/pdf/agent-print-helpers';
+import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 
 
 export function AgentDetail() {
@@ -23,13 +26,14 @@ export function AgentDetail() {
   const goBack = useGoBack('/agents');
   const { agents, transfers, loadAgents, loadTransfers } = useAgentStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { loadProducts } = useProductStore();
+  const { products, categories, loadProducts, loadCategories } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const [showHistory, setShowHistory] = useState(false);
+  const [showPrint, setShowPrint] = useState(false);
 
   useEffect(() => {
-    loadAgents(); loadTransfers(); loadCustomers(); loadProducts(); loadInvoices();
-  }, [loadAgents, loadTransfers, loadCustomers, loadProducts, loadInvoices]);
+    loadAgents(); loadTransfers(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices();
+  }, [loadAgents, loadTransfers, loadCustomers, loadProducts, loadCategories, loadInvoices]);
 
   const agent = useMemo(() => agents.find(a => a.id === id), [agents, id]);
   const linkedCustomer = useMemo(
@@ -112,6 +116,9 @@ export function AgentDetail() {
             )}
           </div>
           <div className="flex gap-2">
+            <Button variant="ghost" onClick={() => setShowPrint(true)}>
+              <Printer size={14} /> Print Items
+            </Button>
             <Button variant="ghost" onClick={() => setShowHistory(true)}>
               <HistoryIcon size={14} /> History
             </Button>
@@ -177,6 +184,25 @@ export function AgentDetail() {
         entityType="agents"
         entityId={agent.id}
         title={`History · ${agent.name}`}
+      />
+
+      <PrintItemsFilterModal
+        open={showPrint}
+        onClose={() => setShowPrint(false)}
+        kind="approval"
+        scope="single"
+        contextLabel={agent.name}
+        onConfirm={(filter: ItemListFilter) => {
+          runApprovalPrint({
+            filter,
+            scope: 'single',
+            agents: [agent],
+            transfers: myTransfers,
+            invoices,
+            products,
+            categories,
+          });
+        }}
       />
     </div>
   );

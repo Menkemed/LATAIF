@@ -291,7 +291,17 @@ export function WatchList() {
       r = r.filter(p => matchesDeep(p, searchQuery, [categories.find(c => c.id === p.categoryId)]));
     }
     if (filterCategory) r = r.filter(p => p.categoryId === filterCategory);
-    if (filterStatus) r = r.filter(p => p.stockStatus === filterStatus);
+    // Plan §Production-History (2026-05-18): Consumed-Items haben Sonderbehandlung.
+    // - Default (filterStatus = ''): NICHT zeigen, damit Inventar nicht aufgeblaeht wirkt.
+    // - Explizit (filterStatus = 'consumed'): NUR consumed zeigen.
+    // - Anderer Status: normales Match.
+    if (filterStatus === 'consumed' || filterStatus === 'CONSUMED') {
+      r = r.filter(p => p.stockStatus === 'consumed' || p.stockStatus === 'CONSUMED');
+    } else if (filterStatus) {
+      r = r.filter(p => p.stockStatus === filterStatus);
+    } else {
+      r = r.filter(p => p.stockStatus !== 'consumed' && p.stockStatus !== 'CONSUMED');
+    }
     return r;
   }, [products, searchQuery, filterCategory, filterStatus, filterOwnership, categories]);
 
@@ -453,7 +463,7 @@ export function WatchList() {
           ))}
         </FilterGroup>
         <FilterGroup label="Status">
-          {(['', 'in_stock', 'sold'] as (StockStatus | '')[]).map(s => (
+          {(['', 'in_stock', 'sold', 'consumed'] as (StockStatus | '')[]).map(s => (
             <button key={s} onClick={() => setFilterStatus(s)}
               className="cursor-pointer transition-all duration-200"
               style={{
@@ -461,7 +471,7 @@ export function WatchList() {
                 border: `1px solid ${filterStatus === s ? '#0F0F10' : '#D5D9DE'}`,
                 color: filterStatus === s ? '#0F0F10' : '#6B7280',
                 background: filterStatus === s ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
-              }}>{s === '' ? 'Any' : s === 'in_stock' ? 'In Stock' : 'Sold'}</button>
+              }}>{s === '' ? 'Any' : s === 'in_stock' ? 'In Stock' : s === 'sold' ? 'Sold' : 'Consumed'}</button>
           ))}
         </FilterGroup>
         {(filterOwnership !== 'own' || filterCategory || filterStatus !== '') && (

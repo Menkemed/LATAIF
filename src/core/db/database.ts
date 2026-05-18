@@ -1239,6 +1239,77 @@ function runMigrations(database: Database): void {
     // Detection ab v0.1.32; pHash bleibt als Offline-Fallback.
     `ALTER TABLE products ADD COLUMN image_description TEXT`,
     `ALTER TABLE products ADD COLUMN image_embedding TEXT`,
+
+    // ── Scrap Gold Quick Trade ──
+    // Direkter Altgold-Handel (Kunde → wir → Händler). Nur der Spread (sale - purchase)
+    // wird als REVENUE gebucht; Brutto-Preise bleiben als Audit-Trail auf der Row.
+    `CREATE TABLE IF NOT EXISTS scrap_trades (
+      id                       TEXT PRIMARY KEY,
+      branch_id                TEXT NOT NULL REFERENCES branches(id),
+      trade_number             TEXT NOT NULL,
+      seller_name              TEXT NOT NULL,
+      seller_phone             TEXT,
+      seller_customer_id       TEXT REFERENCES customers(id),
+      buyer_name               TEXT NOT NULL,
+      buyer_phone              TEXT,
+      buyer_supplier_id        TEXT REFERENCES suppliers(id),
+      weight_grams             REAL NOT NULL,
+      karat                    TEXT NOT NULL,
+      purchase_price           REAL NOT NULL,
+      sale_price               REAL NOT NULL,
+      profit                   REAL NOT NULL,
+      payment_method_purchase  TEXT DEFAULT 'cash',
+      payment_method_sale      TEXT DEFAULT 'cash',
+      trade_date               TEXT NOT NULL,
+      notes                    TEXT,
+      images_purchase          TEXT DEFAULT '[]',
+      images_sale              TEXT DEFAULT '[]',
+      status                   TEXT DEFAULT 'completed',
+      created_at               TEXT NOT NULL,
+      updated_at               TEXT NOT NULL,
+      created_by               TEXT REFERENCES users(id),
+      version                  INTEGER DEFAULT 1,
+      sync_status              TEXT DEFAULT 'synced',
+      UNIQUE(branch_id, trade_number)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_scrap_trades_branch ON scrap_trades(branch_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_scrap_trades_date ON scrap_trades(trade_date)`,
+    `CREATE INDEX IF NOT EXISTS idx_scrap_trades_status ON scrap_trades(status)`,
+
+    // Scrap Trade Lines — Multi-Item-Support. Ein Trade kann mehrere Goldstücke
+    // mit eigenen Weight/Karat/Preisen umfassen. Aggregat-Felder auf scrap_trades
+    // (weight_grams, karat, purchase_price, sale_price, profit) werden zu Summen
+    // bzw. 'mixed' für karat bei Multi-Line. Photos sind PRO Item, nicht pro Trade.
+    `CREATE TABLE IF NOT EXISTS scrap_trade_lines (
+      id              TEXT PRIMARY KEY,
+      scrap_trade_id  TEXT NOT NULL REFERENCES scrap_trades(id) ON DELETE CASCADE,
+      position        INTEGER DEFAULT 1,
+      weight_grams    REAL NOT NULL,
+      karat           TEXT NOT NULL,
+      purchase_price  REAL NOT NULL,
+      sale_price      REAL NOT NULL,
+      profit          REAL NOT NULL,
+      notes           TEXT,
+      images_purchase TEXT DEFAULT '[]',
+      images_sale     TEXT DEFAULT '[]',
+      created_at      TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_scrap_lines_trade ON scrap_trade_lines(scrap_trade_id)`,
+
+    // Scrap Trade Payments — Split-Payments. Pro Trade können MEHRERE Payments
+    // mit verschiedenen Methoden gebucht werden (z.B. 200 Cash + 300 Benefit zum
+    // Seller, 300 Cash + 600 Bank vom Buyer). Sum(OUT) muss SUM(lines.purchase)
+    // entsprechen, Sum(IN) muss SUM(lines.sale) entsprechen.
+    `CREATE TABLE IF NOT EXISTS scrap_trade_payments (
+      id              TEXT PRIMARY KEY,
+      scrap_trade_id  TEXT NOT NULL REFERENCES scrap_trades(id) ON DELETE CASCADE,
+      direction       TEXT NOT NULL CHECK (direction IN ('OUT','IN')),
+      method          TEXT NOT NULL DEFAULT 'cash',
+      amount          REAL NOT NULL,
+      position        INTEGER DEFAULT 1,
+      created_at      TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_scrap_pmt_trade ON scrap_trade_payments(scrap_trade_id, direction)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
@@ -1663,6 +1734,98 @@ function reconcileProductQuantities(database: Database): void {
   }
 }
 
+// Consumed-Products Backfill (2026-05-18) — alte Production-Records haben Input-
+// Produkte hart geloescht (DELETE FROM products). Damit die Detail-Page und der
+// neue Consumed-Filter in Collection trotzdem die historischen Input-Items zeigt,
+// werden hier aus production_inputs.product_snapshot fehlende Product-Rows neu
+// angelegt mit stock_status='consumed'. Idempotent ueber settings-Flag.
+function backfillConsumedProducts(database: Database): void {
+  try {
+    const flagRes = database.exec(
+      `SELECT value FROM settings WHERE key = 'migration.consumed_products_backfill_v1' LIMIT 1`
+    );
+    if (flagRes.length > 0 && flagRes[0].values.length > 0 && flagRes[0].values[0][0]) {
+      return;
+    }
+
+    // Alle production_inputs deren product_id nicht mehr existiert
+    const res = database.exec(`
+      SELECT pi.product_id, pi.product_snapshot, pi.input_value,
+             pr.branch_id, pr.production_date, pr.created_at
+        FROM production_inputs pi
+        JOIN production_records pr ON pr.id = pi.record_id
+       WHERE NOT EXISTS (SELECT 1 FROM products p WHERE p.id = pi.product_id)
+    `);
+
+    let restored = 0;
+    if (res.length > 0) {
+      for (const row of res[0].values) {
+        const productId = row[0] as string;
+        const snapshotRaw = row[1] as string | null;
+        const inputValue = (row[2] as number) || 0;
+        const branchId = (row[3] as string) || 'branch-main';
+        const prodDate = row[4] as string | null;
+        const createdAt = (row[5] as string) || new Date().toISOString();
+
+        if (!snapshotRaw) continue;
+        let snap: {
+          categoryId?: string; brand?: string; name?: string; sku?: string;
+          condition?: string; attributes?: Record<string, unknown>; images?: string[];
+          purchasePrice?: number;
+        };
+        try { snap = JSON.parse(snapshotRaw); } catch { continue; }
+
+        try {
+          database.run(
+            `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
+              purchase_date, purchase_price, purchase_currency, stock_status, tax_scheme, expected_margin, days_in_stock,
+              supplier_name, notes, images, attributes, source_type, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'BHD', 'consumed', 'MARGIN', NULL, 0, NULL, ?, ?, ?, 'OWN', ?, ?)`,
+            [
+              productId, branchId,
+              snap.categoryId || 'cat-watch',
+              (snap.brand || '').trim(),
+              (snap.name || '').trim(),
+              snap.sku || null,
+              snap.condition || '',
+              prodDate,
+              typeof snap.purchasePrice === 'number' ? snap.purchasePrice : inputValue,
+              'Restored from production snapshot',
+              JSON.stringify(snap.images || []),
+              JSON.stringify(snap.attributes || {}),
+              createdAt, createdAt,
+            ]
+          );
+          restored++;
+        } catch (err) {
+          console.warn('[Migration] consumed backfill row failed:', productId, err);
+        }
+      }
+    }
+
+    // Sichere zusaetzlich: existierende Produkte die in production_inputs auftauchen
+    // aber NICHT consumed sind (z.B. weil das alte DELETE schiefging) auf consumed.
+    database.run(`
+      UPDATE products
+         SET stock_status = 'consumed'
+       WHERE id IN (SELECT product_id FROM production_inputs)
+         AND stock_status NOT IN ('consumed', 'CONSUMED')
+    `);
+
+    const now = new Date().toISOString();
+    database.run(
+      `INSERT INTO settings (branch_id, key, value, category, updated_at)
+       VALUES ('branch-main', 'migration.consumed_products_backfill_v1', '1', 'migration', ?)
+       ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [now]
+    );
+
+    console.info(`[Migration] consumed products backfill v1: ${restored} Produkte wiederhergestellt.`);
+  } catch (err) {
+    console.warn('[Migration] consumed products backfill failed:', err);
+  }
+}
+
 export async function initDatabase(): Promise<Database> {
   if (db) return db;
 
@@ -1678,6 +1841,7 @@ export async function initDatabase(): Promise<Database> {
       migrateCategoriesToV3(db);
       backfillStockLots(db);
       reconcileProductQuantities(db);
+      backfillConsumedProducts(db);
     } catch (err) {
       console.warn('DB load failed, creating fresh:', err);
       db = new SQL.Database();
@@ -1688,6 +1852,7 @@ export async function initDatabase(): Promise<Database> {
       migrateCategoriesToV3(db);
       backfillStockLots(db);
       reconcileProductQuantities(db);
+      backfillConsumedProducts(db);
     }
   } else {
     db = new SQL.Database();
@@ -1702,6 +1867,7 @@ export async function initDatabase(): Promise<Database> {
     migrateCategoriesToV2(db);
     backfillStockLots(db);
     reconcileProductQuantities(db);
+    backfillConsumedProducts(db);
   }
 
   return db;

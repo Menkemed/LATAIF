@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { v4 as uuid } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -14,6 +14,7 @@ import { getDatabase, saveDatabase, resetDatabase } from '@/core/db/database';
 import { exportFile } from '@/core/utils/export-file';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { useProductStore } from '@/stores/productStore';
+import { computeImageEmbedding, cosineSimilarity, pairwiseVisualMatch, isAiConfigured } from '@/core/ai/ai-service';
 import { useAuthStore } from '@/stores/authStore';
 import { usePermission } from '@/hooks/usePermission';
 import { COUNTRIES, type CountryCode } from '@/core/contacts/country-codes';
@@ -2070,86 +2071,204 @@ function describeMasterReasons(p: Product, linkedCount: number): string[] {
 }
 
 function severityFromScore(score: number): { text: string; color: string; bg: string } {
-  if (score >= 100) return { text: 'Almost certainly duplicate', color: '#AA6E6E', bg: 'rgba(170,110,110,0.10)' };
-  if (score >= 60)  return { text: 'Likely duplicate',           color: '#AA956E', bg: 'rgba(170,149,110,0.12)' };
+  // 2026-05-18 — neue Schwellen passend zu STRONG (>=80) / POSSIBLE (60-79).
+  if (score >= 150) return { text: 'Almost certainly duplicate', color: '#AA6E6E', bg: 'rgba(170,110,110,0.10)' };
+  if (score >= 80)  return { text: 'Likely duplicate',           color: '#AA956E', bg: 'rgba(170,149,110,0.12)' };
   return { text: 'Possibly similar', color: '#6E8AAA', bg: 'rgba(110,138,170,0.12)' };
 }
 
+function StatusCell({ label, value, sub, tone }: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: 'good' | 'warn' | 'muted';
+}) {
+  const valueColor = tone === 'good' ? '#5C8550' : tone === 'warn' ? '#AA956E' : '#0F0F10';
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+        {label}
+      </div>
+      <div className="font-display" style={{ fontSize: 22, color: valueColor, lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
 function DuplicatesTab() {
-  const { products, findPossibleDuplicates, deleteProduct, mergeIntoExisting, getLinkedRecordCounts, loadProducts } = useProductStore();
+  const { products, updateProduct, deleteProduct, mergeIntoExisting, getLinkedRecordCounts, loadProducts } = useProductStore();
   const navigate = useNavigate();
   const [scanning, setScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState<{ stage: string; current: number; total: number } | null>(null);
   const [groups, setGroups] = useState<DuplicateGroup[] | null>(null);
   const [ignoredGroups, setIgnoredGroups] = useState<Set<string>>(new Set());
   const [actionMsg, setActionMsg] = useState<{ text: string; ok: boolean } | null>(null);
-  const [matchMode, setMatchMode] = useState<'all' | 'image-only'>('all');
 
-  function scan() {
+  // Backfill-State
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillProgress, setBackfillProgress] = useState<{ current: number; total: number; errors: number } | null>(null);
+
+  // Status: wie viele Produkte haben AI-Embedding, wie viele nicht, wie viele
+  // gar kein Foto. Damit der User sieht was Stage-1 ueberhaupt vergleichen kann.
+  const embeddingStatus = useMemo(() => {
+    let withEmb = 0, withImgNoEmb = 0, noImg = 0;
+    for (const p of products) {
+      if (!p.images || p.images.length === 0) { noImg++; continue; }
+      if (p.imageEmbedding && p.imageEmbedding.length > 0) withEmb++;
+      else withImgNoEmb++;
+    }
+    return { withEmb, withImgNoEmb, noImg, total: products.length };
+  }, [products]);
+
+  const apiKeyOk = isAiConfigured();
+
+  // 2026-05-18 — Two-Stage Duplicate Scan:
+  //   Stage 1 (lokal, kostenlos): paarweise Cosine-Similarity der gespeicherten
+  //     AI-Embeddings + Kategorie-Filter. Findet ~30-100 Kandidaten aus 200 Items.
+  //   Stage 2 (GPT-4o-mini Vision): schickt beide Fotos direkt an die LLM mit
+  //     Prompt "same physical product yes/no?". Nur isMatch=true (high
+  //     confidence) wird als STRONG-Edge im Cluster verwendet. Andere Antworten
+  //     ("uncertain" / "no") werden verworfen.
+  //
+  // Vorteil ggue. dem alten Text-Score: das Text-Embedding einer Bild-Beschreibung
+  // misst Sprach-Naehe, nicht Produkt-Identitaet. GPT-4o-Vision sieht die echten
+  // Identitaets-Merkmale (Modell-Nummer, Zifferblatt-Layout, Bezel-Form, Lume-
+  // Pattern). Two-Stage ist Standard-Pattern (Pinecone, Algolia Re-Ranking).
+  async function scan() {
     setScanning(true);
     setActionMsg(null);
-    setTimeout(() => {
-      // Phase 1: Edges sammeln (jedes Pair max einmal via sorted-key dedupe).
-      const edgeKey = (a: string, b: string) => [a, b].sort().join('|');
-      const edges: Array<{ a: string; b: string; score: number; reasons: string[] }> = [];
-      const seen = new Set<string>();
-      for (const p of products) {
-        if (!p.id) continue;
-        const matches = findPossibleDuplicates(p, p.id, { mode: matchMode });
-        for (const m of matches) {
-          const key = edgeKey(p.id, m.product.id);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          edges.push({ a: p.id, b: m.product.id, score: m.score, reasons: m.reasons });
-        }
-      }
-      if (edges.length === 0) {
+    setScanProgress({ stage: 'Pre-Filter (Embeddings)', current: 0, total: 0 });
+
+    try {
+      // ── Stage 1: lokaler Embedding-Pre-Filter ────────────────────────────
+      const withEmbedding = products.filter(p => p.imageEmbedding && p.imageEmbedding.length > 0 && p.images && p.images.length > 0);
+      if (withEmbedding.length < 2) {
+        setActionMsg({
+          text: withEmbedding.length === 0
+            ? 'Keine Produkte mit AI-Embedding gefunden — bitte zuerst "Backfill Embeddings" laufen lassen.'
+            : 'Nur 1 Produkt mit Embedding — fuer Vergleich werden mindestens 2 gebraucht.',
+          ok: false,
+        });
         setGroups([]);
-        setIgnoredGroups(new Set());
         setScanning(false);
+        setScanProgress(null);
         return;
       }
 
-      // Phase 2: Union-Find auf Edges. Nur Produkte mit ≥1 Edge sind im Graph.
-      const involvedIds = new Set<string>();
-      for (const e of edges) { involvedIds.add(e.a); involvedIds.add(e.b); }
-      const uf = new UnionFind([...involvedIds]);
-      for (const e of edges) uf.union(e.a, e.b);
+      const STAGE1_THRESHOLD = 0.75;
+      const candidatePairs: Array<{ a: Product; b: Product; cosine: number }> = [];
+      for (let i = 0; i < withEmbedding.length; i++) {
+        for (let j = i + 1; j < withEmbedding.length; j++) {
+          const a = withEmbedding[i], b = withEmbedding[j];
+          // Kategorie-Filter: nur gleiche Kategorie vergleichen — Watches mit
+          // Watches, Jewelry mit Jewelry. Spart LLM-Calls fuer offensichtlich
+          // verschiedene Items.
+          if (a.categoryId !== b.categoryId) continue;
+          const cos = cosineSimilarity(a.imageEmbedding!, b.imageEmbedding!);
+          if (cos >= STAGE1_THRESHOLD) {
+            candidatePairs.push({ a, b, cosine: cos });
+          }
+        }
+      }
+      candidatePairs.sort((x, y) => y.cosine - x.cosine);
 
-      // Phase 3: Edges nach Root gruppieren.
-      const rootBuckets = new Map<string, { ids: Set<string>; edges: typeof edges }>();
-      for (const e of edges) {
-        const r = uf.find(e.a);
-        if (!rootBuckets.has(r)) rootBuckets.set(r, { ids: new Set(), edges: [] });
-        const b = rootBuckets.get(r)!;
-        b.ids.add(e.a); b.ids.add(e.b); b.edges.push(e);
+      if (candidatePairs.length === 0) {
+        setGroups([]);
+        setIgnoredGroups(new Set());
+        setScanning(false);
+        setScanProgress(null);
+        setActionMsg({ text: 'Keine aehnlichen Produkte gefunden (Stage-1 leer).', ok: true });
+        return;
       }
 
-      // Phase 4: Linked-Counts in einem Bulk-Query holen (alle Cluster-Member auf einmal).
+      // ── Stage 2: GPT-4o-mini-Vision bestaetigt jedes Kandidaten-Paar ─────
+      if (!apiKeyOk) {
+        setActionMsg({ text: 'API-Key fehlt — Stage 2 (AI-Vision) nicht moeglich. Bitte in Settings → AI Setup eintragen.', ok: false });
+        setGroups([]);
+        setScanning(false);
+        setScanProgress(null);
+        return;
+      }
+
+      setScanProgress({ stage: 'AI Vision Check', current: 0, total: candidatePairs.length });
+
+      type Confirmed = { a: string; b: string; cosine: number; reason: string; confidence: 'high' | 'medium' | 'low' };
+      const confirmed: Confirmed[] = [];
+
+      // Parallel mit Concurrency-Limit (OpenAI rate-limit-freundlich).
+      const CONCURRENCY = 4;
+      let nextIdx = 0;
+      let doneCount = 0;
+      async function worker() {
+        while (true) {
+          const idx = nextIdx++;
+          if (idx >= candidatePairs.length) break;
+          const pair = candidatePairs[idx];
+          try {
+            const result = await pairwiseVisualMatch(pair.a.images[0], pair.b.images[0]);
+            if (result.isMatch) {
+              confirmed.push({
+                a: pair.a.id,
+                b: pair.b.id,
+                cosine: pair.cosine,
+                reason: result.reason || 'AI confirmed same product',
+                confidence: result.confidence,
+              });
+            }
+          } catch (err) {
+            console.warn('[duplicate-scan] pairwise check failed:', err);
+          }
+          doneCount++;
+          setScanProgress({ stage: 'AI Vision Check', current: doneCount, total: candidatePairs.length });
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, candidatePairs.length) }, () => worker()));
+
+      if (confirmed.length === 0) {
+        setGroups([]);
+        setIgnoredGroups(new Set());
+        setScanning(false);
+        setScanProgress(null);
+        setActionMsg({ text: `Stage-1 fand ${candidatePairs.length} Kandidaten — AI hat keinen als sicheres Duplikat bestaetigt.`, ok: true });
+        return;
+      }
+
+      // ── Cluster-Builder via Union-Find auf den bestaetigten Paaren ───────
+      const involvedIds = new Set<string>();
+      for (const e of confirmed) { involvedIds.add(e.a); involvedIds.add(e.b); }
+      const uf = new UnionFind([...involvedIds]);
+      for (const e of confirmed) uf.union(e.a, e.b);
+
+      const rootBuckets = new Map<string, { ids: Set<string>; edges: Confirmed[] }>();
+      for (const e of confirmed) {
+        const r = uf.find(e.a);
+        if (!rootBuckets.has(r)) rootBuckets.set(r, { ids: new Set(), edges: [] });
+        const bucket = rootBuckets.get(r)!;
+        bucket.ids.add(e.a); bucket.ids.add(e.b); bucket.edges.push(e);
+      }
+
       const allClusterIds = [...rootBuckets.values()].flatMap(b => [...b.ids]);
       const linkedAll = getLinkedRecordCounts(allClusterIds);
 
-      // Phase 5: DuplicateGroup-Objekte bauen.
       const out: DuplicateGroup[] = [];
       for (const { ids, edges: groupEdges } of rootBuckets.values()) {
         if (ids.size < 2) continue;
         const members = [...ids].map(id => products.find(p => p.id === id)).filter(Boolean) as Product[];
         if (members.length < 2) continue;
-        const maxScore = Math.max(...groupEdges.map(e => e.score));
 
         const edgesByMember = new Map<string, DuplicateEdge[]>();
         for (const e of groupEdges) {
+          const score = Math.round(e.cosine * 100);
+          const reasons = [`AI Vision: ${e.reason}`, `Cosine ${e.cosine.toFixed(2)}`];
           if (!edgesByMember.has(e.a)) edgesByMember.set(e.a, []);
           if (!edgesByMember.has(e.b)) edgesByMember.set(e.b, []);
-          edgesByMember.get(e.a)!.push({ otherId: e.b, score: e.score, reasons: e.reasons });
-          edgesByMember.get(e.b)!.push({ otherId: e.a, score: e.score, reasons: e.reasons });
+          edgesByMember.get(e.a)!.push({ otherId: e.b, score, reasons });
+          edgesByMember.get(e.b)!.push({ otherId: e.a, score, reasons });
         }
 
-        // Combined reasons — unique, häufigste oben.
-        const reasonCounts = new Map<string, number>();
-        for (const e of groupEdges) for (const r of e.reasons) reasonCounts.set(r, (reasonCounts.get(r) || 0) + 1);
-        const topReasons = [...reasonCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([r]) => r);
+        const maxScore = Math.round(Math.max(...groupEdges.map(e => e.cosine)) * 100);
+        const topReasons = Array.from(new Set(groupEdges.map(e => e.reason))).slice(0, 4);
 
-        // Master-Suggestion: höchster Score gewinnt; bei Gleichstand erstes Element.
         const scored = members.map(p => ({
           product: p,
           score: computeMasterScore(p, linkedAll.get(p.id) || 0),
@@ -2175,8 +2294,57 @@ function DuplicatesTab() {
       out.sort((a, b) => b.maxScore - a.maxScore);
       setGroups(out);
       setIgnoredGroups(new Set());
+      setActionMsg({
+        text: `Fertig — ${candidatePairs.length} Kandidaten gepruft, ${confirmed.length} bestaetigt, ${out.length} Cluster gebildet.`,
+        ok: true,
+      });
+    } catch (err) {
+      console.error('[duplicate-scan] failed:', err);
+      setActionMsg({ text: `Scan fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`, ok: false });
+    } finally {
       setScanning(false);
-    }, 0);
+      setScanProgress(null);
+    }
+  }
+
+  // ── Backfill Embeddings ─────────────────────────────────────────────────
+  // Geht alle Produkte mit Foto aber ohne imageEmbedding durch und laesst
+  // GPT-4o-mini-Vision eine Beschreibung machen + text-embedding-3-small den
+  // Vektor erzeugen. Aendert NICHT die User-Felder (brand/name/sku/etc.) —
+  // nur imageDescription + imageEmbedding werden befuellt.
+  async function runBackfill() {
+    if (!apiKeyOk) {
+      setActionMsg({ text: 'API-Key fehlt — bitte in Settings → AI Setup eintragen.', ok: false });
+      return;
+    }
+    const todo = products.filter(p => p.images && p.images.length > 0 && (!p.imageEmbedding || p.imageEmbedding.length === 0));
+    if (todo.length === 0) {
+      setActionMsg({ text: 'Nichts zu tun — alle Produkte mit Foto haben bereits ein Embedding.', ok: true });
+      return;
+    }
+    setBackfilling(true);
+    setBackfillProgress({ current: 0, total: todo.length, errors: 0 });
+    setActionMsg(null);
+
+    let errors = 0;
+    for (let i = 0; i < todo.length; i++) {
+      const p = todo[i];
+      try {
+        const { description, embedding } = await computeImageEmbedding(p.images[0]);
+        updateProduct(p.id, { imageDescription: description, imageEmbedding: embedding });
+      } catch (err) {
+        errors++;
+        console.warn('[backfill] embedding failed for', p.id, err);
+      }
+      setBackfillProgress({ current: i + 1, total: todo.length, errors });
+    }
+    setBackfilling(false);
+    setBackfillProgress(null);
+    loadProducts();
+    setActionMsg({
+      text: `Backfill fertig — ${todo.length - errors} von ${todo.length} Produkten analysiert${errors > 0 ? `, ${errors} Fehler` : ''}.`,
+      ok: errors === 0,
+    });
   }
 
   function ignoreGroup(groupId: string) {
@@ -2258,29 +2426,62 @@ function DuplicatesTab() {
     <div className="flex flex-col gap-4">
       <Card>
         <div className="flex items-start justify-between gap-4" style={{ flexWrap: 'wrap' }}>
-          <div>
+          <div style={{ minWidth: 0, flex: 1 }}>
             <h2 className="text-display-xs" style={{ color: '#0F0F10' }}>Doppelte Artikel finden</h2>
             <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4, maxWidth: 600 }}>
-              Scannt alle Produkte und gruppiert sie zu Duplikat-Clustern. Pro Gruppe wird automatisch ein Hauptprodukt vorgeschlagen (linked records &gt; SKU &gt; Stammdaten). Du entscheidest final — kein Auto-Löschen.
+              <strong>Two-Stage AI-Scan:</strong> Stage 1 vergleicht die Foto-Embeddings (lokal, gratis). Stage 2 schickt verdaechtige Paare an GPT-4o-mini-Vision, das beide Fotos direkt anschaut. Cluster werden NUR aus AI-bestaetigten Paaren gebildet.
             </p>
-            <div className="flex items-center gap-2" style={{ marginTop: 12 }}>
-              <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5, marginRight: 4 }}>Match by</span>
-              {(['all', 'image-only'] as const).map(m => (
-                <button key={m} onClick={() => setMatchMode(m)}
-                  className="cursor-pointer transition-all duration-200"
-                  style={{
-                    padding: '6px 12px', borderRadius: 999, fontSize: 12,
-                    border: `1px solid ${matchMode === m ? '#0F0F10' : '#D5D9DE'}`,
-                    color: matchMode === m ? '#0F0F10' : '#6B7280',
-                    background: matchMode === m ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
-                  }}>{m === 'all' ? 'All criteria (SKU + Brand + Photo …)' : 'Photo only'}</button>
-              ))}
-            </div>
           </div>
-          <Button variant="primary" onClick={scan} disabled={scanning}>
-            {scanning ? 'Scanning…' : groups ? `Re-scan ${products.length} products` : `Scan ${products.length} products`}
-          </Button>
+          <div className="flex flex-col gap-2" style={{ minWidth: 200 }}>
+            <Button variant="primary" onClick={scan} disabled={scanning || backfilling || embeddingStatus.withEmb < 2}>
+              {scanning ? (scanProgress ? `${scanProgress.stage} ${scanProgress.current}/${scanProgress.total}` : 'Scanning…') : groups ? 'Re-scan with AI' : 'Find Duplicates (AI)'}
+            </Button>
+            <Button variant="secondary" onClick={runBackfill} disabled={scanning || backfilling || !apiKeyOk || embeddingStatus.withImgNoEmb === 0}>
+              {backfilling
+                ? (backfillProgress ? `Backfill ${backfillProgress.current}/${backfillProgress.total}…` : 'Backfilling…')
+                : embeddingStatus.withImgNoEmb > 0
+                  ? `Backfill Embeddings (${embeddingStatus.withImgNoEmb})`
+                  : 'Backfill Embeddings'}
+            </Button>
+          </div>
         </div>
+
+        {/* Status-Panel: zeigt wie viele Produkte AI-vergleichbar sind und wo die Luecken sind. */}
+        <div style={{
+          marginTop: 16, padding: '12px 14px', borderRadius: 8,
+          background: '#FAFBFC', border: '1px solid #E5E9EE',
+          display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12,
+        }}>
+          <StatusCell label="Total Items" value={String(embeddingStatus.total)} sub="im Bestand" />
+          <StatusCell
+            label="AI Foto-Analyse"
+            value={`${embeddingStatus.withEmb}`}
+            sub={`von ${embeddingStatus.total - embeddingStatus.noImg} mit Foto`}
+            tone={embeddingStatus.withEmb === embeddingStatus.total - embeddingStatus.noImg ? 'good' : 'warn'}
+          />
+          <StatusCell
+            label="Foto, kein Embedding"
+            value={String(embeddingStatus.withImgNoEmb)}
+            sub={embeddingStatus.withImgNoEmb > 0 ? 'Backfill noetig' : '—'}
+            tone={embeddingStatus.withImgNoEmb > 0 ? 'warn' : 'good'}
+          />
+          <StatusCell
+            label="Ohne Foto"
+            value={String(embeddingStatus.noImg)}
+            sub="nicht visuell vergleichbar"
+            tone={embeddingStatus.noImg > 0 ? 'muted' : 'good'}
+          />
+        </div>
+
+        {!apiKeyOk && (
+          <div style={{
+            marginTop: 12, padding: '10px 14px', borderRadius: 8,
+            background: 'rgba(170,110,110,0.08)', border: '1px solid rgba(170,110,110,0.30)',
+            fontSize: 12, color: '#7A3535',
+          }}>
+            <strong>API-Key fehlt</strong> — fuer AI-Backfill und AI-Vision-Scan brauchst du einen OpenAI-Key. Settings → AI Setup.
+          </div>
+        )}
 
         {actionMsg && (
           <div style={{

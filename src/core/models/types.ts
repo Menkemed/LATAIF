@@ -58,11 +58,11 @@ export interface Category {
 // Plan §Product §6: Canonical status set.
 // Legacy-Werte (in_stock/reserved/offered/sold/consignment/in_repair/with_agent/on_order)
 // bleiben als Union für Back-Compat erlaubt; canonicalStockStatus() normalisiert.
-export type CanonicalStockStatus = 'IN_STOCK' | 'RESERVED' | 'SOLD' | 'GIVEN_TO_AGENT' | 'UNDER_REPAIR' | 'RETURNED' | 'WRITE_OFF';
+export type CanonicalStockStatus = 'IN_STOCK' | 'RESERVED' | 'SOLD' | 'GIVEN_TO_AGENT' | 'UNDER_REPAIR' | 'RETURNED' | 'WRITE_OFF' | 'CONSUMED';
 export type StockStatus =
   | CanonicalStockStatus
   | 'in_stock' | 'reserved' | 'offered' | 'sold' | 'consignment' | 'consignment_reserved'
-  | 'in_repair' | 'with_agent' | 'on_order';
+  | 'in_repair' | 'with_agent' | 'on_order' | 'consumed';
 
 export function canonicalStockStatus(s: StockStatus | string | undefined | null): CanonicalStockStatus {
   const v = String(s || '').toLowerCase();
@@ -73,6 +73,7 @@ export function canonicalStockStatus(s: StockStatus | string | undefined | null)
   if (v === 'in_repair' || v === 'under_repair') return 'UNDER_REPAIR';
   if (v === 'returned') return 'RETURNED';
   if (v === 'write_off') return 'WRITE_OFF';
+  if (v === 'consumed') return 'CONSUMED';
   if (v === 'on_order') return 'RESERVED';
   return 'IN_STOCK';
 }
@@ -951,11 +952,28 @@ export interface CreditNote {
 }
 
 // Phase 5: Production & Consumption (Plan §Production)
+// Input-Snapshot enthält volle Produkt-Spec zum Zeitpunkt des Konsums (Inputs
+// werden ja aus der products-Tabelle gelöscht). Für Detail-View nötig — sonst
+// hätten wir nur die ID und nichts mehr.
+export interface ProductionInputSnapshot {
+  categoryId?: string;
+  brand?: string;
+  name?: string;
+  sku?: string;
+  condition?: string;
+  attributes?: Record<string, unknown>;
+  images?: string[];
+  purchasePrice?: number;
+}
+
 export interface ProductionInput {
   id: UUID;
   recordId: UUID;
   productId: UUID;
+  /** JSON-string des kompletten Snapshots (siehe ProductionInputSnapshot). */
   productSnapshot?: string;
+  /** Geparste Variante — wird in loadRecords befüllt. */
+  snapshot?: ProductionInputSnapshot;
   inputValue: number;
 }
 
@@ -1120,4 +1138,134 @@ export interface ExpensePayment {
   paidAt: string;
   note?: string;
   createdAt: string;
+}
+
+// ── Scrap Gold Quick Trade ───────────────────────────────────────
+// Direkter Altgold-Handel: Kunde verkauft uns mehrere Goldstücke, wir
+// verkaufen sofort an Händler weiter. Spec: nur Spread pro Item (sale -
+// purchase) zählt als Income; Brutto-Preise bleiben pro Line intern
+// dokumentiert. Aggregate auf scrap_trades sind SUMMEN bzw. 'mixed' für
+// karat bei Multi-Line.
+
+export type ScrapPaymentMethod = 'cash' | 'bank' | 'benefit';
+export type ScrapTradeStatus = 'completed' | 'cancelled';
+export type ScrapPaymentDirection = 'OUT' | 'IN';   // OUT = zum Seller, IN = vom Buyer
+
+export interface ScrapTradeLine {
+  id: UUID;
+  scrapTradeId: UUID;
+  position: number;
+  weightGrams: number;
+  karat: string;                    // '24K' | '22K' | '21K' | '18K' | '14K' | '9K' | custom
+  purchasePrice: number;
+  salePrice: number;
+  profit: number;                   // = salePrice - purchasePrice (persisted)
+  notes?: string;
+  imagesPurchase: string[];         // base64 data URLs PRO Item
+  imagesSale: string[];
+  createdAt: string;
+}
+
+// Split-Payments: ein Trade kann mehrere Payments pro Direction haben.
+// Bsp: Seller bekommt 200 cash + 300 benefit = 500 BHD total Purchase.
+// Sum(OUT) muss SUM(lines.purchase) entsprechen, Sum(IN) = SUM(lines.sale).
+export interface ScrapTradePayment {
+  id: UUID;
+  scrapTradeId: UUID;
+  direction: ScrapPaymentDirection;
+  method: ScrapPaymentMethod;
+  amount: number;
+  position: number;
+  createdAt: string;
+}
+
+export interface ScrapTrade {
+  id: UUID;
+  branchId: UUID;
+  tradeNumber: string;              // 'SGT-000001'
+  sellerName: string;
+  sellerPhone?: string;
+  sellerCustomerId?: UUID;
+  buyerName: string;
+  buyerPhone?: string;
+  buyerSupplierId?: UUID;
+  // Aggregates abgeleitet aus lines:
+  weightGrams: number;              // SUM(lines.weight_grams)
+  karat: string;                    // 'mixed' wenn lines.length > 1, sonst single karat
+  purchasePrice: number;            // SUM(lines.purchase_price)
+  salePrice: number;                // SUM(lines.sale_price)
+  profit: number;                   // SUM(lines.profit)
+  tradeDate: string;                // ISO
+  notes?: string;                   // Trade-weite Notiz (item-spezifisch siehe lines)
+  status: ScrapTradeStatus;
+  lines: ScrapTradeLine[];
+  paymentsOut: ScrapTradePayment[]; // Splits zum Seller — sum = SUM(lines.purchase)
+  paymentsIn: ScrapTradePayment[];  // Splits vom Buyer — sum = SUM(lines.sale)
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: UUID;
+  version: number;
+}
+
+export function rowToScrapTradePayment(row: any): ScrapTradePayment {
+  return {
+    id: row.id,
+    scrapTradeId: row.scrap_trade_id,
+    direction: (row.direction as ScrapPaymentDirection) || 'OUT',
+    method: (row.method as ScrapPaymentMethod) || 'cash',
+    amount: Number(row.amount) || 0,
+    position: Number(row.position) || 1,
+    createdAt: row.created_at,
+  };
+}
+
+export function rowToScrapTradeLine(row: any): ScrapTradeLine {
+  return {
+    id: row.id,
+    scrapTradeId: row.scrap_trade_id,
+    position: Number(row.position) || 1,
+    weightGrams: Number(row.weight_grams) || 0,
+    karat: row.karat,
+    purchasePrice: Number(row.purchase_price) || 0,
+    salePrice: Number(row.sale_price) || 0,
+    profit: Number(row.profit) || 0,
+    notes: row.notes || undefined,
+    imagesPurchase: row.images_purchase ? JSON.parse(row.images_purchase) : [],
+    imagesSale: row.images_sale ? JSON.parse(row.images_sale) : [],
+    createdAt: row.created_at,
+  };
+}
+
+export function rowToScrapTrade(
+  row: any,
+  lines: ScrapTradeLine[] = [],
+  paymentsOut: ScrapTradePayment[] = [],
+  paymentsIn: ScrapTradePayment[] = []
+): ScrapTrade {
+  return {
+    id: row.id,
+    branchId: row.branch_id,
+    tradeNumber: row.trade_number,
+    sellerName: row.seller_name,
+    sellerPhone: row.seller_phone || undefined,
+    sellerCustomerId: row.seller_customer_id || undefined,
+    buyerName: row.buyer_name,
+    buyerPhone: row.buyer_phone || undefined,
+    buyerSupplierId: row.buyer_supplier_id || undefined,
+    weightGrams: Number(row.weight_grams) || 0,
+    karat: row.karat,
+    purchasePrice: Number(row.purchase_price) || 0,
+    salePrice: Number(row.sale_price) || 0,
+    profit: Number(row.profit) || 0,
+    tradeDate: row.trade_date,
+    notes: row.notes || undefined,
+    status: (row.status as ScrapTradeStatus) || 'completed',
+    lines,
+    paymentsOut,
+    paymentsIn,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdBy: row.created_by || undefined,
+    version: Number(row.version) || 1,
+  };
 }

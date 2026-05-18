@@ -848,6 +848,80 @@ export async function computeImageEmbedding(imageBase64: string): Promise<{ desc
   return { description, embedding };
 }
 
+// ═══════════════════════════════════════════════════════════
+// Pairwise Visual Match (2026-05-18)
+// ───────────────────────────────────────────────────────────
+// Two-Stage-Retrieval, Salesforce-Pattern:
+//   Stage 1: Embedding-Cosine als billiger Pre-Filter (recall) →
+//   Stage 2: GPT-4o-mini-Vision bekommt BEIDE Fotos und entscheidet
+//            direkt visuell ob es das gleiche physische Produkt ist.
+//
+// Loest das Embedding-Falsch-Positiv-Problem: text-embedding-3-small
+// auf Bild-Beschreibungen misst nur Sprach-Naehe der Texte (zwei "luxury
+// watch with black dial" landen nah beieinander auch wenn es verschiedene
+// Modelle sind). Vision-LLM kann die echten Identitaets-Merkmale lesen.
+//
+// Output: { isMatch, confidence, reason }. isMatch=true nur bei
+// 'high'-Konfidenz. 'uncertain' wird als "may be related" gezeigt.
+// ═══════════════════════════════════════════════════════════
+
+export interface PairwiseVisualMatchResult {
+  isMatch: boolean;
+  confidence: 'high' | 'medium' | 'low';
+  reason: string;
+}
+
+export async function pairwiseVisualMatch(
+  imageABase64: string,
+  imageBBase64: string,
+): Promise<PairwiseVisualMatchResult> {
+  const key = getApiKey();
+  if (!key) throw new Error('No API key configured');
+
+  const urlA = imageABase64.startsWith('data:') ? imageABase64 : `data:image/jpeg;base64,${imageABase64}`;
+  const urlB = imageBBase64.startsWith('data:') ? imageBBase64 : `data:image/jpeg;base64,${imageBBase64}`;
+
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a duplicate-detection assistant for a luxury watch + jewellery inventory. You receive TWO product images and must decide if they show the SAME physical product (allowing for angle/light/crop variation, multiple photos of the same item from different sides). DIFFERENT items of the same model = NOT a duplicate. Different colorways/sizes/references = NOT a duplicate. Output STRICT JSON with keys: isMatch (boolean), confidence ("high"|"medium"|"low"), reason (string, ≤120 chars). Be conservative — only return isMatch=true with confidence="high" when you are very sure. Never invent details.',
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Image A and Image B — same physical product? Answer in strict JSON.' },
+            { type: 'image_url', image_url: { url: urlA } },
+            { type: 'image_url', image_url: { url: urlB } },
+          ],
+        },
+      ],
+      max_tokens: 150,
+      temperature: 0.0,
+      response_format: { type: 'json_object' },
+      store: false,
+    }),
+  });
+  if (!res.ok) throw new Error(`pairwiseVisualMatch failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  const content = data.choices?.[0]?.message?.content || '{}';
+  try {
+    const parsed = JSON.parse(content);
+    const conf = String(parsed.confidence || 'low').toLowerCase() as 'high' | 'medium' | 'low';
+    return {
+      isMatch: !!parsed.isMatch && conf === 'high',
+      confidence: conf === 'high' || conf === 'medium' ? conf : 'low',
+      reason: String(parsed.reason || '').slice(0, 200),
+    };
+  } catch {
+    return { isMatch: false, confidence: 'low', reason: 'AI response unparseable' };
+  }
+}
+
 /** Cosine-Similarity zwischen zwei Vektoren. 1.0 = identisch, 0 = orthogonal, -1 = invers. */
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;

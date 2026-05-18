@@ -34,8 +34,9 @@ interface Props {
 }
 
 function scoreLabel(score: number): { text: string; color: string; bg: string } {
-  if (score >= 100) return { text: 'Almost certainly duplicate', color: '#AA6E6E', bg: 'rgba(170,110,110,0.10)' };
-  if (score >= 60)  return { text: 'Likely duplicate',           color: '#AA956E', bg: 'rgba(170,149,110,0.12)' };
+  // 2026-05-18 — Schwellen passend zu STRONG (>=80) / POSSIBLE (60-79).
+  if (score >= 150) return { text: 'Almost certainly duplicate', color: '#AA6E6E', bg: 'rgba(170,110,110,0.10)' };
+  if (score >= 80)  return { text: 'Likely duplicate',           color: '#AA956E', bg: 'rgba(170,149,110,0.12)' };
   return { text: 'Possibly similar', color: '#6E8AAA', bg: 'rgba(110,138,170,0.12)' };
 }
 

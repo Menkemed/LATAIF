@@ -15,6 +15,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
+import { useScrapTradeStore } from '@/stores/scrapTradeStore';
 import { useDebtStore } from '@/stores/debtStore';
 import { usePayablesStore, payablesTotal, overdueCount } from '@/stores/payablesStore';
 import { GaugeChart } from '@/components/charts/GaugeChart';
@@ -47,6 +48,7 @@ export function Dashboard() {
   const { loadExpenses, getTotalsByCategory, expenses: allExpenses } = useExpenseStore();
   const { loadTransfers, getBalances } = useBankingStore();
   const { returns: salesReturns, loadReturns: loadSalesReturns } = useSalesReturnStore();
+  const { trades: scrapTrades, loadTrades: loadScrapTrades } = useScrapTradeStore();
   const { debts, loadDebts } = useDebtStore();
   const { payables, loadPayables } = usePayablesStore();
   const userName = useAuthStore(s => s.session?.user.name || '');
@@ -98,8 +100,8 @@ export function Dashboard() {
   useEffect(() => {
     loadCategories(); loadProducts(); loadCustomers();
     loadSuppliers(); loadPartners(); loadInvoices(); loadPurchases(); loadExpenses();
-    loadTransfers(); loadSalesReturns(); loadDebts(); loadPayables();
-  }, [loadCategories, loadProducts, loadCustomers, loadSuppliers, loadPartners, loadInvoices, loadPurchases, loadExpenses, loadTransfers, loadSalesReturns, loadDebts, loadPayables]);
+    loadTransfers(); loadSalesReturns(); loadDebts(); loadPayables(); loadScrapTrades();
+  }, [loadCategories, loadProducts, loadCustomers, loadSuppliers, loadPartners, loadInvoices, loadPurchases, loadExpenses, loadTransfers, loadSalesReturns, loadDebts, loadPayables, loadScrapTrades]);
 
   const stock = useMemo(() => getStockValue(), [products, getStockValue]);
   const stockByCat = useMemo(() => getStockByCategory(), [products, categories, getStockByCategory]);
@@ -139,13 +141,28 @@ export function Dashboard() {
     }
     return { cash, profit };
   }, [salesReturns, finalInvoiceMap, periodStart, periodEnd]);
+  // Scrap Gold Spread: nur completed Trades im Zeitraum. Pro Spec zählt
+  // der Spread (Profit) als Income/Revenue — niemals der volle Sale Price.
+  const scrapSpreadInPeriod = useMemo(() => {
+    let sum = 0;
+    for (const t of scrapTrades) {
+      if (t.status !== 'completed') continue;
+      const when = (t.tradeDate || '').slice(0, 10);
+      const from = periodStart.slice(0, 10);
+      const to = periodEnd.slice(0, 10);
+      if (when && (when < from || when > to)) continue;
+      sum += t.profit || 0;
+    }
+    return sum;
+  }, [scrapTrades, periodStart, periodEnd]);
+
   const totalRevenue = useMemo(
-    () => finalInvoices.reduce((s, i) => s + i.grossAmount, 0) - refundsByPeriod.cash,
-    [finalInvoices, refundsByPeriod]
+    () => finalInvoices.reduce((s, i) => s + i.grossAmount, 0) - refundsByPeriod.cash + scrapSpreadInPeriod,
+    [finalInvoices, refundsByPeriod, scrapSpreadInPeriod]
   );
   const totalProfit = useMemo(
-    () => finalInvoices.reduce((s, i) => s + (i.marginSnapshot || 0), 0) - refundsByPeriod.profit,
-    [finalInvoices, refundsByPeriod]
+    () => finalInvoices.reduce((s, i) => s + (i.marginSnapshot || 0), 0) - refundsByPeriod.profit + scrapSpreadInPeriod,
+    [finalInvoices, refundsByPeriod, scrapSpreadInPeriod]
   );
   // Plan §Dashboard §3.A+B: durchschnittlicher Verkauf + Margin %
   const avgSale = useMemo(() => finalInvoices.length > 0 ? totalRevenue / finalInvoices.length : 0, [finalInvoices, totalRevenue]);
