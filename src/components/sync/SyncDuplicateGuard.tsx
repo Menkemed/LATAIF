@@ -18,7 +18,7 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Bhd } from '@/components/ui/Bhd';
 import { Package, ArrowRight, Plus } from 'lucide-react';
 import { useProductStore } from '@/stores/productStore';
-import { computeImageEmbedding, identifyProduct, isAiConfigured, type AiCategoryId } from '@/core/ai/ai-service';
+import { computeImageEmbedding, cosineSimilarity, identifyProduct, isAiConfigured, pairwiseVisualMatch, type AiCategoryId } from '@/core/ai/ai-service';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { trackUpdate } from '@/core/sync/track';
 import type { Product } from '@/core/models/types';
@@ -156,17 +156,77 @@ export function SyncDuplicateGuard() {
         useProductStore.getState().loadProducts();
       }
 
-      // ── Schritt 2: Image-only Duplicate-Check ───────────────────────────
+      // ── Schritt 2: Two-Stage Duplicate-Check (selbe Logik wie Find-Duplicates) ──
+      // Stage 1: Cosine-Pre-Filter ueber Embeddings (lokal, gratis) — findet
+      //          Kandidaten mit visuell aehnlicher Beschreibung. Threshold 0.75
+      //          ist absichtlich grosszuegig (recall).
+      // Stage 2: pairwiseVisualMatch — GPT-4o-mini-Vision sieht BEIDE Fotos
+      //          direkt und entscheidet "selbes physisches Produkt?". Nur
+      //          isMatch=true (high confidence) wird als Duplikat akzeptiert.
+      //          So vermeidet das Embedding-Falsch-Positiv-Problem (alle Rolex
+      //          sehen im Text-Embedding aehnlich aus, sind aber verschiedene Modelle).
+      // Ohne API-Key: Fallback auf strictere Cosine-Schwelle 0.92.
       const stateAfterEmb = useProductStore.getState();
       const reviews: PendingReview[] = [];
       const duplicateFoundIds = new Set<string>();
+      const STAGE1_THRESHOLD = 0.75;
+      const STRICT_FALLBACK = 0.92;
+
       for (const id of ids) {
         const incoming = stateAfterEmb.products.find(p => p.id === id);
         if (!incoming) continue;
         if (!incoming.imageEmbedding || incoming.imageEmbedding.length === 0) continue;
-        const matches = stateAfterEmb.findPossibleDuplicates(incoming, id, { mode: 'image-only' });
-        if (matches.length > 0) {
-          reviews.push({ incoming, matches });
+        if (!incoming.images || incoming.images.length === 0) continue;
+
+        // Stage 1: Cosine-Pre-Filter
+        const candidates: Array<{ product: Product; cosine: number }> = [];
+        for (const p of stateAfterEmb.products) {
+          if (p.id === id) continue;
+          if (!p.imageEmbedding || p.imageEmbedding.length === 0) continue;
+          if (p.categoryId !== incoming.categoryId) continue;
+          if (!p.images || p.images.length === 0) continue;
+          const cos = cosineSimilarity(incoming.imageEmbedding, p.imageEmbedding);
+          if (cos >= STAGE1_THRESHOLD) candidates.push({ product: p, cosine: cos });
+        }
+        candidates.sort((a, b) => b.cosine - a.cosine);
+        const top = candidates.slice(0, 5); // bound LLM cost
+        if (top.length === 0) continue;
+
+        if (!isAiConfigured()) {
+          // Fallback ohne LLM: nur sehr enge Cosine-Treffer zaehlen.
+          const strict = top.filter(c => c.cosine >= STRICT_FALLBACK);
+          if (strict.length > 0) {
+            reviews.push({
+              incoming,
+              matches: strict.map(c => ({
+                product: c.product,
+                score: Math.round(c.cosine * 100),
+                reasons: [`Foto-Match Cosine ${c.cosine.toFixed(2)} (no API)`],
+              })),
+            });
+            duplicateFoundIds.add(id);
+          }
+          continue;
+        }
+
+        // Stage 2: GPT-4o-mini-Vision pairwise
+        const confirmed: Array<{ product: Product; score: number; reasons: string[] }> = [];
+        for (const c of top) {
+          try {
+            const result = await pairwiseVisualMatch(incoming.images[0], c.product.images[0]);
+            if (result.isMatch) {
+              confirmed.push({
+                product: c.product,
+                score: Math.round(c.cosine * 100),
+                reasons: [`AI Vision: ${result.reason}`, `Cosine ${c.cosine.toFixed(2)}`],
+              });
+            }
+          } catch (err) {
+            console.warn('[SyncGuard] pairwise check failed:', id, err);
+          }
+        }
+        if (confirmed.length > 0) {
+          reviews.push({ incoming, matches: confirmed });
           duplicateFoundIds.add(id);
         }
       }
