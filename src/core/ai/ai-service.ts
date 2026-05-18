@@ -423,14 +423,25 @@ Your task: identify this ${spec.name} item with EXTREME specificity and research
 **Rules**:
 - Identify brand + exact model/reference/collection name — include nicknames where applicable (e.g. "Submariner 'Hulk'", "6062 'Dark Star'", "Cartier Love", "Bulgari Serpenti", "Van Cleef Alhambra")
 - **WATCHES (CRITICAL — these three together identify the watch)**:
-  1. **reference_number**: the EXACT manufacturer reference. Read it from the dial bottom, caseback engraving, between the lugs (Rolex), or papers if visible. NEVER substitute family-name (e.g. "Submariner") for a reference. Format examples by brand:
-     - Rolex: 4-6 digits (vintage like "1601", "6062") or modern alphanumeric ("126610LN", "126710BLRO", "116500LN")
+  1. **reference_number**: the EXACT manufacturer reference. Two valid sources:
+     (i) **READ** from visible markings — dial bottom text, caseback engraving, between lugs (Rolex), or papers in the photo.
+     (ii) **INFER FROM MODEL** — once you've identified the specific variant visually (dial color, bezel material, generation, complications, hand type), apply your model knowledge to fill the canonical factory reference. This is the COMMON case for casual photos where engraving isn't visible.
+     Examples of inferring:
+       - Rolex Submariner with green bezel + green dial → 116610LV ("Hulk")
+       - Rolex Submariner Date stainless black bezel modern → 126610LN
+       - Rolex GMT-Master II with red/blue bezel jubilee bracelet → 126710BLRO ("Pepsi")
+       - Patek Nautilus 40mm steel blue dial → 5711/1A-010 (or /1A-018 if Tiffany-blue dial)
+       - AP Royal Oak Jumbo Extra-Thin steel blue dial → 15202ST.OO.1240ST
+       - Cartier Tank Must Large quartz silver dial steel → WSTA0041 family
+       - Datejust 36mm fluted bezel jubilee silver dial → 126234 family; with smooth bezel oyster bracelet → 126200
+     NEVER substitute family-name (e.g. "Submariner") for a reference. Format examples by brand:
+     - Rolex: 4-6 digits vintage ("1601", "6062") or modern alphanumeric ("126610LN", "126710BLRO", "116500LN")
      - Patek Philippe: with slashes ("5711/1A-010", "5990/1A", "5167A-001")
      - Audemars Piguet: long codes ("15500ST.OO.1220ST.01", "26331ST.OO.1220ST.01")
      - Omega: dotted numerics ("310.30.42.50.01.001", "311.30.42.30.01.005")
      - Cartier: "WSSA0030", "W31044M7", "WGNM0017"
      - Vacheron / Lange / IWC / JLC: 4-7 digit numerics often with letters ("4500V/110A-B128", "IW371417", "Q1378420")
-     - If you genuinely cannot read it, return null — do NOT fabricate.
+     **Only return null** if you genuinely cannot identify even the model+variant — i.e. the watch is so obscured/unknown that you can't put a specific name in the name field either. If you can identify the variant, ALWAYS attempt the canonical reference. State your inference path in notes (example: "ref inferred from green bezel + green dial + jubilee bracelet → 116610LV Hulk").
   2. **name** (top-level, NOT in attributes — the exact collector name): include the family AND the nickname/variant (e.g. "Submariner Date 'Hulk'", "GMT-Master II 'Pepsi'", "Daytona 'Panda'", "Royal Oak Jumbo Extra-Thin", "Nautilus 5711/1A 'Tiffany'"). NEVER just "Submariner" — always specify the variant.
   3. **case_diameter_mm**: case width in mm — DETERMINED, NEVER GUESSED. Priority order:
      **(a) REFERENCE-DRIVEN** — if you read a reference number, the size is FIXED by that reference. Apply this lookup table strictly:
