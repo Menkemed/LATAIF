@@ -47,6 +47,77 @@ function buildFallbackSkuSeed(brand?: string, categoryId?: string): string {
   return `${brandCode}-${catCode}-001`;
 }
 
+const VALID_AI_CATEGORIES = new Set<string>([
+  'cat-watch', 'cat-gold-jewelry', 'cat-branded-gold-jewelry',
+  'cat-original-gold-jewelry', 'cat-accessory', 'cat-spare-part',
+]);
+
+/** Auto-AI-Identify fuer ein einzelnes Produkt — wird genutzt:
+ *  (1) nach Mobile-Upload wenn KEIN Duplikat erkannt wurde
+ *  (2) wenn der User das Duplicate-Modal abbricht (= behalten als eigenes Item)
+ *  Silent: skip bei fehlendem API-Key / Foto / unbekannter Kategorie / bereits
+ *  AI-identifiziert. Schreibt brand/name/sku/condition/attributes etc. via
+ *  updateProduct ohne user-typed Daten zu zerstoeren. */
+async function runAutoIdentify(productId: string): Promise<void> {
+  if (!isAiConfigured()) return;
+  const incoming = useProductStore.getState().products.find(p => p.id === productId);
+  if (!incoming) return;
+  if (!incoming.images || incoming.images.length === 0) return;
+  if (!VALID_AI_CATEGORIES.has(incoming.categoryId)) return;
+  const alreadyIdentified = !!incoming.condition && !!incoming.name && incoming.name.trim().length > 3;
+  if (alreadyIdentified) return;
+
+  try {
+    const result = await identifyProduct({
+      categoryId: incoming.categoryId as AiCategoryId,
+      imageBase64: incoming.images[0],
+      hints: {
+        brand: incoming.brand || undefined,
+        name: incoming.name || undefined,
+        reference: incoming.sku || undefined,
+      },
+    });
+    const store = useProductStore.getState();
+    const current = store.products.find(p => p.id === productId);
+    if (!current) return;
+    const patch: Partial<Product> = {};
+    if (result.brand) patch.brand = result.brand;
+    if (result.name) patch.name = result.name;
+    // SKU MANDATORY: empty / 'null' / 'undefined' / whitespace → fill.
+    const currentSkuRaw = String(current.sku ?? '').trim().toLowerCase();
+    const skuIsEmpty = !currentSkuRaw || currentSkuRaw === 'null' || currentSkuRaw === 'undefined';
+    if (skuIsEmpty) {
+      const seed = result.sku || buildFallbackSkuSeed(result.brand || current.brand, current.categoryId);
+      patch.sku = store.nextAvailableSku(seed);
+    }
+    if (result.condition) patch.condition = result.condition;
+    if (result.description) {
+      patch.notes = current.notes ? `${current.notes}\n\n${result.description}` : result.description;
+    }
+    if (result.estimatedValue && !current.plannedSalePrice) patch.plannedSalePrice = result.estimatedValue;
+    if (result.taxScheme && !current.taxScheme) patch.taxScheme = result.taxScheme;
+    if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0
+        && (!current.scopeOfDelivery || current.scopeOfDelivery.length === 0)) {
+      patch.scopeOfDelivery = result.scopeOfDelivery;
+    }
+    const attrs = { ...(current.attributes || {}) } as Record<string, string | number | boolean | string[]>;
+    let attrsChanged = false;
+    for (const [k, v] of Object.entries(result.attributes || {})) {
+      if (v === null || v === undefined || v === '') continue;
+      if (attrs[k] === undefined || attrs[k] === '') {
+        attrs[k] = v as string | number | boolean | string[];
+        attrsChanged = true;
+      }
+    }
+    if (attrsChanged) patch.attributes = attrs;
+    if (Object.keys(patch).length === 0) return;
+    store.updateProduct(productId, patch);
+    console.info('[SyncGuard] auto-identified', productId, Object.keys(patch).join(','));
+  } catch (err) {
+    console.warn('[SyncGuard] auto-identify failed for', productId, err);
+  }
+}
+
 function scoreLabel(score: number): { text: string; color: string; bg: string } {
   if (score >= 100) return { text: 'Almost certainly duplicate', color: '#AA6E6E', bg: 'rgba(170,110,110,0.10)' };
   if (score >= 60)  return { text: 'Likely duplicate',           color: '#AA956E', bg: 'rgba(170,149,110,0.12)' };
@@ -238,71 +309,12 @@ export function SyncDuplicateGuard() {
       }
 
       // ── Schritt 3: AI Identify fuer Nicht-Duplikate ─────────────────────
-      if (!isAiConfigured()) return;
-      const validAiCats = new Set<string>([
-        'cat-watch', 'cat-gold-jewelry', 'cat-branded-gold-jewelry',
-        'cat-original-gold-jewelry', 'cat-accessory', 'cat-spare-part',
-      ]);
+      // Items die als Duplikat erkannt wurden bekommen kein Identify hier —
+      // wenn der User das Modal abbricht ("behalten als eigenes"), wird
+      // runAutoIdentify dort nachgereicht (siehe keepAsNew).
       for (const id of ids) {
         if (duplicateFoundIds.has(id)) continue;
-        const incoming = stateAfterEmb.products.find(p => p.id === id);
-        if (!incoming) continue;
-        if (!incoming.images || incoming.images.length === 0) continue;
-        if (!validAiCats.has(incoming.categoryId)) continue;
-        // Skip wenn schon AI-identifiziert (Name + Condition gefuellt).
-        const alreadyIdentified = !!incoming.condition && !!incoming.name && incoming.name.trim().length > 3;
-        if (alreadyIdentified) continue;
-
-        identifyProduct({
-          categoryId: incoming.categoryId as AiCategoryId,
-          imageBase64: incoming.images[0],
-          hints: {
-            brand: incoming.brand || undefined,
-            name: incoming.name || undefined,
-            reference: incoming.sku || undefined,
-          },
-        })
-          .then(result => {
-            const store = useProductStore.getState();
-            const current = store.products.find(p => p.id === id);
-            if (!current) return;
-            const patch: Partial<Product> = {};
-            if (result.brand) patch.brand = result.brand;
-            if (result.name) patch.name = result.name;
-            // SKU MANDATORY (2026-05-18): Mobile-Upload kommt mit sku=null/''/literal'null'.
-            // Wir behandeln alle drei als "leer" und fuellen mit AI-Vorschlag.
-            // Falls AI nichts liefert: Fallback aus Brand-Kuerzel + Kategorie + Sequenz.
-            const currentSkuRaw = String(current.sku ?? '').trim().toLowerCase();
-            const skuIsEmpty = !currentSkuRaw || currentSkuRaw === 'null' || currentSkuRaw === 'undefined';
-            if (skuIsEmpty) {
-              const seed = result.sku || buildFallbackSkuSeed(result.brand || current.brand, current.categoryId);
-              patch.sku = store.nextAvailableSku(seed);
-            }
-            if (result.condition) patch.condition = result.condition;
-            if (result.description) {
-              patch.notes = current.notes ? `${current.notes}\n\n${result.description}` : result.description;
-            }
-            if (result.estimatedValue && !current.plannedSalePrice) patch.plannedSalePrice = result.estimatedValue;
-            if (result.taxScheme && !current.taxScheme) patch.taxScheme = result.taxScheme;
-            if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0
-                && (!current.scopeOfDelivery || current.scopeOfDelivery.length === 0)) {
-              patch.scopeOfDelivery = result.scopeOfDelivery;
-            }
-            const attrs = { ...(current.attributes || {}) } as Record<string, string | number | boolean | string[]>;
-            let attrsChanged = false;
-            for (const [k, v] of Object.entries(result.attributes || {})) {
-              if (v === null || v === undefined || v === '') continue;
-              if (attrs[k] === undefined || attrs[k] === '') {
-                attrs[k] = v as string | number | boolean | string[];
-                attrsChanged = true;
-              }
-            }
-            if (attrsChanged) patch.attributes = attrs;
-            if (Object.keys(patch).length === 0) return;
-            store.updateProduct(id, patch);
-            console.info('[SyncGuard] auto-identified', id, Object.keys(patch).join(','));
-          })
-          .catch(err => console.warn('[SyncGuard] auto-identify failed for', id, err));
+        runAutoIdentify(id);
       }
     }
     window.addEventListener('lataif:sync-products-inserted', handle as EventListener);
@@ -321,7 +333,14 @@ export function SyncDuplicateGuard() {
   }
 
   function keepAsNew() {
-    // "Ablehnen" / "Erstellen" — Item bleibt wie es ist, nur dismissen.
+    // "Ablehnen" / "Behalten als eigenes Item" — User hat entschieden dass es
+    // KEIN Duplikat ist. Wir reichen das AI-Identify nach (fuellt brand/name/
+    // sku/condition/attributes etc.) — der Mobile-Upload kommt schliesslich mit
+    // leeren Feldern und ohne Identify bleibt das Item als nackter Brand-Stub
+    // in der Datenbank.
+    if (current?.incoming.id) {
+      runAutoIdentify(current.incoming.id);
+    }
     dequeue();
   }
 
