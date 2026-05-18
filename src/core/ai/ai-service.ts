@@ -315,6 +315,10 @@ export interface AiProductIdentification {
   // Research metadata
   referenceSource?: string;
   marketComparables?: string;
+  // Confidence-Self-Rating (2026-05-18) — die AI muss bei jedem Identify
+  // bewerten wie sicher sie sich ist. Damit kann die UI 'Needs Confirmation'-
+  // Badges anzeigen und der User priorisiert was er reviewt.
+  identificationConfidence?: 'high' | 'medium' | 'low';
 }
 
 // Plan §Product §4 — category spec for AI prompt generation
@@ -420,6 +424,23 @@ Your task: identify this ${spec.name} item with EXTREME specificity and research
 **Scope-of-delivery options** (multi-select): ${spec.scopeOptions.join(' | ')}
 **Format notes**: ${spec.notes}
 
+**JEWELER MINDSET — DIFFERENTIAL DIAGNOSIS (MANDATORY before any final answer)**:
+Think like a watchmaker examining a piece on the bench. Do NOT jump to the first plausible reference.
+Process:
+1. **Survey** — note ALL visible details: dial color, dial markers (Roman/baton/diamond/Arabic), bezel (smooth/fluted/diamond-set/ceramic), bracelet (Oyster/Jubilee/President/leather/integrated), case material (steel/two-tone/yellow gold/white gold/Everose), lugs (sharp/rounded/integrated), crown guard (yes/no), date window (with/without cyclops), complications (chronograph/GMT/moonphase), hand style.
+2. **List 3 plausible candidates** with the canonical references for each. Example: a stainless Datejust with silver dial could be 126200 (smooth bezel, oyster), 126234 (fluted bezel, jubilee), 116200 (older 36mm). For each candidate, state ONE strongest VISUAL discriminator that supports OR refutes it.
+3. **Discrimination cues to apply** (specific to common families):
+   - **Rolex Datejust 36 vs 41**: 41mm has wider dial-to-bezel ratio + proportionally smaller crown; 36mm has crown taking ~12% of case diameter, classic chest proportions, smaller lugs.
+   - **Datejust New (super-case 2010+) vs Old**: New = bolder lugs, "maxi" indices, wider bracelet end-links, crown guard impression even on DJ; Old (pre-2009) = thinner lugs, smaller indices, slimmer overall.
+   - **Datejust special editions**: Wimbledon (slate dial + Roman numerals in green/silver), Palm (green palm-leaf pattern dial), Fluted Motif (engraved dial pattern), Mother-of-Pearl (iridescent), Diamond dial (markers replaced by diamonds), Big-Diamond bezel (5-stone or pave) — note all explicitly.
+   - **Submariner Hulk (116610LV)** vs **Kermit (16610LV)** vs **Starbucks (126610LV new 41mm)**: Hulk = green dial+green bezel, 40mm, 2010-2020. Kermit = black dial+green bezel, 40mm, 2003-2010. Starbucks = black dial+green bezel modern, 41mm wider case, ceramic bezel, post-2020.
+   - **GMT Pepsi vs Coke vs Batman vs Sprite**: red/blue, red/black, black/blue, black/green. Bracelet: Jubilee (126710BLRO/BLNR) or Oyster (126710BLNR/BLRO oyster also exists for some).
+   - **Daytona 116500LN vs 116520**: 116500 = ceramic bezel post-2016. 116520 = aluminum bezel 2000-2016 (collectible "APH" dial variants).
+   - **Patek Nautilus 5711/1A**: -010 = blue dial, -014 = white dial Tiffany not, -018 = Tiffany-Blue dial (rare), Tiffany & Co cobranded = signature on dial.
+   - **AP Royal Oak Jumbo** (15202): 39mm extra-thin tonneau case, integrated bracelet, "Petite Tapisserie" dial; vs **Royal Oak 15500** = 41mm modern, "Grande Tapisserie".
+4. **Confidence Self-Rating** — output an extra top-level field "identificationConfidence": one of "high" | "medium" | "low". HIGH = visible reference engraving or all-clear DD-cues match exactly. MEDIUM = strong visual identification but no engraving + 1-2 small features ambiguous. LOW = best-guess from visible features but uncertain on variant. If LOW or worse, prefer null in reference_number and explain in notes.
+5. **Output** — in notes field, write a 1-line "DD trail": "Considered: A, B, C. Chose B because: [cue]. Ruled out A because: [cue]. Ruled out C because: [cue]."
+
 **Rules**:
 - Identify brand + exact model/reference/collection name — include nicknames where applicable (e.g. "Submariner 'Hulk'", "6062 'Dark Star'", "Cartier Love", "Bulgari Serpenti", "Van Cleef Alhambra")
 - **WATCHES (CRITICAL — these three together identify the watch)**:
@@ -504,6 +525,7 @@ Respond with JSON ONLY, no markdown. Structure:
   "notes": "",
   "referenceSource": "",
   "marketComparables": "",
+  "identificationConfidence": "medium",
   "attributes": { ${spec.required.map(k => `"${k}": null`).concat(spec.optional.map(k => `"${k}": null`)).join(', ')} }
 }
 
