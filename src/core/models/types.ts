@@ -118,6 +118,14 @@ export interface Product {
   imageDescription?: string;
   /** Plan §AI-Embedding: text-embedding-3-small Vektor (1536 Dim) der Description. */
   imageEmbedding?: number[];
+  /** Plan §AI-Learning (2026-05-18) — Snapshot dessen was die AI beim letzten
+   *  Identify vorgeschlagen hat (JSON). Wird benutzt um spaeter user-Korrekturen
+   *  zu erkennen (diff aktueller Wert vs Snapshot). */
+  aiIdentifiedSnapshot?: string;
+  /** Plan §AI-Learning — Liste der Felder die der User nach AI-Identify
+   *  korrigiert hat. JSON-Array: [{ field, aiSaid, userChanged, at }].
+   *  Wird beim naechsten Identify als Few-Shot-Example an die AI gegeben. */
+  aiCorrections?: string;
   // Dynamic attributes (category-specific)
   attributes: Record<string, string | number | boolean | string[]>;
   createdAt: string;

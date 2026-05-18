@@ -81,6 +81,48 @@ function rowToCategory(row: Record<string, unknown>): Category {
   };
 }
 
+// 2026-05-18 — AI-Learning: liefert die letzten N user-Korrekturen pro
+// Brand/Kategorie als Few-Shot-Text fuer den naechsten Identify. Wird von
+// SyncDuplicateGuard.runAutoIdentify und NewProductModal aufgerufen damit die
+// AI aus den Fehlern lernt die der User bereits korrigiert hat.
+export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string, limit = 5): string {
+  try {
+    const rows = query(
+      `SELECT brand, name, sku, ai_corrections, ai_identified_snapshot
+         FROM products
+        WHERE ai_corrections IS NOT NULL
+          AND TRIM(ai_corrections) != ''
+          AND TRIM(ai_corrections) != '[]'
+          AND (
+            ? = '' OR brand = ?
+            OR ? = '' OR category_id = ?
+          )
+        ORDER BY updated_at DESC
+        LIMIT ?`,
+      [brand || '', brand || '', categoryId || '', categoryId || '', limit]
+    );
+    if (rows.length === 0) return '';
+    const lines: string[] = [];
+    for (const r of rows) {
+      try {
+        const corrections = JSON.parse(r.ai_corrections as string) as Array<{ field: string; aiSaid: unknown; userChanged: unknown }>;
+        if (!Array.isArray(corrections) || corrections.length === 0) continue;
+        const itemLabel = `${r.brand} ${r.name || ''}`.trim() || '(item)';
+        for (const c of corrections) {
+          const aiVal = c.aiSaid === null || c.aiSaid === undefined ? '(empty)' : String(c.aiSaid);
+          const userVal = c.userChanged === null || c.userChanged === undefined ? '(empty)' : String(c.userChanged);
+          lines.push(`  - "${itemLabel}" — AI said ${c.field}=${aiVal}, user corrected to ${c.field}=${userVal}`);
+        }
+      } catch { /* parse error → skip */ }
+    }
+    if (lines.length === 0) return '';
+    return `\n\nRECENT USER CORRECTIONS (learn from these — past mistakes you made in similar items):\n${lines.slice(0, 8).join('\n')}\n`;
+  } catch (err) {
+    console.warn('[getRecentCorrectionsAsPrompt] failed:', err);
+    return '';
+  }
+}
+
 function rowToProduct(row: Record<string, unknown>): Product {
   return {
     id: row.id as string,
@@ -120,6 +162,8 @@ function rowToProduct(row: Record<string, unknown>): Product {
         return Array.isArray(v) && v.length > 0 ? v as number[] : undefined;
       } catch { return undefined; }
     })(),
+    aiIdentifiedSnapshot: (row.ai_identified_snapshot as string) || undefined,
+    aiCorrections: (row.ai_corrections as string) || undefined,
     attributes: JSON.parse((row.attributes as string) || '{}'),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -341,6 +385,15 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     if (data.scopeOfDelivery) { fields.push('scope_of_delivery = ?'); values.push(JSON.stringify(data.scopeOfDelivery)); }
     if (data.attributes) { fields.push('attributes = ?'); values.push(JSON.stringify(data.attributes)); }
     if (data.images) { fields.push('images = ?'); values.push(JSON.stringify(data.images)); }
+    // 2026-05-18 AI-Learning: Snapshot + Corrections durchreichen.
+    if ((data as { aiIdentifiedSnapshot?: string }).aiIdentifiedSnapshot !== undefined) {
+      fields.push('ai_identified_snapshot = ?');
+      values.push((data as { aiIdentifiedSnapshot?: string }).aiIdentifiedSnapshot || null);
+    }
+    if ((data as { aiCorrections?: string }).aiCorrections !== undefined) {
+      fields.push('ai_corrections = ?');
+      values.push((data as { aiCorrections?: string }).aiCorrections || null);
+    }
     // Caller darf imageHash direkt setzen (z.B. Mobile-Push hat den Hash schon).
     // Sonst lassen wir das Feld leer und der Backfill in loadProducts holt's nach.
     if ((data as { imageHash?: string }).imageHash !== undefined) {

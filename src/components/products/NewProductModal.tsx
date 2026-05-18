@@ -326,10 +326,14 @@ export function NewProductModal({
                   }
                   setAiBusy(true);
                   try {
+                    // AI-Learning: User-Korrekturen aus aehnlichen Items als
+                    // Few-Shot mitsenden (siehe getRecentCorrectionsAsPrompt).
+                    const { getRecentCorrectionsAsPrompt } = await import('@/stores/productStore');
                     const result = await ai.identifyProduct({
                       categoryId: form.categoryId as AiCategoryId,
                       imageBase64: hasImage ? form.images![0] : undefined,
                       hints: hasHints ? { brand: form.brand, name: form.name, reference: form.sku } : undefined,
+                      recentCorrections: getRecentCorrectionsAsPrompt(form.brand, form.categoryId),
                     });
                     setForm(f => {
                       const updated = { ...f };
@@ -349,6 +353,17 @@ export function NewProductModal({
                         attrs[k] = v as string | number | boolean | string[];
                       }
                       updated.attributes = attrs;
+                      // AI-Learning: Snapshot speichern damit Editing-Korrekturen
+                      // spaeter erkannt werden (Diff in ProductDetail-Save).
+                      updated.aiIdentifiedSnapshot = JSON.stringify({
+                        brand: result.brand,
+                        name: result.name,
+                        sku: result.sku,
+                        condition: result.condition,
+                        attributes: result.attributes,
+                        identificationConfidence: result.identificationConfidence,
+                        at: new Date().toISOString(),
+                      });
                       return updated;
                     });
                     // Sofortige Duplicate-Detection direkt nach AI-Erkennung —

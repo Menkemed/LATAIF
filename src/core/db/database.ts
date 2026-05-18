@@ -1240,6 +1240,14 @@ function runMigrations(database: Database): void {
     `ALTER TABLE products ADD COLUMN image_description TEXT`,
     `ALTER TABLE products ADD COLUMN image_embedding TEXT`,
 
+    // ── AI-Learning (2026-05-18, v0.1.41) ──
+    // Snapshot dessen was die AI beim letzten Identify vorgeschlagen hat (JSON).
+    // ai_corrections speichert eine Liste von Feld-Korrekturen die der User
+    // gemacht hat (Diff gegen Snapshot). Wird beim naechsten Identify als
+    // Few-Shot-Example reingegeben damit die AI aus deinen Bestaetigungen lernt.
+    `ALTER TABLE products ADD COLUMN ai_identified_snapshot TEXT`,
+    `ALTER TABLE products ADD COLUMN ai_corrections TEXT`,
+
     // ── Scrap Gold Quick Trade ──
     // Direkter Altgold-Handel (Kunde → wir → Händler). Nur der Spread (sale - purchase)
     // wird als REVENUE gebucht; Brutto-Preise bleiben als Audit-Trail auf der Row.

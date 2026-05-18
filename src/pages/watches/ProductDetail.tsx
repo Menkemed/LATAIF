@@ -365,10 +365,49 @@ export function ProductDetail() {
     }
     setErrors(validate());
     const margin = form.plannedSalePrice ? form.plannedSalePrice - (form.purchasePrice || 0) : undefined;
+
+    // 2026-05-18 AI-Learning: Wenn dieses Produkt einen AI-Snapshot hat
+    // (= letztes Identify), diffen wir die Felder die der User jetzt aendert
+    // gegen den Snapshot und loggen die Korrekturen. Beim NAECHSTEN Identify
+    // werden diese als Few-Shot mitgegeben damit die AI nicht den gleichen
+    // Fehler wieder macht.
+    let updatedCorrections: string | undefined;
+    if (product?.aiIdentifiedSnapshot) {
+      try {
+        const snap = JSON.parse(product.aiIdentifiedSnapshot) as {
+          brand?: string; name?: string; sku?: string; condition?: string;
+          attributes?: Record<string, unknown>;
+        };
+        const newCorrections: Array<{ field: string; aiSaid: unknown; userChanged: unknown; at: string }> = [];
+        const now = new Date().toISOString();
+        const compare = (field: string, aiVal: unknown, userVal: unknown) => {
+          const a = aiVal === undefined || aiVal === null ? '' : String(aiVal).trim().toLowerCase();
+          const u = userVal === undefined || userVal === null ? '' : String(userVal).trim().toLowerCase();
+          if (a && a !== u) newCorrections.push({ field, aiSaid: aiVal, userChanged: userVal, at: now });
+        };
+        compare('brand', snap.brand, form.brand);
+        compare('name', snap.name, form.name);
+        compare('sku', snap.sku, form.sku);
+        compare('condition', snap.condition, form.condition);
+        const snapAttrs = snap.attributes || {};
+        for (const k of Object.keys(snapAttrs)) {
+          compare(`attr.${k}`, snapAttrs[k], formAttrs[k]);
+        }
+        if (newCorrections.length > 0) {
+          let existing: typeof newCorrections = [];
+          try {
+            if (product.aiCorrections) existing = JSON.parse(product.aiCorrections);
+          } catch { /* */ }
+          updatedCorrections = JSON.stringify([...existing, ...newCorrections]);
+        }
+      } catch { /* snapshot parse error → no correction tracking */ }
+    }
+
     updateProduct(id, {
       ...form,
       attributes: formAttrs,
       expectedMargin: margin,
+      ...(updatedCorrections ? { aiCorrections: updatedCorrections } as Partial<Product> : {}),
     });
     setEditing(false);
   }

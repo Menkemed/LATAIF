@@ -404,6 +404,10 @@ export async function identifyProduct(params: {
     serial?: string;
     notes?: string;
   };
+  /** 2026-05-18 — Few-Shot-Block mit User-Korrekturen, wird direkt in den
+   *  System-Prompt injected damit die AI aus deinen Bestaetigungen lernt.
+   *  Aufbau via getRecentCorrectionsAsPrompt(brand, categoryId). */
+  recentCorrections?: string;
 }): Promise<AiProductIdentification> {
   const spec = CATEGORY_SPECS[params.categoryId];
   if (!spec) throw new Error(`Unknown category: ${params.categoryId}`);
@@ -545,9 +549,13 @@ Set fields to null/empty ONLY if truly indeterminable. Never guess serial number
     userContent.push({ type: 'image_url', image_url: { url: params.imageBase64 } });
   }
 
+  // AI-Learning: User-Korrekturen aus der Vergangenheit als Few-Shot-Suffix
+  // an den System-Prompt anhaengen. Wenn leer → unveraendert.
+  const fullSystemPrompt = systemPrompt + (params.recentCorrections || '');
+
   const response = await callOpenAI(
     [
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: fullSystemPrompt },
       { role: 'user', content: userContent.length > 1 ? userContent : userContent[0].text },
     ],
     1200,

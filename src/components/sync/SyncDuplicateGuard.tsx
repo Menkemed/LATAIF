@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/Button';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Bhd } from '@/components/ui/Bhd';
 import { Package, ArrowRight, Plus } from 'lucide-react';
-import { useProductStore } from '@/stores/productStore';
+import { getRecentCorrectionsAsPrompt, useProductStore } from '@/stores/productStore';
 import { computeImageEmbedding, cosineSimilarity, identifyProduct, isAiConfigured, pairwiseVisualMatch, type AiCategoryId } from '@/core/ai/ai-service';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { trackUpdate } from '@/core/sync/track';
@@ -76,6 +76,7 @@ async function runAutoIdentify(productId: string): Promise<void> {
         name: incoming.name || undefined,
         reference: incoming.sku || undefined,
       },
+      recentCorrections: getRecentCorrectionsAsPrompt(incoming.brand, incoming.categoryId),
     });
     const store = useProductStore.getState();
     const current = store.products.find(p => p.id === productId);
@@ -110,6 +111,19 @@ async function runAutoIdentify(productId: string): Promise<void> {
       }
     }
     if (attrsChanged) patch.attributes = attrs;
+    // AI-Learning: Snapshot dessen was die AI vorgeschlagen hat speichern.
+    // Wir picken nur die "lernbaren" Felder (Brand/Name/SKU/Condition + alle
+    // Attribute) — Marktpreise und Notes sind nicht relevant fuers Lernen.
+    const snapshot = {
+      brand: result.brand,
+      name: result.name,
+      sku: result.sku,
+      condition: result.condition,
+      attributes: result.attributes,
+      identificationConfidence: result.identificationConfidence,
+      at: new Date().toISOString(),
+    };
+    patch.aiIdentifiedSnapshot = JSON.stringify(snapshot);
     if (Object.keys(patch).length === 0) return;
     store.updateProduct(productId, patch);
     console.info('[SyncGuard] auto-identified', productId, Object.keys(patch).join(','));
