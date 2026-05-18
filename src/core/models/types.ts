@@ -126,6 +126,10 @@ export interface Product {
    *  korrigiert hat. JSON-Array: [{ field, aiSaid, userChanged, at }].
    *  Wird beim naechsten Identify als Few-Shot-Example an die AI gegeben. */
   aiCorrections?: string;
+  /** Plan §AI-Learning — Zeitpunkt an dem der User die AI-Identifikation
+   *  explizit bestaetigt hat ("AI hatte recht"). Bestaetigte Items werden bei
+   *  naechsten Identifies als POSITIVE Few-Shot-Examples mitgegeben. */
+  aiConfirmedAt?: string;
   // Dynamic attributes (category-specific)
   attributes: Record<string, string | number | boolean | string[]>;
   createdAt: string;

@@ -727,6 +727,43 @@ export function ProductDetail() {
                   })()}
                   {product.condition && <span style={{ fontSize: 13, color: '#4B5563' }}>{product.condition}</span>}
                 </div>
+                {/* AI-Identifikation Status (2026-05-18) — Confirm-Badge wenn
+                    AI das Item identifiziert hat. Bestaetigte Items werden im
+                    naechsten Identify als Positive-Few-Shot mitgegeben. */}
+                {product.aiIdentifiedSnapshot && (
+                  <div style={{ marginTop: 12 }}>
+                    {product.aiConfirmedAt ? (
+                      <span style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 6,
+                        fontSize: 11, padding: '4px 10px', borderRadius: 999,
+                        background: 'rgba(126,170,110,0.10)', color: '#5C8550',
+                        border: '1px solid rgba(126,170,110,0.4)',
+                      }}>
+                        ✓ AI Identification confirmed
+                        <span style={{ color: '#9CA3AF', marginLeft: 4 }}>
+                          {product.aiConfirmedAt.split('T')[0]}
+                        </span>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          if (!id) return;
+                          updateProduct(id, { aiConfirmedAt: new Date().toISOString() } as Partial<Product>);
+                        }}
+                        className="cursor-pointer transition-all"
+                        title="Mark AI Identification as correct — used as positive example next time"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6,
+                          fontSize: 11, padding: '4px 10px', borderRadius: 999,
+                          background: 'rgba(170,149,110,0.08)', color: '#AA956E',
+                          border: '1px dashed rgba(170,149,110,0.5)',
+                        }}
+                      >
+                        ✓ Confirm AI Identification
+                      </button>
+                    )}
+                  </div>
+                )}
               </>
             )}
 

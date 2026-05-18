@@ -488,6 +488,22 @@ Process:
         - lug_case_ratio = lug-tip-to-tip / case-diameter. Modern Rolex sport ~1.18-1.20; modern DJ ~1.20; Patek Nautilus 5711 ~1.20 (flat ears); AP Royal Oak ~1.27 (integrated bracelet); IWC Portugieser ~1.20.
         - date_window_ratio = date-window-width / dial-radius. Rolex cyclops 3-o'clock ~0.18-0.22 (large magnified); Patek/AP unmagnified ~0.10-0.12.
         Use these ratios as PRIMARY size-discriminator: if measured crown_case_ratio >= 0.115 → likely 36mm DJ, if <= 0.105 → likely 41mm DJ.
+     **(e1) LUGS — MANDATORY EXAMINATION** (specific lug profile distinguishes generations):
+        - **Lug-tip-to-tip span**: state in mm (e.g. "lugs ~48mm tip-to-tip on a 41mm case = lug ratio 1.17"). Use this AS PRIMARY scale anchor when wrist not visible.
+        - **Lug shape**: sharp-edged vs polished-rounded vs integrated. Rolex pre-2010 = thinner/sharper lugs; "super-case" 2010+ = thicker/wider lugs with polished bevels. Patek Nautilus = horizontal "ears" (flat-topped, integrated). AP Royal Oak = no separate lugs, case extends into bracelet (octagonal bezel screws). IWC Portugieser = thin straight lugs, no bevel.
+        - **Lug width (where the strap attaches)**: critical for reference identification — Rolex DJ36 = 20mm strap, DJ41 = 21mm strap, Sub 40 = 20mm, Sub 41 (126610) = 21mm, AP Jumbo = 21mm integrated, Patek Nautilus = 21mm integrated, Speedmaster Pro = 20mm. Measure strap-width-vs-case visually and use as cross-check.
+     **(e2) CROWN / WINDER — MANDATORY EXAMINATION**:
+        - **Crown shape + signing**: Rolex modern = fluted edges with raised coronet (crown emblem) on top — count the small dots below the coronet: 3 dots = Triplock (sport models / dive watches), 1 dot = Twinlock (dress / Datejust). Omega = "Ω" symbol on crown. Cartier = blue spinel cabochon (Tank, Santos). IWC = polished disc. Patek = engraved Calatrava-cross.
+        - **Crown guard**: Submariner / GMT / Daytona / DeepSea = pronounced crown shoulders flanking the crown. Datejust / Day-Date / Explorer = NO crown guard. If you see crown guard → never Datejust. If no crown guard → never Sub/GMT.
+        - **Screw-down vs Push-pull**: water-resistant sport models have screw-down crowns (visible thread pattern when partially unscrewed); dress watches have push-pull.
+     **(e3) SWISS-MADE SIGNATURE — MANDATORY at 6 o'clock**:
+        - Rolex modern: "SWISS MADE" with a tiny coronet (crown ♛ symbol) BETWEEN "SWISS" and "MADE" — this is the genuine maker's mark since ~2008. If you see this, it's a real modern Rolex.
+        - Rolex vintage: just "SWISS" alone (pre-1971 with tritium dots) or "T SWISS T" (tritium, 1971-1998) or "SWISS — T < 25" (post-1971).
+        - Patek Philippe: "PATEK PHILIPPE" + "GENEVE" on dial, "SWISS" small at 6, sometimes "PP" hallmark on caseback.
+        - AP: "SWISS MADE" at 6 in same script as Royal Oak applied logo.
+        - Omega: "SWISS MADE" without symbol; case has "Ω" hallmark.
+        - Cartier: "SWISS MADE" stamped at bottom + secret signature near 7 (anti-counterfeit) on Roman numeral VII.
+        State EXPLICITLY in notes which Swiss-Made signature you observed and what brand it confirms. If the signature contradicts the brand you concluded, lower confidence to "low" and reconsider.
      **(e) WRIST + STRAP CONTEXT — calibration anchors** (if visible, use as scale):
         - On-wrist photo: average male wrist width = 17cm, female = 15cm. Measure watch case width as fraction of wrist width visible. E.g. case spans 45% of a 17cm wrist → ~38mm. Cross-check with model defaults.
         - Strap-only / flat photo: standard lug widths by case size — 36mm case→ 20mm strap (Rolex DJ36 = 20mm), 40-41mm case → 20-21mm (Sub/GMT = 20mm, DJ41 = 21mm), Royal Oak Jumbo 39 = 21mm integrated. Measure strap width relative to case to derive case mm.

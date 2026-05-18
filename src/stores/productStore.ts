@@ -81,14 +81,21 @@ function rowToCategory(row: Record<string, unknown>): Category {
   };
 }
 
-// 2026-05-18 — AI-Learning: liefert die letzten N user-Korrekturen pro
-// Brand/Kategorie als Few-Shot-Text fuer den naechsten Identify. Wird von
-// SyncDuplicateGuard.runAutoIdentify und NewProductModal aufgerufen damit die
-// AI aus den Fehlern lernt die der User bereits korrigiert hat.
+// 2026-05-18 — AI-Learning: liefert die letzten N user-Korrekturen +
+// Bestaetigungen pro Brand/Kategorie als Few-Shot-Text fuer den naechsten
+// Identify. Wird von SyncDuplicateGuard.runAutoIdentify und NewProductModal
+// aufgerufen.
+//
+// Format:
+//   NEGATIVE Examples (Corrections): "AI said X, user corrected to Y"
+//   POSITIVE Examples (Confirmations): "Confirmed by user: Brand+Name+Ref=Z"
 export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string, limit = 5): string {
+  const sections: string[] = [];
+
+  // Negative Examples
   try {
     const rows = query(
-      `SELECT brand, name, sku, ai_corrections, ai_identified_snapshot
+      `SELECT brand, name, sku, ai_corrections
          FROM products
         WHERE ai_corrections IS NOT NULL
           AND TRIM(ai_corrections) != ''
@@ -101,7 +108,6 @@ export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string
         LIMIT ?`,
       [brand || '', brand || '', categoryId || '', categoryId || '', limit]
     );
-    if (rows.length === 0) return '';
     const lines: string[] = [];
     for (const r of rows) {
       try {
@@ -113,14 +119,46 @@ export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string
           const userVal = c.userChanged === null || c.userChanged === undefined ? '(empty)' : String(c.userChanged);
           lines.push(`  - "${itemLabel}" — AI said ${c.field}=${aiVal}, user corrected to ${c.field}=${userVal}`);
         }
-      } catch { /* parse error → skip */ }
+      } catch { /* */ }
     }
-    if (lines.length === 0) return '';
-    return `\n\nRECENT USER CORRECTIONS (learn from these — past mistakes you made in similar items):\n${lines.slice(0, 8).join('\n')}\n`;
-  } catch (err) {
-    console.warn('[getRecentCorrectionsAsPrompt] failed:', err);
-    return '';
-  }
+    if (lines.length > 0) {
+      sections.push(`RECENT USER CORRECTIONS (negative examples — past mistakes; do NOT repeat them):\n${lines.slice(0, 8).join('\n')}`);
+    }
+  } catch (err) { console.warn('[corrections] failed:', err); }
+
+  // Positive Examples (user-confirmed)
+  try {
+    const rows = query(
+      `SELECT brand, name, sku, attributes
+         FROM products
+        WHERE ai_confirmed_at IS NOT NULL
+          AND TRIM(ai_confirmed_at) != ''
+          AND (
+            ? = '' OR brand = ?
+            OR ? = '' OR category_id = ?
+          )
+        ORDER BY ai_confirmed_at DESC
+        LIMIT ?`,
+      [brand || '', brand || '', categoryId || '', categoryId || '', limit]
+    );
+    const lines: string[] = [];
+    for (const r of rows) {
+      const refAttr = (() => {
+        try {
+          const a = JSON.parse((r.attributes as string) || '{}') as Record<string, unknown>;
+          return (a.reference_number || a.reference || a.serial_number) as string | undefined;
+        } catch { return undefined; }
+      })();
+      const refLabel = refAttr ? ` ref=${refAttr}` : '';
+      lines.push(`  - "${r.brand} ${r.name || ''}".trim()" CONFIRMED CORRECT by user (sku=${r.sku || '?'}${refLabel})`);
+    }
+    if (lines.length > 0) {
+      sections.push(`CONFIRMED CORRECT IDENTIFICATIONS (positive examples — when you see similar items, use these as known-good references):\n${lines.slice(0, 8).join('\n')}`);
+    }
+  } catch (err) { console.warn('[confirmations] failed:', err); }
+
+  if (sections.length === 0) return '';
+  return `\n\n${sections.join('\n\n')}\n`;
 }
 
 function rowToProduct(row: Record<string, unknown>): Product {
@@ -164,6 +202,7 @@ function rowToProduct(row: Record<string, unknown>): Product {
     })(),
     aiIdentifiedSnapshot: (row.ai_identified_snapshot as string) || undefined,
     aiCorrections: (row.ai_corrections as string) || undefined,
+    aiConfirmedAt: (row.ai_confirmed_at as string) || undefined,
     attributes: JSON.parse((row.attributes as string) || '{}'),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -393,6 +432,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     if ((data as { aiCorrections?: string }).aiCorrections !== undefined) {
       fields.push('ai_corrections = ?');
       values.push((data as { aiCorrections?: string }).aiCorrections || null);
+    }
+    if ((data as { aiConfirmedAt?: string }).aiConfirmedAt !== undefined) {
+      fields.push('ai_confirmed_at = ?');
+      values.push((data as { aiConfirmedAt?: string }).aiConfirmedAt || null);
     }
     // Caller darf imageHash direkt setzen (z.B. Mobile-Push hat den Hash schon).
     // Sonst lassen wir das Feld leer und der Backfill in loadProducts holt's nach.

@@ -1247,6 +1247,7 @@ function runMigrations(database: Database): void {
     // Few-Shot-Example reingegeben damit die AI aus deinen Bestaetigungen lernt.
     `ALTER TABLE products ADD COLUMN ai_identified_snapshot TEXT`,
     `ALTER TABLE products ADD COLUMN ai_corrections TEXT`,
+    `ALTER TABLE products ADD COLUMN ai_confirmed_at TEXT`,
 
     // ── Scrap Gold Quick Trade ──
     // Direkter Altgold-Handel (Kunde → wir → Händler). Nur der Spread (sale - purchase)
