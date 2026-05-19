@@ -215,12 +215,28 @@ interface GoldStore {
   // Cross-Settle: Shop-Gold-Inventar → Supplier-Gold-Payable
   applyShopGoldToSupplierPayable: (payableId: string, grams: number) => void;
 
+  // Plan v0.1.45 — Customer-Gold-Leftover „Shop Keeps": Inflow ins Shop-Inventar
+  // ohne Supplier/Customer-Beteiligung. Schreibt automatisch gold_movement.
+  creditShopGold: (branchId: string, karat: string, grams: number, opts?: { repairId?: string; sourceLabel?: string; notes?: string }) => void;
+
   // Aggregate-Selektoren fuer Detail-Pages
   getGoldOwedBySupplier: (supplierId: string) => Array<{ karat: string; totalGrams: number; count: number }>;
   getGoldCreditByCustomer: (customerId: string) => Array<{ karat: string; totalGrams: number; count: number }>;
   getGoldPayablesBySupplier: (supplierId: string) => GoldPayable[];
   getGoldCreditsByCustomer: (customerId: string) => CustomerGoldCredit[];
   loadGoldMovements: (filters?: { repairId?: string; supplierId?: string; customerId?: string; limit?: number }) => GoldMovement[];
+
+  // Plan v0.1.45 — Reconciliation: Drift-Check fuer repair_lines / expenses /
+  // gold-buckets. Read-only; gibt nur Diagnose, kein Auto-Fix.
+  getRepairLineDrift: () => Array<{
+    repairId: string;
+    repairNumber: string;
+    lineId: string;
+    expenseId?: string;
+    drift: 'cancelled_expense' | 'missing_expense' | 'amount_mismatch' | 'orphan_expense';
+    detail: string;
+  }>;
+  getGoldDrift: () => Array<{ karat: string; movementsNet: number; preciousMetalsSum: number; drift: number }>;
 }
 
 export const useGoldStore = create<GoldStore>((set, get) => ({
@@ -682,5 +698,164 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       );
       return rows.map(rowToGoldMovement);
     } catch { return []; }
+  },
+
+  // Plan v0.1.45 — Customer-Gold-Leftover „Shop Keeps" als direkter Inflow
+  // ins Shop-Inventar. Source-Bucket = 'repair_consumption' damit der
+  // Audit-Trail klar zeigt woher das Gold kommt (Customer brachte X g, der
+  // Shop behaelt den Rest als implizite Reparatur-Gebuehr-Komponente).
+  creditShopGold: (branchId, karat, grams, opts = {}) => {
+    if (!Number.isFinite(grams) || grams <= 0) {
+      throw new Error('creditShopGold: grams must be > 0');
+    }
+    if (!karat) throw new Error('creditShopGold: karat required');
+
+    const label = opts.sourceLabel || (opts.repairId
+      ? `Customer-leftover from repair ${opts.repairId.slice(0, 8)}`
+      : `Shop-keeps gold credit`);
+
+    adjustPreciousMetals({
+      branchId, karat, deltaGrams: grams, sourceLabel: label,
+    });
+    recordGoldMovement({
+      branchId, direction: 'in', weightGrams: grams, karat,
+      sourceBucket: 'repair_consumption',
+      sourceId: opts.repairId,
+      targetBucket: 'precious_metals',
+      relatedRepairId: opts.repairId,
+      notes: opts.notes || label,
+    });
+
+    saveDatabase();
+    // Reload nicht noetig — precious_metals wird nicht im Store gecacht.
+  },
+
+  // Plan v0.1.45 — Reconciliation: pruefe Drift zwischen repair_lines.expense_id
+  // und expenses-Status / -Existenz. Liefert Liste von Problemen die manuell
+  // (vom Owner) gesichtet werden muessen.
+  getRepairLineDrift: () => {
+    try {
+      // LEFT JOIN: jede repair_line mit ihrer (optionalen) expense + repair.
+      // Wir suchen:
+      //   - drift='cancelled_expense' → line.expense_id zeigt auf CANCELLED expense (line aber OPEN)
+      //   - drift='missing_expense'   → line.expense_id ist gesetzt aber expense existiert nicht
+      //   - drift='amount_mismatch'   → line.cost_amount != expense.amount
+      //   - drift='orphan_expense'    → expense mit related_module='repair' aber kein passender repair_line
+      const drifts: ReturnType<GoldStore['getRepairLineDrift']> = [];
+
+      const lineRows = query(
+        `SELECT rl.id AS line_id, rl.repair_id, rl.expense_id, rl.cost_amount, rl.status AS line_status,
+                r.repair_number,
+                e.id AS exp_id, e.amount AS exp_amount, e.status AS exp_status, e.related_entity_id
+           FROM repair_lines rl
+           JOIN repairs r ON r.id = rl.repair_id
+           LEFT JOIN expenses e ON e.id = rl.expense_id`
+      );
+      for (const row of lineRows) {
+        const lineId = row.line_id as string;
+        const repairId = row.repair_id as string;
+        const repairNumber = (row.repair_number as string) || '?';
+        const expId = (row.expense_id as string) || undefined;
+        const cost = (row.cost_amount as number) || 0;
+        const lineStatus = row.line_status as string;
+        const expExisting = !!row.exp_id;
+        const expAmount = (row.exp_amount as number) || 0;
+        const expStatus = row.exp_status as string | undefined;
+
+        if (expId && !expExisting) {
+          drifts.push({
+            repairId, repairNumber, lineId, expenseId: expId,
+            drift: 'missing_expense',
+            detail: `Line linkt auf expense_id=${expId.slice(0,8)} — Expense existiert nicht in der DB`,
+          });
+          continue;
+        }
+        if (expId && expStatus === 'CANCELLED' && lineStatus === 'OPEN') {
+          drifts.push({
+            repairId, repairNumber, lineId, expenseId: expId,
+            drift: 'cancelled_expense',
+            detail: `Line OPEN aber verknuepfte Expense ist CANCELLED — Cost ${cost.toFixed(3)} BHD nicht im A/P`,
+          });
+          continue;
+        }
+        if (expId && expExisting && lineStatus === 'OPEN' && Math.abs(cost - expAmount) > 0.005) {
+          drifts.push({
+            repairId, repairNumber, lineId, expenseId: expId,
+            drift: 'amount_mismatch',
+            detail: `Line-Cost=${cost.toFixed(3)} vs Expense-Amount=${expAmount.toFixed(3)} (Drift ${(cost - expAmount).toFixed(3)})`,
+          });
+        }
+      }
+
+      // Orphan expenses: related_module='repair' aber kein passender repair_line.expense_id
+      const orphanRows = query(
+        `SELECT e.id AS exp_id, e.amount, e.related_entity_id, e.status,
+                r.repair_number
+           FROM expenses e
+           LEFT JOIN repair_lines rl ON rl.expense_id = e.id
+           LEFT JOIN repairs r ON r.id = e.related_entity_id
+           WHERE e.related_module = 'repair'
+             AND e.status != 'CANCELLED'
+             AND rl.id IS NULL`
+      );
+      for (const row of orphanRows) {
+        const repairId = (row.related_entity_id as string) || '';
+        const repairNumber = (row.repair_number as string) || '?';
+        const expId = row.exp_id as string;
+        const amount = (row.amount as number) || 0;
+        drifts.push({
+          repairId, repairNumber, lineId: '', expenseId: expId,
+          drift: 'orphan_expense',
+          detail: `Expense ${expId.slice(0,8)} (${amount.toFixed(3)} BHD) ohne repair_line-Link — Backfill verpasst oder Line geloescht?`,
+        });
+      }
+
+      return drifts;
+    } catch (err) {
+      console.error('[gold] getRepairLineDrift failed:', err);
+      return [];
+    }
+  },
+
+  getGoldDrift: () => {
+    try {
+      const rows = query(
+        `SELECT karat,
+                COALESCE(SUM(CASE WHEN direction='in' THEN weight_grams ELSE -weight_grams END), 0) AS net_movement
+           FROM gold_movements
+           GROUP BY karat`
+      );
+      const pmRows = query(
+        `SELECT karat, COALESCE(SUM(weight_grams), 0) AS pm_sum FROM precious_metals
+           WHERE status = 'in_stock' AND karat IS NOT NULL
+           GROUP BY karat`
+      );
+      const pmMap: Record<string, number> = {};
+      for (const r of pmRows) {
+        pmMap[r.karat as string] = (r.pm_sum as number) || 0;
+      }
+
+      const out: ReturnType<GoldStore['getGoldDrift']> = [];
+      // Karate aus beiden Quellen kombinieren
+      const allKarats = new Set<string>([
+        ...rows.map(r => r.karat as string),
+        ...Object.keys(pmMap),
+      ]);
+      for (const k of Array.from(allKarats).filter(Boolean)) {
+        const mv = rows.find(r => r.karat === k);
+        const movementsNet = mv ? (mv.net_movement as number) : 0;
+        const pmSum = pmMap[k] || 0;
+        out.push({
+          karat: k,
+          movementsNet,
+          preciousMetalsSum: pmSum,
+          drift: movementsNet - pmSum,
+        });
+      }
+      return out.sort((a, b) => a.karat.localeCompare(b.karat));
+    } catch (err) {
+      console.error('[gold] getGoldDrift failed:', err);
+      return [];
+    }
   },
 }));

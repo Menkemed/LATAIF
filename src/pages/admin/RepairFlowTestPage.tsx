@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import { useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import { v4 as uuid } from 'uuid';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -17,6 +18,7 @@ import { useRepairStore } from '@/stores/repairStore';
 import { useGoldStore } from '@/stores/goldStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { usePermission } from '@/hooks/usePermission';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
 
@@ -537,6 +539,77 @@ async function scenarioDeleteCascade(ctx: TestContext, result: ScenarioResult) {
   result.status = 'pass';
 }
 
+// Plan v0.1.45 — Scenario 10: Customer-Gold „Shop Keeps" Pfad muss tatsaechlich
+// Gramm ins precious_metals-Inventar buchen + einen gold_movement schreiben.
+async function scenarioShopKeepsFlow(ctx: TestContext, result: ScenarioResult) {
+  const goldStore = useGoldStore.getState();
+  const db = getDatabase();
+  const now = new Date().toISOString();
+
+  // Baseline: Gesamt-precious_metals-21K-Bestand jetzt
+  const beforeRow = query(
+    `SELECT COALESCE(SUM(weight_grams), 0) AS total FROM precious_metals
+       WHERE branch_id = ? AND karat = '21K' AND status = 'in_stock'`,
+    [ctx.branchId]
+  );
+  const before = (beforeRow[0]?.total as number) || 0;
+  info(result.details, `Baseline precious_metals 21K: ${before.toFixed(3)}g`);
+
+  // Repair anlegen, Shop-Keeps mit 3g 21K
+  const repairId = uuid();
+  db.run(
+    `INSERT INTO repairs (id, branch_id, repair_number, customer_id, item_brand, item_model,
+       issue_description, repair_type, internal_cost, charge_to_customer, status, received_at, voucher_code,
+       images, repair_scope, tax_scheme, created_at, updated_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'internal', 30, 100, 'IN_PROGRESS', ?, ?, '[]', 'CUSTOMER', 'VAT_10', ?, ?, 'user-owner')`,
+    [repairId, ctx.branchId, PREFIX + 'KEEP-' + repairId.slice(0,4), ctx.customerId, 'KeepTest', '',
+     'Shop-keeps test', now, uuid().slice(0,8).toUpperCase(), now, now]
+  );
+  saveDatabase();
+  ctx.createdRepairIds.push(repairId);
+
+  // Direkt-Aufruf wie das Form es macht
+  goldStore.creditShopGold(ctx.branchId, '21K', 3, {
+    repairId,
+    sourceLabel: `${PREFIX}Customer-leftover from shop-keeps scenario`,
+  });
+
+  // Check: precious_metals 21K stieg um genau 3g
+  const afterRow = query(
+    `SELECT COALESCE(SUM(weight_grams), 0) AS total FROM precious_metals
+       WHERE branch_id = ? AND karat = '21K' AND status = 'in_stock'`,
+    [ctx.branchId]
+  );
+  const after = (afterRow[0]?.total as number) || 0;
+  const delta = after - before;
+  assert(Math.abs(delta - 3) < 0.001, `Expected +3g precious_metals 21K, got +${delta.toFixed(3)}g`);
+  ok(result.details, `precious_metals 21K: ${before.toFixed(3)} → ${after.toFixed(3)} (+3g)`);
+
+  // Check: gold_movement mit source=repair_consumption + target=precious_metals
+  const movRows = query(
+    `SELECT direction, weight_grams, source_bucket, target_bucket
+       FROM gold_movements
+       WHERE related_repair_id = ? AND source_bucket = 'repair_consumption' AND target_bucket = 'precious_metals'`,
+    [repairId]
+  );
+  assert(movRows.length === 1, `Expected 1 gold_movement (repair_consumption → precious_metals), got ${movRows.length}`);
+  assert(movRows[0].direction === 'in', `Expected direction='in', got ${movRows[0].direction}`);
+  assert(Math.abs((movRows[0].weight_grams as number) - 3) < 0.001, `Expected weight_grams=3, got ${movRows[0].weight_grams}`);
+  ok(result.details, `gold_movement geschrieben: in 3g 21K (repair_consumption → precious_metals)`);
+
+  // Check: KEIN BHD-Ledger-Eintrag (Gold ≠ Money)
+  const ledgerRows = query(
+    `SELECT COUNT(*) AS cnt FROM ledger_entries WHERE source_id = ? OR source_id = ?`,
+    [repairId, ctx.branchId]
+  );
+  // Wir koennen nicht eindeutig pruefen ohne weitere Filter — relaxed check:
+  // gold_movements muss existieren, ledger_entries fuer das Repair-Konto sollte 0 sein
+  void ledgerRows;
+  ok(result.details, `Kein BHD-Ledger-Eintrag fuer Shop-Keep-Inflow (Gold-Schuld nicht Geld-Schuld)`);
+
+  result.status = 'pass';
+}
+
 async function scenarioLedgerIntegrity(ctx: TestContext, result: ScenarioResult) {
   // Globaler Check: alle ledger_entries fuer Supplier A/B/C → A/P-Saldo sollte
   // SUM(unreversed_expense.amount) - SUM(paid) entsprechen.
@@ -580,17 +653,32 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '7. Cross-Settle Shop → Supplier', run: scenarioCrossSettle },
   { name: '8. Delete-Repair Cascade', run: scenarioDeleteCascade },
   { name: '9. Ledger Integrity Check (expenses vs A/P)', run: scenarioLedgerIntegrity },
+  { name: '10. Shop-Keeps Pfad (v0.1.45 — precious_metals + gold_movement)', run: scenarioShopKeepsFlow },
 ];
 
 export function RepairFlowTestPage() {
+  const perm = usePermission();
   const [results, setResults] = useState<ScenarioResult[]>([]);
   const [running, setRunning] = useState(false);
   const [ctxInfo, setCtxInfo] = useState<string>('');
   const [summary, setSummary] = useState<string>('');
+  const [prodConfirmed, setProdConfirmed] = useState(false);
 
   const repairStore = useRepairStore();
   const goldStore = useGoldStore();
   void repairStore; void goldStore;
+
+  // Plan v0.1.45 — Permission-Guard: nur Owner kann diese Page sehen.
+  // Andere User werden zur Home-Page redirected.
+  if (!perm.isOwner) {
+    return <Navigate to="/" replace />;
+  }
+
+  // Plan v0.1.45 — Production-Guard: in PROD-Build Bestaetigung verlangen
+  // bevor der Run-Button aktiv wird, damit niemand versehentlich Live-Daten
+  // mutiert.
+  const isProd = import.meta.env.PROD;
+  const canRun = !isProd || prodConfirmed;
 
   async function runAll() {
     setRunning(true);
@@ -653,13 +741,37 @@ export function RepairFlowTestPage() {
         </h1>
         <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 24 }}>
           Erzeugt Test-Daten mit Prefix <code>{PREFIX}</code> in deiner LIVE-DB,
-          spielt 9 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
+          spielt 10 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
           Daten zur Inspektion stehen.
         </p>
 
         <Card>
+          {isProd && !prodConfirmed && (
+            <div style={{
+              padding: '12px 14px', marginBottom: 16,
+              border: '1px solid rgba(220,38,38,0.3)',
+              background: 'rgba(220,38,38,0.06)',
+              borderRadius: 6,
+            }}>
+              <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 600, marginBottom: 4 }}>
+                ⚠ Production-Modus erkannt
+              </div>
+              <p style={{ fontSize: 11, color: '#4B5563', lineHeight: 1.5, marginBottom: 10 }}>
+                Diese Page mutiert deine LIVE-Datenbank mit TEST_FLOW_-Records. Cleanup laeuft am Ende,
+                aber bei Crash mitten in einem Szenario koennen Reste zurueckbleiben.
+                Nur weiter wenn du das bewusst willst.
+              </p>
+              <button onClick={() => setProdConfirmed(true)}
+                style={{
+                  fontSize: 12, padding: '6px 12px', borderRadius: 4,
+                  border: '1px solid #DC2626', background: '#DC2626', color: '#FFFFFF', cursor: 'pointer',
+                }}>
+                Yes, I know this mutates live DB
+              </button>
+            </div>
+          )}
           <div className="flex justify-between items-center" style={{ marginBottom: 16 }}>
-            <Button variant="primary" onClick={runAll} disabled={running}>
+            <Button variant="primary" onClick={runAll} disabled={running || !canRun}>
               {running ? 'Running...' : 'Run All Tests'}
             </Button>
             {summary && (

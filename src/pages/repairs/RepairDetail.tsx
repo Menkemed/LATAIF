@@ -221,22 +221,13 @@ export function RepairDetail() {
           notes: `Customer-Gold leftover from repair ${repair.repairNumber}`,
         });
       } else if (leftover > 0 && newGoldForm.leftoverDest === 'shop_keep') {
-        // Direct adjustment via goldStore (precious_metals ↑) — wir nutzen die
-        // applyShopGoldToSupplierPayable-Logik nicht, sondern legen einen
-        // synthetic gold_movement an indem wir createGoldPayable + sofort
-        // settle_return_gold aufrufen? Nein, einfacher: wir nutzen direkt
-        // metalStore.adjust ueber ein internes Helper. Da wir keinen direkten
-        // Zugriff haben, schreiben wir es ueber eine "ghost"-Konstruktion:
-        // wir legen ein gold_payable mit supplier_id = 'shop-keep' an? Nein.
-        //
-        // Stattdessen: nutze adjustPreciousMetals direkt via goldStore-Action.
-        // Da diese Funktion noch nicht im Store exponiert ist, exposen wir sie
-        // via eine neue action `creditShopGold` (TODO). Vorlaeufig nutzen wir
-        // einen workaround: leftover als "self-payable" zum Owner anlegen und
-        // sofort settlen — verwirrend. Cleaner: skip fuer diese Iteration und
-        // documenten als TODO.
-        // TODO: expose creditShopGold(branchId, karat, grams) im goldStore
-        console.warn('[gold] Shop-Keep-Pfad noch nicht voll integriert — leftover bleibt unverbucht.');
+        // Plan v0.1.45: Shop-Keep buchen direkt ins precious_metals-Inventar
+        // via creditShopGold-Action. gold_movement-Audit-Eintrag entsteht
+        // automatisch (source=repair_consumption, target=precious_metals).
+        goldStore.creditShopGold(repair.branchId, newGoldForm.karat, leftover, {
+          repairId: id,
+          sourceLabel: `Customer-Gold leftover from repair ${repair.repairNumber}`,
+        });
       }
       // leftoverDest === 'return' → nichts buchen, nur Doku im Repair-Notes
     }
@@ -1360,9 +1351,8 @@ export function RepairDetail() {
                   ))}
                 </div>
                 {newGoldForm.leftoverDest === 'shop_keep' && (
-                  <p style={{ fontSize: 11, color: '#D97706', marginTop: 6 }}>
-                    Hinweis: Shop-Keep wird in dieser Version nur dokumentiert.
-                    Volle Inventar-Buchung kommt in der naechsten Iteration.
+                  <p style={{ fontSize: 11, color: '#16A34A', marginTop: 6 }}>
+                    Shop behaelt den Rest. Wird ins Shop-Gold-Inventar (precious_metals) gebucht.
                   </p>
                 )}
               </div>
