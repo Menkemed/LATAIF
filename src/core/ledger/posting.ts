@@ -241,9 +241,16 @@ export function postEntries(
  * um Doppel-Postings beim Replay/Re-Save zu vermeiden.
  */
 export function hasLedgerEntries(sourceModule: SourceModule, sourceId: string): boolean {
+  // Multi-Cycle-Pattern (Plan repair-multi-supplier): True genau dann, wenn
+  // es ein ORIGINAL-Entry (reverses_entry_id IS NULL) gibt, das NOCH NICHT
+  // reversed wurde. Stale Originale aus alten Zyklen werden ignoriert.
   const rows = query(
-    `SELECT 1 FROM ledger_entries
-     WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NULL
+    `SELECT 1 FROM ledger_entries e1
+     WHERE e1.source_module = ? AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM ledger_entries e2
+         WHERE e2.reverses_entry_id = e1.id
+       )
      LIMIT 1`,
     [sourceModule, sourceId]
   );
@@ -251,17 +258,23 @@ export function hasLedgerEntries(sourceModule: SourceModule, sourceId: string): 
 }
 
 /**
- * Liefert true, wenn (source_module, source_id) bereits eine Reversal-Transaktion
- * hat. Verhindert Doppel-Stornos.
+ * Liefert true, wenn der LETZTE Zyklus von (source_module, source_id) bereits
+ * reversed wurde — also keine offenen Original-Entries mehr existieren. Wenn
+ * es ueberhaupt keine Eintraege gibt, false (es gibt nichts zu reversen).
+ *
+ * Multi-Cycle-Pattern (Plan repair-multi-supplier): erlaubt mehrfache
+ * sequenzielle Reverse-and-Repost-Zyklen, indem die Pruefung sich nur auf
+ * den aktuellsten Zyklus bezieht. Frueher: blockierte jede zweite Reversal.
  */
 export function hasReversalFor(sourceModule: SourceModule, sourceId: string): boolean {
-  const rows = query(
+  const anyOriginal = query(
     `SELECT 1 FROM ledger_entries
-     WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NOT NULL
-     LIMIT 1`,
+     WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NULL LIMIT 1`,
     [sourceModule, sourceId]
   );
-  return rows.length > 0;
+  if (anyOriginal.length === 0) return false;
+  // True = alle Originale reversed = "letzter Zyklus geschlossen"
+  return !hasLedgerEntries(sourceModule, sourceId);
 }
 
 // ── Domain-Mappings ───────────────────────────────────────────
@@ -504,11 +517,16 @@ export function reverseSource(
     throw new Error(`reverseSource: ${sourceModule}/${sourceId} already reversed`);
   }
   const db = getDatabase();
+  // Multi-Cycle-Safe: nur Originale die NICHT bereits eine Reversal haben.
+  // So koennen mehrere Reverse-and-Repost-Zyklen sauber sequenziert werden.
   const r = db.exec(
-    `SELECT id, account, direction, amount, counterparty_type, counterparty_id,
-            source_line_id, tax_scheme_snapshot, vat_rate_snapshot, currency
-     FROM ledger_entries
-     WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NULL`,
+    `SELECT e1.id, e1.account, e1.direction, e1.amount, e1.counterparty_type, e1.counterparty_id,
+            e1.source_line_id, e1.tax_scheme_snapshot, e1.vat_rate_snapshot, e1.currency
+     FROM ledger_entries e1
+     WHERE e1.source_module = ? AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id
+       )`,
     [sourceModule, sourceId]
   );
   if (r.length === 0 || r[0].values.length === 0) {

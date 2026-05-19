@@ -8,8 +8,11 @@ import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { PhoneInput } from '@/components/ui/PhoneInput';
+import { ImageUpload } from '@/components/ui/ImageUpload';
+import { SoftWarn } from '@/components/ui/SoftWarn';
 import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
+import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Supplier } from '@/core/models/types';
@@ -125,10 +128,26 @@ export function SupplierList() {
           )}
           <Input required label="NAME" placeholder="e.g. Gold Dealer LLC" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} autoFocus />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
+            <div>
+              <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
+              <SoftWarn warning={validatePhone(form.phone).warning} />
+            </div>
             <Input label="EMAIL" placeholder="contact@supplier.com" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
           </div>
           <Input label="ADDRESS" placeholder="Street, City" value={form.address || ''} onChange={e => setForm({ ...form, address: e.target.value })} />
+          <div>
+            <Input label="CPR / ID NUMBER" placeholder="e.g. 900123456" value={form.cpr || ''} onChange={e => setForm({ ...form, cpr: e.target.value })} />
+            <SoftWarn warning={validateCpr(form.cpr).warning} />
+          </div>
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CPR / ID CARD PHOTO</span>
+            <p style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>Wird auf jedem Ankaufs-Print mitgedruckt.</p>
+            <ImageUpload
+              images={form.cprImage ? [form.cprImage] : []}
+              onChange={imgs => setForm({ ...form, cprImage: imgs[0] || undefined })}
+              maxImages={1}
+            />
+          </div>
           <div>
             <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
             <textarea

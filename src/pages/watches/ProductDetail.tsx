@@ -14,7 +14,7 @@ import { ImageUpload } from '@/components/ui/ImageUpload';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
-import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
+import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '@/stores/repairStore';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { query } from '@/core/db/helpers';
 import { usePermission } from '@/hooks/usePermission';
@@ -1399,7 +1399,7 @@ export function ProductDetail() {
               <span className="text-overline" style={{ marginBottom: 16 }}>REPAIR HISTORY</span>
               <div style={{ marginTop: 12 }}>
                 {productRepairs.map(rep => {
-                  const totalCost = computeRepairTotalCost(rep);
+                  const totalCost = computeRepairTotalCost(rep, sumOpenRepairLineCosts(rep.id));
                   const isOwn = rep.repairScope === 'OWN';
                   return (
                     <div key={rep.id}
@@ -1435,7 +1435,7 @@ export function ProductDetail() {
                   <div className="flex justify-between" style={{ padding: '12px 14px', marginTop: 4, fontSize: 12, color: '#6B7280' }}>
                     <span>Total Own-Item repair cost capitalized into purchase price</span>
                     <span className="font-mono" style={{ color: '#0F0F10' }}>
-                      {fmt(productRepairs.filter(r => r.repairScope === 'OWN' && r.completedAt).reduce((s, r) => s + computeRepairTotalCost(r), 0))} BHD
+                      {fmt(productRepairs.filter(r => r.repairScope === 'OWN' && r.completedAt).reduce((s, r) => s + computeRepairTotalCost(r, sumOpenRepairLineCosts(r.id)), 0))} BHD
                     </span>
                   </div>
                 )}

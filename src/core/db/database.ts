@@ -1319,6 +1319,144 @@ function runMigrations(database: Database): void {
       created_at      TEXT NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_scrap_pmt_trade ON scrap_trade_payments(scrap_trade_id, direction)`,
+
+    // CPR (Bahrain ID) + ID-Card-Bild als Felder am Supplier — fuer
+    // Purchase-Print-PDFs (Beleg-Block bei Altgold-/Used-Watch-Ankaeufen).
+    `ALTER TABLE suppliers ADD COLUMN cpr TEXT`,
+    `ALTER TABLE suppliers ADD COLUMN cpr_image TEXT`,
+
+    // Audit-Snapshot der Supplier-Daten zum Zeitpunkt des Purchase-Create.
+    // Salesforce-Pattern: vermeidet rueckwirkende Aenderungen am gedruckten
+    // Beleg wenn der Supplier-Datensatz spaeter editiert/geloescht wird.
+    `ALTER TABLE purchases ADD COLUMN supplier_snapshot TEXT`,
+
+    // ─── Repair Multi-Line + Gold-Flow (Plan repair-multi-supplier) ────
+    // Pro Repair koennen N Work-Lines existieren, je 1 externe Line erzeugt
+    // beim Status-Wechsel auf IN_PROGRESS eine eigene Expense. Stand-Heute-
+    // Single-Supplier-Repairs werden ueber das Backfill-INSERT weiter unten
+    // automatisch in eine repair_lines-Zeile migriert.
+    `CREATE TABLE IF NOT EXISTS repair_lines (
+      id           TEXT PRIMARY KEY,
+      branch_id    TEXT NOT NULL,
+      repair_id    TEXT NOT NULL REFERENCES repairs(id) ON DELETE CASCADE,
+      position     INTEGER NOT NULL,
+      supplier_id  TEXT REFERENCES suppliers(id),
+      work_type    TEXT,
+      description  TEXT,
+      cost_amount  REAL NOT NULL DEFAULT 0,
+      expense_id   TEXT REFERENCES expenses(id),
+      status       TEXT NOT NULL DEFAULT 'OPEN',
+      due_date     TEXT,
+      notes        TEXT,
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL,
+      UNIQUE(repair_id, position)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_repair_lines_repair ON repair_lines(repair_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_repair_lines_supplier ON repair_lines(supplier_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_repair_lines_expense ON repair_lines(expense_id)`,
+
+    // Gold-Payable: Workshop hat eigenes Gold im Repair verwendet → wir schulden
+    // X Gramm in Karat Y. Settlement entweder durch Gold-Return aus precious_metals
+    // ODER durch Umrechnung in BHD (settlement_expense_id verlinkt die erzeugte
+    // Expense). Direction zukunftssicher fuer "they_owe" Fall (selten — wenn der
+    // Workshop unser Gold genommen hat ohne es zu verwenden).
+    `CREATE TABLE IF NOT EXISTS gold_payables (
+      id                    TEXT PRIMARY KEY,
+      branch_id             TEXT NOT NULL,
+      supplier_id           TEXT NOT NULL REFERENCES suppliers(id),
+      source_repair_id      TEXT REFERENCES repairs(id) ON DELETE CASCADE,
+      source_repair_line_id TEXT REFERENCES repair_lines(id) ON DELETE SET NULL,
+      direction             TEXT NOT NULL DEFAULT 'we_owe',
+      weight_grams          REAL NOT NULL,
+      karat                 TEXT NOT NULL,
+      settlement_type       TEXT NOT NULL,
+      fulfilled_grams       REAL NOT NULL DEFAULT 0,
+      settlement_expense_id TEXT REFERENCES expenses(id),
+      status                TEXT NOT NULL DEFAULT 'OPEN',
+      notes                 TEXT,
+      created_at            TEXT NOT NULL,
+      updated_at            TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_payables_supplier ON gold_payables(supplier_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_payables_source ON gold_payables(source_repair_id)`,
+
+    // Customer-Gold-Credit: Kunde hat eigenes Gold gebracht, nur Teil davon
+    // verwendet, Rest als Guthaben bei uns geparkt. Mirror von gold_payables
+    // aber auf der Customer-Seite. Konvertierbar zu BHD-Credit oder einloesbar
+    // in zukuenftigen Repair.
+    `CREATE TABLE IF NOT EXISTS customer_gold_credits (
+      id                   TEXT PRIMARY KEY,
+      branch_id            TEXT NOT NULL,
+      customer_id          TEXT NOT NULL REFERENCES customers(id),
+      source_repair_id     TEXT REFERENCES repairs(id) ON DELETE SET NULL,
+      weight_grams         REAL NOT NULL,
+      karat                TEXT NOT NULL,
+      fulfilled_grams      REAL NOT NULL DEFAULT 0,
+      settlement_credit_id TEXT,
+      status               TEXT NOT NULL DEFAULT 'OPEN',
+      notes                TEXT,
+      created_at           TEXT NOT NULL,
+      updated_at           TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_customer_gold_credits_customer ON customer_gold_credits(customer_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_customer_gold_credits_source ON customer_gold_credits(source_repair_id)`,
+
+    // Gold-Movements: universeller Audit-Trail fuer alle Gramm-Bewegungen
+    // (analog ledger_entries fuer BHD). Schreibt sich automatisch bei jeder
+    // Settle/Convert/Cross-Settle-Action.
+    `CREATE TABLE IF NOT EXISTS gold_movements (
+      id                TEXT PRIMARY KEY,
+      branch_id         TEXT NOT NULL,
+      moved_at          TEXT NOT NULL,
+      direction         TEXT NOT NULL,
+      weight_grams      REAL NOT NULL,
+      karat             TEXT NOT NULL,
+      source_bucket     TEXT,
+      source_id         TEXT,
+      target_bucket     TEXT,
+      target_id         TEXT,
+      related_repair_id TEXT,
+      notes             TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_movements_moved_at ON gold_movements(moved_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_movements_repair ON gold_movements(related_repair_id)`,
+
+    // Customer-Credits (BHD) — Mirror von supplier_credits, fuer Faelle wo
+    // wir Kunden Geld schulden (z.B. Gold-Credit-Conversion, Refund-Credit).
+    // Plan repair-multi-supplier: convertCustomerCreditToMoney schreibt hier rein.
+    `CREATE TABLE IF NOT EXISTS customer_credits (
+      id              TEXT PRIMARY KEY,
+      branch_id       TEXT NOT NULL,
+      customer_id     TEXT NOT NULL,
+      source_type     TEXT,
+      source_id       TEXT,
+      amount          REAL NOT NULL,
+      used_amount     REAL DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'OPEN',
+      note            TEXT,
+      created_at      TEXT NOT NULL,
+      created_by      TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_customer_credits_customer ON customer_credits(customer_id, status)`,
+
+    // Backfill: existierende Single-Supplier-Repairs in eine repair_lines-Zeile
+    // migrieren. NOT EXISTS-Guard macht den Schritt idempotent.
+    `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, cost_amount, expense_id, status, created_at, updated_at)
+     SELECT
+       lower(hex(randomblob(16))),
+       r.branch_id, r.id, 1, r.workshop_supplier_id, 'service',
+       COALESCE(r.actual_cost, r.estimated_cost, 0),
+       (SELECT e.id FROM expenses e
+          WHERE e.related_module = 'repair' AND e.related_entity_id = r.id
+          ORDER BY e.created_at ASC
+          LIMIT 1),
+       'OPEN',
+       COALESCE(r.created_at, datetime('now')),
+       COALESCE(r.updated_at, datetime('now'))
+     FROM repairs r
+     WHERE r.workshop_supplier_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM repair_lines rl WHERE rl.repair_id = r.id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

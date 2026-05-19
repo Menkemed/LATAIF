@@ -7,8 +7,10 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { PhoneInput } from '@/components/ui/PhoneInput';
+import { SoftWarn } from '@/components/ui/SoftWarn';
 import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
+import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useCustomerStore } from '@/stores/customerStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Customer, VIPLevel } from '@/core/models/types';
@@ -195,10 +197,19 @@ export function CustomerList() {
             <Input required label="LAST NAME" placeholder="Al-Khalifa" value={form.lastName || ''} onChange={e => setForm({ ...form, lastName: e.target.value })} />
           </div>
           <Input label="COMPANY" placeholder="Company name" value={form.company || ''} onChange={e => setForm({ ...form, company: e.target.value })} />
-          <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />
+          <div>
+            <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />
+            <SoftWarn warning={validateCpr(form.personalId).warning} />
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-            <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
-            <PhoneInput label="WHATSAPP" value={form.whatsapp || ''} onChange={v => setForm({ ...form, whatsapp: v })} />
+            <div>
+              <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
+              <SoftWarn warning={validatePhone(form.phone).warning} />
+            </div>
+            <div>
+              <PhoneInput label="WHATSAPP" value={form.whatsapp || ''} onChange={v => setForm({ ...form, whatsapp: v })} />
+              <SoftWarn warning={validatePhone(form.whatsapp).warning} />
+            </div>
           </div>
           <Input label="EMAIL" placeholder="email@example.com" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
           <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR VAT export" value={form.vatAccountNumber || ''} onChange={e => setForm({ ...form, vatAccountNumber: e.target.value })} />

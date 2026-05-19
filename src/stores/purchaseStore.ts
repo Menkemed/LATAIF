@@ -87,6 +87,12 @@ interface PurchaseStore {
 }
 
 function rowToPurchase(row: Record<string, unknown>): Purchase {
+  // Snapshot der Supplier-Daten zum Zeitpunkt des Purchase-Create (Audit-Trail).
+  let snapshot: import('@/core/models/types').SupplierSnapshot | undefined;
+  const snapRaw = row.supplier_snapshot as string | null | undefined;
+  if (snapRaw) {
+    try { snapshot = JSON.parse(snapRaw); } catch { snapshot = undefined; }
+  }
   return {
     id: row.id as string,
     purchaseNumber: row.purchase_number as string,
@@ -101,6 +107,7 @@ function rowToPurchase(row: Record<string, unknown>): Purchase {
     lines: [],
     payments: [],
     staffId: (row.staff_id as string) || undefined,
+    supplierSnapshot: snapshot,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
@@ -281,12 +288,38 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // Insert purchase header (status UNPAID unless initial payment covers)
     const status: PurchaseStatus = computeStatus(total, input.initialPayment?.amount || 0);
     const paid = input.initialPayment?.amount || 0;
+
+    // Salesforce-Pattern: Supplier-Stamm-/Beleg-Daten zum Zeitpunkt des
+    // Purchase-Create einfrieren. Vermeidet dass spaetere Edits am Supplier
+    // (Name, CPR, ID-Bild) den gedruckten Original-Beleg ueberschreiben.
+    let snapshotJson: string | null = null;
+    try {
+      const sup = query(
+        'SELECT name, phone, email, address, cpr, cpr_image FROM suppliers WHERE id = ?',
+        [input.supplierId]
+      )[0];
+      if (sup) {
+        const snap = {
+          name: (sup.name as string) || '',
+          phone: (sup.phone as string) || undefined,
+          email: (sup.email as string) || undefined,
+          address: (sup.address as string) || undefined,
+          cpr: (sup.cpr as string) || undefined,
+          cprImage: (sup.cpr_image as string) || undefined,
+          snapshotAt: now,
+        };
+        snapshotJson = JSON.stringify(snap);
+      }
+    } catch (err) {
+      console.warn('[purchase] supplier snapshot failed:', err);
+    }
+
     db.run(
       `INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, status, total_amount, paid_amount, remaining_amount,
-        purchase_date, notes, staff_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        purchase_date, notes, staff_id, supplier_snapshot, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, purchaseNumber, input.supplierId, status, total, paid, total - paid,
-       purchaseDate, input.notes || null, input.staffId || null, now, now, userId]
+       purchaseDate, input.notes || null, input.staffId || null, snapshotJson, now, now, userId]
     );
 
     // Insert lines (inkl. Input-VAT-Felder)

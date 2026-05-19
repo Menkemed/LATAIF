@@ -13,6 +13,7 @@ import { InvoiceCreate } from '@/pages/invoices/InvoiceCreate';
 import { InvoiceDetail } from '@/pages/invoices/InvoiceDetail';
 import { RepairList } from '@/pages/repairs/RepairList';
 import { RepairDetail } from '@/pages/repairs/RepairDetail';
+import { RepairFlowTestPage } from '@/pages/admin/RepairFlowTestPage';
 import { ScrapTradeList } from '@/pages/scrap-trades/ScrapTradeList';
 import { ScrapTradeNew } from '@/pages/scrap-trades/ScrapTradeNew';
 import { ScrapTradeDetail } from '@/pages/scrap-trades/ScrapTradeDetail';
@@ -219,6 +220,7 @@ export default function App() {
           <Route path="/invoices/:id" element={<InvoiceDetail />} />
           <Route path="/repairs" element={<RepairList />} />
           <Route path="/repairs/:id" element={<RepairDetail />} />
+          <Route path="/admin/repair-flow-test" element={<RepairFlowTestPage />} />
           <Route path="/scrap-trades" element={<ScrapTradeList />} />
           <Route path="/scrap-trades/new" element={<ScrapTradeNew />} />
           <Route path="/scrap-trades/:id" element={<ScrapTradeDetail />} />

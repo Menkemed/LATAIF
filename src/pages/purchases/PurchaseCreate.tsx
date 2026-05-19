@@ -8,13 +8,20 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import { Input } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
+import { PhoneInput } from '@/components/ui/PhoneInput';
+import { ImageUpload } from '@/components/ui/ImageUpload';
+import { SoftWarn } from '@/components/ui/SoftWarn';
+import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
+import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { NewProductModal } from '@/components/products/NewProductModal';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useProductStore } from '@/stores/productStore';
 import { StaffSelect } from '@/components/employees/StaffSelect';
-import type { Product } from '@/core/models/types';
+import type { Product, Supplier } from '@/core/models/types';
 import { getProductSpecs } from '@/core/utils/product-format';
 
 function fmt(v: number): string {
@@ -43,7 +50,7 @@ export function PurchaseCreate() {
   const goBack = useGoBack('/purchases');
   const [searchParams] = useSearchParams();
   const { createPurchase } = usePurchaseStore();
-  const { suppliers, loadSuppliers } = useSupplierStore();
+  const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
 
   useEffect(() => { loadSuppliers(); loadProducts(); loadCategories(); }, [loadSuppliers, loadProducts, loadCategories]);
@@ -65,6 +72,36 @@ export function PurchaseCreate() {
   // Plan §Purchase §New-Item: Modal für volle Item-Erfassung (shared NewProductModal)
   const [newItemModalIdx, setNewItemModalIdx] = useState<number | null>(null);
   const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
+
+  // Quick-Create Supplier inline (spart Navigation zu /suppliers + zurueck).
+  // Felder spiegeln SupplierList — inkl. CPR + ID-Bild damit der Print-PDF
+  // direkt mit dem Beleg-Block ausgedruckt werden kann.
+  const [showNewSupplier, setShowNewSupplier] = useState(false);
+  const [newSupplierForm, setNewSupplierForm] = useState<Partial<Supplier>>({});
+
+  // Duplicate-Check live im Quick-Modal (Salesforce-Stil): vermeidet
+  // doppelt angelegte Suppliers wenn Counter-Mitarbeiter unter Druck schnell tippen.
+  const supplierDuplicateMatches = useMemo(() => {
+    if (!showNewSupplier) return [];
+    return findSimilarContacts(
+      { name: newSupplierForm.name, phone: newSupplierForm.phone },
+      suppliers,
+    );
+  }, [showNewSupplier, newSupplierForm.name, newSupplierForm.phone, suppliers]);
+
+  function handleCreateSupplier() {
+    if (!newSupplierForm.name) return;
+    const created = createSupplier(newSupplierForm);
+    setSupplierId(created.id);
+    setShowNewSupplier(false);
+    setNewSupplierForm({});
+  }
+
+  function pickExistingSupplier(sid: string) {
+    setSupplierId(sid);
+    setShowNewSupplier(false);
+    setNewSupplierForm({});
+  }
 
   const supplier = useMemo(() => suppliers.find(s => s.id === supplierId), [suppliers, supplierId]);
   const supplierOptions = useMemo(() => suppliers.map(s => ({
@@ -242,20 +279,46 @@ export function PurchaseCreate() {
         {/* 1. SUPPLIER */}
         <Card>
           <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>1 · SUPPLIER</span>
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginTop: 12 }}>
-            <SearchSelect
-              label="SUPPLIER"
-              placeholder="Search suppliers..."
-              options={supplierOptions}
-              value={supplierId}
-              onChange={setSupplierId}
-            />
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginTop: 12, alignItems: 'end' }}>
+            <div>
+              <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+                <span className="text-overline">SUPPLIER</span>
+                <button onClick={() => setShowNewSupplier(true)}
+                  className="cursor-pointer flex items-center gap-1"
+                  style={{
+                    padding: '4px 10px', fontSize: 11, borderRadius: 999,
+                    border: '1px solid #C6A36D', color: '#0F0F10',
+                    background: 'rgba(198,163,109,0.08)',
+                  }}>
+                  <Plus size={12} /> New Supplier
+                </button>
+              </div>
+              <SearchSelect
+                placeholder="Search suppliers..."
+                options={supplierOptions}
+                value={supplierId}
+                onChange={setSupplierId}
+              />
+            </div>
             <Input required label="PURCHASE DATE" type="date"
               value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} />
           </div>
           {supplier && (
             <div style={{ padding: '10px 14px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8, marginTop: 12, fontSize: 12, color: '#4B5563' }}>
-              {supplier.name}{supplier.phone ? ` · ${supplier.phone}` : ''}{supplier.email ? ` · ${supplier.email}` : ''}
+              <div className="flex items-center justify-between">
+                <div>
+                  {supplier.name}{supplier.phone ? ` · ${supplier.phone}` : ''}{supplier.email ? ` · ${supplier.email}` : ''}
+                  {supplier.cpr && (
+                    <span style={{ marginLeft: 10, color: '#6B7280', fontSize: 11 }}>
+                      CPR <span className="font-mono">{supplier.cpr}</span>
+                    </span>
+                  )}
+                </div>
+                {supplier.cprImage && (
+                  <img src={supplier.cprImage} alt="CPR / ID Card"
+                    style={{ maxWidth: 80, maxHeight: 50, border: '1px solid #E5E9EE', borderRadius: 4, objectFit: 'contain', background: '#FFFFFF' }} />
+                )}
+              </div>
             </div>
           )}
         </Card>
@@ -603,6 +666,66 @@ export function PurchaseCreate() {
         hint={<><strong style={{ color: '#0F0F10' }}>Wird ins Lager aufgenommen.</strong> Einkaufspreis kommt aus der Purchase-Line — nicht doppelt eingeben.</>}
         hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true }}
       />
+
+      {/* Quick-Create Supplier — gleiche Felder wie SupplierList, inkl. CPR + ID-Card. */}
+      <Modal open={showNewSupplier} onClose={() => setShowNewSupplier(false)} title="New Supplier" width={500}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {supplierDuplicateMatches.length > 0 && (
+            <DuplicateWarningBanner
+              matches={supplierDuplicateMatches}
+              entityLabel="supplier"
+              onSelectMatch={s => pickExistingSupplier(s.id)}
+            />
+          )}
+          <Input required label="NAME" placeholder="e.g. Gold Dealer LLC"
+            value={newSupplierForm.name || ''} onChange={e => setNewSupplierForm({ ...newSupplierForm, name: e.target.value })}
+            autoFocus />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div>
+              <PhoneInput label="PHONE" value={newSupplierForm.phone || ''}
+                onChange={v => setNewSupplierForm({ ...newSupplierForm, phone: v })} />
+              <SoftWarn warning={validatePhone(newSupplierForm.phone).warning} />
+            </div>
+            <Input label="EMAIL" placeholder="contact@supplier.com"
+              value={newSupplierForm.email || ''}
+              onChange={e => setNewSupplierForm({ ...newSupplierForm, email: e.target.value })} />
+          </div>
+          <Input label="ADDRESS" placeholder="Street, City"
+            value={newSupplierForm.address || ''}
+            onChange={e => setNewSupplierForm({ ...newSupplierForm, address: e.target.value })} />
+          <div>
+            <Input label="CPR / ID NUMBER" placeholder="e.g. 900123456"
+              value={newSupplierForm.cpr || ''}
+              onChange={e => setNewSupplierForm({ ...newSupplierForm, cpr: e.target.value })} />
+            <SoftWarn warning={validateCpr(newSupplierForm.cpr).warning} />
+          </div>
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CPR / ID CARD PHOTO</span>
+            <p style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>Wird auf jedem Ankaufs-Print mitgedruckt.</p>
+            <ImageUpload
+              images={newSupplierForm.cprImage ? [newSupplierForm.cprImage] : []}
+              onChange={imgs => setNewSupplierForm({ ...newSupplierForm, cprImage: imgs[0] || undefined })}
+              maxImages={1}
+            />
+          </div>
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
+            <textarea
+              value={newSupplierForm.notes || ''}
+              onChange={e => setNewSupplierForm({ ...newSupplierForm, notes: e.target.value })}
+              className="w-full outline-none"
+              rows={2}
+              style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }}
+            />
+          </div>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => { setShowNewSupplier(false); setNewSupplierForm({}); }}>Cancel</Button>
+            <Button variant="primary" onClick={handleCreateSupplier} disabled={!newSupplierForm.name}>
+              {supplierDuplicateMatches.length > 0 ? 'Create anyway &amp; Use' : 'Create &amp; Use'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

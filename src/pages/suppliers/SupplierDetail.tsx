@@ -9,9 +9,16 @@ import { Bhd } from '@/components/ui/Bhd';
 import { KPICard } from '@/components/ui/KPICard';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { ImageUpload } from '@/components/ui/ImageUpload';
+import { SoftWarn } from '@/components/ui/SoftWarn';
+import { PhoneInput } from '@/components/ui/PhoneInput';
+import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
+import { useGoldStore } from '@/stores/goldStore';
+import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
+import type { GoldPayable } from '@/core/models/types';
 import { query } from '@/core/db/helpers';
 import type { Supplier } from '@/core/models/types';
 
@@ -30,12 +37,18 @@ export function SupplierDetail() {
   const goBack = useGoBack('/suppliers');
   const { suppliers, loadSuppliers, updateSupplier, deleteSupplier, getLedger } = useSupplierStore();
   const { purchases, loadPurchases } = usePurchaseStore();
+  const goldStore = useGoldStore();
+  const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; payable?: GoldPayable }>({ open: false, mode: 'settle_supplier_return' });
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Supplier>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
-  useEffect(() => { loadSuppliers(); loadPurchases(); }, [loadSuppliers, loadPurchases]);
+  useEffect(() => { loadSuppliers(); loadPurchases(); goldStore.loadAll(); }, [loadSuppliers, loadPurchases, goldStore]);
+
+  // Plan repair-multi-supplier — Gold-Buckets fuer diesen Supplier
+  const goldOwedSummary = useMemo(() => id ? goldStore.getGoldOwedBySupplier(id) : [], [id, goldStore.goldPayables]); // eslint-disable-line react-hooks/exhaustive-deps
+  const supplierGoldPayables = useMemo(() => id ? goldStore.getGoldPayablesBySupplier(id) : [], [id, goldStore.goldPayables]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const supplier = useMemo(() => suppliers.find(s => s.id === id), [suppliers, id]);
 
@@ -131,6 +144,8 @@ export function SupplierDetail() {
       email: form.email,
       address: form.address,
       notes: form.notes,
+      cpr: form.cpr,
+      cprImage: form.cprImage,
       active: form.active,
     });
     setEditing(false);
@@ -183,9 +198,25 @@ export function SupplierDetail() {
             <div style={{ marginTop: 20 }}>
               {editing ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  <Input label="PHONE" value={form.phone || ''} onChange={e => setForm({ ...form, phone: e.target.value })} />
+                  <div>
+                    <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
+                    <SoftWarn warning={validatePhone(form.phone).warning} />
+                  </div>
                   <Input label="EMAIL" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
                   <Input label="ADDRESS" value={form.address || ''} onChange={e => setForm({ ...form, address: e.target.value })} />
+                  <div>
+                    <Input label="CPR / ID NUMBER" value={form.cpr || ''} onChange={e => setForm({ ...form, cpr: e.target.value })} />
+                    <SoftWarn warning={validateCpr(form.cpr).warning} />
+                  </div>
+                  <div>
+                    <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CPR / ID CARD PHOTO</span>
+                    <p style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>Wird auf jedem Ankaufs-Print mitgedruckt.</p>
+                    <ImageUpload
+                      images={form.cprImage ? [form.cprImage] : []}
+                      onChange={imgs => setForm({ ...form, cprImage: imgs[0] || undefined })}
+                      maxImages={1}
+                    />
+                  </div>
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
                     <textarea
@@ -201,6 +232,17 @@ export function SupplierDetail() {
                   {supplier.phone && <div style={{ fontSize: 13, color: '#4B5563' }}>{supplier.phone}</div>}
                   {supplier.email && <div style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>{supplier.email}</div>}
                   {supplier.address && <div style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>{supplier.address}</div>}
+                  {supplier.cpr && (
+                    <div style={{ fontSize: 13, color: '#4B5563', marginTop: 8 }}>
+                      <span style={{ color: '#9CA3AF', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', marginRight: 6 }}>CPR</span>
+                      <span className="font-mono">{supplier.cpr}</span>
+                    </div>
+                  )}
+                  {supplier.cprImage && (
+                    <div style={{ marginTop: 10 }}>
+                      <img src={supplier.cprImage} alt="CPR / ID Card" style={{ maxWidth: 220, maxHeight: 140, border: '1px solid #E5E9EE', borderRadius: 6, objectFit: 'contain', background: '#F2F7FA' }} />
+                    </div>
+                  )}
                   {supplier.notes && <div style={{ fontSize: 13, color: '#4B5563', marginTop: 12, lineHeight: 1.5 }}>{supplier.notes}</div>}
                 </>
               )}
@@ -280,6 +322,84 @@ export function SupplierDetail() {
                   );
                 })}
               </div>
+            </Card>
+          </div>
+        )}
+
+        {/* Gold-Owed (Plan repair-multi-supplier) — KPI-Karte + Liste der OPEN Gold-Payables.
+            Bewusst SEPARAT von BHD-Money-Payables: Gold bleibt Gold, Geld bleibt Geld. */}
+        {(goldOwedSummary.length > 0 || supplierGoldPayables.length > 0) && (
+          <div style={{ marginTop: 24 }}>
+            <Card>
+              <div className="flex justify-between items-start" style={{ marginBottom: 14 }}>
+                <span className="text-overline">GOLD OWED · BY KARAT</span>
+                {goldOwedSummary.length > 0 && (
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    {goldOwedSummary.map(s => (
+                      <div key={s.karat} style={{
+                        padding: '6px 12px', borderRadius: 6,
+                        background: 'rgba(198,163,109,0.08)',
+                        border: '1px solid rgba(198,163,109,0.3)',
+                      }}>
+                        <span className="font-mono" style={{ fontSize: 16, color: '#0F0F10' }}>
+                          {s.totalGrams.toFixed(3)}g
+                        </span>
+                        <span style={{ fontSize: 11, color: '#8A7548', marginLeft: 6 }}>{s.karat}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {supplierGoldPayables.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No gold-payables.</p>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 0.9fr 0.8fr 1fr 1fr 1.4fr', gap: 12, fontSize: 12 }}>
+                  <span className="text-overline">DATE</span>
+                  <span className="text-overline">REPAIR</span>
+                  <span className="text-overline">KARAT</span>
+                  <span className="text-overline" style={{ textAlign: 'right' }}>WEIGHT (g)</span>
+                  <span className="text-overline" style={{ textAlign: 'right' }}>SETTLED (g)</span>
+                  <span className="text-overline">ACTIONS</span>
+                  {supplierGoldPayables.map(gp => {
+                    const remaining = Math.max(0, gp.weightGrams - gp.fulfilledGrams);
+                    return (
+                      <div key={gp.id} style={{ display: 'contents' }}>
+                        <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(gp.createdAt)}</span>
+                        <span className="font-mono" style={{ fontSize: 11, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: gp.sourceRepairId ? 'pointer' : 'default' }}
+                          onClick={() => gp.sourceRepairId && navigate(`/repairs/${gp.sourceRepairId}`)}>
+                          {gp.sourceRepairId ? gp.sourceRepairId.slice(0, 8) : '—'}
+                        </span>
+                        <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{gp.karat}</span>
+                        <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{gp.weightGrams.toFixed(3)}</span>
+                        <span className="font-mono" style={{ fontSize: 12, color: gp.status === 'FULFILLED' ? '#16A34A' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {gp.fulfilledGrams.toFixed(3)}
+                        </span>
+                        <div style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {gp.status === 'OPEN' && remaining > 0 && (
+                            <>
+                              <button onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
+                                style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
+                                Return gold
+                              </button>
+                              <button onClick={() => setSettleModal({ open: true, mode: 'apply_shop_to_supplier', payable: gp })}
+                                style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
+                                Apply shop gold
+                              </button>
+                              <button onClick={() => setSettleModal({ open: true, mode: 'convert_supplier_money', payable: gp })}
+                                style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
+                                → BHD
+                              </button>
+                            </>
+                          )}
+                          {gp.status !== 'OPEN' && (
+                            <span style={{ fontSize: 10, color: '#6B7280' }}>{gp.status}</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </Card>
           </div>
         )}
@@ -364,6 +484,13 @@ export function SupplierDetail() {
         entityType="suppliers"
         entityId={supplier.id}
         title={`History · ${supplier.name}`}
+      />
+
+      <SettleGoldModal
+        open={settleModal.open}
+        mode={settleModal.mode}
+        payable={settleModal.payable}
+        onClose={() => setSettleModal({ open: false, mode: 'settle_supplier_return' })}
       />
     </div>
   );

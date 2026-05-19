@@ -11,6 +11,9 @@ import { Input } from '@/components/ui/Input';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
+import { useGoldStore } from '@/stores/goldStore';
+import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
+import type { RepairWorkType, GoldPayable, CustomerGoldCredit } from '@/core/models/types';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -22,7 +25,7 @@ import { SearchSelect } from '@/components/ui/SearchSelect';
 import { formatProductMultiLine } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import type { Repair, RepairStatus } from '@/core/models/types';
+import type { Repair, RepairStatus, RepairLine } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 
 function fmt(v: number): string {
@@ -72,7 +75,11 @@ export function RepairDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/repairs');
-  const { repairs, loadRepairs, updateRepair, updateStatus, deleteRepair } = useRepairStore();
+  const {
+    repairs, loadRepairs, updateRepair, updateStatus, deleteRepair,
+    repairLines, loadRepairLines, getRepairLines, addRepairLine, cancelRepairLine,
+  } = useRepairStore();
+  const goldStore = useGoldStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -88,7 +95,13 @@ export function RepairDetail() {
   const [showHistory, setShowHistory] = useState(false);
   const perm = usePermission();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadExpenses(); loadEmployees(); }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadExpenses, loadEmployees]);
+  useEffect(() => {
+    loadRepairs(); loadCustomers(); loadProducts(); loadCategories();
+    loadInvoices(); loadSuppliers(); loadExpenses(); loadEmployees();
+    loadRepairLines();
+    goldStore.loadAll();
+  }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices,
+      loadSuppliers, loadExpenses, loadEmployees, loadRepairLines, goldStore]);
 
   const supplierOptions = useMemo(() => suppliers
     .filter(s => s.active)
@@ -118,6 +131,46 @@ export function RepairDetail() {
     if (repair) setForm({ ...repair });
   }, [repair]);
 
+  // Plan repair-multi-supplier — State fuer Add-Line + Add-Gold + Settle-Modal
+  const [showAddLineModal, setShowAddLineModal] = useState(false);
+  const [newLineForm, setNewLineForm] = useState<{
+    supplierId: string; workType: RepairWorkType; description: string; cost: string; dueDate: string;
+  }>({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
+
+  const [showAddGoldModal, setShowAddGoldModal] = useState(false);
+  const [newGoldForm, setNewGoldForm] = useState<{
+    source: 'workshop' | 'customer'; supplierId: string;
+    receivedG: string; usedG: string; karat: string;
+    settlementType: 'return_gold' | 'pay_money';
+    leftoverDest: 'return' | 'credit' | 'shop_keep';
+  }>({
+    source: 'workshop', supplierId: '', receivedG: '', usedG: '', karat: '21K',
+    settlementType: 'return_gold', leftoverDest: 'return',
+  });
+
+  const [settleModal, setSettleModal] = useState<{
+    open: boolean; mode: SettleGoldMode; payable?: GoldPayable; credit?: CustomerGoldCredit;
+  }>({ open: false, mode: 'settle_supplier_return' });
+
+  // Lines + Gold-Buckets fuer diesen Repair
+  const thisRepairLines = useMemo(
+    () => id ? getRepairLines(id) : [],
+    // repairLines als Dep, damit Re-Renders bei Mutationen greifen
+    [id, repairLines, getRepairLines], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const linesTotalCost = useMemo(
+    () => thisRepairLines.filter(l => l.status === 'OPEN').reduce((s, l) => s + l.costAmount, 0),
+    [thisRepairLines],
+  );
+  const repairGoldPayables = useMemo(
+    () => id ? goldStore.goldPayables.filter(gp => gp.sourceRepairId === id) : [],
+    [id, goldStore.goldPayables],
+  );
+  const repairCustomerGoldCredits = useMemo(
+    () => id ? goldStore.customerGoldCredits.filter(gc => gc.sourceRepairId === id) : [],
+    [id, goldStore.customerGoldCredits],
+  );
+
   if (!repair) {
     return (
       <div className="flex-1 flex items-center justify-center" style={{ height: '100vh', background: '#FFFFFF' }}>
@@ -126,11 +179,83 @@ export function RepairDetail() {
     );
   }
 
+  function handleAddLine() {
+    if (!id) return;
+    const cost = parseFloat(newLineForm.cost) || 0;
+    addRepairLine(id, {
+      supplierId: newLineForm.supplierId || undefined,
+      workType: newLineForm.workType,
+      description: newLineForm.description || undefined,
+      costAmount: cost,
+      dueDate: newLineForm.dueDate || undefined,
+    });
+    setShowAddLineModal(false);
+    setNewLineForm({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
+  }
+
+  function handleAddGold() {
+    if (!id || !repair) return;
+    const received = parseFloat(newGoldForm.receivedG) || 0;
+    const used = parseFloat(newGoldForm.usedG) || 0;
+
+    if (newGoldForm.source === 'workshop') {
+      // Workshop hat eigenes Gold verwendet → gold_payable
+      if (!newGoldForm.supplierId || received <= 0) return;
+      goldStore.createGoldPayable({
+        supplierId: newGoldForm.supplierId,
+        sourceRepairId: id,
+        weightGrams: received,
+        karat: newGoldForm.karat,
+        settlementType: newGoldForm.settlementType,
+      });
+    } else {
+      // Customer-Gold: leftover behandeln
+      if (received <= 0) return;
+      const leftover = received - used;
+      if (leftover > 0 && newGoldForm.leftoverDest === 'credit') {
+        goldStore.createCustomerGoldCredit({
+          customerId: repair.customerId,
+          sourceRepairId: id,
+          weightGrams: leftover,
+          karat: newGoldForm.karat,
+          notes: `Customer-Gold leftover from repair ${repair.repairNumber}`,
+        });
+      } else if (leftover > 0 && newGoldForm.leftoverDest === 'shop_keep') {
+        // Direct adjustment via goldStore (precious_metals ↑) — wir nutzen die
+        // applyShopGoldToSupplierPayable-Logik nicht, sondern legen einen
+        // synthetic gold_movement an indem wir createGoldPayable + sofort
+        // settle_return_gold aufrufen? Nein, einfacher: wir nutzen direkt
+        // metalStore.adjust ueber ein internes Helper. Da wir keinen direkten
+        // Zugriff haben, schreiben wir es ueber eine "ghost"-Konstruktion:
+        // wir legen ein gold_payable mit supplier_id = 'shop-keep' an? Nein.
+        //
+        // Stattdessen: nutze adjustPreciousMetals direkt via goldStore-Action.
+        // Da diese Funktion noch nicht im Store exponiert ist, exposen wir sie
+        // via eine neue action `creditShopGold` (TODO). Vorlaeufig nutzen wir
+        // einen workaround: leftover als "self-payable" zum Owner anlegen und
+        // sofort settlen — verwirrend. Cleaner: skip fuer diese Iteration und
+        // documenten als TODO.
+        // TODO: expose creditShopGold(branchId, karat, grams) im goldStore
+        console.warn('[gold] Shop-Keep-Pfad noch nicht voll integriert — leftover bleibt unverbucht.');
+      }
+      // leftoverDest === 'return' → nichts buchen, nur Doku im Repair-Notes
+    }
+
+    setShowAddGoldModal(false);
+    setNewGoldForm({
+      source: 'workshop', supplierId: '', receivedG: '', usedG: '', karat: '21K',
+      settlementType: 'return_gold', leftoverDest: 'return',
+    });
+  }
+
   const nextStatus = getNextStatus(repair.status, repair.repairType, repair.repairScope);
   // Hybrid-Margin-Fix: bei Hybrid ziehen wir Internal + Workshop ab, sonst nur internalCost
   // (Workshop ist bei external bereits in internalCost gespiegelt).
+  // Plan repair-multi-supplier: bei Multi-Line-Repair zaehlt SUM(OPEN lines) als
+  // Workshop-Kost (ueberschreibt Legacy-estimatedCost) — linesTotalCost kommt
+  // aus dem Store und re-rendert automatisch bei Line-Mutationen.
   const margin = repair.chargeToCustomer != null
-    ? repair.chargeToCustomer - computeRepairTotalCost(repair)
+    ? repair.chargeToCustomer - computeRepairTotalCost(repair, linesTotalCost)
     : null;
 
   // Workshop fee owed to supplier (for display in status panel + OWN-scope).
@@ -870,6 +995,192 @@ export function RepairDetail() {
               </div>
             )}
           </Card>
+
+          {/* Plan repair-multi-supplier — Work Lines section (external/hybrid).
+              Multi-Supplier-Tracking: jede Zeile ist ein eigener Lieferant +
+              Cost + Payment-Status. Beim Status >= IN_PROGRESS wird je Line
+              eine eigene Expense gebucht (Supplier-A/P). */}
+          {(repair.repairType === 'external' || repair.repairType === 'hybrid') && (
+            <div style={{ marginTop: 20 }}>
+              <Card>
+                <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
+                  <span className="text-overline">WORK LINES ({thisRepairLines.filter(l => l.status === 'OPEN').length})</span>
+                  <button onClick={() => setShowAddLineModal(true)}
+                    className="cursor-pointer"
+                    style={{ padding: '6px 12px', fontSize: 12, borderRadius: 6,
+                             border: '1px solid #0F0F10', background: 'transparent', color: '#0F0F10' }}>
+                    + Add Work Line
+                  </button>
+                </div>
+                {thisRepairLines.length === 0 ? (
+                  <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click „Add Work Line" to register a supplier/workshop position.</p>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
+                    <span className="text-overline">SUPPLIER</span>
+                    <span className="text-overline">WORK TYPE</span>
+                    <span className="text-overline">DESCRIPTION</span>
+                    <span className="text-overline" style={{ textAlign: 'right' }}>COST</span>
+                    <span className="text-overline">PAYMENT</span>
+                    <span className="text-overline">ACTIONS</span>
+                    {thisRepairLines.map((l: RepairLine) => {
+                      const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
+                      return (
+                        <div key={l.id} style={{ display: 'contents' }}>
+                          <span style={{ fontSize: 12, color: l.status === 'CANCELLED' ? '#9CA3AF' : '#0F0F10',
+                                         padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                         textDecoration: l.status === 'CANCELLED' ? 'line-through' : 'none',
+                                         cursor: sup ? 'pointer' : 'default' }}
+                            onClick={() => sup && navigate(`/suppliers/${sup.id}`)}>
+                            {sup?.name || '—'}
+                          </span>
+                          <span style={{ fontSize: 12, color: '#4B5563', padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                         textTransform: 'capitalize' }}>
+                            {(l.workType || 'other').replace(/_/g, ' ')}
+                          </span>
+                          <span style={{ fontSize: 12, color: '#6B7280', padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {l.description || '—'}
+                          </span>
+                          <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right',
+                                                                padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                            <Bhd v={l.costAmount}/>
+                          </span>
+                          <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                         color: l.paymentStatus === 'PAID' ? '#16A34A'
+                                              : l.paymentStatus === 'PARTIALLY_PAID' ? '#D97706'
+                                              : '#6B7280' }}>
+                            {l.expenseId ? (l.paymentStatus || 'UNPAID') : '— (uncommitted)'}
+                          </span>
+                          <div style={{ padding: '8px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6 }}>
+                            {l.status === 'OPEN' && (
+                              <button onClick={() => {
+                                if (!confirm('Cancel this work line? If a payment was made, use Cancel + Replace.')) return;
+                                cancelRepairLine(l.id);
+                              }}
+                                style={{ fontSize: 10, padding: '3px 8px', border: '1px solid rgba(220,38,38,0.3)',
+                                         borderRadius: 4, background: 'transparent', color: '#DC2626', cursor: 'pointer' }}>
+                                Cancel
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {linesTotalCost > 0 && (
+                  <div className="flex justify-between" style={{
+                    marginTop: 12, paddingTop: 12, borderTop: '1px solid #0F0F10', fontSize: 13,
+                  }}>
+                    <span style={{ color: '#0F0F10' }}>Total external cost</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={linesTotalCost}/> BHD</span>
+                  </div>
+                )}
+              </Card>
+            </div>
+          )}
+
+          {/* Plan repair-multi-supplier — Gold-Used Block (Workshop + Customer Gold).
+              Workshop-Gold legt eine gold_payable an. Customer-Gold-Rest entweder
+              zurueck, als Credit, oder vom Shop behalten. */}
+          <div style={{ marginTop: 20 }}>
+            <Card>
+              <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
+                <span className="text-overline">
+                  GOLD USED ({repairGoldPayables.length + repairCustomerGoldCredits.length})
+                </span>
+                <button onClick={() => setShowAddGoldModal(true)}
+                  className="cursor-pointer"
+                  style={{ padding: '6px 12px', fontSize: 12, borderRadius: 6,
+                           border: '1px solid #C6A36D', background: 'rgba(198,163,109,0.08)', color: '#8A7548' }}>
+                  + Add Gold Usage
+                </button>
+              </div>
+              {repairGoldPayables.length === 0 && repairCustomerGoldCredits.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No gold positions recorded for this repair.</p>
+              ) : (
+                <>
+                  {repairGoldPayables.length > 0 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+                        Workshop Gold (we owe)
+                      </div>
+                      {repairGoldPayables.map(gp => {
+                        const sup = suppliers.find(s => s.id === gp.supplierId);
+                        const remaining = Math.max(0, gp.weightGrams - gp.fulfilledGrams);
+                        return (
+                          <div key={gp.id} className="flex justify-between" style={{
+                            padding: '8px 12px', marginBottom: 6,
+                            background: '#FAFBFC', border: '1px solid #E5E9EE', borderRadius: 6,
+                            fontSize: 12,
+                          }}>
+                            <div>
+                              <span style={{ color: '#0F0F10' }}>{sup?.name || '—'}</span>
+                              <span className="font-mono" style={{ color: '#8A7548', marginLeft: 10 }}>
+                                {remaining.toFixed(3)}g {gp.karat}
+                              </span>
+                              <span style={{ color: '#9CA3AF', marginLeft: 8, fontSize: 11 }}>
+                                · {gp.settlementType === 'return_gold' ? 'return gold' : 'pay money'} · {gp.status}
+                              </span>
+                            </div>
+                            {gp.status === 'OPEN' && remaining > 0 && (
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                <button onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
+                                  style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
+                                  Settle
+                                </button>
+                                <button onClick={() => setSettleModal({ open: true, mode: 'convert_supplier_money', payable: gp })}
+                                  style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
+                                  → BHD
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {repairCustomerGoldCredits.length > 0 && (
+                    <div>
+                      <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+                        Customer Gold (we owe customer)
+                      </div>
+                      {repairCustomerGoldCredits.map(gc => {
+                        const remaining = Math.max(0, gc.weightGrams - gc.fulfilledGrams);
+                        return (
+                          <div key={gc.id} className="flex justify-between" style={{
+                            padding: '8px 12px', marginBottom: 6,
+                            background: '#FAFBFC', border: '1px solid #E5E9EE', borderRadius: 6,
+                            fontSize: 12,
+                          }}>
+                            <div>
+                              <span style={{ color: '#0F0F10' }}>{customer ? `${customer.firstName} ${customer.lastName}` : '—'}</span>
+                              <span className="font-mono" style={{ color: '#8A7548', marginLeft: 10 }}>
+                                {remaining.toFixed(3)}g {gc.karat}
+                              </span>
+                              <span style={{ color: '#9CA3AF', marginLeft: 8, fontSize: 11 }}>· credit · {gc.status}</span>
+                            </div>
+                            {gc.status === 'OPEN' && remaining > 0 && (
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                <button onClick={() => setSettleModal({ open: true, mode: 'return_customer', credit: gc })}
+                                  style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
+                                  Return
+                                </button>
+                                <button onClick={() => setSettleModal({ open: true, mode: 'convert_customer_money', credit: gc })}
+                                  style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
+                                  → BHD
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+            </Card>
+          </div>
         </div>
       </div>
 
@@ -913,6 +1224,169 @@ export function RepairDetail() {
         variant="repair"
         onCancel={() => setNumberDialogOpen(false)}
         onConfirm={executeRepairInvoiceCreate}
+      />
+
+      {/* Plan repair-multi-supplier — Add-Line Modal */}
+      <Modal open={showAddLineModal} onClose={() => setShowAddLineModal(false)} title="Add Work Line" width={520}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <SearchSelect
+            label="SUPPLIER / WORKSHOP"
+            placeholder="Pick supplier..."
+            options={supplierOptions}
+            value={newLineForm.supplierId}
+            onChange={sid => setNewLineForm({ ...newLineForm, supplierId: sid })}
+          />
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>WORK TYPE</span>
+            <select
+              value={newLineForm.workType}
+              onChange={e => setNewLineForm({ ...newLineForm, workType: e.target.value as RepairWorkType })}
+              style={{ width: '100%', padding: '9px 12px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#F2F7FA' }}>
+              <option value="service">Service</option>
+              <option value="polishing">Polishing</option>
+              <option value="spare_part">Spare Part</option>
+              <option value="gold_work">Gold Work</option>
+              <option value="stone_setting">Stone Setting</option>
+              <option value="engraving">Engraving</option>
+              <option value="plating">Plating</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <Input label="DESCRIPTION" placeholder="e.g. replace mainspring"
+            value={newLineForm.description}
+            onChange={e => setNewLineForm({ ...newLineForm, description: e.target.value })} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <Input label="COST (BHD)" type="number" step="0.001"
+              value={newLineForm.cost}
+              onChange={e => setNewLineForm({ ...newLineForm, cost: e.target.value })} />
+            <Input label="DUE DATE (optional)" type="date"
+              value={newLineForm.dueDate}
+              onChange={e => setNewLineForm({ ...newLineForm, dueDate: e.target.value })} />
+          </div>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => setShowAddLineModal(false)}>Cancel</Button>
+            <Button variant="primary" onClick={handleAddLine}
+              disabled={!newLineForm.supplierId || !parseFloat(newLineForm.cost)}>
+              Add Line
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Plan repair-multi-supplier — Add-Gold Modal */}
+      <Modal open={showAddGoldModal} onClose={() => setShowAddGoldModal(false)} title="Add Gold Usage" width={540}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>GOLD SOURCE</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {(['workshop', 'customer'] as const).map(src => (
+                <button key={src} type="button"
+                  onClick={() => setNewGoldForm({ ...newGoldForm, source: src })}
+                  style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
+                           border: `1px solid ${newGoldForm.source === src ? '#0F0F10' : '#D5D9DE'}`,
+                           background: newGoldForm.source === src ? 'rgba(15,15,16,0.06)' : 'transparent',
+                           color: newGoldForm.source === src ? '#0F0F10' : '#6B7280',
+                           cursor: 'pointer' }}>
+                  {src === 'workshop' ? 'Workshop/Supplier Gold' : 'Customer Gold'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <Input label="WEIGHT RECEIVED (g)" type="number" step="0.001"
+              value={newGoldForm.receivedG}
+              onChange={e => setNewGoldForm({ ...newGoldForm, receivedG: e.target.value })} />
+            <div>
+              <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>KARAT</span>
+              <select value={newGoldForm.karat}
+                onChange={e => setNewGoldForm({ ...newGoldForm, karat: e.target.value })}
+                style={{ width: '100%', padding: '9px 12px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#F2F7FA' }}>
+                {(['24K','22K','21K','18K','14K','9K','999','925','950'] as const).map(k => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {newGoldForm.source === 'workshop' ? (
+            <>
+              <SearchSelect
+                label="SUPPLIER / GOLDSMITH"
+                placeholder="Pick supplier..."
+                options={supplierOptions}
+                value={newGoldForm.supplierId}
+                onChange={sid => setNewGoldForm({ ...newGoldForm, supplierId: sid })}
+              />
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SETTLEMENT TYPE</span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {(['return_gold', 'pay_money'] as const).map(st => (
+                    <button key={st} type="button"
+                      onClick={() => setNewGoldForm({ ...newGoldForm, settlementType: st })}
+                      style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
+                               border: `1px solid ${newGoldForm.settlementType === st ? '#0F0F10' : '#D5D9DE'}`,
+                               background: newGoldForm.settlementType === st ? 'rgba(15,15,16,0.06)' : 'transparent',
+                               color: newGoldForm.settlementType === st ? '#0F0F10' : '#6B7280',
+                               cursor: 'pointer' }}>
+                      {st === 'return_gold' ? 'Return Gold' : 'Pay Money'}
+                    </button>
+                  ))}
+                </div>
+                <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 6 }}>
+                  Return Gold = wir schulden dem Workshop {newGoldForm.receivedG || '—'}g Gold zurueck (kein BHD-Eintrag bis zur Konvertierung).
+                  Pay Money = wir verhandeln spaeter einen BHD-Betrag fuer das Gold.
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <Input label="WEIGHT USED IN REPAIR (g)" type="number" step="0.001"
+                value={newGoldForm.usedG}
+                onChange={e => setNewGoldForm({ ...newGoldForm, usedG: e.target.value })} />
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>LEFTOVER DESTINATION</span>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {(['return', 'credit', 'shop_keep'] as const).map(d => (
+                    <button key={d} type="button"
+                      onClick={() => setNewGoldForm({ ...newGoldForm, leftoverDest: d })}
+                      style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
+                               border: `1px solid ${newGoldForm.leftoverDest === d ? '#0F0F10' : '#D5D9DE'}`,
+                               background: newGoldForm.leftoverDest === d ? 'rgba(15,15,16,0.06)' : 'transparent',
+                               color: newGoldForm.leftoverDest === d ? '#0F0F10' : '#6B7280',
+                               cursor: 'pointer' }}>
+                      {d === 'return' ? 'Return to Customer' : d === 'credit' ? 'Customer Credit' : 'Shop Keeps'}
+                    </button>
+                  ))}
+                </div>
+                {newGoldForm.leftoverDest === 'shop_keep' && (
+                  <p style={{ fontSize: 11, color: '#D97706', marginTop: 6 }}>
+                    Hinweis: Shop-Keep wird in dieser Version nur dokumentiert.
+                    Volle Inventar-Buchung kommt in der naechsten Iteration.
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => setShowAddGoldModal(false)}>Cancel</Button>
+            <Button variant="primary" onClick={handleAddGold}
+              disabled={!parseFloat(newGoldForm.receivedG) ||
+                        (newGoldForm.source === 'workshop' && !newGoldForm.supplierId)}>
+              Add Gold Usage
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <SettleGoldModal
+        open={settleModal.open}
+        mode={settleModal.mode}
+        payable={settleModal.payable}
+        credit={settleModal.credit}
+        repairId={repair.id}
+        onClose={() => setSettleModal({ open: false, mode: 'settle_supplier_return' })}
       />
     </div>
   );

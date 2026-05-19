@@ -10,8 +10,14 @@ import { Card } from '@/components/ui/Card';
 import { VIPBadge } from '@/components/ui/VIPBadge';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { PhoneInput } from '@/components/ui/PhoneInput';
+import { SoftWarn } from '@/components/ui/SoftWarn';
+import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useGoldStore } from '@/stores/goldStore';
+import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
+import type { CustomerGoldCredit } from '@/core/models/types';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useDebtStore } from '@/stores/debtStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
@@ -116,6 +122,8 @@ export function CustomerDetail() {
   const { products, loadProducts } = useProductStore();
   const { debts, loadDebts } = useDebtStore();
   const { invoices, loadInvoices } = useInvoiceStore();
+  const goldStore = useGoldStore();
+  const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; credit?: CustomerGoldCredit }>({ open: false, mode: 'return_customer' });
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Customer>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -127,9 +135,14 @@ export function CustomerDetail() {
 
   useEffect(() => {
     loadCustomers(); loadProducts(); loadSalesReturns(); loadDebts(); loadInvoices();
-  }, [loadCustomers, loadProducts, loadSalesReturns, loadDebts, loadInvoices]);
+    goldStore.loadAll();
+  }, [loadCustomers, loadProducts, loadSalesReturns, loadDebts, loadInvoices, goldStore]);
 
   const customer = useMemo(() => customers.find(c => c.id === id), [customers, id]);
+
+  // Plan repair-multi-supplier — Gold-Credits dieses Kunden
+  const goldCreditSummary = useMemo(() => id ? goldStore.getGoldCreditByCustomer(id) : [], [id, goldStore.customerGoldCredits]); // eslint-disable-line react-hooks/exhaustive-deps
+  const customerGoldCredits = useMemo(() => id ? goldStore.getGoldCreditsByCustomer(id) : [], [id, goldStore.customerGoldCredits]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (customer) setForm({ ...customer });
@@ -394,12 +407,21 @@ export function CustomerDetail() {
                 <Input label="COMPANY" value={form.company || ''} onChange={e => setForm({ ...form, company: e.target.value })} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
-                <Input label="PHONE" value={form.phone || ''} onChange={e => setForm({ ...form, phone: e.target.value })} />
-                <Input label="WHATSAPP" value={form.whatsapp || ''} onChange={e => setForm({ ...form, whatsapp: e.target.value })} />
+                <div>
+                  <PhoneInput label="PHONE" value={form.phone || ''} onChange={v => setForm({ ...form, phone: v })} />
+                  <SoftWarn warning={validatePhone(form.phone).warning} />
+                </div>
+                <div>
+                  <PhoneInput label="WHATSAPP" value={form.whatsapp || ''} onChange={v => setForm({ ...form, whatsapp: v })} />
+                  <SoftWarn warning={validatePhone(form.whatsapp).warning} />
+                </div>
                 <Input label="EMAIL" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
-                <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />
+                <div>
+                  <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={form.personalId || ''} onChange={e => setForm({ ...form, personalId: e.target.value })} />
+                  <SoftWarn warning={validateCpr(form.personalId).warning} />
+                </div>
                 <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={form.vatAccountNumber || ''} onChange={e => setForm({ ...form, vatAccountNumber: e.target.value })} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
@@ -584,6 +606,81 @@ export function CustomerDetail() {
                 )}
               </Card>
             </div>
+
+            {/* Gold-Credit (Plan repair-multi-supplier) — KPI + Liste der OPEN
+                Customer-Gold-Credits. Bewusst SEPARAT von BHD-Receivables:
+                Gold bleibt Gold, Geld bleibt Geld. */}
+            {(goldCreditSummary.length > 0 || customerGoldCredits.length > 0) && (
+              <div style={{ marginTop: 24 }}>
+                <Card>
+                  <div className="flex justify-between items-start" style={{ marginBottom: 14 }}>
+                    <span className="text-overline">GOLD CREDIT · BY KARAT</span>
+                    {goldCreditSummary.length > 0 && (
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                        {goldCreditSummary.map(s => (
+                          <div key={s.karat} style={{
+                            padding: '6px 12px', borderRadius: 6,
+                            background: 'rgba(198,163,109,0.08)',
+                            border: '1px solid rgba(198,163,109,0.3)',
+                          }}>
+                            <span className="font-mono" style={{ fontSize: 16, color: '#0F0F10' }}>
+                              {s.totalGrams.toFixed(3)}g
+                            </span>
+                            <span style={{ fontSize: 11, color: '#8A7548', marginLeft: 6 }}>{s.karat}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {customerGoldCredits.length === 0 ? (
+                    <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No gold credits.</p>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 0.9fr 0.8fr 1fr 1fr 1.4fr', gap: 12, fontSize: 12 }}>
+                      <span className="text-overline">DATE</span>
+                      <span className="text-overline">REPAIR</span>
+                      <span className="text-overline">KARAT</span>
+                      <span className="text-overline" style={{ textAlign: 'right' }}>WEIGHT (g)</span>
+                      <span className="text-overline" style={{ textAlign: 'right' }}>SETTLED (g)</span>
+                      <span className="text-overline">ACTIONS</span>
+                      {customerGoldCredits.map(gc => {
+                        const remaining = Math.max(0, gc.weightGrams - gc.fulfilledGrams);
+                        return (
+                          <div key={gc.id} style={{ display: 'contents' }}>
+                            <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(gc.createdAt)}</span>
+                            <span className="font-mono" style={{ fontSize: 11, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: gc.sourceRepairId ? 'pointer' : 'default' }}
+                              onClick={() => gc.sourceRepairId && navigate(`/repairs/${gc.sourceRepairId}`)}>
+                              {gc.sourceRepairId ? gc.sourceRepairId.slice(0, 8) : '—'}
+                            </span>
+                            <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{gc.karat}</span>
+                            <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{gc.weightGrams.toFixed(3)}</span>
+                            <span className="font-mono" style={{ fontSize: 12, color: gc.status === 'FULFILLED' ? '#16A34A' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>
+                              {gc.fulfilledGrams.toFixed(3)}
+                            </span>
+                            <div style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {gc.status === 'OPEN' && remaining > 0 && (
+                                <>
+                                  <button onClick={() => setSettleModal({ open: true, mode: 'return_customer', credit: gc })}
+                                    style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
+                                    Return gold
+                                  </button>
+                                  <button onClick={() => setSettleModal({ open: true, mode: 'convert_customer_money', credit: gc })}
+                                    style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
+                                    → BHD
+                                  </button>
+                                </>
+                              )}
+                              {gc.status !== 'OPEN' && (
+                                <span style={{ fontSize: 10, color: '#6B7280' }}>{gc.status}</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </Card>
+              </div>
+            )}
 
             {/* LOANS / CASH GIVEN TABLE — split nach direction (we_lend = unsere Forderung, we_borrow = unsere Schuld) */}
             {customerLoans.length > 0 && (() => {
@@ -879,6 +976,13 @@ export function CustomerDetail() {
           <Button variant="danger" onClick={handleDelete}>Delete</Button>
         </div>
       </Modal>
+
+      <SettleGoldModal
+        open={settleModal.open}
+        mode={settleModal.mode}
+        credit={settleModal.credit}
+        onClose={() => setSettleModal({ open: false, mode: 'return_customer' })}
+      />
     </div>
   );
 }

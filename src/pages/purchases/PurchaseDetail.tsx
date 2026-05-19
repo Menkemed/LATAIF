@@ -1,7 +1,7 @@
 // Plan §Purchases + §Purchase Returns — Detail page
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CreditCard, XCircle, RotateCcw } from 'lucide-react';
+import { ArrowLeft, CreditCard, XCircle, RotateCcw, Printer } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -15,6 +15,7 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { PurchaseStatus } from '@/core/models/types';
 import { getProductSpecs } from '@/core/utils/product-format';
+import { printPurchasePdf } from '@/core/pdf/purchase-pdf';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -137,6 +138,9 @@ export function PurchaseDetail() {
           <div className="flex gap-2">
             {canPay && <Button variant="primary" onClick={() => setShowPayment(true)}><CreditCard size={14} /> Add Payment</Button>}
             {canReturn && <Button variant="secondary" onClick={openReturnModal}><RotateCcw size={14} /> Return to Supplier</Button>}
+            <Button variant="ghost" onClick={() => printPurchasePdf({ purchase, supplier, products, categories })}>
+              <Printer size={14} /> Print
+            </Button>
             <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
             {canCancel && <Button variant="danger" onClick={() => setConfirmCancel(true)}><XCircle size={14} /> Cancel</Button>}
           </div>
@@ -174,14 +178,67 @@ export function PurchaseDetail() {
           </Card>
         </div>
 
-        {/* Supplier */}
-        <Card>
-          <span className="text-overline">SUPPLIER</span>
-          <div style={{ marginTop: 8 }}>
-            <div style={{ fontSize: 15, color: '#0F0F10' }}>{supplier?.name || '—'}</div>
-            {supplier?.phone && <div style={{ fontSize: 12, color: '#6B7280' }}>{supplier.phone}</div>}
-          </div>
-        </Card>
+        {/* Supplier — Snapshot at Purchase Date hat Vorrang vor live Supplier
+            (Salesforce-Audit-Pattern). Live wird nur als Fallback fuer historische
+            Records ohne Snapshot oder bei geloeschtem Supplier verwendet. */}
+        {(() => {
+          const snap = purchase.supplierSnapshot;
+          const sName = snap?.name ?? supplier?.name ?? '—';
+          const sPhone = snap?.phone ?? supplier?.phone;
+          const sCpr = snap?.cpr ?? supplier?.cpr;
+          const sCprImage = snap?.cprImage ?? supplier?.cprImage;
+          const drifted = !!snap && !!supplier && (
+            snap.name !== supplier.name ||
+            snap.phone !== supplier.phone ||
+            snap.cpr !== supplier.cpr ||
+            snap.address !== supplier.address
+          );
+          return (
+            <Card>
+              <div className="flex justify-between items-start">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-overline">SUPPLIER</span>
+                    {snap && (
+                      <span title="Snapshot zum Ankaufszeitpunkt — Beleg-Audit-Trail"
+                        style={{ fontSize: 9, padding: '2px 6px', borderRadius: 999, background: 'rgba(126,170,110,0.12)', color: '#5C8550', border: '1px solid rgba(126,170,110,0.3)' }}>
+                        SNAPSHOT
+                      </span>
+                    )}
+                    {drifted && (
+                      <span title="Supplier wurde nach dem Ankaufstag geaendert"
+                        style={{ fontSize: 9, padding: '2px 6px', borderRadius: 999, background: 'rgba(170,149,110,0.12)', color: '#7A6B4F', border: '1px solid rgba(170,149,110,0.3)' }}>
+                        EDITED SINCE
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <div
+                      style={{ fontSize: 15, color: '#0F0F10', cursor: supplier ? 'pointer' : 'default', textDecoration: supplier ? 'underline' : 'none' }}
+                      onClick={() => supplier && navigate(`/suppliers/${supplier.id}`)}
+                    >
+                      {sName}
+                    </div>
+                    {sPhone && <div style={{ fontSize: 12, color: '#6B7280' }}>{sPhone}</div>}
+                    {sCpr && (
+                      <div style={{ fontSize: 12, color: '#4B5563', marginTop: 6 }}>
+                        <span style={{ color: '#9CA3AF', fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase', marginRight: 6 }}>CPR</span>
+                        <span className="font-mono">{sCpr}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {sCprImage && (
+                  <img
+                    src={sCprImage}
+                    alt="CPR / ID Card"
+                    style={{ maxWidth: 140, maxHeight: 90, border: '1px solid #E5E9EE', borderRadius: 4, objectFit: 'contain', background: '#F2F7FA' }}
+                  />
+                )}
+              </div>
+            </Card>
+          );
+        })()}
 
         {/* Lines */}
         <div style={{ marginTop: 20 }}><Card>

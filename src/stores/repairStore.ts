@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Repair, RepairStatus } from '@/core/models/types';
+import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
+import { canonicalRepairStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
@@ -28,14 +29,39 @@ function safePost(label: string, fn: () => void): void {
 // (internalCost) und der externe Workshop-Anteil (estimatedCost). Bei pure
 // internal/external wird der relevante Cost-Wert vom Form bereits in internalCost
 // gespiegelt, deshalb reicht dort internalCost allein.
+//
+// Plan repair-multi-supplier: optionaler `lineTotal`-Param erfasst die SUM aller
+// OPEN repair_lines.cost_amount fuer Multi-Line-Repairs. Wenn >0, ersetzt er
+// die Legacy-estimatedCost-Logik. Call-Sites die noch ohne Lines arbeiten
+// (Default=0) verhalten sich rueckwaerts-kompatibel.
 export function computeRepairTotalCost(
   r: Pick<Repair, 'repairType' | 'internalCost' | 'estimatedCost'>,
+  lineTotal = 0,
 ): number {
   const internal = r.internalCost || 0;
+  if (lineTotal > 0) {
+    if (r.repairType === 'hybrid') return internal + lineTotal;
+    if (r.repairType === 'external') return lineTotal;
+    return internal; // internal-only sollte keine Lines haben
+  }
+  // Legacy single-supplier path
   if (r.repairType === 'hybrid') {
     return internal + (r.estimatedCost || 0);
   }
   return internal;
+}
+
+// Helper fuer das Multi-Line-Total — wird sowohl in Store-internen Aufrufen
+// als auch von externen Konsumenten (ProductDetail, RepairDetail) genutzt.
+export function sumOpenRepairLineCosts(repairId: string): number {
+  try {
+    const rows = query(
+      `SELECT COALESCE(SUM(cost_amount), 0) AS total
+         FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'`,
+      [repairId]
+    );
+    return (rows[0]?.total as number) || 0;
+  } catch { return 0; }
 }
 
 // Plan §Repair §Workshop-as-Supplier — Late-Bind Reconciliation:
@@ -202,23 +228,157 @@ export function getOrCreateRepairServiceProductId(branchId: string): string {
   return prodId;
 }
 
+// Plan repair-multi-supplier — Stage-based Commit:
+// Postet fuer jede OPEN Line ohne Expense_id eine neue Expense + Ledger-Eintrag.
+// Wird beim IN_PROGRESS/SENT_TO_WORKSHOP-Uebergang ausgefuehrt sowie wenn nach
+// diesen Stages weitere Lines hinzugefuegt werden. Idempotent: ueberspringt
+// Lines die bereits einen expense_id haben.
+function commitRepairLineExpenses(repairId: string): void {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  // Repair-Header laden fuer Description + Repair-Number
+  const repairRows = query(
+    `SELECT id, branch_id, repair_number, internal_paid_from FROM repairs WHERE id = ?`,
+    [repairId]
+  );
+  if (repairRows.length === 0) return;
+  const repair = repairRows[0];
+  const repairNumber = repair.repair_number as string;
+  const internalPaidFrom = repair.internal_paid_from as string | null;
+  let branchId: string, userId: string;
+  try { branchId = currentBranchId(); userId = currentUserId(); }
+  catch { branchId = (repair.branch_id as string) || 'branch-main'; userId = 'user-owner'; }
+
+  // OPEN-Lines mit Supplier ohne Expense
+  const lineRows = query(
+    `SELECT id, supplier_id, work_type, description, cost_amount
+       FROM repair_lines
+       WHERE repair_id = ? AND status = 'OPEN' AND supplier_id IS NOT NULL AND expense_id IS NULL
+         AND cost_amount > 0
+       ORDER BY position`,
+    [repairId]
+  );
+  if (lineRows.length === 0) return;
+
+  for (const lr of lineRows) {
+    const lineId = lr.id as string;
+    const supplierId = lr.supplier_id as string;
+    const workType = (lr.work_type as string) || 'service';
+    const description = (lr.description as string) || '';
+    const cost = (lr.cost_amount as number) || 0;
+    if (cost <= 0) continue;
+
+    const expenseId = uuid();
+    const expenseNumber = getNextDocumentNumber('EXP');
+    const method = (internalPaidFrom as 'cash' | 'bank' | 'benefit' | null) || 'bank';
+    const expStatus = 'PENDING' as const;
+
+    // Supplier-Label fuer Description
+    let supplierLabel = '';
+    try {
+      const sRow = query(`SELECT name FROM suppliers WHERE id = ?`, [supplierId]);
+      if (sRow.length > 0) supplierLabel = ' · ' + (sRow[0].name as string);
+    } catch { /* */ }
+
+    const desc = `Repair ${repairNumber} · ${workType}${description ? ' · ' + description : ''}${supplierLabel}`;
+    db.run(
+      `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
+         expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
+       VALUES (?, ?, ?, 'RepairCosts', ?, 0, ?, ?, ?, 'repair', ?, ?, ?, ?, ?)`,
+      [expenseId, branchId, expenseNumber, cost, method,
+       now.split('T')[0], desc, repairId, supplierId, expStatus, now, userId]
+    );
+    trackInsert('expenses', expenseId, {
+      category: 'RepairCosts', amount: cost, repairId, repairLineId: lineId,
+      supplierId, status: expStatus,
+    });
+
+    // Line ↔ Expense linken
+    db.run(
+      `UPDATE repair_lines SET expense_id = ?, updated_at = ? WHERE id = ?`,
+      [expenseId, now, lineId]
+    );
+    trackUpdate('repair_lines', lineId, { expenseId });
+
+    // Ledger-Post (idempotent via hasLedgerEntries-Guard)
+    const expenseRecord: Expense = {
+      id: expenseId, expenseNumber, branchId, category: 'RepairCosts',
+      amount: cost, paidAmount: 0, paymentMethod: method,
+      expenseDate: now.split('T')[0], description: desc,
+      relatedModule: 'repair', relatedEntityId: repairId,
+      supplierId, status: expStatus, createdAt: now,
+    };
+    safePost(`postExpense(${expenseId}) [repair-line-commit]`, () => {
+      if (hasLedgerEntries('EXPENSE', expenseId)) return;
+      postExpense(expenseRecord);
+    });
+  }
+  saveDatabase();
+}
+
 interface RepairStore {
   repairs: Repair[];
+  repairLines: RepairLine[];      // Plan repair-multi-supplier — alle Lines aller Repairs (geladen via loadRepairLines)
   loading: boolean;
   loadRepairs: () => void;
+  loadRepairLines: () => void;
   getRepair: (id: string) => Repair | undefined;
+  getRepairLines: (repairId: string) => RepairLine[];
   createRepair: (data: Partial<Repair>) => Repair;
   updateRepair: (id: string, data: Partial<Repair>) => void;
   updateStatus: (id: string, status: RepairStatus) => void;
   deleteRepair: (id: string) => void;
   getNextRepairNumber: () => string;
   generateVoucherCode: () => string;
+  // Plan repair-multi-supplier — Line-CRUD
+  addRepairLine: (repairId: string, data: Partial<RepairLine>) => RepairLine;
+  updateRepairLine: (lineId: string, data: Partial<RepairLine>) => void;
+  cancelRepairLine: (lineId: string, notes?: string) => void;
+  recomputeRepairAggregates: (repairId: string) => void;
   // Plan §8 #1 — Customer-Charge Payment-Tracking
   recordCustomerPayment: (id: string, amount: number, method: 'cash' | 'bank' | 'card', date?: string) => void;
   // User-Spec §Repair Bulk-Invoice: mehrere READY-Repairs eines Customers in
   // EINE gemeinsame Multi-Line-Invoice. Validiert atomisch: alle ready, kein
   // invoiceId, alle gleicher Customer, charge>0. Linkt invoiceId auf jedem Repair.
   createCombinedRepairInvoice: (repairIds: string[]) => { invoiceId: string };
+}
+
+function rowToRepairLine(row: Record<string, unknown>): RepairLine {
+  return {
+    id: row.id as string,
+    branchId: row.branch_id as string,
+    repairId: row.repair_id as string,
+    position: (row.position as number) || 1,
+    supplierId: (row.supplier_id as string) || undefined,
+    workType: (row.work_type as RepairWorkType) || undefined,
+    description: (row.description as string) || undefined,
+    costAmount: (row.cost_amount as number) || 0,
+    expenseId: (row.expense_id as string) || undefined,
+    status: ((row.status as string) || 'OPEN') as RepairLineStatus,
+    dueDate: (row.due_date as string) || undefined,
+    notes: (row.notes as string) || undefined,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+// Reichert Lines mit Live-Payment-Daten aus der verlinkten expense an.
+function enrichLineWithExpense(line: RepairLine): RepairLine {
+  if (!line.expenseId) return line;
+  try {
+    const rows = query(
+      `SELECT amount, paid_amount, status FROM expenses WHERE id = ?`,
+      [line.expenseId]
+    );
+    if (rows.length === 0) return line;
+    const paidAmount = (rows[0].paid_amount as number) || 0;
+    const amount = (rows[0].amount as number) || 0;
+    const status = rows[0].status as string;
+    let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID';
+    if (status === 'PAID' || paidAmount >= amount - 0.0001) paymentStatus = 'PAID';
+    else if (paidAmount > 0) paymentStatus = 'PARTIALLY_PAID';
+    return { ...line, paidAmount, paymentStatus };
+  } catch { return line; }
 }
 
 function rowToRepair(row: Record<string, unknown>): Repair {
@@ -275,6 +435,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
 
 export const useRepairStore = create<RepairStore>((set, get) => ({
   repairs: [],
+  repairLines: [],
   loading: false,
 
   loadRepairs: () => {
@@ -285,7 +446,21 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     } catch { set({ repairs: [], loading: false }); }
   },
 
+  loadRepairLines: () => {
+    try {
+      const branchId = currentBranchId();
+      const rows = query(
+        `SELECT * FROM repair_lines WHERE branch_id = ? ORDER BY repair_id, position`,
+        [branchId]
+      );
+      const lines = rows.map(rowToRepairLine).map(enrichLineWithExpense);
+      set({ repairLines: lines });
+    } catch { set({ repairLines: [] }); }
+  },
+
   getRepair: (id) => get().repairs.find(r => r.id === id),
+  getRepairLines: (repairId) =>
+    get().repairLines.filter(l => l.repairId === repairId).sort((a, b) => a.position - b.position),
 
   getNextRepairNumber: () => getNextNumber('repairs', 'repair.number_prefix', 'REP'),
 
@@ -345,10 +520,32 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       db.run(`UPDATE products SET stock_status = 'in_repair', updated_at = ? WHERE id = ?`, [now, data.productId]);
     }
 
+    // Plan repair-multi-supplier: wenn das Form einen workshop_supplier_id +
+    // estimatedCost mitgibt (Legacy-Form-Pfad), legen wir gleich eine
+    // repair_lines-Zeile an damit der Datensatz konsistent ist (gleicher Effekt
+    // wie die Backfill-Migration, nur fuer NEW-repairs).
+    if (data.workshopSupplierId && (data.repairType === 'external' || data.repairType === 'hybrid')) {
+      const lineId = uuid();
+      const cost = data.repairType === 'hybrid'
+        ? (data.estimatedCost || 0)
+        : (data.estimatedCost || data.internalCost || 0);
+      if (cost > 0) {
+        db.run(
+          `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, cost_amount, status, created_at, updated_at)
+           VALUES (?, ?, ?, 1, ?, 'service', ?, 'OPEN', ?, ?)`,
+          [lineId, branchId, id, data.workshopSupplierId, cost, now, now]
+        );
+        trackInsert('repair_lines', lineId, {
+          repairId: id, supplierId: data.workshopSupplierId, costAmount: cost, fromCreateRepair: true,
+        });
+      }
+    }
+
     saveDatabase();
     trackInsert('repairs', id, { repairNumber, customerId: data.customerId });
     eventBus.emit('repair.created', 'repair', id, { customerId: data.customerId, voucherCode });
     get().loadRepairs();
+    get().loadRepairLines();
 
     return get().getRepair(id)!;
   },
@@ -421,11 +618,19 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     switch (status) {
       case 'diagnosed': updates.diagnosed_at = now; break;
       case 'in_progress':
-      case 'IN_PROGRESS':
-        updates.started_at = now; break;
+      case 'IN_PROGRESS': {
+        updates.started_at = now;
+        // Plan repair-multi-supplier — Stage-based Commit:
+        // Sobald die Arbeit beginnt, werden die Supplier-Payables fuer alle
+        // externen Lines gebucht. Per-Line-Expense + Ledger-Post.
+        commitRepairLineExpenses(id);
+        break;
+      }
       case 'sent_to_workshop':
       case 'SENT_TO_WORKSHOP':
         if (!repair.startedAt) updates.started_at = now;
+        // Identisch zu IN_PROGRESS — Supplier-Workshop-Forderungen jetzt sichtbar.
+        commitRepairLineExpenses(id);
         break;
       case 'READY':
       case 'ready': {
@@ -442,11 +647,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
             ? (repair.estimatedCost || repair.internalCost || 0)
             : 0;
 
+        // Multi-Line-Total: SUM aller OPEN repair_lines. Wird sowohl fuer
+        // OWN-Capitalisation als auch fuer Customer-Margin verwendet.
+        const lineTotal = sumOpenRepairLineCosts(id);
+
         if (repair.repairScope === 'OWN') {
           // OWN-Item: gesamter Repair-Cost auf verlinkte Produkt kapitalisieren.
           // Idempotent: nur beim ersten Übergang nach READY (completedAt guard).
           if (repair.productId && !repair.completedAt) {
-            const totalCost = computeRepairTotalCost(repair);
+            const totalCost = computeRepairTotalCost(repair, lineTotal);
             if (totalCost > 0) {
               db.run(
                 `UPDATE products SET purchase_price = COALESCE(purchase_price, 0) + ?, updated_at = ? WHERE id = ?`,
@@ -490,9 +699,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
           }
           // KEIN break hier — Expense-Block unten gilt auch für OWN wenn Supplier verlinkt.
         } else {
-          // CUSTOMER-scope: Margin berechnen.
+          // CUSTOMER-scope: Margin berechnen — beruecksichtigt Multi-Line-Kosten.
           if (repair.chargeToCustomer) {
-            const totalCost = computeRepairTotalCost(repair);
+            const totalCost = computeRepairTotalCost(repair, lineTotal);
             if (totalCost > 0) {
               updates.margin = repair.chargeToCustomer - totalCost;
             }
@@ -504,9 +713,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         // – CUSTOMER-scope: immer wenn externe/hybride Kosten vorhanden (P&L + Supplier-Bilanz).
         // – OWN-scope: nur wenn Supplier verlinkt (reine A/P-Erfassung für Supplier-Bilanz;
         //   Kosten sind bereits in product.purchase_price kapitalisiert).
+        //
+        // Plan repair-multi-supplier: Bei Multi-Line-Repair (lineTotal > 0) sind
+        // die Expenses bereits per-Line beim IN_PROGRESS-Stage erzeugt worden.
+        // Wir ueberspringen den Legacy-Single-Expense-Pfad damit kein Duplikat
+        // entsteht.
         const isExternalOrHybrid = repair.repairType === 'external' || repair.repairType === 'hybrid';
         const expenseNeeded = isExternalOrHybrid
           && workshopFee > 0
+          && lineTotal === 0
           && (repair.repairScope !== 'OWN' || !!repair.workshopSupplierId);
 
         if (expenseNeeded) {
@@ -636,6 +851,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     }
 
     get().loadRepairs();
+    // Plan repair-multi-supplier: nach Stage-Commits (IN_PROGRESS/SENT_TO_WORKSHOP)
+    // wurden Lines mit expense_id verlinkt — Store muss neu lesen damit subsequent
+    // updateRepairLine / Detail-Page Anzeige die frischen expense_id-Werte sehen.
+    get().loadRepairLines();
   },
 
   deleteRepair: (id) => {
@@ -690,7 +909,25 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       });
     }
 
+    // Plan repair-multi-supplier — Cascade auf Gold-Buckets:
+    // OPEN gold_payables + customer_gold_credits, die diesem Repair entstammen,
+    // werden gecancelled (kein Ledger-Effekt — Gold ist nicht im BHD-Ledger).
+    // FULFILLED Eintraege bleiben unangetastet (sind bereits abgeschlossen).
+    const nowDel = new Date().toISOString();
+    db.run(
+      `UPDATE gold_payables SET status = 'CANCELLED', notes = COALESCE(notes, '') || ' · Repair deleted',
+         updated_at = ? WHERE source_repair_id = ? AND status = 'OPEN'`,
+      [nowDel, id]
+    );
+    db.run(
+      `UPDATE customer_gold_credits SET status = 'CANCELLED', notes = COALESCE(notes, '') || ' · Repair deleted',
+         updated_at = ? WHERE source_repair_id = ? AND status = 'OPEN'`,
+      [nowDel, id]
+    );
+    saveDatabase();
+
     get().loadRepairs();
+    get().loadRepairLines();
   },
 
   // Plan §8 #1 — Customer-Charge Payment-Tracking. Akkumuliert Zahlungen, leitet Status ab.
@@ -768,16 +1005,23 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // Pro Repair eine Invoice-Line — chargeToCustomer ist gross-incl-VAT je nach
     // taxScheme dekomponiert. So bleibt Mixed-Scheme (eine Repair VAT_10, andere
     // ZERO) korrekt aggregiert.
+    //
+    // Plan repair-multi-supplier: purchase_price der Invoice-Line MUSS alle
+    // Cost-Bestandteile enthalten (internalCost + SUM externe Lines), sonst
+    // ergibt die Gross-Margin auf dem Invoice ein zu hohes Profit (Bug-Fix
+    // gegen das Stille-Drift-Risiko aus dem Plan-Review).
     const lines = reps.map(r => {
       const scheme = r.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10';
       const rate = scheme === 'VAT_10' ? 10 : 0;
       const gross = r.chargeToCustomer || 0;
       const net = scheme === 'VAT_10' ? gross / (1 + rate / 100) : gross;
       const vat = gross - net;
+      const externalLineTotal = sumOpenRepairLineCosts(r.id);
+      const fullCost = (r.internalCost || 0) + externalLineTotal;
       return {
         productId,
         unitPrice: net,
-        purchasePrice: r.internalCost || 0,
+        purchasePrice: fullCost,
         taxScheme: scheme,
         vatRate: rate,
         vatAmount: vat,
@@ -804,5 +1048,188 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     });
 
     return { invoiceId: invoice.id };
+  },
+
+  // ─── Repair-Lines CRUD (Plan repair-multi-supplier) ───
+
+  addRepairLine: (repairId, data) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+
+    // Next position = max existing + 1
+    const existingRows = query(
+      `SELECT COALESCE(MAX(position), 0) AS max_pos FROM repair_lines WHERE repair_id = ?`,
+      [repairId]
+    );
+    const nextPos = (existingRows[0]?.max_pos as number || 0) + 1;
+    const id = uuid();
+    db.run(
+      `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, description,
+         cost_amount, expense_id, status, due_date, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'OPEN', ?, ?, ?, ?)`,
+      [
+        id, branchId, repairId, nextPos,
+        data.supplierId || null, data.workType || null, data.description || null,
+        data.costAmount || 0, data.dueDate || null, data.notes || null, now, now,
+      ]
+    );
+    trackInsert('repair_lines', id, {
+      repairId, supplierId: data.supplierId, costAmount: data.costAmount, workType: data.workType,
+    });
+    saveDatabase();
+    get().loadRepairLines();
+    get().recomputeRepairAggregates(repairId);
+
+    // Plan repair-multi-supplier — Stage-based Commit: wenn der Repair schon
+    // ueber DRAFT/RECEIVED hinaus ist, wird die neue Line sofort als
+    // Supplier-Forderung gebucht (analog zur READY-Auto-Expense).
+    const repair = get().getRepair(repairId);
+    if (repair) {
+      const canon = canonicalRepairStatus(repair.status);
+      const committingStages: string[] = ['IN_PROGRESS', 'SENT_TO_WORKSHOP', 'READY', 'DELIVERED'];
+      if (committingStages.includes(canon)) {
+        commitRepairLineExpenses(repairId);
+        get().loadRepairLines();
+      }
+    }
+    return get().repairLines.find(l => l.id === id)!;
+  },
+
+  updateRepairLine: (lineId, data) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const line = get().repairLines.find(l => l.id === lineId);
+    if (!line) throw new Error(`Repair-Line ${lineId} nicht gefunden`);
+
+    // Salesforce-Stil: Wenn die linkierte Expense bereits eine Zahlung hat,
+    // duerfen Cost/Supplier NICHT direkt geaendert werden — User muss Cancel+Replace.
+    if (line.expenseId) {
+      const expRows = query(
+        `SELECT COALESCE(paid_amount, 0) AS paid FROM expenses WHERE id = ?`,
+        [line.expenseId]
+      );
+      const paid = (expRows[0]?.paid as number) || 0;
+      const wantsCriticalChange = data.costAmount !== undefined && data.costAmount !== line.costAmount
+        || (data.supplierId !== undefined && data.supplierId !== line.supplierId);
+      if (paid > 0 && wantsCriticalChange) {
+        throw new Error(
+          'Cost/Supplier dieser Zeile kann nicht editiert werden — Zahlung bereits gebucht. ' +
+          'Nutze "Cancel + Replace" stattdessen.'
+        );
+      }
+    }
+
+    const fields: string[] = [];
+    const params: unknown[] = [];
+    const map: Record<string, string> = {
+      supplierId: 'supplier_id', workType: 'work_type', description: 'description',
+      costAmount: 'cost_amount', dueDate: 'due_date', notes: 'notes', status: 'status',
+    };
+    for (const [k, v] of Object.entries(data)) {
+      const col = map[k];
+      if (col) { fields.push(`${col} = ?`); params.push(v === undefined ? null : v); }
+    }
+    if (fields.length === 0) return;
+    fields.push('updated_at = ?'); params.push(now);
+    params.push(lineId);
+    db.run(`UPDATE repair_lines SET ${fields.join(', ')} WHERE id = ?`, params);
+    trackUpdate('repair_lines', lineId, data);
+
+    // Wenn Cost veraendert + Line hat schon Expense aber NOCH KEINE Payment:
+    // Expense.amount mit-aktualisieren + reverseSource+postExpense neu fuer
+    // Ledger-Konsistenz (multi-cycle safe nach Patch).
+    if (data.costAmount !== undefined && line.expenseId) {
+      db.run(
+        `UPDATE expenses SET amount = ? WHERE id = ?`,
+        [data.costAmount, line.expenseId]
+      );
+      trackUpdate('expenses', line.expenseId, { amount: data.costAmount, fromRepairLineEdit: lineId });
+      // Reverse alten Post (falls noch unreversed) + neu posten
+      if (hasLedgerEntries('EXPENSE', line.expenseId)) {
+        safePost(`reverseSource(EXPENSE,${line.expenseId}) [line-edit]`, () => {
+          reverseSource('EXPENSE', line.expenseId!, now);
+        });
+      }
+      // Re-Post mit neuem Betrag
+      const expRow = query(`SELECT * FROM expenses WHERE id = ?`, [line.expenseId]);
+      if (expRow.length > 0) {
+        const r = expRow[0];
+        const expenseRecord: Expense = {
+          id: line.expenseId, expenseNumber: r.expense_number as string,
+          branchId: r.branch_id as string, category: r.category as Expense['category'],
+          amount: data.costAmount, paidAmount: (r.paid_amount as number) || 0,
+          paymentMethod: r.payment_method as Expense['paymentMethod'],
+          expenseDate: r.expense_date as string,
+          description: r.description as string,
+          relatedModule: r.related_module as string,
+          relatedEntityId: r.related_entity_id as string,
+          supplierId: (r.supplier_id as string) || undefined,
+          status: r.status as Expense['status'],
+          createdAt: r.created_at as string,
+        };
+        safePost(`postExpense(${line.expenseId}) [line-edit-repost]`, () => {
+          if (hasLedgerEntries('EXPENSE', line.expenseId!)) return;
+          postExpense(expenseRecord);
+        });
+      }
+    }
+
+    saveDatabase();
+    get().loadRepairLines();
+    get().recomputeRepairAggregates(line.repairId);
+  },
+
+  cancelRepairLine: (lineId, notes) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const line = get().repairLines.find(l => l.id === lineId);
+    if (!line) return;
+    if (line.status === 'CANCELLED') return;
+
+    db.run(
+      `UPDATE repair_lines SET status = 'CANCELLED', notes = COALESCE(notes, '') || ?, updated_at = ? WHERE id = ?`,
+      [' · ' + (notes || 'Cancelled'), now, lineId]
+    );
+    trackUpdate('repair_lines', lineId, { status: 'CANCELLED' });
+
+    // Linkierte Expense canceln falls vorhanden — reverseSource reversed den
+    // A/P-Post via hasReversalFor-Guard idempotent (multi-cycle safe nach Patch).
+    if (line.expenseId) {
+      db.run(
+        `UPDATE expenses SET status = 'CANCELLED' WHERE id = ?`,
+        [line.expenseId]
+      );
+      trackUpdate('expenses', line.expenseId, { status: 'CANCELLED', fromRepairLineCancel: lineId });
+      safePost(`reverseSource(EXPENSE,${line.expenseId}) [line-cancel]`, () => {
+        if (hasReversalFor('EXPENSE', line.expenseId!)) return;
+        reverseSource('EXPENSE', line.expenseId!, now);
+      });
+    }
+
+    saveDatabase();
+    get().loadRepairLines();
+    get().recomputeRepairAggregates(line.repairId);
+  },
+
+  // Salesforce-Pattern: legacy repairs.workshop_supplier_id + actual_cost werden
+  // aus den OPEN Lines abgeleitet, damit alle bestehenden Read-Pfade
+  // (supplierStore.getLedger, Reports, etc.) ohne Code-Aenderung weiter
+  // funktionieren. Bei N Lines (>1) gilt: workshop_supplier_id=NULL, actual_cost=SUM.
+  recomputeRepairAggregates: (repairId) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const lines = get().repairLines.filter(l => l.repairId === repairId && l.status === 'OPEN');
+    const supplierIds = Array.from(new Set(lines.map(l => l.supplierId).filter(Boolean) as string[]));
+    const totalCost = lines.reduce((s, l) => s + (l.costAmount || 0), 0);
+    const newSupplierId = supplierIds.length === 1 ? supplierIds[0] : null;
+    db.run(
+      `UPDATE repairs SET workshop_supplier_id = ?, actual_cost = ?, updated_at = ? WHERE id = ?`,
+      [newSupplierId, totalCost, now, repairId]
+    );
+    trackUpdate('repairs', repairId, { workshopSupplierId: newSupplierId, actualCost: totalCost, recomputedFromLines: true });
+    saveDatabase();
+    get().loadRepairs();
   },
 }));

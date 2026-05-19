@@ -620,6 +620,113 @@ export interface AgentTransfer {
   product?: Product;
 }
 
+// ── Repair Work Lines + Gold-Flow (Plan repair-multi-supplier) ──
+
+// Plan §6: Work-Type Enum fuer Repair-Lines. Frei erweiterbar — UI rendert
+// als Dropdown. Wird im DB als TEXT gespeichert.
+export type RepairWorkType =
+  | 'service'
+  | 'polishing'
+  | 'spare_part'
+  | 'gold_work'
+  | 'stone_setting'
+  | 'engraving'
+  | 'plating'
+  | 'other';
+
+export type RepairLineStatus = 'OPEN' | 'CANCELLED';
+
+export interface RepairLine {
+  id: UUID;
+  branchId: UUID;
+  repairId: UUID;
+  position: number;
+  supplierId?: UUID;          // NULL bei Legacy-Backfill ohne Supplier
+  workType?: RepairWorkType;
+  description?: string;
+  costAmount: number;
+  expenseId?: UUID;           // 1:1 link auf expenses, NULL bis IN_PROGRESS
+  status: RepairLineStatus;
+  dueDate?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+  // Populated (nicht gespeichert) — live aus expenses-Tabelle gelesen.
+  paidAmount?: number;
+  paymentStatus?: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
+}
+
+// Gold-Schuld an Supplier/Workshop in Gramm + Karat (NICHT in BHD —
+// Goldpreis schwankt, daher getrennte Buchung). Wird beim Workshop-Gold-
+// Repair angelegt; settled entweder durch Gold-Return aus precious_metals
+// oder durch Konvertierung in eine Money-Expense.
+export type GoldPayableStatus = 'OPEN' | 'FULFILLED' | 'CANCELLED';
+export type GoldSettlementType = 'return_gold' | 'pay_money';
+export type GoldPayableDirection = 'we_owe' | 'they_owe';
+
+export interface GoldPayable {
+  id: UUID;
+  branchId: UUID;
+  supplierId: UUID;
+  sourceRepairId?: UUID;
+  sourceRepairLineId?: UUID;
+  direction: GoldPayableDirection;
+  weightGrams: number;
+  karat: MetalKarat | string;
+  settlementType: GoldSettlementType;
+  fulfilledGrams: number;
+  settlementExpenseId?: UUID;
+  status: GoldPayableStatus;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Customer-Gold-Credit: Kunde hat Gold gebracht, nur Teil davon im Repair
+// verwendet, Rest als Guthaben geparkt. Spaetere Settlement-Optionen:
+// Redeem im naechsten Repair, Return als physisches Gold, Convert zu BHD-Credit.
+export type CustomerGoldCreditStatus = 'OPEN' | 'FULFILLED' | 'CANCELLED';
+
+export interface CustomerGoldCredit {
+  id: UUID;
+  branchId: UUID;
+  customerId: UUID;
+  sourceRepairId?: UUID;
+  weightGrams: number;
+  karat: MetalKarat | string;
+  fulfilledGrams: number;
+  settlementCreditId?: UUID;   // Link auf BHD-Credit-Eintrag wenn konvertiert
+  status: CustomerGoldCreditStatus;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Audit-Trail aller Gramm-Bewegungen. Schreibt sich automatisch bei jeder
+// Settle/Convert/Cross-Settle-Action (analog ledger_entries fuer BHD).
+export type GoldBucket =
+  | 'precious_metals'
+  | 'gold_payable'
+  | 'customer_gold_credit'
+  | 'repair_consumption'
+  | 'scrap_trade'
+  | 'external';
+
+export interface GoldMovement {
+  id: UUID;
+  branchId: UUID;
+  movedAt: string;
+  direction: 'in' | 'out';
+  weightGrams: number;
+  karat: MetalKarat | string;
+  sourceBucket?: GoldBucket;
+  sourceId?: UUID;
+  targetBucket?: GoldBucket;
+  targetId?: UUID;
+  relatedRepairId?: UUID;
+  notes?: string;
+}
+
 // ── Order (Pre-Order / Sourcing) ──
 
 // ── Precious Metals ──
@@ -805,6 +912,11 @@ export interface Supplier {
   email?: string;
   address?: string;
   notes?: string;
+  // CPR (Bahrain personal ID) + ID-card image (base64 data URL).
+  // Erscheint auf Purchase-Print-PDFs als Beleg-Block (z.B. fuer Altgold/used watches
+  // von Privatpersonen — Compliance-relevant).
+  cpr?: string;
+  cprImage?: string;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -846,6 +958,22 @@ export interface PurchasePayment {
   createdAt: string;
 }
 
+// Audit-Snapshot: Supplier-Stamm-/Identifikationsdaten zum Zeitpunkt des
+// Purchase-Create. Wird NIE veraendert. Print-PDF + Detail lesen ZUERST aus
+// dem Snapshot, fallen nur fuer historische Records ohne Snapshot auf den
+// live Supplier zurueck. So zeigt der gedruckte Beleg immer die Daten an,
+// die zum Ankaufszeitpunkt galten — Compliance-relevant fuer Altgold-/
+// Used-Watch-Belege.
+export interface SupplierSnapshot {
+  name: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  cpr?: string;
+  cprImage?: string;
+  snapshotAt: string;
+}
+
 export interface Purchase {
   id: UUID;
   purchaseNumber: string;
@@ -860,6 +988,7 @@ export interface Purchase {
   lines: PurchaseLine[];
   payments: PurchasePayment[];
   staffId?: UUID;
+  supplierSnapshot?: SupplierSnapshot;
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;

@@ -3,8 +3,10 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { PhoneInput } from '@/components/ui/PhoneInput';
+import { SoftWarn } from '@/components/ui/SoftWarn';
 import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
+import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useCustomerStore } from '@/stores/customerStore';
 
 interface Props {
@@ -81,9 +83,18 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
           <Input label="FIRST NAME" value={firstName} onChange={e => setFirstName(e.target.value)} autoFocus />
           <Input label="LAST NAME" value={lastName} onChange={e => setLastName(e.target.value)} />
         </div>
-        <PhoneInput label="PHONE" value={phone} onChange={setPhone} />
-        <PhoneInput label="WHATSAPP" value={whatsapp} onChange={setWhatsapp} />
-        <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={personalId} onChange={e => setPersonalId(e.target.value)} />
+        <div>
+          <PhoneInput label="PHONE" value={phone} onChange={setPhone} />
+          <SoftWarn warning={validatePhone(phone).warning} />
+        </div>
+        <div>
+          <PhoneInput label="WHATSAPP" value={whatsapp} onChange={setWhatsapp} />
+          <SoftWarn warning={validatePhone(whatsapp).warning} />
+        </div>
+        <div>
+          <Input label="PERSONAL ID (CPR / PASSPORT)" placeholder="e.g. 900123456" value={personalId} onChange={e => setPersonalId(e.target.value)} />
+          <SoftWarn warning={validateCpr(personalId).warning} />
+        </div>
         <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={vatAccountNumber} onChange={e => setVatAccountNumber(e.target.value)} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => { reset(); onClose(); }}>Cancel</Button>

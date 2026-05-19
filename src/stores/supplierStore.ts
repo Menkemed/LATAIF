@@ -52,6 +52,8 @@ function rowToSupplier(row: Record<string, unknown>): Supplier {
     email: row.email as string | undefined,
     address: row.address as string | undefined,
     notes: row.notes as string | undefined,
+    cpr: (row.cpr as string) || undefined,
+    cprImage: (row.cpr_image as string) || undefined,
     active: Number(row.active) === 1,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -86,10 +88,12 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
     db.run(
-      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, active, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, cpr_image, active, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
       [id, branchId, data.name || '', data.phone || null, data.email || null,
-       data.address || null, data.notes || null, now, now, userId]
+       data.address || null, data.notes || null,
+       data.cpr || null, data.cprImage || null,
+       now, now, userId]
     );
     saveDatabase();
     trackInsert('suppliers', id, { name: data.name });
@@ -104,6 +108,7 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     const values: unknown[] = [];
     const map: Record<string, string> = {
       name: 'name', phone: 'phone', email: 'email', address: 'address', notes: 'notes',
+      cpr: 'cpr', cprImage: 'cpr_image',
     };
     for (const [k, v] of Object.entries(data)) {
       const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v); }
