@@ -5,6 +5,8 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getSetting } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postMetalPayment, hasLedgerEntries } from '@/core/ledger/posting';
+import { useGoldStore } from '@/stores/goldStore';
+import { useExpenseStore } from '@/stores/expenseStore';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -45,6 +47,8 @@ function rowToMetal(row: Record<string, unknown>): PreciousMetal {
     paidAmount: (row.paid_amount as number) || 0,
     paymentStatus: (row.payment_status as 'UNPAID' | 'PARTIALLY_PAID' | 'PAID') || 'UNPAID',
     supplierName: row.supplier_name as string | undefined,
+    supplierId: row.supplier_id as string | undefined,
+    linkedExpenseId: row.linked_expense_id as string | undefined,
     customerId: row.customer_id as string | undefined,
     notes: row.notes as string | undefined,
     images: JSON.parse((row.images as string) || '[]'),
@@ -109,6 +113,7 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
       salePrice: data.salePrice,
       status: data.status || 'in_stock',
       supplierName: data.supplierName,
+      supplierId: data.supplierId,
       customerId: data.customerId,
       notes: data.notes,
       images: data.images || [],
@@ -122,21 +127,64 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
     db.run(
       `INSERT INTO precious_metals (id, branch_id, metal_type, karat, weight_grams, description,
         purchase_price_per_gram, purchase_total, spot_price_at_purchase, current_spot_price,
-        melt_value, sale_price, status, supplier_name, customer_id, notes, images,
+        melt_value, sale_price, status, supplier_name, supplier_id, customer_id, notes, images,
         created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, metal.metalType, metal.karat || null, metal.weightGrams,
        metal.description || null, metal.purchasePricePerGram || null,
        metal.purchaseTotal || null, metal.spotPriceAtPurchase || null,
        metal.currentSpotPrice || null, metal.meltValue || null,
        metal.salePrice || null, metal.status,
-       metal.supplierName || null, metal.customerId || null,
+       metal.supplierName || null, metal.supplierId || null, metal.customerId || null,
        metal.notes || null, JSON.stringify(metal.images), now, now,
        (() => { try { return currentUserId(); } catch { return null; } })()]
     );
 
     saveDatabase();
     trackInsert('precious_metals', id, { metalType: metal.metalType, karat: metal.karat, weightGrams: metal.weightGrams });
+
+    // v0.1.46 — Audit-Eintrag fuer Bestands-Inflow. Gold ohne Karat zaehlt nicht
+    // (silver bekommt z.B. nur '925' was wir als Karat-String akzeptieren).
+    if (metal.metalType === 'gold' && metal.karat && metal.weightGrams > 0) {
+      try {
+        useGoldStore.getState().recordExternalGoldInflow(branchId, metal.karat, metal.weightGrams, {
+          supplierId: metal.supplierId,
+          metalId: id,
+          notes: metal.supplierId
+            ? `Purchase: ${metal.weightGrams}g ${metal.karat} (metal ${id.slice(0, 8)})`
+            : `Manual entry: ${metal.weightGrams}g ${metal.karat} (metal ${id.slice(0, 8)})`,
+        });
+      } catch (err) {
+        console.warn('[metals] gold_movement audit failed:', err);
+      }
+    }
+
+    // v0.1.46 — wenn Supplier + purchaseTotal > 0 angegeben → automatisch eine
+    // Expense erzeugen + Ledger A/P posten. Das schliesst die Geld-Schuld-Luecke
+    // (vorher konnte man Bestand erhoehen ohne dass irgendwo die Zahlung an den
+    // Lieferanten landet). payNow=false → A/P bleibt OPEN bis explizit bezahlt.
+    if (metal.supplierId && (metal.purchaseTotal || 0) > 0) {
+      try {
+        const exp = useExpenseStore.getState().createExpense({
+          category: 'Inventory',
+          amount: metal.purchaseTotal,
+          supplierId: metal.supplierId,
+          expenseDate: now.split('T')[0],
+          description: `Metal purchase: ${metal.weightGrams}g ${metal.karat || ''} (${id.slice(0, 8)})`,
+          relatedModule: 'metal',
+          relatedEntityId: id,
+          payNow: false,  // A/P, Owner zahlt spaeter via Supplier-Detail
+        });
+        // Link expense back to metal
+        db.run(`UPDATE precious_metals SET linked_expense_id = ?, updated_at = ? WHERE id = ?`, [exp.id, now, id]);
+        metal.linkedExpenseId = exp.id;
+        saveDatabase();
+        trackUpdate('precious_metals', id, { linkedExpenseId: exp.id });
+      } catch (err) {
+        console.error('[metals] auto-expense for supplier purchase failed:', err);
+      }
+    }
+
     get().loadMetals();
     return metal;
   },

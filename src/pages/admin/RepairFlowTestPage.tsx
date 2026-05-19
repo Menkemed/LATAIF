@@ -643,6 +643,103 @@ async function scenarioLedgerIntegrity(ctx: TestContext, result: ScenarioResult)
   result.status = 'pass';
 }
 
+// Plan v0.1.46 — Scenario 11: Metal-Inflow via /metals New Metal mit Supplier
+// muss (a) gold_movement-Audit erzeugen UND (b) automatisch A/P-Schuld + Ledger
+// posten wenn supplierId + purchaseTotal > 0 gesetzt.
+async function scenarioMetalInflowWithAP(ctx: TestContext, result: ScenarioResult) {
+  const db = getDatabase();
+  const { useMetalStore } = await import('@/stores/metalStore');
+  const metalStore = useMetalStore.getState();
+
+  // Baseline 22K precious_metals + ledger A/P bei Supplier A
+  const beforeRow = query(
+    `SELECT COALESCE(SUM(weight_grams), 0) AS total FROM precious_metals
+       WHERE branch_id = ? AND karat = '22K' AND status = 'in_stock'`,
+    [ctx.branchId]
+  );
+  const before = (beforeRow[0]?.total as number) || 0;
+
+  const ledgerBefore = query(
+    `SELECT COALESCE(SUM(amount), 0) AS ap FROM ledger_entries
+       WHERE counterparty_id = ? AND account = 'ACCOUNTS_PAYABLE'
+         AND direction = 'CREDIT' AND reverses_entry_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = ledger_entries.id)`,
+    [ctx.supplierA]
+  );
+  const apBefore = (ledgerBefore[0]?.ap as number) || 0;
+  info(result.details, `Baseline: precious_metals 22K = ${before.toFixed(3)}g, A/P SupplierA = ${apBefore.toFixed(3)} BHD`);
+
+  // Action: 8g 22K von SupplierA fuer 50 BHD kaufen
+  const metal = metalStore.createMetal({
+    metalType: 'gold',
+    karat: '22K',
+    weightGrams: 8,
+    purchaseTotal: 50,
+    supplierId: ctx.supplierA,
+    description: PREFIX + 'METAL-IN',
+  });
+
+  // (a) precious_metals +8g
+  const afterRow = query(
+    `SELECT COALESCE(SUM(weight_grams), 0) AS total FROM precious_metals
+       WHERE branch_id = ? AND karat = '22K' AND status = 'in_stock'`,
+    [ctx.branchId]
+  );
+  const after = (afterRow[0]?.total as number) || 0;
+  assert(Math.abs(after - before - 8) < 0.001, `precious_metals 22K: expected +8g, got +${(after - before).toFixed(3)}g`);
+  ok(result.details, `precious_metals 22K: ${before.toFixed(3)} → ${after.toFixed(3)} (+8g)`);
+
+  // (b) gold_movement audit
+  const movRows = query(
+    `SELECT direction, weight_grams, source_bucket, target_bucket
+       FROM gold_movements
+       WHERE target_id = ? AND target_bucket = 'precious_metals' AND source_bucket = 'external'`,
+    [metal.id]
+  );
+  assert(movRows.length === 1, `Expected 1 gold_movement (external → precious_metals), got ${movRows.length}`);
+  assert(movRows[0].direction === 'in', `direction='in' erwartet`);
+  ok(result.details, `gold_movement: in 8g 22K (external → precious_metals)`);
+
+  // (c) Expense + Ledger A/P fuer Supplier
+  const expRows = query(
+    `SELECT id, amount, paid_amount, supplier_id, related_module, related_entity_id, status
+       FROM expenses WHERE related_module = 'metal' AND related_entity_id = ?`,
+    [metal.id]
+  );
+  assert(expRows.length === 1, `Expected 1 expense for metal purchase, got ${expRows.length}`);
+  assert(Math.abs((expRows[0].amount as number) - 50) < 0.001, `expense.amount=50 erwartet`);
+  assert((expRows[0].supplier_id as string) === ctx.supplierA, `expense.supplier_id muss SupplierA sein`);
+  ok(result.details, `Expense 50 BHD an Supplier A erzeugt (related_module='metal')`);
+
+  const ledgerAfter = query(
+    `SELECT COALESCE(SUM(amount), 0) AS ap FROM ledger_entries
+       WHERE counterparty_id = ? AND account = 'ACCOUNTS_PAYABLE'
+         AND direction = 'CREDIT' AND reverses_entry_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = ledger_entries.id)`,
+    [ctx.supplierA]
+  );
+  const apAfter = (ledgerAfter[0]?.ap as number) || 0;
+  const apDelta = apAfter - apBefore;
+  assert(Math.abs(apDelta - 50) < 0.001, `A/P-Delta: expected +50, got +${apDelta.toFixed(3)}`);
+  ok(result.details, `Ledger A/P SupplierA: ${apBefore.toFixed(3)} → ${apAfter.toFixed(3)} (+50)`);
+
+  // (d) linked_expense_id auf precious_metals row
+  const linkRows = query(`SELECT linked_expense_id FROM precious_metals WHERE id = ?`, [metal.id]);
+  assert(linkRows.length === 1 && !!linkRows[0].linked_expense_id, `precious_metals.linked_expense_id muss gesetzt sein`);
+  ok(result.details, `linked_expense_id verknuepft (Audit-Chain Metal → Expense)`);
+
+  // Cleanup-Vorbereitung: das Metal-Row und Expense werden vom cleanupContext NICHT geloescht.
+  // Wir loeschen sie hier explizit damit die Test-Daten verschwinden.
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM expenses WHERE related_module='metal' AND related_entity_id=?)`, [metal.id]);
+  db.run(`DELETE FROM expense_payments WHERE expense_id IN (SELECT id FROM expenses WHERE related_module='metal' AND related_entity_id=?)`, [metal.id]);
+  db.run(`DELETE FROM expenses WHERE related_module='metal' AND related_entity_id=?`, [metal.id]);
+  db.run(`DELETE FROM gold_movements WHERE target_id = ?`, [metal.id]);
+  db.run(`DELETE FROM precious_metals WHERE id = ?`, [metal.id]);
+  saveDatabase();
+
+  result.status = 'pass';
+}
+
 const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioResult) => Promise<void> }> = [
   { name: '1. Multi-Line Commit @ IN_PROGRESS', run: scenarioMultiLineCommit },
   { name: '2. Line-Edit before Payment (reverse + repost)', run: scenarioLineEditBeforePayment },
@@ -654,6 +751,7 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '8. Delete-Repair Cascade', run: scenarioDeleteCascade },
   { name: '9. Ledger Integrity Check (expenses vs A/P)', run: scenarioLedgerIntegrity },
   { name: '10. Shop-Keeps Pfad (v0.1.45 — precious_metals + gold_movement)', run: scenarioShopKeepsFlow },
+  { name: '11. Metal-Inflow mit Supplier-A/P (v0.1.46 — audit + ledger)', run: scenarioMetalInflowWithAP },
 ];
 
 export function RepairFlowTestPage() {
@@ -741,7 +839,7 @@ export function RepairFlowTestPage() {
         </h1>
         <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 24 }}>
           Erzeugt Test-Daten mit Prefix <code>{PREFIX}</code> in deiner LIVE-DB,
-          spielt 10 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
+          spielt 11 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
           Daten zur Inspektion stehen.
         </p>
 

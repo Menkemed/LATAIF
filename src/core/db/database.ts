@@ -1457,6 +1457,13 @@ function runMigrations(database: Database): void {
      FROM repairs r
      WHERE r.workshop_supplier_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM repair_lines rl WHERE rl.repair_id = r.id)`,
+
+    // v0.1.46 — Metal-Inflow Audit + Ledger-Linkage:
+    // Optionaler supplier_id-FK auf precious_metals erlaubt der MetalCreate-Action
+    // einen A/P-Eintrag fuer den Lieferanten zu erzeugen (statt nur Bestands-Add).
+    `ALTER TABLE precious_metals ADD COLUMN supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL`,
+    `ALTER TABLE precious_metals ADD COLUMN linked_expense_id TEXT REFERENCES expenses(id) ON DELETE SET NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_precious_metals_supplier ON precious_metals(supplier_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

@@ -171,6 +171,23 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
 
   return (
     <div style={{ maxWidth: 1100, margin: '0 auto', display: 'grid', gap: 16 }}>
+      {/* v0.1.46 — Hint fuer Behalt-Workflow: Scrap-Trade ist NUR fuer Buy-and-immediately-sell.
+          Wenn das Gold im Bestand bleiben soll → /metals "New Metal" mit Supplier-Picker. */}
+      {!initial && (
+        <div className="rounded" style={{
+          padding: '12px 16px', fontSize: 13, color: '#475569',
+          background: '#F8FAFC', border: '1px solid #E2E8F0',
+          display: 'flex', alignItems: 'center', gap: 12,
+        }}>
+          <span style={{ fontWeight: 600 }}>ℹ Behalten statt direkt verkaufen?</span>
+          <span>Scrap-Trade ist fuer Buy-and-immediately-sell. Wenn das Gold im Bestand bleibt → </span>
+          <a href="/metals" style={{ color: '#3D7FFF', textDecoration: 'underline', fontWeight: 600 }}>
+            /metals · New Metal
+          </a>
+          <span>(Supplier-Picker bucht automatisch A/P-Schuld).</span>
+        </div>
+      )}
+
       {/* A. Seller Section */}
       <Card>
         <SectionHeader title="A. Seller" subtitle="Wer verkauft uns das Gold?" />

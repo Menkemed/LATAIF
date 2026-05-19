@@ -219,6 +219,11 @@ interface GoldStore {
   // ohne Supplier/Customer-Beteiligung. Schreibt automatisch gold_movement.
   creditShopGold: (branchId: string, karat: string, grams: number, opts?: { repairId?: string; sourceLabel?: string; notes?: string }) => void;
 
+  // Plan v0.1.46 — Audit-Eintrag fuer Gold-Inflow aus externer Quelle (Lieferanten-
+  // Kauf / Direkt-Eintrag). Aufgerufen von metalStore.createMetal damit JEDE
+  // Bestandserhoehung einen gold_movement-Audit-Eintrag erzeugt.
+  recordExternalGoldInflow: (branchId: string, karat: string, grams: number, opts?: { supplierId?: string; metalId?: string; notes?: string }) => void;
+
   // Aggregate-Selektoren fuer Detail-Pages
   getGoldOwedBySupplier: (supplierId: string) => Array<{ karat: string; totalGrams: number; count: number }>;
   getGoldCreditByCustomer: (customerId: string) => Array<{ karat: string; totalGrams: number; count: number }>;
@@ -698,6 +703,29 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       );
       return rows.map(rowToGoldMovement);
     } catch { return []; }
+  },
+
+  // Plan v0.1.46 — externer Gold-Inflow (Lieferanten-Kauf, Direkt-Eintrag in
+  // /metals). Wird von metalStore.createMetal aufgerufen damit jedes Inflow
+  // einen gold_movement-Audit-Eintrag erzeugt. Bei supplierId wird der Movement
+  // mit source_bucket=external + source_id=supplierId getaggt; bei manueller
+  // Erfassung ohne Supplier ist nur source_bucket=external gesetzt.
+  recordExternalGoldInflow: (branchId, karat, grams, opts = {}) => {
+    if (!Number.isFinite(grams) || grams <= 0) {
+      throw new Error('recordExternalGoldInflow: grams must be > 0');
+    }
+    if (!karat) throw new Error('recordExternalGoldInflow: karat required');
+    recordGoldMovement({
+      branchId, direction: 'in', weightGrams: grams, karat,
+      sourceBucket: 'external',
+      sourceId: opts.supplierId,
+      targetBucket: 'precious_metals',
+      targetId: opts.metalId,
+      notes: opts.notes || (opts.supplierId
+        ? `Purchase from supplier ${opts.supplierId.slice(0, 8)}`
+        : 'Manual inventory entry'),
+    });
+    saveDatabase();
   },
 
   // Plan v0.1.45 — Customer-Gold-Leftover „Shop Keeps" als direkter Inflow

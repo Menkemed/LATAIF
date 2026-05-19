@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { useMetalStore } from '@/stores/metalStore';
+import { useSupplierStore } from '@/stores/supplierStore';
+import { SearchSelect } from '@/components/ui/SearchSelect';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { PreciousMetal, MetalType, MetalKarat, MetalStatus } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
@@ -55,6 +57,7 @@ function metalColor(type: MetalType): string {
 
 export function MetalList() {
   const { metals, loadMetals, createMetal, updateMetal, deleteMetal, getSpotPrice, setSpotPrice } = useMetalStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState<MetalStatus | ''>('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -70,10 +73,11 @@ export function MetalList() {
 
   useEffect(() => {
     loadMetals();
+    loadSuppliers();
     setSpotGold(getSpotPrice('gold'));
     setSpotSilver(getSpotPrice('silver'));
     setSpotPlatinum(getSpotPrice('platinum'));
-  }, [loadMetals, getSpotPrice]);
+  }, [loadMetals, loadSuppliers, getSpotPrice]);
 
   function getSpotForType(type: MetalType): number {
     switch (type) {
@@ -445,12 +449,20 @@ export function MetalList() {
           {/* Supplier & Description */}
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-              <Input
-                label="SUPPLIER"
-                placeholder="Supplier name"
-                value={form.supplierName || ''}
-                onChange={e => setForm({ ...form, supplierName: e.target.value })}
-              />
+              <div>
+                <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SUPPLIER (OPTIONAL)</span>
+                <SearchSelect
+                  options={suppliers.filter(s => s.active).map(s => ({
+                    id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
+                  }))}
+                  value={form.supplierId || ''}
+                  onChange={(id) => {
+                    const sup = suppliers.find(s => s.id === id);
+                    setForm({ ...form, supplierId: id, supplierName: sup?.name || form.supplierName });
+                  }}
+                  placeholder="Pick a supplier — or leave empty"
+                />
+              </div>
               <Input
                 label="DESCRIPTION"
                 placeholder="e.g. Bar, Coin, Chain..."
@@ -458,6 +470,24 @@ export function MetalList() {
                 onChange={e => setForm({ ...form, description: e.target.value })}
               />
             </div>
+            {/* v0.1.46 hint: A/P will auto-post when supplier + purchaseTotal set */}
+            {form.supplierId && (form.purchaseTotal || 0) > 0 && (
+              <div className="rounded" style={{
+                marginTop: 12, padding: '10px 14px', fontSize: 12, color: '#16A34A',
+                background: 'rgba(22,163,74,0.06)', border: '1px solid rgba(22,163,74,0.3)',
+              }}>
+                ✓ Supplier + Purchase Total gesetzt → A/P-Schuld wird automatisch gebucht (OPEN bis bezahlt).
+              </div>
+            )}
+            {!form.supplierId && (form.purchaseTotal || 0) > 0 && (
+              <div className="rounded" style={{
+                marginTop: 12, padding: '10px 14px', fontSize: 12, color: '#92400E',
+                background: 'rgba(217,119,6,0.06)', border: '1px solid rgba(217,119,6,0.3)',
+              }}>
+                ⚠ Kein Supplier ausgewaehlt — Bestand wird erhoeht, aber keine Geld-Schuld gebucht.
+                Wenn du via Lieferant gekauft hast, bitte Supplier setzen.
+              </div>
+            )}
           </div>
 
           {/* Notes */}

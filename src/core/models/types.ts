@@ -752,6 +752,11 @@ export interface PreciousMetal {
   paidAmount?: number;
   paymentStatus?: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
   supplierName?: string;
+  // v0.1.46 — optional Supplier-FK + linked Expense fuer A/P-Buchung beim Kauf.
+  // Wenn supplierId + purchaseTotal > 0 → metalStore.createMetal erzeugt
+  // automatisch eine Expense (category=Inventory) + postExpense() Ledger-Eintrag.
+  supplierId?: UUID;
+  linkedExpenseId?: UUID;
   customerId?: UUID;
   notes?: string;
   images: string[];
@@ -1201,7 +1206,7 @@ export interface PartnerTransaction {
 }
 
 // Expense (Plan §Expenses §3 + §11)
-export type ExpenseCategory = 'Rent' | 'Salary' | 'Utilities' | 'CardFees' | 'RepairCosts' | 'Transport' | 'ConsignorLoss' | 'Miscellaneous';
+export type ExpenseCategory = 'Rent' | 'Salary' | 'Utilities' | 'CardFees' | 'RepairCosts' | 'Transport' | 'ConsignorLoss' | 'Inventory' | 'Miscellaneous';
 
 export interface Expense {
   id: UUID;
