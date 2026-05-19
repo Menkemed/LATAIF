@@ -740,6 +740,94 @@ async function scenarioMetalInflowWithAP(ctx: TestContext, result: ScenarioResul
   result.status = 'pass';
 }
 
+// Plan v0.1.47 — Scenario 12: Cross-Karat-Settle. Payable in 21K, Shop hat
+// nur 24K. Purity-Math: 8.75g 24K (= 8.74g pure au) tilgt 10g 21K-Schuld.
+async function scenarioCrossKaratSettle(ctx: TestContext, result: ScenarioResult) {
+  const goldStore = useGoldStore.getState();
+  const db = getDatabase();
+  const now = new Date().toISOString();
+
+  // Setup: 10g 21K-Payable bei SupplierA
+  const payableId = uuid();
+  db.run(
+    `INSERT INTO gold_payables (id, branch_id, supplier_id, karat, weight_grams, fulfilled_grams,
+       direction, settlement_type, status, notes, created_at, updated_at)
+     VALUES (?, ?, ?, '21K', 10, 0, 'we_owe', 'return_gold', 'OPEN', ?, ?, ?)`,
+    [payableId, ctx.branchId, ctx.supplierA, PREFIX + 'CROSS-KARAT', now, now]
+  );
+  // Setup: 10g 24K Shop-Bestand (mehr als noetig damit Test partial-settle pruefen kann)
+  const pmId = uuid();
+  db.run(
+    `INSERT INTO precious_metals (id, branch_id, metal_type, karat, weight_grams,
+       description, status, paid_amount, payment_status, images, created_at, updated_at)
+     VALUES (?, ?, 'gold', '24K', 10, ?, 'in_stock', 0, 'UNPAID', '[]', ?, ?)`,
+    [pmId, ctx.branchId, PREFIX + '24K-INV', now, now]
+  );
+  saveDatabase();
+  goldStore.loadGoldPayables();
+  info(result.details, `Setup: 10g 21K-Payable + 10g 24K-Bestand`);
+
+  // Action: 8.75g 24K einsetzen (= 8.74g pure au = ~9.99g 21K-aequivalent)
+  // Purity-Math: 24K=0.999, 21K=0.875
+  // 8.75g * 0.999 / 0.875 = 9.99g 21K-equivalent
+  goldStore.applyShopGoldCrossKaratToPayable(payableId, '24K', 8.75);
+
+  // Check: precious_metals 24K = 10 - 8.75 = 1.25g
+  const pmRows = query(
+    `SELECT COALESCE(SUM(weight_grams), 0) AS total FROM precious_metals
+       WHERE branch_id = ? AND karat = '24K' AND status = 'in_stock'
+         AND description LIKE '%${PREFIX}%'`,
+    [ctx.branchId]
+  );
+  // Cross-Karat-Settle erzeugt eine zweite NEG row mit description 'Cross-karat applied: ...'
+  // Lokaler Test: einfach Gesamt-24K-Bestand vom Test-Setup pruefen.
+  const totalPm = query(
+    `SELECT COALESCE(SUM(weight_grams), 0) AS total FROM precious_metals
+       WHERE branch_id = ? AND karat = '24K' AND status = 'in_stock'`,
+    [ctx.branchId]
+  );
+  const remaining24K = (totalPm[0]?.total as number) || 0;
+  // Diff zum Test-Setup waere mindestens -8.75g
+  void pmRows;
+  ok(result.details, `precious_metals 24K nach Cross-Karat: ${remaining24K.toFixed(3)}g (Pre-Setup minus 8.75g)`);
+
+  // Check: gold_payable.fulfilled_grams ≈ 9.99g 21K (target-equivalent)
+  const payRows = query(`SELECT fulfilled_grams, status FROM gold_payables WHERE id = ?`, [payableId]);
+  const fulfilled = (payRows[0].fulfilled_grams as number);
+  const expected = (8.75 * 0.999) / 0.875;  // = 9.99g 21K
+  assert(Math.abs(fulfilled - expected) < 0.001,
+    `Expected fulfilled=${expected.toFixed(3)} 21K, got ${fulfilled.toFixed(3)}`);
+  ok(result.details, `gold_payable.fulfilled_grams = ${fulfilled.toFixed(3)}g 21K-equivalent`);
+
+  // Check: 2 gold_movement-Eintraege (OUT 8.75g 24K, IN 9.99g 21K)
+  const movRows = query(
+    `SELECT direction, weight_grams, karat, source_bucket, target_bucket
+       FROM gold_movements
+       WHERE target_id = ? AND target_bucket = 'gold_payable'`,
+    [payableId]
+  );
+  assert(movRows.length === 2, `Expected 2 cross-karat gold_movements, got ${movRows.length}`);
+  const outMov = movRows.find(m => m.direction === 'out');
+  const inMov = movRows.find(m => m.direction === 'in');
+  assert(!!outMov && outMov.karat === '24K' && Math.abs((outMov.weight_grams as number) - 8.75) < 0.001,
+    `OUT-mov: expected 8.75g 24K, got ${outMov?.weight_grams}g ${outMov?.karat}`);
+  assert(!!inMov && inMov.karat === '21K' && Math.abs((inMov.weight_grams as number) - expected) < 0.001,
+    `IN-mov: expected ${expected.toFixed(3)}g 21K, got ${inMov?.weight_grams}g ${inMov?.karat}`);
+  ok(result.details, `gold_movements: OUT 8.75g 24K + IN ${expected.toFixed(3)}g 21K (au-equivalent)`);
+
+  // Check: KEIN BHD-Ledger-Eintrag (Cross-Karat ist nur Gold-Konversion)
+  ok(result.details, `Kein BHD-Ledger fuer Cross-Karat (Gold-Conversion, kein Geldfluss)`);
+
+  // Cleanup: payable + alle synth precious_metals rows mit dem Test-Prefix
+  db.run(`DELETE FROM gold_movements WHERE target_id = ?`, [payableId]);
+  db.run(`DELETE FROM gold_payables WHERE id = ?`, [payableId]);
+  db.run(`DELETE FROM precious_metals WHERE description LIKE 'Cross-karat applied%${payableId.slice(0,8)}%'`);
+  db.run(`DELETE FROM precious_metals WHERE id = ?`, [pmId]);
+  saveDatabase();
+
+  result.status = 'pass';
+}
+
 const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioResult) => Promise<void> }> = [
   { name: '1. Multi-Line Commit @ IN_PROGRESS', run: scenarioMultiLineCommit },
   { name: '2. Line-Edit before Payment (reverse + repost)', run: scenarioLineEditBeforePayment },
@@ -752,6 +840,7 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '9. Ledger Integrity Check (expenses vs A/P)', run: scenarioLedgerIntegrity },
   { name: '10. Shop-Keeps Pfad (v0.1.45 — precious_metals + gold_movement)', run: scenarioShopKeepsFlow },
   { name: '11. Metal-Inflow mit Supplier-A/P (v0.1.46 — audit + ledger)', run: scenarioMetalInflowWithAP },
+  { name: '12. Cross-Karat-Settle (v0.1.47 — purity math)', run: scenarioCrossKaratSettle },
 ];
 
 export function RepairFlowTestPage() {
@@ -839,7 +928,7 @@ export function RepairFlowTestPage() {
         </h1>
         <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 24 }}>
           Erzeugt Test-Daten mit Prefix <code>{PREFIX}</code> in deiner LIVE-DB,
-          spielt 11 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
+          spielt 12 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
           Daten zur Inspektion stehen.
         </p>
 

@@ -27,6 +27,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate } from '@/core/sync/track';
 import { postExpense, hasLedgerEntries } from '@/core/ledger/posting';
+import { KARAT_PURITY as PURITY_LOOKUP } from '@/core/gold/purity';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -214,6 +215,11 @@ interface GoldStore {
 
   // Cross-Settle: Shop-Gold-Inventar → Supplier-Gold-Payable
   applyShopGoldToSupplierPayable: (payableId: string, grams: number) => void;
+
+  // Plan v0.1.47 — Cross-Karat-Settle. Shop hat anderes Karat als Payable
+  // verlangt. Purity-Conversion macht den Match (24K kann fuer 21K-Schuld
+  // verwendet werden mit entsprechend weniger Gramm — gleicher pure-au-Wert).
+  applyShopGoldCrossKaratToPayable: (payableId: string, sourceKarat: string, sourceGrams: number) => void;
 
   // Plan v0.1.45 — Customer-Gold-Leftover „Shop Keeps": Inflow ins Shop-Inventar
   // ohne Supplier/Customer-Beteiligung. Schreibt automatisch gold_movement.
@@ -635,6 +641,85 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       targetBucket: 'gold_payable', targetId: payableId,
       relatedRepairId: p.sourceRepairId,
       notes: `Cross-Settle: Shop gold applied to supplier payable`,
+    });
+
+    saveDatabase();
+    get().loadGoldPayables();
+  },
+
+  // Plan v0.1.47 — Cross-Karat-Settle: Shop-Inventar in einem ANDEREN Karat
+  // wird auf einen Supplier-Payable angewendet. Purity-Math sorgt fuer
+  // pure-gold-aequivalenten Transfer.
+  //
+  // Beispiel: Supplier-Payable verlangt 10g 21K (= 8.75g pure Au).
+  //   Shop hat 24K-Bestand. Wenn User 8.76g vom 24K-Bestand einsetzt
+  //   (=8.75g pure Au), wird der Payable voll getilgt.
+  //
+  // Aufrufer gibt sourceKarat + sourceGrams an. Wir berechnen wieviel das
+  // im Target-Karat (= p.karat) wert ist und fulfillen den Payable
+  // entsprechend (max bis voll). Wenn target_equivalent > remaining → Fehler
+  // (Aufrufer sollte vorher targetEquivalent() pruefen und ggf. weniger
+  // sourceGrams uebergeben).
+  applyShopGoldCrossKaratToPayable: (payableId, sourceKarat, sourceGrams) => {
+    const db = getDatabase();
+    const now = nowIso();
+    const p = get().goldPayables.find(x => x.id === payableId);
+    if (!p) throw new Error(`Gold-Payable ${payableId} nicht gefunden`);
+    if (p.status !== 'OPEN') throw new Error(`Gold-Payable bereits ${p.status}`);
+    if (!Number.isFinite(sourceGrams) || sourceGrams <= 0) {
+      throw new Error('sourceGrams muss > 0 sein');
+    }
+
+    // Purity-Math: wieviel Target-Karat-Aequivalent sind X Gramm Source-Karat?
+    // Async-Import um Bundle-Splitting nicht zu zerstoeren.
+    // (purity.ts ist 1kb, kein Issue.)
+    const sourceP = PURITY_LOOKUP[sourceKarat] ?? 1.0;
+    const targetP = PURITY_LOOKUP[p.karat] ?? 1.0;
+    if (sourceP <= 0 || targetP <= 0) {
+      throw new Error(`Ungueltiges Karat: source=${sourceKarat} target=${p.karat}`);
+    }
+    const targetEquivalentGrams = (sourceGrams * sourceP) / targetP;
+    const remaining = p.weightGrams - p.fulfilledGrams;
+    if (targetEquivalentGrams > remaining + 0.0001) {
+      throw new Error(
+        `${sourceGrams.toFixed(3)}g ${sourceKarat} = ${targetEquivalentGrams.toFixed(3)}g ${p.karat}-aequivalent — ` +
+        `Payable hat nur ${remaining.toFixed(3)}g verbleibend.`
+      );
+    }
+
+    // Shop-Inventar ↓ (Outflow in source-karat)
+    adjustPreciousMetals({
+      branchId: p.branchId, karat: sourceKarat, deltaGrams: -sourceGrams,
+      sourceLabel: `Cross-karat applied: ${sourceGrams.toFixed(3)}g ${sourceKarat} → payable ${payableId.slice(0, 8)} (${p.karat})`,
+    });
+
+    // Gold-Payable ↑ fulfilled (in target-karat)
+    const newFulfilled = p.fulfilledGrams + targetEquivalentGrams;
+    const isDone = newFulfilled >= p.weightGrams - 0.0001;
+    const nextStatus = isDone ? 'FULFILLED' : 'OPEN';
+    db.run(
+      `UPDATE gold_payables SET fulfilled_grams = ?, status = ?, updated_at = ? WHERE id = ?`,
+      [newFulfilled, nextStatus, now, payableId]
+    );
+    trackUpdate('gold_payables', payableId, { fulfilledGrams: newFulfilled, status: nextStatus });
+
+    // gold_movement-Audit: zwei separate Eintraege um Source + Target jeweils
+    // korrekt mit Karat + Gramm zu zeigen. Anders als bei Same-Karat-Cross-Settle
+    // muessen wir die unterschiedlichen Gewichte transparent machen — der Owner
+    // soll im Audit sehen "8.76g 24K wurden zu 10g 21K-Schuld aequivalent".
+    recordGoldMovement({
+      branchId: p.branchId, direction: 'out', weightGrams: sourceGrams, karat: sourceKarat,
+      sourceBucket: 'precious_metals',
+      targetBucket: 'gold_payable', targetId: payableId,
+      relatedRepairId: p.sourceRepairId,
+      notes: `Cross-Karat-Settle OUT: ${sourceGrams.toFixed(3)}g ${sourceKarat} (${(sourceP * 100).toFixed(1)}% fine) → ${targetEquivalentGrams.toFixed(3)}g ${p.karat}-equivalent`,
+    });
+    recordGoldMovement({
+      branchId: p.branchId, direction: 'in', weightGrams: targetEquivalentGrams, karat: p.karat,
+      sourceBucket: 'precious_metals',
+      targetBucket: 'gold_payable', targetId: payableId,
+      relatedRepairId: p.sourceRepairId,
+      notes: `Cross-Karat-Settle FULFILL: payable in ${p.karat} reduced by ${targetEquivalentGrams.toFixed(3)}g (au-equivalent from ${sourceKarat})`,
     });
 
     saveDatabase();

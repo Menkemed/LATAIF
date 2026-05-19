@@ -12,12 +12,14 @@
 // gewaehlt, niemals automatisch. Soft-Warn bei verdaechtigen Eingaben
 // (z.B. Karat-Mismatch), aber nie blockierend.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SoftWarn } from '@/components/ui/SoftWarn';
 import { useGoldStore } from '@/stores/goldStore';
+import { KARAT_PURITY } from '@/core/gold/purity';
+import { query, currentBranchId } from '@/core/db/helpers';
 import type { GoldPayable, CustomerGoldCredit } from '@/core/models/types';
 
 export type SettleGoldMode =
@@ -68,6 +70,10 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
   const [notes, setNotes] = useState<string>('');
   const [error, setError] = useState<string>('');
 
+  // v0.1.47 — Cross-Karat-Settle. Nur fuer apply_shop_to_supplier-Mode.
+  // Default = Payable-Karat (= "exakter Match", kein Cross-Karat).
+  const [sourceKarat, setSourceKarat] = useState<string>('');
+
   // Remaining grams aus dem entsprechenden Bucket
   const remainingGrams = payable
     ? Math.max(0, payable.weightGrams - payable.fulfilledGrams)
@@ -83,15 +89,62 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
       setBhd('');
       setNotes('');
       setError('');
+      setSourceKarat(karat);
     }
-  }, [open, remainingGrams]);
+  }, [open, remainingGrams, karat]);
+
+  // v0.1.47 — fetche Shop-Inventory pro Karat damit der User sieht was zur
+  // Verfuegung steht. Nur fuer apply_shop_to_supplier-Mode relevant.
+  const shopInventory = useMemo<Array<{ karat: string; grams: number }>>(() => {
+    if (mode !== 'apply_shop_to_supplier' || !open) return [];
+    try {
+      const branchId = currentBranchId();
+      const rows = query(
+        `SELECT karat, COALESCE(SUM(weight_grams), 0) AS total
+           FROM precious_metals
+           WHERE branch_id = ? AND status = 'in_stock' AND weight_grams > 0
+           GROUP BY karat
+           ORDER BY karat DESC`,
+        [branchId]
+      );
+      return rows.map(r => ({ karat: r.karat as string, grams: r.total as number }));
+    } catch { return []; }
+  }, [mode, open]);
+
+  // v0.1.47 — Conversion-Preview fuer Cross-Karat
+  const isCrossKarat = mode === 'apply_shop_to_supplier' && sourceKarat && sourceKarat !== karat;
+  const sourceGramsNum = parseFloat(grams) || 0;
+  const conversionPreview = useMemo(() => {
+    if (!isCrossKarat || sourceGramsNum <= 0) return null;
+    try {
+      // sourceGrams im sourceKarat → wieviel ist das im targetKarat?
+      const sourceP = KARAT_PURITY[sourceKarat] || 1.0;
+      const targetP = KARAT_PURITY[karat] || 1.0;
+      const targetEquiv = (sourceGramsNum * sourceP) / targetP;
+      return {
+        sourceP, targetP, targetEquiv,
+        pureGoldGrams: sourceGramsNum * sourceP,
+      };
+    } catch { return null; }
+  }, [isCrossKarat, sourceGramsNum, sourceKarat, karat]);
 
   const needsBhd = mode === 'convert_supplier_money' || mode === 'convert_customer_money';
 
-  // SoftWarn-Hinweise
+  // SoftWarn-Hinweise. Bei Cross-Karat sind die Vergleichsgroessen in
+  // unterschiedlichen Karaten — wir vergleichen target-equivalent vs remaining.
   let gramsWarn: string | undefined;
   const gNum = parseFloat(grams) || 0;
-  if (gNum > 0 && gNum > remainingGrams + 0.0001) {
+  if (isCrossKarat && conversionPreview) {
+    const inv = shopInventory.find(i => i.karat === sourceKarat);
+    const avail = inv?.grams || 0;
+    if (gNum > avail + 0.0001) {
+      gramsWarn = `Nur ${avail.toFixed(3)}g ${sourceKarat} im Bestand — wird beim Speichern zurueckgewiesen.`;
+    } else if (conversionPreview.targetEquiv > remainingGrams + 0.0001) {
+      gramsWarn = `${conversionPreview.targetEquiv.toFixed(3)}g ${karat}-equivalent uebersteigt die offene Schuld (${remainingGrams.toFixed(3)}g) — wird beim Speichern zurueckgewiesen.`;
+    } else if (conversionPreview.targetEquiv < remainingGrams - 0.0001) {
+      gramsWarn = `Partial settlement: ${(remainingGrams - conversionPreview.targetEquiv).toFixed(3)}g ${karat} bleiben offen.`;
+    }
+  } else if (gNum > 0 && gNum > remainingGrams + 0.0001) {
     gramsWarn = `Mehr Gramm angegeben als offen (${remainingGrams.toFixed(3)}g) — wird beim Speichern zurueckgewiesen.`;
   } else if (gNum > 0 && gNum < remainingGrams - 0.0001) {
     gramsWarn = `Partial settlement: ${(remainingGrams - gNum).toFixed(3)}g bleiben offen.`;
@@ -117,7 +170,12 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
         case 'apply_shop_to_supplier':
           if (!payable) throw new Error('payable required');
           if (g <= 0) throw new Error('Gramm > 0 erforderlich');
-          goldStore.applyShopGoldToSupplierPayable(payable.id, g);
+          if (sourceKarat && sourceKarat !== payable.karat) {
+            // Cross-Karat: andere Reinheit als Payable verlangt
+            goldStore.applyShopGoldCrossKaratToPayable(payable.id, sourceKarat, g);
+          } else {
+            goldStore.applyShopGoldToSupplierPayable(payable.id, g);
+          }
           break;
         case 'return_customer':
           if (!credit) throw new Error('credit required');
@@ -151,11 +209,66 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
           )}
         </div>
 
+        {/* v0.1.47 — Source-Karat-Picker fuer apply_shop_to_supplier mode.
+            Default = Payable-Karat (kein Cross-Karat). User kann auf anderes
+            Karat wechseln, dann zeigt sich Conversion-Preview. */}
+        {mode === 'apply_shop_to_supplier' && shopInventory.length > 0 && (
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+              FROM YOUR INVENTORY (KARAT)
+            </span>
+            <div className="flex gap-2 flex-wrap">
+              {shopInventory.map(inv => (
+                <button
+                  key={inv.karat}
+                  type="button"
+                  onClick={() => setSourceKarat(inv.karat)}
+                  className="cursor-pointer rounded transition-all duration-200"
+                  style={{
+                    padding: '6px 12px', fontSize: 12,
+                    border: `1px solid ${sourceKarat === inv.karat ? '#0F0F10' : '#D5D9DE'}`,
+                    color: sourceKarat === inv.karat ? '#0F0F10' : '#6B7280',
+                    background: sourceKarat === inv.karat ? 'rgba(15,15,16,0.06)' : 'transparent',
+                  }}
+                >
+                  {inv.karat}
+                  <span style={{ fontSize: 10, color: '#9CA3AF', marginLeft: 6 }}>
+                    {inv.grams.toFixed(3)}g verfuegbar
+                    {inv.karat === karat && ' (exakt)'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {mode !== 'convert_supplier_money' && mode !== 'convert_customer_money' && (
           <div>
-            <Input label="WEIGHT (g)" type="number" step="0.001" value={grams}
+            <Input
+              label={isCrossKarat ? `WEIGHT (g ${sourceKarat})` : 'WEIGHT (g)'}
+              type="number" step="0.001" value={grams}
               onChange={e => setGrams(e.target.value)} autoFocus />
             <SoftWarn warning={gramsWarn} />
+          </div>
+        )}
+
+        {/* v0.1.47 — Cross-Karat-Conversion-Preview */}
+        {conversionPreview && (
+          <div style={{
+            padding: '10px 12px', background: 'rgba(61,127,255,0.06)',
+            border: '1px solid rgba(61,127,255,0.3)', borderRadius: 6, fontSize: 12,
+          }}>
+            <div style={{ color: '#3D7FFF', fontWeight: 600, marginBottom: 4 }}>
+              ⇄ Cross-Karat Conversion
+            </div>
+            <div className="font-mono" style={{ color: '#0F0F10', fontSize: 13 }}>
+              {sourceGramsNum.toFixed(3)}g {sourceKarat} ({(conversionPreview.sourceP * 100).toFixed(1)}%)
+              {' = '}
+              <strong>{conversionPreview.targetEquiv.toFixed(3)}g {karat}-equivalent</strong>
+            </div>
+            <div style={{ color: '#6B7280', fontSize: 11, marginTop: 4 }}>
+              = {conversionPreview.pureGoldGrams.toFixed(3)}g pure gold · Payable wird mit {conversionPreview.targetEquiv.toFixed(3)}g {karat} fulfilled.
+            </div>
           </div>
         )}
 
