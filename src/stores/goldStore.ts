@@ -248,6 +248,43 @@ interface GoldStore {
     detail: string;
   }>;
   getGoldDrift: () => Array<{ karat: string; movementsNet: number; preciousMetalsSum: number; drift: number }>;
+
+  // v0.1.49 Dashboard-Selektoren
+  getTopSuppliersByGoldOwed: (limit?: number) => Array<{
+    supplierId: string;
+    supplierName: string;
+    breakdown: Array<{ karat: string; grams: number }>;
+    pureAuGrams: number;
+  }>;
+  getTopCustomersByGoldCredit: (limit?: number) => Array<{
+    customerId: string;
+    customerName: string;
+    breakdown: Array<{ karat: string; grams: number }>;
+    pureAuGrams: number;
+  }>;
+  getRecentGoldMovements: (limit?: number) => Array<{
+    id: string;
+    movedAt: string;
+    direction: 'in' | 'out';
+    weightGrams: number;
+    karat: string;
+    sourceBucket?: string;
+    targetBucket?: string;
+    relatedRepairId?: string;
+    notes?: string;
+  }>;
+  getNegativeInventoryRows: () => Array<{
+    id: string;
+    karat: string;
+    weightGrams: number;
+    description: string;
+    createdAt: string;
+  }>;
+  getPureGoldTotal: () => {
+    totalGrams: number;
+    pureAuGrams: number;
+    perKarat: Array<{ karat: string; grams: number; pureAu: number }>;
+  };
 }
 
 export const useGoldStore = create<GoldStore>((set, get) => ({
@@ -970,5 +1007,147 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       console.error('[gold] getGoldDrift failed:', err);
       return [];
     }
+  },
+
+  // ── v0.1.49 Dashboard-Selektoren ────────────────────────────────────
+
+  // Top-Lieferanten nach Gold-Schuld (we_owe). Pure-Au-summiert ueber alle
+  // Karate des Lieferanten damit ein einziger Vergleichswert entsteht.
+  getTopSuppliersByGoldOwed: (limit = 5) => {
+    try {
+      const rows = query(
+        `SELECT gp.supplier_id, s.name AS supplier_name,
+                gp.karat,
+                SUM(gp.weight_grams - gp.fulfilled_grams) AS open_grams
+           FROM gold_payables gp
+           LEFT JOIN suppliers s ON s.id = gp.supplier_id
+           WHERE gp.status = 'OPEN' AND gp.direction = 'we_owe'
+           GROUP BY gp.supplier_id, gp.karat
+           HAVING open_grams > 0
+           ORDER BY open_grams DESC`
+      );
+      // Aggregate by supplier (sum pure-au across karats)
+      const PURITY: Record<string, number> = {
+        '24K': 0.999, '22K': 0.916, '21K': 0.875, '18K': 0.75, '14K': 0.585, '9K': 0.375,
+      };
+      const map: Record<string, { supplierId: string; supplierName: string;
+        breakdown: Array<{ karat: string; grams: number }>; pureAuGrams: number }> = {};
+      for (const r of rows) {
+        const sid = r.supplier_id as string;
+        const name = (r.supplier_name as string) || sid.slice(0, 8);
+        const karat = r.karat as string;
+        const grams = (r.open_grams as number) || 0;
+        const pure = grams * (PURITY[karat] ?? 1);
+        if (!map[sid]) map[sid] = { supplierId: sid, supplierName: name, breakdown: [], pureAuGrams: 0 };
+        map[sid].breakdown.push({ karat, grams });
+        map[sid].pureAuGrams += pure;
+      }
+      return Object.values(map).sort((a, b) => b.pureAuGrams - a.pureAuGrams).slice(0, limit);
+    } catch { return []; }
+  },
+
+  // Spiegel-Analog fuer Customer-Gold-Credits (we_owe an Kunden).
+  getTopCustomersByGoldCredit: (limit = 5) => {
+    try {
+      const rows = query(
+        `SELECT cc.customer_id,
+                COALESCE(c.first_name || ' ' || c.last_name, '(unnamed)') AS customer_name,
+                cc.karat,
+                SUM(cc.weight_grams - cc.fulfilled_grams) AS open_grams
+           FROM customer_gold_credits cc
+           LEFT JOIN customers c ON c.id = cc.customer_id
+           WHERE cc.status = 'OPEN'
+           GROUP BY cc.customer_id, cc.karat
+           HAVING open_grams > 0
+           ORDER BY open_grams DESC`
+      );
+      const PURITY: Record<string, number> = {
+        '24K': 0.999, '22K': 0.916, '21K': 0.875, '18K': 0.75, '14K': 0.585, '9K': 0.375,
+      };
+      const map: Record<string, { customerId: string; customerName: string;
+        breakdown: Array<{ karat: string; grams: number }>; pureAuGrams: number }> = {};
+      for (const r of rows) {
+        const cid = r.customer_id as string;
+        const name = (r.customer_name as string) || cid.slice(0, 8);
+        const karat = r.karat as string;
+        const grams = (r.open_grams as number) || 0;
+        const pure = grams * (PURITY[karat] ?? 1);
+        if (!map[cid]) map[cid] = { customerId: cid, customerName: name.trim(), breakdown: [], pureAuGrams: 0 };
+        map[cid].breakdown.push({ karat, grams });
+        map[cid].pureAuGrams += pure;
+      }
+      return Object.values(map).sort((a, b) => b.pureAuGrams - a.pureAuGrams).slice(0, limit);
+    } catch { return []; }
+  },
+
+  // Letzte N gold_movements fuer Recent-Activity-Feed im Dashboard.
+  getRecentGoldMovements: (limit = 20) => {
+    try {
+      const rows = query(
+        `SELECT id, moved_at, direction, weight_grams, karat, source_bucket, target_bucket,
+                related_repair_id, notes
+           FROM gold_movements
+           ORDER BY moved_at DESC LIMIT ?`,
+        [limit]
+      );
+      return rows.map(r => ({
+        id: r.id as string,
+        movedAt: r.moved_at as string,
+        direction: r.direction as 'in' | 'out',
+        weightGrams: (r.weight_grams as number) || 0,
+        karat: (r.karat as string) || '',
+        sourceBucket: (r.source_bucket as string) || undefined,
+        targetBucket: (r.target_bucket as string) || undefined,
+        relatedRepairId: (r.related_repair_id as string) || undefined,
+        notes: (r.notes as string) || undefined,
+      }));
+    } catch { return []; }
+  },
+
+  // Negative precious_metals rows = Anomalie (Outflow ohne Bestand entstanden).
+  // Surfacing fuer Owner damit das nicht stillschweigend auflaeuft.
+  getNegativeInventoryRows: () => {
+    try {
+      const rows = query(
+        `SELECT id, branch_id, karat, weight_grams, description, created_at
+           FROM precious_metals
+           WHERE status = 'in_stock' AND weight_grams < 0
+           ORDER BY weight_grams ASC`
+      );
+      return rows.map(r => ({
+        id: r.id as string,
+        karat: (r.karat as string) || '',
+        weightGrams: (r.weight_grams as number) || 0,
+        description: (r.description as string) || '',
+        createdAt: (r.created_at as string) || '',
+      }));
+    } catch { return []; }
+  },
+
+  // Pure-Gold-Aggregat ueber alle Karate (24K-Equivalent). Schnell-Sicht
+  // fuer „wieviel Gold habe ich physisch insgesamt im Shop?".
+  getPureGoldTotal: () => {
+    try {
+      const rows = query(
+        `SELECT karat, COALESCE(SUM(weight_grams), 0) AS total
+           FROM precious_metals
+           WHERE status = 'in_stock' AND karat IS NOT NULL AND weight_grams > 0
+           GROUP BY karat`
+      );
+      const PURITY: Record<string, number> = {
+        '24K': 0.999, '22K': 0.916, '21K': 0.875, '18K': 0.75, '14K': 0.585, '9K': 0.375,
+      };
+      let totalGrams = 0, pureAu = 0;
+      const perKarat: Array<{ karat: string; grams: number; pureAu: number }> = [];
+      for (const r of rows) {
+        const k = r.karat as string;
+        const g = (r.total as number) || 0;
+        const p = g * (PURITY[k] ?? 1);
+        totalGrams += g;
+        pureAu += p;
+        perKarat.push({ karat: k, grams: g, pureAu: p });
+      }
+      return { totalGrams, pureAuGrams: pureAu, perKarat: perKarat.sort((a,b) => a.karat.localeCompare(b.karat)) };
+    } catch { return { totalGrams: 0, pureAuGrams: 0, perKarat: [] }; }
   },
 }));
