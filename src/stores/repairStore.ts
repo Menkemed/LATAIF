@@ -5,6 +5,7 @@ import { canonicalRepairStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
+import { formatRepairLineNumber } from '@/core/repairs/line-numbering';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import {
@@ -251,7 +252,7 @@ function commitRepairLineExpenses(repairId: string): void {
 
   // OPEN-Lines mit Supplier ohne Expense
   const lineRows = query(
-    `SELECT id, supplier_id, work_type, description, cost_amount
+    `SELECT id, position, supplier_id, work_type, description, cost_amount
        FROM repair_lines
        WHERE repair_id = ? AND status = 'OPEN' AND supplier_id IS NOT NULL AND expense_id IS NULL
          AND cost_amount > 0
@@ -262,6 +263,7 @@ function commitRepairLineExpenses(repairId: string): void {
 
   for (const lr of lineRows) {
     const lineId = lr.id as string;
+    const position = (lr.position as number) || 0;
     const supplierId = lr.supplier_id as string;
     const workType = (lr.work_type as string) || 'service';
     const description = (lr.description as string) || '';
@@ -280,7 +282,9 @@ function commitRepairLineExpenses(repairId: string): void {
       if (sRow.length > 0) supplierLabel = ' · ' + (sRow[0].name as string);
     } catch { /* */ }
 
-    const desc = `Repair ${repairNumber} · ${workType}${description ? ' · ' + description : ''}${supplierLabel}`;
+    // v0.1.48 — Sub-Number REP-000023-L1 statt nur REP-000023 fuer Audit-Klarheit
+    const lineLabel = formatRepairLineNumber(repairNumber, position);
+    const desc = `${lineLabel} · ${workType}${description ? ' · ' + description : ''}${supplierLabel}`;
     db.run(
       `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
          expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)

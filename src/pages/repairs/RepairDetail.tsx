@@ -1010,7 +1010,8 @@ export function RepairDetail() {
                 {thisRepairLines.length === 0 ? (
                   <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click „Add Work Line" to register a supplier/workshop position.</p>
                 ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '0.5fr 1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
+                    <span className="text-overline">L#</span>
                     <span className="text-overline">SUPPLIER</span>
                     <span className="text-overline">WORK TYPE</span>
                     <span className="text-overline">DESCRIPTION</span>
@@ -1021,6 +1022,12 @@ export function RepairDetail() {
                       const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
                       return (
                         <div key={l.id} style={{ display: 'contents' }}>
+                          {/* v0.1.48 — Sub-Number L# fuer Print + Audit-Pfad */}
+                          <span className="font-mono" style={{ fontSize: 12, color: '#6B7280',
+                                         padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                         textDecoration: l.status === 'CANCELLED' ? 'line-through' : 'none' }}>
+                            {repair.repairNumber}-L{l.position}
+                          </span>
                           <span style={{ fontSize: 12, color: l.status === 'CANCELLED' ? '#9CA3AF' : '#0F0F10',
                                          padding: '10px 0', borderTop: '1px solid #E5E9EE',
                                          textDecoration: l.status === 'CANCELLED' ? 'line-through' : 'none',
