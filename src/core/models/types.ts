@@ -649,6 +649,9 @@ export interface RepairLine {
   status: RepairLineStatus;
   dueDate?: string;
   notes?: string;
+  // v0.2.1 — Material Parity (Diamond/Stone/Gold-Piece consumed during repair)
+  materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
+  materialDetails?: MaterialDetails;
   createdAt: string;
   updatedAt: string;
   // Populated (nicht gespeichert) — live aus expenses-Tabelle gelesen.
@@ -668,7 +671,9 @@ export interface GoldPayable {
   id: UUID;
   branchId: UUID;
   supplierId: UUID;
+  // v0.2.1 — exactly one of sourceRepairId / sourceOrderId must be set
   sourceRepairId?: UUID;
+  sourceOrderId?: UUID;
   sourceRepairLineId?: UUID;
   direction: GoldPayableDirection;
   weightGrams: number;
@@ -691,7 +696,9 @@ export interface CustomerGoldCredit {
   id: UUID;
   branchId: UUID;
   customerId: UUID;
+  // v0.2.1 — exactly one of sourceRepairId / sourceOrderId must be set
   sourceRepairId?: UUID;
+  sourceOrderId?: UUID;
   weightGrams: number;
   karat: MetalKarat | string;
   fulfilledGrams: number;
@@ -709,6 +716,7 @@ export type GoldBucket =
   | 'gold_payable'
   | 'customer_gold_credit'
   | 'repair_consumption'
+  | 'order_consumption'  // v0.2.1 — Gold konsumiert durch eine Custom-Order
   | 'scrap_trade'
   | 'external';
 
@@ -724,6 +732,7 @@ export interface GoldMovement {
   targetBucket?: GoldBucket;
   targetId?: UUID;
   relatedRepairId?: UUID;
+  relatedOrderId?: UUID;  // v0.2.1 — optionaler Order-Link analog zu Repair
   notes?: string;
 }
 
@@ -797,13 +806,78 @@ export interface OrderLine {
   // persistiert sein, damit Convert-to-Invoice nicht erneut fragt und nicht doppelt rechnet.
   taxScheme?: TaxScheme;     // VAT_10 / ZERO / MARGIN — undefined = Legacy-Order ohne Snapshot
   vatRate?: number;           // 10 oder 0
+  // v0.2.1 — Custom-Order Support: per-line supplier-cost analog zu repair_lines
+  supplierId?: UUID;         // wenn gesetzt → A/P-Expense bei commitOrderLineExpenses
+  costAmount?: number;        // was wir Supplier zahlen (default = unitPrice fuer 1:1 Pass-Through)
+  expenseId?: UUID;          // verlinkter Expense-Eintrag nach commit
+  isCustomerFacing?: boolean; // default true; false = pure-cost-line, NICHT auf Invoice
+  // v0.2.1 — Material Parity (Diamond/Stone/Gold)
+  materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
+  materialDetails?: MaterialDetails;
   product?: Product;
 }
+
+/**
+ * v0.2.1 — Strukturierte Material-Daten fuer repair_lines + order_lines.
+ * Gespeichert als JSON in repair_lines.material_details / order_lines.material_details.
+ */
+export interface MaterialDetails {
+  ct?: number;              // Carat (fuer Diamond/Stone)
+  qty?: number;             // Stueckzahl
+  description?: string;     // "Round Brilliant", "Princess cut"
+  karat?: string;           // bei Gold-Material
+  weightGrams?: number;     // bei Gold-Material
+  supplierName?: string;    // Snapshot fuer Print (auch wenn supplier_id NULL)
+}
+
+/**
+ * v0.2.1 — Custom-Order Meta-Daten (Materialien + Output-Beschreibung +
+ * Diamond-Items). Wird als JSON in orders.custom_meta serialisiert.
+ */
+export interface CustomOrderMeta {
+  // Customer-Material (nur dokumentiert, kein Asset, kein Expense)
+  customerGoldWeight?: number;     // gramm
+  customerGoldKarat?: string;       // '24K' | '22K' | '21K' | '18K' | ...
+  customerStones?: string;          // freier Text: "2x 0.5ct round diamonds"
+  customerMaterialReceivedAt?: string; // ISO date
+
+  // Final Output
+  finalProductDescription?: string;
+  finalProductPhotos?: string[];    // base64 images
+
+  // Workshop-Gold-Debt Flag (gold_payable lebt in eigener Tabelle)
+  workshopOwesUsGold?: boolean;
+
+  // Diamond/Stone Materials — strukturierte Liste fuer Reports & Print
+  // (jeder Eintrag erzeugt EINE order_line mit material_kind='diamond')
+  diamondDetails?: Array<{
+    description: string;       // "Round Brilliant", "Princess cut"
+    quantity: number;          // pieces
+    caratPerPiece: number;     // ct
+    totalCost: number;         // BHD wir zahlen
+    customerPrice: number;     // BHD Customer zahlt (default = totalCost)
+    supplierId?: UUID;         // wenn gesetzt → A/P
+  }>;
+
+  // Misc
+  rushOrder?: boolean;
+  internalNotes?: string;
+}
+
+export type OrderType = 'normal' | 'custom';
 
 export interface Order {
   id: UUID;
   orderNumber: string;
   customerId: UUID;
+  // v0.2.1 — Order-Type Discriminator. 'custom' = Goldsmith / Sonderanfertigung.
+  // Conditional UI Cards + custom_meta Daten + commitOrderLineExpenses Trigger.
+  type?: OrderType;
+  customMeta?: CustomOrderMeta;
+  // Promoted Custom-Fields (queryable / report-friendly statt nur JSON)
+  goldsmithSupplierId?: UUID;
+  laborCost?: number;
+  extraGoldValue?: number;
   // Single source of truth: Order nutzt Collection-Kategorie + dynamische Attribute.
   categoryId?: UUID;
   attributes?: Record<string, string | number | boolean | string[]>;

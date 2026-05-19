@@ -348,6 +348,11 @@ interface RepairStore {
 }
 
 function rowToRepairLine(row: Record<string, unknown>): RepairLine {
+  let matDetails: import('@/core/models/types').MaterialDetails | undefined;
+  try {
+    const raw = row.material_details as string | null;
+    if (raw) matDetails = JSON.parse(raw);
+  } catch { /* */ }
   return {
     id: row.id as string,
     branchId: row.branch_id as string,
@@ -361,6 +366,8 @@ function rowToRepairLine(row: Record<string, unknown>): RepairLine {
     status: ((row.status as string) || 'OPEN') as RepairLineStatus,
     dueDate: (row.due_date as string) || undefined,
     notes: (row.notes as string) || undefined,
+    materialKind: (row.material_kind as RepairLine['materialKind']) || undefined,
+    materialDetails: matDetails,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -1069,18 +1076,23 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     );
     const nextPos = (existingRows[0]?.max_pos as number || 0) + 1;
     const id = uuid();
+    // v0.2.1 — Material-Lines (Diamond/Stone/Gold) bekommen material_kind +
+    // material_details JSON. work_type wird 'material' wenn Material gesetzt ist.
+    const matJson = data.materialDetails ? JSON.stringify(data.materialDetails) : null;
     db.run(
       `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, description,
-         cost_amount, expense_id, status, due_date, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'OPEN', ?, ?, ?, ?)`,
+         cost_amount, expense_id, status, due_date, notes, material_kind, material_details, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'OPEN', ?, ?, ?, ?, ?, ?)`,
       [
         id, branchId, repairId, nextPos,
         data.supplierId || null, data.workType || null, data.description || null,
-        data.costAmount || 0, data.dueDate || null, data.notes || null, now, now,
+        data.costAmount || 0, data.dueDate || null, data.notes || null,
+        data.materialKind || null, matJson, now, now,
       ]
     );
     trackInsert('repair_lines', id, {
       repairId, supplierId: data.supplierId, costAmount: data.costAmount, workType: data.workType,
+      materialKind: data.materialKind,
     });
     saveDatabase();
     get().loadRepairLines();

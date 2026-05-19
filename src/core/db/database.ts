@@ -1464,6 +1464,44 @@ function runMigrations(database: Database): void {
     `ALTER TABLE precious_metals ADD COLUMN supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL`,
     `ALTER TABLE precious_metals ADD COLUMN linked_expense_id TEXT REFERENCES expenses(id) ON DELETE SET NULL`,
     `CREATE INDEX IF NOT EXISTS idx_precious_metals_supplier ON precious_metals(supplier_id)`,
+
+    // v0.2.1 — Custom Orders Merge:
+    // Order-Type Discriminator: 'normal' (default) vs 'custom' (Goldsmith-Auftraege)
+    `ALTER TABLE orders ADD COLUMN type TEXT NOT NULL DEFAULT 'normal'`,
+    `ALTER TABLE orders ADD COLUMN custom_meta TEXT`,
+    `ALTER TABLE orders ADD COLUMN goldsmith_supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL`,
+    `ALTER TABLE orders ADD COLUMN labor_cost REAL DEFAULT 0`,
+    `ALTER TABLE orders ADD COLUMN extra_gold_value REAL DEFAULT 0`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_type ON orders(type)`,
+
+    // order_lines erweitern (analog zu repair_lines): per-line supplier-cost.
+    `ALTER TABLE order_lines ADD COLUMN supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL`,
+    `ALTER TABLE order_lines ADD COLUMN cost_amount REAL DEFAULT 0`,
+    `ALTER TABLE order_lines ADD COLUMN expense_id TEXT REFERENCES expenses(id) ON DELETE SET NULL`,
+    `ALTER TABLE order_lines ADD COLUMN is_customer_facing INTEGER DEFAULT 1`,
+    `CREATE INDEX IF NOT EXISTS idx_order_lines_supplier ON order_lines(supplier_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_lines_expense ON order_lines(expense_id)`,
+
+    // Gold-Buckets source-agnostic: parallel sourceFK fuer Custom-Orders.
+    // Konvention: exactly one of source_repair_id / source_order_id must be set.
+    `ALTER TABLE gold_payables ADD COLUMN source_order_id TEXT REFERENCES orders(id) ON DELETE CASCADE`,
+    `ALTER TABLE customer_gold_credits ADD COLUMN source_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_payables_source_order ON gold_payables(source_order_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_customer_gold_credits_source_order ON customer_gold_credits(source_order_id)`,
+
+    // gold_movements: optionaler Order-Link analog zum repair-Link.
+    `ALTER TABLE gold_movements ADD COLUMN related_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_movements_order ON gold_movements(related_order_id)`,
+
+    // Material-Kind Parity fuer BEIDE Module: repair_lines + order_lines bekommen
+    // strukturierte Material-Daten. material_kind ist Discriminator,
+    // material_details ist JSON ({ct, qty, description, karat, supplierName}).
+    `ALTER TABLE repair_lines ADD COLUMN material_kind TEXT`,
+    `ALTER TABLE repair_lines ADD COLUMN material_details TEXT`,
+    `ALTER TABLE order_lines ADD COLUMN material_kind TEXT`,
+    `ALTER TABLE order_lines ADD COLUMN material_details TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_repair_lines_material_kind ON repair_lines(material_kind)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_lines_material_kind ON order_lines(material_kind)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

@@ -331,20 +331,27 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     if (!data.supplierId) throw new Error('createGoldPayable: supplierId required');
     if (!data.weightGrams || data.weightGrams <= 0) throw new Error('createGoldPayable: weightGrams must be > 0');
     if (!data.karat) throw new Error('createGoldPayable: karat required');
+    // v0.2.1 — exactly one of sourceRepairId / sourceOrderId
+    if (data.sourceRepairId && data.sourceOrderId) {
+      throw new Error('createGoldPayable: only one of sourceRepairId / sourceOrderId may be set');
+    }
 
     db.run(
-      `INSERT INTO gold_payables (id, branch_id, supplier_id, source_repair_id, source_repair_line_id,
+      `INSERT INTO gold_payables (id, branch_id, supplier_id, source_repair_id, source_repair_line_id, source_order_id,
          direction, weight_grams, karat, settlement_type, fulfilled_grams, status, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
       [
         id, branchId, data.supplierId, data.sourceRepairId || null, data.sourceRepairLineId || null,
+        data.sourceOrderId || null,
         data.direction || 'we_owe', data.weightGrams, data.karat,
         data.settlementType || 'return_gold', data.notes || null, now, now,
       ]
     );
     trackInsert('gold_payables', id, {
       supplierId: data.supplierId, weightGrams: data.weightGrams, karat: data.karat,
-      settlementType: data.settlementType, sourceRepairId: data.sourceRepairId,
+      settlementType: data.settlementType,
+      sourceRepairId: data.sourceRepairId,
+      sourceOrderId: data.sourceOrderId,
     });
     saveDatabase();
     get().loadGoldPayables();
@@ -361,19 +368,24 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     if (!data.customerId) throw new Error('createCustomerGoldCredit: customerId required');
     if (!data.weightGrams || data.weightGrams <= 0) throw new Error('createCustomerGoldCredit: weightGrams must be > 0');
     if (!data.karat) throw new Error('createCustomerGoldCredit: karat required');
+    // v0.2.1 — exactly one of sourceRepairId / sourceOrderId
+    if (data.sourceRepairId && data.sourceOrderId) {
+      throw new Error('createCustomerGoldCredit: only one of sourceRepairId / sourceOrderId may be set');
+    }
 
     db.run(
-      `INSERT INTO customer_gold_credits (id, branch_id, customer_id, source_repair_id,
+      `INSERT INTO customer_gold_credits (id, branch_id, customer_id, source_repair_id, source_order_id,
          weight_grams, karat, fulfilled_grams, status, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
       [
-        id, branchId, data.customerId, data.sourceRepairId || null,
+        id, branchId, data.customerId, data.sourceRepairId || null, data.sourceOrderId || null,
         data.weightGrams, data.karat, data.notes || null, now, now,
       ]
     );
     trackInsert('customer_gold_credits', id, {
       customerId: data.customerId, weightGrams: data.weightGrams, karat: data.karat,
       sourceRepairId: data.sourceRepairId,
+      sourceOrderId: data.sourceOrderId,
     });
     saveDatabase();
     get().loadCustomerGoldCredits();

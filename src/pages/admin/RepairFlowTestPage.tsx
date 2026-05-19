@@ -828,6 +828,220 @@ async function scenarioCrossKaratSettle(ctx: TestContext, result: ScenarioResult
   result.status = 'pass';
 }
 
+// Plan v0.2.1 — Scenario 13: Custom-Order mit Goldsmith-Labor (Markup) +
+// Extra-Gold + Diamond-Supplier-Purchase + Customer-Gold-Credit. Validiert:
+//  - orders.type='custom', custom_meta JSON gespeichert
+//  - 3 order_lines (labor, extra-gold, diamond) mit material_kind
+//  - Status -> 'arrived' triggert commitOrderLineExpenses -> 2 Expenses
+//    (labor Acme 50 BHD, diamond GemPro 120 BHD; extra-gold hat keinen
+//    supplier_id, also kein A/P)
+//  - Ledger A/P fuer Acme + GemPro stieg um 50 + 120
+//  - customer_gold_credit mit source_order_id verlinkt
+async function scenarioCustomOrderMultiMaterial(ctx: TestContext, result: ScenarioResult) {
+  const db = getDatabase();
+  const { useOrderStore } = await import('@/stores/orderStore');
+  const { useGoldStore } = await import('@/stores/goldStore');
+  const orderStore = useOrderStore.getState();
+  const goldStore = useGoldStore.getState();
+
+  // Setup: dritter Supplier als Diamond-Supplier — wir nutzen supplierB als Diamond.
+  const apBeforeA = getApFor(ctx.supplierA);
+  const apBeforeB = getApFor(ctx.supplierB);
+  info(result.details, `Baseline A/P: SupplierA=${apBeforeA.toFixed(3)}, SupplierB=${apBeforeB.toFixed(3)}`);
+
+  const order = orderStore.createOrder({
+    customerId: ctx.customerId,
+    type: 'custom',
+    customMeta: {
+      customerGoldWeight: 10,
+      customerGoldKarat: '22K',
+      customerStones: PREFIX + 'optional 2x 0.5ct ',
+      finalProductDescription: PREFIX + 'Custom 22K wedding ring',
+    },
+    goldsmithSupplierId: ctx.supplierA,
+    laborCost: 50,
+    extraGoldValue: 40,
+    requestedBrand: 'Custom Order',
+    requestedModel: PREFIX + 'Custom 22K wedding ring',
+    expectedDelivery: undefined,
+    notes: PREFIX + 'custom-order-test',
+    lines: [
+      // Goldsmith Labor: supplier_id=Acme, cost=50, customer-price=80 (markup-test)
+      {
+        description: 'Goldsmith Labor — SupplierA',
+        quantity: 1,
+        unitPrice: 80,
+        taxScheme: 'VAT_10',
+        vatRate: 10,
+        supplierId: ctx.supplierA,
+        costAmount: 50,
+        isCustomerFacing: true,
+        materialKind: 'labor',
+      },
+      // Extra Gold: kein supplier_id (eigener Bestand), cost=customer-price=40
+      {
+        description: 'Extra 18K Gold',
+        quantity: 1,
+        unitPrice: 40,
+        taxScheme: 'VAT_10',
+        vatRate: 10,
+        costAmount: 40,
+        isCustomerFacing: true,
+        materialKind: 'gold',
+      },
+      // Diamond: supplier_id=SupplierB (= Diamond-Supplier), cost=120, customer=200
+      {
+        description: 'Diamond 2x 0.5ct Round — SupplierB',
+        quantity: 1,
+        unitPrice: 200,
+        taxScheme: 'VAT_10',
+        vatRate: 10,
+        supplierId: ctx.supplierB,
+        costAmount: 120,
+        isCustomerFacing: true,
+        materialKind: 'diamond',
+      },
+    ],
+  });
+
+  // Linked customer_gold_credit fuer das 10g 22K Customer-Gold
+  goldStore.createCustomerGoldCredit({
+    customerId: ctx.customerId,
+    sourceOrderId: order.id,
+    weightGrams: 10,
+    karat: '22K',
+    notes: PREFIX + 'custom-order customer gold',
+  });
+
+  ok(result.details, `Order angelegt: type=${order.type}, agreedPrice=${(order.agreedPrice||0).toFixed(3)} (80+40+200=320)`);
+
+  // (a) orders.type='custom' + custom_meta JSON
+  const oRow = query(`SELECT type, custom_meta, agreed_price FROM orders WHERE id = ?`, [order.id]);
+  assert(oRow[0].type === 'custom', `orders.type='custom' erwartet, got '${oRow[0].type}'`);
+  const meta = JSON.parse(oRow[0].custom_meta as string);
+  assert(meta.customerGoldWeight === 10, `custom_meta.customerGoldWeight=10 erwartet`);
+  ok(result.details, `orders.type='custom' + custom_meta JSON gespeichert`);
+
+  // (b) 3 order_lines mit material_kind
+  const lineRows = query(`SELECT material_kind, supplier_id, cost_amount, unit_price FROM order_lines WHERE order_id = ? ORDER BY position`, [order.id]);
+  assert(lineRows.length === 3, `3 order_lines erwartet, got ${lineRows.length}`);
+  assert(lineRows[0].material_kind === 'labor', `Line 1 material_kind='labor'`);
+  assert(lineRows[1].material_kind === 'gold', `Line 2 material_kind='gold'`);
+  assert(lineRows[2].material_kind === 'diamond', `Line 3 material_kind='diamond'`);
+  ok(result.details, `3 order_lines mit korrekten material_kind`);
+
+  // (c) Status -> 'arrived' triggert commitOrderLineExpenses
+  orderStore.updateStatus(order.id, 'arrived');
+
+  // (d) 2 Expenses (Labor an SupplierA, Diamond an SupplierB; Extra-Gold ohne supplier_id => keine Expense)
+  const expRows = query(
+    `SELECT supplier_id, amount FROM expenses WHERE related_module = 'order' AND related_entity_id = ?`,
+    [order.id]
+  );
+  assert(expRows.length === 2, `2 expenses fuer order erwartet, got ${expRows.length}`);
+  const supASum = expRows.filter(r => r.supplier_id === ctx.supplierA).reduce((s, r) => s + (r.amount as number), 0);
+  const supBSum = expRows.filter(r => r.supplier_id === ctx.supplierB).reduce((s, r) => s + (r.amount as number), 0);
+  assert(Math.abs(supASum - 50) < 0.001, `SupplierA expense=50 erwartet, got ${supASum.toFixed(3)}`);
+  assert(Math.abs(supBSum - 120) < 0.001, `SupplierB expense=120 erwartet, got ${supBSum.toFixed(3)}`);
+  ok(result.details, `Expenses: SupplierA=50, SupplierB=120`);
+
+  // (e) Ledger A/P stieg
+  const apAfterA = getApFor(ctx.supplierA);
+  const apAfterB = getApFor(ctx.supplierB);
+  assert(Math.abs((apAfterA - apBeforeA) - 50) < 0.001, `Ledger A/P SupplierA stieg um 50`);
+  assert(Math.abs((apAfterB - apBeforeB) - 120) < 0.001, `Ledger A/P SupplierB stieg um 120`);
+  ok(result.details, `Ledger A/P: SupplierA +50, SupplierB +120`);
+
+  // (f) customer_gold_credit mit source_order_id
+  const credRows = query(`SELECT source_order_id, weight_grams FROM customer_gold_credits WHERE source_order_id = ?`, [order.id]);
+  assert(credRows.length === 1, `1 customer_gold_credit mit source_order_id erwartet`);
+  ok(result.details, `customer_gold_credit verlinkt via source_order_id`);
+
+  // Cleanup
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM expenses WHERE related_module='order' AND related_entity_id=?)`, [order.id]);
+  db.run(`DELETE FROM expense_payments WHERE expense_id IN (SELECT id FROM expenses WHERE related_module='order' AND related_entity_id=?)`, [order.id]);
+  db.run(`DELETE FROM expenses WHERE related_module='order' AND related_entity_id=?`, [order.id]);
+  db.run(`DELETE FROM customer_gold_credits WHERE source_order_id = ?`, [order.id]);
+  db.run(`DELETE FROM order_lines WHERE order_id = ?`, [order.id]);
+  db.run(`DELETE FROM order_payments WHERE order_id = ?`, [order.id]);
+  db.run(`DELETE FROM orders WHERE id = ?`, [order.id]);
+  saveDatabase();
+
+  result.status = 'pass';
+}
+
+// Plan v0.2.1 — Scenario 14: Repair-Module bekommt Diamond-Material via
+// addRepairLine mit material_kind='diamond' + supplier_id. Status->IN_PROGRESS
+// postet die A/P-Expense automatisch via commitRepairLineExpenses.
+async function scenarioRepairDiamondMaterial(ctx: TestContext, result: ScenarioResult) {
+  const db = getDatabase();
+  const repairStore = useRepairStore.getState();
+
+  const apBefore = getApFor(ctx.supplierB);
+  info(result.details, `Baseline A/P SupplierB: ${apBefore.toFixed(3)}`);
+
+  // Repair anlegen + addRepairLine mit Diamond-Material
+  const repairId = uuid();
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT INTO repairs (id, branch_id, repair_number, customer_id, item_brand, item_model,
+       issue_description, repair_type, internal_cost, charge_to_customer, status, received_at, voucher_code,
+       images, repair_scope, tax_scheme, created_at, updated_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'external', 0, 200, 'DRAFT', ?, ?, '[]', 'CUSTOMER', 'VAT_10', ?, ?, 'user-owner')`,
+    [repairId, ctx.branchId, PREFIX + 'DIA-' + repairId.slice(0,4), ctx.customerId, 'Cartier', 'Tank',
+     'Diamond replacement', now, uuid().slice(0,8).toUpperCase(), now, now]
+  );
+  saveDatabase();
+  ctx.createdRepairIds.push(repairId);
+  repairStore.loadRepairs();
+
+  const line = repairStore.addRepairLine(repairId, {
+    supplierId: ctx.supplierB,
+    workType: 'service',
+    description: 'Diamond 0.5ct Round Brilliant — GemPro',
+    costAmount: 80,
+    materialKind: 'diamond',
+    materialDetails: { ct: 0.5, qty: 1, description: 'Round Brilliant', supplierName: 'GemPro' },
+  });
+  ok(result.details, `repair_line angelegt: material_kind=${line.materialKind}, cost=${line.costAmount}`);
+
+  // Status -> IN_PROGRESS triggert commitRepairLineExpenses
+  repairStore.updateStatus(repairId, 'IN_PROGRESS');
+
+  // Check: line wurde mit expense_id verlinkt
+  const lineRows = query(`SELECT expense_id, material_kind FROM repair_lines WHERE id = ?`, [line.id]);
+  assert(!!lineRows[0].expense_id, `repair_line.expense_id muss gesetzt sein`);
+  assert(lineRows[0].material_kind === 'diamond', `material_kind='diamond' persisted`);
+  ok(result.details, `repair_line.expense_id verlinkt + material_kind='diamond' persistiert`);
+
+  // Check: Expense erzeugt mit related_module='repair'
+  const expRows = query(
+    `SELECT amount, supplier_id FROM expenses WHERE id = ?`,
+    [lineRows[0].expense_id]
+  );
+  assert(expRows.length === 1 && Math.abs((expRows[0].amount as number) - 80) < 0.001, `Expense 80 BHD erzeugt`);
+  ok(result.details, `Expense 80 BHD an SupplierB erzeugt (related_module='repair')`);
+
+  // Check: Ledger A/P SupplierB +80
+  const apAfter = getApFor(ctx.supplierB);
+  assert(Math.abs((apAfter - apBefore) - 80) < 0.001, `Ledger A/P SupplierB +80`);
+  ok(result.details, `Ledger A/P SupplierB: ${apBefore.toFixed(3)} → ${apAfter.toFixed(3)} (+80)`);
+
+  result.status = 'pass';
+}
+
+// Helper: Sum-CREDIT-Ledger fuer einen Supplier (gleicher Pattern wie scenario 9)
+function getApFor(supplierId: string): number {
+  const rows = query(
+    `SELECT COALESCE(SUM(amount), 0) AS ap FROM ledger_entries e1
+       WHERE e1.counterparty_id = ? AND e1.account = 'ACCOUNTS_PAYABLE'
+         AND e1.direction = 'CREDIT' AND e1.reverses_entry_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)`,
+    [supplierId]
+  );
+  return (rows[0]?.ap as number) || 0;
+}
+
 const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioResult) => Promise<void> }> = [
   { name: '1. Multi-Line Commit @ IN_PROGRESS', run: scenarioMultiLineCommit },
   { name: '2. Line-Edit before Payment (reverse + repost)', run: scenarioLineEditBeforePayment },
@@ -841,6 +1055,8 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '10. Shop-Keeps Pfad (v0.1.45 — precious_metals + gold_movement)', run: scenarioShopKeepsFlow },
   { name: '11. Metal-Inflow mit Supplier-A/P (v0.1.46 — audit + ledger)', run: scenarioMetalInflowWithAP },
   { name: '12. Cross-Karat-Settle (v0.1.47 — purity math)', run: scenarioCrossKaratSettle },
+  { name: '13. Custom-Order Multi-Material (v0.2.1 — Goldsmith+Diamond+Extra-Gold)', run: scenarioCustomOrderMultiMaterial },
+  { name: '14. Repair Diamond-Material (v0.2.1 — A/P fuer Diamond-Supplier)', run: scenarioRepairDiamondMaterial },
 ];
 
 export function RepairFlowTestPage() {
@@ -928,7 +1144,7 @@ export function RepairFlowTestPage() {
         </h1>
         <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 24 }}>
           Erzeugt Test-Daten mit Prefix <code>{PREFIX}</code> in deiner LIVE-DB,
-          spielt 12 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
+          spielt 14 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
           Daten zur Inspektion stehen.
         </p>
 

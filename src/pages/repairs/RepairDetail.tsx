@@ -27,6 +27,8 @@ import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Repair, RepairStatus, RepairLine } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
+import { MaterialsCard } from '@/components/work-orders/MaterialsCard';
+import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -147,6 +149,8 @@ export function RepairDetail() {
     source: 'workshop', supplierId: '', receivedG: '', usedG: '', karat: '21K',
     settlementType: 'return_gold', leftoverDest: 'return',
   });
+  // v0.2.1 — Material-Modal fuer Diamond/Stone/Gold-Piece im Repair
+  const [showAddMaterialModal, setShowAddMaterialModal] = useState(false);
 
   const [settleModal, setSettleModal] = useState<{
     open: boolean; mode: SettleGoldMode; payable?: GoldPayable; credit?: CustomerGoldCredit;
@@ -1082,6 +1086,32 @@ export function RepairDetail() {
             </div>
           )}
 
+          {/* v0.2.1 — Materials Used Card (Diamond/Stone/Gold-Piece-Verbrauch) */}
+          <div style={{ marginTop: 20 }}>
+            <MaterialsCard
+              title="MATERIALS USED"
+              lines={thisRepairLines
+                .filter(l => l.materialKind && l.materialKind !== 'labor')
+                .map(l => {
+                  const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
+                  return {
+                    id: l.id,
+                    position: l.position,
+                    materialKind: l.materialKind,
+                    materialDetails: l.materialDetails,
+                    description: l.description,
+                    supplierId: l.supplierId,
+                    supplierName: sup?.name || l.materialDetails?.supplierName,
+                    costAmount: l.costAmount,
+                    status: l.status,
+                  };
+                })}
+              onAdd={() => setShowAddMaterialModal(true)}
+              showCustomerPrice={false}
+              canEdit={true}
+            />
+          </div>
+
           {/* Plan repair-multi-supplier — Gold-Used Block (Workshop + Customer Gold).
               Workshop-Gold legt eine gold_payable an. Customer-Gold-Rest entweder
               zurueck, als Credit, oder vom Shop behalten. */}
@@ -1388,6 +1418,30 @@ export function RepairDetail() {
         credit={settleModal.credit}
         repairId={repair.id}
         onClose={() => setSettleModal({ open: false, mode: 'settle_supplier_return' })}
+      />
+
+      {/* v0.2.1 — AddMaterialModal: Diamond/Stone/Gold-Piece -> repair_line */}
+      <AddMaterialModal
+        open={showAddMaterialModal}
+        onClose={() => setShowAddMaterialModal(false)}
+        showCustomerPrice={false}
+        onSubmit={(data) => {
+          addRepairLine(repair.id, {
+            supplierId: data.supplierId || undefined,
+            workType: 'service',
+            description: data.description,
+            costAmount: data.totalCost,
+            materialKind: data.materialKind,
+            materialDetails: {
+              ct: data.caratPerPiece,
+              qty: data.quantity,
+              description: data.description,
+              karat: data.karat,
+              weightGrams: data.weightGrams,
+              supplierName: data.supplierName,
+            },
+          });
+        }}
       />
     </div>
   );
