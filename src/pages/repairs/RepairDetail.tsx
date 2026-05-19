@@ -193,7 +193,7 @@ export function RepairDetail() {
     setNewLineForm({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
   }
 
-  function handleAddGold() {
+  async function handleAddGold() {
     if (!id || !repair) return;
     const received = parseFloat(newGoldForm.receivedG) || 0;
     const used = parseFloat(newGoldForm.usedG) || 0;
@@ -224,7 +224,11 @@ export function RepairDetail() {
         // Plan v0.1.45: Shop-Keep buchen direkt ins precious_metals-Inventar
         // via creditShopGold-Action. gold_movement-Audit-Eintrag entsteht
         // automatisch (source=repair_consumption, target=precious_metals).
-        goldStore.creditShopGold(repair.branchId, newGoldForm.karat, leftover, {
+        // Repair hat keine eigene branchId — Current-Branch aus Auth (Fallback branch-main).
+        const { currentBranchId: getBranch } = await import('@/core/db/helpers');
+        let branchId: string;
+        try { branchId = getBranch(); } catch { branchId = 'branch-main'; }
+        goldStore.creditShopGold(branchId, newGoldForm.karat, leftover, {
           repairId: id,
           sourceLabel: `Customer-Gold leftover from repair ${repair.repairNumber}`,
         });
