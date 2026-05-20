@@ -1148,6 +1148,100 @@ async function scenarioMixedOrderPartialInvoicing(ctx: TestContext, result: Scen
   result.status = 'pass';
 }
 
+// Plan v0.3.1 — Scenario 16: Order-A/P-Reversal. Zwei Luecken aus v0.3.0:
+//  (A) Cancel einer ARRIVED order_line muss die gebuchte A/P-Expense reversen.
+//  (B) deleteOrder muss die A/P-Expenses der order_lines reversen + entfernen.
+// Sonst bliebe die Supplier-Schuld jeweils als Orphan im Ledger stehen.
+async function scenarioOrderApReversal(ctx: TestContext, result: ScenarioResult) {
+  const db = getDatabase();
+  const { useOrderStore } = await import('@/stores/orderStore');
+  const orderStore = useOrderStore.getState();
+
+  // ── Teil A — Cancel einer ARRIVED-Line reverst die A/P-Expense ──────────
+  const apBeforeA = getApFor(ctx.supplierA);
+  const order1 = orderStore.createOrder({
+    customerId: ctx.customerId,
+    paymentMethod: 'cash',
+    requestedBrand: 'AP Reversal — Cancel',
+    requestedModel: PREFIX + 'ap-cancel',
+    notes: PREFIX + 'ap-reversal-cancel',
+    lines: [
+      { description: PREFIX + 'Goldsmith Labor cancel-test', quantity: 1, unitPrice: 90,
+        taxScheme: 'VAT_10', vatRate: 10, supplierId: ctx.supplierA, costAmount: 60,
+        isCustomerFacing: true, materialKind: 'labor' },
+    ],
+  });
+  const l1 = query(`SELECT id FROM order_lines WHERE order_id = ?`, [order1.id])[0].id as string;
+
+  orderStore.updateOrderLineStatus(l1, 'ARRIVED');
+  const apArrived = getApFor(ctx.supplierA);
+  assert(Math.abs((apArrived - apBeforeA) - 60) < 0.001,
+    `A/P +60 nach ARRIVED erwartet, got +${(apArrived - apBeforeA).toFixed(3)}`);
+  assert(!!query(`SELECT expense_id FROM order_lines WHERE id = ?`, [l1])[0].expense_id,
+    `order_line.expense_id gesetzt nach ARRIVED`);
+  ok(result.details, `ARRIVED → A/P SupplierA +60, expense_id verlinkt`);
+
+  orderStore.updateOrderLineStatus(l1, 'CANCELLED');
+  const apCancelled = getApFor(ctx.supplierA);
+  assert(Math.abs(apCancelled - apBeforeA) < 0.001,
+    `A/P zurueck auf Ausgang nach CANCEL erwartet, got drift ${(apCancelled - apBeforeA).toFixed(3)}`);
+  assert(!query(`SELECT expense_id FROM order_lines WHERE id = ?`, [l1])[0].expense_id,
+    `order_line.expense_id NULL nach CANCEL erwartet`);
+  const cancExp = query(`SELECT status FROM expenses WHERE related_module='order' AND related_entity_id=?`, [order1.id]);
+  assert(cancExp.length === 1 && cancExp[0].status === 'CANCELLED',
+    `Order-Line-Expense status='CANCELLED' erwartet`);
+  ok(result.details, `CANCELLED → A/P reversed (drift 0), Expense storniert + Link geloest`);
+
+  // Cleanup order1 (Expense existiert noch als CANCELLED-Row)
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM expenses WHERE related_module='order' AND related_entity_id=?)`, [order1.id]);
+  db.run(`DELETE FROM expense_payments WHERE expense_id IN (SELECT id FROM expenses WHERE related_module='order' AND related_entity_id=?)`, [order1.id]);
+  db.run(`DELETE FROM expenses WHERE related_module='order' AND related_entity_id=?`, [order1.id]);
+  db.run(`DELETE FROM order_lines WHERE order_id = ?`, [order1.id]);
+  db.run(`DELETE FROM order_payments WHERE order_id = ?`, [order1.id]);
+  db.run(`DELETE FROM orders WHERE id = ?`, [order1.id]);
+  saveDatabase();
+
+  // ── Teil B — deleteOrder reverst die A/P-Expenses der order_lines ───────
+  const apBeforeB = getApFor(ctx.supplierB);
+  const order2 = orderStore.createOrder({
+    customerId: ctx.customerId,
+    paymentMethod: 'cash',
+    requestedBrand: 'AP Reversal — Delete',
+    requestedModel: PREFIX + 'ap-delete',
+    notes: PREFIX + 'ap-reversal-delete',
+    lines: [
+      { description: PREFIX + 'Diamond delete-test', quantity: 1, unitPrice: 250,
+        taxScheme: 'VAT_10', vatRate: 10, supplierId: ctx.supplierB, costAmount: 140,
+        isCustomerFacing: true, materialKind: 'diamond' },
+    ],
+  });
+  const l2 = query(`SELECT id FROM order_lines WHERE order_id = ?`, [order2.id])[0].id as string;
+  orderStore.updateOrderLineStatus(l2, 'ARRIVED');
+  const apMidB = getApFor(ctx.supplierB);
+  assert(Math.abs((apMidB - apBeforeB) - 140) < 0.001,
+    `A/P +140 nach ARRIVED erwartet, got +${(apMidB - apBeforeB).toFixed(3)}`);
+  // Expense-ID merken — deleteOrder entfernt die Expense-Row, die ledger_entries
+  // (Original + Reversal) bleiben aber und muessen per source_id aufgeraeumt werden.
+  const exp2Id = query(`SELECT expense_id FROM order_lines WHERE id = ?`, [l2])[0].expense_id as string;
+
+  orderStore.deleteOrder(order2.id);
+  const apAfterDelete = getApFor(ctx.supplierB);
+  assert(Math.abs(apAfterDelete - apBeforeB) < 0.001,
+    `A/P zurueck auf Ausgang nach deleteOrder erwartet, got drift ${(apAfterDelete - apBeforeB).toFixed(3)}`);
+  assert((query(`SELECT COUNT(*) AS c FROM expenses WHERE related_module='order' AND related_entity_id=?`, [order2.id])[0].c as number) === 0,
+    `keine Orphan-Expense nach deleteOrder erwartet`);
+  assert((query(`SELECT COUNT(*) AS c FROM order_lines WHERE order_id=?`, [order2.id])[0].c as number) === 0,
+    `order_lines geloescht nach deleteOrder`);
+  ok(result.details, `deleteOrder → A/P SupplierB reversed (drift 0), keine Orphan-Expense`);
+
+  // Cleanup order2 (order/order_lines/expense schon weg — nur ledger_entries)
+  if (exp2Id) db.run(`DELETE FROM ledger_entries WHERE source_id = ?`, [exp2Id]);
+  db.run(`DELETE FROM order_payments WHERE order_id = ?`, [order2.id]);
+  saveDatabase();
+
+  result.status = 'pass';
+}
+
 // Helper: Sum-CREDIT-Ledger fuer einen Supplier (gleicher Pattern wie scenario 9)
 function getApFor(supplierId: string): number {
   const rows = query(
@@ -1176,6 +1270,7 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '13. Custom-Order Multi-Material (v0.2.1 — Goldsmith+Diamond+Extra-Gold)', run: scenarioCustomOrderMultiMaterial },
   { name: '14. Repair Diamond-Material (v0.2.1 — A/P fuer Diamond-Supplier)', run: scenarioRepairDiamondMaterial },
   { name: '15. Mixed Order + Partielles Invoicing (v0.3.0)', run: scenarioMixedOrderPartialInvoicing },
+  { name: '16. Order A/P-Reversal (v0.3.1 — Cancel-Line + Delete-Order)', run: scenarioOrderApReversal },
 ];
 
 export function RepairFlowTestPage() {
@@ -1263,8 +1358,8 @@ export function RepairFlowTestPage() {
         </h1>
         <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 24 }}>
           Erzeugt Test-Daten mit Prefix <code>{PREFIX}</code> in deiner LIVE-DB,
-          spielt 15 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
-          Daten zur Inspektion stehen.
+          spielt {SCENARIOS.length} Szenarien durch, raeumt am Ende auf. Bei Fail
+          bleiben die Daten zur Inspektion stehen.
         </p>
 
         <Card>

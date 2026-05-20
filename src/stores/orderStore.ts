@@ -10,6 +10,7 @@ import {
   postOrderPayment,
   postOrderPaymentReversed,
   postExpense,
+  postExpenseCancelled,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -19,6 +20,48 @@ function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
     console.error(`[ledger] ${label} failed:`, err);
   }
+}
+
+// v0.3.1 — Eine Order-Line-A/P-Expense stornieren: Status → CANCELLED + Ledger-
+// Reverse. Bewusst NICHT ueber expenseStore.updateExpense: commitOrderLineExpenses
+// inserted die Expense per Raw-SQL, daher kennt der expenseStore-Cache sie nicht
+// (before = getExpense() waere undefined → der Reverse-Block wuerde stumm
+// uebersprungen). Wir bauen den Expense-Snapshot direkt aus der DB-Zeile —
+// gleicher Pattern wie invoiceStore.cancelInvoice fuer seine Auto-Expenses.
+function cancelOrderLineExpense(expenseId: string): void {
+  const db = getDatabase();
+  const rows = query(
+    `SELECT id, expense_number, branch_id, category, amount, paid_amount, payment_method,
+            expense_date, description, related_entity_id, supplier_id, status, created_at
+       FROM expenses WHERE id = ?`,
+    [expenseId]
+  );
+  if (rows.length === 0) return;
+  const er = rows[0];
+  if ((er.status as string) === 'CANCELLED') return;
+  const expForReverse: Expense = {
+    id: expenseId,
+    expenseNumber: er.expense_number as string,
+    branchId: er.branch_id as string,
+    category: (er.category as Expense['category']) || 'Inventory',
+    amount: Number(er.amount || 0),
+    paidAmount: Number(er.paid_amount || 0),
+    paymentMethod: (er.payment_method as Expense['paymentMethod']) || 'bank',
+    expenseDate: er.expense_date as string,
+    description: er.description as string,
+    relatedModule: 'order',
+    relatedEntityId: (er.related_entity_id as string) || undefined,
+    supplierId: (er.supplier_id as string) || undefined,
+    status: er.status as Expense['status'],
+    createdAt: er.created_at as string,
+  };
+  db.run(`UPDATE expenses SET status = 'CANCELLED' WHERE id = ?`, [expenseId]);
+  trackUpdate('expenses', expenseId, { status: 'CANCELLED' });
+  safePost(`postExpenseCancelled(${expenseId}) [order-line]`, () => {
+    if (!hasLedgerEntries('EXPENSE', expenseId)) return;
+    if (hasReversalFor('EXPENSE', expenseId)) return;
+    postExpenseCancelled(expForReverse);
+  });
 }
 
 interface OrderStore {
@@ -356,12 +399,13 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   updateOrderLineStatus: (lineId, status) => {
     const db = getDatabase();
     const lineRows = query(
-      `SELECT order_id, invoice_id, status FROM order_lines WHERE id = ?`,
+      `SELECT order_id, invoice_id, status, expense_id FROM order_lines WHERE id = ?`,
       [lineId]
     );
     if (lineRows.length === 0) throw new Error(`Order-Line ${lineId} nicht gefunden`);
     const orderId = lineRows[0].order_id as string;
     const invoiceId = lineRows[0].invoice_id as string | null;
+    const lineExpenseId = lineRows[0].expense_id as string | null;
 
     // Salesforce-Regel: eine bereits invoicte Line darf nicht ge-cancelled
     // werden ohne die Invoice anzufassen → Block + Hinweis.
@@ -371,6 +415,20 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
 
     db.run(`UPDATE order_lines SET status = ? WHERE id = ?`, [status, lineId]);
     trackUpdate('order_lines', lineId, { status });
+
+    // v0.3.1 — Wird eine Line mit bereits gebuchter A/P-Expense ge-CANCELLED,
+    // muss die Expense mit-storniert werden (Ledger-Reverse). Sonst bliebe die
+    // Supplier-Schuld als Orphan stehen. expense_id wird geloest, damit ein
+    // spaeteres Re-ARRIVED via commitOrderLineExpenses sauber neu bucht.
+    if (status === 'CANCELLED' && lineExpenseId) {
+      try {
+        cancelOrderLineExpense(lineExpenseId);
+        db.run(`UPDATE order_lines SET expense_id = NULL WHERE id = ?`, [lineId]);
+        trackUpdate('order_lines', lineId, { expenseId: null });
+      } catch (err) {
+        console.error('[order] order-line expense cancel failed:', err);
+      }
+    }
 
     // Bei ARRIVED: A/P-Expense fuer Supplier-Lines buchen (idempotent).
     if (status === 'ARRIVED' || status === 'DELIVERED') {
@@ -626,6 +684,24 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         if (hasReversalFor('ORDER_PAYMENT', opId)) return;
         postOrderPaymentReversed(opId);
       });
+    }
+    // v0.3.1 — Order-Line-A/P-Expenses (gebucht bei ARRIVED via commitOrderLineExpenses)
+    // vor dem Loeschen der order_lines storno-reversen + entfernen. Sonst bliebe die
+    // Supplier-Schuld als Orphan-Expense ohne Quelle im Ledger haengen.
+    const expRows = query(
+      `SELECT expense_id FROM order_lines WHERE order_id = ? AND expense_id IS NOT NULL`,
+      [id]
+    );
+    for (const er of expRows) {
+      const expId = er.expense_id as string;
+      try {
+        cancelOrderLineExpense(expId);
+        db.run(`DELETE FROM expense_payments WHERE expense_id = ?`, [expId]);
+        db.run(`DELETE FROM expenses WHERE id = ?`, [expId]);
+        trackDelete('expenses', expId);
+      } catch (err) {
+        console.error(`[order] order-line expense cleanup failed (${expId}):`, err);
+      }
     }
     db.run(`DELETE FROM order_lines WHERE order_id = ?`, [id]);
     db.run(`DELETE FROM orders WHERE id = ?`, [id]);

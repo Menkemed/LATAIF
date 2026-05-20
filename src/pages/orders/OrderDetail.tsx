@@ -14,6 +14,7 @@ import { useProductStore } from '@/stores/productStore';
 import { formatProductMultiLine } from '@/core/utils/product-format';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import { query } from '@/core/db/helpers';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
@@ -225,19 +226,59 @@ export function OrderDetail() {
   }
 
   // Carry-over Logik wird sowohl vom direkten als auch vom Legacy-Pfad benötigt.
-  async function carryOverOrderPaymentsToInvoice(invoiceId: string, orderId: string, orderNumber: string) {
-    const orderPayments = paymentsByOrder[orderId] || [];
-    if (orderPayments.length > 0) {
-      // ZIEL.md §3a — Order-Payment-Ledger reversen BEVOR die Invoice-Payments
-      // gepostet werden. Sonst doppelt-Cash (Order-Payment + Invoice-Payment).
-      // markConvertedToInvoice macht beides atomar (Reverse + SQL-Flag).
-      useOrderPaymentStore.getState().markConvertedToInvoice(orderId);
-      const inv = useInvoiceStore.getState();
-      for (const op of orderPayments) {
-        inv.recordPayment(invoiceId, op.amount, op.method || 'cash', `Carried over from order ${orderNumber}`);
+  // v0.3.1 — Deposit-Pool = die noch nicht convertierten order_payments. Beim
+  // (Teil-)Convert wird hoechstens das Invoice-Total angerechnet (Cap). Ein
+  // Ueberschuss (Deposit > diese Invoice) bleibt als frischer order_payments-
+  // Eintrag stehen und fliesst beim naechsten Convert auf die naechste Invoice.
+  async function carryOverOrderPaymentsToInvoice(
+    invoiceId: string, orderId: string, orderNumber: string, invoiceTotal: number,
+  ) {
+    const inv = useInvoiceStore.getState();
+    const poolRows = query(
+      `SELECT id, amount, method FROM order_payments
+         WHERE order_id = ? AND converted_to_invoice = 0
+         ORDER BY paid_at ASC, created_at ASC`,
+      [orderId],
+    );
+    const pool = poolRows.reduce((s, r) => s + Number(r.amount || 0), 0);
+
+    // Leerer Pool: Folge-Invoice nach verbrauchtem Deposit → startet UNPAID.
+    // Legacy-Fallback: alte Orders ohne order_payments-Zeilen (Deposit nur auf
+    // der orders-Zeile) — einmalig, gedeckelt aufs Invoice-Total.
+    if (pool <= 0.005) {
+      if (poolRows.length === 0 && totalPaid > 0) {
+        inv.recordPayment(invoiceId, Math.min(totalPaid, invoiceTotal), 'cash',
+          `Carried over from order ${orderNumber}`);
       }
-    } else if (totalPaid > 0) {
-      useInvoiceStore.getState().recordPayment(invoiceId, totalPaid, 'cash', `Carried over from order ${orderNumber}`);
+      return;
+    }
+
+    // ZIEL.md §3a — Order-Payment-Ledger reversen + converted-Flag setzen, BEVOR
+    // die Invoice-Payments gepostet werden (sonst doppelt-Cash). Idempotent.
+    useOrderPaymentStore.getState().markConvertedToInvoice(orderId);
+
+    // Cap: hoechstens das Invoice-Total auf diese Invoice anrechnen.
+    const cap = Math.min(pool, invoiceTotal);
+    let budget = cap;
+    let lastMethod = 'cash';
+    for (const r of poolRows) {
+      if (budget <= 0.005) break;
+      const take = Math.min(Number(r.amount || 0), budget);
+      lastMethod = (r.method as string) || 'cash';
+      inv.recordPayment(invoiceId, take, lastMethod, `Carried over from order ${orderNumber}`);
+      budget -= take;
+    }
+
+    // Ueberschuss → neuer Deposit-Eintrag fuer die naechste Teil-Invoice.
+    const remainder = pool - cap;
+    if (remainder > 0.005) {
+      useOrderPaymentStore.getState().addPayment({
+        orderId,
+        amount: remainder,
+        paidAt: new Date().toISOString().split('T')[0],
+        method: lastMethod,
+        note: `Deposit remainder after partial invoice for order ${orderNumber}`,
+      });
     }
   }
 
@@ -294,10 +335,6 @@ export function OrderDetail() {
   // weil wir nicht erneut auf einen schon-gross-Wert rechnen.
   async function convertWithPersistedSchemes(orderLines: OrderLine[], specialMark: boolean = false) {
     if (!id || !order) return;
-
-    // v0.3.0 — „erster Convert" = noch keine Line der Order ist invoiced.
-    // Nur dann wird die Anzahlung (order_payments) auf die Invoice ge-carried.
-    const isFirstConvert = !getOrderLines(id).some(l => l.invoiceId);
 
     // v0.3.0 — defensiv: nur customer-facing Lines invoicen (cost-only NIE).
     const billableLines = orderLines.filter(l => l.isCustomerFacing !== false);
@@ -361,11 +398,10 @@ export function OrderDetail() {
     markOrderLinesInvoiced(billableLines.map(l => l.id), invoice.id);
     updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
-    // v0.3.0 — Anzahlung nur beim ERSTEN Convert auf die Invoice carry-over'n.
-    // Folge-Invoices (weitere Fulfillment-Batches) starten unbezahlt.
-    if (isFirstConvert) {
-      await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber);
-    }
+    // v0.3.1 — Deposit-Pool auf die Invoice anrechnen, gedeckelt aufs Invoice-Total.
+    // Ein Ueberschuss bleibt fuer die naechste Teil-Invoice stehen; ist der Pool
+    // leer (Deposit schon verbraucht), startet diese Invoice UNPAID.
+    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount);
     navigate(`/invoices/${invoice.id}`);
   }
 
@@ -411,7 +447,7 @@ export function OrderDetail() {
     );
     updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
-    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber);
+    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount);
     navigate(`/invoices/${invoice.id}`);
   }
 
