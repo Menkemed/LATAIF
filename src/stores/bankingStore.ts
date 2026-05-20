@@ -12,6 +12,7 @@ import type { BankTransfer } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackDelete } from '@/core/sync/track';
+import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import {
   postBankTransfer,
   postBankTransferReversed,
@@ -196,26 +197,46 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       }
     };
 
-    // SALES_IN: invoice payments
+    // SALES_IN: invoice payments.
+    // v0.3.2 — Card-Zahlungen NETTO zeigen: der Kartenprozessor zieht die Gebuehr
+    // direkt ab, auf dem Bankkonto landet nur (Betrag − Card-Fee). Die zugehoerige
+    // CardFees-Expense wird ueber den identischen created_at-Timestamp gematcht —
+    // invoiceStore.recordPayment schreibt Payment + Fee-Expense mit demselben `now`.
+    // Beschreibung nutzt formatInvoiceDisplay → exakt die Nummer die die Invoice
+    // selbst anzeigt (No: 000009 / PINV-… ), nicht das rohe DB-Format.
     const payments = safeQuery('payments',
-      `SELECT p.id, p.amount, p.method, p.received_at, p.invoice_id, i.invoice_number, p.created_at
+      `SELECT p.id, p.amount, p.method, p.received_at, p.invoice_id, p.created_at,
+              i.invoice_number, i.status AS inv_status, i.special_mark AS inv_special,
+              (SELECT COALESCE(SUM(e.amount), 0) FROM expenses e
+                 WHERE e.category = 'CardFees' AND e.related_module = 'invoice'
+                   AND e.related_entity_id = p.invoice_id
+                   AND e.created_at = p.created_at
+                   AND e.status != 'CANCELLED') AS card_fee
        FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
        WHERE p.branch_id = ?`,
       [branchId]
     );
     for (const p of payments) {
       const date = (p.received_at as string) || '';
+      const method = (p.method as string) || '';
+      const gross = (p.amount as number) || 0;
+      const fee = method.toLowerCase() === 'card' ? ((p.card_fee as number) || 0) : 0;
+      const invLabel = formatInvoiceDisplay({
+        invoiceNumber: (p.invoice_number as string) || '',
+        status: (p.inv_status as string) || undefined,
+        specialMark: Number(p.inv_special) === 1,
+      });
       txs.push({
         id: `pay-${p.id}`,
         date,
         createdAt: (p.created_at as string) || date,
         type: 'SALES_IN',
-        account: accountFor(p.method as string),
-        amount: (p.amount as number) || 0,
+        account: accountFor(method),
+        amount: gross - fee,
         flow: 'in',
         relatedModule: 'invoice',
         relatedEntityId: p.invoice_id as string,
-        description: `Payment · ${p.invoice_number || ''} · ${p.method}`,
+        description: `Payment · ${invLabel} · ${method}${fee > 0 ? ` (net of ${fee.toFixed(3)} card fee)` : ''}`,
       });
     }
 
@@ -245,11 +266,15 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     // EXPENSE_OUT: nur tatsächlich bezahlte Beträge (paid_amount > 0).
     // Pending-Expenses (Supplier-Payables, z.B. Repair-Workshop-Kosten) bewegen
     // noch kein Geld → dürfen nicht als Cashflow erscheinen.
+    // v0.3.2 — Auto-CardFees-Expenses (related_module='invoice') sind bereits in
+    // der SALES_IN-Zeile netto verrechnet → hier ausschliessen, sonst Doppel-
+    // zaehlung falls die Fee-Expense je manuell als bezahlt markiert wird.
     const expenses = safeQuery('expenses',
       `SELECT id, COALESCE(paid_amount, 0) AS paid_amount, payment_method,
               expense_date, description, expense_number, category, created_at
        FROM expenses
-       WHERE branch_id = ? AND status != 'CANCELLED' AND COALESCE(paid_amount, 0) > 0`,
+       WHERE branch_id = ? AND status != 'CANCELLED' AND COALESCE(paid_amount, 0) > 0
+         AND NOT (category = 'CardFees' AND related_module = 'invoice')`,
       [branchId]
     );
     for (const e of expenses) {

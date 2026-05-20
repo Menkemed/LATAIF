@@ -7,6 +7,7 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored } from '@/core/lots/lot-queries';
+import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import {
   postInvoiceIssued,
   postInvoicePayment,
@@ -643,6 +644,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       throw new Error('Payment amount must be a positive number.');
     }
     const db = getDatabase();
+    // WICHTIG: dasselbe `now` wird fuer den payments-Insert UND die Auto-CardFees-
+    // Expense verwendet. bankingStore matcht die Fee ueber created_at = payment.created_at
+    // um die Bank-Zeile netto zu zeigen — dieser geteilte Timestamp ist load-bearing.
     const now = new Date().toISOString();
     const paymentId = uuid();
     let branchId: string, userId: string;
@@ -655,56 +659,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       [paymentId, branchId, invoiceId, amount, method, now, notes || null, now, userId]
     );
 
-    // Plan §Sales §11 + §Expenses §8: Card-Fee wird automatisch als Expense gebucht.
-    if (method === 'card' && amount > 0) {
-      const rateRow = query(
-        `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.card_fee_rate'`,
-        [branchId]
-      );
-      const feeRate = parseFloat((rateRow[0]?.value as string) || '2.2') || 0;
-      const fee = Math.round(amount * feeRate) / 100;
-      if (fee > 0) {
-        const expenseId = uuid();
-        const expenseNumber = getNextDocumentNumber('EXP');
-        const expenseDescription = `Card fee for payment ${paymentId.slice(0, 8)} (${feeRate}% of ${amount.toFixed(3)} BHD)`;
-        const expenseDate = now.split('T')[0];
-        db.run(
-          `INSERT INTO expenses (id, branch_id, expense_number, category, amount, payment_method,
-            expense_date, description, related_module, related_entity_id, created_at, created_by)
-           VALUES (?, ?, ?, 'CardFees', ?, 'bank', ?, ?, 'invoice', ?, ?, ?)`,
-          [expenseId, branchId, expenseNumber, fee, expenseDate,
-           expenseDescription,
-           invoiceId, now, userId]
-        );
-        trackInsert('expenses', expenseId, { category: 'CardFees', amount: fee, auto: true, invoiceId });
-
-        // Ledger-Post fuer Auto-Card-Fee. Status 'PENDING' (paidAmount 0) — dieser
-        // Expense wird in einem zweiten Schritt manuell bezahlt (oder von einer
-        // Card-Reconciliation-Routine). Posting ergibt EXPENSES_OPERATING vs A/P.
-        const cardFeeExpense: Expense = {
-          id: expenseId,
-          expenseNumber,
-          branchId,
-          category: 'CardFees',
-          amount: fee,
-          paidAmount: 0,
-          paymentMethod: 'bank',
-          expenseDate,
-          description: expenseDescription,
-          relatedModule: 'invoice',
-          relatedEntityId: invoiceId,
-          status: 'PENDING',
-          createdAt: now,
-        };
-        safePost(`postExpense(${expenseId}) [card-fee]`, () => {
-          if (hasLedgerEntries('EXPENSE', expenseId)) return;
-          postExpense(cardFeeExpense);
-        });
-      }
-    }
-
     // Plan §Sales §12: bei Vollzahlung Auto-Konvertierung Partial → Final.
     // Plan §Sales §3: Nur Final Invoice zählt in Umsatz/Gewinn/Steuer.
+    // v0.3.2 — finalInvoiceLabel haelt die Display-Nummer NACH einer evtl.
+    // Finalisierung fest, damit die danach erzeugte Card-Fee-Expense dieselbe
+    // Nummer traegt wie die Bank-Zeile (No: 000009 statt veraltetem PINV-…).
+    let finalInvoiceLabel = '';
     const inv = get().getInvoice(invoiceId);
     if (inv) {
       const newPaid = inv.paidAmount + amount;
@@ -739,6 +699,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           newInvoiceNumber = getNextDocumentNumber(useSpecial ? 'SINV' : 'INV');
         }
       }
+      // v0.3.2 — Display-Nummer fuer die danach erzeugte Card-Fee-Beschreibung
+      // festhalten (nutzt die finale Nummer + Status, nicht den Pre-Payment-Stand).
+      finalInvoiceLabel = formatInvoiceDisplay({
+        invoiceNumber: newInvoiceNumber, status: newStatus, specialMark: useSpecial,
+      });
 
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, invoice_number = ?, special_mark = ?, updated_at = ? WHERE id = ?`,
         [newPaid, tip, newStatus, newInvoiceNumber, nextSpecial, now, invoiceId]);
@@ -754,6 +719,61 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (wasFullyPaid) {
         eventBus.emit('invoice.paid', 'invoice', invoiceId, { amount: newPaid, tip });
         eventBus.emit('payment.received', 'payment', paymentId, { invoiceId, amount });
+      }
+    }
+
+    // Plan §Sales §11 + §Expenses §8: Card-Fee wird automatisch als Expense gebucht.
+    // v0.3.2 — NACH der Finalisierung, damit expenseDescription die finale
+    // Invoice-Nummer traegt (finalInvoiceLabel). created_at bleibt `now` und
+    // matcht damit weiterhin den payments-Insert (bankingStore Card-Fee-Netting).
+    if (method === 'card' && amount > 0) {
+      const rateRow = query(
+        `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.card_fee_rate'`,
+        [branchId]
+      );
+      const feeRate = parseFloat((rateRow[0]?.value as string) || '2.2') || 0;
+      const fee = Math.round(amount * feeRate) / 100;
+      if (fee > 0) {
+        const expenseId = uuid();
+        const expenseNumber = getNextDocumentNumber('EXP');
+        // Beschreibung referenziert die Invoice-Nummer (No: 000009 / PINV-…) statt
+        // eines opaquen Payment-UUID-Fragments — Card-Fee ist so der Verkaufs-
+        // Rechnung zuzuordnen und matcht die Bank-Zeile.
+        const feeInvLabel = finalInvoiceLabel || invoiceId.slice(0, 8);
+        const expenseDescription = `Card fee · ${feeInvLabel} · ${feeRate}% of ${amount.toFixed(3)} BHD`;
+        const expenseDate = now.split('T')[0];
+        db.run(
+          `INSERT INTO expenses (id, branch_id, expense_number, category, amount, payment_method,
+            expense_date, description, related_module, related_entity_id, created_at, created_by)
+           VALUES (?, ?, ?, 'CardFees', ?, 'bank', ?, ?, 'invoice', ?, ?, ?)`,
+          [expenseId, branchId, expenseNumber, fee, expenseDate,
+           expenseDescription,
+           invoiceId, now, userId]
+        );
+        trackInsert('expenses', expenseId, { category: 'CardFees', amount: fee, auto: true, invoiceId });
+
+        // Ledger-Post fuer Auto-Card-Fee. Status 'PENDING' (paidAmount 0) — dieser
+        // Expense wird in einem zweiten Schritt manuell bezahlt (oder von einer
+        // Card-Reconciliation-Routine). Posting ergibt EXPENSES_OPERATING vs A/P.
+        const cardFeeExpense: Expense = {
+          id: expenseId,
+          expenseNumber,
+          branchId,
+          category: 'CardFees',
+          amount: fee,
+          paidAmount: 0,
+          paymentMethod: 'bank',
+          expenseDate,
+          description: expenseDescription,
+          relatedModule: 'invoice',
+          relatedEntityId: invoiceId,
+          status: 'PENDING',
+          createdAt: now,
+        };
+        safePost(`postExpense(${expenseId}) [card-fee]`, () => {
+          if (hasLedgerEntries('EXPENSE', expenseId)) return;
+          postExpense(cardFeeExpense);
+        });
       }
     }
 
