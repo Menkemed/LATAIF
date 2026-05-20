@@ -17,6 +17,7 @@
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
+import { trackChange } from '@/core/sync/sync-service';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
 import { canonicalLoanDirection } from '@/core/models/types';
 
@@ -146,6 +147,18 @@ function reserveEntryNos(branchId: string, count: number): number[] {
 
 // ── Low-Level: atomare Buchung ────────────────────────────────
 
+// v0.4.2 — Ledger-Entries fuer die LAN-Spiegelung trackn. Ohne das wuerde der
+// zweite Rechner Domain-Daten bekommen, aber ein leeres/falsches Ledger.
+// trackChange snapshottet die volle Zeile; der andere Rechner uebernimmt sie
+// via applyUpsert und postet NICHT neu → keine Doppelbuchung. trackChange ist
+// ein No-op wenn kein Sync konfiguriert ist.
+function trackLedgerEntries(entryIds: string[]): void {
+  for (const id of entryIds) {
+    try { trackChange('ledger_entries', id, 'insert', {}); }
+    catch (err) { console.warn('[ledger] trackChange(ledger_entries) failed:', err); }
+  }
+}
+
 export function postEntries(
   entries: LedgerEntryInput[],
   ctx: PostContext
@@ -226,6 +239,7 @@ export function postEntries(
     // Persist nach jeder erfolgreichen Buchung — sonst gehen Posts beim Browser-Reload verloren,
     // weil sql.js in-memory ist und localStorage nur via saveDatabase() aktualisiert wird.
     saveDatabase();
+    trackLedgerEntries(entryIds);
     return { transactionId, entryIds };
   } catch (err) {
     db.run('ROLLBACK');
@@ -600,6 +614,7 @@ export function reverseSource(
     }
     db.run('COMMIT');
     saveDatabase();
+    trackLedgerEntries(entryIds);
     return { transactionId, entryIds };
   } catch (err) {
     db.run('ROLLBACK');
@@ -725,6 +740,7 @@ export function reverseTransaction(transactionId: string, occurredAt: string): P
     }
     db.run('COMMIT');
     saveDatabase();
+    trackLedgerEntries(entryIds);
     return { transactionId: newTxId, entryIds };
   } catch (err) {
     db.run('ROLLBACK');

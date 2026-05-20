@@ -65,10 +65,26 @@ export function trackChange(tableName: string, recordId: string, action: 'insert
     const db = getDatabase();
     const now = new Date().toISOString();
     const branchId = (() => { try { const s = JSON.parse(localStorage.getItem('lataif_session') || '{}'); return s.branchId || ''; } catch { return ''; } })();
+
+    // v0.4.2 — Die DB-Spiegelung MUSS die vollstaendige Zeile replizieren.
+    // Das vom Caller uebergebene `data` ist oft nur eine Teil-Zusammenfassung
+    // (teils mit Feldnamen, die keine echten Spalten sind). Das auf dem anderen
+    // Rechner via applyUpsert anzuwenden erzeugt kaputte/unvollstaendige Zeilen
+    // oder einen SQL-Fehler → der Change geht verloren. Bei insert/update lesen
+    // wir daher die echte Zeile frisch aus der DB; bei delete bleibt es leer
+    // (applyUpsert nutzt dort nur die record_id).
+    let syncData: Record<string, unknown> = data;
+    if (action === 'insert' || action === 'update') {
+      try {
+        const rows = query(`SELECT * FROM ${tableName} WHERE id = ?`, [recordId]);
+        if (rows.length > 0) syncData = rows[0];
+      } catch { /* Tabelle ohne id-Spalte → Fallback auf Caller-data */ }
+    }
+
     db.run(
       `INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at)
        VALUES (?, ?, ?, ?, ?, 0, ?)`,
-      [tableName, recordId, branchId, action, JSON.stringify(data), now]
+      [tableName, recordId, branchId, action, JSON.stringify(syncData), now]
     );
     saveDatabase();
   } catch (err) {
