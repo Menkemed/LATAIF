@@ -514,7 +514,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         estimated_cost, internal_cost, charge_to_customer,
         status, received_at, estimated_ready, voucher_code,
         notes, images, repair_scope, staff_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, repairNumber, effectiveCustomerId, data.productId || null, data.lotId || null,
        data.itemCategoryId || null, JSON.stringify(data.itemAttributes || {}), data.taxScheme || 'VAT_10',
        data.itemBrand || null, data.itemModel || null, data.itemReference || null,
@@ -523,7 +523,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
        data.repairType || 'internal', data.externalVendor || null, data.workshopSupplierId || null,
        data.estimatedCost || null, data.internalCost || 0, effectiveCharge,
        now, data.estimatedReady || null, voucherCode,
-       data.notes || null, scope, data.staffId || null, now, now, userId]
+       data.notes || null, JSON.stringify(data.images || []), scope, data.staffId || null, now, now, userId]
     );
 
     // If linked to a product, update its status
@@ -595,6 +595,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     }
     if (data.itemAttributes !== undefined) {
       fields.push('item_attributes = ?'); values.push(JSON.stringify(data.itemAttributes));
+    }
+    if (data.images !== undefined) {
+      fields.push('images = ?'); values.push(JSON.stringify(data.images || []));
     }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);

@@ -29,6 +29,7 @@ import type { Repair, RepairStatus, RepairLine } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { MaterialsCard } from '@/components/work-orders/MaterialsCard';
 import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
+import { ImageUpload } from '@/components/ui/ImageUpload';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -386,6 +387,7 @@ export function RepairDetail() {
       itemDescription: form.itemDescription,
       issueDescription: form.issueDescription,
       taxScheme: form.taxScheme,
+      images: form.images,
     });
     setEditing(false);
   }
@@ -959,6 +961,35 @@ export function RepairDetail() {
                     style={{ width: '100%', background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }} />
                 ) : (
                   <p style={{ fontSize: 13, color: '#0F0F10', lineHeight: 1.6 }}>{repair.issueDescription || '\u2014'}</p>
+                )}
+              </div>
+
+              {/* Item-Fotos \u2014 Zustand bei Annahme */}
+              <div style={{ marginTop: 16 }}>
+                <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Item Photos</span>
+                {editing ? (
+                  <ImageUpload
+                    images={form.images || []}
+                    onChange={imgs => setForm({ ...form, images: imgs })}
+                    maxImages={6}
+                  />
+                ) : (repair.images && repair.images.length > 0) ? (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {repair.images.map((src, i) => (
+                      <img
+                        key={i}
+                        src={src}
+                        alt={`Item photo ${i + 1}`}
+                        onClick={() => window.open(src, '_blank')}
+                        style={{
+                          width: 96, height: 96, objectFit: 'cover', borderRadius: 8,
+                          border: '1px solid #E5E9EE', cursor: 'pointer',
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 13, color: '#9CA3AF' }}>Keine Fotos erfasst.</p>
                 )}
               </div>
 

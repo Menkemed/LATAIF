@@ -5,6 +5,7 @@ import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { ImageUpload } from '@/components/ui/ImageUpload';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useRepairStore } from '@/stores/repairStore';
@@ -833,6 +834,19 @@ export function RepairList() {
               onChange={e => setForm({ ...form, issueDescription: e.target.value })}
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
               onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D9DE')}
+            />
+          </div>
+
+          {/* Item-Fotos — Zustand bei Annahme dokumentieren */}
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>ITEM PHOTOS</span>
+            <p style={{ fontSize: 11, color: '#6B7280', marginBottom: 10 }}>
+              Foto(s) des Items bei Annahme — dokumentiert den Zustand fuer Kunde + Werkstatt.
+            </p>
+            <ImageUpload
+              images={form.images || []}
+              onChange={imgs => setForm({ ...form, images: imgs })}
+              maxImages={6}
             />
           </div>
 
