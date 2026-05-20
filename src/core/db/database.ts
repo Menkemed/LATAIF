@@ -1513,6 +1513,21 @@ function runMigrations(database: Database): void {
     `ALTER TABLE order_lines ADD COLUMN invoice_id TEXT REFERENCES invoices(id) ON DELETE SET NULL`,
     `CREATE INDEX IF NOT EXISTS idx_order_lines_status ON order_lines(status)`,
     `CREATE INDEX IF NOT EXISTS idx_order_lines_invoice ON order_lines(invoice_id)`,
+
+    // v0.4.0 — Mobile-Capture Vorfilter: Purchase-Inbox. Die /mobile-Seite legt
+    // im Modus "Purchase" nur ein Foto in diese Inbox (kein Produkt, keine
+    // Purchase, kein Ledger). Am Desktop oeffnet ein Klick auf das Inbox-Foto
+    // die New-Purchase-Seite mit dem Foto. status: pending | done | dismissed.
+    `CREATE TABLE IF NOT EXISTS purchase_inbox (
+      id         TEXT PRIMARY KEY,
+      branch_id  TEXT NOT NULL,
+      images     TEXT NOT NULL DEFAULT '[]',
+      note       TEXT,
+      status     TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_purchase_inbox_status ON purchase_inbox(status)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

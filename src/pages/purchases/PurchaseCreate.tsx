@@ -23,6 +23,7 @@ import { useProductStore } from '@/stores/productStore';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import type { Product, Supplier } from '@/core/models/types';
 import { getProductSpecs } from '@/core/utils/product-format';
+import { query } from '@/core/db/helpers';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -49,11 +50,50 @@ export function PurchaseCreate() {
   const navigate = useNavigate();
   const goBack = useGoBack('/purchases');
   const [searchParams] = useSearchParams();
-  const { createPurchase } = usePurchaseStore();
+  const { createPurchase, markPurchaseInboxDone } = usePurchaseStore();
   const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
 
   useEffect(() => { loadSuppliers(); loadProducts(); loadCategories(); }, [loadSuppliers, loadProducts, loadCategories]);
+
+  // v0.4.0 — Mit ?inbox=<id> aufgerufen (Klick auf ein Purchase-Inbox-Foto):
+  // das Mobile-Capture-Foto in die erste "New Item"-Zeile laden und den
+  // NewProductModal direkt oeffnen, damit der User AI-Identify nutzen kann.
+  const inboxId = searchParams.get('inbox');
+  const [inboxLoaded, setInboxLoaded] = useState(false);
+  useEffect(() => {
+    if (!inboxId || inboxLoaded || categories.length === 0) return;
+    try {
+      const rows = query('SELECT images, note FROM purchase_inbox WHERE id = ?', [inboxId]);
+      if (rows.length > 0) {
+        let imgs: string[] = [];
+        try {
+          const parsed = JSON.parse((rows[0].images as string) || '[]');
+          if (Array.isArray(parsed)) imgs = parsed as string[];
+        } catch { /* kein Bild */ }
+        if (imgs.length > 0) {
+          setLines(prev => {
+            const next = [...prev];
+            next[0] = {
+              ...next[0],
+              mode: 'new',
+              newProduct: {
+                categoryId: next[0].categoryId || categories[0]?.id || '',
+                brand: '', name: '', sku: '', condition: '',
+                taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD',
+                attributes: {}, images: imgs,
+              },
+            };
+            return next;
+          });
+          setNewItemModalIdx(0);
+        }
+        const note = rows[0].note as string | null;
+        if (note) setNotes(prev => prev || note);
+      }
+    } catch { /* Inbox-Eintrag nicht gefunden → normale New Purchase */ }
+    setInboxLoaded(true);
+  }, [inboxId, inboxLoaded, categories]);
 
   const [supplierId, setSupplierId] = useState(searchParams.get('supplier') || '');
   const [purchaseDate, setPurchaseDate] = useState(new Date().toISOString().split('T')[0]);
@@ -244,6 +284,11 @@ export function PurchaseCreate() {
       lines: payload,
       initialPayment: paymentAmount > 0 ? { amount: paymentAmount, method: paymentMethod } : undefined,
     });
+
+    // v0.4.0 — Purchase aus einem Mobile-Inbox-Foto erstellt → Inbox-Item erledigt.
+    if (inboxId) {
+      try { markPurchaseInboxDone(inboxId); } catch { /* */ }
+    }
 
     if (continueEditing) {
       reset();

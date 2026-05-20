@@ -13,7 +13,7 @@ import { v4 as uuid } from 'uuid';
 import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
+import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
 import { syncProductQuantity } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
@@ -60,9 +60,21 @@ interface PurchaseInput {
   initialPayment?: { amount: number; method: 'cash' | 'bank' | 'benefit'; reference?: string };
 }
 
+// v0.4.0 — Mobile-Capture: ein Foto aus der /mobile-Seite, das noch zu einer
+// echten Purchase werden soll. Klick im Desktop oeffnet damit New Purchase.
+export interface PurchaseInboxItem {
+  id: string;
+  branchId: string;
+  images: string[];
+  note?: string;
+  status: string;
+  createdAt: string;
+}
+
 interface PurchaseStore {
   purchases: Purchase[];
   returns: PurchaseReturn[];
+  purchaseInbox: PurchaseInboxItem[];
   loading: boolean;
   loadPurchases: () => void;
   loadReturns: () => void;
@@ -84,6 +96,10 @@ interface PurchaseStore {
   completeReturn: (id: string) => void;
   cancelReturn: (id: string) => void;
   deleteReturn: (id: string) => void;
+  // v0.4.0 — Purchase-Inbox (Mobile-Capture)
+  loadPurchaseInbox: () => void;
+  markPurchaseInboxDone: (id: string) => void;
+  dismissPurchaseInbox: (id: string) => void;
 }
 
 function rowToPurchase(row: Record<string, unknown>): Purchase {
@@ -174,6 +190,22 @@ function rowToReturnLine(row: Record<string, unknown>): PurchaseReturnLine {
   };
 }
 
+function rowToInboxItem(row: Record<string, unknown>): PurchaseInboxItem {
+  let images: string[] = [];
+  try {
+    const parsed = JSON.parse((row.images as string) || '[]');
+    if (Array.isArray(parsed)) images = parsed as string[];
+  } catch { /* leeres Array lassen */ }
+  return {
+    id: row.id as string,
+    branchId: row.branch_id as string,
+    images,
+    note: (row.note as string) || undefined,
+    status: (row.status as string) || 'pending',
+    createdAt: row.created_at as string,
+  };
+}
+
 function computeStatus(total: number, paid: number, cancelled = false): PurchaseStatus {
   if (cancelled) return 'CANCELLED';
   if (total <= 0) return 'DRAFT';
@@ -185,6 +217,7 @@ function computeStatus(total: number, paid: number, cancelled = false): Purchase
 export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
   purchases: [],
   returns: [],
+  purchaseInbox: [],
   loading: false,
 
   loadPurchases: () => {
@@ -201,6 +234,34 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       });
       set({ purchases: list, loading: false });
     } catch { set({ purchases: [], loading: false }); }
+  },
+
+  // ── v0.4.0 — Purchase-Inbox (Mobile-Capture) ──
+  loadPurchaseInbox: () => {
+    try {
+      const branchId = currentBranchId();
+      const rows = query(
+        `SELECT * FROM purchase_inbox WHERE branch_id = ? AND status = 'pending' ORDER BY created_at DESC`,
+        [branchId]
+      );
+      set({ purchaseInbox: rows.map(rowToInboxItem) });
+    } catch { set({ purchaseInbox: [] }); }
+  },
+
+  markPurchaseInboxDone: (id) => {
+    const db = getDatabase();
+    db.run(`UPDATE purchase_inbox SET status = 'done' WHERE id = ?`, [id]);
+    saveDatabase();
+    trackUpdate('purchase_inbox', id, { status: 'done' });
+    get().loadPurchaseInbox();
+  },
+
+  dismissPurchaseInbox: (id) => {
+    const db = getDatabase();
+    db.run(`UPDATE purchase_inbox SET status = 'dismissed' WHERE id = ?`, [id]);
+    saveDatabase();
+    trackUpdate('purchase_inbox', id, { status: 'dismissed' });
+    get().loadPurchaseInbox();
   },
 
   loadReturns: () => {

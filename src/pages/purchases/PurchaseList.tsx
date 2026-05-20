@@ -1,7 +1,7 @@
 // Plan §Purchases — List with status filter + New Purchase button (navigiert zu Full-Page).
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ShoppingCart } from 'lucide-react';
+import { ShoppingCart, Inbox, X } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -21,7 +21,7 @@ type StatusFilter = '' | PurchaseStatus;
 
 export function PurchaseList() {
   const navigate = useNavigate();
-  const { purchases, loadPurchases } = usePurchaseStore();
+  const { purchases, loadPurchases, purchaseInbox, loadPurchaseInbox, dismissPurchaseInbox } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { loadEmployees } = useEmployeeStore();
 
@@ -39,7 +39,8 @@ export function PurchaseList() {
     }
   }, [filter, searchParams, setSearchParams]);
 
-  useEffect(() => { loadPurchases(); loadSuppliers(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadEmployees]);
+  useEffect(() => { loadPurchases(); loadSuppliers(); loadEmployees(); loadPurchaseInbox(); },
+    [loadPurchases, loadSuppliers, loadEmployees, loadPurchaseInbox]);
 
   const filtered = useMemo(() => {
     let r = purchases;
@@ -84,6 +85,47 @@ export function PurchaseList() {
         </div>
       }
     >
+      {/* v0.4.0 — Purchase-Inbox: vom Handy aufgenommene Fotos, die noch zu
+          einer echten Purchase werden sollen. Klick aufs Bild → New Purchase. */}
+      {purchaseInbox.length > 0 && (
+        <Card style={{ marginBottom: 16, background: 'rgba(198,163,109,0.06)', border: '1px solid rgba(198,163,109,0.35)' }}>
+          <div className="flex items-center gap-2" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
+            <Inbox size={15} style={{ color: '#9A7B43' }} />
+            <span className="text-overline" style={{ color: '#9A7B43' }}>
+              Purchase Inbox · {purchaseInbox.length} photo{purchaseInbox.length === 1 ? '' : 's'} from mobile
+            </span>
+            <span style={{ fontSize: 12, color: '#9CA3AF' }}>— tap a photo to create the purchase</span>
+          </div>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+            {purchaseInbox.map(item => (
+              <div key={item.id} style={{ position: 'relative' }}>
+                <div
+                  onClick={() => navigate(`/purchases/new?inbox=${item.id}`)}
+                  title={item.note || 'Create purchase from this photo'}
+                  className="cursor-pointer"
+                  style={{
+                    width: 92, height: 92, borderRadius: 8, overflow: 'hidden',
+                    border: '1px solid #E5E9EE', background: '#F2F4F7',
+                  }}>
+                  {item.images[0]
+                    ? <img src={item.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 24 }}>🛒</div>}
+                </div>
+                <button
+                  onClick={() => dismissPurchaseInbox(item.id)}
+                  title="Dismiss"
+                  style={{
+                    position: 'absolute', top: -7, right: -7, width: 20, height: 20, borderRadius: 999,
+                    background: '#0F0F10', color: '#FFFFFF', border: '2px solid #FFFFFF',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0,
+                  }}>
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
       {filtered.length === 0 ? (
         <div style={{ padding: '60px 0', textAlign: 'center' }}>
           <ShoppingCart size={36} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 12px' }} />

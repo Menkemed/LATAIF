@@ -186,11 +186,12 @@ async function pullChanges(): Promise<number> {
       // order_payments / customer_messages: per-entity store (loadPayments(orderId)/
       // loadMessages(customerId)). Beim Sync-Pull kennen wir die Entity-ID nicht —
       // betroffene Detail-Pages reloaden beim Nav-Switch. Bewusst aus der Map raus.
-      { tables: ['purchases', 'purchase_lines', 'purchase_payments', 'purchase_returns', 'purchase_return_lines'],
+      { tables: ['purchases', 'purchase_lines', 'purchase_payments', 'purchase_returns', 'purchase_return_lines', 'purchase_inbox'],
         reload: async () => {
           const m = await import('@/stores/purchaseStore');
           m.usePurchaseStore.getState().loadPurchases();
           m.usePurchaseStore.getState().loadReturns();
+          m.usePurchaseStore.getState().loadPurchaseInbox();
         } },
       { tables: ['agents', 'agent_transfers', 'agent_settlement_payments'],
         reload: async () => {
