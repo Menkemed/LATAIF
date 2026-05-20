@@ -537,6 +537,9 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       const repairData = {
         id: repairId, branch_id: branchId,
         repair_number: 'REP-MOB-' + Date.now(),
+        // v0.4.1 — Pickup-Voucher-Code generieren (8 Hex, wie repairStore.generateVoucherCode).
+        // Ohne den hat das vom Handy angelegte Repair keinen Abhol-Code.
+        voucher_code: uuid().replace(/-/g, '').substring(0, 8).toUpperCase(),
         customer_id: customerId,
         item_brand: $('rBrand').value.trim() || null,
         item_model: $('rModel').value.trim() || null,
@@ -592,5 +595,50 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   init();
 })();
 </script>
+</body>
+</html>"##;
+
+// v0.4.1 — Landing-Seite fuer "/" (NICHT die Mobile-Capture). Verhindert, dass
+// am Counter beim Oeffnen der nackten Sync-URL die Mobile-Version erscheint.
+// Die volle Software ist die installierte LATAIF-Desktop-App; dieser Server
+// ist nur der LAN-Sync-Endpunkt. Die Mobile-Capture liegt ausschliesslich
+// unter /mobile (mit Direkt-Link von hier fuers Handy).
+pub const ROOT_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0B0B0D" />
+<title>LATAIF Sync Server</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #08080A; color: #EAEAEA; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .wrap { max-width: 420px; width: 100%; text-align: center; }
+  h1 { font-size: 24px; letter-spacing: 0.25em; color: #C6A36D; font-weight: 300; }
+  .sub { font-size: 11px; color: #6B6B73; letter-spacing: 0.12em; margin-top: 6px; text-transform: uppercase; }
+  .card { background: #121216; border: 1px solid #1A1A1F; border-radius: 10px; padding: 24px; margin-top: 28px; }
+  .lead { font-size: 14px; color: #A1A1AA; line-height: 1.6; }
+  .btn { display: block; margin-top: 18px; background: #C6A36D; color: #0B0B0D; text-decoration: none;
+    border-radius: 6px; padding: 14px; font-size: 15px; font-weight: 600; letter-spacing: 0.03em; }
+  .note { font-size: 12px; color: #6B6B73; line-height: 1.6; margin-top: 18px;
+    padding-top: 16px; border-top: 1px solid #1A1A1F; }
+  .note strong { color: #A1A1AA; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>LATAIF</h1>
+  <p class="sub">Local Sync Server</p>
+  <div class="card">
+    <p class="lead">This address is the local <strong style="color:#A1A1AA;">sync server</strong> — not the application.</p>
+    <a class="btn" href="/mobile">📱 Open Mobile Capture</a>
+    <p class="note">
+      💻 At the counter, work in the installed <strong>LATAIF desktop app</strong> —
+      that is the full software. This page is only for phones capturing photos.
+    </p>
+  </div>
+</div>
 </body>
 </html>"##;

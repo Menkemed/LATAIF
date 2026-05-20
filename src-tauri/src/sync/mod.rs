@@ -4,6 +4,13 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 async fn serve_mobile_page() -> Html<&'static str> {
     Html(mobile_page::MOBILE_HTML)
 }
+
+// v0.4.1 — "/" zeigt eine neutrale Landing-Seite, NICHT die Mobile-Capture.
+// So landet niemand am Counter versehentlich in der Mobile-Version; die
+// Capture-Seite ist ausschliesslich unter /mobile erreichbar.
+async fn serve_root() -> Html<&'static str> {
+    Html(mobile_page::ROOT_HTML)
+}
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
@@ -83,7 +90,7 @@ impl SyncServer {
         let app = Router::new()
             .nest("/api", routes::api_routes())
             .route("/mobile", axum::routing::get(serve_mobile_page))
-            .route("/", axum::routing::get(serve_mobile_page))
+            .route("/", axum::routing::get(serve_root))
             .layer(body_limit)
             .layer(cors)
             .with_state(state);

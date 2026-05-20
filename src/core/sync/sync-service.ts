@@ -153,7 +153,10 @@ async function pullChanges(): Promise<number> {
         db.run(`DELETE FROM ${change.table_name} WHERE id = ?`, [change.record_id]);
       }
     } catch (err) {
-      console.warn('[Sync] Failed to apply change:', change, err);
+      // v0.4.1 — NICHT das ganze change-Objekt loggen: change.data kann ein
+      // base64-Foto (~1 MB) enthalten — das wuerde die Konsole/den Speicher
+      // bei jedem fehlgeschlagenen Apply zumuellen. Nur Tabelle + Record-ID.
+      console.warn('[Sync] Failed to apply change:', change.table_name, change.record_id, err);
     }
   }
 
@@ -252,7 +255,12 @@ async function pullChanges(): Promise<number> {
 }
 
 function applyUpsert(db: any, table: string, id: string, data: Record<string, unknown>) {
-  const keys = Object.keys(data);
+  // v0.4.1 — `id` aus den Spalten herausfiltern. Die /mobile-Capture-Seite
+  // schickt `id` MIT im data-Objekt. Ohne diesen Filter entsteht unten
+  // `INSERT INTO t (id, id, …)` (duplizierte Spalte) → der ganze Change
+  // scheitert und das vom Handy hochgeladene Repair/Produkt/Customer taucht
+  // nie auf. Die separate `id`-Variable bleibt der maßgebliche Schlüssel.
+  const keys = Object.keys(data).filter(k => k !== 'id');
   if (keys.length === 0) return;
 
   // Try update first
