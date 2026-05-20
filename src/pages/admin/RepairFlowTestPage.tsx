@@ -1030,6 +1030,124 @@ async function scenarioRepairDiamondMaterial(ctx: TestContext, result: ScenarioR
   result.status = 'pass';
 }
 
+// Plan v0.3.0 — Scenario 15: Mixed Order (Produkt + Goldsmith-Labor + Diamond +
+// Cost-only-Line) + per-Line Fulfillment-Status + partielles Invoicing.
+async function scenarioMixedOrderPartialInvoicing(ctx: TestContext, result: ScenarioResult) {
+  const db = getDatabase();
+  const { useOrderStore } = await import('@/stores/orderStore');
+  const orderStore = useOrderStore.getState();
+
+  const apBeforeA = getApFor(ctx.supplierA);
+  const apBeforeB = getApFor(ctx.supplierB);
+
+  // Order anlegen OHNE explizites type (testet Derivation), depositAmount=100
+  const order = orderStore.createOrder({
+    customerId: ctx.customerId,
+    depositAmount: 100,
+    paymentMethod: 'cash',
+    requestedBrand: 'Mixed Order',
+    requestedModel: PREFIX + 'Mixed test',
+    notes: PREFIX + 'mixed-order-test',
+    lines: [
+      // Produkt-Line (kein materialKind → 'product')
+      { description: PREFIX + 'Rolex Datejust', quantity: 1, unitPrice: 300, taxScheme: 'VAT_10', vatRate: 10, isCustomerFacing: true },
+      // Goldsmith-Labor (materialKind='labor', Supplier A)
+      { description: 'Goldsmith Labor — A', quantity: 1, unitPrice: 80, taxScheme: 'VAT_10', vatRate: 10,
+        supplierId: ctx.supplierA, costAmount: 50, isCustomerFacing: true, materialKind: 'labor' },
+      // Diamond (materialKind='diamond', Supplier B)
+      { description: 'Diamond 0.5ct — B', quantity: 1, unitPrice: 200, taxScheme: 'VAT_10', vatRate: 10,
+        supplierId: ctx.supplierB, costAmount: 120, isCustomerFacing: true, materialKind: 'diamond' },
+      // Cost-only-Line (is_customer_facing=false, KEIN supplier → keine Expense)
+      { description: 'Internal handling cost', quantity: 1, unitPrice: 0, costAmount: 30, isCustomerFacing: false },
+    ],
+  });
+
+  // (3) type derived = 'mixed'
+  const oRow = query(`SELECT type, agreed_price FROM orders WHERE id = ?`, [order.id]);
+  assert(oRow[0].type === 'mixed', `orders.type='mixed' erwartet, got '${oRow[0].type}'`);
+  ok(result.details, `orders.type='mixed' (derived ohne explizites type)`);
+
+  // (4) 4 order_lines, alle PENDING, invoice_id NULL, agreedPrice=580
+  const lineRows = query(`SELECT id, position, status, invoice_id, material_kind, is_customer_facing FROM order_lines WHERE order_id = ? ORDER BY position`, [order.id]);
+  assert(lineRows.length === 4, `4 order_lines erwartet, got ${lineRows.length}`);
+  assert(lineRows.every(r => r.status === 'PENDING'), `alle Lines PENDING erwartet`);
+  assert(lineRows.every(r => !r.invoice_id), `alle Lines invoice_id NULL erwartet`);
+  const agreed = oRow[0].agreed_price as number;
+  assert(Math.abs(agreed - 580) < 0.001, `agreedPrice=580 erwartet (300+80+200), got ${agreed}`);
+  ok(result.details, `4 Lines PENDING, agreedPrice=580 (cost-only exkludiert)`);
+
+  const productLineId = lineRows[0].id as string;
+  const laborLineId = lineRows[1].id as string;
+  const diamondLineId = lineRows[2].id as string;
+  const costOnlyLineId = lineRows[3].id as string;
+
+  // (5) Produkt-Line → ARRIVED
+  orderStore.updateOrderLineStatus(productLineId, 'ARRIVED');
+  let billable = orderStore.getBillableLines(order.id);
+  assert(billable.length === 1, `1 billable Line erwartet, got ${billable.length}`);
+  const oStatus1 = (query(`SELECT status FROM orders WHERE id = ?`, [order.id])[0].status as string);
+  assert(oStatus1 === 'pending', `Order-Status bleibt 'pending' (nicht alle ARRIVED), got '${oStatus1}'`);
+  ok(result.details, `Produkt-Line ARRIVED → 1 billable, Order bleibt pending`);
+
+  // (6) Erster Convert (partial) — nur Produkt-Line. Test der partial-
+  // invoicing Verknuepfungs-Logik (markOrderLinesInvoiced + getBillableLines).
+  // Synthetic Invoice-ID — die echte createDirectInvoice-Integration ist
+  // separat getestet; hier zaehlt nur das Line→Invoice-Linking.
+  const invoice1Id = PREFIX + 'INV1-' + uuid().slice(0, 8);
+  orderStore.markOrderLinesInvoiced(billable.map(l => l.id), invoice1Id);
+  const inv1Lines = query(`SELECT COUNT(*) AS c FROM order_lines WHERE invoice_id = ?`, [invoice1Id]);
+  assert((inv1Lines[0].c as number) === 1, `Invoice #1 hat 1 verlinkte Line`);
+  billable = orderStore.getBillableLines(order.id);
+  assert(billable.length === 0, `nach Convert #1: 0 billable (Produkt schon invoiced)`);
+  ok(result.details, `Erster Convert: Invoice #1 verlinkt 1 Line, danach 0 billable`);
+  void productLineId;
+
+  // (7) Diamond-Line → ARRIVED → Diamond-Expense gebucht
+  orderStore.updateOrderLineStatus(diamondLineId, 'ARRIVED');
+  const apMidB = getApFor(ctx.supplierB);
+  assert(Math.abs((apMidB - apBeforeB) - 120) < 0.001, `Diamond-A/P +120 erwartet, got +${(apMidB - apBeforeB).toFixed(3)}`);
+  ok(result.details, `Diamond-Line ARRIVED → A/P SupplierB +120`);
+
+  // (8) Labor + Cost-only → ARRIVED
+  orderStore.updateOrderLineStatus(laborLineId, 'ARRIVED');
+  orderStore.updateOrderLineStatus(costOnlyLineId, 'ARRIVED');
+  const apAfterA = getApFor(ctx.supplierA);
+  assert(Math.abs((apAfterA - apBeforeA) - 50) < 0.001, `Labor-A/P +50 erwartet, got +${(apAfterA - apBeforeA).toFixed(3)}`);
+  const oStatus2 = (query(`SELECT status FROM orders WHERE id = ?`, [order.id])[0].status as string);
+  assert(oStatus2 === 'arrived', `Order-Status roll-up → 'arrived' erwartet, got '${oStatus2}'`);
+  ok(result.details, `Labor ARRIVED → A/P SupplierA +50; Order roll-up → 'arrived'`);
+
+  // (9) Zweiter Convert — Labor + Diamond billable (cost-only NIE billable)
+  billable = orderStore.getBillableLines(order.id);
+  assert(billable.length === 2, `2 billable erwartet (Labor+Diamond, cost-only exkludiert), got ${billable.length}`);
+  const invoice2Id = PREFIX + 'INV2-' + uuid().slice(0, 8);
+  orderStore.markOrderLinesInvoiced(billable.map(l => l.id), invoice2Id);
+  const inv2Lines = query(`SELECT COUNT(*) AS c FROM order_lines WHERE invoice_id = ?`, [invoice2Id]);
+  assert((inv2Lines[0].c as number) === 2, `Invoice #2 hat 2 verlinkte Lines`);
+  const distinctInv = query(`SELECT COUNT(DISTINCT invoice_id) AS c FROM order_lines WHERE order_id = ? AND invoice_id IS NOT NULL`, [order.id]);
+  assert((distinctInv[0].c as number) === 2, `Order hat 2 distinct Invoices`);
+  ok(result.details, `Zweiter Convert: Invoice #2 verlinkt 2 Lines — Order hat 2 Invoices`);
+
+  // (10) Alle Lines → DELIVERED → Order roll-up 'completed'
+  for (const lid of [productLineId, laborLineId, diamondLineId, costOnlyLineId]) {
+    orderStore.updateOrderLineStatus(lid, 'DELIVERED');
+  }
+  const oStatus3 = (query(`SELECT status FROM orders WHERE id = ?`, [order.id])[0].status as string);
+  assert(oStatus3 === 'completed', `Order roll-up → 'completed' erwartet, got '${oStatus3}'`);
+  ok(result.details, `Alle Lines DELIVERED → Order 'completed'`);
+
+  // Cleanup — synthetische Invoice-IDs hatten keine echten invoices/payments.
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM expenses WHERE related_module='order' AND related_entity_id=?)`, [order.id]);
+  db.run(`DELETE FROM expense_payments WHERE expense_id IN (SELECT id FROM expenses WHERE related_module='order' AND related_entity_id=?)`, [order.id]);
+  db.run(`DELETE FROM expenses WHERE related_module='order' AND related_entity_id=?`, [order.id]);
+  db.run(`DELETE FROM order_lines WHERE order_id = ?`, [order.id]);
+  db.run(`DELETE FROM order_payments WHERE order_id = ?`, [order.id]);
+  db.run(`DELETE FROM orders WHERE id = ?`, [order.id]);
+  saveDatabase();
+
+  result.status = 'pass';
+}
+
 // Helper: Sum-CREDIT-Ledger fuer einen Supplier (gleicher Pattern wie scenario 9)
 function getApFor(supplierId: string): number {
   const rows = query(
@@ -1057,6 +1175,7 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '12. Cross-Karat-Settle (v0.1.47 — purity math)', run: scenarioCrossKaratSettle },
   { name: '13. Custom-Order Multi-Material (v0.2.1 — Goldsmith+Diamond+Extra-Gold)', run: scenarioCustomOrderMultiMaterial },
   { name: '14. Repair Diamond-Material (v0.2.1 — A/P fuer Diamond-Supplier)', run: scenarioRepairDiamondMaterial },
+  { name: '15. Mixed Order + Partielles Invoicing (v0.3.0)', run: scenarioMixedOrderPartialInvoicing },
 ];
 
 export function RepairFlowTestPage() {
@@ -1144,7 +1263,7 @@ export function RepairFlowTestPage() {
         </h1>
         <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 24 }}>
           Erzeugt Test-Daten mit Prefix <code>{PREFIX}</code> in deiner LIVE-DB,
-          spielt 14 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
+          spielt 15 Szenarien durch, raeumt am Ende auf. Bei Fail bleiben die
           Daten zur Inspektion stehen.
         </p>
 

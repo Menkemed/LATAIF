@@ -45,7 +45,8 @@ export function OrderDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/orders');
-  const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines } = useOrderStore();
+  const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
+    getBillableLines, markOrderLinesInvoiced, updateOrderLineStatus } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, createProduct } = useProductStore();
@@ -68,6 +69,8 @@ export function OrderDetail() {
   const [showHistory, setShowHistory] = useState(false);
   // 2026-05-16 — Pending action waiting for Number-Type selection.
   const [pendingNumberAction, setPendingNumberAction] = useState<((special: boolean) => Promise<void>) | null>(null);
+  // v0.3.0 — bumpt nach Line-Status-Aenderung damit das Order-Items-Grid neu lädt
+  const [lineRefresh, setLineRefresh] = useState(0);
   const { paymentsByOrder, loadPayments, addPayment, deletePayment } = useOrderPaymentStore();
   const { createDirectInvoice, invoices, loadInvoices } = useInvoiceStore();
   const perm = usePermission();
@@ -77,6 +80,11 @@ export function OrderDetail() {
 
   const payments = useMemo(() => (id ? paymentsByOrder[id] || [] : []), [id, paymentsByOrder]);
   const totalPaid = useMemo(() => payments.reduce((s, p) => s + p.amount, 0), [payments]);
+  // v0.3.0 — Order-Lines fuer das Fulfillment-Grid (re-lädt bei lineRefresh)
+  const orderLineList = useMemo(
+    () => (id ? getOrderLines(id) : []),
+    [id, getOrderLines, lineRefresh, orders] // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const order = useMemo(() => orders.find(o => o.id === id), [orders, id]);
   const customer = useMemo(
@@ -235,19 +243,25 @@ export function OrderDetail() {
 
   async function handleCreateFinalInvoice() {
     if (!id || !order) return;
-    const gross = order.agreedPrice || totalPaid;
-    if (gross <= 0) { alert('Agreed price required.'); return; }
 
-    // Plan §Order §Convert: Wenn alle Order-Lines einen persistierten Tax-Scheme-Snapshot
-    // haben (Standard für alle Orders ab v0.1.15), übernehmen wir den direkt — kein Modal,
-    // keine Doppelbesteuerung. Das in OrderCreate gewählte Steuerschema ist verbindlich.
-    const orderLines = getOrderLines(id);
-    const allPersisted = orderLines.length > 0 && orderLines.every(l => !!l.taxScheme);
-    if (allPersisted) {
-      // Number-Type-Dialog vor Convert.
-      setPendingNumberAction(() => async (special: boolean) => convertWithPersistedSchemes(orderLines, special));
+    // v0.3.0 — Partielles Invoicing: nur Lines die fertig (ARRIVED/DELIVERED)
+    // + customer-facing + noch nicht invoiced sind werden gebillt.
+    const billable = getBillableLines(id);
+    if (billable.length === 0) {
+      alert('Nichts fertig zum Invoicen. Markiere Order-Items als „Arrived" bevor du eine Invoice erstellst.');
       return;
     }
+
+    // Plan §Order §Convert: Wenn alle billable Lines einen persistierten Tax-Scheme-
+    // Snapshot haben (Standard ab v0.1.15), uebernehmen wir den direkt — kein Modal.
+    const allPersisted = billable.every(l => !!l.taxScheme);
+    if (allPersisted) {
+      // Number-Type-Dialog vor Convert.
+      setPendingNumberAction(() => async (special: boolean) => convertWithPersistedSchemes(billable, special));
+      return;
+    }
+    const gross = order.agreedPrice || totalPaid;
+    if (gross <= 0) { alert('Agreed price required.'); return; }
 
     // Legacy-Order ohne Scheme-Snapshot (vor v0.1.15 angelegt) → Modal als Fallback.
     if (!linkedProduct) {
@@ -281,12 +295,23 @@ export function OrderDetail() {
   async function convertWithPersistedSchemes(orderLines: OrderLine[], specialMark: boolean = false) {
     if (!id || !order) return;
 
+    // v0.3.0 — „erster Convert" = noch keine Line der Order ist invoiced.
+    // Nur dann wird die Anzahlung (order_payments) auf die Invoice ge-carried.
+    const isFirstConvert = !getOrderLines(id).some(l => l.invoiceId);
+
+    // v0.3.0 — defensiv: nur customer-facing Lines invoicen (cost-only NIE).
+    const billableLines = orderLines.filter(l => l.isCustomerFacing !== false);
+    if (billableLines.length === 0) {
+      alert('Keine customer-facing Lines zum Invoicen.');
+      return;
+    }
+
     const invoiceLineInputs: Array<{
       productId: string; quantity: number; unitPrice: number; purchasePrice: number;
       taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number;
     }> = [];
 
-    for (const ol of orderLines) {
+    for (const ol of billableLines) {
       let prod = ol.productId ? products.find(p => p.id === ol.productId) : undefined;
       // Für freitext-Lines ohne Produkt eines auto-erzeugen — analog zum bisherigen
       // Single-Line-Auto-Create, nur jetzt pro Line.
@@ -326,15 +351,21 @@ export function OrderDetail() {
     const invoice = createDirectInvoice(
       order.customerId,
       invoiceLineInputs,
-      `Final invoice for order ${order.orderNumber}`,
+      `Invoice for order ${order.orderNumber}`,
       undefined,
       undefined,
       undefined,
       specialMark,
     );
+    // v0.3.0 — invoicte Lines mit der Invoice verknuepfen (partial invoicing).
+    markOrderLinesInvoiced(billableLines.map(l => l.id), invoice.id);
     updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
-    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber);
+    // v0.3.0 — Anzahlung nur beim ERSTEN Convert auf die Invoice carry-over'n.
+    // Folge-Invoices (weitere Fulfillment-Batches) starten unbezahlt.
+    if (isFirstConvert) {
+      await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber);
+    }
     navigate(`/invoices/${invoice.id}`);
   }
 
@@ -740,6 +771,117 @@ export function OrderDetail() {
             )}
           </Card>
         </div>
+
+        {/* v0.3.0 — Order Items Grid mit Per-Line Fulfillment-Status */}
+        {!editing && orderLineList.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <Card>
+              <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+                <span className="text-overline">ORDER ITEMS ({orderLineList.length})</span>
+                {(() => {
+                  const active = orderLineList.filter(l => l.status !== 'CANCELLED');
+                  const ready = active.filter(l => l.status === 'ARRIVED' || l.status === 'DELIVERED').length;
+                  return (
+                    <span style={{ fontSize: 11, color: '#6B7280' }}>
+                      {ready} / {active.length} ready
+                    </span>
+                  );
+                })()}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 2fr 0.5fr 0.9fr 1.4fr', gap: 10, fontSize: 12 }}>
+                <span className="text-overline">KIND</span>
+                <span className="text-overline">DESCRIPTION</span>
+                <span className="text-overline" style={{ textAlign: 'right' }}>TOTAL</span>
+                <span className="text-overline">INVOICE</span>
+                <span className="text-overline">FULFILLMENT</span>
+                {orderLineList.map(l => {
+                  const kindMeta: Record<string, { icon: string; label: string }> = {
+                    labor: { icon: '🔨', label: 'Labor' },
+                    diamond: { icon: '💎', label: 'Diamond' },
+                    stone: { icon: '🔮', label: 'Stone' },
+                    gold: { icon: '🥇', label: 'Gold' },
+                  };
+                  const km = l.materialKind ? kindMeta[l.materialKind] : { icon: '📦', label: 'Product' };
+                  const costOnly = l.isCustomerFacing === false;
+                  const cancelled = l.status === 'CANCELLED';
+                  const dim = costOnly || cancelled;
+                  const statusColors: Record<string, string> = {
+                    PENDING: '#6B7280', ARRIVED: '#D97706', DELIVERED: '#16A34A', CANCELLED: '#DC2626',
+                  };
+                  return (
+                    <div key={l.id} style={{ display: 'contents' }}>
+                      <span style={{ fontSize: 12, padding: '10px 0', borderTop: '1px solid #E5E9EE', opacity: dim ? 0.5 : 1 }}>
+                        {km.icon} {km.label}
+                      </span>
+                      <span style={{ fontSize: 13, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                     opacity: dim ? 0.5 : 1, textDecoration: cancelled ? 'line-through' : 'none' }}>
+                        {l.description || '—'}
+                        {costOnly && <span style={{ fontSize: 10, color: '#9CA3AF', marginLeft: 6 }}>(internal cost)</span>}
+                      </span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right',
+                                     padding: '10px 0', borderTop: '1px solid #E5E9EE', opacity: dim ? 0.5 : 1 }}>
+                        {costOnly ? '—' : <Bhd v={l.lineTotal || 0}/>}
+                      </span>
+                      <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                        {l.invoiceId
+                          ? <span style={{ color: '#3D7FFF', cursor: 'pointer', textDecoration: 'underline' }}
+                              onClick={() => navigate(`/invoices/${l.invoiceId}`)}>invoiced</span>
+                          : <span style={{ color: '#9CA3AF' }}>—</span>}
+                      </span>
+                      <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {cancelled ? (
+                          <span style={{ fontSize: 11, color: '#DC2626' }}>cancelled</span>
+                        ) : (
+                          (['PENDING', 'ARRIVED', 'DELIVERED'] as const).map(st => (
+                            <button
+                              key={st}
+                              type="button"
+                              onClick={() => {
+                                if (l.status === st) return;
+                                try {
+                                  updateOrderLineStatus(l.id, st);
+                                  setLineRefresh(k => k + 1);
+                                } catch (e) {
+                                  alert(e instanceof Error ? e.message : String(e));
+                                }
+                              }}
+                              style={{
+                                fontSize: 10, padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
+                                border: `1px solid ${l.status === st ? statusColors[st] : '#D5D9DE'}`,
+                                color: l.status === st ? '#FFFFFF' : '#6B7280',
+                                background: l.status === st ? statusColors[st] : 'transparent',
+                              }}
+                            >{st}</button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* v0.3.0 — Partielles Convert */}
+              {!isCancelled && (() => {
+                const billable = id ? getBillableLines(id) : [];
+                return (
+                  <div className="flex items-center justify-between" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                    <span style={{ fontSize: 12, color: '#6B7280' }}>
+                      {billable.length > 0
+                        ? `${billable.length} item(s) bereit zum Invoicen`
+                        : 'Keine fertigen Items zum Invoicen — markiere Items als „Arrived".'}
+                    </span>
+                    <Button
+                      variant="primary"
+                      onClick={handleCreateFinalInvoice}
+                      disabled={billable.length === 0}
+                    >
+                      Convert ready items ({billable.length})
+                    </Button>
+                  </div>
+                );
+              })()}
+            </Card>
+          </div>
+        )}
 
         {/* Payments Card */}
         {!editing && !isCancelled && (

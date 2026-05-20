@@ -12,7 +12,7 @@ import { query } from '@/core/db/helpers';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
-import type { OrderStatus, OrderPaymentStatus } from '@/core/models/types';
+import type { OrderStatus, OrderPaymentStatus, OrderType } from '@/core/models/types';
 import { deriveOrderPaymentStatus } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 
@@ -51,8 +51,16 @@ const PAYMENT_STATUS_STYLE: Record<OrderPaymentStatus, { fg: string; bg: string 
 
 const FILTER_STATUSES: (OrderStatus | '')[] = ['', 'pending', 'arrived', 'notified', 'completed', 'cancelled'];
 
-// Spalten: Date | Order# | Client | Phone | Total | Paid | Remaining | Payment | Order Status | (Convert-Action)
-const GRID_COLUMNS = 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,1.4fr)';
+// v0.3.0 — Order-Type Filter + Badge
+const FILTER_TYPES: (OrderType | '')[] = ['', 'normal', 'custom', 'mixed'];
+const TYPE_BADGE: Record<OrderType, { icon: string; label: string; fg: string; bg: string }> = {
+  normal: { icon: '📦', label: 'Normal', fg: '#4B5563', bg: 'rgba(75,85,99,0.10)' },
+  custom: { icon: '💎', label: 'Custom', fg: '#4F46E5', bg: 'rgba(99,102,241,0.10)' },
+  mixed:  { icon: '🔀', label: 'Mixed',  fg: '#92400E', bg: 'rgba(217,119,6,0.10)' },
+};
+
+// Spalten: Date | Order# | Type | Client | Phone | Total | Paid | Remaining | Payment | Order Status | (Convert-Action)
+const GRID_COLUMNS = 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,0.8fr) minmax(0,1.6fr) minmax(0,1.1fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,1.4fr)';
 
 export function OrderList() {
   const navigate = useNavigate();
@@ -64,6 +72,7 @@ export function OrderList() {
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [filterStatus, setFilterStatus] = useState<OrderStatus | ''>('');
+  const [filterType, setFilterType] = useState<OrderType | ''>('');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Pay-Modal — analog InvoiceList
@@ -114,6 +123,7 @@ export function OrderList() {
   const filtered = useMemo(() => {
     let r = orders;
     if (filterStatus) r = r.filter(o => o.status === filterStatus);
+    if (filterType) r = r.filter(o => (o.type || 'normal') === filterType);
     if (searchQuery) {
       r = r.filter(o => {
         const customer = customers.find(c => c.id === o.customerId);
@@ -121,7 +131,7 @@ export function OrderList() {
       });
     }
     return r;
-  }, [orders, filterStatus, searchQuery, customers]);
+  }, [orders, filterStatus, filterType, searchQuery, customers]);
 
   const activeCount = orders.filter(o => o.status !== 'completed' && o.status !== 'cancelled').length;
 
@@ -145,6 +155,17 @@ export function OrderList() {
       actions={
         <div className="flex items-center gap-3">
           <div className="flex gap-1" style={{ marginRight: 4 }}>
+            {FILTER_TYPES.map(t => (
+              <button key={t} onClick={() => setFilterType(t)}
+                className="cursor-pointer transition-all duration-200"
+                style={{
+                  padding: '5px 10px', fontSize: 11, borderRadius: 999, border: 'none',
+                  background: filterType === t ? 'rgba(15,15,16,0.08)' : 'transparent',
+                  color: filterType === t ? '#0F0F10' : '#6B7280',
+                }}>{t === '' ? 'All types' : `${TYPE_BADGE[t].icon} ${TYPE_BADGE[t].label}`}</button>
+            ))}
+          </div>
+          <div className="flex gap-1" style={{ marginRight: 4 }}>
             {FILTER_STATUSES.map(s => (
               <button key={s} onClick={() => setFilterStatus(s)}
                 className="cursor-pointer transition-all duration-200"
@@ -161,7 +182,7 @@ export function OrderList() {
     >
       {/* Spalten-Header — Plan §Order Übersicht: Date | # | Client | Phone | Total | Paid | Remaining | Payment | Order | Actions */}
       <div style={{ display: 'grid', gridTemplateColumns: GRID_COLUMNS, gap: 12, padding: '0 12px 10px' }}>
-        {['DATE', 'ORDER #', 'CLIENT', 'PHONE', 'TOTAL', 'PAID', 'REMAINING', 'PAYMENT', 'ORDER STATUS', 'ACTIONS'].map((h, i) => (
+        {['DATE', 'ORDER #', 'TYPE', 'CLIENT', 'PHONE', 'TOTAL', 'PAID', 'REMAINING', 'PAYMENT', 'ORDER STATUS', 'ACTIONS'].map((h, i) => (
           <span key={i} className="text-overline">{h}</span>
         ))}
       </div>
@@ -210,6 +231,19 @@ export function OrderList() {
             <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {order.orderNumber}
             </span>
+
+            {/* v0.3.0 — Type-Badge */}
+            {(() => {
+              const tb = TYPE_BADGE[(order.type || 'normal') as OrderType];
+              return (
+                <span style={{
+                  fontSize: 10, fontWeight: 600, padding: '3px 7px', borderRadius: 999,
+                  color: tb.fg, background: tb.bg, justifySelf: 'start', whiteSpace: 'nowrap',
+                }}>
+                  {tb.icon} {tb.label}
+                </span>
+              );
+            })()}
 
             {/* Client */}
             <span style={{ fontSize: 13, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

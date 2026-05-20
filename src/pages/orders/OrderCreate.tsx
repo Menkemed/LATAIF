@@ -184,14 +184,24 @@ export function OrderCreate() {
     setError('');
   }
 
+  // v0.3.0 — sichtbar ob der Custom-Block ueberhaupt gefuellt wurde
+  function hasCustomComponent(): boolean {
+    return parseFloat(laborCost) > 0
+      || parseFloat(extraGoldCost) > 0
+      || materialLines.length > 0;
+  }
+  function hasProductLines(): boolean {
+    return lines.some(l => l.description.trim());
+  }
+
   function validate(): string | null {
     if (!customerId) return 'Please select a customer';
-    if (orderType === 'custom') {
-      // Custom-Order braucht mindestens eine Component (Labor / Extra-Gold / Material)
-      const hasLabor = parseFloat(laborCost) > 0;
-      const hasExtra = parseFloat(extraGoldCost) > 0;
-      const hasMat = materialLines.length > 0;
-      if (!hasLabor && !hasExtra && !hasMat) {
+    const wantsProduct = orderType === 'normal' || orderType === 'mixed';
+    const wantsCustom = orderType === 'custom' || orderType === 'mixed';
+
+    if (wantsCustom && !wantsProduct) {
+      // reiner Custom-Order
+      if (!hasCustomComponent()) {
         return 'Custom Order braucht mindestens Labor, Extra-Gold ODER ein Material';
       }
       if (!finalProductDescription.trim()) {
@@ -199,27 +209,82 @@ export function OrderCreate() {
       }
       return null;
     }
-    if (lines.length === 0) return 'Please add at least one item';
-    const hasInvalid = lines.some(l => !l.description.trim() || l.quantity <= 0);
-    if (hasInvalid) return 'Each item needs a description and quantity > 0';
+    if (wantsProduct && !wantsCustom) {
+      // reiner Normal-Order
+      if (lines.length === 0) return 'Please add at least one item';
+      const hasInvalid = lines.some(l => !l.description.trim() || l.quantity <= 0);
+      if (hasInvalid) return 'Each item needs a description and quantity > 0';
+      return null;
+    }
+    // Mixed: Customer + (≥1 Produkt-Line ODER ≥1 Custom-Komponente)
+    if (!hasProductLines() && !hasCustomComponent()) {
+      return 'Mixed Order braucht mindestens ein Produkt ODER eine Custom-Komponente';
+    }
+    // Wenn Produkt-Lines vorhanden, muessen sie gueltig sein
+    if (hasProductLines()) {
+      const hasInvalid = lines.some(l => l.description.trim() && l.quantity <= 0);
+      if (hasInvalid) return 'Each product item needs a quantity > 0';
+    }
+    // finalProductDescription nur Pflicht wenn Custom-Komponente vorhanden
+    if (hasCustomComponent() && !finalProductDescription.trim()) {
+      return 'Bitte Final-Product-Description fuer den Custom-Teil angeben';
+    }
     return null;
   }
 
-  // v0.2.1 — Build payload fuer Custom-Order. Erzeugt order_lines mit
-  // supplier_id + cost_amount + material_kind je nach Komponente.
-  function buildCustomPayload() {
-    const customLines: Array<{
-      description: string;
-      quantity: number;
-      unitPrice: number;
-      taxScheme?: 'VAT_10' | 'ZERO' | 'MARGIN';
-      vatRate?: number;
-      supplierId?: string;
-      costAmount?: number;
-      isCustomerFacing?: boolean;
-      materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
-      materialDetails?: MaterialDetails;
-    }> = [];
+  type UnifiedLine = {
+    productId?: string;
+    description: string;
+    quantity: number;
+    unitPrice: number;
+    taxScheme?: 'VAT_10' | 'ZERO' | 'MARGIN';
+    vatRate?: number;
+    supplierId?: string;
+    costAmount?: number;
+    isCustomerFacing?: boolean;
+    materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
+    materialDetails?: MaterialDetails;
+  };
+
+  // v0.3.0 — sammelt die normalen Produkt-Lines (kein materialKind).
+  function collectProductLines(): UnifiedLine[] {
+    return lines
+      .filter(l => l.description.trim())
+      .map((l, i) => ({
+        productId: l.productId,
+        description: l.description,
+        quantity: l.quantity,
+        unitPrice: l.unitPrice,
+        taxScheme: computed[i].scheme,
+        vatRate: computed[i].vatRate,
+      }));
+  }
+
+  // v0.3.0 — Custom-Meta separat (fuer Order.customMeta JSON).
+  function collectCustomMeta(): CustomOrderMeta {
+    const customGoldNum = parseFloat(customerGoldGrams) || 0;
+    return {
+      customerGoldWeight: customGoldNum > 0 ? customGoldNum : undefined,
+      customerGoldKarat: customGoldNum > 0 ? customerGoldKarat : undefined,
+      customerStones: customerStones.trim() || undefined,
+      finalProductDescription: finalProductDescription.trim() || undefined,
+      customerMaterialReceivedAt: customGoldNum > 0 ? new Date().toISOString().split('T')[0] : undefined,
+      diamondDetails: materialLines
+        .filter(m => m.materialKind === 'diamond' || m.materialKind === 'stone')
+        .map(m => ({
+          description: m.description,
+          quantity: m.quantity,
+          caratPerPiece: m.caratPerPiece || 0,
+          totalCost: m.totalCost,
+          customerPrice: m.customerPrice ?? m.totalCost,
+          supplierId: m.supplierId,
+        })),
+    };
+  }
+
+  // v0.3.0 — sammelt die Custom-Lines (Labor / Extra-Gold / Materials).
+  function collectCustomLines(): UnifiedLine[] {
+    const customLines: UnifiedLine[] = [];
 
     // Goldsmith Labor Line
     const laborCostNum = parseFloat(laborCost) || 0;
@@ -285,83 +350,56 @@ export function OrderCreate() {
       });
     }
 
-    // Total = SUM of customer-facing unitPrice * quantity
-    const customTotal = customLines.reduce((s, l) => s + (l.unitPrice * l.quantity), 0);
-
-    // Custom-Meta
-    const customGoldNum = parseFloat(customerGoldGrams) || 0;
-    const customMeta: CustomOrderMeta = {
-      customerGoldWeight: customGoldNum > 0 ? customGoldNum : undefined,
-      customerGoldKarat: customGoldNum > 0 ? customerGoldKarat : undefined,
-      customerStones: customerStones.trim() || undefined,
-      finalProductDescription: finalProductDescription.trim() || undefined,
-      customerMaterialReceivedAt: customGoldNum > 0 ? new Date().toISOString().split('T')[0] : undefined,
-      diamondDetails: materialLines
-        .filter(m => m.materialKind === 'diamond' || m.materialKind === 'stone')
-        .map(m => ({
-          description: m.description,
-          quantity: m.quantity,
-          caratPerPiece: m.caratPerPiece || 0,
-          totalCost: m.totalCost,
-          customerPrice: m.customerPrice ?? m.totalCost,
-          supplierId: m.supplierId,
-        })),
-    };
-
-    return {
-      customerId,
-      type: 'custom' as OrderType,
-      customMeta,
-      goldsmithSupplierId: goldsmithSupplierId || undefined,
-      laborCost: laborCostNum,
-      extraGoldValue: extraCostNum,
-      requestedBrand: 'Custom Order',
-      requestedModel: finalProductDescription.trim() || 'Sonderanfertigung',
-      requestedDetails: customGoldNum > 0
-        ? `Customer-Gold ${customGoldNum}g ${customerGoldKarat}`
-        : undefined,
-      agreedPrice: customTotal,
-      depositAmount: fullyPaid ? customTotal : depositAmount,
-      depositPaid: depositAmount > 0 || fullyPaid,
-      depositDate: depositAmount > 0 || fullyPaid ? new Date().toISOString().split('T')[0] : undefined,
-      paymentMethod,
-      fullyPaid,
-      expectedDelivery: expectedDelivery || undefined,
-      status,
-      notes: notes || undefined,
-      lines: customLines,
-    };
+    return customLines;
   }
 
-  function buildPayload() {
+  // v0.3.0 — Unified Payload-Builder. Merged Produkt-Lines + Custom-Lines
+  // je nach orderType. type wird vom Store aus den Lines abgeleitet.
+  function buildOrderPayload() {
+    const wantsProduct = orderType === 'normal' || orderType === 'mixed';
+    const wantsCustom = orderType === 'custom' || orderType === 'mixed';
+    const productLines = wantsProduct ? collectProductLines() : [];
+    const customLines = wantsCustom ? collectCustomLines() : [];
+    const allLines: UnifiedLine[] = [...productLines, ...customLines];
+
+    // Total = SUM aller customer-facing Lines (cost-only exkludiert)
+    const grandTotal = allLines
+      .filter(l => l.isCustomerFacing !== false)
+      .reduce((s, l) => s + (l.unitPrice * l.quantity), 0);
+
     const first = lines[0];
     const product = first?.productId ? products.find(p => p.id === first.productId) : undefined;
-    // Per-Line auch Scheme + VatRate persistieren — sonst ginge die in dieser
-    // Maske gewählte Steuer beim Save verloren und Convert-to-Invoice müsste
-    // erneut fragen / könnte falsch rechnen.
-    const draftLines = lines.map((l, i) => ({
-      productId: l.productId,
-      description: l.description,
-      quantity: l.quantity,
-      unitPrice: l.unitPrice,
-      taxScheme: computed[i].scheme,
-      vatRate: computed[i].vatRate,
-    }));
+    const customMeta = wantsCustom ? collectCustomMeta() : undefined;
+    const customGoldNum = parseFloat(customerGoldGrams) || 0;
+
+    // Hero-Felder: bei reinem Normal aus erstem Produkt, sonst neutral
+    const heroBrand = wantsCustom && !wantsProduct
+      ? 'Custom Order'
+      : (product?.brand || first?.description.split(' ')[0] || (orderType === 'mixed' ? 'Mixed Order' : ''));
+    const heroModel = wantsCustom && !wantsProduct
+      ? (finalProductDescription.trim() || 'Sonderanfertigung')
+      : (product?.name || first?.description || (orderType === 'mixed' ? `${allLines.length} positions` : ''));
+
     return {
       customerId,
-      lines: draftLines,
-      // Legacy single-item Felder aus erster Line (für Anzeige in alter UI)
-      requestedBrand: product?.brand || first?.description.split(' ')[0] || '',
-      requestedModel: product?.name || first?.description || '',
-      requestedReference: product?.sku,
-      requestedDetails: lines.length > 1 ? `${lines.length} items` : undefined,
-      categoryId: product?.categoryId,
-      attributes: product?.attributes,
-      condition: product?.condition,
-      existingProductId: product?.id,
-      agreedPrice: total,
+      lines: allLines,
+      customMeta,
+      goldsmithSupplierId: goldsmithSupplierId || undefined,
+      laborCost: parseFloat(laborCost) || 0,
+      extraGoldValue: parseFloat(extraGoldCost) || 0,
+      requestedBrand: heroBrand,
+      requestedModel: heroModel,
+      requestedReference: !wantsCustom ? product?.sku : undefined,
+      requestedDetails: customGoldNum > 0
+        ? `Customer-Gold ${customGoldNum}g ${customerGoldKarat}`
+        : (allLines.length > 1 ? `${allLines.length} positions` : undefined),
+      categoryId: !wantsCustom ? product?.categoryId : undefined,
+      attributes: !wantsCustom ? product?.attributes : undefined,
+      condition: !wantsCustom ? product?.condition : undefined,
+      existingProductId: !wantsCustom ? product?.id : undefined,
+      agreedPrice: grandTotal,
       taxAmount: totalVat,
-      depositAmount: fullyPaid ? total : depositAmount,
+      depositAmount: fullyPaid ? grandTotal : depositAmount,
       depositPaid: depositAmount > 0 || fullyPaid,
       depositDate: depositAmount > 0 || fullyPaid ? new Date().toISOString().split('T')[0] : undefined,
       paymentMethod,
@@ -376,8 +414,7 @@ export function OrderCreate() {
     setError('');
     const v = validate();
     if (v) { setError(v); return; }
-    const payload = orderType === 'custom' ? buildCustomPayload() : buildPayload();
-    const order = createOrder(payload);
+    const order = createOrder(buildOrderPayload());
     if (continueEditing) {
       reset();
     } else {
@@ -433,36 +470,43 @@ export function OrderCreate() {
           </div>
         </Card>
 
-        {/* v0.2.1 — Order Type Picker (Normal vs Custom) */}
+        {/* v0.3.0 — Order Type Picker (Normal / Custom / Mixed) */}
         <div style={{ marginTop: 16 }}>
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>2 · ORDER TYPE</span>
             <div className="flex gap-3">
-              {(['normal', 'custom'] as OrderType[]).map(t => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setOrderType(t)}
-                  className="cursor-pointer rounded transition-all duration-200"
-                  style={{
-                    padding: '12px 24px', fontSize: 14, fontWeight: 500,
-                    border: `1px solid ${orderType === t ? '#0F0F10' : '#D5D9DE'}`,
-                    color: orderType === t ? '#0F0F10' : '#6B7280',
-                    background: orderType === t ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}
-                >
-                  {t === 'normal' ? '📦 Normal Order' : '💎 Custom Order'}
-                  <div style={{ fontSize: 11, fontWeight: 400, color: '#9CA3AF', marginTop: 4 }}>
-                    {t === 'normal' ? 'Standard-Bestellung / Sourcing' : 'Goldsmith / Sonderanfertigung'}
-                  </div>
-                </button>
-              ))}
+              {(['normal', 'custom', 'mixed'] as OrderType[]).map(t => {
+                const meta = {
+                  normal: { icon: '📦', label: 'Normal Order', sub: 'Standard-Bestellung / Sourcing' },
+                  custom: { icon: '💎', label: 'Custom Order', sub: 'Goldsmith / Sonderanfertigung' },
+                  mixed:  { icon: '🔀', label: 'Mixed Order', sub: 'Produkte + Goldsmith in einer Order' },
+                }[t];
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setOrderType(t)}
+                    className="cursor-pointer rounded transition-all duration-200"
+                    style={{
+                      padding: '12px 20px', fontSize: 14, fontWeight: 500, flex: 1,
+                      border: `1px solid ${orderType === t ? '#0F0F10' : '#D5D9DE'}`,
+                      color: orderType === t ? '#0F0F10' : '#6B7280',
+                      background: orderType === t ? 'rgba(15,15,16,0.06)' : 'transparent',
+                    }}
+                  >
+                    {meta.icon} {meta.label}
+                    <div style={{ fontSize: 11, fontWeight: 400, color: '#9CA3AF', marginTop: 4 }}>
+                      {meta.sub}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </Card>
         </div>
 
-        {/* v0.2.1 — Custom-Order conditional sections */}
-        {orderType === 'custom' && (
+        {/* v0.2.1/v0.3.0 — Custom-Order conditional sections (custom ODER mixed) */}
+        {(orderType === 'custom' || orderType === 'mixed') && (
           <>
             {/* Customer Material Card */}
             <div style={{ marginTop: 16 }}>
@@ -667,11 +711,11 @@ export function OrderCreate() {
           </>
         )}
 
-        {/* 2. ORDER ITEMS SECTION (nur fuer Normal-Orders) */}
-        {orderType === 'normal' && <div style={{ marginTop: 16 }}>
+        {/* 2. ORDER ITEMS SECTION (Normal ODER Mixed) */}
+        {(orderType === 'normal' || orderType === 'mixed') && <div style={{ marginTop: 16 }}>
           <Card>
             <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
-              <span className="text-overline">3 · ORDER ITEMS</span>
+              <span className="text-overline">{orderType === 'mixed' ? '4 · ORDER ITEMS (PRODUCTS)' : '3 · ORDER ITEMS'}</span>
               <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Item</Button>
             </div>
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>

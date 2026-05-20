@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Order, OrderStatus, OrderLine, OrderType, CustomOrderMeta, MaterialDetails, Expense } from '@/core/models/types';
+import type { Order, OrderStatus, OrderLine, OrderType, OrderLineStatus, CustomOrderMeta, MaterialDetails, Expense } from '@/core/models/types';
+import { deriveOrderType, deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
@@ -46,8 +47,15 @@ interface OrderStore {
   getOrderLines: (orderId: string) => OrderLine[];
   // v0.2.1 — Trigger A/P-Expense fuer jede order_line mit supplier_id + cost_amount > 0
   // (analog zu repairStore.commitRepairLineExpenses). Idempotent: ueberspringt lines
-  // die bereits expense_id haben.
+  // die bereits expense_id haben. v0.3.0: committed nur Lines mit status='ARRIVED'.
   commitOrderLineExpenses: (orderId: string) => void;
+  // v0.3.0 — Per-Line Fulfillment-Status
+  updateOrderLineStatus: (lineId: string, status: OrderLineStatus) => void;
+  recomputeOrderStatus: (orderId: string) => void;
+  // v0.3.0 — Partial Invoicing: Lines die fertig + noch nicht invoiced sind
+  getBillableLines: (orderId: string) => OrderLine[];
+  // v0.3.0 — verknuepft Lines mit der erzeugten Invoice (nach Convert)
+  markOrderLinesInvoiced: (lineIds: string[], invoiceId: string) => void;
 }
 
 function rowToOrder(row: Record<string, unknown>): Order {
@@ -124,7 +132,16 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
 
     const orderNumber = getNextNumber('orders', 'order.number_prefix', 'ORD');
 
-    const remaining = (data.agreedPrice || 0) - (data.depositAmount || 0);
+    // v0.3.0 — agreedPrice: falls Caller keinen liefert, aus den customer-facing
+    // Lines ableiten (SUM unitPrice*qty). So funktioniert createOrder auch wenn
+    // nur lines uebergeben werden (z.B. E2E / programmatische Aufrufe).
+    const derivedAgreed = (data.lines || [])
+      .filter(l => (l as Partial<OrderLine>).isCustomerFacing !== false)
+      .reduce((s, l) => s + ((l.unitPrice || 0) * Math.max(1, l.quantity || 1)), 0);
+    const agreedPrice = data.agreedPrice != null ? data.agreedPrice
+      : (derivedAgreed > 0 ? derivedAgreed : null);
+
+    const remaining = (agreedPrice || 0) - (data.depositAmount || 0);
 
     // Plan §Order: Order-Status ist orthogonal zum Zahlungsstand.
     // Default ist immer 'pending', auch bei direkt-bezahlten Auftraegen — der Payment-Status
@@ -133,8 +150,19 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // koennen nur 'pending' starten oder per Caller explizit gesetzt sein.
     const initialStatus: OrderStatus = (data.status as OrderStatus) || 'pending';
     // v0.2.1 — Order-Type + Custom-Meta + promoted Custom-Fields
-    const orderType: OrderType = (data.type as OrderType) || 'normal';
+    // v0.3.0 — type wird IMMER aus den Lines abgeleitet (override data.type),
+    // damit Mixed-Orders korrekt erkannt werden egal was der Caller schickt.
+    const orderType: OrderType = data.lines && data.lines.length > 0
+      ? deriveOrderType(data.lines)
+      : ((data.type as OrderType) || 'normal');
     const customMetaJson = data.customMeta ? JSON.stringify(data.customMeta) : null;
+    // v0.3.0 — initialer Line-Status aus dem Order-Initial-Status gemappt
+    const initialLineStatus: OrderLineStatus =
+      initialStatus === 'arrived' ? 'ARRIVED'
+      : initialStatus === 'notified' ? 'ARRIVED'
+      : initialStatus === 'completed' ? 'DELIVERED'
+      : initialStatus === 'cancelled' ? 'CANCELLED'
+      : 'PENDING';
     db.run(
       `INSERT INTO orders (id, branch_id, order_number, customer_id,
         category_id, attributes, condition, serial_number, existing_product_id,
@@ -150,11 +178,11 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
        data.condition || null, data.serialNumber || null, data.existingProductId || null,
        data.requestedBrand || '', data.requestedModel || '',
        data.requestedReference || null, data.requestedDetails || null,
-       data.agreedPrice || null, data.taxAmount || 0, data.depositAmount || 0,
+       agreedPrice, data.taxAmount || 0, data.depositAmount || 0,
        data.depositPaid || data.fullyPaid ? 1 : 0, data.depositDate || null, remaining,
        data.paymentMethod || null, data.fullyPaid ? 1 : 0,
        data.supplierName || null, data.supplierPrice || null,
-       data.agreedPrice && data.supplierPrice ? data.agreedPrice - data.supplierPrice : null,
+       agreedPrice && data.supplierPrice ? agreedPrice - data.supplierPrice : null,
        data.expectedDelivery || null, initialStatus, data.notes || null, now, now, userId,
        orderType, customMetaJson, data.goldsmithSupplierId || null,
        data.laborCost || 0, data.extraGoldValue || 0]
@@ -167,19 +195,22 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     if (data.lines && data.lines.length > 0) {
       const stmt = db.prepare(
         `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate,
-          supplier_id, cost_amount, is_customer_facing, material_kind, material_details, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          supplier_id, cost_amount, is_customer_facing, material_kind, material_details, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       data.lines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
         const total = qty * (l.unitPrice || 0);
         const matJson = l.materialDetails ? JSON.stringify(l.materialDetails) : null;
+        // v0.3.0 — falls Caller explizit einen Line-Status schickt nutze den,
+        // sonst der vom Order-Initial-Status abgeleitete.
+        const lineStatus = (l as Partial<OrderLine>).status || initialLineStatus;
         stmt.run([
           uuid(), id, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1,
           l.taxScheme || null, l.vatRate ?? null,
           l.supplierId || null, l.costAmount ?? 0,
           l.isCustomerFacing === false ? 0 : 1,
-          l.materialKind || null, matJson,
+          l.materialKind || null, matJson, lineStatus,
           now,
         ]);
       });
@@ -189,7 +220,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // Plan §Order: Wenn beim Anlegen ein Deposit eingegeben wurde, gleich als order_payments-Eintrag
     // persistieren — sonst zeigt OrderDetail Total Paid = 0 (summiert aus order_payments), waehrend
     // OrderList den deposit_amount aus der orders-Tabelle nimmt → Inkonsistenz.
-    const initialPaid = data.fullyPaid ? (data.agreedPrice || 0) : (data.depositAmount || 0);
+    const initialPaid = data.fullyPaid ? (agreedPrice || 0) : (data.depositAmount || 0);
     let initialPaymentId: string | null = null;
     const paidAt = data.depositDate || now.split('T')[0];
     const method = data.paymentMethod || 'cash';
@@ -276,6 +307,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   },
 
   updateStatus: (id, status) => {
+    const db = getDatabase();
     const now = new Date().toISOString();
     const updates: Partial<Order> = { status };
 
@@ -283,12 +315,26 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       updates.actualDelivery = now.split('T')[0];
     }
 
+    // v0.3.0 — Order-Status ist primaer ein Roll-up der Line-Stati. Wenn der
+    // User den Order-Status manuell setzt, cascaded das auf die Lines:
+    //  - 'arrived'   → alle non-cancelled PENDING-Lines → ARRIVED
+    //  - 'completed' → alle non-cancelled Lines → DELIVERED
+    //  - 'cancelled' → alle Lines → CANCELLED
+    //  - 'notified' / 'pending' → nur Order-Status (kein Line-Cascade)
+    if (status === 'arrived') {
+      db.run(`UPDATE order_lines SET status = 'ARRIVED' WHERE order_id = ? AND status = 'PENDING'`, [id]);
+    } else if (status === 'completed') {
+      db.run(`UPDATE order_lines SET status = 'DELIVERED' WHERE order_id = ? AND status != 'CANCELLED'`, [id]);
+    } else if (status === 'cancelled') {
+      db.run(`UPDATE order_lines SET status = 'CANCELLED' WHERE order_id = ?`, [id]);
+    }
+
     get().updateOrder(id, updates);
 
-    // v0.2.1 — Bei status='arrived' (Goldsmith hat geliefert) werden alle
-    // OPEN order_lines mit supplier_id + cost_amount > 0 als A/P-Expense
-    // gebucht (analog Repair commitRepairLineExpenses bei IN_PROGRESS).
-    if (status === 'arrived') {
+    // v0.2.1/v0.3.0 — Bei status='arrived'/'completed' werden die jetzt
+    // ARRIVED-Lines mit supplier_id als A/P-Expense gebucht. commitOrderLineExpenses
+    // filtert intern auf status IN ('ARRIVED','DELIVERED') + idempotent.
+    if (status === 'arrived' || status === 'completed') {
       try { get().commitOrderLineExpenses(id); }
       catch (err) { console.error('[order] commitOrderLineExpenses failed:', err); }
     }
@@ -303,6 +349,80 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     if (eventMap[status]) {
       eventBus.emit(eventMap[status] as any, 'order', id, { status });
     }
+  },
+
+  // v0.3.0 — Per-Line Fulfillment-Status setzen. Triggert A/P-Buchung wenn
+  // die Line auf ARRIVED geht + recomputed den Order-Roll-up-Status.
+  updateOrderLineStatus: (lineId, status) => {
+    const db = getDatabase();
+    const lineRows = query(
+      `SELECT order_id, invoice_id, status FROM order_lines WHERE id = ?`,
+      [lineId]
+    );
+    if (lineRows.length === 0) throw new Error(`Order-Line ${lineId} nicht gefunden`);
+    const orderId = lineRows[0].order_id as string;
+    const invoiceId = lineRows[0].invoice_id as string | null;
+
+    // Salesforce-Regel: eine bereits invoicte Line darf nicht ge-cancelled
+    // werden ohne die Invoice anzufassen → Block + Hinweis.
+    if (status === 'CANCELLED' && invoiceId) {
+      throw new Error('Diese Line ist bereits in einer Invoice — erst die Invoice stornieren (Cancel + Replace).');
+    }
+
+    db.run(`UPDATE order_lines SET status = ? WHERE id = ?`, [status, lineId]);
+    trackUpdate('order_lines', lineId, { status });
+
+    // Bei ARRIVED: A/P-Expense fuer Supplier-Lines buchen (idempotent).
+    if (status === 'ARRIVED' || status === 'DELIVERED') {
+      try { get().commitOrderLineExpenses(orderId); }
+      catch (err) { console.error('[order] commitOrderLineExpenses failed:', err); }
+    }
+
+    saveDatabase();
+    get().recomputeOrderStatus(orderId);
+    get().loadOrders();
+  },
+
+  // v0.3.0 — Order-Status aus den Line-Stati neu ableiten (Roll-up).
+  recomputeOrderStatus: (orderId) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const orderRows = query(`SELECT status FROM orders WHERE id = ?`, [orderId]);
+    if (orderRows.length === 0) return;
+    const currentStatus = (orderRows[0].status as OrderStatus) || 'pending';
+    const lineRows = query(`SELECT status FROM order_lines WHERE order_id = ?`, [orderId]);
+    if (lineRows.length === 0) return;
+    const lineStatuses = lineRows.map(r => ((r.status as string) || 'PENDING') as OrderLineStatus);
+    const derived = deriveOrderStatusFromLines(lineStatuses, currentStatus);
+    if (derived !== currentStatus) {
+      db.run(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`, [derived, now, orderId]);
+      trackUpdate('orders', orderId, { status: derived });
+      saveDatabase();
+      get().loadOrders();
+    }
+  },
+
+  // v0.3.0 — Lines die fertig (ARRIVED/DELIVERED) + customer-facing + noch
+  // nicht invoiced sind. Basis fuer partielles Convert-to-Invoice.
+  getBillableLines: (orderId) => {
+    return get().getOrderLines(orderId).filter(l =>
+      l.isCustomerFacing !== false &&
+      !l.invoiceId &&
+      (l.status === 'ARRIVED' || l.status === 'DELIVERED')
+    );
+  },
+
+  // v0.3.0 — nach erfolgreichem Convert: die invoicten Lines mit der Invoice
+  // verknuepfen. Order.invoice_id zeigt auf die zuletzt erzeugte Invoice.
+  markOrderLinesInvoiced: (lineIds, invoiceId) => {
+    if (lineIds.length === 0) return;
+    const db = getDatabase();
+    for (const lid of lineIds) {
+      db.run(`UPDATE order_lines SET invoice_id = ? WHERE id = ?`, [invoiceId, lid]);
+      trackUpdate('order_lines', lid, { invoiceId });
+    }
+    saveDatabase();
+    get().loadOrders();
   },
 
   // v0.2.1 — Port von repairStore.commitRepairLineExpenses. Postet pro
@@ -322,11 +442,15 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = (order.branch_id as string) || 'branch-main'; userId = 'user-owner'; }
 
+    // v0.3.0 — nur Lines die physisch da sind (status='ARRIVED') werden gebucht.
+    // Die A/P-Schuld entsteht wenn das Teil vom Supplier geliefert wurde —
+    // nicht schon bei Order-Anlage. DELIVERED zaehlt auch (war mal ARRIVED).
     const lineRows = query(
       `SELECT id, position, supplier_id, description, cost_amount, material_kind, material_details
          FROM order_lines
          WHERE order_id = ? AND supplier_id IS NOT NULL AND expense_id IS NULL
            AND cost_amount > 0
+           AND status IN ('ARRIVED', 'DELIVERED')
          ORDER BY position`,
       [orderId]
     );
@@ -403,23 +527,38 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   rewriteOrderLines: (orderId, lines) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // v0.3.0 — alte Line-Stati per Position merken, damit Edit nicht das
+    // Fulfillment zuruecksetzt. Auch invoice_id erhalten (wo Position matcht).
+    const oldRows = query(
+      `SELECT position, status, invoice_id FROM order_lines WHERE order_id = ?`,
+      [orderId]
+    );
+    const oldByPos = new Map<number, { status: string; invoiceId: string | null }>();
+    for (const r of oldRows) {
+      oldByPos.set((r.position as number) || 0, {
+        status: (r.status as string) || 'PENDING',
+        invoiceId: (r.invoice_id as string | null) || null,
+      });
+    }
     db.run(`DELETE FROM order_lines WHERE order_id = ?`, [orderId]);
     if (lines.length > 0) {
       const stmt = db.prepare(
         `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate,
-          supplier_id, cost_amount, is_customer_facing, material_kind, material_details, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          supplier_id, cost_amount, is_customer_facing, material_kind, material_details, status, invoice_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       lines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
         const total = qty * (l.unitPrice || 0);
         const matJson = l.materialDetails ? JSON.stringify(l.materialDetails) : null;
+        const prev = oldByPos.get(i + 1);
         stmt.run([
           uuid(), orderId, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1,
           l.taxScheme || null, l.vatRate ?? null,
           l.supplierId || null, l.costAmount ?? 0,
           l.isCustomerFacing === false ? 0 : 1,
           l.materialKind || null, matJson,
+          prev?.status || 'PENDING', prev?.invoiceId || null,
           now,
         ]);
       });
@@ -428,11 +567,12 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // Recompute agreedPrice from lines — nur customer-facing zaehlt!
     const sumRow = query(`SELECT COALESCE(SUM(line_total), 0) AS t FROM order_lines WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 1`, [orderId]);
     const total = Number(sumRow[0]?.t || 0);
-    if (total > 0) {
-      db.run(`UPDATE orders SET agreed_price = ?, updated_at = ? WHERE id = ?`, [total, now, orderId]);
-    }
+    // v0.3.0 — type neu ableiten nach Line-Edit
+    const derivedType = deriveOrderType(lines.map(l => ({ materialKind: l.materialKind })));
+    db.run(`UPDATE orders SET agreed_price = ?, type = ?, updated_at = ? WHERE id = ?`,
+      [total > 0 ? total : null, derivedType, now, orderId]);
     saveDatabase();
-    trackUpdate('orders', orderId, { linesReplaced: true, total });
+    trackUpdate('orders', orderId, { linesReplaced: true, total, type: derivedType });
     get().loadOrders();
   },
 
@@ -466,6 +606,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
           isCustomerFacing: r.is_customer_facing == null ? true : Number(r.is_customer_facing) === 1,
           materialKind: (r.material_kind as OrderLine['materialKind']) || undefined,
           materialDetails: matDetails,
+          // v0.3.0 — Per-Line Status + partial-invoicing link
+          status: ((r.status as string) || 'PENDING') as OrderLineStatus,
+          invoiceId: (r.invoice_id as string | null) || undefined,
         };
       });
     } catch { return []; }

@@ -814,6 +814,9 @@ export interface OrderLine {
   // v0.2.1 — Material Parity (Diamond/Stone/Gold)
   materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
   materialDetails?: MaterialDetails;
+  // v0.3.0 — Per-Line Fulfillment-Status + partial-invoicing link
+  status?: OrderLineStatus;   // default 'PENDING'
+  invoiceId?: UUID;           // NULL bis die Line invoiced wurde
   product?: Product;
 }
 
@@ -864,7 +867,42 @@ export interface CustomOrderMeta {
   internalNotes?: string;
 }
 
-export type OrderType = 'normal' | 'custom';
+export type OrderType = 'normal' | 'custom' | 'mixed';
+
+// v0.3.0 — Per-Line Fulfillment-Status. Erlaubt gemischte Orders mit
+// unterschiedlichen Liefer-Timelines pro Line zu tracken.
+export type OrderLineStatus = 'PENDING' | 'ARRIVED' | 'DELIVERED' | 'CANCELLED';
+
+/**
+ * v0.3.0 — Leitet den Order-Type aus den Lines ab. Eine Line gilt als
+ * „custom" wenn sie ein materialKind traegt (labor/diamond/stone/gold).
+ */
+export function deriveOrderType(lines: Array<{ materialKind?: string | null }>): OrderType {
+  const hasCustom = lines.some(l => l.materialKind != null);
+  const hasProduct = lines.some(l => l.materialKind == null);
+  if (hasCustom && hasProduct) return 'mixed';
+  if (hasCustom) return 'custom';
+  return 'normal';
+}
+
+/**
+ * v0.3.0 — Roll-up des Order-Status aus den Line-Stati.
+ * 'notified' ist sticky (manuelle Customer-Benachrichtigung wird nicht
+ * von einem Roll-up ueberschrieben solange alle Lines mind. ARRIVED sind).
+ */
+export function deriveOrderStatusFromLines(
+  lineStatuses: OrderLineStatus[],
+  currentStatus: OrderStatus
+): OrderStatus {
+  const active = lineStatuses.filter(s => s !== 'CANCELLED');
+  if (active.length === 0) {
+    return lineStatuses.length > 0 ? 'cancelled' : currentStatus;
+  }
+  if (active.every(s => s === 'DELIVERED')) return 'completed';
+  const allHere = active.every(s => s === 'ARRIVED' || s === 'DELIVERED');
+  if (allHere) return currentStatus === 'notified' ? 'notified' : 'arrived';
+  return 'pending';
+}
 
 export interface Order {
   id: UUID;

@@ -1502,6 +1502,17 @@ function runMigrations(database: Database): void {
     `ALTER TABLE order_lines ADD COLUMN material_details TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_repair_lines_material_kind ON repair_lines(material_kind)`,
     `CREATE INDEX IF NOT EXISTS idx_order_lines_material_kind ON order_lines(material_kind)`,
+
+    // v0.3.0 — Mixed Orders + Per-Line Fulfillment Status + Partial Invoicing:
+    // order_lines bekommt einen eigenen Fulfillment-Status (PENDING/ARRIVED/
+    // DELIVERED/CANCELLED) damit gemischte Orders mit verschiedenen Liefer-
+    // Timelines per-Line getrackt werden koennen. invoice_id verlinkt eine
+    // bereits invoicte Line (NULL = noch nicht invoiced) — ermoeglicht
+    // partielles Invoicing (mehrere Invoices pro Order).
+    `ALTER TABLE order_lines ADD COLUMN status TEXT DEFAULT 'PENDING'`,
+    `ALTER TABLE order_lines ADD COLUMN invoice_id TEXT REFERENCES invoices(id) ON DELETE SET NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_order_lines_status ON order_lines(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_lines_invoice ON order_lines(invoice_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
