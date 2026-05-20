@@ -1,6 +1,7 @@
 // Plan §Banking — Cash + Bank overview + unified transaction log with all 9 types.
 import { useEffect, useState, useMemo } from 'react';
-import { ArrowRightLeft, Wallet, Building2, Smartphone, ArrowUpRight, ArrowDownLeft } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { ArrowRightLeft, Wallet, Building2, Smartphone, ArrowUpRight, ArrowDownLeft, ChevronRight } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -36,6 +37,7 @@ const TYPE_COLORS: Record<BankTransactionType, string> = {
 
 export function BankingPage() {
   const { transfers, loadTransfers, createTransfer, getTransactions } = useBankingStore();
+  const navigate = useNavigate();
   const [showNew, setShowNew] = useState(false);
   const [amount, setAmount] = useState('');
   const [fromAcc, setFromAcc] = useState<BankAccount>('cash');
@@ -44,6 +46,8 @@ export function BankingPage() {
   const [notes, setNotes] = useState('');
   const [accountFilter, setAccountFilter] = useState<BankAccount | 'all'>('all');
   const [typeFilter, setTypeFilter] = useState<BankTransactionType | 'all'>('all');
+  // v0.3.3 — gehoverte Transaktions-Zeile fuer das Klick-Highlight.
+  const [hoverId, setHoverId] = useState<string | null>(null);
 
   useEffect(() => { loadTransfers(); }, [loadTransfers]);
 
@@ -195,12 +199,23 @@ export function BankingPage() {
             ))}
           </div>
           <div style={{ maxHeight: 600, overflowY: 'auto' }}>
-            {filteredTxs.map(t => (
-              <div key={t.id} style={{
-                display: 'grid', gridTemplateColumns: '100px 120px 80px 1fr 110px 40px',
-                gap: 12, padding: '10px 16px', alignItems: 'center',
-                borderBottom: '1px solid rgba(229,225,214,0.6)',
-              }}>
+            {filteredTxs.map(t => {
+              // v0.3.3 — Zeile ist anklickbar wenn ein Verfolg-Link existiert.
+              const linkable = !!t.link;
+              return (
+              <div key={t.id}
+                onClick={() => { if (t.link) navigate(t.link); }}
+                onMouseEnter={() => setHoverId(t.id)}
+                onMouseLeave={() => setHoverId(null)}
+                title={linkable ? 'Open source document' : undefined}
+                style={{
+                  display: 'grid', gridTemplateColumns: '100px 120px 80px 1fr 110px 40px',
+                  gap: 12, padding: '10px 16px', alignItems: 'center',
+                  borderBottom: '1px solid rgba(229,225,214,0.6)',
+                  cursor: linkable ? 'pointer' : 'default',
+                  background: linkable && hoverId === t.id ? '#F2F4F7' : 'transparent',
+                  transition: 'background 0.1s',
+                }}>
                 <span style={{ fontSize: 12, color: '#4B5563' }}>{t.date?.split('T')[0] || '—'}</span>
                 <span style={{
                   fontSize: 10, padding: '2px 8px', borderRadius: 999,
@@ -210,8 +225,14 @@ export function BankingPage() {
                 <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase' }}>
                   {t.account === 'cash' ? '💵 Cash' : t.account === 'benefit' ? '📱 Benefit' : '🏦 Bank'}
                 </span>
-                <span style={{ fontSize: 12, color: '#4B5563', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {t.description || '—'}
+                <span style={{
+                  fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden',
+                  color: linkable ? '#2563EB' : '#4B5563',
+                }}>
+                  <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {t.description || '—'}
+                  </span>
+                  {linkable && <ChevronRight size={12} style={{ flexShrink: 0, opacity: 0.65 }} />}
                 </span>
                 <span className="font-mono" style={{
                   fontSize: 13, textAlign: 'right',
@@ -224,7 +245,8 @@ export function BankingPage() {
                   {t.flow === 'in' ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}
                 </span>
               </div>
-            ))}
+              );
+            })}
           </div>
         </Card>
       )}

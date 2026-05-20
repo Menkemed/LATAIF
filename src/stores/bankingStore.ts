@@ -57,6 +57,9 @@ export interface BankTransaction {
   relatedModule: string;
   relatedEntityId?: string;
   description?: string;
+  // v0.3.3 — Verfolg-Link auf die Detail-Seite des Quell-Dokuments. undefined
+  // wenn es keine sinnvolle Zielseite gibt (z.B. interne Bank-Transfers).
+  link?: string;
 }
 
 interface BankingStore {
@@ -112,6 +115,27 @@ function accountFor(method: string | null | undefined): BankAccount {
   if (m === 'benefit') return 'benefit';
   // card, bank, bank_transfer, crypto → bank
   return 'bank';
+}
+
+// v0.3.3 — Verfolg-Link: Route auf die Detail-Seite des Quell-Dokuments einer
+// Bank-Transaktion. Module mit eigener Detail-Page → Deep-Link; Module ohne
+// Detail-Page → Listen-Seite (immer noch ein nuetzlicher Sprung). Bank-Transfers
+// haben keine Zielseite (stehen auf der Banking-Page selbst) → kein Link.
+function linkFor(relatedModule: string, relatedEntityId?: string): string | undefined {
+  switch (relatedModule) {
+    case 'invoice':        return relatedEntityId ? `/invoices/${relatedEntityId}` : undefined;
+    case 'purchase':       return relatedEntityId ? `/purchases/${relatedEntityId}` : undefined;
+    case 'order':          return relatedEntityId ? `/orders/${relatedEntityId}` : undefined;
+    case 'repair':         return relatedEntityId ? `/repairs/${relatedEntityId}` : undefined;
+    case 'consignment':    return relatedEntityId ? `/consignments/${relatedEntityId}` : undefined;
+    case 'scrap_trade':    return relatedEntityId ? `/scrap-trades/${relatedEntityId}` : undefined;
+    case 'agent_transfer': return relatedEntityId ? `/transfers/${relatedEntityId}` : undefined;
+    case 'expense':        return '/expenses';
+    case 'debt':           return '/debts';
+    case 'partner':        return '/partners';
+    case 'metal':          return '/metals';
+    default:               return undefined; // transfer, sales/purchase_return: s. unten
+  }
 }
 
 export const useBankingStore = create<BankingStore>((set, get) => ({
@@ -416,7 +440,8 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     // Fix 2026-05: sales_returns hat KEIN updated_at — vorher silent empty wegen
     // safeQuery-Schluck. Nur created_at + refund_paid_date.
     const salesRet = safeQuery('sales_returns',
-      `SELECT id, refund_amount, refund_paid_amount, refund_paid_date, refund_method, return_date, return_number, invoice_id, created_at
+      `SELECT id, refund_amount, refund_paid_amount, refund_paid_date, refund_method, return_date, return_number, invoice_id, created_at,
+              (SELECT cn.id FROM credit_notes cn WHERE cn.sales_return_id = sales_returns.id LIMIT 1) AS credit_note_id
        FROM sales_returns WHERE branch_id = ? AND status != 'REJECTED'
          AND (refund_paid_amount > 0 OR refund_amount > 0)`,
       [branchId]
@@ -437,6 +462,12 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
         relatedModule: 'sales_return',
         relatedEntityId: r.id as string,
         description: `Sales refund · ${r.return_number || ''}`,
+        // v0.3.3 — Sales-Refund verlinkt auf die Credit Note (das eigentliche
+        // Refund-Dokument). Fallback auf die Quell-Invoice falls (noch) keine
+        // Credit Note zum Return existiert.
+        link: (r.credit_note_id as string)
+          ? `/credit-notes/${r.credit_note_id}`
+          : ((r.invoice_id as string) ? `/invoices/${r.invoice_id}` : undefined),
       });
     }
 
@@ -459,6 +490,8 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
         relatedModule: 'purchase_return',
         relatedEntityId: r.id as string,
         description: `Purchase refund · ${r.return_number || ''}`,
+        // v0.3.3 — Refund hat keine eigene Detail-Page → auf die Quell-Purchase verlinken.
+        link: (r.purchase_id as string) ? `/purchases/${r.purchase_id}` : undefined,
       });
     }
 
@@ -610,6 +643,11 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       const cB = b.createdAt || b.date || '';
       return cB.localeCompare(cA);
     });
+    // v0.3.3 — Verfolg-Link pro Transaktion ableiten (sales/purchase_return
+    // haben ihren Link oben schon gesetzt → nicht ueberschreiben).
+    for (const t of txs) {
+      if (!t.link) t.link = linkFor(t.relatedModule, t.relatedEntityId);
+    }
     return txs;
   },
 
