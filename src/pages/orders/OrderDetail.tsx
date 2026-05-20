@@ -862,20 +862,48 @@ export function OrderDetail() {
               {/* v0.3.0 — Partielles Convert */}
               {!isCancelled && (() => {
                 const billable = id ? getBillableLines(id) : [];
+                // Noch offene customer-facing Lines (PENDING, nicht invoiced) —
+                // wenn vorhanden, kann man fuers Kombinieren in EINE Invoice warten.
+                const pending = orderLineList.filter(l =>
+                  l.isCustomerFacing !== false && !l.invoiceId && l.status === 'PENDING'
+                ).length;
                 return (
-                  <div className="flex items-center justify-between" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-                    <span style={{ fontSize: 12, color: '#6B7280' }}>
-                      {billable.length > 0
-                        ? `${billable.length} item(s) bereit zum Invoicen`
-                        : 'Keine fertigen Items zum Invoicen — markiere Items als „Arrived".'}
-                    </span>
-                    <Button
-                      variant="primary"
-                      onClick={handleCreateFinalInvoice}
-                      disabled={billable.length === 0}
-                    >
-                      Convert ready items ({billable.length})
-                    </Button>
+                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                    {/* Combine-vs-Partial Entscheidungshilfe */}
+                    {billable.length > 0 && pending > 0 && (
+                      <div style={{
+                        marginBottom: 10, padding: '8px 12px', borderRadius: 6, fontSize: 12,
+                        background: 'rgba(217,119,6,0.06)', border: '1px solid rgba(217,119,6,0.3)',
+                        color: '#92400E',
+                      }}>
+                        {pending} Item(s) noch nicht fertig (PENDING).
+                        {' '}Fuer EINE kombinierte Invoice warten bis alles „Arrived" ist —
+                        oder die {billable.length} fertigen jetzt als Teil-Invoice converten.
+                      </div>
+                    )}
+                    {billable.length > 0 && pending === 0 && (
+                      <div style={{
+                        marginBottom: 10, padding: '8px 12px', borderRadius: 6, fontSize: 12,
+                        background: 'rgba(22,163,74,0.06)', border: '1px solid rgba(22,163,74,0.3)',
+                        color: '#16A34A',
+                      }}>
+                        ✓ Alle Items fertig — Convert erzeugt EINE kombinierte Invoice fuer alle {billable.length}.
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between">
+                      <span style={{ fontSize: 12, color: '#6B7280' }}>
+                        {billable.length > 0
+                          ? `${billable.length} item(s) bereit zum Invoicen${pending > 0 ? ` · ${pending} noch PENDING` : ''}`
+                          : 'Keine fertigen Items zum Invoicen — markiere Items als „Arrived".'}
+                      </span>
+                      <Button
+                        variant="primary"
+                        onClick={handleCreateFinalInvoice}
+                        disabled={billable.length === 0}
+                      >
+                        Convert ready items ({billable.length})
+                      </Button>
+                    </div>
                   </div>
                 );
               })()}
