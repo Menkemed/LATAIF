@@ -82,7 +82,17 @@ export function RepairDetail() {
     repairs, loadRepairs, updateRepair, updateStatus, deleteRepair,
     repairLines, loadRepairLines, getRepairLines, addRepairLine, cancelRepairLine,
   } = useRepairStore();
-  const goldStore = useGoldStore();
+  // v0.4.3 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
+  // bei jeder Mutation seine Referenz. Als useEffect-Dependency + goldStore.loadAll()
+  // im Effect → Endlos-Loop (RepairDetail fror beim Oeffnen ein). Stabile
+  // Selektoren: Actions sind referenz-stabil, State-Arrays aendern nur bei echten
+  // Gold-Daten-Aenderungen.
+  const goldLoadAll = useGoldStore(s => s.loadAll);
+  const goldPayables = useGoldStore(s => s.goldPayables);
+  const customerGoldCredits = useGoldStore(s => s.customerGoldCredits);
+  const createGoldPayable = useGoldStore(s => s.createGoldPayable);
+  const createCustomerGoldCredit = useGoldStore(s => s.createCustomerGoldCredit);
+  const creditShopGold = useGoldStore(s => s.creditShopGold);
   const { invoices, loadInvoices } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -102,9 +112,9 @@ export function RepairDetail() {
     loadRepairs(); loadCustomers(); loadProducts(); loadCategories();
     loadInvoices(); loadSuppliers(); loadExpenses(); loadEmployees();
     loadRepairLines();
-    goldStore.loadAll();
+    goldLoadAll();
   }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices,
-      loadSuppliers, loadExpenses, loadEmployees, loadRepairLines, goldStore]);
+      loadSuppliers, loadExpenses, loadEmployees, loadRepairLines, goldLoadAll]);
 
   const supplierOptions = useMemo(() => suppliers
     .filter(s => s.active)
@@ -168,12 +178,12 @@ export function RepairDetail() {
     [thisRepairLines],
   );
   const repairGoldPayables = useMemo(
-    () => id ? goldStore.goldPayables.filter(gp => gp.sourceRepairId === id) : [],
-    [id, goldStore.goldPayables],
+    () => id ? goldPayables.filter(gp => gp.sourceRepairId === id) : [],
+    [id, goldPayables],
   );
   const repairCustomerGoldCredits = useMemo(
-    () => id ? goldStore.customerGoldCredits.filter(gc => gc.sourceRepairId === id) : [],
-    [id, goldStore.customerGoldCredits],
+    () => id ? customerGoldCredits.filter(gc => gc.sourceRepairId === id) : [],
+    [id, customerGoldCredits],
   );
 
   if (!repair) {
@@ -206,7 +216,7 @@ export function RepairDetail() {
     if (newGoldForm.source === 'workshop') {
       // Workshop hat eigenes Gold verwendet → gold_payable
       if (!newGoldForm.supplierId || received <= 0) return;
-      goldStore.createGoldPayable({
+      createGoldPayable({
         supplierId: newGoldForm.supplierId,
         sourceRepairId: id,
         weightGrams: received,
@@ -218,7 +228,7 @@ export function RepairDetail() {
       if (received <= 0) return;
       const leftover = received - used;
       if (leftover > 0 && newGoldForm.leftoverDest === 'credit') {
-        goldStore.createCustomerGoldCredit({
+        createCustomerGoldCredit({
           customerId: repair.customerId,
           sourceRepairId: id,
           weightGrams: leftover,
@@ -233,7 +243,7 @@ export function RepairDetail() {
         const { currentBranchId: getBranch } = await import('@/core/db/helpers');
         let branchId: string;
         try { branchId = getBranch(); } catch { branchId = 'branch-main'; }
-        goldStore.creditShopGold(branchId, newGoldForm.karat, leftover, {
+        creditShopGold(branchId, newGoldForm.karat, leftover, {
           repairId: id,
           sourceLabel: `Customer-Gold leftover from repair ${repair.repairNumber}`,
         });
