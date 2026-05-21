@@ -18,6 +18,7 @@ import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { PrintItemsFilterModal } from '@/components/print/PrintItemsFilterModal';
 import { runApprovalPrint } from '@/core/pdf/agent-print-helpers';
+import { productSearchText } from '@/core/utils/product-format';
 import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 import { useAgentStore } from '@/stores/agentStore';
 import { useProductStore } from '@/stores/productStore';
@@ -95,20 +96,12 @@ export function AgentList() {
 
   const availableProducts = useMemo(() => products.filter(p => p.stockStatus === 'in_stock'), [products]);
 
-  // Search-Filter ueber Brand / Name / SKU / Reference / Serial / Material / Karat.
-  // Deep-Match damit auch Attribute-Werte (z.B. "5711/1A") greifen.
+  // Deep-Match über Brand / Name / SKU / Condition + alle Attribut-Werte —
+  // key-agnostisch via productSearchText (gleiche Suche wie Sales/Order/Purchase).
   const filteredTransferProducts = useMemo(() => {
     const q = transferSearch.trim().toLowerCase();
     if (!q) return availableProducts;
-    return availableProducts.filter(p => {
-      const attrs = (p.attributes || {}) as Record<string, unknown>;
-      const hay = [
-        p.brand, p.name, p.sku, p.condition,
-        attrs.reference_number, attrs.serial_number, attrs.material,
-        attrs.karat, attrs.karat_color, attrs.weight, attrs.color, attrs.item_type,
-      ].map(v => String(v ?? '').toLowerCase()).join(' ');
-      return hay.includes(q);
-    });
+    return availableProducts.filter(p => productSearchText(p).includes(q));
   }, [availableProducts, transferSearch]);
 
   function handleCreateTransfer() {

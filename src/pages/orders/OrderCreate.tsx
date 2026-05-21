@@ -19,6 +19,7 @@ import { getSpotPrices } from '@/core/market/spot-prices';
 import { purityOf } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getStockAggregates } from '@/core/lots/lot-queries';
+import { productSearchText } from '@/core/utils/product-format';
 import type { OrderStatus, OrderType, CustomOrderMeta, MaterialDetails, Product } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { MaterialsCard, type MaterialLine } from '@/components/work-orders/MaterialsCard';
@@ -141,6 +142,7 @@ export function OrderCreate() {
     id: p.id,
     label: `${p.brand} ${p.name}${p.sku ? ' · ' + p.sku : ''}`,
     subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD`,
+    searchText: productSearchText(p),
   })), [products]);
 
   // Phase 7 — Lot-Aggregate fuer alle in lines referenzierten Produkte cachen,

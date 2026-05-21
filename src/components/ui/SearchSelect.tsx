@@ -7,6 +7,9 @@ export interface SearchSelectOption {
   label: string;
   subtitle?: string;
   meta?: string;
+  /** Unsichtbarer Match-Text — wird mitdurchsucht, aber nicht gerendert.
+   *  Für Tiefen-Suche (Reference, Serial, Attribute, …). */
+  searchText?: string;
 }
 
 interface SearchSelectProps {
@@ -63,7 +66,7 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
   const selected = options.find(o => o.id === value);
 
   const filtered = query
-    ? options.filter(o => `${o.label} ${o.subtitle || ''} ${o.meta || ''}`.toLowerCase().includes(query.toLowerCase())).slice(0, 50)
+    ? options.filter(o => `${o.label} ${o.subtitle || ''} ${o.meta || ''} ${o.searchText || ''}`.toLowerCase().includes(query.toLowerCase())).slice(0, 50)
     : options.slice(0, 50);
 
   useEffect(() => {
@@ -223,7 +226,7 @@ export function SearchMultiSelect({ label, placeholder = 'Search and select...',
   const selectedOptions = options.filter(o => value.includes(o.id));
 
   const filtered = query
-    ? options.filter(o => `${o.label} ${o.subtitle || ''} ${o.meta || ''}`.toLowerCase().includes(query.toLowerCase())).slice(0, 100)
+    ? options.filter(o => `${o.label} ${o.subtitle || ''} ${o.meta || ''} ${o.searchText || ''}`.toLowerCase().includes(query.toLowerCase())).slice(0, 100)
     : options.slice(0, 100);
 
   useEffect(() => {

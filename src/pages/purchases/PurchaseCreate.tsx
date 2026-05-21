@@ -22,7 +22,7 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import { useProductStore } from '@/stores/productStore';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import type { Product, Supplier } from '@/core/models/types';
-import { getProductSpecs } from '@/core/utils/product-format';
+import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import { query } from '@/core/db/helpers';
 
 function fmt(v: number): string {
@@ -212,6 +212,7 @@ export function PurchaseCreate() {
         label: `${p.brand} ${p.name}`,
         subtitle: p.sku || undefined,
         meta: `${fmt(p.purchasePrice || 0)} BHD`,
+        searchText: productSearchText(p),
       })),
     [products]);
 

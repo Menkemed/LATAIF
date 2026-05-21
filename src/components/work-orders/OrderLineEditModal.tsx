@@ -7,6 +7,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { productSearchText } from '@/core/utils/product-format';
 import { NewProductModal } from '@/components/products/NewProductModal';
 import { useProductStore } from '@/stores/productStore';
 import type { OrderLine, Product } from '@/core/models/types';
@@ -54,6 +55,7 @@ export function OrderLineEditModal({ open, line, productLocked, onClose, onSave 
     id: p.id,
     label: `${p.brand} ${p.name}${p.sku ? ' · ' + p.sku : ''}`,
     subtitle: (p.quantity ?? 0) > 0 ? `${p.quantity} auf Lager` : 'ausverkauft',
+    searchText: productSearchText(p),
   })), [products]);
 
   function pickProduct(pid: string) {

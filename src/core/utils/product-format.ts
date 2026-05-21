@@ -67,6 +67,18 @@ export function formatProductOneLine(
   return `${head} · ${specs.map(s => s.value).join(' · ')}`;
 }
 
+/** Lowercased Haystack über Brand, Name, SKU, Condition + ALLE Attribut-Werte
+ *  (Reference, Serial, Material, Karat, Farbe, …) — für die Tiefen-Suche in
+ *  Produkt-Pickern via `SearchSelectOption.searchText`. */
+export function productSearchText(product: Product): string {
+  const attrs = (product.attributes as Record<string, unknown>) || {};
+  const attrValues = Object.values(attrs).map(v => (Array.isArray(v) ? v.join(' ') : v));
+  return [product.brand, product.name, product.sku, product.condition, ...attrValues]
+    .map(v => String(v ?? '').toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+}
+
 /** Multi-line Beschreibung für PDF/Print: "Brand Name\nRef: X\nDiameter: 40mm\n…". */
 export function formatProductMultiLine(
   product: Product | undefined,

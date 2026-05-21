@@ -18,7 +18,7 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getLotsWithPurchaseNumbers, formatLotLabel, getStockAggregates, type StockLot } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
-import { getProductSpecs } from '@/core/utils/product-format';
+import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -142,6 +142,7 @@ export function InvoiceCreate() {
         label: `${p.brand} ${p.name}`,
         subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${stock}`,
         meta: p.sku,
+        searchText: productSearchText(p),
       };
     });
   }, [products]);
