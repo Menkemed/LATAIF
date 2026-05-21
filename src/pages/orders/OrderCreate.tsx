@@ -3,7 +3,7 @@
 // Plan §8 — Pricing-Section identisch zu Invoice: per-Line Tax-Scheme + auto VAT.
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Save, X, Phone } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Save, X, Phone, Edit3 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -19,10 +19,11 @@ import { getSpotPrices } from '@/core/market/spot-prices';
 import { purityOf } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getStockAggregates } from '@/core/lots/lot-queries';
-import type { OrderStatus, OrderType, CustomOrderMeta, MaterialDetails } from '@/core/models/types';
+import type { OrderStatus, OrderType, CustomOrderMeta, MaterialDetails, Product } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { MaterialsCard, type MaterialLine } from '@/components/work-orders/MaterialsCard';
 import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
+import { NewProductModal } from '@/components/products/NewProductModal';
 import { v4 as genId } from 'uuid';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
@@ -32,7 +33,12 @@ function fmt(v: number): string {
 }
 
 interface DraftLine {
+  // Back-to-Back: jede Produkt-Zeile ist entweder ein bestehendes Produkt
+  // (Picker) oder ein neu definiertes (NewProductModal). brand/name aus
+  // newProduct dienen nur der Inline-Anzeige; die volle Spec lebt in newProduct.
+  mode: 'existing' | 'new';
   productId?: string;
+  newProduct?: Partial<Product>;
   description: string;
   scheme: Scheme;
   quantity: number;
@@ -64,11 +70,11 @@ export function OrderCreate() {
   const goBack = useGoBack('/orders');
   const { createOrder } = useOrderStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts } = useProductStore();
+  const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { createGoldPayable } = useGoldStore();
 
-  useEffect(() => { loadCustomers(); loadProducts(); loadSuppliers(); }, [loadCustomers, loadProducts, loadSuppliers]);
+  useEffect(() => { loadCustomers(); loadProducts(); loadSuppliers(); loadCategories(); }, [loadCustomers, loadProducts, loadSuppliers, loadCategories]);
   // v0.6.0 — Live-Goldpreis fuer die provisorische COGS-Bewertung von
   // Goldschmied-Gold (wenn nur Gewicht, kein Cost eingegeben wird).
   useEffect(() => {
@@ -108,9 +114,11 @@ export function OrderCreate() {
   // werden sie als order_lines mit material_kind/material_details persistiert.
   const [materialLines, setMaterialLines] = useState<Array<MaterialLineInput & { _id: string }>>([]);
   const [showAddMaterial, setShowAddMaterial] = useState(false);
+  // Back-to-Back: NewProductModal fuer "New"-Produkt-Zeilen (Index der Zeile).
+  const [newItemModalIdx, setNewItemModalIdx] = useState<number | null>(null);
 
   const [lines, setLines] = useState<DraftLine[]>([
-    { description: '', scheme: 'auto', quantity: 1, unitPrice: 0 },
+    { mode: 'existing', description: '', scheme: 'auto', quantity: 1, unitPrice: 0 },
   ]);
   // Locale string state per line for the editable Total input — preserves trailing zeros
   // and decimal points while user types (e.g. "5500.50" stays as typed).
@@ -146,7 +154,7 @@ export function OrderCreate() {
   // Pro Zeile auflösen: Scheme + VAT + Net + Gross (genau wie Invoice).
   const computed = lines.map(l => {
     const product = l.productId ? products.find(p => p.id === l.productId) : undefined;
-    const fallbackScheme: 'VAT_10' | 'ZERO' | 'MARGIN' = (product?.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') || 'MARGIN';
+    const fallbackScheme: 'VAT_10' | 'ZERO' | 'MARGIN' = ((product?.taxScheme || l.newProduct?.taxScheme) as 'VAT_10' | 'ZERO' | 'MARGIN') || 'MARGIN';
     const resolved = l.scheme === 'auto' ? fallbackScheme : l.scheme;
     const vatRate = resolved === 'ZERO' ? 0 : 10;
     const agg = product ? lotAgg.get(product.id) : undefined;
@@ -177,7 +185,7 @@ export function OrderCreate() {
   }
 
   function addLine() {
-    setLines(prev => [...prev, { description: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
+    setLines(prev => [...prev, { mode: 'existing', description: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
   }
 
   function removeLine(idx: number) {
@@ -189,14 +197,41 @@ export function OrderCreate() {
     if (!p) return;
     updateLine(idx, {
       productId,
+      newProduct: undefined,
       description: `${p.brand} ${p.name}`,
       unitPrice: p.plannedSalePrice ?? p.purchasePrice ?? 0,
     });
   }
 
+  function openNewItemModal(idx: number) {
+    setNewItemModalIdx(idx);
+  }
+
+  function modalInitial(): Partial<Product> | undefined {
+    if (newItemModalIdx == null) return undefined;
+    const line = lines[newItemModalIdx];
+    return line?.newProduct ?? {
+      categoryId: categories[0]?.id || '',
+      brand: '', name: '', sku: '', condition: '',
+      taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD',
+      attributes: {}, images: [],
+    };
+  }
+
+  function handleModalSave(prod: Partial<Product>) {
+    if (newItemModalIdx == null) return;
+    const label = `${prod.brand || ''} ${prod.name || ''}`.trim();
+    updateLine(newItemModalIdx, {
+      newProduct: prod,
+      productId: undefined,
+      description: label,
+    });
+    setNewItemModalIdx(null);
+  }
+
   function reset() {
     setCustomerId('');
-    setLines([{ description: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
+    setLines([{ mode: 'existing', description: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
     setDepositAmount(0);
     setPaymentMethod('cash');
     setFullyPaid(false);
@@ -218,7 +253,7 @@ export function OrderCreate() {
   }
 
   function hasProductLines(): boolean {
-    return lines.some(l => l.description.trim());
+    return lines.some(l => l.productId || l.newProduct);
   }
 
   // v0.5.0 — Quote-first Validierung. Ein Custom-Order braucht nur den approx.
@@ -237,19 +272,18 @@ export function OrderCreate() {
       return null;
     }
     if (wantsProduct && !wantsCustom) {
-      // reiner Normal-Order
-      if (lines.length === 0) return 'Please add at least one item';
-      const hasInvalid = lines.some(l => !l.description.trim() || l.quantity <= 0);
-      if (hasInvalid) return 'Each item needs a description and quantity > 0';
+      // reiner Normal-Order — jede Zeile ist Existing (Produkt) oder New (Spec).
+      const realLines = lines.filter(l => l.productId || l.newProduct);
+      if (realLines.length === 0) return 'Bitte mindestens einen Artikel waehlen (Existing) oder anlegen (New)';
+      if (realLines.some(l => l.quantity <= 0)) return 'Jeder Artikel braucht eine Menge > 0';
       return null;
     }
     // Mixed: Customer + (≥1 Produkt-Line ODER Quoted Price)
     if (!hasProductLines() && quote <= 0) {
       return 'Mixed Order braucht mindestens ein Produkt ODER einen Quoted Price';
     }
-    if (hasProductLines()) {
-      const hasInvalid = lines.some(l => l.description.trim() && l.quantity <= 0);
-      if (hasInvalid) return 'Each product item needs a quantity > 0';
+    if (lines.filter(l => l.productId || l.newProduct).some(l => l.quantity <= 0)) {
+      return 'Jeder Artikel braucht eine Menge > 0';
     }
     if (quote > 0 && !finalProductDescription.trim()) {
       return 'Bitte Final-Product-Description fuer den Custom-Teil angeben';
@@ -259,6 +293,7 @@ export function OrderCreate() {
 
   type UnifiedLine = {
     productId?: string;
+    newProduct?: Partial<Product>;
     description: string;
     quantity: number;
     unitPrice: number;
@@ -272,16 +307,20 @@ export function OrderCreate() {
   };
 
   // v0.3.0 — sammelt die normalen Produkt-Lines (kein materialKind).
+  // Eine Zeile zaehlt nur wenn sie ein Produkt traegt (Existing oder New-Spec);
+  // ueber den Original-Index gemappt, damit computed[] korrekt zugeordnet ist.
   function collectProductLines(): UnifiedLine[] {
     return lines
-      .filter(l => l.description.trim())
-      .map((l, i) => ({
+      .map((l, i) => ({ l, c: computed[i] }))
+      .filter(({ l }) => l.productId || l.newProduct)
+      .map(({ l, c }) => ({
         productId: l.productId,
+        newProduct: l.newProduct,
         description: l.description,
         quantity: l.quantity,
         unitPrice: l.unitPrice,
-        taxScheme: computed[i].scheme,
-        vatRate: computed[i].vatRate,
+        taxScheme: c.scheme,
+        vatRate: c.vatRate,
       }));
   }
 
@@ -814,18 +853,53 @@ export function OrderCreate() {
                     gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
                     gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
                   }}>
-                    <div style={{ minWidth: 0 }}>
-                      <SearchSelect
-                        placeholder="Pick product or type free text"
-                        options={productOptions}
-                        value={l.productId || ''}
-                        onChange={pid => pickProductForLine(idx, pid)}
-                      />
+                    <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <select value={l.mode}
+                        onChange={e => {
+                          const m = e.target.value as 'existing' | 'new';
+                          updateLine(idx, { mode: m, productId: undefined, newProduct: undefined, description: '' });
+                          if (m === 'new') openNewItemModal(idx);
+                        }}
+                        style={{ padding: '6px 8px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 4, background: '#FFFFFF', width: '100%' }}>
+                        <option value="existing">Existing Product</option>
+                        <option value="new">New Product</option>
+                      </select>
+                      {l.mode === 'existing' ? (
+                        <SearchSelect
+                          placeholder="Pick product..."
+                          options={productOptions}
+                          value={l.productId || ''}
+                          onChange={pid => pickProductForLine(idx, pid)}
+                        />
+                      ) : l.newProduct ? (
+                        <div className="flex items-center justify-between" style={{
+                          padding: '7px 10px', background: '#F2F7FA', border: '1px solid #E5E9EE',
+                          borderRadius: 4, fontSize: 12, color: '#0F0F10', minWidth: 0,
+                        }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {l.newProduct.brand} <span style={{ color: '#4B5563' }}>{l.newProduct.name}</span>
+                          </span>
+                          <button onClick={() => openNewItemModal(idx)} title="Produkt-Details bearbeiten"
+                            className="cursor-pointer flex items-center gap-1"
+                            style={{ background: 'none', border: 'none', color: '#6B7280', padding: '0 0 0 8px', fontSize: 11 }}>
+                            <Edit3 size={12} /> Edit
+                          </button>
+                        </div>
+                      ) : (
+                        <button onClick={() => openNewItemModal(idx)}
+                          className="cursor-pointer"
+                          style={{
+                            padding: '7px 10px', fontSize: 12, border: '1px dashed #D5D9DE',
+                            borderRadius: 4, background: '#FFFFFF', color: '#6B7280', textAlign: 'left', width: '100%',
+                          }}>
+                          + Neues Produkt definieren…
+                        </button>
+                      )}
                       <input
                         placeholder="Description"
                         value={l.description}
                         onChange={e => updateLine(idx, { description: e.target.value })}
-                        style={{ marginTop: 6, width: '100%', padding: '6px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0 }} />
+                        style={{ width: '100%', padding: '6px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0 }} />
                     </div>
                     <select value={l.scheme}
                       onChange={e => updateLine(idx, { scheme: e.target.value as Scheme })}
@@ -1058,6 +1132,18 @@ export function OrderCreate() {
           setMaterialLines(prev => [...prev, { ...data, _id: genId() }]);
         }}
         showCustomerPrice={false}
+      />
+
+      {/* Back-to-Back: New-Product-Zeile — volle Produkt-Spec via shared Modal */}
+      <NewProductModal
+        open={newItemModalIdx != null}
+        onClose={() => setNewItemModalIdx(null)}
+        onSubmit={handleModalSave}
+        initial={modalInitial()}
+        title="Neues Produkt — Artikel definieren"
+        submitLabel="Artikel uebernehmen"
+        hint={<>Das Produkt wird mit der Order angelegt. Einkaufspreis + Lagerbestand kommen spaeter beim Wareneingang (Purchase).</>}
+        hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true }}
       />
     </div>
   );

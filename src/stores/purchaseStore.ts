@@ -10,7 +10,8 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product } from '@/core/models/types';
+import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product, OrderStatus, OrderLineStatus } from '@/core/models/types';
+import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
@@ -56,8 +57,12 @@ interface PurchaseInput {
     // Plan §Purchase §Tax: Input-VAT (Vorsteuer) per Line.
     taxScheme?: 'ZERO' | 'VAT_10';
     vatRate?: number;          // 0 oder 10
+    // Back-to-Back: verknuepft diese Zeile mit der Order-Zeile, die sie ausgeloest hat.
+    sourceOrderLineId?: string;
   }>;
   initialPayment?: { amount: number; method: 'cash' | 'bank' | 'benefit'; reference?: string };
+  // Back-to-Back: Order, deren Posten dieser Einkauf (mit-)beschafft.
+  sourceOrderId?: string;
 }
 
 // v0.4.0 — Mobile-Capture: ein Foto aus der /mobile-Seite, das noch zu einer
@@ -127,6 +132,7 @@ function rowToPurchase(row: Record<string, unknown>): Purchase {
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
+    sourceOrderId: (row.source_order_id as string | null) || undefined,
   };
 }
 
@@ -143,6 +149,7 @@ function rowToLine(row: Record<string, unknown>): PurchaseLine {
     taxScheme: (row.tax_scheme as 'ZERO' | 'VAT_10' | null) || undefined,
     vatRate: row.vat_rate != null ? (row.vat_rate as number) : undefined,
     vatAmount: row.vat_amount != null ? (row.vat_amount as number) : undefined,
+    sourceOrderLineId: (row.source_order_line_id as string | null) || undefined,
   };
 }
 
@@ -212,6 +219,76 @@ function computeStatus(total: number, paid: number, cancelled = false): Purchase
   if (paid <= 0) return 'UNPAID';
   if (paid >= total) return 'PAID';
   return 'PARTIALLY_PAID';
+}
+
+// ── Back-to-Back Beschaffung: Order-Line Status-Sync ──────────────────────
+// purchaseStore importiert NIE orderStore (HMR-Circular-Risk) — der Order-Line-
+// Status wird per Raw-SQL aktualisiert, der Order-Roll-up ueber die REINE
+// Funktion deriveOrderStatusFromLines (kein Store-Zugriff).
+
+type SqlDb = ReturnType<typeof getDatabase>;
+
+function recomputeOrderStatusRaw(db: SqlDb, orderId: string): void {
+  const now = new Date().toISOString();
+  const orderRows = query(`SELECT status FROM orders WHERE id = ?`, [orderId]);
+  if (orderRows.length === 0) return;
+  const currentStatus = (orderRows[0].status as OrderStatus) || 'pending';
+  const lineRows = query(
+    `SELECT status FROM order_lines WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 1`,
+    [orderId]
+  );
+  if (lineRows.length === 0) return;
+  const statuses = lineRows.map(r => ((r.status as string) || 'PENDING') as OrderLineStatus);
+  const derived = deriveOrderStatusFromLines(statuses, currentStatus);
+  if (derived !== currentStatus) {
+    db.run(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`, [derived, now, orderId]);
+    trackUpdate('orders', orderId, { status: derived });
+  }
+}
+
+// Nach createPurchase: verknuepfte Order-Zeilen auf ARRIVED setzen. Invoicte oder
+// stornierte Zeilen werden uebersprungen.
+function arriveLinkedOrderLines(
+  db: SqlDb,
+  lineRecords: Array<{ sourceOrderLineId: string | null }>,
+): void {
+  const affectedOrders = new Set<string>();
+  for (const lr of lineRecords) {
+    if (!lr.sourceOrderLineId) continue;
+    const rows = query(
+      `SELECT order_id, invoice_id, status FROM order_lines WHERE id = ?`,
+      [lr.sourceOrderLineId]
+    );
+    if (rows.length === 0) continue;
+    if (rows[0].invoice_id) continue;
+    if ((rows[0].status as string) === 'CANCELLED') continue;
+    db.run(`UPDATE order_lines SET status = 'ARRIVED' WHERE id = ?`, [lr.sourceOrderLineId]);
+    trackUpdate('order_lines', lr.sourceOrderLineId, { status: 'ARRIVED' });
+    affectedOrders.add(rows[0].order_id as string);
+  }
+  for (const oid of affectedOrders) recomputeOrderStatusRaw(db, oid);
+}
+
+// Nach cancelPurchase/deletePurchase: verknuepfte ARRIVED-Zeilen zurueck auf
+// PENDING (nur nicht-invoicte) — die Order kann dann neu beschafft werden.
+function revertLinkedOrderLines(db: SqlDb, purchaseId: string): void {
+  const linkRows = query(
+    `SELECT DISTINCT source_order_line_id AS olid FROM purchase_lines
+       WHERE purchase_id = ? AND source_order_line_id IS NOT NULL`,
+    [purchaseId]
+  );
+  const affectedOrders = new Set<string>();
+  for (const lr of linkRows) {
+    const olid = lr.olid as string;
+    const rows = query(`SELECT order_id, status, invoice_id FROM order_lines WHERE id = ?`, [olid]);
+    if (rows.length === 0) continue;
+    if (rows[0].invoice_id) continue;
+    if ((rows[0].status as string) !== 'ARRIVED') continue;
+    db.run(`UPDATE order_lines SET status = 'PENDING' WHERE id = ?`, [olid]);
+    trackUpdate('order_lines', olid, { status: 'PENDING' });
+    affectedOrders.add(rows[0].order_id as string);
+  }
+  for (const oid of affectedOrders) recomputeOrderStatusRaw(db, oid);
 }
 
 export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
@@ -298,6 +375,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       id: string; productId: string; description: string | null;
       qty: number; unitPrice: number; lineTotal: number; position: number;
       taxScheme: 'ZERO' | 'VAT_10'; vatRate: number; vatAmount: number;
+      sourceOrderLineId: string | null;
     }> = [];
     let total = 0;
     input.lines.forEach((ln, idx) => {
@@ -343,6 +421,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
         id: lineId, productId, description: ln.description || null,
         qty, unitPrice, lineTotal, position: idx + 1,
         taxScheme: scheme, vatRate: rate, vatAmount,
+        sourceOrderLineId: ln.sourceOrderLineId ?? null,
       });
     });
 
@@ -377,19 +456,20 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
     db.run(
       `INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, status, total_amount, paid_amount, remaining_amount,
-        purchase_date, notes, staff_id, supplier_snapshot, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        purchase_date, notes, staff_id, supplier_snapshot, created_at, updated_at, created_by, source_order_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, purchaseNumber, input.supplierId, status, total, paid, total - paid,
-       purchaseDate, input.notes || null, input.staffId || null, snapshotJson, now, now, userId]
+       purchaseDate, input.notes || null, input.staffId || null, snapshotJson, now, now, userId,
+       input.sourceOrderId || null]
     );
 
-    // Insert lines (inkl. Input-VAT-Felder)
+    // Insert lines (inkl. Input-VAT-Felder + Back-to-Back Order-Link)
     const lineStmt = db.prepare(
-      `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount, source_order_line_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const l of lineRecords) {
-      lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount]);
+      lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId]);
     }
     lineStmt.free();
 
@@ -427,6 +507,11 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
         [initialPaymentId, id, input.initialPayment.amount, input.initialPayment.method, purchaseDate, input.initialPayment.reference || null, null, now]
       );
       trackPayment('purchases', id, input.initialPayment.amount, input.initialPayment.method);
+    }
+
+    // Back-to-Back: verknuepfte Order-Zeilen auf ARRIVED + Order-Status hochrollen.
+    if (input.sourceOrderId) {
+      arriveLinkedOrderLines(db, lineRecords);
     }
 
     saveDatabase();
@@ -520,6 +605,8 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // Cost-Snapshot ist Eigentum der Invoice, nicht des Lots.
     db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE purchase_id = ?`, [id]);
     for (const pid of affectedProductIds) syncProductQuantity(pid);
+    // Back-to-Back: verknuepfte ARRIVED-Order-Zeilen zurueck auf PENDING.
+    if (p.sourceOrderId) revertLinkedOrderLines(db, id);
     saveDatabase();
     trackStatusChange('purchases', id, p.status, 'CANCELLED');
     get().loadPurchases();
@@ -547,6 +634,9 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // Bereits verkaufte Lots (invoice_lines.lot_id gesetzt) duerfen nicht weg —
     // soft-cancel statt hart loeschen, damit Cost-Snapshot-Audit erhalten bleibt.
     db.run(`UPDATE stock_lots SET status = 'CANCELLED', purchase_id = NULL, purchase_line_id = NULL WHERE purchase_id = ?`, [id]);
+    // Back-to-Back: verknuepfte ARRIVED-Order-Zeilen zurueck auf PENDING — VOR
+    // dem DELETE, da die Link-Zeilen in purchase_lines mit-cascaded werden.
+    revertLinkedOrderLines(db, id);
     db.run(`DELETE FROM purchases WHERE id = ?`, [id]);
     for (const pid of affectedProductIds) syncProductQuantity(pid);
     saveDatabase();

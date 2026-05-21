@@ -817,6 +817,9 @@ export interface OrderLine {
   // v0.3.0 — Per-Line Fulfillment-Status + partial-invoicing link
   status?: OrderLineStatus;   // default 'PENDING'
   invoiceId?: UUID;           // NULL bis die Line invoiced wurde
+  // Back-to-Back Beschaffung: beim "Beim Supplier bestellt"-Markieren erfasster
+  // Supplier — gruppiert den Wareneingang nach Lieferant.
+  orderedSupplierId?: UUID;
   product?: Product;
 }
 
@@ -871,7 +874,9 @@ export type OrderType = 'normal' | 'custom' | 'mixed';
 
 // v0.3.0 — Per-Line Fulfillment-Status. Erlaubt gemischte Orders mit
 // unterschiedlichen Liefer-Timelines pro Line zu tracken.
-export type OrderLineStatus = 'PENDING' | 'ARRIVED' | 'DELIVERED' | 'CANCELLED';
+// 'ORDERED' = beim Supplier bestellt, Wareneingang/Purchase steht noch aus
+// (Back-to-Back Beschaffung — Zwischen-Marker vor 'ARRIVED').
+export type OrderLineStatus = 'PENDING' | 'ORDERED' | 'ARRIVED' | 'DELIVERED' | 'CANCELLED';
 
 /**
  * v0.3.0 — Leitet den Order-Type aus den Lines ab. Eine Line gilt als
@@ -1061,6 +1066,9 @@ export interface PurchaseLine {
   taxScheme?: 'ZERO' | 'VAT_10';
   vatRate?: number;            // 0 oder 10
   vatAmount?: number;          // dekomponiert: lineTotal × rate / (100 + rate)
+  // Back-to-Back Beschaffung: verknuepft diese Einkaufs-Zeile mit der Order-Zeile,
+  // die sie ausgeloest hat. NULL = reine Lager-Zeile ohne Order-Bezug.
+  sourceOrderLineId?: UUID;
 }
 
 // Plan §Purchase Returns §8: 'credit' erlaubt Nutzung von Supplier-Credit-Balance.
@@ -1110,6 +1118,8 @@ export interface Purchase {
   updatedAt: string;
   createdBy?: UUID;
   supplier?: Supplier;
+  // Back-to-Back Beschaffung: Order, deren Posten dieser Einkauf (mit-)beschafft.
+  sourceOrderId?: UUID;
 }
 
 // Purchase Return (Plan §Purchase Returns §17)

@@ -7,8 +7,11 @@ import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { SearchSelect } from '@/components/ui/SearchSelect';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
+import { OrderLineEditModal, type OrderLineEditPatch } from '@/components/work-orders/OrderLineEditModal';
+import { SourceItemsModal } from '@/components/work-orders/SourceItemsModal';
 import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -62,7 +65,8 @@ export function OrderDetail() {
   const goBack = useGoBack('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
     getBillableLines, markOrderLinesInvoiced, updateOrderLineStatus,
-    addOrderLine, deleteOrderLine } = useOrderStore();
+    addOrderLine, deleteOrderLine, updateOrderLinePrice, updateOrderLine,
+    markOrderLineOrdered } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
@@ -89,6 +93,13 @@ export function OrderDetail() {
   const [pendingNumberAction, setPendingNumberAction] = useState<((special: boolean) => Promise<void>) | null>(null);
   // v0.3.0 — bumpt nach Line-Status-Aenderung damit das Order-Items-Grid neu lädt
   const [lineRefresh, setLineRefresh] = useState(0);
+  // Back-to-Back — Order-Line bearbeiten (Produkt/Menge/Preis/Beschreibung)
+  const [editLine, setEditLine] = useState<OrderLine | null>(null);
+  // Back-to-Back — Wareneingang-Auswahl-Modal
+  const [sourceModalOpen, setSourceModalOpen] = useState(false);
+  // Back-to-Back — "Beim Supplier bestellt" Mini-Modal (Supplier-Picker)
+  const [markOrderedLine, setMarkOrderedLine] = useState<OrderLine | null>(null);
+  const [markOrderedSupplier, setMarkOrderedSupplier] = useState('');
   // v0.5.0 — Add-Cost Modal (Labor/Diamond/Material-Kosten nachträglich erfassen)
   const [showAddCost, setShowAddCost] = useState(false);
   // v0.6.0 — Gold-Verbindlichkeit begleichen (Gold geben / in Geld umwandeln)
@@ -122,6 +133,38 @@ export function OrderDetail() {
   const orderGoldPayables = useMemo(
     () => goldPayables.filter(gp => gp.sourceOrderId === id),
     [goldPayables, id]
+  );
+  // v0.5.0 — die kundenseitige Quote-Line (der Quoted Price) — falls vorhanden.
+  const quoteLine = useMemo(() => customerLines.find(l => l.materialKind === 'custom'), [customerLines]);
+  // Back-to-Back — pro customer-facing Zeile: gibt es einen aktiven (nicht
+  // stornierten) Purchase, der sie beschafft hat? Reverse-Lookup ueber
+  // purchase_lines.source_order_line_id.
+  const sourcedMap = useMemo(() => {
+    const map = new Map<string, { purchaseId: string; purchaseNumber: string }>();
+    const ids = customerLines.map(l => l.id);
+    if (ids.length === 0) return map;
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      const rows = query(
+        `SELECT pl.source_order_line_id AS olid, pl.purchase_id AS pid, p.purchase_number AS pnum
+           FROM purchase_lines pl JOIN purchases p ON p.id = pl.purchase_id
+          WHERE pl.source_order_line_id IN (${placeholders}) AND p.status != 'CANCELLED'`,
+        ids
+      );
+      for (const r of rows) {
+        map.set(r.olid as string, { purchaseId: r.pid as string, purchaseNumber: r.pnum as string });
+      }
+    } catch { /* Migration evtl. noch nicht durch */ }
+    return map;
+  }, [customerLines, lineRefresh]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Back-to-Back — un-beschaffte Produkt-Posten: PENDING/ORDERED, nicht invoiced,
+  // echte Produkt-Zeile (kein materialKind), noch nicht via Purchase verknuepft.
+  const sourceCandidates = useMemo(
+    () => customerLines.filter(l =>
+      (l.status === 'PENDING' || l.status === 'ORDERED') &&
+      !l.invoiceId && !l.materialKind && !sourcedMap.has(l.id)
+    ),
+    [customerLines, sourcedMap]
   );
 
   const order = useMemo(() => orders.find(o => o.id === id), [orders, id]);
@@ -301,13 +344,25 @@ export function OrderDetail() {
 
   function handleSave() {
     if (!id) return;
+    // v0.5.0 — Quoted Price ändern: existiert eine Custom-Quote-Line, ziehen
+    // wir ihren Preis + agreed_price konsistent mit (sonst nähme der Convert
+    // den alten Wert). Bei Normal-Orders direkt der Header-Wert.
+    if (quoteLine && form.agreedPrice != null
+        && Math.abs(form.agreedPrice - (quoteLine.unitPrice || 0)) > 0.0005) {
+      try {
+        updateOrderLinePrice(quoteLine.id, form.agreedPrice);
+      } catch (e) {
+        alert(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
     const margin =
       form.agreedPrice && form.supplierPrice
         ? form.agreedPrice - form.supplierPrice
         : undefined;
     const rem = (form.agreedPrice || 0) - (form.depositAmount || 0);
     updateOrder(id, {
-      agreedPrice: form.agreedPrice,
+      ...(quoteLine ? {} : { agreedPrice: form.agreedPrice }),
       depositAmount: form.depositAmount,
       supplierName: form.supplierName,
       supplierPrice: form.supplierPrice,
@@ -323,6 +378,18 @@ export function OrderDetail() {
     if (!id) return;
     updateStatus(id, status);
     setConfirmAdvance(null);
+  }
+
+  // Back-to-Back — Order-Position bearbeiten (Produkt/Menge/Preis/Beschreibung).
+  function handleSaveOrderLine(patch: OrderLineEditPatch) {
+    if (!editLine) return;
+    try {
+      updateOrderLine(editLine.id, patch);
+      setEditLine(null);
+      setLineRefresh(k => k + 1);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
   }
 
   function handleCancel() {
@@ -867,7 +934,17 @@ export function OrderDetail() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <Input label="SUPPLIER NAME" value={form.supplierName || ''} onChange={e => setForm({ ...form, supplierName: e.target.value })} />
                   <Input label="SUPPLIER PRICE (BHD)" type="number" value={form.supplierPrice ?? ''} onChange={e => setForm({ ...form, supplierPrice: Number(e.target.value) || undefined })} />
-                  <Input required label="AGREED PRICE (BHD)" type="number" value={form.agreedPrice ?? ''} onChange={e => setForm({ ...form, agreedPrice: Number(e.target.value) || undefined })} />
+                  <div>
+                    <Input required label={quoteLine ? 'QUOTED PRICE (BHD)' : 'AGREED PRICE (BHD)'} type="number"
+                      value={form.agreedPrice ?? ''}
+                      onChange={e => setForm({ ...form, agreedPrice: Number(e.target.value) || undefined })}
+                      disabled={!!quoteLine?.invoiceId} />
+                    {quoteLine?.invoiceId && (
+                      <span style={{ fontSize: 11, color: '#9CA3AF', marginTop: 4, display: 'block' }}>
+                        Bereits in einer Invoice — Preis nur über Storno der Invoice änderbar.
+                      </span>
+                    )}
+                  </div>
                   <Input label="DEPOSIT AMOUNT (BHD)" type="number" value={form.depositAmount ?? ''} onChange={e => setForm({ ...form, depositAmount: Number(e.target.value) || 0 })} />
                 </div>
               ) : (
@@ -933,22 +1010,30 @@ export function OrderDetail() {
             <Card>
               <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
                 <span className="text-overline">ORDER ITEMS ({customerLines.length})</span>
-                {(() => {
-                  const active = customerLines.filter(l => l.status !== 'CANCELLED');
-                  const ready = active.filter(l => l.status === 'ARRIVED' || l.status === 'DELIVERED').length;
-                  return (
-                    <span style={{ fontSize: 11, color: '#6B7280' }}>
-                      {ready} / {active.length} ready
-                    </span>
-                  );
-                })()}
+                <div className="flex items-center gap-3">
+                  {!isCancelled && perm.canManageOrders && sourceCandidates.length > 0 && (
+                    <Button variant="secondary" onClick={() => setSourceModalOpen(true)}>
+                      <Plus size={14} /> Wareneingang erfassen
+                    </Button>
+                  )}
+                  {(() => {
+                    const active = customerLines.filter(l => l.status !== 'CANCELLED');
+                    const ready = active.filter(l => l.status === 'ARRIVED' || l.status === 'DELIVERED').length;
+                    return (
+                      <span style={{ fontSize: 11, color: '#6B7280' }}>
+                        {ready} / {active.length} ready
+                      </span>
+                    );
+                  })()}
+                </div>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 2fr 0.5fr 0.9fr 1.4fr', gap: 10, fontSize: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '0.6fr 1.7fr 0.5fr 0.6fr 1.3fr 1.2fr', gap: 10, fontSize: 12 }}>
                 <span className="text-overline">KIND</span>
                 <span className="text-overline">DESCRIPTION</span>
                 <span className="text-overline" style={{ textAlign: 'right' }}>TOTAL</span>
                 <span className="text-overline">INVOICE</span>
                 <span className="text-overline">FULFILLMENT</span>
+                <span className="text-overline">ACTIONS</span>
                 {customerLines.map(l => {
                   const km = COST_KIND_META[l.materialKind || 'product'] || COST_KIND_META.product;
                   const costOnly = l.isCustomerFacing === false;
@@ -980,8 +1065,14 @@ export function OrderDetail() {
                       <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         {cancelled ? (
                           <span style={{ fontSize: 11, color: '#DC2626' }}>cancelled</span>
-                        ) : (
-                          (['PENDING', 'ARRIVED', 'DELIVERED'] as const).map(st => (
+                        ) : (<>
+                          {l.status === 'ORDERED' && (
+                            <span style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4,
+                              background: 'rgba(217,119,6,0.1)', color: '#D97706', border: '1px solid rgba(217,119,6,0.3)' }}>
+                              ORDERED
+                            </span>
+                          )}
+                          {(['PENDING', 'ARRIVED', 'DELIVERED'] as const).map(st => (
                             <button
                               key={st}
                               type="button"
@@ -1001,7 +1092,44 @@ export function OrderDetail() {
                                 background: l.status === st ? statusColors[st] : 'transparent',
                               }}
                             >{st}</button>
-                          ))
+                          ))}
+                        </>)}
+                      </div>
+                      <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                        {!cancelled && !l.invoiceId && !isCancelled && perm.canManageOrders && (
+                          <button type="button" onClick={() => setEditLine(l)}
+                            className="cursor-pointer flex items-center gap-1"
+                            style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}
+                            title="Position bearbeiten">
+                            <Edit3 size={11} /> Edit
+                          </button>
+                        )}
+                        {!cancelled && !l.invoiceId && !isCancelled && perm.canManageOrders
+                          && l.status === 'PENDING' && !l.materialKind && !sourcedMap.has(l.id) && (() => {
+                            const lp = l.productId ? products.find(p => p.id === l.productId) : undefined;
+                            const noStock = !lp || (lp.quantity ?? 0) <= 0;
+                            return (
+                              <button type="button"
+                                onClick={() => { setMarkOrderedLine(l); setMarkOrderedSupplier(l.orderedSupplierId || ''); }}
+                                className="cursor-pointer"
+                                style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4,
+                                  border: `1px solid ${noStock ? '#D97706' : '#D5D9DE'}`,
+                                  color: noStock ? '#FFFFFF' : '#6B7280',
+                                  background: noStock ? '#D97706' : 'transparent' }}
+                                title="Beim Supplier bestellt markieren">
+                                Beim Supplier bestellt
+                              </button>
+                            );
+                          })()}
+                        {sourcedMap.has(l.id) && (
+                          <button type="button"
+                            onClick={() => navigate(`/purchases/${sourcedMap.get(l.id)!.purchaseId}`)}
+                            className="cursor-pointer"
+                            style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4,
+                              border: '1px solid rgba(22,163,74,0.4)', color: '#16A34A', background: 'rgba(22,163,74,0.08)' }}
+                            title="Zum verknuepften Purchase">
+                            Sourced · {sourcedMap.get(l.id)!.purchaseNumber}
+                          </button>
                         )}
                       </div>
                     </div>
@@ -1370,6 +1498,55 @@ export function OrderDetail() {
         showCustomerPrice={false}
         allowLabor={true}
       />
+
+      {/* Back-to-Back — Order-Position bearbeiten */}
+      <OrderLineEditModal
+        open={!!editLine}
+        line={editLine}
+        productLocked={!!(editLine && sourcedMap.has(editLine.id))}
+        onClose={() => setEditLine(null)}
+        onSave={handleSaveOrderLine}
+      />
+
+      {/* Back-to-Back — Wareneingang erfassen (Posten-Auswahl, gruppiert nach Supplier) */}
+      <SourceItemsModal
+        open={sourceModalOpen}
+        orderId={id || ''}
+        lines={sourceCandidates}
+        onClose={() => { setSourceModalOpen(false); setLineRefresh(k => k + 1); }}
+      />
+
+      {/* Back-to-Back — "Beim Supplier bestellt" markieren (Supplier festhalten) */}
+      <Modal open={!!markOrderedLine} onClose={() => setMarkOrderedLine(null)}
+        title="Beim Supplier bestellt" width={440}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <p style={{ fontSize: 12, color: '#6B7280' }}>
+            Markiert „{markOrderedLine?.description}" als beim Supplier bestellt. Waehle den
+            Supplier — der Wareneingang gruppiert die Posten danach. Den Wareneingang
+            (Kosten + Lager) erfasst du spaeter als Purchase.
+          </p>
+          <div>
+            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SUPPLIER (OPTIONAL)</span>
+            <SearchSelect
+              placeholder="Supplier waehlen — oder leer lassen"
+              options={suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '' }))}
+              value={markOrderedSupplier}
+              onChange={setMarkOrderedSupplier}
+            />
+          </div>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => setMarkOrderedLine(null)}>Abbrechen</Button>
+            <Button variant="primary" onClick={() => {
+              if (!markOrderedLine) return;
+              try {
+                markOrderLineOrdered(markOrderedLine.id, markOrderedSupplier || undefined);
+                setMarkOrderedLine(null);
+                setLineRefresh(k => k + 1);
+              } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+            }}>Bestellt markieren</Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* v0.6.0 — Gold-Verbindlichkeit begleichen (Gold geben / in Geld umwandeln) */}
       {settleGold && (

@@ -1455,6 +1455,121 @@ function getApFor(supplierId: string): number {
   return (rows[0]?.ap as number) || 0;
 }
 
+// ─── Scenario 18 — Back-to-Back Beschaffung (Order ↔ Purchase Verknuepfung) ──
+//  (A) Order mit "New"-Produkt-Zeile → Produkt quantity 0 (kein Lager bis Purchase)
+//  (B) markOrderLineOrdered → Status ORDERED + ordered_supplier_id
+//  (C) updateOrderLine → Menge aendern
+//  (D) createPurchase mit sourceOrderId/sourceOrderLineId → Zeile ARRIVED + Lager + A/P
+//  (E) cancelPurchase → verknuepfte Zeile zurueck auf PENDING
+//  (F) deleteOrder → Purchase-Links (source_order_id + source_order_line_id) genullt
+async function scenarioBackToBackSourcing(ctx: TestContext, result: ScenarioResult) {
+  const db = getDatabase();
+  const { useOrderStore } = await import('@/stores/orderStore');
+  const { usePurchaseStore } = await import('@/stores/purchaseStore');
+  const orderStore = useOrderStore.getState();
+  const purchaseStore = usePurchaseStore.getState();
+
+  const catRow = query(`SELECT id FROM categories LIMIT 1`);
+  assert(catRow.length > 0, `mindestens eine Kategorie erwartet`);
+  const categoryId = catRow[0].id as string;
+
+  // ── Teil A — Order mit "New"-Produkt-Zeile ─────────────────────────────
+  const order = orderStore.createOrder({
+    customerId: ctx.customerId,
+    paymentMethod: 'cash',
+    requestedBrand: 'B2B',
+    requestedModel: PREFIX + 'b2b-order',
+    notes: PREFIX + 'back-to-back',
+    lines: [
+      { description: PREFIX + 'Special-Order Ring', quantity: 1, unitPrice: 500,
+        taxScheme: 'MARGIN', vatRate: 10, isCustomerFacing: true,
+        newProduct: { categoryId, brand: 'B2B', name: PREFIX + 'Special Ring', taxScheme: 'MARGIN' } },
+    ],
+  });
+  const lineRow = query(`SELECT id, product_id, status FROM order_lines WHERE order_id = ?`, [order.id]);
+  assert(lineRow.length === 1, `1 order_line erwartet, got ${lineRow.length}`);
+  const lineId = lineRow[0].id as string;
+  const productId = lineRow[0].product_id as string;
+  assert(!!productId, `order_line.product_id gesetzt erwartet (New-Produkt angelegt)`);
+  assert(lineRow[0].status === 'PENDING', `order_line PENDING bei Anlage erwartet`);
+  const pq0 = query(`SELECT quantity FROM products WHERE id = ?`, [productId])[0].quantity as number;
+  assert((pq0 || 0) === 0, `New-Produkt quantity=0 erwartet (kein Lager bis Purchase), got ${pq0}`);
+  ok(result.details, `Order angelegt: New-Produkt mit quantity=0, order_line PENDING`);
+
+  // ── Teil B — markOrderLineOrdered ──────────────────────────────────────
+  orderStore.markOrderLineOrdered(lineId, ctx.supplierA);
+  const afterOrdered = query(`SELECT status, ordered_supplier_id FROM order_lines WHERE id = ?`, [lineId]);
+  assert(afterOrdered[0].status === 'ORDERED', `order_line ORDERED erwartet, got '${afterOrdered[0].status}'`);
+  assert(afterOrdered[0].ordered_supplier_id === ctx.supplierA, `ordered_supplier_id = supplierA erwartet`);
+  ok(result.details, `markOrderLineOrdered: Status ORDERED + Supplier festgehalten`);
+
+  // ── Teil C — updateOrderLine: Menge aendern ────────────────────────────
+  orderStore.updateOrderLine(lineId, { quantity: 2 });
+  const afterQty = query(`SELECT quantity, line_total FROM order_lines WHERE id = ?`, [lineId]);
+  assert((afterQty[0].quantity as number) === 2, `Menge 2 nach updateOrderLine erwartet`);
+  assert(Math.abs((afterQty[0].line_total as number) - 1000) < 0.001, `line_total 1000 (2×500) erwartet`);
+  ok(result.details, `updateOrderLine: Menge 1→2, line_total 1000`);
+
+  // ── Teil D — createPurchase mit Order-Verknuepfung ─────────────────────
+  const apBefore = getApFor(ctx.supplierA);
+  const purchase = purchaseStore.createPurchase({
+    supplierId: ctx.supplierA,
+    sourceOrderId: order.id,
+    lines: [
+      { productId, quantity: 2, unitPrice: 300, taxScheme: 'ZERO', vatRate: 0,
+        sourceOrderLineId: lineId },
+    ],
+  });
+  const afterPurchase = query(`SELECT status FROM order_lines WHERE id = ?`, [lineId]);
+  assert(afterPurchase[0].status === 'ARRIVED',
+    `order_line ARRIVED nach createPurchase erwartet, got '${afterPurchase[0].status}'`);
+  const purRow = query(`SELECT source_order_id FROM purchases WHERE id = ?`, [purchase.id]);
+  assert(purRow[0].source_order_id === order.id, `purchases.source_order_id = order.id erwartet`);
+  const plRow = query(`SELECT source_order_line_id FROM purchase_lines WHERE purchase_id = ?`, [purchase.id]);
+  assert(plRow[0].source_order_line_id === lineId, `purchase_lines.source_order_line_id = lineId erwartet`);
+  const pq1 = query(`SELECT quantity FROM products WHERE id = ?`, [productId])[0].quantity as number;
+  assert((pq1 || 0) === 2, `Produkt quantity=2 nach Purchase erwartet, got ${pq1}`);
+  const apAfter = getApFor(ctx.supplierA);
+  assert(Math.abs((apAfter - apBefore) - 600) < 0.001,
+    `A/P SupplierA +600 (2×300) erwartet, got +${(apAfter - apBefore).toFixed(3)}`);
+  const invLedger = query(
+    `SELECT COUNT(*) AS c FROM ledger_entries WHERE source_id = ? AND account = 'INVENTORY'`,
+    [purchase.id]
+  );
+  assert((invLedger[0].c as number) > 0, `INVENTORY-Ledger-Eintrag fuer Purchase erwartet`);
+  ok(result.details, `createPurchase: Zeile ARRIVED, Lager=2, A/P +600, INVENTORY gebucht, Links gesetzt`);
+
+  // ── Teil E — cancelPurchase → Zeile zurueck auf PENDING ────────────────
+  purchaseStore.cancelPurchase(purchase.id);
+  const afterCancel = query(`SELECT status FROM order_lines WHERE id = ?`, [lineId]);
+  assert(afterCancel[0].status === 'PENDING',
+    `order_line zurueck auf PENDING nach cancelPurchase erwartet, got '${afterCancel[0].status}'`);
+  ok(result.details, `cancelPurchase: verknuepfte Order-Zeile revertiert auf PENDING`);
+
+  // ── Teil F — deleteOrder nullt die Purchase-Links ──────────────────────
+  orderStore.deleteOrder(order.id);
+  const linkAfter = query(`SELECT source_order_line_id FROM purchase_lines WHERE purchase_id = ?`, [purchase.id]);
+  assert(linkAfter.length > 0 && linkAfter[0].source_order_line_id == null,
+    `purchase_lines.source_order_line_id genullt nach deleteOrder erwartet`);
+  const purLinkAfter = query(`SELECT source_order_id FROM purchases WHERE id = ?`, [purchase.id]);
+  assert(purLinkAfter[0].source_order_id == null, `purchases.source_order_id genullt nach deleteOrder erwartet`);
+  assert((query(`SELECT COUNT(*) AS c FROM order_lines WHERE order_id=?`, [order.id])[0].c as number) === 0,
+    `order_lines geloescht nach deleteOrder`);
+  ok(result.details, `deleteOrder: Purchase-Links (source_order_id + source_order_line_id) genullt`);
+
+  // ── Cleanup ────────────────────────────────────────────────────────────
+  db.run(`DELETE FROM ledger_entries WHERE reverses_entry_id IN (SELECT id FROM ledger_entries WHERE source_id = ?)`, [purchase.id]);
+  db.run(`DELETE FROM ledger_entries WHERE source_id = ?`, [purchase.id]);
+  db.run(`DELETE FROM stock_lots WHERE purchase_id = ? OR product_id = ?`, [purchase.id, productId]);
+  db.run(`DELETE FROM purchase_lines WHERE purchase_id = ?`, [purchase.id]);
+  db.run(`DELETE FROM purchases WHERE id = ?`, [purchase.id]);
+  db.run(`DELETE FROM order_payments WHERE order_id = ?`, [order.id]);
+  db.run(`DELETE FROM products WHERE id = ?`, [productId]);
+  saveDatabase();
+
+  result.status = 'pass';
+}
+
 const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioResult) => Promise<void> }> = [
   { name: '1. Multi-Line Commit @ IN_PROGRESS', run: scenarioMultiLineCommit },
   { name: '2. Line-Edit before Payment (reverse + repost)', run: scenarioLineEditBeforePayment },
@@ -1473,6 +1588,7 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '15. Mixed Order + Partielles Invoicing (v0.3.0)', run: scenarioMixedOrderPartialInvoicing },
   { name: '16. Order A/P-Reversal (v0.3.1 — Cancel-Line + Delete-Order)', run: scenarioOrderApReversal },
   { name: '17. Model B — Order-Gold-Payable + Kapitalisierung (v0.6.0)', run: scenarioOrderGoldPayableModelB },
+  { name: '18. Back-to-Back Beschaffung (Order → Purchase)', run: scenarioBackToBackSourcing },
 ];
 
 export function RepairFlowTestPage() {

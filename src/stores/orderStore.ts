@@ -1,11 +1,12 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Order, OrderStatus, OrderLine, OrderType, OrderLineStatus, CustomOrderMeta, MaterialDetails, Expense } from '@/core/models/types';
+import type { Order, OrderStatus, OrderLine, OrderType, OrderLineStatus, CustomOrderMeta, MaterialDetails, Expense, Product } from '@/core/models/types';
 import { deriveOrderType, deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { useProductStore } from '@/stores/productStore';
 import {
   postOrderPayment,
   postOrderPaymentReversed,
@@ -69,7 +70,7 @@ interface OrderStore {
   loading: boolean;
   loadOrders: () => void;
   getOrder: (id: string) => Order | undefined;
-  createOrder: (data: Partial<Omit<Order, 'lines'>> & { lines?: Array<Omit<OrderLine, 'id' | 'orderId' | 'lineTotal' | 'position'>> }) => Order;
+  createOrder: (data: Partial<Omit<Order, 'lines'>> & { lines?: Array<Omit<OrderLine, 'id' | 'orderId' | 'lineTotal' | 'position'> & { newProduct?: Partial<Product> }> }) => Order;
   updateOrder: (id: string, data: Partial<Order>) => void;
   updateStatus: (id: string, status: OrderStatus) => void;
   deleteOrder: (id: string) => void;
@@ -107,12 +108,29 @@ interface OrderStore {
     status?: OrderLineStatus;
   }) => string;
   deleteOrderLine: (lineId: string) => void;
+  // v0.5.0 — Preis einer Order-Line aendern (z.B. Quoted Price nachtraeglich).
+  // Aktualisiert unit_price + line_total und leitet agreed_price neu ab.
+  // Blockt wenn die Line bereits invoiced ist.
+  updateOrderLinePrice: (lineId: string, unitPrice: number) => void;
+  // Back-to-Back — Order-Line in-place bearbeiten (Produkt/Menge/Preis/Beschreibung).
+  // Guards: invoiced → komplett gesperrt; via aktivem Purchase beschafft →
+  // Produkt-Wechsel gesperrt (Menge/Preis/Beschreibung bleiben frei).
+  updateOrderLine: (lineId: string, patch: {
+    productId?: string;
+    newProduct?: Partial<Product>;
+    description?: string;
+    quantity?: number;
+    unitPrice?: number;
+  }) => void;
   // v0.2.1 — Trigger A/P-Expense fuer jede order_line mit supplier_id + cost_amount > 0
   // (analog zu repairStore.commitRepairLineExpenses). Idempotent: ueberspringt lines
   // die bereits expense_id haben. v0.3.0: committed nur Lines mit status='ARRIVED'.
   commitOrderLineExpenses: (orderId: string) => void;
   // v0.3.0 — Per-Line Fulfillment-Status
   updateOrderLineStatus: (lineId: string, status: OrderLineStatus) => void;
+  // Back-to-Back — Zeile als "beim Supplier bestellt" markieren (Status ORDERED)
+  // + den geplanten Supplier festhalten (gruppiert spaeter den Wareneingang).
+  markOrderLineOrdered: (lineId: string, orderedSupplierId?: string) => void;
   recomputeOrderStatus: (orderId: string) => void;
   // v0.3.0 — Partial Invoicing: Lines die fertig + noch nicht invoiced sind
   getBillableLines: (orderId: string) => OrderLine[];
@@ -255,6 +273,31 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // v0.2.1 — auch supplier_id / cost_amount / is_customer_facing / material_*
     // werden persistiert (analog zu repair_lines).
     if (data.lines && data.lines.length > 0) {
+      // Back-to-Back Beschaffung: Zeilen mit newProduct-Spec ("New" zur Order-Zeit)
+      // legen das Produkt sofort an. quantity wird per syncProductQuantity auf 0
+      // gesetzt — es gibt noch kein stock_lot, der Bestand entsteht erst beim
+      // Wareneingang (Purchase). Vor dem prepare aufgeloest, um das offene
+      // Statement nicht mit anderen db-Ops zu verschachteln.
+      const resolvedProductIds: Array<string | null> = data.lines.map((l) => {
+        if (l.productId) return l.productId;
+        if (l.newProduct) {
+          try {
+            const created = useProductStore.getState().createProduct({
+              ...l.newProduct,
+              stockStatus: 'in_stock',
+            });
+            // Order-Zeit "New"-Produkt hat noch keinen Bestand — quantity 0 bis
+            // der Wareneingang (Purchase) ein stock_lot anlegt. createProduct
+            // erzwingt min. 1, daher hier explizit zuruecksetzen.
+            db.run(`UPDATE products SET quantity = 0 WHERE id = ?`, [created.id]);
+            return created.id;
+          } catch (err) {
+            console.error('[order] createProduct (new order line) failed:', err);
+            return null;
+          }
+        }
+        return null;
+      });
       const stmt = db.prepare(
         `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate,
           supplier_id, cost_amount, is_customer_facing, material_kind, material_details, status, created_at)
@@ -268,7 +311,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         // sonst der vom Order-Initial-Status abgeleitete.
         const lineStatus = (l as Partial<OrderLine>).status || initialLineStatus;
         stmt.run([
-          uuid(), id, l.productId || null, l.description || '', qty, l.unitPrice || 0, total, i + 1,
+          uuid(), id, resolvedProductIds[i], l.description || '', qty, l.unitPrice || 0, total, i + 1,
           l.taxScheme || null, l.vatRate ?? null,
           l.supplierId || null, l.costAmount ?? 0,
           l.isCustomerFacing === false ? 0 : 1,
@@ -384,7 +427,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     //  - 'cancelled' → alle Lines → CANCELLED
     //  - 'notified' / 'pending' → nur Order-Status (kein Line-Cascade)
     if (status === 'arrived') {
-      db.run(`UPDATE order_lines SET status = 'ARRIVED' WHERE order_id = ? AND status = 'PENDING'`, [id]);
+      db.run(`UPDATE order_lines SET status = 'ARRIVED' WHERE order_id = ? AND status IN ('PENDING', 'ORDERED')`, [id]);
     } else if (status === 'completed') {
       db.run(`UPDATE order_lines SET status = 'DELIVERED' WHERE order_id = ? AND status != 'CANCELLED'`, [id]);
     } else if (status === 'cancelled') {
@@ -455,6 +498,25 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       catch (err) { console.error('[order] commitOrderLineExpenses failed:', err); }
     }
 
+    saveDatabase();
+    get().recomputeOrderStatus(orderId);
+    get().loadOrders();
+  },
+
+  // Back-to-Back — Zeile als "beim Supplier bestellt" markieren. Reiner Marker:
+  // kein Geld, kein Lager. Der geplante Supplier wird festgehalten, damit der
+  // Wareneingang die Posten nach Lieferant gruppieren kann.
+  markOrderLineOrdered: (lineId, orderedSupplierId) => {
+    const db = getDatabase();
+    const rows = query(`SELECT order_id, invoice_id FROM order_lines WHERE id = ?`, [lineId]);
+    if (rows.length === 0) throw new Error(`Order-Line ${lineId} nicht gefunden`);
+    if (rows[0].invoice_id) {
+      throw new Error('Diese Position ist bereits in einer Invoice.');
+    }
+    const orderId = rows[0].order_id as string;
+    db.run(`UPDATE order_lines SET status = 'ORDERED', ordered_supplier_id = ? WHERE id = ?`,
+      [orderedSupplierId || null, lineId]);
+    trackUpdate('order_lines', lineId, { status: 'ORDERED', orderedSupplierId: orderedSupplierId || null });
     saveDatabase();
     get().recomputeOrderStatus(orderId);
     get().loadOrders();
@@ -570,10 +632,115 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         console.error(`[order] order-line expense cleanup failed (${expenseId}):`, err);
       }
     }
+    // Back-to-Back: eine evtl. verknuepfte Purchase-Zeile entkoppeln (defensiv —
+    // sql.js erzwingt FK ON DELETE SET NULL evtl. nicht).
+    db.run(`UPDATE purchase_lines SET source_order_line_id = NULL WHERE source_order_line_id = ?`, [lineId]);
     db.run(`DELETE FROM order_lines WHERE id = ?`, [lineId]);
     trackDelete('order_lines', lineId);
     saveDatabase();
     get().recomputeOrderStatus(orderId);
+    get().loadOrders();
+  },
+
+  // v0.5.0 — Preis einer Order-Line aendern (Quoted Price nachtraeglich).
+  updateOrderLinePrice: (lineId, unitPrice) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const rows = query(`SELECT order_id, quantity, invoice_id FROM order_lines WHERE id = ?`, [lineId]);
+    if (rows.length === 0) throw new Error(`Order-Line ${lineId} nicht gefunden`);
+    if (rows[0].invoice_id) {
+      throw new Error('Diese Position ist bereits in einer Invoice — Preis erst nach Storno der Invoice aenderbar.');
+    }
+    const orderId = rows[0].order_id as string;
+    const qty = Math.max(1, (rows[0].quantity as number) || 1);
+    const total = qty * unitPrice;
+    db.run(`UPDATE order_lines SET unit_price = ?, line_total = ? WHERE id = ?`, [unitPrice, total, lineId]);
+    trackUpdate('order_lines', lineId, { unitPrice, lineTotal: total });
+    // agreed_price = Σ line_total der kundenseitigen Lines neu ableiten.
+    const sumRow = query(
+      `SELECT COALESCE(SUM(line_total), 0) AS t FROM order_lines WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 1`,
+      [orderId]
+    );
+    const agreed = Number(sumRow[0]?.t || 0);
+    db.run(`UPDATE orders SET agreed_price = ?, updated_at = ? WHERE id = ?`,
+      [agreed > 0 ? agreed : null, now, orderId]);
+    trackUpdate('orders', orderId, { agreedPrice: agreed });
+    saveDatabase();
+    get().loadOrders();
+  },
+
+  // Back-to-Back — Order-Line in-place bearbeiten. Zeilen-ID bleibt erhalten,
+  // damit purchase_lines.source_order_line_id-Verknuepfungen intakt bleiben.
+  updateOrderLine: (lineId, patch) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const rows = query(
+      `SELECT order_id, product_id, quantity, unit_price, invoice_id FROM order_lines WHERE id = ?`,
+      [lineId]
+    );
+    if (rows.length === 0) throw new Error(`Order-Line ${lineId} nicht gefunden`);
+    if (rows[0].invoice_id) {
+      throw new Error('Diese Position ist bereits in einer Invoice — erst die Invoice stornieren.');
+    }
+    const orderId = rows[0].order_id as string;
+
+    // Produkt-Wechsel? — gesperrt sobald die Zeile via aktivem Purchase beschafft wurde.
+    const wantsProductChange = patch.productId !== undefined || patch.newProduct !== undefined;
+    if (wantsProductChange) {
+      const sourced = query(
+        `SELECT 1 FROM purchase_lines pl JOIN purchases p ON p.id = pl.purchase_id
+          WHERE pl.source_order_line_id = ? AND p.status != 'CANCELLED' LIMIT 1`,
+        [lineId]
+      );
+      if (sourced.length > 0) {
+        throw new Error('Diese Position wurde bereits beim Supplier beschafft — Produkt erst nach Storno des Purchase aenderbar.');
+      }
+    }
+
+    // Produkt aufloesen: undefined = nicht aendern.
+    let productId: string | null | undefined;
+    if (patch.newProduct) {
+      try {
+        const created = useProductStore.getState().createProduct({
+          ...patch.newProduct,
+          stockStatus: 'in_stock',
+        });
+        // New-Produkt ohne Bestand — quantity 0 bis zum Wareneingang (Purchase).
+        db.run(`UPDATE products SET quantity = 0 WHERE id = ?`, [created.id]);
+        productId = created.id;
+      } catch (err) {
+        console.error('[order] createProduct (updateOrderLine) failed:', err);
+      }
+    } else if (patch.productId !== undefined) {
+      productId = patch.productId || null;
+    }
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    if (productId !== undefined) { fields.push('product_id = ?'); values.push(productId); }
+    if (patch.description !== undefined) { fields.push('description = ?'); values.push(patch.description || ''); }
+    const qty = patch.quantity !== undefined ? Math.max(1, patch.quantity) : (Number(rows[0].quantity) || 1);
+    const unitPrice = patch.unitPrice !== undefined ? patch.unitPrice : (Number(rows[0].unit_price) || 0);
+    if (patch.quantity !== undefined) { fields.push('quantity = ?'); values.push(qty); }
+    if (patch.unitPrice !== undefined) { fields.push('unit_price = ?'); values.push(unitPrice); }
+    if (patch.quantity !== undefined || patch.unitPrice !== undefined) {
+      fields.push('line_total = ?'); values.push(qty * unitPrice);
+    }
+    if (fields.length === 0) return;
+    values.push(lineId);
+    db.run(`UPDATE order_lines SET ${fields.join(', ')} WHERE id = ?`, values);
+    trackUpdate('order_lines', lineId, patch);
+
+    // agreed_price = Σ line_total der kundenseitigen Lines neu ableiten.
+    const sumRow = query(
+      `SELECT COALESCE(SUM(line_total), 0) AS t FROM order_lines WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 1`,
+      [orderId]
+    );
+    const agreed = Number(sumRow[0]?.t || 0);
+    db.run(`UPDATE orders SET agreed_price = ?, updated_at = ? WHERE id = ?`,
+      [agreed > 0 ? agreed : null, now, orderId]);
+    trackUpdate('orders', orderId, { agreedPrice: agreed });
+    saveDatabase();
     get().loadOrders();
   },
 
@@ -761,6 +928,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
           // v0.3.0 — Per-Line Status + partial-invoicing link
           status: ((r.status as string) || 'PENDING') as OrderLineStatus,
           invoiceId: (r.invoice_id as string | null) || undefined,
+          orderedSupplierId: (r.ordered_supplier_id as string | null) || undefined,
         };
       });
     } catch { return []; }
@@ -806,6 +974,14 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         [new Date().toISOString(), gpId]);
       trackUpdate('gold_payables', gpId, { status: 'CANCELLED' });
     }
+    // Back-to-Back: Purchase-Verknuepfungen entkoppeln, bevor die order_lines
+    // hart geloescht werden (sql.js erzwingt FK ON DELETE SET NULL evtl. nicht).
+    db.run(
+      `UPDATE purchase_lines SET source_order_line_id = NULL
+        WHERE source_order_line_id IN (SELECT id FROM order_lines WHERE order_id = ?)`,
+      [id]
+    );
+    db.run(`UPDATE purchases SET source_order_id = NULL WHERE source_order_id = ?`, [id]);
     db.run(`DELETE FROM order_lines WHERE order_id = ?`, [id]);
     db.run(`DELETE FROM orders WHERE id = ?`, [id]);
     saveDatabase();

@@ -44,6 +44,8 @@ interface DraftLine {
   categoryId: string;
   quantity: number;
   unitPrice: number;
+  // Back-to-Back: gesetzt fuer aus einer Order vorbefuellte Zeilen.
+  sourceOrderLineId?: string;
 }
 
 export function PurchaseCreate() {
@@ -94,6 +96,59 @@ export function PurchaseCreate() {
     } catch { /* Inbox-Eintrag nicht gefunden → normale New Purchase */ }
     setInboxLoaded(true);
   }, [inboxId, inboxLoaded, categories]);
+
+  // Back-to-Back: aus einer Order geoeffnet (Wareneingang erfassen) — die
+  // angegebenen Order-Zeilen werden als Purchase-Zeilen vorbefuellt + verknuepft.
+  const sourceOrderId = searchParams.get('sourceOrderId');
+  const [sourceLoaded, setSourceLoaded] = useState(false);
+  const [sourceOrderInfo, setSourceOrderInfo] = useState<{ orderNumber: string; customerName: string } | null>(null);
+  useEffect(() => {
+    if (!sourceOrderId || sourceLoaded || categories.length === 0 || products.length === 0) return;
+    try {
+      const ordRows = query(
+        `SELECT o.order_number AS onum, c.first_name AS fn, c.last_name AS ln
+           FROM orders o LEFT JOIN customers c ON c.id = o.customer_id
+          WHERE o.id = ?`,
+        [sourceOrderId]
+      );
+      if (ordRows.length > 0) {
+        setSourceOrderInfo({
+          orderNumber: (ordRows[0].onum as string) || '',
+          customerName: `${ordRows[0].fn || ''} ${ordRows[0].ln || ''}`.trim(),
+        });
+      }
+      const wantIds = (searchParams.get('sourceOrderLineIds') || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      if (wantIds.length > 0) {
+        const placeholders = wantIds.map(() => '?').join(',');
+        const lineRows = query(
+          `SELECT id, product_id, description, quantity FROM order_lines WHERE id IN (${placeholders})`,
+          wantIds
+        );
+        const byId = new Map(lineRows.map(r => [r.id as string, r]));
+        const seeded: DraftLine[] = [];
+        for (const oid of wantIds) {
+          const r = byId.get(oid);
+          if (!r) continue;
+          const pid = (r.product_id as string | null) || undefined;
+          const p = pid ? products.find(pp => pp.id === pid) : undefined;
+          seeded.push({
+            mode: pid ? 'existing' : 'new',
+            productId: pid,
+            brand: p?.brand || '',
+            name: p?.name || (r.description as string) || '',
+            sku: p?.sku || '',
+            categoryId: p?.categoryId || categories[0]?.id || '',
+            quantity: Math.max(1, (r.quantity as number) || 1),
+            unitPrice: 0,
+            sourceOrderLineId: oid,
+          });
+        }
+        if (seeded.length > 0) setLines(seeded);
+      }
+    } catch { /* Order/Migration nicht da → normales New Purchase */ }
+    setSourceLoaded(true);
+  }, [sourceOrderId, sourceLoaded, categories, products, searchParams]);
 
   const [supplierId, setSupplierId] = useState(searchParams.get('supplier') || '');
   const [purchaseDate, setPurchaseDate] = useState(new Date().toISOString().split('T')[0]);
@@ -261,7 +316,7 @@ export function PurchaseCreate() {
     if (v) { setError(v); return; }
 
     const payload = lines.map(l => l.mode === 'existing'
-      ? { productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice, taxScheme: purchaseTaxScheme, vatRate: inputVatRate }
+      ? { productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice, taxScheme: purchaseTaxScheme, vatRate: inputVatRate, sourceOrderLineId: l.sourceOrderLineId }
       : {
           // Plan §Purchase §New-Item: Wenn Modal-Spec da ist, volle Product-Specs durchreichen.
           // Sonst Legacy-Inline-Pfad mit nur Brand/Name/SKU/Kategorie.
@@ -274,6 +329,7 @@ export function PurchaseCreate() {
           unitPrice: l.unitPrice,
           taxScheme: purchaseTaxScheme,
           vatRate: inputVatRate,
+          sourceOrderLineId: l.sourceOrderLineId,
         });
 
     const purchase = createPurchase({
@@ -283,6 +339,7 @@ export function PurchaseCreate() {
       staffId: staffId || undefined,
       lines: payload,
       initialPayment: paymentAmount > 0 ? { amount: paymentAmount, method: paymentMethod } : undefined,
+      sourceOrderId: sourceOrderId || undefined,
     });
 
     // v0.4.0 — Purchase aus einem Mobile-Inbox-Foto erstellt → Inbox-Item erledigt.
@@ -292,6 +349,9 @@ export function PurchaseCreate() {
 
     if (continueEditing) {
       reset();
+    } else if (sourceOrderId) {
+      // Back-to-Back: zurueck zur Order — die Posten stehen jetzt auf „Arrived".
+      navigate(`/orders/${sourceOrderId}`);
     } else {
       navigate(`/purchases/${purchase.id}`);
     }
@@ -320,6 +380,21 @@ export function PurchaseCreate() {
             {status}
           </span>
         </div>
+
+        {/* Back-to-Back: Kontext-Banner wenn aus einer Order geoeffnet */}
+        {sourceOrderId && sourceOrderInfo && (
+          <div style={{
+            marginBottom: 16, padding: '10px 14px', background: '#F2F7FA',
+            border: '1px solid #C6A36D', borderRadius: 8, fontSize: 13, color: '#0F0F10',
+          }}>
+            📦 Beschaffung fuer Order <strong>{sourceOrderInfo.orderNumber}</strong>
+            {sourceOrderInfo.customerName ? ` · Kunde ${sourceOrderInfo.customerName}` : ''}
+            <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+              Die vorbefuellten Posten werden mit der Order verknuepft und nach dem Speichern
+              auf „Arrived" gesetzt. Du kannst weitere Lager-Posten ergaenzen.
+            </div>
+          </div>
+        )}
 
         {/* 1. SUPPLIER */}
         <Card>

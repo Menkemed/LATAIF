@@ -1528,6 +1528,17 @@ function runMigrations(database: Database): void {
       created_by TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_purchase_inbox_status ON purchase_inbox(status)`,
+
+    // Back-to-Back Beschaffung: Order ↔ Purchase Verknuepfung.
+    // source_order_id / source_order_line_id verknuepfen einen Lieferanten-Einkauf
+    // mit der Kunden-Order, die ihn ausgeloest hat (ein Purchase kann order-
+    // verknuepfte + reine Lager-Zeilen mischen). ordered_supplier_id haelt beim
+    // "Beim Supplier bestellt"-Markieren den geplanten Supplier fest (Gruppierung).
+    `ALTER TABLE purchases ADD COLUMN source_order_id TEXT REFERENCES orders(id) ON DELETE SET NULL`,
+    `ALTER TABLE purchase_lines ADD COLUMN source_order_line_id TEXT REFERENCES order_lines(id) ON DELETE SET NULL`,
+    `ALTER TABLE order_lines ADD COLUMN ordered_supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_purchases_source_order ON purchases(source_order_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_purchase_lines_source_order_line ON purchase_lines(source_order_line_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
