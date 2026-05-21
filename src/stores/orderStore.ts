@@ -327,7 +327,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       laborCost: 'labor_cost', extraGoldValue: 'extra_gold_value',
     };
     for (const [k, v] of Object.entries(data)) {
-      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v); }
+      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
     if (data.attributes !== undefined) {
       fields.push('attributes = ?'); values.push(JSON.stringify(data.attributes));

@@ -419,7 +419,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
     for (const [key, val] of Object.entries(data)) {
       const col = fieldMap[key];
-      if (col) { fields.push(`${col} = ?`); values.push(val); }
+      if (col) { fields.push(`${col} = ?`); values.push(val ?? null); }
     }
     if (data.scopeOfDelivery) { fields.push('scope_of_delivery = ?'); values.push(JSON.stringify(data.scopeOfDelivery)); }
     if (data.attributes) { fields.push('attributes = ?'); values.push(JSON.stringify(data.attributes)); }

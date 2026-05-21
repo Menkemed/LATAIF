@@ -152,7 +152,7 @@ export const useRecurringExpenseStore = create<RecurringExpenseStore>((set, get)
       let val: unknown = v;
       if (k === 'payNowDefault' || k === 'active') val = v ? 1 : 0;
       if (k === 'dayOfMonth') val = Math.max(1, Math.min(31, Math.round(Number(v) || 1)));
-      fields.push(`${col} = ?`); values.push(val);
+      fields.push(`${col} = ?`); values.push(val ?? null);
     }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);

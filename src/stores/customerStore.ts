@@ -175,7 +175,7 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       const col = fieldMap[key];
       if (col) {
         fields.push(`${col} = ?`);
-        values.push(val);
+        values.push(val ?? null);
       }
     }
 

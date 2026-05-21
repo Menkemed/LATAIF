@@ -244,7 +244,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       staffId: 'staff_id',
     };
     for (const [k, v] of Object.entries(data)) {
-      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v); }
+      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);

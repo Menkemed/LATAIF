@@ -122,7 +122,14 @@ export function CustomerDetail() {
   const { products, loadProducts } = useProductStore();
   const { debts, loadDebts } = useDebtStore();
   const { invoices, loadInvoices } = useInvoiceStore();
-  const goldStore = useGoldStore();
+  // v0.4.4 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
+  // bei jeder Mutation seine Referenz. In einer useEffect-Dependency + loadAll()
+  // im Effect → Endlos-Loop (CustomerDetail fror beim Oeffnen ein). Stabile
+  // Selektoren — Actions sind referenz-stabil.
+  const goldLoadAll = useGoldStore(s => s.loadAll);
+  const getGoldCreditByCustomer = useGoldStore(s => s.getGoldCreditByCustomer);
+  const getGoldCreditsByCustomer = useGoldStore(s => s.getGoldCreditsByCustomer);
+  const allGoldCredits = useGoldStore(s => s.customerGoldCredits);
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; credit?: CustomerGoldCredit }>({ open: false, mode: 'return_customer' });
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Customer>>({});
@@ -135,14 +142,14 @@ export function CustomerDetail() {
 
   useEffect(() => {
     loadCustomers(); loadProducts(); loadSalesReturns(); loadDebts(); loadInvoices();
-    goldStore.loadAll();
-  }, [loadCustomers, loadProducts, loadSalesReturns, loadDebts, loadInvoices, goldStore]);
+    goldLoadAll();
+  }, [loadCustomers, loadProducts, loadSalesReturns, loadDebts, loadInvoices, goldLoadAll]);
 
   const customer = useMemo(() => customers.find(c => c.id === id), [customers, id]);
 
   // Plan repair-multi-supplier — Gold-Credits dieses Kunden
-  const goldCreditSummary = useMemo(() => id ? goldStore.getGoldCreditByCustomer(id) : [], [id, goldStore.customerGoldCredits]); // eslint-disable-line react-hooks/exhaustive-deps
-  const customerGoldCredits = useMemo(() => id ? goldStore.getGoldCreditsByCustomer(id) : [], [id, goldStore.customerGoldCredits]); // eslint-disable-line react-hooks/exhaustive-deps
+  const goldCreditSummary = useMemo(() => id ? getGoldCreditByCustomer(id) : [], [id, getGoldCreditByCustomer, allGoldCredits]);
+  const customerGoldCredits = useMemo(() => id ? getGoldCreditsByCustomer(id) : [], [id, getGoldCreditsByCustomer, allGoldCredits]);
 
   useEffect(() => {
     if (customer) setForm({ ...customer });

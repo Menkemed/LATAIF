@@ -161,7 +161,7 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
 
     for (const [k, v] of Object.entries(data)) {
       const col = map[k];
-      if (col) { fields.push(`${col} = ?`); values.push(v); }
+      if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
 
     if (fields.length === 0) return;

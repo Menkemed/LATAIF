@@ -214,7 +214,7 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
 
     for (const [key, val] of Object.entries(data)) {
       const col = fieldMap[key];
-      if (col) { fields.push(`${col} = ?`); values.push(val); }
+      if (col) { fields.push(`${col} = ?`); values.push(val ?? null); }
     }
     if (data.images) { fields.push('images = ?'); values.push(JSON.stringify(data.images)); }
 

@@ -202,7 +202,7 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
       status: 'status',
     };
     for (const [k, v] of Object.entries(data)) {
-      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v); }
+      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
     if (fields.length === 0) return;
     values.push(id);

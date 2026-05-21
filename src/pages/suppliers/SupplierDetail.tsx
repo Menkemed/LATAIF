@@ -37,18 +37,25 @@ export function SupplierDetail() {
   const goBack = useGoBack('/suppliers');
   const { suppliers, loadSuppliers, updateSupplier, deleteSupplier, getLedger } = useSupplierStore();
   const { purchases, loadPurchases } = usePurchaseStore();
-  const goldStore = useGoldStore();
+  // v0.4.4 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
+  // bei jeder Mutation seine Referenz. In einer useEffect-Dependency + loadAll()
+  // im Effect → Endlos-Loop (SupplierDetail fror beim Oeffnen ein, zeigte
+  // "Supplier not found"). Stabile Selektoren — Actions sind referenz-stabil.
+  const goldLoadAll = useGoldStore(s => s.loadAll);
+  const getGoldOwedBySupplier = useGoldStore(s => s.getGoldOwedBySupplier);
+  const getGoldPayablesBySupplier = useGoldStore(s => s.getGoldPayablesBySupplier);
+  const goldPayables = useGoldStore(s => s.goldPayables);
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; payable?: GoldPayable }>({ open: false, mode: 'settle_supplier_return' });
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Supplier>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
-  useEffect(() => { loadSuppliers(); loadPurchases(); goldStore.loadAll(); }, [loadSuppliers, loadPurchases, goldStore]);
+  useEffect(() => { loadSuppliers(); loadPurchases(); goldLoadAll(); }, [loadSuppliers, loadPurchases, goldLoadAll]);
 
   // Plan repair-multi-supplier — Gold-Buckets fuer diesen Supplier
-  const goldOwedSummary = useMemo(() => id ? goldStore.getGoldOwedBySupplier(id) : [], [id, goldStore.goldPayables]); // eslint-disable-line react-hooks/exhaustive-deps
-  const supplierGoldPayables = useMemo(() => id ? goldStore.getGoldPayablesBySupplier(id) : [], [id, goldStore.goldPayables]); // eslint-disable-line react-hooks/exhaustive-deps
+  const goldOwedSummary = useMemo(() => id ? getGoldOwedBySupplier(id) : [], [id, getGoldOwedBySupplier, goldPayables]);
+  const supplierGoldPayables = useMemo(() => id ? getGoldPayablesBySupplier(id) : [], [id, getGoldPayablesBySupplier, goldPayables]);
 
   const supplier = useMemo(() => suppliers.find(s => s.id === id), [suppliers, id]);
 

@@ -163,7 +163,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       customerId: 'customer_id',
     };
     for (const [k, v] of Object.entries(data)) {
-      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v); }
+      const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
     if (data.active !== undefined) { fields.push('active = ?'); values.push(data.active ? 1 : 0); }
     if (fields.length === 0) return;

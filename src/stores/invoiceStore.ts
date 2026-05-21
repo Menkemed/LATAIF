@@ -428,7 +428,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const col = map[k];
       if (col) {
         fields.push(`${col} = ?`);
-        values.push(k === 'butterfly' ? (v ? 1 : 0) : v);
+        values.push(k === 'butterfly' ? (v ? 1 : 0) : (v ?? null));
       }
     }
     if (fields.length === 0) return;

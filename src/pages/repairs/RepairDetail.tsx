@@ -106,6 +106,8 @@ export function RepairDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  // v0.4.4 — Lightbox: Klick auf ein Item-Foto zeigt die Vergroesserung im Popup.
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const perm = usePermission();
 
   useEffect(() => {
@@ -990,7 +992,7 @@ export function RepairDetail() {
                         key={i}
                         src={src}
                         alt={`Item photo ${i + 1}`}
-                        onClick={() => window.open(src, '_blank')}
+                        onClick={() => setLightboxSrc(src)}
                         style={{
                           width: 96, height: 96, objectFit: 'cover', borderRadius: 8,
                           border: '1px solid #E5E9EE', cursor: 'pointer',
@@ -1002,6 +1004,36 @@ export function RepairDetail() {
                   <p style={{ fontSize: 13, color: '#9CA3AF' }}>Keine Fotos erfasst.</p>
                 )}
               </div>
+
+              {/* v0.4.4 — Foto-Lightbox: Klick aufs Item-Foto zeigt die Vergroesserung. */}
+              {lightboxSrc && (
+                <div
+                  onClick={() => setLightboxSrc(null)}
+                  style={{
+                    position: 'fixed', inset: 0, zIndex: 9999,
+                    background: 'rgba(0,0,0,0.85)', cursor: 'zoom-out',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 32,
+                  }}
+                >
+                  <img
+                    src={lightboxSrc}
+                    alt="Item photo"
+                    style={{
+                      maxWidth: '95%', maxHeight: '95%', objectFit: 'contain',
+                      borderRadius: 8, boxShadow: '0 8px 40px rgba(0,0,0,0.5)',
+                    }}
+                  />
+                  <button
+                    onClick={() => setLightboxSrc(null)}
+                    aria-label="Close"
+                    style={{
+                      position: 'fixed', top: 20, right: 24, width: 40, height: 40, borderRadius: 999,
+                      background: 'rgba(255,255,255,0.15)', color: '#FFFFFF', border: 'none',
+                      fontSize: 24, lineHeight: 1, cursor: 'pointer',
+                    }}
+                  >&times;</button>
+                </div>
+              )}
 
               {/* Linked Product */}
               {product && (
@@ -1055,7 +1087,7 @@ export function RepairDetail() {
                 {thisRepairLines.length === 0 ? (
                   <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click „Add Work Line" to register a supplier/workshop position.</p>
                 ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: '0.5fr 1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
                     <span className="text-overline">L#</span>
                     <span className="text-overline">SUPPLIER</span>
                     <span className="text-overline">WORK TYPE</span>
@@ -1067,9 +1099,11 @@ export function RepairDetail() {
                       const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
                       return (
                         <div key={l.id} style={{ display: 'contents' }}>
-                          {/* v0.1.48 — Sub-Number L# fuer Print + Audit-Pfad */}
+                          {/* v0.1.48 — Volle Sub-Number REP-…-L# fuer Nachverfolgbarkeit
+                              (auch im Supplier-/Expense-Kontext eindeutig). v0.4.4 — Spalte
+                              auf max-content + nowrap, damit sie nicht vertikal umbricht. */}
                           <span className="font-mono" style={{ fontSize: 12, color: '#6B7280',
-                                         padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                         padding: '10px 0', borderTop: '1px solid #E5E9EE', whiteSpace: 'nowrap',
                                          textDecoration: l.status === 'CANCELLED' ? 'line-through' : 'none' }}>
                             {repair.repairNumber}-L{l.position}
                           </span>

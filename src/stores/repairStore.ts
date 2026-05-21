@@ -591,7 +591,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     for (const [k, v] of Object.entries(data)) {
       const col = map[k];
-      if (col) { fields.push(`${col} = ?`); values.push(v); }
+      // v0.4.4 — sql.js kann `undefined` NICHT binden ("unknown type"-Fehler).
+      // handleSave schickt immer alle Felder mit; leere sind undefined → zu null
+      // normalisieren, sonst wirft db.run und der Save-Button "tut nichts".
+      if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
     if (data.itemAttributes !== undefined) {
       fields.push('item_attributes = ?'); values.push(JSON.stringify(data.itemAttributes));
