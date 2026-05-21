@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
@@ -412,6 +413,10 @@ export function InvoiceCreate() {
                         options={productOptions}
                         value={l.productId}
                         onChange={pid => pickProductForLine(idx, pid)}
+                        renderPreview={id => {
+                          const p = products.find(x => x.id === id);
+                          return p ? <ProductHoverCard product={p} categories={categories} /> : null;
+                        }}
                       />
                       {/* Phase 3 — Lot-Picker wenn mehrere ACTIVE Lots fuer das Produkt
                           existieren. Single-Lot bleibt unsichtbar (UX wie bisher). */}

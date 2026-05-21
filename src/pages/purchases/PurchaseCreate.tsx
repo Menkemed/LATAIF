@@ -14,6 +14,7 @@ import { ImageUpload } from '@/components/ui/ImageUpload';
 import { SoftWarn } from '@/components/ui/SoftWarn';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { NewProductModal } from '@/components/products/NewProductModal';
@@ -514,6 +515,10 @@ export function PurchaseCreate() {
                         options={productOptions}
                         value={l.productId || ''}
                         onChange={pid => pickProductForLine(idx, pid)}
+                        renderPreview={id => {
+                          const p = products.find(x => x.id === id);
+                          return p ? <ProductHoverCard product={p} categories={categories} /> : null;
+                        }}
                       />
                     </div>
                   ) : (

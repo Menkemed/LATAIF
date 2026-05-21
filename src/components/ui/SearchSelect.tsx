@@ -19,6 +19,9 @@ interface SearchSelectProps {
   value: string;
   onChange: (id: string) => void;
   disabled?: boolean;
+  /** Optional: rendert ein Preview-Panel (z.B. ProductHoverCard) neben dem
+   *  Dropdown wenn der User mit der Maus ueber eine Option faehrt. */
+  renderPreview?: (id: string) => React.ReactNode;
 }
 
 // Dropdown-Position aus Trigger-Rect berechnen — nutzt position:fixed,
@@ -54,9 +57,10 @@ function useDropdownPosition(triggerRef: React.RefObject<HTMLDivElement | null>,
   return pos;
 }
 
-export function SearchSelect({ label, placeholder = 'Search...', options, value, onChange, disabled }: SearchSelectProps) {
+export function SearchSelect({ label, placeholder = 'Search...', options, value, onChange, disabled, renderPreview }: SearchSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -179,8 +183,8 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
                   borderLeft: opt.id === value ? '2px solid #0F0F10' : '2px solid transparent',
                 }}
                 onClick={() => handleSelect(opt.id)}
-                onMouseEnter={e => { if (opt.id !== value) e.currentTarget.style.background = 'rgba(15,15,16,0.04)'; }}
-                onMouseLeave={e => { if (opt.id !== value) e.currentTarget.style.background = 'transparent'; }}
+                onMouseEnter={e => { setHoveredId(opt.id); if (opt.id !== value) e.currentTarget.style.background = 'rgba(15,15,16,0.04)'; }}
+                onMouseLeave={e => { setHoveredId(prev => prev === opt.id ? null : prev); if (opt.id !== value) e.currentTarget.style.background = 'transparent'; }}
               >
                 <div style={{ fontSize: 13, color: '#0F0F10' }}>{opt.label}</div>
                 {(opt.subtitle || opt.meta) && (
@@ -192,6 +196,36 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
             ))}
           </div>
         </div>,
+        document.body
+      )}
+
+      {/* Preview-Panel — rechts neben dem Dropdown wenn Platz ist, sonst links. */}
+      {open && pos && hoveredId && renderPreview && createPortal(
+        (() => {
+          const PREVIEW_W = 320;
+          const dropdownLeft = Math.min(pos.left, window.innerWidth - Math.max(pos.width, 360) - 16);
+          const dropdownWidth = Math.max(pos.width, 360);
+          const spaceRight = window.innerWidth - (dropdownLeft + dropdownWidth) - 16;
+          const placeRight = spaceRight >= PREVIEW_W + 8;
+          const left = placeRight
+            ? dropdownLeft + dropdownWidth + 8
+            : Math.max(8, dropdownLeft - PREVIEW_W - 8);
+          return (
+            <div
+              style={{
+                position: 'fixed',
+                top: pos.openUp ? undefined : pos.top,
+                bottom: pos.openUp ? window.innerHeight - pos.top : undefined,
+                left,
+                width: PREVIEW_W,
+                zIndex: 100000,
+                pointerEvents: 'none',
+              }}
+            >
+              {renderPreview(hoveredId)}
+            </div>
+          );
+        })(),
         document.body
       )}
     </div>

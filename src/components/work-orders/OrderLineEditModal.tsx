@@ -7,6 +7,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { productSearchText } from '@/core/utils/product-format';
 import { NewProductModal } from '@/components/products/NewProductModal';
 import { useProductStore } from '@/stores/productStore';
@@ -133,6 +134,10 @@ export function OrderLineEditModal({ open, line, productLocked, onClose, onSave 
                   options={productOptions}
                   value={productId}
                   onChange={pickProduct}
+                  renderPreview={id => {
+                    const p = products.find(x => x.id === id);
+                    return p ? <ProductHoverCard product={p} categories={categories} /> : null;
+                  }}
                 />
               ) : newProduct ? (
                 <div className="flex items-center justify-between" style={{

@@ -3,12 +3,13 @@
 // Plan §8 — Pricing-Section identisch zu Invoice: per-Line Tax-Scheme + auto VAT.
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, Save, X, Phone, Edit3 } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Save, X, Phone, Edit3, ChevronDown } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -19,7 +20,7 @@ import { getSpotPrices } from '@/core/market/spot-prices';
 import { purityOf } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getStockAggregates } from '@/core/lots/lot-queries';
-import { productSearchText } from '@/core/utils/product-format';
+import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import type { OrderStatus, OrderType, CustomOrderMeta, MaterialDetails, Product } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { MaterialsCard, type MaterialLine } from '@/components/work-orders/MaterialsCard';
@@ -124,6 +125,7 @@ export function OrderCreate() {
   // Locale string state per line for the editable Total input — preserves trailing zeros
   // and decimal points while user types (e.g. "5500.50" stays as typed).
   const [lineTotalDrafts, setLineTotalDrafts] = useState<Record<number, string>>({});
+  const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
   const [depositAmount, setDepositAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'card' | 'benefit'>('cash');
   const [fullyPaid, setFullyPaid] = useState(false);
@@ -835,10 +837,11 @@ export function OrderCreate() {
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
+                gridTemplateColumns: '28px minmax(0,2fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
                 gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
                 fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em',
               }}>
+                <span></span>
                 <span>Product / Description</span>
                 <span>Tax Scheme</span>
                 <span style={{ textAlign: 'center' }}>Qty</span>
@@ -849,12 +852,32 @@ export function OrderCreate() {
               </div>
               {lines.map((l, idx) => {
                 const c = computed[idx];
+                const lineProduct = l.mode === 'existing' && l.productId ? products.find(p => p.id === l.productId) : undefined;
+                const lineSpecs = lineProduct ? getProductSpecs(lineProduct, categories) : [];
+                const expanded = !!expandedLines[idx];
                 return (
-                  <div key={idx} style={{
+                  <div key={idx} style={{ borderBottom: '1px solid #E5E9EE' }}>
+                  <div style={{
                     display: 'grid',
-                    gridTemplateColumns: 'minmax(0,2fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
-                    gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center',
+                    gridTemplateColumns: '28px minmax(0,2fr) minmax(0,1fr) 56px minmax(0,1fr) minmax(0,0.9fr) minmax(0,1.1fr) 44px',
+                    gap: 10, padding: '10px 12px', alignItems: 'center',
                   }}>
+                    {/* Chevron — Produkt-Specs ein-/ausklappen (nur Existing-Product mit Specs) */}
+                    {lineProduct && lineSpecs.length > 0 ? (
+                      <button onClick={() => setExpandedLines(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                        title={expanded ? 'Details ausblenden' : 'Produkt-Details anzeigen'}
+                        className="cursor-pointer"
+                        style={{
+                          width: 28, height: 28, borderRadius: 6,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          background: expanded ? 'rgba(126,91,239,0.1)' : 'transparent',
+                          border: '1px solid ' + (expanded ? 'rgba(126,91,239,0.3)' : '#D5D9DE'),
+                          color: expanded ? '#7E5BEF' : '#6B7280',
+                          padding: 0,
+                        }}>
+                        <ChevronDown size={14} style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }} />
+                      </button>
+                    ) : <span />}
                     <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <select value={l.mode}
                         onChange={e => {
@@ -872,6 +895,10 @@ export function OrderCreate() {
                           options={productOptions}
                           value={l.productId || ''}
                           onChange={pid => pickProductForLine(idx, pid)}
+                          renderPreview={id => {
+                            const p = products.find(x => x.id === id);
+                            return p ? <ProductHoverCard product={p} categories={categories} /> : null;
+                          }}
                         />
                       ) : l.newProduct ? (
                         <div className="flex items-center justify-between" style={{
@@ -963,6 +990,46 @@ export function OrderCreate() {
                       onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
                       <Trash2 size={16} strokeWidth={2} />
                     </button>
+                  </div>
+                  {/* Expanded Product-Detail-Panel — Specs-Grid + Bild */}
+                  {expanded && lineProduct && (
+                    <div style={{
+                      padding: '14px 16px 16px',
+                      background: '#FAFBFC',
+                      borderTop: '1px solid #E5E9EE',
+                      display: 'grid',
+                      gridTemplateColumns: lineProduct.images?.length ? '100px 1fr' : '1fr',
+                      gap: 18,
+                      alignItems: 'start',
+                    }}>
+                      {lineProduct.images?.length ? (
+                        <div style={{
+                          width: 100, height: 100, borderRadius: 10,
+                          background: '#FFFFFF', border: '1px solid #E5E9EE',
+                          overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <img src={lineProduct.images[0]} alt={lineProduct.name}
+                            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+                        </div>
+                      ) : null}
+                      <div>
+                        <div style={{ marginBottom: 8 }}>
+                          <span style={{ fontSize: 11, color: '#9CA3AF', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Produkt-Specs</span>
+                        </div>
+                        <div style={{
+                          display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                          columnGap: 18, rowGap: 8,
+                        }}>
+                          {lineSpecs.map((s, i) => (
+                            <div key={i} style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 9, color: '#9CA3AF', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 2 }}>{s.label}</div>
+                              <div style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.value}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   </div>
                 );
               })}

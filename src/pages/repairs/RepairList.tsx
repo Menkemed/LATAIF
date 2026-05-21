@@ -7,6 +7,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useRepairStore } from '@/stores/repairStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -15,6 +16,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { productSearchText } from '@/core/utils/product-format';
 import { getLotsWithPurchaseNumbers, formatLotLabel } from '@/core/lots/lot-queries';
 import type { Repair, RepairStatus } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
@@ -117,6 +119,7 @@ export function RepairList() {
       label: `${p.brand || ''} ${p.name || ''}`.trim() || p.id,
       subtitle: p.sku || '',
       meta: `${p.purchasePrice.toLocaleString('en-US')} BHD`,
+      searchText: productSearchText(p),
     })), [products]);
 
   function getPaymentStyle(rep: Repair) {
@@ -743,7 +746,7 @@ export function RepairList() {
             <div>
               <SearchSelect
                 label="OWN PRODUCT FROM INVENTORY"
-                placeholder="Search by brand, name, SKU..."
+                placeholder="Search by brand, name, SKU, reference, attributes..."
                 options={ownProductOptions}
                 value={form.productId || ''}
                 onChange={pid => {
@@ -757,6 +760,10 @@ export function RepairList() {
                     itemReference: p?.sku,
                     itemCategoryId: p?.categoryId,
                   });
+                }}
+                renderPreview={id => {
+                  const p = products.find(x => x.id === id);
+                  return p ? <ProductHoverCard product={p} categories={categories} /> : null;
                 }}
               />
               {form.productId && (() => {
