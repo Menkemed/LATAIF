@@ -14,6 +14,9 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useSupplierStore } from '@/stores/supplierStore';
+import { useGoldStore } from '@/stores/goldStore';
+import { getSpotPrices } from '@/core/market/spot-prices';
+import { purityOf } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getStockAggregates } from '@/core/lots/lot-queries';
 import type { OrderStatus, OrderType, CustomOrderMeta, MaterialDetails } from '@/core/models/types';
@@ -63,8 +66,14 @@ export function OrderCreate() {
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts } = useProductStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
+  const { createGoldPayable } = useGoldStore();
 
   useEffect(() => { loadCustomers(); loadProducts(); loadSuppliers(); }, [loadCustomers, loadProducts, loadSuppliers]);
+  // v0.6.0 — Live-Goldpreis fuer die provisorische COGS-Bewertung von
+  // Goldschmied-Gold (wenn nur Gewicht, kein Cost eingegeben wird).
+  useEffect(() => {
+    getSpotPrices().then(r => { if (r.gold) setGoldRate(r.gold.bhdPerGram); }).catch(() => {});
+  }, []);
 
   const [searchParams] = useSearchParams();
   const [customerId, setCustomerId] = useState(searchParams.get('customer') || '');
@@ -79,14 +88,22 @@ export function OrderCreate() {
   const [customerStones, setCustomerStones] = useState('');
   const [goldsmithSupplierId, setGoldsmithSupplierId] = useState('');
   const [laborCost, setLaborCost] = useState('');
-  const [laborCustomerPrice, setLaborCustomerPrice] = useState('');
-  const [laborShowMarkup, setLaborShowMarkup] = useState(false);
   const [extraGoldGrams, setExtraGoldGrams] = useState('');
   const [extraGoldKarat, setExtraGoldKarat] = useState('22K');
   const [extraGoldCost, setExtraGoldCost] = useState('');
-  const [extraGoldCustomerPrice, setExtraGoldCustomerPrice] = useState('');
-  const [extraGoldShowMarkup, setExtraGoldShowMarkup] = useState(false);
+  // v0.6.0 — Goldschmied der sein eigenes Gold beisteuert → Gold-Verbindlichkeit
+  // (Gramm) statt Geld. goldRate = Live-Goldpreis BHD/g (pure).
+  const [extraGoldSupplierId, setExtraGoldSupplierId] = useState('');
+  const [goldRate, setGoldRate] = useState(0);
+  // v0.6.0 — Custom-Cards 3a-3d sind standardmaessig zu (Quote-first: nur der
+  // Quoted Price in 3e ist Pflicht). Per Chip oeffnen wenn gebraucht.
+  const [openCard, setOpenCard] = useState<Record<'3a' | '3b' | '3c' | '3d', boolean>>({
+    '3a': false, '3b': false, '3c': false, '3d': false,
+  });
   const [finalProductDescription, setFinalProductDescription] = useState('');
+  // v0.5.0 — Quote-first: der approx. Preis den der Kunde akzeptiert. Kosten
+  // (Labor/Diamond) sind optional und koennen spaeter auf der Detail-Seite rein.
+  const [quotedPrice, setQuotedPrice] = useState('');
   // Diamond/Stone Materials werden lokal als Liste gefuehrt — beim createOrder
   // werden sie als order_lines mit material_kind/material_details persistiert.
   const [materialLines, setMaterialLines] = useState<Array<MaterialLineInput & { _id: string }>>([]);
@@ -145,7 +162,12 @@ export function OrderCreate() {
     };
   });
 
-  const subtotal = computed.reduce((s, c) => s + c.net, 0);
+  // v0.5.0 — Custom/Mixed: der Quoted Price (approx.) ist eine MARGIN-Position
+  // (gross == net) und fliesst direkt ins Pricing-Total ein.
+  const quoteGross = (orderType === 'custom' || orderType === 'mixed')
+    ? (parseFloat(quotedPrice) || 0)
+    : 0;
+  const subtotal = computed.reduce((s, c) => s + c.net, 0) + quoteGross;
   const totalVat = computed.reduce((s, c) => s + c.vat, 0);
   const total = subtotal + totalVat;
   const remaining = Math.max(0, total - (fullyPaid ? total : depositAmount));
@@ -182,31 +204,36 @@ export function OrderCreate() {
     setStatus('pending');
     setNotes('');
     setError('');
+    // v0.5.0 — Custom-Felder ebenfalls leeren
+    setQuotedPrice('');
+    setLaborCost('');
+    setGoldsmithSupplierId('');
+    setExtraGoldCost('');
+    setExtraGoldGrams('');
+    setExtraGoldSupplierId('');
+    setCustomerGoldGrams('');
+    setCustomerStones('');
+    setFinalProductDescription('');
+    setMaterialLines([]);
   }
 
-  // v0.3.0 — sichtbar ob der Custom-Block ueberhaupt gefuellt wurde
-  function hasCustomComponent(): boolean {
-    return parseFloat(laborCost) > 0
-      || parseFloat(extraGoldCost) > 0
-      || materialLines.length > 0;
-  }
   function hasProductLines(): boolean {
     return lines.some(l => l.description.trim());
   }
 
+  // v0.5.0 — Quote-first Validierung. Ein Custom-Order braucht nur den approx.
+  // Preis + die Beschreibung; Labor-/Diamond-Kosten sind optional (kommen oft
+  // erst spaeter rein, wenn das Stueck fertig ist).
   function validate(): string | null {
     if (!customerId) return 'Please select a customer';
     const wantsProduct = orderType === 'normal' || orderType === 'mixed';
     const wantsCustom = orderType === 'custom' || orderType === 'mixed';
+    const quote = parseFloat(quotedPrice) || 0;
 
     if (wantsCustom && !wantsProduct) {
       // reiner Custom-Order
-      if (!hasCustomComponent()) {
-        return 'Custom Order braucht mindestens Labor, Extra-Gold ODER ein Material';
-      }
-      if (!finalProductDescription.trim()) {
-        return 'Bitte Final-Product-Description angeben';
-      }
+      if (quote <= 0) return 'Bitte einen Quoted Price (approx.) angeben';
+      if (!finalProductDescription.trim()) return 'Bitte Final-Product-Description angeben';
       return null;
     }
     if (wantsProduct && !wantsCustom) {
@@ -216,17 +243,15 @@ export function OrderCreate() {
       if (hasInvalid) return 'Each item needs a description and quantity > 0';
       return null;
     }
-    // Mixed: Customer + (≥1 Produkt-Line ODER ≥1 Custom-Komponente)
-    if (!hasProductLines() && !hasCustomComponent()) {
-      return 'Mixed Order braucht mindestens ein Produkt ODER eine Custom-Komponente';
+    // Mixed: Customer + (≥1 Produkt-Line ODER Quoted Price)
+    if (!hasProductLines() && quote <= 0) {
+      return 'Mixed Order braucht mindestens ein Produkt ODER einen Quoted Price';
     }
-    // Wenn Produkt-Lines vorhanden, muessen sie gueltig sein
     if (hasProductLines()) {
       const hasInvalid = lines.some(l => l.description.trim() && l.quantity <= 0);
       if (hasInvalid) return 'Each product item needs a quantity > 0';
     }
-    // finalProductDescription nur Pflicht wenn Custom-Komponente vorhanden
-    if (hasCustomComponent() && !finalProductDescription.trim()) {
+    if (quote > 0 && !finalProductDescription.trim()) {
       return 'Bitte Final-Product-Description fuer den Custom-Teil angeben';
     }
     return null;
@@ -242,7 +267,7 @@ export function OrderCreate() {
     supplierId?: string;
     costAmount?: number;
     isCustomerFacing?: boolean;
-    materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
+    materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | 'custom' | null;
     materialDetails?: MaterialDetails;
   };
 
@@ -282,49 +307,69 @@ export function OrderCreate() {
     };
   }
 
-  // v0.3.0 — sammelt die Custom-Lines (Labor / Extra-Gold / Materials).
+  // v0.5.0 — Quote-first: EINE kundenseitige Position (der approx. Preis als
+  // MARGIN-Line) + optionale reine Kostenpositionen (Labor / Extra-Gold /
+  // Materials) mit is_customer_facing = false. Der Quoted Price allein bestimmt
+  // was der Kunde zahlt; die Kosten sind interne Buchhaltung (A/P + Marge).
   function collectCustomLines(): UnifiedLine[] {
     const customLines: UnifiedLine[] = [];
 
-    // Goldsmith Labor Line
+    // Quoted-Price-Line — die einzige kundenseitige Position des Custom-Teils.
+    const quote = parseFloat(quotedPrice) || 0;
+    if (quote > 0) {
+      customLines.push({
+        description: finalProductDescription.trim() || 'Custom Order',
+        quantity: 1,
+        unitPrice: quote,
+        taxScheme: 'MARGIN',
+        vatRate: 10,
+        isCustomerFacing: true,
+        materialKind: 'custom',
+        costAmount: 0,
+      });
+    }
+
+    // Goldsmith Labor — reine Kostenposition (cost-only, nicht auf der Invoice).
     const laborCostNum = parseFloat(laborCost) || 0;
     if (laborCostNum > 0) {
-      const laborPrice = laborShowMarkup ? (parseFloat(laborCustomerPrice) || laborCostNum) : laborCostNum;
       const supName = goldsmithSupplierId ? suppliers.find(s => s.id === goldsmithSupplierId)?.name : undefined;
       customLines.push({
         description: `Goldsmith Labor${supName ? ' — ' + supName : ''}`,
         quantity: 1,
-        unitPrice: laborPrice,
-        taxScheme: 'VAT_10',
-        vatRate: 10,
+        unitPrice: 0,
         supplierId: goldsmithSupplierId || undefined,
         costAmount: laborCostNum,
-        isCustomerFacing: true,
+        isCustomerFacing: false,
         materialKind: 'labor',
       });
     }
 
-    // Extra Gold Line
+    // Extra Gold — reine Kostenposition (COGS-Beitrag). Bei Goldschmied-Gold
+    // wird zusaetzlich (in handleSave) eine Gold-Verbindlichkeit angelegt; die
+    // Cost-Line traegt NIE einen supplier → kein doppeltes Geld-A/P.
+    // Cost = eingegebener Betrag, sonst Bewertung zum Live-Goldpreis × Reinheit.
     const extraCostNum = parseFloat(extraGoldCost) || 0;
     const extraGramsNum = parseFloat(extraGoldGrams) || 0;
-    if (extraCostNum > 0) {
-      const extraPrice = extraGoldShowMarkup ? (parseFloat(extraGoldCustomerPrice) || extraCostNum) : extraCostNum;
+    const extraGoldValue = extraCostNum > 0
+      ? extraCostNum
+      : (extraGramsNum > 0 && goldRate > 0
+          ? Math.round(extraGramsNum * purityOf(extraGoldKarat) * goldRate * 1000) / 1000
+          : 0);
+    if (extraGoldValue > 0) {
+      const sup = extraGoldSupplierId ? suppliers.find(s => s.id === extraGoldSupplierId) : undefined;
       customLines.push({
-        description: `Extra Gold ${extraGramsNum > 0 ? extraGramsNum.toFixed(3) + 'g ' + extraGoldKarat : ''}`.trim(),
+        description: `Extra Gold ${extraGramsNum > 0 ? extraGramsNum.toFixed(3) + 'g ' + extraGoldKarat : ''}${sup ? ' — ' + sup.name : ''}`.trim(),
         quantity: 1,
-        unitPrice: extraPrice,
-        taxScheme: 'VAT_10',
-        vatRate: 10,
-        costAmount: extraCostNum,
-        isCustomerFacing: true,
+        unitPrice: 0,
+        costAmount: extraGoldValue,
+        isCustomerFacing: false,
         materialKind: 'gold',
-        materialDetails: { weightGrams: extraGramsNum, karat: extraGoldKarat },
+        materialDetails: { weightGrams: extraGramsNum, karat: extraGoldKarat, supplierName: sup?.name },
       });
     }
 
-    // Material-Lines (Diamond / Stone / Gold-Piece)
+    // Material-Lines (Diamond / Stone / Gold-Piece) — reine Kostenpositionen.
     for (const m of materialLines) {
-      const customerPrice = m.customerPrice ?? m.totalCost;
       const supName = m.supplierId ? suppliers.find(s => s.id === m.supplierId)?.name : m.supplierName;
       const ctLabel = (m.materialKind === 'diamond' || m.materialKind === 'stone')
         ? `${m.quantity}× ${(m.caratPerPiece || 0).toFixed(2)}ct `
@@ -332,12 +377,10 @@ export function OrderCreate() {
       customLines.push({
         description: `${ctLabel}${m.description}${supName ? ' — ' + supName : ''}`,
         quantity: 1,
-        unitPrice: customerPrice,
-        taxScheme: 'VAT_10',
-        vatRate: 10,
+        unitPrice: 0,
         supplierId: m.supplierId,
         costAmount: m.totalCost,
-        isCustomerFacing: true,
+        isCustomerFacing: false,
         materialKind: m.materialKind,
         materialDetails: {
           ct: m.caratPerPiece,
@@ -415,6 +458,21 @@ export function OrderCreate() {
     const v = validate();
     if (v) { setError(v); return; }
     const order = createOrder(buildOrderPayload());
+    // v0.6.0 — Goldschmied-Gold → Gold-Verbindlichkeit (Gramm) an den Goldschmied,
+    // verknuepft mit der Order. Wird auf der Detail-Seite in Gold oder Geld beglichen.
+    const egGrams = parseFloat(extraGoldGrams) || 0;
+    if (extraGoldSupplierId && egGrams > 0) {
+      try {
+        createGoldPayable({
+          supplierId: extraGoldSupplierId,
+          sourceOrderId: order.id,
+          weightGrams: egGrams,
+          karat: extraGoldKarat,
+        });
+      } catch (err) {
+        console.error('[order] createGoldPayable failed:', err);
+      }
+    }
     if (continueEditing) {
       reset();
     } else {
@@ -508,7 +566,26 @@ export function OrderCreate() {
         {/* v0.2.1/v0.3.0 — Custom-Order conditional sections (custom ODER mixed) */}
         {(orderType === 'custom' || orderType === 'mixed') && (
           <>
+            {/* v0.6.0 — Custom-Cards 3a-3d nur bei Bedarf öffnen (Quote-first) */}
+            <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span className="text-overline">OPTIONALE DETAILS — BEI BEDARF ÖFFNEN</span>
+              {([['3a', '3a · Customer Material'], ['3b', '3b · Goldsmith Labor'], ['3c', '3c · Extra Gold'], ['3d', '3d · Diamonds / Materials']] as const).map(([k, label]) => {
+                const on = openCard[k];
+                return (
+                  <button key={k} type="button" onClick={() => setOpenCard(p => ({ ...p, [k]: !p[k] }))}
+                    className="cursor-pointer rounded-full"
+                    style={{ padding: '6px 14px', fontSize: 12,
+                      border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
+                      color: on ? '#0F0F10' : '#6B7280',
+                      background: on ? 'rgba(15,15,16,0.06)' : 'transparent' }}>
+                    {on ? '− ' : '+ '}{label}
+                  </button>
+                );
+              })}
+            </div>
+
             {/* Customer Material Card */}
+            {openCard['3a'] && (
             <div style={{ marginTop: 16 }}>
               <Card>
                 <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>
@@ -554,12 +631,14 @@ export function OrderCreate() {
                 </p>
               </Card>
             </div>
+            )}
 
             {/* Goldsmith Work Card */}
+            {openCard['3b'] && (
             <div style={{ marginTop: 16 }}>
               <Card>
-                <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3b · GOLDSMITH WORK / LABOR</span>
-                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 16 }}>
+                <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3b · GOLDSMITH WORK / LABOR — COST (OPTIONAL)</span>
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SUPPLIER (OPTIONAL — A/P)</span>
                     <SearchSelect
@@ -579,36 +658,20 @@ export function OrderCreate() {
                     value={laborCost}
                     onChange={e => setLaborCost(e.target.value)}
                   />
-                  <div>
-                    <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
-                      <span className="text-overline">CUSTOMER PRICE</span>
-                      <button
-                        type="button"
-                        onClick={() => setLaborShowMarkup(!laborShowMarkup)}
-                        style={{ fontSize: 10, color: '#3D7FFF', background: 'transparent', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-                      >
-                        {laborShowMarkup ? 'Use 1:1' : 'Add markup'}
-                      </button>
-                    </div>
-                    <Input
-                      label=""
-                      type="number"
-                      step="0.001"
-                      placeholder={laborShowMarkup ? '0.000' : '(same as cost)'}
-                      value={laborShowMarkup ? laborCustomerPrice : laborCost}
-                      onChange={e => setLaborCustomerPrice(e.target.value)}
-                      disabled={!laborShowMarkup}
-                    />
-                  </div>
                 </div>
+                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+                  Kosten sind optional — du kannst sie auch später auf der Order-Detail-Seite eintragen, sobald das Stück fertig ist.
+                </p>
               </Card>
             </div>
+            )}
 
             {/* Extra Gold Card */}
+            {openCard['3c'] && (
             <div style={{ marginTop: 16 }}>
               <Card>
-                <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3c · EXTRA GOLD (OUR STOCK / PURCHASED)</span>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 16 }}>
+                <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3c · EXTRA GOLD (OPTIONAL)</span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr', gap: 16 }}>
                   <Input
                     label="WEIGHT (G)"
                     type="number"
@@ -637,42 +700,37 @@ export function OrderCreate() {
                     </div>
                   </div>
                   <Input
-                    label="COST (BHD)"
+                    label="COST (BHD) — OPTIONAL"
                     type="number"
                     step="0.001"
                     placeholder="0.000"
                     value={extraGoldCost}
                     onChange={e => setExtraGoldCost(e.target.value)}
                   />
-                  <div>
-                    <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
-                      <span className="text-overline">CUSTOMER PRICE</span>
-                      <button
-                        type="button"
-                        onClick={() => setExtraGoldShowMarkup(!extraGoldShowMarkup)}
-                        style={{ fontSize: 10, color: '#3D7FFF', background: 'transparent', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-                      >
-                        {extraGoldShowMarkup ? 'Use 1:1' : 'Add markup'}
-                      </button>
-                    </div>
-                    <Input
-                      label=""
-                      type="number"
-                      step="0.001"
-                      placeholder={extraGoldShowMarkup ? '0.000' : '(same as cost)'}
-                      value={extraGoldShowMarkup ? extraGoldCustomerPrice : extraGoldCost}
-                      onChange={e => setExtraGoldCustomerPrice(e.target.value)}
-                      disabled={!extraGoldShowMarkup}
-                    />
-                  </div>
                 </div>
+                <div style={{ marginTop: 12 }}>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>GOLDSMITH / SUPPLIER (OPTIONAL)</span>
+                  <SearchSelect
+                    options={suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '' }))}
+                    value={extraGoldSupplierId}
+                    onChange={setExtraGoldSupplierId}
+                    placeholder="Goldschmied wählen = sein Gold → Gold-Verbindlichkeit · leer = eigenes Gold"
+                  />
+                </div>
+                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+                  {extraGoldSupplierId
+                    ? `Goldschmied-Gold → Gold-Verbindlichkeit (Gramm), später in Gold oder Geld beglichen. Cost optional${goldRate > 0 ? ` — leer = Bewertung zum Live-Goldpreis ${goldRate.toFixed(3)} BHD/g` : ''}.`
+                    : 'Eigenes Gold → reine Geld-Kostenposition. Mit Goldschmied als Supplier wird stattdessen eine Gold-Verbindlichkeit angelegt.'}
+                </p>
               </Card>
             </div>
+            )}
 
             {/* Materials (Diamond/Stone/Gold-Piece) — uses shared component */}
+            {openCard['3d'] && (
             <div style={{ marginTop: 16 }}>
               <MaterialsCard
-                title="3d · DIAMONDS / STONES / GOLD-PIECES"
+                title="3d · DIAMONDS / STONES / GOLD-PIECES — COST (OPTIONAL)"
                 lines={materialLines.map(m => ({
                   id: m._id,
                   materialKind: m.materialKind,
@@ -691,21 +749,36 @@ export function OrderCreate() {
                   unitPrice: m.customerPrice ?? m.totalCost,
                 } as MaterialLine))}
                 onAdd={() => setShowAddMaterial(true)}
-                showCustomerPrice={true}
+                onRemove={(rid) => setMaterialLines(prev => prev.filter(m => m._id !== rid))}
+                showCustomerPrice={false}
                 canEdit={true}
               />
             </div>
+            )}
 
-            {/* Final Product Description */}
+            {/* Final Product Description — immer offen (Quoted Price ist Pflicht) */}
             <div style={{ marginTop: 16 }}>
               <Card>
-                <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3e · FINAL PRODUCT / OUTPUT</span>
-                <Input
-                  label="FINAL PRODUCT DESCRIPTION"
-                  placeholder="e.g. Custom 22K wedding ring with 0.5ct center diamond"
-                  value={finalProductDescription}
-                  onChange={e => setFinalProductDescription(e.target.value)}
-                />
+                <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3e · FINAL PRODUCT / OUTPUT + QUOTED PRICE</span>
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+                  <Input
+                    label="FINAL PRODUCT DESCRIPTION"
+                    placeholder="e.g. Custom 22K wedding ring with 0.5ct center diamond"
+                    value={finalProductDescription}
+                    onChange={e => setFinalProductDescription(e.target.value)}
+                  />
+                  <Input
+                    label="QUOTED PRICE — APPROX. (BHD)"
+                    type="number"
+                    step="0.001"
+                    placeholder="0.000"
+                    value={quotedPrice}
+                    onChange={e => setQuotedPrice(e.target.value)}
+                  />
+                </div>
+                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+                  Der approx. Preis den der Kunde akzeptiert — landet auf dem Order-Beleg und später 1:1 auf der Invoice.
+                </p>
               </Card>
             </div>
           </>
@@ -984,7 +1057,7 @@ export function OrderCreate() {
         onSubmit={(data) => {
           setMaterialLines(prev => [...prev, { ...data, _id: genId() }]);
         }}
-        showCustomerPrice={true}
+        showCustomerPrice={false}
       />
     </div>
   );

@@ -17,6 +17,7 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
 import { getStockAggregates } from '@/core/lots/lot-queries';
+import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useAgentStore } from '@/stores/agentStore';
@@ -307,10 +308,15 @@ export function BusinessReportsPage() {
   // ── Expense Report (Plan §Reports §E)
   const expenseReport = useMemo(() => {
     const totals = getTotalsByCategory();
-    const total = Object.values(totals).reduce((s, v) => s + v, 0);
-    // By month
+    // v0.6.0 — Inventory-Kosten sind kapitalisierte Herstellkosten (COGS), keine
+    // laufende Betriebsausgabe → vom operativen Total ausgeschlossen.
+    const total = Object.entries(totals)
+      .filter(([k]) => !isCapitalizedExpenseCategory(k))
+      .reduce((s, [, v]) => s + v, 0);
+    // By month — kapitalisierte Kategorien ausgeschlossen
     const byMonth: Record<string, number> = {};
     for (const e of expenses) {
+      if (isCapitalizedExpenseCategory(e.category)) continue;
       const m = (e.expenseDate || '').substring(0, 7);
       byMonth[m] = (byMonth[m] || 0) + e.amount;
     }
@@ -510,9 +516,12 @@ export function BusinessReportsPage() {
       case 'expense':
         return { title: 'Expense Report', rows: [
           ['Category', 'Amount (BHD)'],
-          ...Object.entries(expenseReport.totals).map(([k, v]) => [k, v.toFixed(2)]),
+          ...Object.entries(expenseReport.totals).map(([k, v]) => [
+            isCapitalizedExpenseCategory(k) ? `${k} (capitalized — COGS, not operating)` : k,
+            v.toFixed(2),
+          ]),
           ['', ''],
-          ['Total', expenseReport.total.toFixed(2)],
+          ['Operating Total', expenseReport.total.toFixed(2)],
         ]};
       case 'payables':
         return { title: 'Payables Report', rows: [
@@ -780,15 +789,21 @@ export function BusinessReportsPage() {
 
       {active === 'expense' && (
         <div style={{ display: 'grid', gap: 16 }}>
-          <MetricCard label="TOTAL EXPENSES" value={`${fmt(expenseReport.total)} BHD`} />
+          <MetricCard label="OPERATING EXPENSES" value={`${fmt(expenseReport.total)} BHD`} />
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>BY CATEGORY</span>
-            {Object.entries(expenseReport.totals).map(([k, v]) => (
-              <div key={k} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
-                <span style={{ color: '#0F0F10' }}>{k}</span>
-                <span className="font-mono" style={{ color: '#DC2626' }}><Bhd v={v}/> BHD</span>
-              </div>
-            ))}
+            {Object.entries(expenseReport.totals).map(([k, v]) => {
+              const capitalized = isCapitalizedExpenseCategory(k);
+              return (
+                <div key={k} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
+                  <span style={{ color: '#0F0F10' }}>
+                    {k}
+                    {capitalized && <span style={{ fontSize: 11, color: '#6B7280' }}> · capitalized (COGS, not operating)</span>}
+                  </span>
+                  <span className="font-mono" style={{ color: capitalized ? '#6B7280' : '#DC2626' }}><Bhd v={v}/> BHD</span>
+                </div>
+              );
+            })}
           </Card>
         </div>
       )}

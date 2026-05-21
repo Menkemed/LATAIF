@@ -650,7 +650,7 @@ export interface RepairLine {
   dueDate?: string;
   notes?: string;
   // v0.2.1 — Material Parity (Diamond/Stone/Gold-Piece consumed during repair)
-  materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
+  materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | 'custom' | null;
   materialDetails?: MaterialDetails;
   createdAt: string;
   updatedAt: string;
@@ -812,7 +812,7 @@ export interface OrderLine {
   expenseId?: UUID;          // verlinkter Expense-Eintrag nach commit
   isCustomerFacing?: boolean; // default true; false = pure-cost-line, NICHT auf Invoice
   // v0.2.1 — Material Parity (Diamond/Stone/Gold)
-  materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
+  materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | 'custom' | null;
   materialDetails?: MaterialDetails;
   // v0.3.0 — Per-Line Fulfillment-Status + partial-invoicing link
   status?: OrderLineStatus;   // default 'PENDING'
@@ -1319,6 +1319,16 @@ export interface PartnerTransaction {
 
 // Expense (Plan §Expenses §3 + §11)
 export type ExpenseCategory = 'Rent' | 'Salary' | 'Utilities' | 'CardFees' | 'RepairCosts' | 'Transport' | 'ConsignorLoss' | 'Inventory' | 'Miscellaneous';
+
+// v0.6.0 — Kategorien deren Kosten in den Produkt-/Inventar-Wert kapitalisiert
+// werden (→ COGS beim Verkauf) und daher NICHT als laufende Betriebsausgabe
+// zaehlen. Sonst wuerde dieselbe Kost doppelt zaehlen — einmal als COGS in der
+// Invoice-Marge, einmal als operative Ausgabe.
+export const CAPITALIZED_EXPENSE_CATEGORIES: readonly ExpenseCategory[] = ['Inventory'];
+
+export function isCapitalizedExpenseCategory(cat: string): boolean {
+  return (CAPITALIZED_EXPENSE_CATEGORIES as readonly string[]).includes(cat);
+}
 
 export interface Expense {
   id: UUID;

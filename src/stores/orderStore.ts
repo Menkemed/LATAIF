@@ -84,10 +84,29 @@ interface OrderStore {
     supplierId?: string;
     costAmount?: number;
     isCustomerFacing?: boolean;
-    materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | null;
+    materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | 'custom' | null;
     materialDetails?: MaterialDetails;
   }>) => void;
   getOrderLines: (orderId: string) => OrderLine[];
+  // v0.5.0 — Custom-Order „cost-later": einzelne Order-Line nachtraeglich anlegen/loeschen.
+  // addOrderLine haengt eine Line ans Ende (naechste Position); bucht A/P sofort wenn
+  // sie als ARRIVED + supplier_id reinkommt. deleteOrderLine reverst die A/P-Expense
+  // und blockt wenn die Line bereits invoiced ist.
+  addOrderLine: (orderId: string, line: {
+    productId?: string;
+    description: string;
+    quantity?: number;
+    unitPrice?: number;
+    taxScheme?: OrderLine['taxScheme'];
+    vatRate?: number;
+    supplierId?: string;
+    costAmount?: number;
+    isCustomerFacing?: boolean;
+    materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | 'custom' | null;
+    materialDetails?: MaterialDetails;
+    status?: OrderLineStatus;
+  }) => string;
+  deleteOrderLine: (lineId: string) => void;
   // v0.2.1 — Trigger A/P-Expense fuer jede order_line mit supplier_id + cost_amount > 0
   // (analog zu repairStore.commitRepairLineExpenses). Idempotent: ueberspringt lines
   // die bereits expense_id haben. v0.3.0: committed nur Lines mit status='ARRIVED'.
@@ -448,7 +467,13 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     const orderRows = query(`SELECT status FROM orders WHERE id = ?`, [orderId]);
     if (orderRows.length === 0) return;
     const currentStatus = (orderRows[0].status as OrderStatus) || 'pending';
-    const lineRows = query(`SELECT status FROM order_lines WHERE order_id = ?`, [orderId]);
+    // v0.5.0 — nur kundenseitige Lines zaehlen fuer den Roll-up. Interne
+    // Kostenpositionen (is_customer_facing = 0) sind reine Buchhaltung und
+    // duerfen den Fulfillment-Status nicht beeinflussen.
+    const lineRows = query(
+      `SELECT status FROM order_lines WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 1`,
+      [orderId]
+    );
     if (lineRows.length === 0) return;
     const lineStatuses = lineRows.map(r => ((r.status as string) || 'PENDING') as OrderLineStatus);
     const derived = deriveOrderStatusFromLines(lineStatuses, currentStatus);
@@ -480,6 +505,75 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       trackUpdate('order_lines', lid, { invoiceId });
     }
     saveDatabase();
+    get().loadOrders();
+  },
+
+  // v0.5.0 — Custom-Order „cost-later": eine einzelne Line ans Order anhaengen.
+  // Genutzt von OrderDetail um Labor-/Diamond-/Material-Kosten nachzutragen wenn
+  // das Stueck fertig ist. Kommt die Line als ARRIVED + supplier_id rein, bucht
+  // commitOrderLineExpenses direkt die A/P-Schuld.
+  addOrderLine: (orderId, line) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const posRow = query(`SELECT COALESCE(MAX(position), 0) AS m FROM order_lines WHERE order_id = ?`, [orderId]);
+    const position = Number(posRow[0]?.m || 0) + 1;
+    const lineId = uuid();
+    const qty = Math.max(1, line.quantity || 1);
+    const total = qty * (line.unitPrice || 0);
+    const matJson = line.materialDetails ? JSON.stringify(line.materialDetails) : null;
+    const status: OrderLineStatus = line.status || 'PENDING';
+    db.run(
+      `INSERT INTO order_lines (id, order_id, product_id, description, quantity, unit_price, line_total, position,
+        tax_scheme, vat_rate, supplier_id, cost_amount, is_customer_facing, material_kind, material_details, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [lineId, orderId, line.productId || null, line.description || '', qty, line.unitPrice || 0, total, position,
+       line.taxScheme || null, line.vatRate ?? null,
+       line.supplierId || null, line.costAmount ?? 0,
+       line.isCustomerFacing === false ? 0 : 1,
+       line.materialKind || null, matJson, status, now]
+    );
+    trackInsert('order_lines', lineId, { orderId, position, status });
+    saveDatabase();
+
+    // Bei ARRIVED/DELIVERED: A/P-Expense fuer supplier-Lines buchen (idempotent).
+    if (status === 'ARRIVED' || status === 'DELIVERED') {
+      try { get().commitOrderLineExpenses(orderId); }
+      catch (err) { console.error('[order] commitOrderLineExpenses (addOrderLine) failed:', err); }
+    }
+    get().recomputeOrderStatus(orderId);
+    get().loadOrders();
+    return lineId;
+  },
+
+  // v0.5.0 — Eine Order-Line loeschen. Blockt wenn bereits invoiced; reverst die
+  // verknuepfte A/P-Expense damit keine Orphan-Supplier-Schuld zurueckbleibt.
+  deleteOrderLine: (lineId) => {
+    const db = getDatabase();
+    const rows = query(
+      `SELECT order_id, invoice_id, expense_id FROM order_lines WHERE id = ?`,
+      [lineId]
+    );
+    if (rows.length === 0) return;
+    const orderId = rows[0].order_id as string;
+    const invoiceId = rows[0].invoice_id as string | null;
+    const expenseId = rows[0].expense_id as string | null;
+    if (invoiceId) {
+      throw new Error('Diese Position ist bereits in einer Invoice — erst die Invoice stornieren.');
+    }
+    if (expenseId) {
+      try {
+        cancelOrderLineExpense(expenseId);
+        db.run(`DELETE FROM expense_payments WHERE expense_id = ?`, [expenseId]);
+        db.run(`DELETE FROM expenses WHERE id = ?`, [expenseId]);
+        trackDelete('expenses', expenseId);
+      } catch (err) {
+        console.error(`[order] order-line expense cleanup failed (${expenseId}):`, err);
+      }
+    }
+    db.run(`DELETE FROM order_lines WHERE id = ?`, [lineId]);
+    trackDelete('order_lines', lineId);
+    saveDatabase();
+    get().recomputeOrderStatus(orderId);
     get().loadOrders();
   },
 
@@ -702,6 +796,15 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       } catch (err) {
         console.error(`[order] order-line expense cleanup failed (${expId}):`, err);
       }
+    }
+    // v0.6.0 — Order-verknuepfte Gold-Verbindlichkeiten stornieren (Gramm-Schuld,
+    // kein Ledger-Effekt). Nur OPEN — bereits beglichene bleiben unberuehrt.
+    const gpRows = query(`SELECT id FROM gold_payables WHERE source_order_id = ? AND status = 'OPEN'`, [id]);
+    for (const gr of gpRows) {
+      const gpId = gr.id as string;
+      db.run(`UPDATE gold_payables SET status = 'CANCELLED', updated_at = ? WHERE id = ?`,
+        [new Date().toISOString(), gpId]);
+      trackUpdate('gold_payables', gpId, { status: 'CANCELLED' });
     }
     db.run(`DELETE FROM order_lines WHERE order_id = ?`, [id]);
     db.run(`DELETE FROM orders WHERE id = ?`, [id]);

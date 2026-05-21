@@ -22,7 +22,7 @@ import { GaugeChart } from '@/components/charts/GaugeChart';
 import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
 import { query, currentBranchId } from '@/core/db/helpers';
-import { isLoanGiven, canonicalLoanStatus } from '@/core/models/types';
+import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { receivablesSummary, type ReceivableSource } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
 
@@ -199,19 +199,25 @@ export function Dashboard() {
     }
   }, [getBalances, invoices, purchases, allExpenses]);
 
-  // Plan §Dashboard §3.F: Total + Monthly + Top Kategorien
+  // Plan §Dashboard §3.F: Total + Monthly + Top Kategorien.
+  // v0.6.0 — kapitalisierte Kategorien (Inventory) zaehlen NICHT als laufende
+  // Betriebsausgabe — sie sind COGS und stecken schon in der Invoice-Marge.
   const expenseTotals = getTotalsByCategory();
-  const totalExpenses = Object.values(expenseTotals).reduce((s, v) => s + v, 0);
+  const totalExpenses = Object.entries(expenseTotals)
+    .filter(([c]) => !isCapitalizedExpenseCategory(c))
+    .reduce((s, [, v]) => s + v, 0);
   const topExpenseCats = useMemo(() =>
     Object.entries(expenseTotals)
-      .filter(([, v]) => v > 0)
+      .filter(([c, v]) => v > 0 && !isCapitalizedExpenseCategory(c))
       .sort(([, a], [, b]) => b - a)
       .slice(0, 3),
     [expenseTotals]
   );
   const monthlyExpenses = useMemo(() => {
     const prefix = new Date().toISOString().slice(0, 7);
-    return allExpenses.filter(e => (e.expenseDate || '').startsWith(prefix)).reduce((s, e) => s + e.amount, 0);
+    return allExpenses
+      .filter(e => (e.expenseDate || '').startsWith(prefix) && !isCapitalizedExpenseCategory(e.category))
+      .reduce((s, e) => s + e.amount, 0);
   }, [allExpenses]);
 
   // Plan §Dashboard §3.G: Partner Capital + offene Auszahlung + Gewinnanteile

@@ -8,8 +8,12 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
+import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
 import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useSupplierStore } from '@/stores/supplierStore';
+import { useGoldStore } from '@/stores/goldStore';
+import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
 import { useProductStore } from '@/stores/productStore';
 import { formatProductMultiLine } from '@/core/utils/product-format';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
@@ -18,7 +22,7 @@ import { query } from '@/core/db/helpers';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
-import type { Order, OrderLine, OrderStatus, Product, TaxScheme } from '@/core/models/types';
+import type { Order, OrderLine, OrderStatus, Product, TaxScheme, GoldPayable } from '@/core/models/types';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -31,6 +35,16 @@ function fmt(v: number | undefined | null): string {
 }
 
 const STATUS_FLOW: OrderStatus[] = ['pending', 'arrived', 'notified', 'completed'];
+
+// v0.5.0 — Icon/Label fuer Order-Line-Kinds (Produkt + Custom-Komponenten).
+const COST_KIND_META: Record<string, { icon: string; label: string }> = {
+  labor: { icon: '🔨', label: 'Labor' },
+  diamond: { icon: '💎', label: 'Diamond' },
+  stone: { icon: '🔮', label: 'Stone' },
+  gold: { icon: '🥇', label: 'Gold' },
+  custom: { icon: '💍', label: 'Custom' },
+  product: { icon: '📦', label: 'Product' },
+};
 
 function getNextStatus(current: OrderStatus): OrderStatus | null {
   const idx = STATUS_FLOW.indexOf(current);
@@ -47,9 +61,12 @@ export function OrderDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
-    getBillableLines, markOrderLinesInvoiced, updateOrderLineStatus } = useOrderStore();
+    getBillableLines, markOrderLinesInvoiced, updateOrderLineStatus,
+    addOrderLine, deleteOrderLine } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
+  const { goldPayables, loadGoldPayables, createGoldPayable } = useGoldStore();
   const { products, loadProducts, createProduct } = useProductStore();
   // Plan §Order §Convert: Wenn die Order kein verlinktes Produkt hat (manuell beschrieben),
   // wird beim Convert eines automatisch erzeugt und hier gehalten — wird vom VAT-Modal +
@@ -72,11 +89,15 @@ export function OrderDetail() {
   const [pendingNumberAction, setPendingNumberAction] = useState<((special: boolean) => Promise<void>) | null>(null);
   // v0.3.0 — bumpt nach Line-Status-Aenderung damit das Order-Items-Grid neu lädt
   const [lineRefresh, setLineRefresh] = useState(0);
+  // v0.5.0 — Add-Cost Modal (Labor/Diamond/Material-Kosten nachträglich erfassen)
+  const [showAddCost, setShowAddCost] = useState(false);
+  // v0.6.0 — Gold-Verbindlichkeit begleichen (Gold geben / in Geld umwandeln)
+  const [settleGold, setSettleGold] = useState<{ mode: SettleGoldMode; payable: GoldPayable } | null>(null);
   const { paymentsByOrder, loadPayments, addPayment, deletePayment } = useOrderPaymentStore();
   const { createDirectInvoice, invoices, loadInvoices } = useInvoiceStore();
   const perm = usePermission();
 
-  useEffect(() => { loadOrders(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); }, [loadOrders, loadCustomers, loadProducts, loadCategories, loadInvoices]);
+  useEffect(() => { loadOrders(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadGoldPayables(); }, [loadOrders, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadGoldPayables]);
   useEffect(() => { if (id) loadPayments(id); }, [id, loadPayments]);
 
   const payments = useMemo(() => (id ? paymentsByOrder[id] || [] : []), [id, paymentsByOrder]);
@@ -85,6 +106,22 @@ export function OrderDetail() {
   const orderLineList = useMemo(
     () => (id ? getOrderLines(id) : []),
     [id, getOrderLines, lineRefresh, orders] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  // v0.5.0 — kundenseitige Positionen (Order-Items-Grid + Invoicing) vs.
+  // interne Kostenpositionen (Costs-Card). Trennung per is_customer_facing.
+  const customerLines = useMemo(() => orderLineList.filter(l => l.isCustomerFacing !== false), [orderLineList]);
+  const costLines = useMemo(() => orderLineList.filter(l => l.isCustomerFacing === false), [orderLineList]);
+  // v0.6.0 Model B — Kostenbasis des fertigen Custom-Stuecks = Summe aller
+  // internen Kostenpositionen (Labor + Diamond + Gold). Wird beim Convert als
+  // purchasePrice (COGS) ins erzeugte Produkt kapitalisiert.
+  const customCostBasis = useMemo(
+    () => orderLineList.reduce((s, l) => s + (l.costAmount || 0), 0),
+    [orderLineList]
+  );
+  // v0.6.0 — Gold-Verbindlichkeiten (Goldschmied-Gold) dieser Order.
+  const orderGoldPayables = useMemo(
+    () => goldPayables.filter(gp => gp.sourceOrderId === id),
+    [goldPayables, id]
   );
 
   const order = useMemo(() => orders.find(o => o.id === id), [orders, id]);
@@ -134,6 +171,81 @@ export function OrderDetail() {
     });
     setPayAmount(''); setPayNote(''); setPayDate(new Date().toISOString().split('T')[0]);
     setShowPayment(false);
+  }
+
+  // v0.5.0 — Kostenposition nachträglich erfassen (Quote-first „cost-later").
+  // Wird als ARRIVED angelegt → commitOrderLineExpenses bucht die A/P sofort.
+  function handleAddCostMaterial(data: MaterialLineInput) {
+    if (!id) return;
+    const ctLabel = (data.materialKind === 'diamond' || data.materialKind === 'stone')
+      ? `${data.quantity}× ${(data.caratPerPiece || 0).toFixed(2)}ct `
+      : '';
+    // v0.6.0 — Goldschmied-Gold (Gold-Kind + Supplier) → Gold-Verbindlichkeit
+    // (Gramm) statt Geld-A/P. Die Cost-Line traegt dann KEINEN Supplier — sie
+    // ist nur der COGS-Wert; die Gramm-Schuld lebt im gold_payable.
+    const goldAsPayable = data.materialKind === 'gold' && !!data.supplierId && (data.weightGrams || 0) > 0;
+    try {
+      if (goldAsPayable && data.supplierId) {
+        createGoldPayable({
+          supplierId: data.supplierId,
+          sourceOrderId: id,
+          weightGrams: data.weightGrams!,
+          karat: data.karat || '22K',
+        });
+        loadGoldPayables();
+      }
+      addOrderLine(id, {
+        description: `${ctLabel}${data.description}`.trim(),
+        quantity: 1,
+        unitPrice: 0,
+        isCustomerFacing: false,
+        materialKind: data.materialKind,
+        supplierId: goldAsPayable ? undefined : (data.supplierId || undefined),
+        costAmount: data.totalCost,
+        status: 'ARRIVED',
+        materialDetails: {
+          ct: data.caratPerPiece,
+          qty: data.quantity,
+          description: data.description,
+          karat: data.karat,
+          weightGrams: data.weightGrams,
+          supplierName: data.supplierName,
+        },
+      });
+      setLineRefresh(k => k + 1);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // v0.5.0 — Order-Beleg (Quotation) — Bestellbestätigung für den Kunden bei Anlage.
+  function handleDownloadOrderReceipt() {
+    if (!order) return;
+    const itemDesc = `${order.requestedBrand || ''} ${order.requestedModel || ''}`.trim() || 'Custom Order';
+    downloadPdf({
+      title: `Order Receipt — ${order.orderNumber}`,
+      number: order.orderNumber,
+      date: order.createdAt?.split('T')[0] || new Date().toISOString().split('T')[0],
+      subtitle: 'Order confirmation / quotation',
+      customer: customer
+        ? { name: `${customer.firstName} ${customer.lastName}`, company: customer.company, phone: customer.phone }
+        : undefined,
+      type: 'receipt',
+      sections: [
+        { title: 'Order', lines: [
+          { label: 'Order Number', value: order.orderNumber },
+          { label: 'Item', value: itemDesc },
+          ...(order.requestedDetails ? [{ label: 'Details', value: order.requestedDetails }] : []),
+          ...(order.expectedDelivery ? [{ label: 'Expected Delivery', value: order.expectedDelivery }] : []),
+        ]},
+        { title: 'Pricing', lines: [
+          { label: 'Quoted / Agreed Price (approx.)', value: `${fmt(order.agreedPrice)} BHD`, bold: true },
+          { label: 'Deposit Paid', value: `${fmt(totalPaid)} BHD` },
+          { label: 'Remaining', value: `${fmt(Math.max(0, remaining))} BHD` },
+        ]},
+      ],
+      footer: 'Thank you for your order. The quoted price is approximate and confirmed on the final invoice.',
+    });
   }
 
   function handleDownloadReceipt(p: { id: string; amount: number; paidAt: string; method?: string; reference?: string; note?: string }) {
@@ -312,11 +424,12 @@ export function OrderDetail() {
         name: order.requestedModel || order.requestedBrand || 'Custom Item',
         condition: order.condition || '',
         attributes: order.attributes || {},
-        purchasePrice: order.supplierPrice || 0,
+        // v0.6.0 Model B — Kostenbasis = kapitalisierte Custom-Kosten (COGS),
+        // sonst Supplier-Preis. Kein Purchase, kein Lager-Durchlauf.
+        purchasePrice: customCostBasis > 0 ? customCostBasis : (order.supplierPrice || 0),
         plannedSalePrice: order.agreedPrice,
-        // Plan §Sales §Partial-Payment-Reservation: Produkt startet 'in_stock',
-        // der Invoice-Create-Flow setzt es auf 'reserved' (PARTIAL) bzw. 'sold' (FINAL).
-        stockStatus: 'in_stock',
+        // v0.6.0 — made-to-order, geht direkt auf die Invoice → nie 'in_stock'.
+        stockStatus: 'reserved',
         taxScheme: 'MARGIN',
         sourceType: 'OWN',
         supplierName: order.supplierName,
@@ -353,16 +466,19 @@ export function OrderDetail() {
       // Für freitext-Lines ohne Produkt eines auto-erzeugen — analog zum bisherigen
       // Single-Line-Auto-Create, nur jetzt pro Line.
       if (!prod) {
+        // v0.6.0 Model B — das Custom-Stueck wird gefertigt, nicht gekauft:
+        // seine Kostenbasis (COGS) = Summe der internen Kostenpositionen der
+        // Order. Kein Purchase, kein Lager-Durchlauf ('reserved' statt 'in_stock').
+        const isCustomPiece = ol.materialKind === 'custom';
         prod = createProduct({
           categoryId: order.categoryId || '',
           brand: order.requestedBrand || '',
           name: ol.description || order.requestedModel || 'Custom Item',
           condition: order.condition || '',
           attributes: order.attributes || {},
-          purchasePrice: 0,
+          purchasePrice: isCustomPiece ? customCostBasis : 0,
           plannedSalePrice: ol.unitPrice * Math.max(1, ol.quantity),
-          // Plan §Sales §Partial-Payment-Reservation — wie oben.
-          stockStatus: 'in_stock',
+          stockStatus: 'reserved',
           taxScheme: ol.taxScheme!,
           sourceType: 'OWN',
           notes: `From order ${order.orderNumber}`,
@@ -482,6 +598,9 @@ export function OrderDetail() {
               </>
             ) : (
               <>
+                <Button variant="secondary" onClick={handleDownloadOrderReceipt}>
+                  <Download size={14} /> Order Receipt
+                </Button>
                 {order.status === 'arrived' && customer && (
                   <Button variant="secondary" onClick={() => setShowMessage(true)}>
                     <MessageCircle size={14} /> AI Notify Arrival
@@ -808,14 +927,14 @@ export function OrderDetail() {
           </Card>
         </div>
 
-        {/* v0.3.0 — Order Items Grid mit Per-Line Fulfillment-Status */}
-        {!editing && orderLineList.length > 0 && (
+        {/* v0.3.0 — Order Items Grid mit Per-Line Fulfillment-Status (nur kundenseitige Lines) */}
+        {!editing && customerLines.length > 0 && (
           <div style={{ marginTop: 24 }}>
             <Card>
               <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
-                <span className="text-overline">ORDER ITEMS ({orderLineList.length})</span>
+                <span className="text-overline">ORDER ITEMS ({customerLines.length})</span>
                 {(() => {
-                  const active = orderLineList.filter(l => l.status !== 'CANCELLED');
+                  const active = customerLines.filter(l => l.status !== 'CANCELLED');
                   const ready = active.filter(l => l.status === 'ARRIVED' || l.status === 'DELIVERED').length;
                   return (
                     <span style={{ fontSize: 11, color: '#6B7280' }}>
@@ -830,14 +949,8 @@ export function OrderDetail() {
                 <span className="text-overline" style={{ textAlign: 'right' }}>TOTAL</span>
                 <span className="text-overline">INVOICE</span>
                 <span className="text-overline">FULFILLMENT</span>
-                {orderLineList.map(l => {
-                  const kindMeta: Record<string, { icon: string; label: string }> = {
-                    labor: { icon: '🔨', label: 'Labor' },
-                    diamond: { icon: '💎', label: 'Diamond' },
-                    stone: { icon: '🔮', label: 'Stone' },
-                    gold: { icon: '🥇', label: 'Gold' },
-                  };
-                  const km = l.materialKind ? kindMeta[l.materialKind] : { icon: '📦', label: 'Product' };
+                {customerLines.map(l => {
+                  const km = COST_KIND_META[l.materialKind || 'product'] || COST_KIND_META.product;
                   const costOnly = l.isCustomerFacing === false;
                   const cancelled = l.status === 'CANCELLED';
                   const dim = costOnly || cancelled;
@@ -900,8 +1013,8 @@ export function OrderDetail() {
                 const billable = id ? getBillableLines(id) : [];
                 // Noch offene customer-facing Lines (PENDING, nicht invoiced) —
                 // wenn vorhanden, kann man fuers Kombinieren in EINE Invoice warten.
-                const pending = orderLineList.filter(l =>
-                  l.isCustomerFacing !== false && !l.invoiceId && l.status === 'PENDING'
+                const pending = customerLines.filter(l =>
+                  !l.invoiceId && l.status === 'PENDING'
                 ).length;
                 return (
                   <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
@@ -943,6 +1056,152 @@ export function OrderDetail() {
                   </div>
                 );
               })()}
+            </Card>
+          </div>
+        )}
+
+        {/* v0.5.0 — Costs / Materials — Kosten nachträglich erfassen (Quote-first „cost-later") */}
+        {!editing && (order.type === 'custom' || order.type === 'mixed' || costLines.length > 0) && (
+          <div style={{ marginTop: 24 }}>
+            <Card>
+              <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+                <span className="text-overline">COSTS / MATERIALS ({costLines.length})</span>
+                {!isCancelled && perm.canManageOrders && (
+                  <Button variant="secondary" onClick={() => setShowAddCost(true)}>
+                    <Plus size={14} /> Add Cost
+                  </Button>
+                )}
+              </div>
+              {costLines.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#6B7280', padding: '8px 0' }}>
+                  Noch keine Kosten erfasst. Trag Labor-, Diamond- &amp; Material-Kosten ein, sobald das Stück fertig
+                  ist — die A/P-Schuld an den Supplier wird dabei automatisch gebucht.
+                </p>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 1.2fr 1.5fr 0.8fr 0.9fr 0.9fr 40px', gap: 10, fontSize: 12 }}>
+                  <span className="text-overline">KIND</span>
+                  <span className="text-overline">SUPPLIER</span>
+                  <span className="text-overline">DESCRIPTION</span>
+                  <span className="text-overline" style={{ textAlign: 'right' }}>COST/CT</span>
+                  <span className="text-overline" style={{ textAlign: 'right' }}>COST</span>
+                  <span className="text-overline">A/P</span>
+                  <span />
+                  {costLines.map(l => {
+                    const km = COST_KIND_META[l.materialKind || 'labor'] || COST_KIND_META.product;
+                    const supName = l.materialDetails?.supplierName
+                      || (l.supplierId ? suppliers.find(s => s.id === l.supplierId)?.name : undefined);
+                    const totalCt = (l.materialDetails?.ct || 0) * (l.materialDetails?.qty || 0);
+                    const perCt = (l.materialKind === 'diamond' || l.materialKind === 'stone') && totalCt > 0
+                      ? (l.costAmount || 0) / totalCt : 0;
+                    return (
+                      <div key={l.id} style={{ display: 'contents' }}>
+                        <span style={{ fontSize: 12, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>{km.icon} {km.label}</span>
+                        <span style={{ fontSize: 12, color: supName ? '#0F0F10' : '#9CA3AF', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {supName || '— own cost'}
+                        </span>
+                        <span style={{ fontSize: 13, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>{l.description || '—'}</span>
+                        <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {perCt > 0 ? <Bhd v={perCt}/> : '—'}
+                        </span>
+                        <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          <Bhd v={l.costAmount || 0}/>
+                        </span>
+                        <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {!l.supplierId
+                            ? <span style={{ color: '#9CA3AF' }}>own cost</span>
+                            : l.expenseId
+                              ? <span style={{ color: '#16A34A' }}>A/P booked</span>
+                              : <span style={{ color: '#D97706' }}>pending</span>}
+                        </span>
+                        {!isCancelled && perm.canManageOrders ? (
+                          <button
+                            onClick={() => {
+                              if (!window.confirm('Diese Kostenposition löschen? Eine gebuchte A/P-Schuld wird storniert.')) return;
+                              try { deleteOrderLine(l.id); setLineRefresh(k => k + 1); }
+                              catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+                            }}
+                            className="cursor-pointer"
+                            style={{ background: 'none', border: 'none', color: '#DC2626', borderTop: '1px solid #E5E9EE', padding: '10px 0' }}
+                            title="Kostenposition löschen">
+                            <Trash2 size={14} />
+                          </button>
+                        ) : <span style={{ borderTop: '1px solid #E5E9EE' }} />}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {(() => {
+                const totalCost = customCostBasis;
+                const margin = (order.agreedPrice || 0) - totalCost;
+                return (
+                  <div className="flex items-center justify-between" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                    <span style={{ fontSize: 12, color: '#6B7280' }}>
+                      Total Cost&nbsp;
+                      <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={totalCost}/> BHD</span>
+                    </span>
+                    <span style={{ fontSize: 13, color: '#6B7280' }}>
+                      Margin&nbsp;
+                      <span className="font-mono" style={{ color: margin >= 0 ? '#16A34A' : '#DC2626' }}><Bhd v={margin}/> BHD</span>
+                    </span>
+                  </div>
+                );
+              })()}
+            </Card>
+          </div>
+        )}
+
+        {/* v0.6.0 — Gold-Verbindlichkeiten (Goldschmied-Gold) der Order */}
+        {!editing && orderGoldPayables.length > 0 && (
+          <div style={{ marginTop: 24 }}>
+            <Card>
+              <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>
+                GOLD-VERBINDLICHKEITEN — GOLDSCHMIED ({orderGoldPayables.length})
+              </span>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 0.9fr 0.7fr 0.9fr 1.5fr', gap: 10, fontSize: 12 }}>
+                <span className="text-overline">SUPPLIER</span>
+                <span className="text-overline" style={{ textAlign: 'right' }}>OFFEN (G)</span>
+                <span className="text-overline">KARAT</span>
+                <span className="text-overline">STATUS</span>
+                <span className="text-overline">BEGLEICHEN</span>
+                {orderGoldPayables.map(gp => {
+                  const supName = suppliers.find(s => s.id === gp.supplierId)?.name || gp.supplierId.slice(0, 8);
+                  const remaining = Math.max(0, gp.weightGrams - gp.fulfilledGrams);
+                  const open = gp.status === 'OPEN';
+                  return (
+                    <div key={gp.id} style={{ display: 'contents' }}>
+                      <span style={{ fontSize: 13, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>🥇 {supName}</span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                        {remaining.toFixed(3)} g
+                      </span>
+                      <span style={{ fontSize: 12, color: '#4B5563', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>{gp.karat}</span>
+                      <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                        color: gp.status === 'FULFILLED' ? '#16A34A' : gp.status === 'CANCELLED' ? '#9CA3AF' : '#D97706' }}>
+                        {gp.status}
+                      </span>
+                      <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {open && !isCancelled && perm.canManageOrders ? (
+                          <>
+                            <button type="button" onClick={() => setSettleGold({ mode: 'apply_shop_to_supplier', payable: gp })}
+                              className="cursor-pointer"
+                              style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #C6A36D', color: '#9A7B3F', background: 'transparent' }}>
+                              Gold geben
+                            </button>
+                            <button type="button" onClick={() => setSettleGold({ mode: 'convert_supplier_money', payable: gp })}
+                              className="cursor-pointer"
+                              style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #6E8AAA', color: '#4B6A8A', background: 'transparent' }}>
+                              In Geld
+                            </button>
+                          </>
+                        ) : <span style={{ fontSize: 11, color: '#9CA3AF' }}>—</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p style={{ fontSize: 11, color: '#6B7280', marginTop: 10 }}>
+                Gold das der Goldschmied beigesteuert hat — Gramm-Schuld. „Gold geben" begleicht aus eurem Bestand, „In Geld" wandelt in einen BHD-Betrag um (A/P an den Goldschmied).
+              </p>
             </Card>
           </div>
         )}
@@ -1102,6 +1361,25 @@ export function OrderDetail() {
           </div>
         </div>
       </Modal>
+
+      {/* v0.5.0 — Add Cost: shared Material-Modal (Labor + Diamond/Stone/Gold, Cost/Carat) */}
+      <AddMaterialModal
+        open={showAddCost}
+        onClose={() => setShowAddCost(false)}
+        onSubmit={handleAddCostMaterial}
+        showCustomerPrice={false}
+        allowLabor={true}
+      />
+
+      {/* v0.6.0 — Gold-Verbindlichkeit begleichen (Gold geben / in Geld umwandeln) */}
+      {settleGold && (
+        <SettleGoldModal
+          open={true}
+          mode={settleGold.mode}
+          payable={settleGold.payable}
+          onClose={() => { setSettleGold(null); loadGoldPayables(); }}
+        />
+      )}
 
       {customer && (
         <MessagePreviewModal

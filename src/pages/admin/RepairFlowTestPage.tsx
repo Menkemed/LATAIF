@@ -85,6 +85,16 @@ function cleanupContext(ctx: TestContext): void {
     db.run(`DELETE FROM ledger_entries WHERE source_id = ? OR source_id IN (SELECT id FROM expenses WHERE related_entity_id = ?) OR source_id IN (SELECT id FROM expense_payments WHERE expense_id IN (SELECT id FROM expenses WHERE related_entity_id = ?))`, [repairId, repairId, repairId]);
     db.run(`DELETE FROM expense_payments WHERE expense_id IN (SELECT id FROM expenses WHERE related_entity_id = ?)`, [repairId]);
     db.run(`DELETE FROM expenses WHERE related_entity_id = ?`, [repairId]);
+    // v0.6.0 — Gold-Movements der Payables/Credits dieses Repairs ueber
+    // source_id/target_id mit-loeschen. Customer-Gold-Credit-Convert-Movements
+    // tragen KEIN related_repair_id → sonst bleibt Reconcile-Gold-Drift stehen.
+    for (const gr of [
+      ...query(`SELECT id FROM gold_payables WHERE source_repair_id = ?`, [repairId]),
+      ...query(`SELECT id FROM customer_gold_credits WHERE source_repair_id = ?`, [repairId]),
+    ]) {
+      const gid = gr.id as string;
+      db.run(`DELETE FROM gold_movements WHERE source_id = ? OR target_id = ?`, [gid, gid]);
+    }
     db.run(`DELETE FROM gold_movements WHERE related_repair_id = ?`, [repairId]);
     db.run(`DELETE FROM gold_payables WHERE source_repair_id = ?`, [repairId]);
     db.run(`DELETE FROM customer_gold_credits WHERE source_repair_id = ?`, [repairId]);
@@ -99,7 +109,80 @@ function cleanupContext(ctx: TestContext): void {
   // Cleanup any synth precious_metals rows that came from our movements
   db.run(`DELETE FROM precious_metals WHERE description LIKE '%${PREFIX}%' OR description LIKE 'NEG: %${PREFIX}%' OR description LIKE 'Gold-Return from supplier (payable %)' OR description LIKE 'Applied to supplier gold-payable %'`);
   db.run(`DELETE FROM customers WHERE id = ?`, [ctx.customerId]);
+  // v0.6.0 — verwaiste Gold-Movements (Quell-Payable/Credit existiert nicht mehr)
+  // self-heilend mit-aufraeumen — sonst Reconcile-Gold-Drift. In Echt-Daten gibt
+  // es keine solchen Waisen (Payables/Credits werden nie hart geloescht).
+  db.run(`DELETE FROM gold_movements
+            WHERE source_bucket IN ('gold_payable', 'customer_gold_credit')
+              AND source_id IS NOT NULL
+              AND source_id NOT IN (SELECT id FROM gold_payables)
+              AND source_id NOT IN (SELECT id FROM customer_gold_credits)`);
   saveDatabase();
+}
+
+// v0.6.0 — Wiederholbare Bereinigung ALLER TEST_FLOW_-Daten — auch aus
+// fehlgeschlagenen Laeufen, bei denen cleanupContext uebersprungen wurde.
+// Findet Test-Entitaeten ueber den PREFIX + Quell-Verknuepfungen und raeumt
+// inkl. der verwaisten gold_movements (Reconcile-Drift-Ursache) auf.
+function purgeTestData(): string {
+  const db = getDatabase();
+  const ids = (rows: Array<Record<string, unknown>>) => rows.map(r => r.id as string);
+  const sqlIn = (arr: string[]) => (arr.length ? `(${arr.map(x => `'${x}'`).join(',')})` : `('')`);
+  const like = PREFIX + '%';
+
+  const repairIds = ids(query(`SELECT id FROM repairs WHERE repair_number LIKE ?`, [like]));
+  const orderIds = ids(query(`SELECT id FROM orders WHERE notes LIKE ? OR requested_model LIKE ?`, [like, like]));
+  const supplierIds = ids(query(`SELECT id FROM suppliers WHERE name LIKE ?`, [like]));
+  const customerIds = ids(query(`SELECT id FROM customers WHERE first_name LIKE ?`, [like]));
+
+  const gpIds = ids(query(
+    `SELECT id FROM gold_payables WHERE supplier_id IN ${sqlIn(supplierIds)}
+        OR source_repair_id IN ${sqlIn(repairIds)} OR source_order_id IN ${sqlIn(orderIds)}`));
+  const cgcIds = ids(query(
+    `SELECT id FROM customer_gold_credits WHERE customer_id IN ${sqlIn(customerIds)}
+        OR source_repair_id IN ${sqlIn(repairIds)} OR source_order_id IN ${sqlIn(orderIds)}`));
+  const goldRefIds = [...gpIds, ...cgcIds];
+
+  const expenseIds = ids(query(
+    `SELECT id FROM expenses WHERE related_entity_id IN ${sqlIn([...repairIds, ...orderIds, ...goldRefIds])}
+        OR supplier_id IN ${sqlIn(supplierIds)} OR description LIKE ?`, [like]));
+
+  const movBefore = (query(`SELECT COUNT(*) c FROM gold_movements`)[0].c as number) || 0;
+
+  // gold_movements: ueber Repair, ueber Payable/Credit, und verwaiste
+  db.run(`DELETE FROM gold_movements WHERE related_repair_id IN ${sqlIn(repairIds)}
+            OR source_id IN ${sqlIn(goldRefIds)} OR target_id IN ${sqlIn(goldRefIds)}`);
+  db.run(`DELETE FROM gold_movements WHERE source_bucket IN ('gold_payable','customer_gold_credit')
+            AND source_id IS NOT NULL
+            AND source_id NOT IN (SELECT id FROM gold_payables)
+            AND source_id NOT IN (SELECT id FROM customer_gold_credits)`);
+
+  // ledger + expenses + payments
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN ${sqlIn(expenseIds)}`);
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM expense_payments WHERE expense_id IN ${sqlIn(expenseIds)})`);
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM order_payments WHERE order_id IN ${sqlIn(orderIds)})`);
+  db.run(`DELETE FROM expense_payments WHERE expense_id IN ${sqlIn(expenseIds)}`);
+  db.run(`DELETE FROM expenses WHERE id IN ${sqlIn(expenseIds)}`);
+
+  // gold buckets
+  db.run(`DELETE FROM gold_payables WHERE id IN ${sqlIn(goldRefIds)}`);
+  db.run(`DELETE FROM customer_gold_credits WHERE id IN ${sqlIn(cgcIds)}`);
+
+  // repairs + orders + children
+  db.run(`DELETE FROM repair_lines WHERE repair_id IN ${sqlIn(repairIds)}`);
+  db.run(`DELETE FROM repairs WHERE id IN ${sqlIn(repairIds)}`);
+  db.run(`DELETE FROM order_lines WHERE order_id IN ${sqlIn(orderIds)}`);
+  db.run(`DELETE FROM order_payments WHERE order_id IN ${sqlIn(orderIds)}`);
+  db.run(`DELETE FROM orders WHERE id IN ${sqlIn(orderIds)}`);
+
+  // precious_metals + suppliers + customers
+  db.run(`DELETE FROM precious_metals WHERE description LIKE ? OR description LIKE ?`, [like, 'NEG: ' + like]);
+  db.run(`DELETE FROM suppliers WHERE id IN ${sqlIn(supplierIds)}`);
+  db.run(`DELETE FROM customers WHERE id IN ${sqlIn(customerIds)}`);
+
+  saveDatabase();
+  const movAfter = (query(`SELECT COUNT(*) c FROM gold_movements`)[0].c as number) || 0;
+  return `Purged: ${repairIds.length} repairs · ${orderIds.length} orders · ${supplierIds.length} suppliers · ${customerIds.length} customers · ${goldRefIds.length} gold-buckets · ${expenseIds.length} expenses · ${movBefore - movAfter} gold-movements.`;
 }
 
 // ─── Scenarios ───
@@ -1242,6 +1325,124 @@ async function scenarioOrderApReversal(ctx: TestContext, result: ScenarioResult)
   result.status = 'pass';
 }
 
+// Plan v0.6.0 — Scenario 17: Model B — Custom-Order Kosten-Kapitalisierung +
+// Goldschmied-Gold als Gold-Verbindlichkeit.
+//  (A) Capitalized-Category Helper (Inventory excluded from operating expenses)
+//  (B) Custom-Order: type-Derivation + Kostenbasis = Σ Kostenzeilen
+//  (C) createGoldPayable mit sourceOrderId
+//  (D) convertGoldPayableToMoney bei Order-Gold → Kategorie 'Inventory'
+//  (E) deleteOrder storniert offene Order-Gold-Verbindlichkeiten
+async function scenarioOrderGoldPayableModelB(ctx: TestContext, result: ScenarioResult) {
+  const db = getDatabase();
+  const { useOrderStore } = await import('@/stores/orderStore');
+  const { useGoldStore } = await import('@/stores/goldStore');
+  const { isCapitalizedExpenseCategory } = await import('@/core/models/types');
+  const orderStore = useOrderStore.getState();
+  const goldStore = useGoldStore.getState();
+
+  // ── Teil A — Capitalized-Category Helper ───────────────────────────────
+  assert(isCapitalizedExpenseCategory('Inventory') === true, `'Inventory' ist kapitalisiert`);
+  assert(isCapitalizedExpenseCategory('Rent') === false, `'Rent' ist NICHT kapitalisiert`);
+  ok(result.details, `Capitalized-Category: Inventory=ja, Rent=nein (kein Doppel-Zaehlen)`);
+
+  // ── Teil B — Custom-Order: type + Kostenbasis ──────────────────────────
+  const order = orderStore.createOrder({
+    customerId: ctx.customerId,
+    paymentMethod: 'cash',
+    requestedBrand: 'Custom Ring',
+    requestedModel: PREFIX + 'modelb-ring',
+    notes: PREFIX + 'modelb',
+    lines: [
+      // Quote-Line (customer-facing, der approx. Preis)
+      { description: PREFIX + 'Custom 22K Ring', quantity: 1, unitPrice: 600,
+        taxScheme: 'MARGIN', vatRate: 10, isCustomerFacing: true, materialKind: 'custom' },
+      // Labor-Kostenzeile (Supplier A) — PENDING, noch keine Expense
+      { description: PREFIX + 'Goldsmith Labor', quantity: 1, unitPrice: 0,
+        supplierId: ctx.supplierA, costAmount: 70, isCustomerFacing: false, materialKind: 'labor' },
+      // Diamond-Kostenzeile (Supplier B)
+      { description: PREFIX + 'Diamond 0.4ct', quantity: 1, unitPrice: 0,
+        supplierId: ctx.supplierB, costAmount: 150, isCustomerFacing: false, materialKind: 'diamond' },
+      // Gold-Kostenzeile (KEIN Supplier — reiner COGS-Wert)
+      { description: PREFIX + 'Goldsmith gold valuation', quantity: 1, unitPrice: 0,
+        costAmount: 90, isCustomerFacing: false, materialKind: 'gold' },
+    ],
+  });
+
+  const oRow = query(`SELECT type, agreed_price FROM orders WHERE id = ?`, [order.id]);
+  assert(oRow[0].type === 'custom', `orders.type='custom' erwartet, got '${oRow[0].type}'`);
+  assert(Math.abs((oRow[0].agreed_price as number) - 600) < 0.001,
+    `agreedPrice=600 erwartet (nur Quote-Line, Kostenzeilen exkludiert), got ${oRow[0].agreed_price}`);
+  ok(result.details, `Custom-Order: type='custom', agreedPrice=600 (Quote-Line allein)`);
+
+  // Kostenbasis (Model B COGS) = Σ Kostenzeilen-costAmount = 70+150+90 = 310
+  const basisRow = query(
+    `SELECT COALESCE(SUM(cost_amount),0) AS c FROM order_lines WHERE order_id=? AND COALESCE(is_customer_facing,1)=0`,
+    [order.id]
+  );
+  assert(Math.abs((basisRow[0].c as number) - 310) < 0.001,
+    `Kostenbasis=310 erwartet (70+150+90), got ${basisRow[0].c}`);
+  // Keine Expense bei PENDING-Kostenzeilen (commitOrderLineExpenses erst bei ARRIVED)
+  const expAtCreate = query(`SELECT COUNT(*) AS c FROM expenses WHERE related_module='order' AND related_entity_id=?`, [order.id]);
+  assert((expAtCreate[0].c as number) === 0, `keine Expense bei PENDING-Kostenzeilen erwartet`);
+  ok(result.details, `Kostenbasis Σ=310 → Marge waere 600−310=290; keine Expense bei Anlage`);
+
+  // ── Teil C — Goldschmied-Gold als Gold-Verbindlichkeit ─────────────────
+  const gp = goldStore.createGoldPayable({
+    supplierId: ctx.supplierC, sourceOrderId: order.id, weightGrams: 5, karat: '22K',
+  });
+  const gpRow = query(
+    `SELECT source_order_id, source_repair_id, weight_grams, karat, status FROM gold_payables WHERE id=?`,
+    [gp.id]
+  );
+  assert(gpRow[0].source_order_id === order.id, `gold_payable.source_order_id = order.id erwartet`);
+  assert(!gpRow[0].source_repair_id, `gold_payable.source_repair_id NULL erwartet`);
+  assert(Math.abs((gpRow[0].weight_grams as number) - 5) < 0.001 && gpRow[0].karat === '22K',
+    `5g 22K erwartet`);
+  assert(gpRow[0].status === 'OPEN', `gold_payable OPEN erwartet`);
+  ok(result.details, `Gold-Verbindlichkeit: 5g 22K an GoldsmithC, mit Order verknuepft, OPEN`);
+
+  // ── Teil D — Convert-to-Money: Order-Gold → Kategorie 'Inventory' ───────
+  const apBeforeC = getApFor(ctx.supplierC);
+  goldStore.convertGoldPayableToMoney(gp.id, 95, 'bank', PREFIX + 'convert');
+  const convExp = query(
+    `SELECT category, amount FROM expenses WHERE related_module='gold_payable' AND related_entity_id=?`,
+    [gp.id]
+  );
+  assert(convExp.length === 1, `1 Settlement-Expense erwartet, got ${convExp.length}`);
+  assert(convExp[0].category === 'Inventory',
+    `Order-Gold-Settlement Kategorie='Inventory' erwartet (kapitalisiert), got '${convExp[0].category}'`);
+  assert(isCapitalizedExpenseCategory(convExp[0].category as string),
+    `Settlement-Expense ist kapitalisiert → von Betriebsausgaben ausgeschlossen`);
+  const apAfterC = getApFor(ctx.supplierC);
+  assert(Math.abs((apAfterC - apBeforeC) - 95) < 0.001,
+    `A/P GoldsmithC +95 nach Convert erwartet, got +${(apAfterC - apBeforeC).toFixed(3)}`);
+  assert(query(`SELECT status FROM gold_payables WHERE id=?`, [gp.id])[0].status === 'FULFILLED',
+    `gold_payable FULFILLED nach Convert erwartet`);
+  ok(result.details, `Convert-to-Money: Expense='Inventory' (kapitalisiert), A/P +95, Payable FULFILLED`);
+
+  // ── Teil E — deleteOrder storniert offene Order-Gold-Verbindlichkeiten ──
+  const gp2 = goldStore.createGoldPayable({
+    supplierId: ctx.supplierC, sourceOrderId: order.id, weightGrams: 3, karat: '21K',
+  });
+  orderStore.deleteOrder(order.id);
+  assert(query(`SELECT status FROM gold_payables WHERE id=?`, [gp2.id])[0].status === 'CANCELLED',
+    `offene Order-Gold-Verbindlichkeit nach deleteOrder CANCELLED erwartet`);
+  assert((query(`SELECT COUNT(*) AS c FROM order_lines WHERE order_id=?`, [order.id])[0].c as number) === 0,
+    `order_lines nach deleteOrder geloescht`);
+  ok(result.details, `deleteOrder → offene Gold-Verbindlichkeit storniert (CANCELLED)`);
+
+  // ── Cleanup ────────────────────────────────────────────────────────────
+  db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM expenses WHERE related_module='gold_payable' AND related_entity_id IN (?, ?))`, [gp.id, gp2.id]);
+  db.run(`DELETE FROM expense_payments WHERE expense_id IN (SELECT id FROM expenses WHERE related_module='gold_payable' AND related_entity_id IN (?, ?))`, [gp.id, gp2.id]);
+  db.run(`DELETE FROM expenses WHERE related_module='gold_payable' AND related_entity_id IN (?, ?)`, [gp.id, gp2.id]);
+  db.run(`DELETE FROM gold_movements WHERE source_id IN (?, ?) OR target_id IN (?, ?)`, [gp.id, gp2.id, gp.id, gp2.id]);
+  db.run(`DELETE FROM gold_payables WHERE id IN (?, ?)`, [gp.id, gp2.id]);
+  db.run(`DELETE FROM order_payments WHERE order_id = ?`, [order.id]);
+  saveDatabase();
+
+  result.status = 'pass';
+}
+
 // Helper: Sum-CREDIT-Ledger fuer einen Supplier (gleicher Pattern wie scenario 9)
 function getApFor(supplierId: string): number {
   const rows = query(
@@ -1271,6 +1472,7 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '14. Repair Diamond-Material (v0.2.1 — A/P fuer Diamond-Supplier)', run: scenarioRepairDiamondMaterial },
   { name: '15. Mixed Order + Partielles Invoicing (v0.3.0)', run: scenarioMixedOrderPartialInvoicing },
   { name: '16. Order A/P-Reversal (v0.3.1 — Cancel-Line + Delete-Order)', run: scenarioOrderApReversal },
+  { name: '17. Model B — Order-Gold-Payable + Kapitalisierung (v0.6.0)', run: scenarioOrderGoldPayableModelB },
 ];
 
 export function RepairFlowTestPage() {
@@ -1280,6 +1482,7 @@ export function RepairFlowTestPage() {
   const [ctxInfo, setCtxInfo] = useState<string>('');
   const [summary, setSummary] = useState<string>('');
   const [prodConfirmed, setProdConfirmed] = useState(false);
+  const [purgeResult, setPurgeResult] = useState<string>('');
 
   const repairStore = useRepairStore();
   const goldStore = useGoldStore();
@@ -1350,6 +1553,20 @@ export function RepairFlowTestPage() {
     }
   }
 
+  function handlePurge() {
+    try {
+      const msg = purgeTestData();
+      setPurgeResult(msg);
+      useSupplierStore.getState().loadSuppliers();
+      useCustomerStore.getState().loadCustomers();
+      useRepairStore.getState().loadRepairs();
+      useRepairStore.getState().loadRepairLines();
+      useGoldStore.getState().loadAll();
+    } catch (e) {
+      setPurgeResult('Purge-Error: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
       <div style={{ padding: '32px 48px 80px', maxWidth: 1100 }}>
@@ -1388,9 +1605,14 @@ export function RepairFlowTestPage() {
             </div>
           )}
           <div className="flex justify-between items-center" style={{ marginBottom: 16 }}>
-            <Button variant="primary" onClick={runAll} disabled={running || !canRun}>
-              {running ? 'Running...' : 'Run All Tests'}
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="primary" onClick={runAll} disabled={running || !canRun}>
+                {running ? 'Running...' : 'Run All Tests'}
+              </Button>
+              <Button variant="secondary" onClick={handlePurge} disabled={running}>
+                Clean leftover TEST data
+              </Button>
+            </div>
             {summary && (
               <span style={{
                 fontSize: 14, fontWeight: 600,
@@ -1400,6 +1622,9 @@ export function RepairFlowTestPage() {
           </div>
           {ctxInfo && (
             <p style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 16, fontFamily: 'monospace' }}>{ctxInfo}</p>
+          )}
+          {purgeResult && (
+            <p style={{ fontSize: 11, color: '#16A34A', marginBottom: 16, fontFamily: 'monospace' }}>{purgeResult}</p>
           )}
 
           {results.map((r, i) => (

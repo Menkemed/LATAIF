@@ -44,6 +44,8 @@ function rowToGoldPayable(row: Record<string, unknown>): GoldPayable {
     supplierId: row.supplier_id as string,
     sourceRepairId: (row.source_repair_id as string) || undefined,
     sourceRepairLineId: (row.source_repair_line_id as string) || undefined,
+    // v0.6.0 — Order-verknuepfte Gold-Verbindlichkeit (Custom-Order Goldschmied-Gold).
+    sourceOrderId: (row.source_order_id as string) || undefined,
     direction: ((row.direction as string) || 'we_owe') as GoldPayable['direction'],
     weightGrams: (row.weight_grams as number) || 0,
     karat: row.karat as string,
@@ -455,13 +457,16 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     const expenseNumber = getNextDocumentNumber('EXP');
     const remainingGrams = p.weightGrams - p.fulfilledGrams;
     const description = `Gold-Settlement: ${remainingGrams.toFixed(3)}g ${p.karat} (gold_payable ${payableId.slice(0, 8)})`;
+    // v0.6.0 — Order-Gold-Payables kapitalisieren in COGS (Kategorie 'Inventory',
+    // von den Betriebsausgaben ausgeschlossen); Repair-Gold bleibt 'RepairCosts'.
+    const expCategory: Expense['category'] = p.sourceOrderId ? 'Inventory' : 'RepairCosts';
 
     db.run(
       `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
          expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
-       VALUES (?, ?, ?, 'RepairCosts', ?, 0, ?, ?, ?, 'gold_payable', ?, ?, 'PENDING', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'gold_payable', ?, ?, 'PENDING', ?, ?)`,
       [
-        expenseId, branchId, expenseNumber, agreedBhd, method,
+        expenseId, branchId, expenseNumber, expCategory, agreedBhd, method,
         now.split('T')[0], description, payableId, p.supplierId, now, userId,
       ]
     );
@@ -471,7 +476,7 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     });
 
     const expenseRecord: Expense = {
-      id: expenseId, expenseNumber, branchId, category: 'RepairCosts',
+      id: expenseId, expenseNumber, branchId, category: expCategory,
       amount: agreedBhd, paidAmount: 0, paymentMethod: method,
       expenseDate: now.split('T')[0], description,
       relatedModule: 'gold_payable', relatedEntityId: payableId,

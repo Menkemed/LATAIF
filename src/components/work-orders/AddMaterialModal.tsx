@@ -1,15 +1,13 @@
 // ═══════════════════════════════════════════════════════════
-// LATAIF — Shared Add-Material Modal (v0.2.1)
+// LATAIF — Shared Add-Material Modal (v0.2.1 · v0.5.0)
 //
 // Eine Modal-Komponente fuer Repair + Custom-Order. Erfasst:
-//  - Material-Kind: Diamond | Stone | Gold-Piece
-//  - Description (z.B. "Round Brilliant")
+//  - Material-Kind: Labor (optional) | Diamond | Stone | Gold-Piece
+//  - Description
 //  - Quantity (pieces) + Carat per piece (bei Diamond/Stone)
 //  - Karat + Gramm (bei Gold-Piece)
-//  - Cost (BHD)
-//  - Customer-Price (optional, mit Markup-Toggle, nur in Order-Mode)
-//  - Supplier (optional): wenn gesetzt → A/P-Expense entsteht beim
-//    commitOrderLineExpenses/commitRepairLineExpenses
+//  - Cost (BHD) — bei Diamond/Stone bidirektional mit Cost/Carat
+//  - Supplier (optional): wenn gesetzt → A/P-Expense entsteht
 //
 // Der Modal ruft `onSubmit(data)` mit der vollstaendigen MaterialLineInput
 // auf — der Caller (RepairDetail / OrderCreate / OrderDetail) entscheidet
@@ -24,7 +22,7 @@ import { SearchSelect } from '@/components/ui/SearchSelect';
 import { useSupplierStore } from '@/stores/supplierStore';
 
 export interface MaterialLineInput {
-  materialKind: 'diamond' | 'stone' | 'gold';
+  materialKind: 'labor' | 'diamond' | 'stone' | 'gold';
   description: string;
   quantity: number;
   caratPerPiece?: number;      // diamond/stone
@@ -41,19 +39,30 @@ interface AddMaterialModalProps {
   onClose: () => void;
   onSubmit: (data: MaterialLineInput) => void;
   showCustomerPrice?: boolean;  // Custom-Order: ja; Repair: nein
+  allowLabor?: boolean;         // v0.5.0 — Labor-Kostenposition zulassen (OrderDetail)
 }
 
 const KARAT_OPTIONS = ['24K', '22K', '21K', '18K', '14K', '9K'];
 
-export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = false }: AddMaterialModalProps) {
+type Kind = 'labor' | 'diamond' | 'stone' | 'gold';
+
+function round3(n: number): string {
+  return String(Math.round(n * 1000) / 1000);
+}
+
+export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = false, allowLabor = false }: AddMaterialModalProps) {
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const [kind, setKind] = useState<'diamond' | 'stone' | 'gold'>('diamond');
+  const [kind, setKind] = useState<Kind>('diamond');
   const [description, setDescription] = useState('');
   const [qty, setQty] = useState('1');
   const [ct, setCt] = useState('');
   const [karat, setKarat] = useState('22K');
   const [grams, setGrams] = useState('');
   const [cost, setCost] = useState('');
+  const [costPerCt, setCostPerCt] = useState('');
+  // v0.5.0 — merkt welches Cost-Feld der User zuletzt getippt hat, damit ein
+  // Recompute bei Quantity/Carat-Aenderung das richtige Feld konstant haelt.
+  const [costMode, setCostMode] = useState<'total' | 'perCt'>('total');
   const [customerPrice, setCustomerPrice] = useState('');
   const [showMarkup, setShowMarkup] = useState(false);
   const [supplierId, setSupplierId] = useState('');
@@ -61,32 +70,63 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
 
   useEffect(() => {
     if (open) {
-      setKind('diamond');
+      setKind(allowLabor ? 'labor' : 'diamond');
       setDescription('');
       setQty('1');
       setCt('');
       setKarat('22K');
       setGrams('');
       setCost('');
+      setCostPerCt('');
+      setCostMode('total');
       setCustomerPrice('');
       setShowMarkup(false);
       setSupplierId('');
       setError('');
       loadSuppliers();
     }
-  }, [open, loadSuppliers]);
+  }, [open, allowLabor, loadSuppliers]);
 
   const supplierOptions = useMemo(() =>
     suppliers.filter(s => s.active).map(s => ({
       id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
     })), [suppliers]);
 
+  const totalCt = (parseFloat(qty) || 0) * (parseFloat(ct) || 0);
+
+  // v0.5.0 — Cost ⇄ Cost/Carat bidirektional. totalCost = costPerCt × qty × ct.
+  function onCostChange(v: string) {
+    setCost(v);
+    setCostMode('total');
+    const tc = (parseFloat(qty) || 0) * (parseFloat(ct) || 0);
+    setCostPerCt(tc > 0 && parseFloat(v) > 0 ? round3(parseFloat(v) / tc) : '');
+  }
+  function onCostPerCtChange(v: string) {
+    setCostPerCt(v);
+    setCostMode('perCt');
+    const tc = (parseFloat(qty) || 0) * (parseFloat(ct) || 0);
+    setCost(tc > 0 && parseFloat(v) > 0 ? round3(parseFloat(v) * tc) : '');
+  }
+  function recompute(nextQty: string, nextCt: string) {
+    const tc = (parseFloat(nextQty) || 0) * (parseFloat(nextCt) || 0);
+    if (tc <= 0) return;
+    if (costMode === 'perCt') {
+      const pc = parseFloat(costPerCt) || 0;
+      if (pc > 0) setCost(round3(pc * tc));
+    } else {
+      const c = parseFloat(cost) || 0;
+      if (c > 0) setCostPerCt(round3(c / tc));
+    }
+  }
+  function onQtyChange(v: string) { setQty(v); recompute(v, ct); }
+  function onCtChange(v: string) { setCt(v); recompute(qty, v); }
+
   function handleConfirm() {
     setError('');
     const costNum = parseFloat(cost) || 0;
     if (!description.trim()) { setError('Description ist Pflicht'); return; }
     if (costNum <= 0) { setError('Cost > 0 erforderlich'); return; }
-    const qtyNum = parseFloat(qty) || 1;
+    const qtyNum = kind === 'labor' ? 1 : (parseFloat(qty) || 1);
     if (qtyNum <= 0) { setError('Quantity > 0 erforderlich'); return; }
 
     const data: MaterialLineInput = {
@@ -116,11 +156,14 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
     onClose();
   }
 
-  const kindButtons: Array<{ value: typeof kind; label: string; emoji: string }> = [
+  const kindButtons: Array<{ value: Kind; label: string; emoji: string }> = [
+    ...(allowLabor ? [{ value: 'labor' as Kind, label: 'Labor', emoji: '🔨' }] : []),
     { value: 'diamond', label: 'Diamond', emoji: '💎' },
     { value: 'stone', label: 'Stone', emoji: '🔮' },
     { value: 'gold', label: 'Gold piece', emoji: '🟡' },
   ];
+
+  const isCarat = kind === 'diamond' || kind === 'stone';
 
   return (
     <Modal open={open} onClose={onClose} title="Add Material" width={520}>
@@ -150,43 +193,48 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
 
         <Input
           label="DESCRIPTION"
-          placeholder={kind === 'diamond' ? 'Round Brilliant, Princess cut...' : kind === 'stone' ? 'Sapphire, Ruby, ...' : 'Bar, Coin, Chain...'}
+          placeholder={kind === 'labor' ? 'Goldsmith labor, setting, polishing...'
+            : kind === 'diamond' ? 'Round Brilliant, Princess cut...'
+            : kind === 'stone' ? 'Sapphire, Ruby, ...'
+            : 'Bar, Coin, Chain...'}
           value={description}
           onChange={e => setDescription(e.target.value)}
           autoFocus
         />
 
-        {/* Quantity + Carat/Grams */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-          <Input
-            label="QUANTITY"
-            type="number"
-            step="1"
-            min="1"
-            value={qty}
-            onChange={e => setQty(e.target.value)}
-          />
-          {(kind === 'diamond' || kind === 'stone') && (
+        {/* Quantity + Carat/Grams — bei Labor entfaellt das */}
+        {kind !== 'labor' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input
-              label="CARAT (CT) PER PIECE"
+              label="QUANTITY"
               type="number"
-              step="0.01"
-              placeholder="0.50"
-              value={ct}
-              onChange={e => setCt(e.target.value)}
+              step="1"
+              min="1"
+              value={qty}
+              onChange={e => onQtyChange(e.target.value)}
             />
-          )}
-          {kind === 'gold' && (
-            <Input
-              label="WEIGHT (GRAMS)"
-              type="number"
-              step="0.001"
-              placeholder="0.000"
-              value={grams}
-              onChange={e => setGrams(e.target.value)}
-            />
-          )}
-        </div>
+            {isCarat && (
+              <Input
+                label="CARAT (CT) PER PIECE"
+                type="number"
+                step="0.01"
+                placeholder="0.50"
+                value={ct}
+                onChange={e => onCtChange(e.target.value)}
+              />
+            )}
+            {kind === 'gold' && (
+              <Input
+                label="WEIGHT (GRAMS)"
+                type="number"
+                step="0.001"
+                placeholder="0.000"
+                value={grams}
+                onChange={e => setGrams(e.target.value)}
+              />
+            )}
+          </div>
+        )}
 
         {kind === 'gold' && (
           <div>
@@ -210,8 +258,34 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
           </div>
         )}
 
-        {/* Cost + Customer Price */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        {/* Cost — bei Diamond/Stone bidirektional Cost/Carat ⇄ Total */}
+        {isCarat ? (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <Input
+                label="COST / CARAT (BHD) — OPTIONAL"
+                type="number"
+                step="0.001"
+                placeholder="0.000"
+                value={costPerCt}
+                onChange={e => onCostPerCtChange(e.target.value)}
+              />
+              <Input
+                label="TOTAL COST (BHD)"
+                type="number"
+                step="0.001"
+                placeholder="0.000"
+                value={cost}
+                onChange={e => onCostChange(e.target.value)}
+              />
+            </div>
+            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+              {totalCt > 0
+                ? `${totalCt.toFixed(2)} ct gesamt — Total ⇄ Cost/Carat werden automatisch berechnet.`
+                : 'Quantity + Carat eingeben — dann rechnet Total ⇄ Cost/Carat automatisch.'}
+            </p>
+          </div>
+        ) : (
           <Input
             label="TOTAL COST (BHD)"
             type="number"
@@ -220,33 +294,34 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
             value={cost}
             onChange={e => setCost(e.target.value)}
           />
-          {showCustomerPrice && (
-            <div>
-              <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
-                <span className="text-overline">CUSTOMER PRICE (BHD)</span>
-                <button
-                  type="button"
-                  onClick={() => setShowMarkup(!showMarkup)}
-                  style={{
-                    fontSize: 10, color: '#3D7FFF', background: 'transparent',
-                    border: 'none', cursor: 'pointer', textDecoration: 'underline',
-                  }}
-                >
-                  {showMarkup ? 'Use 1:1' : 'Add markup'}
-                </button>
-              </div>
-              <Input
-                label=""
-                type="number"
-                step="0.001"
-                placeholder={showMarkup ? '0.000' : '(same as cost)'}
-                value={showMarkup ? customerPrice : cost}
-                onChange={e => setCustomerPrice(e.target.value)}
-                disabled={!showMarkup}
-              />
+        )}
+
+        {showCustomerPrice && (
+          <div>
+            <div className="flex items-center justify-between" style={{ marginBottom: 4 }}>
+              <span className="text-overline">CUSTOMER PRICE (BHD)</span>
+              <button
+                type="button"
+                onClick={() => setShowMarkup(!showMarkup)}
+                style={{
+                  fontSize: 10, color: '#3D7FFF', background: 'transparent',
+                  border: 'none', cursor: 'pointer', textDecoration: 'underline',
+                }}
+              >
+                {showMarkup ? 'Use 1:1' : 'Add markup'}
+              </button>
             </div>
-          )}
-        </div>
+            <Input
+              label=""
+              type="number"
+              step="0.001"
+              placeholder={showMarkup ? '0.000' : '(same as cost)'}
+              value={showMarkup ? customerPrice : cost}
+              onChange={e => setCustomerPrice(e.target.value)}
+              disabled={!showMarkup}
+            />
+          </div>
+        )}
 
         {/* Supplier picker */}
         <div>
@@ -261,7 +336,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
           />
           {supplierId && (
             <p style={{ fontSize: 11, color: '#16A34A', marginTop: 6 }}>
-              ✓ A/P-Schuld an {suppliers.find(s => s.id === supplierId)?.name} wird beim Status-Wechsel zu „arrived" gebucht.
+              ✓ A/P-Schuld an {suppliers.find(s => s.id === supplierId)?.name} wird gebucht.
             </p>
           )}
         </div>
