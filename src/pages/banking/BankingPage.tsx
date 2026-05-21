@@ -1,6 +1,6 @@
 // Plan §Banking — Cash + Bank overview + unified transaction log with all 9 types.
 import { useEffect, useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowRightLeft, Wallet, Building2, Smartphone, ArrowUpRight, ArrowDownLeft, ChevronRight } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -38,6 +38,7 @@ const TYPE_COLORS: Record<BankTransactionType, string> = {
 export function BankingPage() {
   const { transfers, loadTransfers, createTransfer, getTransactions } = useBankingStore();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
   const [amount, setAmount] = useState('');
   const [fromAcc, setFromAcc] = useState<BankAccount>('cash');
@@ -50,6 +51,14 @@ export function BankingPage() {
   const [hoverId, setHoverId] = useState<string | null>(null);
 
   useEffect(() => { loadTransfers(); }, [loadTransfers]);
+
+  // Dashboard-Shortcut „Transfer" → /banking?new=1 öffnet direkt das Transfer-Modal.
+  useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      setShowNew(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   // getTransactions feuert ~14 SQL-Queries — auf Production-Daten merklich langsam.
   // Vorher lief das doppelt (einmal für allTxs, einmal über getBalances). Wir

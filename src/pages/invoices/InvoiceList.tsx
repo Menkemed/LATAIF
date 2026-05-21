@@ -160,6 +160,14 @@ export function InvoiceList() {
         const sum = getInvoiceReturnSummary(i.id, i.grossAmount, i.paidAmount);
         return sum.returns.length === 0;
       });
+    } else if (filterStatus === 'OPEN') {
+      // Dashboard-Shortcut „Add Payment" → /invoices?filter=OPEN. Zeigt genau die
+      // Rechnungen mit offenem Betrag (= die mit sichtbarem „Pay"-Button).
+      r = r.filter(i => {
+        const sum = getInvoiceReturnSummary(i.id, i.grossAmount, i.paidAmount);
+        const ds = deriveDisplayStatus(i, sum.returnState);
+        return ds === 'Unpaid' || ds === 'Partially Paid';
+      });
     } else if (filterStatus) {
       r = r.filter(i => i.status === filterStatus);
     }
@@ -296,7 +304,7 @@ export function InvoiceList() {
             </select>
           )}
           <div className="flex gap-1" style={{ marginRight: 8 }}>
-            {['', 'DRAFT', 'PARTIAL', 'FINAL', 'RETURNED', 'CANCELLED'].map(s => {
+            {['', 'OPEN', 'DRAFT', 'PARTIAL', 'FINAL', 'RETURNED', 'CANCELLED'].map(s => {
               const active = filterStatus === s;
               const label = s ? s.charAt(0) + s.slice(1).toLowerCase() : 'All';
               return (

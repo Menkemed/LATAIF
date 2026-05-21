@@ -463,12 +463,12 @@ export function Dashboard() {
         {/* Plan §Dashboard §6: Quick Actions */}
         <div className="flex gap-2 animate-fade-in" style={{ marginBottom: 32, flexWrap: 'wrap' }}>
           {[
-            { label: 'New Sale', icon: Plus, to: '/invoices' },
-            { label: 'New Purchase', icon: ShoppingCart, to: '/purchases' },
-            { label: 'Add Expense', icon: Wallet, to: '/expenses' },
-            { label: 'Add Payment', icon: CreditCard, to: '/invoices' },
-            { label: 'Transfer', icon: Landmark, to: '/banking' },
-            { label: 'Partners', icon: UserPlus, to: '/partners' },
+            { label: 'New Sale', icon: Plus, to: '/invoices/new' },
+            { label: 'New Purchase', icon: ShoppingCart, to: '/purchases/new' },
+            { label: 'Add Expense', icon: Wallet, to: '/expenses?new=1' },
+            { label: 'Add Payment', icon: CreditCard, to: '/invoices?filter=OPEN' },
+            { label: 'Transfer', icon: Landmark, to: '/banking?new=1' },
+            { label: 'New Partner', icon: UserPlus, to: '/partners?new=1' },
           ].map(a => (
             <button key={a.label} onClick={() => navigate(a.to)}
               className="cursor-pointer rounded-full transition-all"

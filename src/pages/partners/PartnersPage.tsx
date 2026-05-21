@@ -1,5 +1,6 @@
 // Plan §Partner — Partners list + invest/withdraw/profit distribution modals
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Users, TrendingUp, TrendingDown, Gift } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -25,6 +26,7 @@ export function PartnersPage() {
   const { partners, transactions, loadPartners, loadTransactions, createPartner, updatePartner, deletePartner,
     recordInvestment, recordWithdrawal, recordProfitDistribution, deleteTransaction } = usePartnerStore();
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState('');
   const [showNewPartner, setShowNewPartner] = useState(false);
   const [partnerForm, setPartnerForm] = useState<Partial<Partner>>({});
@@ -40,6 +42,14 @@ export function PartnersPage() {
   const [editForm, setEditForm] = useState<Partial<Partner>>({});
 
   useEffect(() => { loadPartners(); loadTransactions(); }, [loadPartners, loadTransactions]);
+
+  // Dashboard-Shortcut „New Partner" → /partners?new=1 öffnet direkt das New-Partner-Modal.
+  useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      setShowNewPartner(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
 
   const filtered = useMemo(() => {
     if (!search) return partners;

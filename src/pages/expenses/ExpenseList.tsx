@@ -1,5 +1,6 @@
 // Plan §Expenses + §Pay-Later — List + create modal mit Pay-Now/Later/Partial + Record-Payment
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Wallet, Trash2, CreditCard, Repeat, Pause, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -87,6 +88,16 @@ export function ExpenseList() {
   const [templatesExpanded, setTemplatesExpanded] = useState(true);
   const [editTemplateId, setEditTemplateId] = useState<string | null>(null);
   const [editTemplateForm, setEditTemplateForm] = useState<Partial<RecurringExpenseTemplate>>({});
+
+  // v0.4.6 — Direkt-Sprung: der Dashboard-Button "Add Expense" navigiert mit
+  // ?new=1 hierher und oeffnet sofort das New-Expense-Modal.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      setShowNew(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
   const [confirmDeleteTemplate, setConfirmDeleteTemplate] = useState<string | null>(null);
 
   // Record-Payment-Modal-State
