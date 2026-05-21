@@ -89,6 +89,16 @@ export function UpdateBanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // v0.4.5 — Manueller Check aus Settings → Updates feuert dieses Event. So
+  // erscheint das Banner sofort, ohne App-Neustart (vorher hatte der Settings-
+  // Check einen eigenen, vom Banner getrennten State).
+  useEffect(() => {
+    const handler = () => checkForUpdate(true);
+    window.addEventListener('lataif:check-update', handler);
+    return () => window.removeEventListener('lataif:check-update', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Sichtbar nur wenn relevant + nicht dismissed
   const visible = !dismissed && (
     state.kind === 'available' ||

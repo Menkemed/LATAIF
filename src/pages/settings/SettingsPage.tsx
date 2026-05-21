@@ -3121,6 +3121,8 @@ function UpdatesTab() {
 
   async function manualCheck() {
     setChecking(true); setResult('');
+    // v0.4.5 — den Update-Banner unten rechts mit-triggern (eigener State).
+    window.dispatchEvent(new CustomEvent('lataif:check-update'));
     try {
       const { check } = await import('@tauri-apps/plugin-updater');
       const update = await check();
