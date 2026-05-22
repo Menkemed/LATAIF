@@ -675,6 +675,8 @@ export interface GoldPayable {
   sourceRepairId?: UUID;
   sourceOrderId?: UUID;
   sourceRepairLineId?: UUID;
+  // v0.6.5 — verknuepft die Gramm-Schuld mit der exakten Order-Kostenzeile.
+  sourceOrderLineId?: UUID;
   direction: GoldPayableDirection;
   weightGrams: number;
   karat: MetalKarat | string;

@@ -70,7 +70,7 @@ export function OrderDetail() {
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const { goldPayables, loadGoldPayables, createGoldPayable } = useGoldStore();
+  const { goldPayables, loadGoldPayables, createGoldPayable, deleteGoldPayable } = useGoldStore();
   const { products, loadProducts, createProduct } = useProductStore();
   // Plan §Order §Convert: Wenn die Order kein verlinktes Produkt hat (manuell beschrieben),
   // wird beim Convert eines automatisch erzeugt und hier gehalten — wird vom VAT-Modal +
@@ -228,16 +228,7 @@ export function OrderDetail() {
     // ist nur der COGS-Wert; die Gramm-Schuld lebt im gold_payable.
     const goldAsPayable = data.materialKind === 'gold' && !!data.supplierId && (data.weightGrams || 0) > 0;
     try {
-      if (goldAsPayable && data.supplierId) {
-        createGoldPayable({
-          supplierId: data.supplierId,
-          sourceOrderId: id,
-          weightGrams: data.weightGrams!,
-          karat: data.karat || '22K',
-        });
-        loadGoldPayables();
-      }
-      addOrderLine(id, {
+      const newLineId = addOrderLine(id, {
         description: `${ctLabel}${data.description}`.trim(),
         quantity: 1,
         unitPrice: 0,
@@ -255,6 +246,18 @@ export function OrderDetail() {
           supplierName: data.supplierName,
         },
       });
+      // v0.6.5 — Gramm-Schuld mit der eben erzeugten Kostenzeile verknuepfen,
+      // damit sie beim Loeschen der Zeile automatisch mitentfernt wird.
+      if (goldAsPayable && data.supplierId) {
+        createGoldPayable({
+          supplierId: data.supplierId,
+          sourceOrderId: id,
+          sourceOrderLineId: newLineId,
+          weightGrams: data.weightGrams!,
+          karat: data.karat || '22K',
+        });
+        loadGoldPayables();
+      }
       setLineRefresh(k => k + 1);
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
@@ -1252,7 +1255,7 @@ export function OrderDetail() {
                           <button
                             onClick={() => {
                               if (!window.confirm('Diese Kostenposition löschen? Eine gebuchte A/P-Schuld wird storniert.')) return;
-                              try { deleteOrderLine(l.id); setLineRefresh(k => k + 1); }
+                              try { deleteOrderLine(l.id); loadGoldPayables(); setLineRefresh(k => k + 1); }
                               catch (e) { alert(e instanceof Error ? e.message : String(e)); }
                             }}
                             className="cursor-pointer"
@@ -1326,6 +1329,17 @@ export function OrderDetail() {
                               className="cursor-pointer"
                               style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #6E8AAA', color: '#4B6A8A', background: 'transparent' }}>
                               In Geld
+                            </button>
+                            <button type="button"
+                              onClick={() => {
+                                if (!window.confirm('Gold-Verbindlichkeit löschen? Nur nutzen wenn sie versehentlich/verwaist ist — die Kostenzeile selbst bleibt unberührt.')) return;
+                                try { deleteGoldPayable(gp.id); }
+                                catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+                              }}
+                              className="cursor-pointer"
+                              title="Verbindlichkeit löschen (nur offene)"
+                              style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, border: '1px solid rgba(220,38,38,0.3)', color: '#DC2626', background: 'transparent' }}>
+                              ✕
                             </button>
                           </>
                         ) : <span style={{ fontSize: 11, color: '#9CA3AF' }}>—</span>}

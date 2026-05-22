@@ -25,7 +25,7 @@ import type {
 } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackUpdate } from '@/core/sync/track';
+import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, hasLedgerEntries } from '@/core/ledger/posting';
 import { KARAT_PURITY as PURITY_LOOKUP } from '@/core/gold/purity';
 
@@ -46,6 +46,7 @@ function rowToGoldPayable(row: Record<string, unknown>): GoldPayable {
     sourceRepairLineId: (row.source_repair_line_id as string) || undefined,
     // v0.6.0 — Order-verknuepfte Gold-Verbindlichkeit (Custom-Order Goldschmied-Gold).
     sourceOrderId: (row.source_order_id as string) || undefined,
+    sourceOrderLineId: (row.source_order_line_id as string) || undefined,
     direction: ((row.direction as string) || 'we_owe') as GoldPayable['direction'],
     weightGrams: (row.weight_grams as number) || 0,
     karat: row.karat as string,
@@ -208,6 +209,7 @@ interface GoldStore {
   settleGoldReturn: (payableId: string, grams: number, notes?: string) => void;
   convertGoldPayableToMoney: (payableId: string, agreedBhd: number, method?: 'cash' | 'bank' | 'benefit', notes?: string) => void;
   cancelGoldPayable: (payableId: string, notes?: string) => void;
+  deleteGoldPayable: (payableId: string) => void;
 
   // Customer-Credit-Settlements
   redeemCustomerCredit: (creditId: string, grams: number, repairId?: string) => void;
@@ -340,11 +342,11 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
 
     db.run(
       `INSERT INTO gold_payables (id, branch_id, supplier_id, source_repair_id, source_repair_line_id, source_order_id,
-         direction, weight_grams, karat, settlement_type, fulfilled_grams, status, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
+         source_order_line_id, direction, weight_grams, karat, settlement_type, fulfilled_grams, status, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
       [
         id, branchId, data.supplierId, data.sourceRepairId || null, data.sourceRepairLineId || null,
-        data.sourceOrderId || null,
+        data.sourceOrderId || null, data.sourceOrderLineId || null,
         data.direction || 'we_owe', data.weightGrams, data.karat,
         data.settlementType || 'return_gold', data.notes || null, now, now,
       ]
@@ -354,6 +356,7 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       settlementType: data.settlementType,
       sourceRepairId: data.sourceRepairId,
       sourceOrderId: data.sourceOrderId,
+      sourceOrderLineId: data.sourceOrderLineId,
     });
     saveDatabase();
     get().loadGoldPayables();
@@ -520,6 +523,22 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       [' · ' + (notes || 'Cancelled'), now, payableId]
     );
     trackUpdate('gold_payables', payableId, { status: 'CANCELLED' });
+    saveDatabase();
+    get().loadGoldPayables();
+  },
+
+  // v0.6.5 — Offene Gramm-Schuld hart loeschen (z.B. wenn die verknuepfte
+  // Order-Kostenzeile entfernt wird, oder verwaiste Alt-Eintraege aufraeumen).
+  // Nur OPEN — beglichene Verbindlichkeiten haben Bestand/Geld bewegt.
+  deleteGoldPayable: (payableId) => {
+    const db = getDatabase();
+    const p = get().goldPayables.find(x => x.id === payableId);
+    if (!p) return;
+    if (p.status !== 'OPEN') {
+      throw new Error('Nur offene Gold-Verbindlichkeiten können gelöscht werden.');
+    }
+    db.run(`DELETE FROM gold_payables WHERE id = ?`, [payableId]);
+    trackDelete('gold_payables', payableId);
     saveDatabase();
     get().loadGoldPayables();
   },

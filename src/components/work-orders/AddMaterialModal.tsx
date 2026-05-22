@@ -22,6 +22,8 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { useSupplierStore } from '@/stores/supplierStore';
+import { getSpotPrices } from '@/core/market/spot-prices';
+import { purityOf } from '@/core/gold/purity';
 
 export interface MaterialLineInput {
   materialKind: 'labor' | 'diamond' | 'stone' | 'gold';
@@ -76,6 +78,9 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
   const [showMarkup, setShowMarkup] = useState(false);
   const [supplierId, setSupplierId] = useState('');
   const [error, setError] = useState('');
+  // v0.6.5 — Live-Goldpreis (BHD/g pure) für die Auto-Bewertung von Gold-Pieces.
+  const [goldRate, setGoldRate] = useState(0);
+  const [goldCostTouched, setGoldCostTouched] = useState(false);
   // v0.6.x — gesammelte Positionen, die beim Speichern alle abgeschickt werden.
   const [rows, setRows] = useState<MaterialLineInput[]>([]);
 
@@ -94,6 +99,20 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
     setCustomerPrice('');
     setShowMarkup(false);
     setSupplierId('');
+    setGoldCostTouched(false);
+  }
+
+  // Kind wechseln → numerische Felder leeren, damit kein Wert vom vorherigen
+  // Kind (z.B. Labor-Kosten) faelschlich als neuer Kind-Wert stehen bleibt.
+  function selectKind(k: Kind) {
+    setKind(k);
+    setCost('');
+    setCostPerCt('');
+    setCostMode('total');
+    setCt('');
+    setGrams('');
+    setGoldCostTouched(false);
+    setError('');
   }
 
   useEffect(() => {
@@ -102,6 +121,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
       setRows([]);
       setError('');
       loadSuppliers();
+      getSpotPrices().then(r => { if (r.gold) setGoldRate(r.gold.bhdPerGram); }).catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, allowLabor, loadSuppliers]);
@@ -112,6 +132,21 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
     })), [suppliers]);
 
   const totalCt = (parseFloat(qty) || 0) * (parseFloat(ct) || 0);
+
+  // v0.6.5 — Gold-Piece: Live-Bewertung Gramm × Reinheit(Karat) × Goldpreis(pure).
+  const autoGoldCost = useMemo(() => {
+    const g = parseFloat(grams) || 0;
+    return kind === 'gold' && g > 0 && goldRate > 0
+      ? Math.round(g * purityOf(karat) * goldRate * 1000) / 1000
+      : 0;
+  }, [kind, grams, karat, goldRate]);
+  // Cost-Feld automatisch mit der Live-Bewertung fuellen, solange der User es
+  // nicht selbst angetippt hat. Nur fuer Kind 'gold'.
+  useEffect(() => {
+    if (kind === 'gold' && !goldCostTouched) {
+      setCost(autoGoldCost > 0 ? String(autoGoldCost) : '');
+    }
+  }, [kind, autoGoldCost, goldCostTouched]);
 
   // v0.5.0 — Cost ⇄ Cost/Carat bidirektional. totalCost = costPerCt × qty × ct.
   function onCostChange(v: string) {
@@ -221,7 +256,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
               <button
                 key={b.value}
                 type="button"
-                onClick={() => setKind(b.value)}
+                onClick={() => selectKind(b.value)}
                 className="cursor-pointer rounded transition-all duration-200"
                 style={{
                   padding: '8px 14px', fontSize: 13,
@@ -329,6 +364,35 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
                 ? `${totalCt.toFixed(2)} ct gesamt — Total ⇄ Cost/Carat werden automatisch berechnet.`
                 : 'Quantity + Carat eingeben — dann rechnet Total ⇄ Cost/Carat automatisch.'}
             </p>
+          </div>
+        ) : kind === 'gold' ? (
+          <div>
+            <Input
+              label={goldCostTouched ? 'TOTAL COST (BHD) — MANUELL' : 'TOTAL COST (BHD) — AUTO'}
+              type="number"
+              step="0.001"
+              placeholder="0.000"
+              value={cost}
+              onChange={e => { setGoldCostTouched(true); setCost(e.target.value); }}
+            />
+            {(parseFloat(grams) || 0) > 0 && (
+              <p style={{ fontSize: 11, marginTop: 6, color: goldCostTouched ? '#0F0F10' : (autoGoldCost > 0 ? '#16A34A' : '#DC2626') }}>
+                {goldCostTouched ? (
+                  <>
+                    Kosten manuell gesetzt.
+                    {autoGoldCost > 0 && (
+                      <button type="button" onClick={() => setGoldCostTouched(false)}
+                        className="cursor-pointer"
+                        style={{ background: 'none', border: 'none', color: '#7E5BEF', fontSize: 11, padding: '0 0 0 6px', textDecoration: 'underline' }}>
+                        ↻ Auto-Bewertung ({autoGoldCost.toFixed(3)} BHD)
+                      </button>
+                    )}
+                  </>
+                ) : autoGoldCost > 0
+                  ? `Auto: ${(parseFloat(grams) || 0).toFixed(3)} g × ${purityOf(karat).toFixed(3)} × ${goldRate.toFixed(3)} BHD/g = ${autoGoldCost.toFixed(3)} BHD (Live-Spot).`
+                  : 'Goldpreis nicht verfügbar — bitte Kosten manuell eingeben.'}
+              </p>
+            )}
           </div>
         ) : (
           <Input

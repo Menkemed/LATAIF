@@ -99,6 +99,9 @@ export function OrderCreate() {
   const [extraGoldGrams, setExtraGoldGrams] = useState('');
   const [extraGoldKarat, setExtraGoldKarat] = useState('22K');
   const [extraGoldCost, setExtraGoldCost] = useState('');
+  // v0.6.4 — Cost-Feld wird automatisch aus dem Live-Goldpreis befuellt, bis der
+  // User es selbst antippt; danach bleibt seine manuelle Eingabe stehen.
+  const [extraGoldCostTouched, setExtraGoldCostTouched] = useState(false);
   // v0.6.0 — Goldschmied der sein eigenes Gold beisteuert → Gold-Verbindlichkeit
   // (Gramm) statt Geld. goldRate = Live-Goldpreis BHD/g (pure).
   const [extraGoldSupplierId, setExtraGoldSupplierId] = useState('');
@@ -233,6 +236,21 @@ export function OrderCreate() {
     setNewItemModalIdx(null);
   }
 
+  // v0.6.4 — Extra-Gold Live-Bewertung: Gramm × Reinheit(Karat) × Goldpreis(pure).
+  const autoGoldValue = useMemo(() => {
+    const g = parseFloat(extraGoldGrams) || 0;
+    return g > 0 && goldRate > 0
+      ? Math.round(g * purityOf(extraGoldKarat) * goldRate * 1000) / 1000
+      : 0;
+  }, [extraGoldGrams, extraGoldKarat, goldRate]);
+  // Solange der User das Cost-Feld nicht selbst angefasst hat → automatisch mit
+  // der Live-Bewertung fuellen; ab erster Hand-Eingabe bleibt seine Zahl stehen.
+  useEffect(() => {
+    if (!extraGoldCostTouched) {
+      setExtraGoldCost(autoGoldValue > 0 ? String(autoGoldValue) : '');
+    }
+  }, [autoGoldValue, extraGoldCostTouched]);
+
   function reset() {
     setCustomerId('');
     setLines([{ mode: 'existing', description: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
@@ -248,6 +266,7 @@ export function OrderCreate() {
     setLaborCost('');
     setGoldsmithSupplierId('');
     setExtraGoldCost('');
+    setExtraGoldCostTouched(false);
     setExtraGoldGrams('');
     setExtraGoldSupplierId('');
     setCustomerGoldGrams('');
@@ -391,17 +410,16 @@ export function OrderCreate() {
     // wird zusaetzlich (in handleSave) eine Gold-Verbindlichkeit angelegt; die
     // Cost-Line traegt NIE einen supplier → kein doppeltes Geld-A/P.
     // Cost = eingegebener Betrag, sonst Bewertung zum Live-Goldpreis × Reinheit.
-    const extraCostNum = parseFloat(extraGoldCost) || 0;
+    // v0.6.4 — extraGoldCost ist immer befuellt (auto aus Live-Kurs ODER manuell).
+    // Die Kostenzeile wird IMMER erzeugt wenn Gramm vorhanden sind — exakt die
+    // gleiche Bedingung wie die Gold-Verbindlichkeit in handleSave. Damit kann nie
+    // wieder eine Gramm-Schuld ohne zugehoerige Kostenzeile entstehen.
     const extraGramsNum = parseFloat(extraGoldGrams) || 0;
-    const extraGoldValue = extraCostNum > 0
-      ? extraCostNum
-      : (extraGramsNum > 0 && goldRate > 0
-          ? Math.round(extraGramsNum * purityOf(extraGoldKarat) * goldRate * 1000) / 1000
-          : 0);
-    if (extraGoldValue > 0) {
+    const extraGoldValue = parseFloat(extraGoldCost) || 0;
+    if (extraGramsNum > 0) {
       const sup = extraGoldSupplierId ? suppliers.find(s => s.id === extraGoldSupplierId) : undefined;
       customLines.push({
-        description: `Extra Gold ${extraGramsNum > 0 ? extraGramsNum.toFixed(3) + 'g ' + extraGoldKarat : ''}${sup ? ' — ' + sup.name : ''}`.trim(),
+        description: `Extra Gold ${extraGramsNum.toFixed(3)}g ${extraGoldKarat}${sup ? ' — ' + sup.name : ''}`.trim(),
         quantity: 1,
         unitPrice: 0,
         costAmount: extraGoldValue,
@@ -500,15 +518,26 @@ export function OrderCreate() {
     setError('');
     const v = validate();
     if (v) { setError(v); return; }
+    // v0.6.4 — Gold ohne Bewertung blockieren: sonst entstuende eine Gold-
+    // Verbindlichkeit ohne Kostenzeile (Marge waere zu hoch).
+    if ((parseFloat(extraGoldGrams) || 0) > 0 && (parseFloat(extraGoldCost) || 0) <= 0) {
+      setError('Extra-Gold: Goldpreis nicht verfügbar — bitte Kosten (BHD) für das Gold eingeben.');
+      return;
+    }
     const order = createOrder(buildOrderPayload());
     // v0.6.0 — Goldschmied-Gold → Gold-Verbindlichkeit (Gramm) an den Goldschmied,
     // verknuepft mit der Order. Wird auf der Detail-Seite in Gold oder Geld beglichen.
     const egGrams = parseFloat(extraGoldGrams) || 0;
     if (extraGoldSupplierId && egGrams > 0) {
       try {
+        // v0.6.5 — die eben angelegte Extra-Gold-Kostenzeile finden und die
+        // Gramm-Schuld damit verknuepfen (loescht dann mit der Zeile mit).
+        const egLine = useOrderStore.getState().getOrderLines(order.id)
+          .find(l => l.materialKind === 'gold' && (l.description || '').startsWith('Extra Gold'));
         createGoldPayable({
           supplierId: extraGoldSupplierId,
           sourceOrderId: order.id,
+          sourceOrderLineId: egLine?.id,
           weightGrams: egGrams,
           karat: extraGoldKarat,
         });
@@ -743,12 +772,12 @@ export function OrderCreate() {
                     </div>
                   </div>
                   <Input
-                    label="COST (BHD) — OPTIONAL"
+                    label={extraGoldCostTouched ? 'COST (BHD) — MANUELL' : 'COST (BHD) — AUTO'}
                     type="number"
                     step="0.001"
                     placeholder="0.000"
                     value={extraGoldCost}
-                    onChange={e => setExtraGoldCost(e.target.value)}
+                    onChange={e => { setExtraGoldCostTouched(true); setExtraGoldCost(e.target.value); }}
                   />
                 </div>
                 <div style={{ marginTop: 12 }}>
@@ -760,11 +789,36 @@ export function OrderCreate() {
                     placeholder="Goldschmied wählen = sein Gold → Gold-Verbindlichkeit · leer = eigenes Gold"
                   />
                 </div>
-                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                  {extraGoldSupplierId
-                    ? `Goldschmied-Gold → Gold-Verbindlichkeit (Gramm), später in Gold oder Geld beglichen. Cost optional${goldRate > 0 ? ` — leer = Bewertung zum Live-Goldpreis ${goldRate.toFixed(3)} BHD/g` : ''}.`
-                    : 'Eigenes Gold → reine Geld-Kostenposition. Mit Goldschmied als Supplier wird stattdessen eine Gold-Verbindlichkeit angelegt.'}
-                </p>
+                <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span>
+                    {extraGoldSupplierId
+                      ? 'Goldschmied-Gold → Gold-Verbindlichkeit (Gramm), später in Gold oder Geld beglichen.'
+                      : 'Eigenes Gold → reine Geld-Kostenposition.'}
+                  </span>
+                  {(parseFloat(extraGoldGrams) || 0) > 0 && (
+                    extraGoldCostTouched ? (
+                      <span style={{ color: '#0F0F10' }}>
+                        Kosten manuell gesetzt.
+                        {autoGoldValue > 0 && (
+                          <button type="button"
+                            onClick={() => setExtraGoldCostTouched(false)}
+                            className="cursor-pointer"
+                            style={{ background: 'none', border: 'none', color: '#7E5BEF', fontSize: 11, padding: '0 0 0 6px', textDecoration: 'underline' }}>
+                            ↻ Auto-Bewertung ({autoGoldValue.toFixed(3)} BHD) übernehmen
+                          </button>
+                        )}
+                      </span>
+                    ) : autoGoldValue > 0 ? (
+                      <span style={{ color: '#16A34A' }}>
+                        Auto-Bewertung: {(parseFloat(extraGoldGrams) || 0).toFixed(3)} g × {purityOf(extraGoldKarat).toFixed(3)} × {goldRate.toFixed(3)} BHD/g = {autoGoldValue.toFixed(3)} BHD (Live-Spot).
+                      </span>
+                    ) : (
+                      <span style={{ color: '#DC2626' }}>
+                        Goldpreis nicht verfügbar — bitte Kosten (BHD) manuell eingeben.
+                      </span>
+                    )
+                  )}
+                </div>
               </Card>
             </div>
             )}

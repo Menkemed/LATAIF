@@ -622,6 +622,17 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     if (invoiceId) {
       throw new Error('Diese Position ist bereits in einer Invoice — erst die Invoice stornieren.');
     }
+    // v0.6.5 — verknuepfte Gold-Verbindlichkeit(en): OPEN → mitloeschen; bereits
+    // beglichene (FULFILLED) → Loeschen blockieren, sonst verwaist die schon
+    // gebuchte Settlement-Expense.
+    const linkedGp = query(`SELECT id, status FROM gold_payables WHERE source_order_line_id = ?`, [lineId]);
+    if (linkedGp.some(g => g.status !== 'OPEN' && g.status !== 'CANCELLED')) {
+      throw new Error('Die Gold-Verbindlichkeit dieser Position wurde bereits beglichen — bitte erst die Verbindlichkeit rückabwickeln.');
+    }
+    for (const g of linkedGp) {
+      db.run(`DELETE FROM gold_payables WHERE id = ?`, [g.id as string]);
+      trackDelete('gold_payables', g.id as string);
+    }
     if (expenseId) {
       try {
         cancelOrderLineExpense(expenseId);

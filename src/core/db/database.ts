@@ -1539,6 +1539,10 @@ function runMigrations(database: Database): void {
     `ALTER TABLE order_lines ADD COLUMN ordered_supplier_id TEXT REFERENCES suppliers(id) ON DELETE SET NULL`,
     `CREATE INDEX IF NOT EXISTS idx_purchases_source_order ON purchases(source_order_id)`,
     `CREATE INDEX IF NOT EXISTS idx_purchase_lines_source_order_line ON purchase_lines(source_order_line_id)`,
+    // v0.6.5 — Gold-Verbindlichkeit ↔ Order-Kostenzeile verknuepfen, damit die
+    // Gramm-Schuld beim Loeschen der Kostenzeile automatisch mitentfernt wird.
+    `ALTER TABLE gold_payables ADD COLUMN source_order_line_id TEXT REFERENCES order_lines(id) ON DELETE SET NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_payables_source_order_line ON gold_payables(source_order_line_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
