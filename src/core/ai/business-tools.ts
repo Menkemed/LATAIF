@@ -11,7 +11,7 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useOfferStore } from '@/stores/offerStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
-import { canonicalStockStatus } from '@/core/models/types';
+import { canonicalStockStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import type { Invoice, Customer, Product } from '@/core/models/types';
 
 // ── Renderable block types (return shape) ───────────────────
@@ -254,7 +254,11 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
   const offersCount = offers.filter(o => inP(o.createdAt)).length;
   const ordersCount = orders.filter(o => inP(o.createdAt)).length;
 
-  const expensesTotal = expenses.filter(e => inP(e.expenseDate || e.createdAt)).reduce((s, e) => s + (e.amount || 0), 0);
+  // Betriebsausgaben: kapitalisierte Kategorien (Inventory = COGS, keine OpEx)
+  // ausschliessen — konsistent mit Dashboard + BusinessReportsPage.
+  const expensesTotal = expenses
+    .filter(e => inP(e.expenseDate || e.createdAt) && !isCapitalizedExpenseCategory(e.category))
+    .reduce((s, e) => s + (e.amount || 0), 0);
   const purchasesTotal = purchases.filter(p => inP(p.purchaseDate || p.createdAt)).reduce((s, p) => s + (p.totalAmount || 0), 0);
 
   const inventoryValue = products.filter(p => canonicalStockStatus(p.stockStatus) === 'IN_STOCK').reduce((s, p) => s + (p.purchasePrice || 0), 0);
