@@ -112,13 +112,18 @@ export function SupplierDetail() {
     } catch { return []; }
   }, [id, purchases]);
 
-  const repairExpenses = useMemo(() => {
-    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; expenseDate: string; status: string; repairId?: string }>;
+  // Workshop-/Service-Payables: A/P-Expenses aus Repairs UND Orders. Order-
+  // Kostenzeilen (Goldschmied-Labor, Diamant-Einkauf bei Sonderanfertigungen)
+  // tragen related_module='order' — vorher fehlten sie hier komplett, obwohl
+  // die OUTSTANDING-KPI sie laengst mitzaehlt (getLedger summiert ALLE expenses
+  // des Suppliers, modul-unabhaengig). Jetzt deckt sich Liste wieder mit KPI.
+  const workshopExpenses = useMemo(() => {
+    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; expenseDate: string; status: string; module: string; linkId?: string }>;
     try {
       const rows = query(
-        `SELECT id, expense_number, description, amount, paid_amount, expense_date, status, related_entity_id
+        `SELECT id, expense_number, description, amount, paid_amount, expense_date, status, related_module, related_entity_id
          FROM expenses
-         WHERE supplier_id = ? AND related_module = 'repair' AND status != 'CANCELLED'
+         WHERE supplier_id = ? AND related_module IN ('repair', 'order') AND status != 'CANCELLED'
          ORDER BY expense_date DESC`,
         [id]
       );
@@ -130,7 +135,8 @@ export function SupplierDetail() {
         paidAmount: (r.paid_amount as number) || 0,
         expenseDate: r.expense_date as string,
         status: r.status as string,
-        repairId: (r.related_entity_id as string) || undefined,
+        module: (r.related_module as string) || 'repair',
+        linkId: (r.related_entity_id as string) || undefined,
       }));
     } catch { return []; }
   }, [id, purchases]);
@@ -261,7 +267,7 @@ export function SupplierDetail() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 32 }}>
           <KPICard label="TOTAL PURCHASES" value={fmt(ledger.totalPurchases)} unit="BHD" />
           <KPICard label="TOTAL PAID" value={fmt(ledger.totalPaid)} unit="BHD" />
-          <KPICard label="OUTSTANDING" value={fmt(ledger.outstandingBalance)} unit={`BHD · ${supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length + repairExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length} open`} />
+          <KPICard label="OUTSTANDING" value={fmt(ledger.outstandingBalance)} unit={`BHD · ${supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length + workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length} open`} />
           <KPICard label="CREDIT BALANCE" value={fmt(ledger.creditBalance)} unit="BHD available" />
         </div>
 
@@ -295,26 +301,29 @@ export function SupplierDetail() {
           )}
         </Card>
 
-        {/* Repair Expenses / Workshop Payables */}
-        {repairExpenses.length > 0 && (
+        {/* Workshop / Service Payables — Repair- UND Order-Kostenzeilen */}
+        {workshopExpenses.length > 0 && (
           <div style={{ marginTop: 24 }}>
             <Card>
-              <span className="text-overline" style={{ marginBottom: 12 }}>REPAIR COSTS / WORKSHOP PAYABLES ({repairExpenses.length})</span>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.8fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12, marginTop: 12 }}>
+              <span className="text-overline" style={{ marginBottom: 12 }}>WORKSHOP &amp; SERVICE COSTS ({workshopExpenses.length})</span>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.8fr 0.8fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12, marginTop: 12 }}>
                 <span className="text-overline">EXPENSE #</span>
                 <span className="text-overline">DESCRIPTION</span>
+                <span className="text-overline">SOURCE</span>
                 <span className="text-overline">DATE</span>
                 <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
                 <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>PAID</span>
                 <span className="text-overline">STATUS</span>
-                {repairExpenses.map(e => {
+                {workshopExpenses.map(e => {
                   const remaining = Math.max(0, e.amount - e.paidAmount);
+                  const target = e.linkId ? (e.module === 'order' ? `/orders/${e.linkId}` : `/repairs/${e.linkId}`) : null;
                   return (
                     <div key={e.id} style={{ display: 'contents' }}
-                      onClick={() => e.repairId && navigate(`/repairs/${e.repairId}`)}
+                      onClick={() => target && navigate(target)}
                     >
-                      <span className="font-mono" style={{ fontSize: 12, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: e.repairId ? 'pointer' : 'default' }}>{e.expenseNumber}</span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: target ? 'pointer' : 'default' }}>{e.expenseNumber}</span>
                       <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description}</span>
+                      <span style={{ fontSize: 11, color: '#6B7280', padding: '8px 0', borderTop: '1px solid #E5E9EE', textTransform: 'capitalize' }}>{e.module}</span>
                       <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(e.expenseDate)}</span>
                       <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.amount}/></span>
                       <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.paidAmount}/></span>

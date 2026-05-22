@@ -1629,6 +1629,38 @@ function runMigrations(database: Database): void {
   } catch (err) {
     console.warn('order_status_v2 migration failed:', err);
   }
+
+  // Daten-Reparatur — verwaiste Order ↔ Invoice-Verknuepfungen aufloesen.
+  // sql.js erzwingt ON DELETE SET NULL nicht zuverlaessig: wurde eine aus einer
+  // Order erzeugte Invoice geloescht ODER storniert, blieb order_lines.invoice_id
+  // / orders.invoice_id als Geist-Referenz stehen. Folge: die Order war dauerhaft
+  // gesperrt — jeder Zeilen-Delete/-Edit verlangte einen Invoice-Storno, den es
+  // gar nicht mehr gab. Heilt Alt-Daten; der Vorwaerts-Fix sitzt in invoiceStore
+  // (cancel/delete entkoppeln jetzt selbst). Idempotent via settings-Flag.
+  try {
+    const flag = database.exec(
+      `SELECT value FROM settings WHERE key = 'migration.unlink_orphan_invoice_links_v1'`
+    );
+    const alreadyApplied = flag.length > 0 && flag[0].values.length > 0 && flag[0].values[0][0] === '1';
+    if (!alreadyApplied) {
+      database.run(
+        `UPDATE order_lines SET invoice_id = NULL
+          WHERE invoice_id IS NOT NULL
+            AND invoice_id NOT IN (SELECT id FROM invoices WHERE status != 'CANCELLED')`
+      );
+      database.run(
+        `UPDATE orders SET invoice_id = NULL, updated_at = datetime('now')
+          WHERE invoice_id IS NOT NULL
+            AND invoice_id NOT IN (SELECT id FROM invoices WHERE status != 'CANCELLED')`
+      );
+      database.run(
+        `INSERT OR REPLACE INTO settings (branch_id, key, value, category, updated_at)
+         VALUES ('branch-main', 'migration.unlink_orphan_invoice_links_v1', '1', 'system', datetime('now'))`
+      );
+    }
+  } catch (err) {
+    console.warn('unlink_orphan_invoice_links migration failed:', err);
+  }
 }
 
 // Replace old 7-category structure (watches, jewelry, bags, shoes, eyewear, services, diamonds)

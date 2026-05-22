@@ -476,6 +476,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         `UPDATE offers SET status = 'sent', invoice_id = NULL, updated_at = ? WHERE invoice_id = ?`,
         [now, id]
       );
+      // Order ↔ Invoice entkoppeln (analog zum Offer). Eine stornierte Invoice
+      // gibt ihre Order-Zeilen wieder frei: invoice_id = NULL macht sie erneut
+      // editier-/loeschbar und re-invoicebar (getBillableLines filtert !invoiceId).
+      // Ohne das bliebe die Order dauerhaft an einer toten Invoice haengen und
+      // jeder Zeilen-Delete/-Edit wuerde mit „erst Invoice stornieren" blocken.
+      db.run(`UPDATE order_lines SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
+      db.run(`UPDATE orders SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
       saveDatabase();
 
       // ZIEL.md §3a — Ledger-Storno bei Invoice-Cancel.
@@ -848,6 +855,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
     for (const pid of deleteProductsToSync) syncProductQuantity(pid);
     db.run(`DELETE FROM payments WHERE invoice_id = ?`, [id]);
+    // Order ↔ Invoice entkoppeln BEVOR die Invoice geloescht wird — sql.js
+    // erzwingt ON DELETE SET NULL nicht zuverlaessig, sonst bleiben
+    // order_lines.invoice_id / orders.invoice_id als Geist-Referenz stehen und
+    // die Order ist dauerhaft gesperrt (Zeilen-Delete/-Edit verlangt einen
+    // Invoice-Storno, den es nicht mehr gibt).
+    db.run(`UPDATE order_lines SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
+    db.run(`UPDATE orders SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
     db.run(`DELETE FROM invoices WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('invoices', id);
