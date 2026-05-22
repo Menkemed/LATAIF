@@ -302,10 +302,12 @@ export function OrderCreate() {
       if (quote <= 0) return 'Bitte einen Quoted Price (approx.) angeben';
       // v0.6.7 — Pflicht: strukturierte Produkt-Spec (Kategorie + Attribute) — sonst
       // landet das Stueck in der Collection ohne Kategorie & nicht filterbar.
-      if (!customProductSpec?.categoryId) return 'Bitte Final Product definieren (Kategorie + Attribute + Brand/Name).';
-      if (!customProductSpec?.brand?.trim() || !customProductSpec?.name?.trim()) {
-        return 'Bitte Brand und Name im Final-Product-Modal angeben.';
-      }
+      if (!customProductSpec?.categoryId) return 'Bitte Final Product definieren (Kategorie + Attribute).';
+      // v0.6.8 — Brand/Name sind bei unbranded Gold-Schmuck optional. Es muss aber
+      // irgendein Bezeichner da sein (Brand/Name oder Beleg-Bezeichnung), sonst hat
+      // die Quote-Line keine vernuenftige Beschreibung.
+      const hasLabel = !!(customProductSpec?.brand?.trim() || customProductSpec?.name?.trim() || finalProductDescription.trim());
+      if (!hasLabel) return 'Bitte mindestens einen Bezeichner setzen (Brand, Name oder Beleg-Bezeichnung).';
       return null;
     }
     if (wantsProduct && !wantsCustom) {
@@ -325,8 +327,9 @@ export function OrderCreate() {
     if (quote > 0 && !customProductSpec?.categoryId) {
       return 'Custom-Teil im Mixed-Order: bitte Final Product definieren (Kategorie + Attribute).';
     }
-    if (quote > 0 && (!customProductSpec?.brand?.trim() || !customProductSpec?.name?.trim())) {
-      return 'Custom-Teil im Mixed-Order: Brand und Name im Final-Product-Modal angeben.';
+    if (quote > 0) {
+      const hasLabel = !!(customProductSpec?.brand?.trim() || customProductSpec?.name?.trim() || finalProductDescription.trim());
+      if (!hasLabel) return 'Custom-Teil: bitte mindestens einen Bezeichner setzen (Brand, Name oder Beleg-Bezeichnung).';
     }
     return null;
   }

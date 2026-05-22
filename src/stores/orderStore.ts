@@ -472,18 +472,32 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   updateOrderLineStatus: (lineId, status) => {
     const db = getDatabase();
     const lineRows = query(
-      `SELECT order_id, invoice_id, status, expense_id FROM order_lines WHERE id = ?`,
+      `SELECT order_id, invoice_id, status, expense_id, ordered_supplier_id FROM order_lines WHERE id = ?`,
       [lineId]
     );
     if (lineRows.length === 0) throw new Error(`Order-Line ${lineId} nicht gefunden`);
     const orderId = lineRows[0].order_id as string;
     const invoiceId = lineRows[0].invoice_id as string | null;
     const lineExpenseId = lineRows[0].expense_id as string | null;
+    const currentStatus = lineRows[0].status as string;
+    const orderedSupplierId = lineRows[0].ordered_supplier_id as string | null;
 
     // Salesforce-Regel: eine bereits invoicte Line darf nicht ge-cancelled
     // werden ohne die Invoice anzufassen → Block + Hinweis.
     if (status === 'CANCELLED' && invoiceId) {
       throw new Error('Diese Line ist bereits in einer Invoice — erst die Invoice stornieren (Cancel + Replace).');
+    }
+
+    // v0.6.8 — Back-to-Back-Guard: eine ORDERED-Zeile (beim Supplier bestellt)
+    // darf nicht manuell auf ARRIVED/DELIVERED gesetzt werden — der Statuswechsel
+    // muss ueber den Wareneingang (createPurchase mit source_order_line_id) laufen,
+    // sonst entstehen keine Kosten, kein Lager-Lot und keine A/P-Schuld.
+    if (currentStatus === 'ORDERED' && orderedSupplierId
+        && (status === 'ARRIVED' || status === 'DELIVERED')) {
+      throw new Error(
+        'Diese Zeile ist beim Supplier bestellt — bitte „Wareneingang erfassen" nutzen, ' +
+        'damit ein Purchase angelegt wird (Kosten + Lager + A/P). Manueller ARRIVED ist gesperrt.'
+      );
     }
 
     db.run(`UPDATE order_lines SET status = ? WHERE id = ?`, [status, lineId]);

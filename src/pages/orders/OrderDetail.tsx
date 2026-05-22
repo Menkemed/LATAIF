@@ -1116,13 +1116,28 @@ export function OrderDetail() {
                       <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         {cancelled ? (
                           <span style={{ fontSize: 11, color: '#DC2626' }}>cancelled</span>
-                        ) : (<>
-                          {l.status === 'ORDERED' && (
+                        ) : l.status === 'ORDERED' ? (
+                          // v0.6.8 — Bei ORDERED keine ARRIVED/DELIVERED-Buttons:
+                          // der Statuswechsel laeuft ueber „Wareneingang erfassen"
+                          // (echter Purchase). Nur ein Undo zurueck auf PENDING.
+                          <>
                             <span style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4,
                               background: 'rgba(217,119,6,0.1)', color: '#D97706', border: '1px solid rgba(217,119,6,0.3)' }}>
                               ORDERED
                             </span>
-                          )}
+                            <span style={{ fontSize: 10, color: '#9CA3AF', alignSelf: 'center' }}>
+                              → Wareneingang erfassen
+                            </span>
+                            <button type="button"
+                              onClick={() => {
+                                try { updateOrderLineStatus(l.id, 'PENDING'); setLineRefresh(k => k + 1); }
+                                catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+                              }}
+                              style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
+                                border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}
+                              title="Bestellung beim Supplier zuruecknehmen — zurueck auf PENDING">↺ Undo</button>
+                          </>
+                        ) : (<>
                           {(['PENDING', 'ARRIVED', 'DELIVERED'] as const).map(st => (
                             <button
                               key={st}

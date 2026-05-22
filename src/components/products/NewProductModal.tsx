@@ -15,7 +15,7 @@ import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { useProductStore } from '@/stores/productStore';
-import type { Product, Category, TaxScheme } from '@/core/models/types';
+import type { Product, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 
 export interface NewProductModalProps {
@@ -98,8 +98,13 @@ export function NewProductModal({
     // der User später nochmal im Edit ran (User-Feedback 2026-05-17).
     const missing: string[] = [];
     if (!form.categoryId) missing.push('Category');
-    if (!form.brand?.trim()) missing.push('Brand');
-    if (!form.name?.trim()) missing.push('Name');
+    // v0.6.8 — Brand/Name nur bei branded-Kategorien Pflicht. Bei unbranded
+    // Gold-Schmuck reicht ein freier Bezeichner (Attribute beschreiben das Stueck).
+    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-original-gold-jewelry');
+    if (brandedRequired) {
+      if (!form.brand?.trim()) missing.push('Brand');
+      if (!form.name?.trim()) missing.push('Name');
+    }
     // Condition ist optional (2026-05-17) — kein Required-Check mehr.
     if (selectedCat) {
       for (const attr of selectedCat.attributes) {
@@ -181,15 +186,23 @@ export function NewProductModal({
           </div>
         </div>
 
-        {/* Brand + Name */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-          <Input required label="BRAND" placeholder="e.g. Rolex, Hermes, Cartier"
-            value={form.brand || ''}
-            onChange={e => setForm(p => ({ ...p, brand: e.target.value }))} />
-          <Input required label="NAME / MODEL" placeholder="e.g. Submariner, Birkin 30"
-            value={form.name || ''}
-            onChange={e => setForm(p => ({ ...p, name: e.target.value }))} />
-        </div>
+        {/* Brand + Name. v0.6.8 — bei unbranded Gold-Schmuck (selbst geschmiedet)
+            sind Brand/Name optional; bei Watch/Branded usw. weiter Pflicht. */}
+        {(() => {
+          const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-original-gold-jewelry');
+          return (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <Input required={brandedRequired} label={brandedRequired ? 'BRAND' : 'BRAND (OPTIONAL)'}
+                placeholder={brandedRequired ? 'e.g. Rolex, Hermes, Cartier' : 'leer = unbranded'}
+                value={form.brand || ''}
+                onChange={e => setForm(p => ({ ...p, brand: e.target.value }))} />
+              <Input required={brandedRequired} label={brandedRequired ? 'NAME / MODEL' : 'NAME / MODEL (OPTIONAL)'}
+                placeholder={brandedRequired ? 'e.g. Submariner, Birkin 30' : 'leer = Beleg nimmt Beschreibung'}
+                value={form.name || ''}
+                onChange={e => setForm(p => ({ ...p, name: e.target.value }))} />
+            </div>
+          );
+        })()}
 
         {/* SKU + (optional) Quantity */}
         <div style={{ display: 'grid', gridTemplateColumns: hideFields?.quantity ? '1fr' : '2fr 1fr', gap: 16 }}>
@@ -398,29 +411,15 @@ export function NewProductModal({
             maxImages={6} />
         </div>
 
-        {/* Tax Scheme + (optional) Storage Location */}
-        <div style={{ display: 'grid', gridTemplateColumns: hideFields?.storageLocation ? '1fr' : '1fr 1fr', gap: 16 }}>
-          <div>
-            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>TAX SCHEME (WHEN SOLD)</span>
-            <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {(['MARGIN', 'VAT_10', 'ZERO'] as TaxScheme[]).map(scheme => (
-                <button key={scheme} onClick={() => setForm(p => ({ ...p, taxScheme: scheme }))}
-                  className="cursor-pointer rounded transition-all duration-200"
-                  style={{
-                    padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${form.taxScheme === scheme ? '#0F0F10' : '#D5D9DE'}`,
-                    color: form.taxScheme === scheme ? '#0F0F10' : '#6B7280',
-                    background: form.taxScheme === scheme ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>{scheme === 'MARGIN' ? 'Margin' : scheme === 'VAT_10' ? 'VAT 10%' : 'Zero'}</button>
-              ))}
-            </div>
-          </div>
-          {!hideFields?.storageLocation && (
-            <Input label="STORAGE LOCATION" placeholder="Safe, Shelf, Display..."
-              value={form.storageLocation || ''}
-              onChange={e => setForm(p => ({ ...p, storageLocation: e.target.value }))} />
-          )}
-        </div>
+        {/* v0.6.8 — TAX SCHEME entfernt: VAT wird beim Verkauf (Invoice/Convert)
+            gewaehlt, nicht beim Produkt-Anlegen. taxScheme bleibt im DB-Modell
+            mit Default 'MARGIN' (siehe useEffect-Init), kann spaeter ueber den
+            ConfirmTaxSchemeModal beim Convert pro Zeile gesetzt werden. */}
+        {!hideFields?.storageLocation && (
+          <Input label="STORAGE LOCATION" placeholder="Safe, Shelf, Display..."
+            value={form.storageLocation || ''}
+            onChange={e => setForm(p => ({ ...p, storageLocation: e.target.value }))} />
+        )}
 
         {/* Optional Pricing fields (controlled by hideFields) */}
         {(!hideFields?.purchasePrice || !hideFields?.salePrice) && (
