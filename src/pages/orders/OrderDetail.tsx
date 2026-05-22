@@ -1221,6 +1221,11 @@ export function OrderDetail() {
                     const totalCt = (l.materialDetails?.ct || 0) * (l.materialDetails?.qty || 0);
                     const perCt = (l.materialKind === 'diamond' || l.materialKind === 'stone') && totalCt > 0
                       ? (l.costAmount || 0) / totalCt : 0;
+                    // v0.6.x — Goldschmied-Gold: Kostenzeile traegt absichtlich KEINEN
+                    // supplierId (die Schuld lebt als Gramm-Verbindlichkeit). Nicht als
+                    // "own cost" anzeigen — das ist eine Gold-Schuld an den Goldschmied.
+                    const isGoldDebt = l.materialKind === 'gold' && !l.supplierId
+                      && (l.materialDetails?.weightGrams || 0) > 0 && !!l.materialDetails?.supplierName;
                     return (
                       <div key={l.id} style={{ display: 'contents' }}>
                         <span style={{ fontSize: 12, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>{km.icon} {km.label}</span>
@@ -1235,7 +1240,9 @@ export function OrderDetail() {
                           <Bhd v={l.costAmount || 0}/>
                         </span>
                         <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          {!l.supplierId
+                          {isGoldDebt
+                            ? <span style={{ color: '#7E5BEF' }} title="Goldschmied-Gold — Gramm-Schuld, siehe Gold-Verbindlichkeiten unten">Gold-Schuld</span>
+                            : !l.supplierId
                             ? <span style={{ color: '#9CA3AF' }}>own cost</span>
                             : l.expenseId
                               ? <span style={{ color: '#16A34A' }}>A/P booked</span>

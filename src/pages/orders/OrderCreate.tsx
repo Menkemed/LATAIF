@@ -1097,11 +1097,8 @@ export function OrderCreate() {
             <div style={{ marginTop: 16 }}>
               <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 13, color: '#0F0F10' }}>
                 <input type="checkbox" checked={fullyPaid}
-                  onChange={e => {
-                    setFullyPaid(e.target.checked);
-                    if (e.target.checked) setStatus('completed');
-                  }} />
-                Fully Paid — Order direkt auf <strong>Completed</strong> setzen
+                  onChange={e => setFullyPaid(e.target.checked)} />
+                Fully Paid — Kunde zahlt jetzt den vollen Betrag <span style={{ color: '#6B7280' }}>(Auftrags-Status bleibt unberührt)</span>
               </label>
             </div>
           </Card>

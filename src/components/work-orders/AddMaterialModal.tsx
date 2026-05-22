@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════
-// LATAIF — Shared Add-Material Modal (v0.2.1 · v0.5.0)
+// LATAIF — Shared Add-Material Modal (v0.2.1 · v0.5.0 · v0.6.x multi-line)
 //
-// Eine Modal-Komponente fuer Repair + Custom-Order. Erfasst:
+// Eine Modal-Komponente fuer Repair + Custom-Order. Erfasst pro Eingabe:
 //  - Material-Kind: Labor (optional) | Diamond | Stone | Gold-Piece
 //  - Description
 //  - Quantity (pieces) + Carat per piece (bei Diamond/Stone)
@@ -9,12 +9,14 @@
 //  - Cost (BHD) — bei Diamond/Stone bidirektional mit Cost/Carat
 //  - Supplier (optional): wenn gesetzt → A/P-Expense entsteht
 //
-// Der Modal ruft `onSubmit(data)` mit der vollstaendigen MaterialLineInput
-// auf — der Caller (RepairDetail / OrderCreate / OrderDetail) entscheidet
-// wie es persistiert wird (repair_line vs order_line).
+// v0.6.x — Multi-Line: der User kann mehrere Positionen sammeln
+// („+ Zur Liste") und dann alle auf einmal speichern. Der Modal ruft
+// `onSubmit(data)` EINMAL PRO Position auf — der Caller (RepairDetail /
+// OrderCreate / OrderDetail) bleibt unveraendert.
 // ═══════════════════════════════════════════════════════════
 
 import { useEffect, useMemo, useState } from 'react';
+import { X } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -46,6 +48,13 @@ const KARAT_OPTIONS = ['24K', '22K', '21K', '18K', '14K', '9K'];
 
 type Kind = 'labor' | 'diamond' | 'stone' | 'gold';
 
+const KIND_META: Record<Kind, { label: string; emoji: string }> = {
+  labor: { label: 'Labor', emoji: '🔨' },
+  diamond: { label: 'Diamond', emoji: '💎' },
+  stone: { label: 'Stone', emoji: '🔮' },
+  gold: { label: 'Gold piece', emoji: '🟡' },
+};
+
 function round3(n: number): string {
   return String(Math.round(n * 1000) / 1000);
 }
@@ -67,24 +76,34 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
   const [showMarkup, setShowMarkup] = useState(false);
   const [supplierId, setSupplierId] = useState('');
   const [error, setError] = useState('');
+  // v0.6.x — gesammelte Positionen, die beim Speichern alle abgeschickt werden.
+  const [rows, setRows] = useState<MaterialLineInput[]>([]);
+
+  // Setzt nur den Eingabe-Block zurueck (fuer die naechste Position) —
+  // die bereits gesammelte Liste bleibt erhalten.
+  function resetEntry() {
+    setKind(allowLabor ? 'labor' : 'diamond');
+    setDescription('');
+    setQty('1');
+    setCt('');
+    setKarat('22K');
+    setGrams('');
+    setCost('');
+    setCostPerCt('');
+    setCostMode('total');
+    setCustomerPrice('');
+    setShowMarkup(false);
+    setSupplierId('');
+  }
 
   useEffect(() => {
     if (open) {
-      setKind(allowLabor ? 'labor' : 'diamond');
-      setDescription('');
-      setQty('1');
-      setCt('');
-      setKarat('22K');
-      setGrams('');
-      setCost('');
-      setCostPerCt('');
-      setCostMode('total');
-      setCustomerPrice('');
-      setShowMarkup(false);
-      setSupplierId('');
+      resetEntry();
+      setRows([]);
       setError('');
       loadSuppliers();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, allowLabor, loadSuppliers]);
 
   const supplierOptions = useMemo(() =>
@@ -121,13 +140,14 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
   function onQtyChange(v: string) { setQty(v); recompute(v, ct); }
   function onCtChange(v: string) { setCt(v); recompute(qty, v); }
 
-  function handleConfirm() {
-    setError('');
+  // Validiert den aktuellen Eingabe-Block und baut eine MaterialLineInput.
+  // Bei Fehler: setzt error + gibt null zurueck.
+  function buildEntry(): MaterialLineInput | null {
     const costNum = parseFloat(cost) || 0;
-    if (!description.trim()) { setError('Description ist Pflicht'); return; }
-    if (costNum <= 0) { setError('Cost > 0 erforderlich'); return; }
+    if (!description.trim()) { setError('Description ist Pflicht'); return null; }
+    if (costNum <= 0) { setError('Cost > 0 erforderlich'); return null; }
     const qtyNum = kind === 'labor' ? 1 : (parseFloat(qty) || 1);
-    if (qtyNum <= 0) { setError('Quantity > 0 erforderlich'); return; }
+    if (qtyNum <= 0) { setError('Quantity > 0 erforderlich'); return null; }
 
     const data: MaterialLineInput = {
       materialKind: kind,
@@ -139,12 +159,12 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
     };
     if (kind === 'diamond' || kind === 'stone') {
       const ctNum = parseFloat(ct) || 0;
-      if (ctNum <= 0) { setError('Carat per piece > 0 erforderlich fuer Diamond/Stone'); return; }
+      if (ctNum <= 0) { setError('Carat per piece > 0 erforderlich fuer Diamond/Stone'); return null; }
       data.caratPerPiece = ctNum;
     }
     if (kind === 'gold') {
       const g = parseFloat(grams) || 0;
-      if (g <= 0) { setError('Gramm > 0 erforderlich fuer Gold-Piece'); return; }
+      if (g <= 0) { setError('Gramm > 0 erforderlich fuer Gold-Piece'); return null; }
       data.weightGrams = g;
       data.karat = karat;
     }
@@ -152,18 +172,43 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
       const cp = parseFloat(customerPrice) || 0;
       data.customerPrice = showMarkup && cp > 0 ? cp : costNum;
     }
-    onSubmit(data);
+    return data;
+  }
+
+  // „+ Zur Liste" — aktuelle Eingabe pruefen, in die Liste legen, Block leeren.
+  function addToList() {
+    setError('');
+    const entry = buildEntry();
+    if (!entry) return;
+    setRows(prev => [...prev, entry]);
+    resetEntry();
+  }
+
+  // „Speichern" — gesammelte Liste + (falls angefangen) der aktuelle Block,
+  // jede Position einzeln an den Caller schicken.
+  function handleSave() {
+    setError('');
+    let all = [...rows];
+    // Wenn der Eingabe-Block angefangen wurde (Description gesetzt) → mitnehmen.
+    if (description.trim()) {
+      const entry = buildEntry();
+      if (!entry) return; // unvollstaendig → Fehler steht, abbrechen
+      all = [...all, entry];
+    }
+    if (all.length === 0) { setError('Mindestens eine Kostenposition hinzufuegen'); return; }
+    all.forEach(onSubmit);
     onClose();
   }
 
   const kindButtons: Array<{ value: Kind; label: string; emoji: string }> = [
-    ...(allowLabor ? [{ value: 'labor' as Kind, label: 'Labor', emoji: '🔨' }] : []),
-    { value: 'diamond', label: 'Diamond', emoji: '💎' },
-    { value: 'stone', label: 'Stone', emoji: '🔮' },
-    { value: 'gold', label: 'Gold piece', emoji: '🟡' },
+    ...(allowLabor ? [{ value: 'labor' as Kind, ...KIND_META.labor }] : []),
+    { value: 'diamond' as Kind, ...KIND_META.diamond },
+    { value: 'stone' as Kind, ...KIND_META.stone },
+    { value: 'gold' as Kind, ...KIND_META.gold },
   ];
 
   const isCarat = kind === 'diamond' || kind === 'stone';
+  const pendingCount = rows.length + (description.trim() ? 1 : 0);
 
   return (
     <Modal open={open} onClose={onClose} title="Add Material" width={520}>
@@ -341,6 +386,57 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
           )}
         </div>
 
+        {/* v0.6.x — „+ Zur Liste": aktuelle Eingabe sammeln, weitere erfassen */}
+        <button
+          type="button"
+          onClick={addToList}
+          className="cursor-pointer rounded transition-colors"
+          style={{
+            padding: '9px 12px', fontSize: 13, fontWeight: 500,
+            border: '1px dashed #0F0F10', background: 'transparent', color: '#0F0F10',
+          }}
+        >
+          + Position zur Liste hinzufügen
+        </button>
+
+        {/* Gesammelte Positionen */}
+        {rows.length > 0 && (
+          <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
+            <div style={{
+              padding: '8px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
+              fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase',
+            }}>
+              Erfasste Positionen ({rows.length})
+            </div>
+            {rows.map((r, i) => (
+              <div key={i} className="flex items-center gap-3" style={{
+                padding: '8px 12px', borderTop: i > 0 ? '1px solid #E5E9EE' : 'none',
+              }}>
+                <span style={{ fontSize: 14 }}>{KIND_META[r.materialKind].emoji}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {r.description}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#6B7280' }}>
+                    {KIND_META[r.materialKind].label}
+                    {r.supplierName ? ` · ${r.supplierName}` : ''}
+                  </div>
+                </div>
+                <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{round3(r.totalCost)} BHD</span>
+                <button
+                  type="button"
+                  onClick={() => setRows(prev => prev.filter((_, j) => j !== i))}
+                  className="cursor-pointer"
+                  title="Position entfernen"
+                  style={{ background: 'none', border: 'none', color: '#6B7280', padding: 2, display: 'flex' }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {error && (
           <div style={{
             padding: '8px 10px', background: 'rgba(220,38,38,0.06)',
@@ -351,7 +447,9 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
 
         <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleConfirm}>Add Material</Button>
+          <Button variant="primary" onClick={handleSave}>
+            {pendingCount > 0 ? `Speichern (${pendingCount})` : 'Speichern'}
+          </Button>
         </div>
       </div>
     </Modal>
