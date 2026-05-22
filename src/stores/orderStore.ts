@@ -146,6 +146,12 @@ function rowToOrder(row: Record<string, unknown>): Order {
     const raw = row.custom_meta as string | null;
     if (raw) customMeta = JSON.parse(raw) as CustomOrderMeta;
   } catch { /* */ }
+  // v0.6.7 — Custom-Order Produkt-Spec (Kategorie + Attribute + Foto …) als JSON.
+  let customProductSpec: Order['customProductSpec'];
+  try {
+    const raw = row.custom_product_spec as string | null;
+    if (raw) customProductSpec = JSON.parse(raw) as Order['customProductSpec'];
+  } catch { /* */ }
   return {
     id: row.id as string,
     orderNumber: row.order_number as string,
@@ -153,6 +159,7 @@ function rowToOrder(row: Record<string, unknown>): Order {
     // v0.2.1 — Order-Type Discriminator + Custom-Meta
     type: ((row.type as string) || 'normal') as OrderType,
     customMeta,
+    customProductSpec,
     goldsmithSupplierId: (row.goldsmith_supplier_id as string | null) || undefined,
     laborCost: (row.labor_cost as number) || 0,
     extraGoldValue: (row.extra_gold_value as number) || 0,
@@ -236,6 +243,8 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       ? deriveOrderType(data.lines)
       : ((data.type as OrderType) || 'normal');
     const customMetaJson = data.customMeta ? JSON.stringify(data.customMeta) : null;
+    // v0.6.7 — Custom-Order Produkt-Spec (NewProductModal-Output) serialisieren.
+    const customProductSpecJson = data.customProductSpec ? JSON.stringify(data.customProductSpec) : null;
     // v0.3.0 — initialer Line-Status aus dem Order-Initial-Status gemappt
     const initialLineStatus: OrderLineStatus =
       initialStatus === 'arrived' ? 'ARRIVED'
@@ -251,8 +260,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         payment_method, fully_paid,
         supplier_name, supplier_price, expected_margin, expected_delivery,
         status, notes, created_at, updated_at, created_by,
-        type, custom_meta, goldsmith_supplier_id, labor_cost, extra_gold_value)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        type, custom_meta, goldsmith_supplier_id, labor_cost, extra_gold_value,
+        custom_product_spec)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, orderNumber, data.customerId,
        data.categoryId || null, JSON.stringify(data.attributes || {}),
        data.condition || null, data.serialNumber || null, data.existingProductId || null,
@@ -265,7 +275,8 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
        agreedPrice && data.supplierPrice ? agreedPrice - data.supplierPrice : null,
        data.expectedDelivery || null, initialStatus, data.notes || null, now, now, userId,
        orderType, customMetaJson, data.goldsmithSupplierId || null,
-       data.laborCost || 0, data.extraGoldValue || 0]
+       data.laborCost || 0, data.extraGoldValue || 0,
+       customProductSpecJson]
     );
 
     // Order Lines persistieren falls übergeben — inkl. Tax-Scheme-Snapshot,

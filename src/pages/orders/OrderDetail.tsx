@@ -88,6 +88,10 @@ export function OrderDetail() {
   const [payMethod, setPayMethod] = useState('cash');
   const [payNote, setPayNote] = useState('');
   const [showInvoiceVatConfirm, setShowInvoiceVatConfirm] = useState(false);
+  // v0.6.7 — VAT-Picker auch fuer persistierte Multi-Line-Orders, damit der User
+  // beim Convert-to-Invoice pro Zeile umschalten kann (Custom-Quote eingeschlossen).
+  const [showPersistedVatConfirm, setShowPersistedVatConfirm] = useState(false);
+  const [pendingBillable, setPendingBillable] = useState<OrderLine[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   // 2026-05-16 — Pending action waiting for Number-Type selection.
   const [pendingNumberAction, setPendingNumberAction] = useState<((special: boolean) => Promise<void>) | null>(null);
@@ -475,12 +479,27 @@ export function OrderDetail() {
       return;
     }
 
-    // Plan §Order §Convert: Wenn alle billable Lines einen persistierten Tax-Scheme-
-    // Snapshot haben (Standard ab v0.1.15), uebernehmen wir den direkt — kein Modal.
+    // v0.6.7 — Guard: Custom-Stuecke duerfen nicht ohne erfasste Kosten gebucht
+    // werden. Ohne Kosten (customCostBasis = 0) wuerde der Convert die volle
+    // Quoted-Summe als Marge buchen → COGS = 0, Marge falsch, Lager-Wert falsch.
+    // Pflicht: erst Labor/Material/Gold ueber „Add Cost" erfassen.
+    const hasCustomLine = billable.some(l => l.materialKind === 'custom');
+    if (hasCustomLine && customCostBasis <= 0) {
+      alert(
+        'Custom-Stueck hat noch keine erfassten Kosten.\n\n' +
+        'Bitte erst die tatsaechlichen Kosten (Labor / Material / Gold) ueber „Add Cost" eintragen — ' +
+        'sonst wird die volle Quoted-Summe als Marge gebucht (COGS = 0).'
+      );
+      return;
+    }
+
+    // v0.6.7 — Auch bei persistierten Lines den VAT-Picker zeigen, damit der
+    // User pro Zeile (inkl. Custom-Quote) das Schema noch umstellen kann bevor
+    // die Rechnung erzeugt wird. Vorher: stilles 1:1 Durchreichen.
     const allPersisted = billable.every(l => !!l.taxScheme);
     if (allPersisted) {
-      // Number-Type-Dialog vor Convert.
-      setPendingNumberAction(() => async (special: boolean) => convertWithPersistedSchemes(billable, special));
+      setPendingBillable(billable);
+      setShowPersistedVatConfirm(true);
       return;
     }
     const gross = order.agreedPrice || totalPaid;
@@ -488,22 +507,30 @@ export function OrderDetail() {
 
     // Legacy-Order ohne Scheme-Snapshot (vor v0.1.15 angelegt) → Modal als Fallback.
     if (!linkedProduct) {
+      // v0.6.7 — Wenn der Custom-Order eine strukturierte Produkt-Spec mitbringt
+      // (Karte 3e via NewProductModal), das Convert-Produkt damit anlegen.
+      // Sonst Fallback auf die Legacy-Felder (requestedBrand/Model/...).
+      const spec = order.customProductSpec || {};
       const newProduct = createProduct({
-        categoryId: order.categoryId || '',
-        brand: order.requestedBrand || '',
-        name: order.requestedModel || order.requestedBrand || 'Custom Item',
-        condition: order.condition || '',
-        attributes: order.attributes || {},
+        categoryId: spec.categoryId || order.categoryId || '',
+        brand: spec.brand || order.requestedBrand || '',
+        name: spec.name || order.requestedModel || order.requestedBrand || 'Custom Item',
+        sku: spec.sku,
+        condition: spec.condition || order.condition || '',
+        attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || order.attributes || {},
+        images: spec.images || [],
+        scopeOfDelivery: spec.scopeOfDelivery || [],
         // v0.6.0 Model B — Kostenbasis = kapitalisierte Custom-Kosten (COGS),
         // sonst Supplier-Preis. Kein Purchase, kein Lager-Durchlauf.
         purchasePrice: customCostBasis > 0 ? customCostBasis : (order.supplierPrice || 0),
         plannedSalePrice: order.agreedPrice,
         // v0.6.0 — made-to-order, geht direkt auf die Invoice → nie 'in_stock'.
         stockStatus: 'reserved',
-        taxScheme: 'MARGIN',
+        taxScheme: spec.taxScheme || 'MARGIN',
         sourceType: 'OWN',
         supplierName: order.supplierName,
-        notes: order.requestedDetails ? `From order ${order.orderNumber}: ${order.requestedDetails}` : `From order ${order.orderNumber}`,
+        notes: spec.notes
+          || (order.requestedDetails ? `From order ${order.orderNumber}: ${order.requestedDetails}` : `From order ${order.orderNumber}`),
       });
       setPendingProduct(newProduct);
       updateOrder(id, { productId: newProduct.id });
@@ -516,7 +543,11 @@ export function OrderDetail() {
   // (siehe OrderCreate.unitNetFromGross), daher: lineNet = unitPrice × qty,
   // dann vatEngine.calculateNet → vat + gross. Keine Doppelbesteuerung möglich,
   // weil wir nicht erneut auf einen schon-gross-Wert rechnen.
-  async function convertWithPersistedSchemes(orderLines: OrderLine[], specialMark: boolean = false) {
+  async function convertWithPersistedSchemes(
+    orderLines: OrderLine[],
+    specialMark: boolean = false,
+    perLineSchemes?: Record<string, TaxScheme>,
+  ) {
     if (!id || !order) return;
 
     // v0.3.0 — defensiv: nur customer-facing Lines invoicen (cost-only NIE).
@@ -532,6 +563,9 @@ export function OrderDetail() {
     }> = [];
 
     for (const ol of billableLines) {
+      // v0.6.7 — Schema aus dem ConfirmTaxSchemeModal-Override, sonst persistiert.
+      const scheme = (perLineSchemes?.[ol.id] as TaxScheme | undefined) || (ol.taxScheme as TaxScheme);
+      const rate = scheme === 'ZERO' ? 0 : 10;
       let prod = ol.productId ? products.find(p => p.id === ol.productId) : undefined;
       // Für freitext-Lines ohne Produkt eines auto-erzeugen — analog zum bisherigen
       // Single-Line-Auto-Create, nur jetzt pro Line.
@@ -540,29 +574,43 @@ export function OrderDetail() {
         // seine Kostenbasis (COGS) = Summe der internen Kostenpositionen der
         // Order. Kein Purchase, kein Lager-Durchlauf ('reserved' statt 'in_stock').
         const isCustomPiece = ol.materialKind === 'custom';
+        // v0.6.7 — bei Custom-Quote die strukturierte Produkt-Spec nutzen wenn da.
+        const spec = isCustomPiece ? (order.customProductSpec || {}) : {};
         prod = createProduct({
-          categoryId: order.categoryId || '',
-          brand: order.requestedBrand || '',
-          name: ol.description || order.requestedModel || 'Custom Item',
-          condition: order.condition || '',
-          attributes: order.attributes || {},
+          categoryId: spec.categoryId || order.categoryId || '',
+          brand: spec.brand || order.requestedBrand || '',
+          name: spec.name || ol.description || order.requestedModel || 'Custom Item',
+          sku: spec.sku,
+          condition: spec.condition || order.condition || '',
+          attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || order.attributes || {},
+          images: spec.images || [],
+          scopeOfDelivery: spec.scopeOfDelivery || [],
           purchasePrice: isCustomPiece ? customCostBasis : 0,
           plannedSalePrice: ol.unitPrice * Math.max(1, ol.quantity),
           stockStatus: 'reserved',
-          taxScheme: ol.taxScheme!,
+          taxScheme: scheme,
           sourceType: 'OWN',
-          notes: `From order ${order.orderNumber}`,
+          notes: spec.notes || `From order ${order.orderNumber}`,
         });
       }
-      const scheme = ol.taxScheme!;
-      const rate = ol.vatRate ?? (scheme === 'ZERO' ? 0 : 10);
       const qty = Math.max(1, ol.quantity);
-      const lineNet = ol.unitPrice * qty;
+      // v0.6.7 — Custom-Quote-Lines speichern BRUTTO (Quoted Price = Endpreis).
+      // Bei VAT_10 auf Custom: lineNet aus brutto decomposen, sonst rechnet
+      // calculateNet 10% on-top und der Kunde wuerde Quoted * 1.10 zahlen.
+      // Normal-Produkt-Lines speichern Netto (siehe OrderCreate.unitNetFromGross),
+      // dort lineNet = unitPrice * qty wie bisher.
+      const grossPerLine = ol.unitPrice * qty;
+      let lineNet: number;
+      if (ol.materialKind === 'custom' && scheme === 'VAT_10') {
+        lineNet = grossPerLine / 1.10;
+      } else {
+        lineNet = grossPerLine;
+      }
       const calc = vatEngine.calculateNet(lineNet, (prod.purchasePrice || 0) * qty, scheme, rate);
       invoiceLineInputs.push({
         productId: prod.id,
         quantity: qty,
-        unitPrice: ol.unitPrice,
+        unitPrice: lineNet / qty,
         purchasePrice: prod.purchasePrice || 0,
         taxScheme: scheme,
         vatRate: rate,
@@ -1629,6 +1677,25 @@ export function OrderDetail() {
         onCancel={() => setShowInvoiceVatConfirm(false)}
         onConfirm={handleConfirmFinalInvoice}
         title="Create Final Invoice"
+      />
+
+      {/* v0.6.7 — VAT-Picker fuer persistierte Multi-Line-Orders (inkl. Custom-Quote). */}
+      <ConfirmTaxSchemeModal
+        open={showPersistedVatConfirm}
+        lines={pendingBillable.map(l => ({
+          id: l.id,
+          label: l.description || (l.materialKind === 'custom' ? 'Custom Item' : 'Item'),
+          currentScheme: (l.taxScheme as TaxScheme) || 'MARGIN',
+        }))}
+        onCancel={() => { setShowPersistedVatConfirm(false); setPendingBillable([]); }}
+        onConfirm={(perLine) => {
+          const billable = pendingBillable;
+          setShowPersistedVatConfirm(false);
+          setPendingBillable([]);
+          setPendingNumberAction(() => async (special: boolean) => convertWithPersistedSchemes(billable, special, perLine));
+        }}
+        title="VAT-Schema bestaetigen"
+        confirmLabel="Weiter"
       />
 
       <NumberTypeDialog

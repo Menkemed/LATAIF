@@ -57,6 +57,25 @@ export function SupplierDetail() {
   const goldOwedSummary = useMemo(() => id ? getGoldOwedBySupplier(id) : [], [id, getGoldOwedBySupplier, goldPayables]);
   const supplierGoldPayables = useMemo(() => id ? getGoldPayablesBySupplier(id) : [], [id, getGoldPayablesBySupplier, goldPayables]);
 
+  // Quell-Beleg (ORD-… / REP-…) je Gold-Payable — fuer einen ehrlichen Link in
+  // der GOLD-OWED-Liste. Eine Gold-Schuld kann aus einem Repair ODER einer
+  // (Custom-)Order stammen; vorher zeigte die Spalte nur Repairs als UUID-Fragment.
+  const goldSourceMap = useMemo(() => {
+    const m: Record<string, { num: string; path: string }> = {};
+    for (const gp of supplierGoldPayables) {
+      try {
+        if (gp.sourceOrderId) {
+          const r = query(`SELECT order_number FROM orders WHERE id = ?`, [gp.sourceOrderId]);
+          if (r.length > 0) m[gp.id] = { num: r[0].order_number as string, path: `/orders/${gp.sourceOrderId}` };
+        } else if (gp.sourceRepairId) {
+          const r = query(`SELECT repair_number FROM repairs WHERE id = ?`, [gp.sourceRepairId]);
+          if (r.length > 0) m[gp.id] = { num: r[0].repair_number as string, path: `/repairs/${gp.sourceRepairId}` };
+        }
+      } catch { /* */ }
+    }
+    return m;
+  }, [supplierGoldPayables]);
+
   const supplier = useMemo(() => suppliers.find(s => s.id === id), [suppliers, id]);
 
   useEffect(() => {
@@ -118,13 +137,19 @@ export function SupplierDetail() {
   // die OUTSTANDING-KPI sie laengst mitzaehlt (getLedger summiert ALLE expenses
   // des Suppliers, modul-unabhaengig). Jetzt deckt sich Liste wieder mit KPI.
   const workshopExpenses = useMemo(() => {
-    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; expenseDate: string; status: string; module: string; linkId?: string }>;
+    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; expenseDate: string; status: string; module: string; linkId?: string; sourceNumber?: string }>;
     try {
+      // LEFT JOIN holt die echte Beleg-Nummer der Quelle (ORD-… / REP-…), damit
+      // die SOURCE-Spalte ein ehrlicher Link ist: angezeigte Nummer == Ziel.
       const rows = query(
-        `SELECT id, expense_number, description, amount, paid_amount, expense_date, status, related_module, related_entity_id
-         FROM expenses
-         WHERE supplier_id = ? AND related_module IN ('repair', 'order') AND status != 'CANCELLED'
-         ORDER BY expense_date DESC`,
+        `SELECT e.id, e.expense_number, e.description, e.amount, e.paid_amount, e.expense_date, e.status,
+                e.related_module, e.related_entity_id,
+                o.order_number AS order_number, r.repair_number AS repair_number
+           FROM expenses e
+           LEFT JOIN orders  o ON o.id = e.related_entity_id AND e.related_module = 'order'
+           LEFT JOIN repairs r ON r.id = e.related_entity_id AND e.related_module = 'repair'
+          WHERE e.supplier_id = ? AND e.related_module IN ('repair', 'order') AND e.status != 'CANCELLED'
+          ORDER BY e.expense_date DESC`,
         [id]
       );
       return rows.map(r => ({
@@ -137,6 +162,7 @@ export function SupplierDetail() {
         status: r.status as string,
         module: (r.related_module as string) || 'repair',
         linkId: (r.related_entity_id as string) || undefined,
+        sourceNumber: (r.order_number as string) || (r.repair_number as string) || undefined,
       }));
     } catch { return []; }
   }, [id, purchases]);
@@ -316,14 +342,21 @@ export function SupplierDetail() {
                 <span className="text-overline">STATUS</span>
                 {workshopExpenses.map(e => {
                   const remaining = Math.max(0, e.amount - e.paidAmount);
-                  const target = e.linkId ? (e.module === 'order' ? `/orders/${e.linkId}` : `/repairs/${e.linkId}`) : null;
+                  // Link nur wenn die Quelle noch existiert (JOIN lieferte eine Nummer).
+                  const target = (e.linkId && e.sourceNumber)
+                    ? (e.module === 'order' ? `/orders/${e.linkId}` : `/repairs/${e.linkId}`)
+                    : null;
                   return (
-                    <div key={e.id} style={{ display: 'contents' }}
-                      onClick={() => target && navigate(target)}
-                    >
-                      <span className="font-mono" style={{ fontSize: 12, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: target ? 'pointer' : 'default' }}>{e.expenseNumber}</span>
+                    <div key={e.id} style={{ display: 'contents' }}>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{e.expenseNumber}</span>
                       <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description}</span>
-                      <span style={{ fontSize: 11, color: '#6B7280', padding: '8px 0', borderTop: '1px solid #E5E9EE', textTransform: 'capitalize' }}>{e.module}</span>
+                      <span
+                        className="font-mono"
+                        onClick={() => target && navigate(target)}
+                        style={{ fontSize: 11, color: target ? '#3D7FFF' : '#9CA3AF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: target ? 'pointer' : 'default' }}
+                      >
+                        {e.sourceNumber || (e.module === 'order' ? 'Order' : 'Repair')}
+                      </span>
                       <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(e.expenseDate)}</span>
                       <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.amount}/></span>
                       <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.paidAmount}/></span>
@@ -371,7 +404,7 @@ export function SupplierDetail() {
               ) : (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 0.9fr 0.8fr 1fr 1fr 1.4fr', gap: 12, fontSize: 12 }}>
                   <span className="text-overline">DATE</span>
-                  <span className="text-overline">REPAIR</span>
+                  <span className="text-overline">SOURCE</span>
                   <span className="text-overline">KARAT</span>
                   <span className="text-overline" style={{ textAlign: 'right' }}>WEIGHT (g)</span>
                   <span className="text-overline" style={{ textAlign: 'right' }}>SETTLED (g)</span>
@@ -381,10 +414,15 @@ export function SupplierDetail() {
                     return (
                       <div key={gp.id} style={{ display: 'contents' }}>
                         <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(gp.createdAt)}</span>
-                        <span className="font-mono" style={{ fontSize: 11, color: '#3D7FFF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: gp.sourceRepairId ? 'pointer' : 'default' }}
-                          onClick={() => gp.sourceRepairId && navigate(`/repairs/${gp.sourceRepairId}`)}>
-                          {gp.sourceRepairId ? gp.sourceRepairId.slice(0, 8) : '—'}
-                        </span>
+                        {(() => {
+                          const src = goldSourceMap[gp.id];
+                          return (
+                            <span className="font-mono" style={{ fontSize: 11, color: src ? '#3D7FFF' : '#9CA3AF', padding: '8px 0', borderTop: '1px solid #E5E9EE', cursor: src ? 'pointer' : 'default' }}
+                              onClick={() => src && navigate(src.path)}>
+                              {src ? src.num : '—'}
+                            </span>
+                          );
+                        })()}
                         <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{gp.karat}</span>
                         <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{gp.weightGrams.toFixed(3)}</span>
                         <span className="font-mono" style={{ fontSize: 12, color: gp.status === 'FULFILLED' ? '#16A34A' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>

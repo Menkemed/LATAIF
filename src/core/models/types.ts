@@ -919,6 +919,11 @@ export interface Order {
   // Conditional UI Cards + custom_meta Daten + commitOrderLineExpenses Trigger.
   type?: OrderType;
   customMeta?: CustomOrderMeta;
+  // v0.6.7 — Strukturierte Produkt-Spec fuer Custom-Orders (Karte 3e). Wird ueber
+  // das NewProductModal erfasst und beim Convert in `createProduct` umgesetzt,
+  // damit das fertige Stueck in der Collection eine Kategorie + Attribute + Foto
+  // bekommt statt nur einen Freitext.
+  customProductSpec?: Partial<Product>;
   // Promoted Custom-Fields (queryable / report-friendly statt nur JSON)
   goldsmithSupplierId?: UUID;
   laborCost?: number;

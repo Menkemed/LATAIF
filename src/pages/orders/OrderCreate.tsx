@@ -115,6 +115,14 @@ export function OrderCreate() {
   // v0.5.0 — Quote-first: der approx. Preis den der Kunde akzeptiert. Kosten
   // (Labor/Diamond) sind optional und koennen spaeter auf der Detail-Seite rein.
   const [quotedPrice, setQuotedPrice] = useState('');
+  // v0.6.7 — Strukturierte Produkt-Spec fuer das fertige Stueck (Kategorie +
+  // Attribute + Foto). Wird via NewProductModal erfasst und auf der Order
+  // persistiert; Convert in OrderDetail erzeugt damit das Collection-Produkt.
+  const [customProductSpec, setCustomProductSpec] = useState<Partial<Product> | undefined>(undefined);
+  const [showCustomProductModal, setShowCustomProductModal] = useState(false);
+  // v0.6.7 — VAT-Schema wird NICHT mehr beim Order-Anlegen gewaehlt; Quote bleibt
+  // immer brutto (= was der Kunde zahlt). Die finale Wahl Margin/VAT_10/Zero passiert
+  // beim Convert-to-Invoice ueber den ConfirmTaxSchemeModal (analog Normal-Orders).
   // Diamond/Stone Materials werden lokal als Liste gefuehrt — beim createOrder
   // werden sie als order_lines mit material_kind/material_details persistiert.
   const [materialLines, setMaterialLines] = useState<Array<MaterialLineInput & { _id: string }>>([]);
@@ -177,8 +185,9 @@ export function OrderCreate() {
     };
   });
 
-  // v0.5.0 — Custom/Mixed: der Quoted Price (approx.) ist eine MARGIN-Position
-  // (gross == net) und fliesst direkt ins Pricing-Total ein.
+  // v0.5.0 — Custom/Mixed: der Quoted Price (approx.) wird als MARGIN-Position
+  // behandelt (gross == net, kein on-top VAT). Die endgueltige VAT-Behandlung
+  // entscheidet der User beim Convert-to-Invoice (ConfirmTaxSchemeModal).
   const quoteGross = (orderType === 'custom' || orderType === 'mixed')
     ? (parseFloat(quotedPrice) || 0)
     : 0;
@@ -291,7 +300,12 @@ export function OrderCreate() {
     if (wantsCustom && !wantsProduct) {
       // reiner Custom-Order
       if (quote <= 0) return 'Bitte einen Quoted Price (approx.) angeben';
-      if (!finalProductDescription.trim()) return 'Bitte Final-Product-Description angeben';
+      // v0.6.7 — Pflicht: strukturierte Produkt-Spec (Kategorie + Attribute) — sonst
+      // landet das Stueck in der Collection ohne Kategorie & nicht filterbar.
+      if (!customProductSpec?.categoryId) return 'Bitte Final Product definieren (Kategorie + Attribute + Brand/Name).';
+      if (!customProductSpec?.brand?.trim() || !customProductSpec?.name?.trim()) {
+        return 'Bitte Brand und Name im Final-Product-Modal angeben.';
+      }
       return null;
     }
     if (wantsProduct && !wantsCustom) {
@@ -308,8 +322,11 @@ export function OrderCreate() {
     if (lines.filter(l => l.productId || l.newProduct).some(l => l.quantity <= 0)) {
       return 'Jeder Artikel braucht eine Menge > 0';
     }
-    if (quote > 0 && !finalProductDescription.trim()) {
-      return 'Bitte Final-Product-Description fuer den Custom-Teil angeben';
+    if (quote > 0 && !customProductSpec?.categoryId) {
+      return 'Custom-Teil im Mixed-Order: bitte Final Product definieren (Kategorie + Attribute).';
+    }
+    if (quote > 0 && (!customProductSpec?.brand?.trim() || !customProductSpec?.name?.trim())) {
+      return 'Custom-Teil im Mixed-Order: Brand und Name im Final-Product-Modal angeben.';
     }
     return null;
   }
@@ -377,10 +394,17 @@ export function OrderCreate() {
     const customLines: UnifiedLine[] = [];
 
     // Quoted-Price-Line — die einzige kundenseitige Position des Custom-Teils.
+    // v0.6.7 — Quote IMMER brutto gespeichert (= was der Kunde zahlt). Default-
+    // Schema MARGIN; beim Convert-to-Invoice kann der User pro Zeile umschalten
+    // (ConfirmTaxSchemeModal). Bei VAT_10-Wahl im Convert wird die Quote-Line
+    // (materialKind 'custom') aus dem Brutto decomposed — Quote bleibt Endpreis.
     const quote = parseFloat(quotedPrice) || 0;
     if (quote > 0) {
+      const desc = (customProductSpec?.brand && customProductSpec?.name)
+        ? `${customProductSpec.brand} ${customProductSpec.name}`.trim()
+        : (finalProductDescription.trim() || 'Custom Order');
       customLines.push({
-        description: finalProductDescription.trim() || 'Custom Order',
+        description: desc,
         quantity: 1,
         unitPrice: quote,
         taxScheme: 'MARGIN',
@@ -466,40 +490,50 @@ export function OrderCreate() {
     const customLines = wantsCustom ? collectCustomLines() : [];
     const allLines: UnifiedLine[] = [...productLines, ...customLines];
 
-    // Total = SUM aller customer-facing Lines (cost-only exkludiert)
-    const grandTotal = allLines
+    // v0.6.7 — Custom-Quote ist immer BRUTTO (was der Kunde zahlt). Bei VAT_10
+    // ist die Zeile selbst netto gespeichert, deshalb hier separat den Brutto-
+    // Quote dazurechnen statt aus den Line-unitPrice-Summen.
+    const customBruttoTotal = wantsCustom ? (parseFloat(quotedPrice) || 0) : 0;
+    const productLinesTotal = productLines
       .filter(l => l.isCustomerFacing !== false)
       .reduce((s, l) => s + (l.unitPrice * l.quantity), 0);
+    const grandTotal = productLinesTotal + customBruttoTotal;
 
     const first = lines[0];
     const product = first?.productId ? products.find(p => p.id === first.productId) : undefined;
     const customMeta = wantsCustom ? collectCustomMeta() : undefined;
     const customGoldNum = parseFloat(customerGoldGrams) || 0;
 
-    // Hero-Felder: bei reinem Normal aus erstem Produkt, sonst neutral
+    // v0.6.7 — Hero-Felder bei Custom-Order aus der Produkt-Spec (Brand/Name),
+    // damit die Order-Karte das tatsaechliche Stueck zeigt statt "Custom Order".
     const heroBrand = wantsCustom && !wantsProduct
-      ? 'Custom Order'
+      ? (customProductSpec?.brand?.trim() || 'Custom Order')
       : (product?.brand || first?.description.split(' ')[0] || (orderType === 'mixed' ? 'Mixed Order' : ''));
     const heroModel = wantsCustom && !wantsProduct
-      ? (finalProductDescription.trim() || 'Sonderanfertigung')
+      ? (customProductSpec?.name?.trim() || finalProductDescription.trim() || 'Sonderanfertigung')
       : (product?.name || first?.description || (orderType === 'mixed' ? `${allLines.length} positions` : ''));
 
     return {
       customerId,
       lines: allLines,
       customMeta,
+      // v0.6.7 — Strukturierte Produkt-Spec (Kategorie + Attribute + Foto) fuer
+      // den Convert; Persistierung in orders.custom_product_spec (JSON).
+      customProductSpec: wantsCustom ? customProductSpec : undefined,
       goldsmithSupplierId: goldsmithSupplierId || undefined,
       laborCost: parseFloat(laborCost) || 0,
       extraGoldValue: parseFloat(extraGoldCost) || 0,
       requestedBrand: heroBrand,
       requestedModel: heroModel,
-      requestedReference: !wantsCustom ? product?.sku : undefined,
+      requestedReference: !wantsCustom ? product?.sku : customProductSpec?.sku,
       requestedDetails: customGoldNum > 0
         ? `Customer-Gold ${customGoldNum}g ${customerGoldKarat}`
         : (allLines.length > 1 ? `${allLines.length} positions` : undefined),
-      categoryId: !wantsCustom ? product?.categoryId : undefined,
-      attributes: !wantsCustom ? product?.attributes : undefined,
-      condition: !wantsCustom ? product?.condition : undefined,
+      // v0.6.7 — Custom: Kategorie + Attribute + Condition aus der Produkt-Spec
+      // (Quelle der Wahrheit fuers Convert-Produkt).
+      categoryId: wantsCustom ? customProductSpec?.categoryId : product?.categoryId,
+      attributes: wantsCustom ? customProductSpec?.attributes : product?.attributes,
+      condition: wantsCustom ? customProductSpec?.condition : product?.condition,
       existingProductId: !wantsCustom ? product?.id : undefined,
       agreedPrice: grandTotal,
       taxAmount: totalVat,
@@ -853,14 +887,77 @@ export function OrderCreate() {
             </div>
             )}
 
-            {/* Final Product Description — immer offen (Quoted Price ist Pflicht) */}
+            {/* Final Product — immer offen (Quoted Price + Produkt-Spec sind Pflicht) */}
             <div style={{ marginTop: 16 }}>
               <Card>
                 <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3e · FINAL PRODUCT / OUTPUT + QUOTED PRICE</span>
+
+                {/* v0.6.7 — Produkt-Spec via NewProductModal (Kategorie + Attribute + Foto). */}
+                <div style={{ marginBottom: 14 }}>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>FINAL PRODUCT (KATEGORIE + ATTRIBUTE)</span>
+                  {customProductSpec?.categoryId ? (
+                    (() => {
+                      const cat = categories.find(c => c.id === customProductSpec.categoryId);
+                      const attrs = customProductSpec.attributes || {};
+                      const attrEntries = Object.entries(attrs)
+                        .filter(([, v]) => v != null && String(v).trim() !== '')
+                        .slice(0, 3);
+                      const thumb = (customProductSpec.images || [])[0];
+                      return (
+                        <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start',
+                                      padding: 12, border: '1px solid #E5E9EE', borderRadius: 8 }}>
+                          {thumb && (
+                            <img src={thumb} alt=""
+                              style={{ width: 60, height: 60, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />
+                          )}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {cat && (
+                              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6,
+                                            padding: '2px 8px', borderRadius: 999,
+                                            background: (cat.color || '#0F0F10') + '14',
+                                            color: cat.color || '#0F0F10', fontSize: 11, marginBottom: 6 }}>
+                                <span className="rounded-full" style={{ width: 6, height: 6, background: cat.color || '#0F0F10' }} />
+                                {cat.name}
+                              </div>
+                            )}
+                            <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>
+                              {customProductSpec.brand || ''} {customProductSpec.name || ''}
+                            </div>
+                            {attrEntries.length > 0 && (
+                              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6 }}>
+                                {attrEntries.map(([k, v]) => (
+                                  <span key={k} style={{ fontSize: 11, color: '#6B7280' }}>
+                                    <span style={{ textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: 4, color: '#9CA3AF' }}>{k}</span>
+                                    {String(v)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <button type="button" onClick={() => setShowCustomProductModal(true)}
+                            className="cursor-pointer"
+                            style={{ background: 'none', border: '1px solid #D5D9DE', borderRadius: 6,
+                                     padding: '6px 12px', fontSize: 12, color: '#0F0F10' }}>
+                            Ändern…
+                          </button>
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <button type="button" onClick={() => setShowCustomProductModal(true)}
+                      className="cursor-pointer"
+                      style={{ background: 'rgba(15,15,16,0.04)', border: '1px dashed #D5D9DE',
+                               borderRadius: 8, padding: '14px 18px', fontSize: 13, color: '#0F0F10',
+                               width: '100%', textAlign: 'left' }}>
+                      + Final Product definieren (Kategorie + Attribute + Foto)
+                    </button>
+                  )}
+                </div>
+
                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
                   <Input
-                    label="FINAL PRODUCT DESCRIPTION"
-                    placeholder="e.g. Custom 22K wedding ring with 0.5ct center diamond"
+                    label="BELEG-BEZEICHNUNG (OPTIONAL)"
+                    placeholder="Erscheint auf Order-Beleg & Invoice — default = Brand + Name"
                     value={finalProductDescription}
                     onChange={e => setFinalProductDescription(e.target.value)}
                   />
@@ -1264,6 +1361,25 @@ export function OrderCreate() {
         submitLabel="Artikel uebernehmen"
         hint={<>Das Produkt wird mit der Order angelegt. Einkaufspreis + Lagerbestand kommen spaeter beim Wareneingang (Purchase).</>}
         hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true }}
+      />
+
+      {/* v0.6.7 — Custom-Order Karte 3e: Final-Product-Spec (Kategorie + Attribute). */}
+      <NewProductModal
+        open={showCustomProductModal}
+        onClose={() => setShowCustomProductModal(false)}
+        initial={customProductSpec}
+        title="Final Product — Kategorie & Attribute"
+        submitLabel="Spec uebernehmen"
+        hint={<>Definiere das fertige Custom-Stueck — Kategorie + Attribute + Foto. Beim Convert wird daraus das Produkt in der Collection. Preis & Lager bleiben Sache der Order/Invoice.</>}
+        hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true, storageLocation: true }}
+        onSubmit={(spec) => {
+          setCustomProductSpec(spec);
+          if (!finalProductDescription.trim()) {
+            const auto = `${spec.brand || ''} ${spec.name || ''}`.trim();
+            if (auto) setFinalProductDescription(auto);
+          }
+          setShowCustomProductModal(false);
+        }}
       />
     </div>
   );

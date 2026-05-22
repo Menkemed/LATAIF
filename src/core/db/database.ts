@@ -1543,6 +1543,15 @@ function runMigrations(database: Database): void {
     // Gramm-Schuld beim Loeschen der Kostenzeile automatisch mitentfernt wird.
     `ALTER TABLE gold_payables ADD COLUMN source_order_line_id TEXT REFERENCES order_lines(id) ON DELETE SET NULL`,
     `CREATE INDEX IF NOT EXISTS idx_gold_payables_source_order_line ON gold_payables(source_order_line_id)`,
+    // v0.6.7 — Custom-Order Produkt-Spec (Kategorie + Attribute + Brand/Name +
+    // Foto + Condition + TaxScheme + Notes) als JSON. Convert in OrderDetail
+    // deserialisiert sie und erzeugt das Produkt damit, statt nur Freitext.
+    `ALTER TABLE orders ADD COLUMN custom_product_spec TEXT`,
+    // v0.6.7 — Gold-Diamond Jewellery: 'New' zur Condition-Liste hinzufuegen
+    // (frisch goldgeschmiedete Custom-Stuecke + Neueinkaeufe). Idempotent durch
+    // NOT-LIKE-Guard — laeuft jeden Startup, matched aber nichts wenn schon drin.
+    `UPDATE categories SET condition_options = '["New","Pre-Owned","Vintage"]'
+       WHERE id = 'cat-gold-jewelry' AND condition_options NOT LIKE '%New%'`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

@@ -168,7 +168,9 @@ export const DEFAULT_CATEGORIES: Omit<Category, 'createdAt'>[] = [
     color: '#C6A36D',
     sortOrder: 2,
     active: true,
-    conditionOptions: ['Pre-Owned', 'Vintage'],
+    // v0.6.7 — 'New' ergaenzt, damit Custom-Orders (frisch goldgeschmiedet) und
+    // Neueinkaeufe eine passende Condition haben.
+    conditionOptions: ['New', 'Pre-Owned', 'Vintage'],
     scopeOptions: ['Box', 'Certificate', 'Pouch'],
     attributes: GOLD_JEWELRY_ATTRIBUTES,
   },
