@@ -736,8 +736,8 @@ export function ConsignmentList() {
               border: '1px solid #E5E9EE', color: '#6B7280', fontSize: 12, lineHeight: 1.5,
               marginBottom: 16,
             }}>
-              <strong style={{ color: '#0F0F10' }}>Customer-owned item:</strong> Wird neu erfasst, gehört dem
-              Consignor bis zum Verkauf. Kein Eigeninventar.
+              <strong style={{ color: '#0F0F10' }}>Customer-owned item:</strong> Newly recorded, belongs to the
+              consignor until sold. Not own inventory.
             </div>
 
             {/* Kategorie */}
@@ -884,7 +884,7 @@ export function ConsignmentList() {
                   <div>
                     <span className="text-overline">AI IDENTIFY &amp; RESEARCH</span>
                     <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
-                      Füllt Brand, Name, Kategorie-Felder, Description automatisch — alles editierbar.
+                      Auto-fills brand, name, category fields, description — everything editable.
                     </div>
                   </div>
                   <button disabled={aiBusy}

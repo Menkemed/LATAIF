@@ -376,7 +376,7 @@ export function AgentList() {
             </div>
           </div>
 
-          <Input required label="OUR PRICE (BHD)" type="number" placeholder="Vereinbarter Betrag, den wir bekommen möchten"
+          <Input required label="OUR PRICE (BHD)" type="number" placeholder="Agreed amount we want to receive"
             value={transferForm.ourPrice || ''}
             onChange={e => setTransferForm({ ...transferForm, ourPrice: Number(e.target.value) || undefined })} />
 
@@ -457,14 +457,14 @@ export function AgentList() {
           </div>
           <div>
             <SearchSelect
-              label="LINKED CUSTOMER (für Convert-to-Invoice)"
+              label="LINKED CUSTOMER (for Convert-to-Invoice)"
               placeholder="Pick existing customer (optional)…"
               options={customerOptions}
               value={editAgentForm.customerId || ''}
               onChange={cid => setEditAgentForm({ ...editAgentForm, customerId: cid || undefined })}
             />
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-              Wird beim ersten Convert automatisch gesetzt. Hier nur ändern wenn nötig.
+              Set automatically on the first Convert. Change here only if needed.
             </p>
           </div>
           <div>

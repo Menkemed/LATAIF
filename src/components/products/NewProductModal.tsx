@@ -319,7 +319,7 @@ export function NewProductModal({
               <div>
                 <span className="text-overline">AI IDENTIFY &amp; RESEARCH</span>
                 <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
-                  Füllt Brand, Name, Kategorie-Felder und Description automatisch — alles bleibt editierbar.
+                  Auto-fills brand, name, category fields and description — everything stays editable.
                 </div>
               </div>
               <button disabled={aiBusy}

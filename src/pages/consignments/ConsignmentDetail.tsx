@@ -872,8 +872,8 @@ export function ConsignmentDetail() {
       {/* ── Post-Sale Return Modal (Plan §Commission §13) ── */}
       <Modal open={postSaleReturnModal} onClose={() => setPostSaleReturnModal(false)} title="Post-Sale Return" width={500}>
         <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 16, lineHeight: 1.5 }}>
-          Plan §Commission §13: Der Endkunde bringt <strong style={{ color: '#0F0F10' }}>{productLabel}</strong> zurück.
-          Wähle die Disposition:
+          Plan §Commission §13: The end customer is returning <strong style={{ color: '#0F0F10' }}>{productLabel}</strong>.
+          Pick the disposition:
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
           <button onClick={() => setPostSaleDisposition('RETURN_TO_OWNER')}
@@ -884,7 +884,7 @@ export function ConsignmentDetail() {
               background: postSaleDisposition === 'RETURN_TO_OWNER' ? 'rgba(15,15,16,0.06)' : 'transparent',
             }}>
             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>A · Return to Owner</div>
-            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Ware verlässt dein System. Produkt = RETURNED, Consignment = RETURNED_TO_OWNER.</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Goods leave your system. Product = RETURNED, Consignment = RETURNED_TO_OWNER.</div>
           </button>
           <button onClick={() => setPostSaleDisposition('KEEP_AS_OWN')}
             className="cursor-pointer text-left"
@@ -894,7 +894,7 @@ export function ConsignmentDetail() {
               background: postSaleDisposition === 'KEEP_AS_OWN' ? 'rgba(15,15,16,0.06)' : 'transparent',
             }}>
             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>B · Keep as Own</div>
-            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Bleibt bei dir. source_type → OWN, purchase_price = sale_price (<Bhd v={consignment.salePrice || 0}/> BHD).</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Stays with you. source_type → OWN, purchase_price = sale_price (<Bhd v={consignment.salePrice || 0}/> BHD).</div>
           </button>
         </div>
         <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12, color: '#4B5563', marginBottom: 16 }}>

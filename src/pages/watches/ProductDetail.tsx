@@ -555,7 +555,7 @@ export function ProductDetail() {
                     <div>
                       <span className="text-overline">AI IDENTIFY &amp; RESEARCH</span>
                       <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
-                        Füllt Brand, Name, Kategorie-Felder, Condition, Marktwert aus dem Foto oder Hints (Brand/Name/SKU).
+                        Fills brand, name, category fields, condition, market value from the photo or hints (brand/name/SKU).
                       </div>
                     </div>
                     <button
@@ -686,7 +686,7 @@ export function ProductDetail() {
                   <Input label="NAME / MODEL *" value={form.name || ''} error={errors.name} onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
                 </div>
                 <SkuInput value={form.sku || ''} onChange={v => { setForm({ ...form, sku: v }); if (errors.sku) setErrors({ ...errors, sku: '' }); }} excludeProductId={id} />
-                <Input label="QUANTITY (STÜCKZAHL)" type="number" min="0"
+                <Input label="QUANTITY (UNITS)" type="number" min="0"
                   value={form.quantity ?? 1}
                   onChange={e => setForm({ ...form, quantity: Math.max(0, Number(e.target.value) || 0) })} />
                 <div>

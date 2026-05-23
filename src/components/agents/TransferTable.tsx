@@ -413,11 +413,11 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                     </button>
                     {canUndo && (
                       <button onClick={() => {
-                        if (!window.confirm(`Convert rückgängig machen? Die Invoice wird gelöscht und der Transfer wieder auf "Sold" gesetzt.`)) return;
+                        if (!window.confirm(`Undo convert? The invoice will be deleted and the transfer reset to "Sold".`)) return;
                         try { undoTransferInvoiceConvert(t.id); }
                         catch (err) { alert(err instanceof Error ? err.message : String(err)); }
                       }}
-                        title="Convert rückgängig machen (nur möglich solange Invoice unbezahlt)"
+                        title="Undo convert (only possible while invoice is unpaid)"
                         className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', borderRadius: 4, background: 'none' }}>
                         Undo
                       </button>
@@ -457,7 +457,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             );
           })()}
           <Input required label="ACTUAL SALE PRICE (BHD)" type="number"
-            placeholder="Tatsächlich verkauft — darf abweichen"
+            placeholder="Actually sold — may differ"
             value={soldPrice || ''}
             onChange={e => setSoldPrice(Number(e.target.value))} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
@@ -496,8 +496,8 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                   </div>
                 </div>
                 <p style={{ fontSize: 12, color: '#6B7280' }}>
-                  Diese Forderung an den Agent wird als reguläre Invoice angelegt.
-                  Wähle einen bestehenden Customer oder lass automatisch einen aus den Agent-Daten anlegen.
+                  This receivable from the agent is created as a regular invoice.
+                  Pick an existing customer or have one auto-created from the agent's data.
                 </p>
                 <div>
                   <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>BILL TO</span>
@@ -625,7 +625,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
 
                 <p style={{ fontSize: 12, color: '#6B7280' }}>
                   Diese {selectedTransfers.length} Items werden zu EINER Multi-Line-Invoice zusammengefasst.
-                  Jeder Transfer wird mit der neuen Invoice verknüpft — keine doppelte Konvertierung mehr möglich.
+                  Each transfer is linked to the new invoice — no double conversion possible.
                 </p>
 
                 <div>

@@ -22,7 +22,7 @@ export function UpdateBanner() {
 
   async function checkForUpdate(manual = false) {
     if (!isTauri()) {
-      if (manual) setState({ kind: 'error', message: 'Updater nur in Desktop-App verfügbar.' });
+      if (manual) setState({ kind: 'error', message: 'Updater only available in the desktop app.' });
       return;
     }
     setState({ kind: 'checking' });
@@ -123,7 +123,7 @@ export function UpdateBanner() {
       <div style={styles} role="status">
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: '#C6A36D' }}>
-            Update verfügbar — v{state.version}
+            Update available — v{state.version}
           </div>
           <div style={{ fontSize: 11, color: '#8E8E97', marginTop: 4 }}>
             {state.notes ? state.notes.slice(0, 100) : 'Neue LATAIF-Version bereit zum Installieren.'}
@@ -139,7 +139,7 @@ export function UpdateBanner() {
         <button onClick={() => setDismissed(true)}
           className="cursor-pointer"
           style={{ padding: 6, background: 'transparent', border: 'none', color: '#8E8E97' }}
-          title="Später erinnern">
+          title="Remind later">
           <X size={14} />
         </button>
       </div>
@@ -206,7 +206,7 @@ export function UpdateBanner() {
 // Hook + Button-Variante für Settings-Page (manueller Check)
 export function useUpdateChecker() {
   return async () => {
-    if (!isTauri()) return { ok: false, message: 'Nur in Desktop verfügbar.' };
+    if (!isTauri()) return { ok: false, message: 'Only available in desktop.' };
     try {
       const { check } = await import('@tauri-apps/plugin-updater');
       const update = await check();

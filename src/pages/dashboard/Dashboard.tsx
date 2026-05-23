@@ -661,7 +661,7 @@ export function Dashboard() {
         </div>
 
         {/* ── SECTION: PERFORMANCE ── */}
-        <DashSection title="Performance" subtitle="Umsatz, Profit und Bestand für die gewählte Periode">
+        <DashSection title="Performance" subtitle="Revenue, profit and stock for the selected period">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
             <KPICard label="REVENUE (FINAL)" value={fmt(totalRevenue)} unit={`BHD · ${finalInvoices.length} inv.`} icon={<TrendingUp size={16} />} accent="green" onClick={() => navigate('/invoices?filter=FINAL')} />
             <KPICard label="PROFIT" value={fmt(totalProfit)} unit={`BHD · ${marginPct.toFixed(1)}% margin`} icon={<TrendingUp size={16} />} accent="purple" onClick={() => navigate('/business-reports')} />
@@ -678,7 +678,7 @@ export function Dashboard() {
         </DashSection>
 
         {/* ── SECTION: CASH FLOW ── */}
-        <DashSection title="Cash Flow" subtitle="Geld auf Kasse, Bank und offene Beträge">
+        <DashSection title="Cash Flow" subtitle="Cash on hand, bank and outstanding amounts">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
             <KPICard label="CASH" value={fmt(accountBalances.cash)} unit="BHD" icon={<Wallet size={16} />} accent="green" onClick={() => navigate('/banking')} />
             <KPICard label="BANK" value={fmt(accountBalances.bank)} unit="BHD" icon={<Landmark size={16} />} accent="blue" onClick={() => navigate('/banking')} />
@@ -718,7 +718,7 @@ export function Dashboard() {
         </DashSection>
 
         {/* ── SECTION: PRIVATE LOANS ── (Cash-Darlehen, NICHT Handel — getrennt von Receivables/Payables) */}
-        <DashSection title="Private Loans" subtitle="Bar-Darlehen außerhalb des Handels — kein Bezug zu Rechnungen oder Lieferanten">
+        <DashSection title="Private Loans" subtitle="Cash loans outside of trade — unrelated to invoices or suppliers">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 20 }}>
             <KPICard label="LOANS GIVEN"
               value={fmt(loansGiven)}
