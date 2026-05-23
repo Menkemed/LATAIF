@@ -35,10 +35,12 @@ import type { CreditNote } from '@/core/models/types';
 // nach jedem CN-UPDATE noetig ist.
 function repostCreditNoteFromCnId(cnId: string, occurredAt: string): void {
   try {
+    // v0.7.3 — credit_notes hat keine status-Spalte (siehe Schema in database.ts).
+    // Vorher selectierten wir status, was 'no such column' warf und repost still ueberging.
     const cnRow = query(
       `SELECT id, credit_note_number, branch_id, customer_id, invoice_id, sales_return_id,
               total_amount, vat_amount, cash_refund_amount, receivable_cancel_amount,
-              refund_method, reason, notes, status, issued_at, created_at
+              refund_method, reason, notes, issued_at, created_at
          FROM credit_notes WHERE id = ?`,
       [cnId]
     )[0];
