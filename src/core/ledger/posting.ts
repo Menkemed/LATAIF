@@ -460,27 +460,46 @@ export function postCreditNote(cn: CreditNote): PostingResult {
     );
   }
 
+  // v0.7.2 — Legacy-Schutz: Pre-v0.7.1 MARGIN-Invoices hatten KEINE MARGIN_VAT-
+  // Ledger-Buchung (alter Convert-Pfad postete vatAmount=0). Die Backfill-Migration
+  // hat zwar invoice_lines.vat_amount korrigiert, aber Ledger nicht angefasst. Wuerde
+  // die CN jetzt MARGIN_VAT DEBIT buchen → Konto wird negativ ohne Gegenstueck.
+  // Loesung: bei MARGIN-Original ohne MARGIN_VAT-Ledger-Entry den VAT-Anteil
+  // stattdessen vollstaendig in REVENUE buchen — spiegelt den Original-Pfad.
+  const origScheme = vat > 0 ? lookupInvoiceTaxScheme(cn.invoiceId) : null;
+  const hasMarginVatLedger = origScheme === 'MARGIN'
+    ? query(
+        `SELECT 1 FROM ledger_entries
+          WHERE source_module = 'INVOICE' AND source_id = ?
+            AND account = 'MARGIN_VAT' AND reverses_entry_id IS NULL
+          LIMIT 1`,
+        [cn.invoiceId]
+      ).length > 0
+    : true;
+  const isLegacyMargin = origScheme === 'MARGIN' && !hasMarginVatLedger;
+  const revenueDebit = isLegacyMargin ? total : net;
+  const vatDebit = isLegacyMargin ? 0 : vat;
+
   const entries: LedgerEntryInput[] = [];
 
-  if (net > 0) {
+  if (revenueDebit > 0) {
     entries.push({
       account: 'REVENUE',
       direction: 'DEBIT',
-      amount: net,
+      amount: revenueDebit,
       counterpartyType: 'CUSTOMER',
       counterpartyId: cn.customerId,
-      metadata: { creditNoteNumber: cn.creditNoteNumber, invoiceId: cn.invoiceId },
+      metadata: { creditNoteNumber: cn.creditNoteNumber, invoiceId: cn.invoiceId, legacyMargin: isLegacyMargin || undefined },
     });
   }
-  if (vat > 0) {
+  if (vatDebit > 0 && origScheme) {
     // VAT-Konto richtet sich nach dem Tax-Scheme der Original-Invoice.
     // 'mixed' fällt auf VAT_OUTPUT zurück, weil CN keine Line-Granularität hat.
-    const origScheme = lookupInvoiceTaxScheme(cn.invoiceId);
     const vatAcc = origScheme === 'MARGIN' ? 'MARGIN_VAT' : 'VAT_OUTPUT';
     entries.push({
       account: vatAcc,
       direction: 'DEBIT',
-      amount: vat,
+      amount: vatDebit,
       counterpartyType: 'CUSTOMER',
       counterpartyId: cn.customerId,
       taxSchemeSnapshot: origScheme,
@@ -498,9 +517,12 @@ export function postCreditNote(cn: CreditNote): PostingResult {
     });
   }
   if (cashRefund > 0) {
+    // v0.7.2 — benefit explizit auf BENEFIT-Konto, sonst lief jede Benefit-Refund
+    // auf BANK und das Banking-Page-Saldo war falsch.
     const refundAcc: LedgerAccount =
       cn.refundMethod === 'cash' ? 'CASH' :
       cn.refundMethod === 'card' ? 'CARD_CLEARING' :
+      cn.refundMethod === 'benefit' ? 'BENEFIT' :
       'BANK';
     entries.push({
       account: refundAcc,
@@ -830,10 +852,11 @@ export function postPurchaseReceived(purchase: Purchase): PostingResult {
 
 function purchaseCashAccountFor(method: PurchasePayment['method']): LedgerAccount {
   switch (method) {
-    case 'cash':   return 'CASH';
-    case 'bank':   return 'BANK';
-    case 'credit': return 'SUPPLIER_CREDIT';
-    default:       return 'BANK';
+    case 'cash':    return 'CASH';
+    case 'bank':    return 'BANK';
+    case 'benefit': return 'BENEFIT';
+    case 'credit':  return 'SUPPLIER_CREDIT';
+    default:        return 'BANK';
   }
 }
 
@@ -935,9 +958,10 @@ export function postExpense(expense: Expense): PostingResult {
 
 function expenseCashAccountFor(method: ExpensePayment['method']): LedgerAccount {
   switch (method) {
-    case 'cash': return 'CASH';
-    case 'bank': return 'BANK';
-    default:     return 'BANK';
+    case 'cash':    return 'CASH';
+    case 'bank':    return 'BANK';
+    case 'benefit': return 'BENEFIT';
+    default:        return 'BANK';
   }
 }
 
@@ -1071,6 +1095,7 @@ function orderPaymentCashAccountFor(method?: string): LedgerAccount {
   const m = (method || 'cash').toLowerCase();
   if (m === 'cash') return 'CASH';
   if (m === 'card') return 'CARD_CLEARING';
+  if (m === 'benefit') return 'BENEFIT';
   // 'bank', 'bank_transfer', sonstiges → BANK
   return 'BANK';
 }
@@ -1515,6 +1540,7 @@ function metalCashAccountFor(method: string): LedgerAccount {
   const m = (method || 'bank').toLowerCase();
   if (m === 'cash') return 'CASH';
   if (m === 'card') return 'CARD_CLEARING';
+  if (m === 'benefit') return 'BENEFIT';
   return 'BANK';
 }
 
@@ -1623,7 +1649,7 @@ export interface AgentSettlementPaymentLike {
   id: string;
   transferId: string;
   amount: number;
-  method: 'cash' | 'bank';
+  method: 'cash' | 'bank' | 'benefit';
   paidAt: string;
 }
 
@@ -1643,7 +1669,11 @@ export function postAgentSettlementPayment(payment: AgentSettlementPaymentLike, 
   if (!customerId) {
     throw new Error('postAgentSettlementPayment: customerId required to reduce receivable.');
   }
-  const cashAcc: LedgerAccount = payment.method === 'cash' ? 'CASH' : 'BANK';
+  // v0.7.2 — benefit auf BENEFIT-Konto statt fallback BANK.
+  const cashAcc: LedgerAccount =
+    payment.method === 'cash' ? 'CASH' :
+    payment.method === 'benefit' ? 'BENEFIT' :
+    'BANK';
   return postEntries(
     [
       {
@@ -1692,7 +1722,7 @@ export interface ConsignmentPayoutLike {
   consignmentId: string;
   consignorId?: string;   // customer_id des Consignors
   amount: number;
-  method: 'cash' | 'bank';
+  method: 'cash' | 'bank' | 'benefit';
   paidAt: string;
 }
 
@@ -1701,7 +1731,11 @@ export function postConsignmentPayout(payout: ConsignmentPayoutLike): PostingRes
   if (amount <= 0) {
     throw new Error(`postConsignmentPayout: amount must be > 0 (got ${payout.amount})`);
   }
-  const cashAcc: LedgerAccount = payout.method === 'cash' ? 'CASH' : 'BANK';
+  // v0.7.2 — benefit auf BENEFIT-Konto statt fallback BANK.
+  const cashAcc: LedgerAccount =
+    payout.method === 'cash' ? 'CASH' :
+    payout.method === 'benefit' ? 'BENEFIT' :
+    'BANK';
   const cpType: CounterpartyType | undefined = payout.consignorId ? 'CUSTOMER' : undefined;
   return postEntries(
     [
