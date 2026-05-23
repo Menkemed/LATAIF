@@ -415,11 +415,11 @@ export function RepairDetail() {
     const needsWorkshopCheck = isExternalOrHybrid && (nextStatus === 'sent_to_workshop' || nextStatus === 'ready');
     const hasNoWorkshop = !repair.workshopSupplierId && thisRepairLines.filter(l => l.status === 'OPEN').length === 0;
     if (needsWorkshopCheck && hasNoWorkshop) {
-      const statusLabel = nextStatus === 'sent_to_workshop' ? '„Sent to Workshop"' : '„Ready"';
+      const statusLabel = nextStatus === 'sent_to_workshop' ? '"Sent to Workshop"' : '"Ready"';
       const confirmed = window.confirm(
-        `Du willst diesen Repair auf ${statusLabel} setzen, hast aber noch keinen Workshop eingetragen.\n\n` +
-        `Wenn du jetzt weiter machst, wird kein A/P beim Supplier gebucht — und du musst es spaeter manuell ueber „+ Add Work Line" nachholen.\n\n` +
-        `Trotzdem fortfahren?`
+        `You're about to move this repair to ${statusLabel}, but no workshop is set yet.\n\n` +
+        `If you continue now, no A/P will be booked against a supplier — you'll need to add it manually later via "+ Add Work Line".\n\n` +
+        `Continue anyway?`
       );
       if (!confirmed) return;
     }
@@ -849,7 +849,7 @@ export function RepairDetail() {
                   />
                   {(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId && (
                     <p style={{ fontSize: 11, color: '#6B7280', marginTop: -4, lineHeight: 1.4 }}>
-                      💡 Optional — wenn leer, trag Workshop + Cost spaeter via „+ Add Work Line" ein.
+                      💡 Optional — if empty, add workshop + cost later via "+ Add Work Line".
                     </p>
                   )}
                   <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value || undefined })} />
@@ -1101,7 +1101,7 @@ export function RepairDetail() {
                   </button>
                 </div>
                 {thisRepairLines.length === 0 ? (
-                  <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click „Add Work Line" to register a supplier/workshop position.</p>
+                  <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click "Add Work Line" to register a supplier/workshop position.</p>
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
                     <span className="text-overline">L#</span>

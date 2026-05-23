@@ -620,8 +620,8 @@ export function RepairList() {
             <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>REPAIR FOR</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
               {([
-                { v: 'CUSTOMER' as const, label: 'Customer Item', sub: 'Reparatur für einen Kunden' },
-                { v: 'OWN' as const, label: 'Own Item', sub: 'Reparatur eines eigenen Inventar-Produkts' },
+                { v: 'CUSTOMER' as const, label: 'Customer Item', sub: 'Repair for a customer' },
+                { v: 'OWN' as const, label: 'Own Item', sub: 'Repair of an own inventory product' },
               ]).map(opt => {
                 const active = (form.repairScope || 'CUSTOMER') === opt.v;
                 return (
@@ -795,13 +795,13 @@ export function RepairList() {
                         {p.sku ? ` · ${p.sku}` : ''}
                       </div>
                       <div style={{ color: '#6B7280', marginTop: 4, fontSize: 11 }}>
-                        Repair-Kosten werden bei Status „Ready" auf den gewaehlten Stock-Lot addiert.
+                        Repair costs are added to the chosen stock lot when status moves to "Ready".
                       </div>
                     </div>
 
                     {lots.length > 1 && (
                       <div style={{ marginTop: 12 }}>
-                        <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>STOCK LOT (welcher Bestand wird repariert?)</span>
+                        <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>STOCK LOT (which lot is being repaired?)</span>
                         <select
                           value={form.lotId || ''}
                           onChange={e => setForm({ ...form, lotId: e.target.value || undefined })}
@@ -887,9 +887,9 @@ export function RepairList() {
               ))}
             </div>
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
-              {form.repairType === 'internal' && 'Komplett intern bearbeitet — keine externen Kosten.'}
-              {form.repairType === 'external' && 'Komplett extern bearbeitet — Estimated Cost = Workshop-Rechnung. Wird bei Status „Ready" als Expense gebucht.'}
-              {form.repairType === 'hybrid' && 'Teil intern, Teil extern — der externe Anteil (Estimated Cost) wird als Expense gebucht.'}
+              {form.repairType === 'internal' && 'Handled fully in-house — no external costs.'}
+              {form.repairType === 'external' && 'Handled fully externally — Estimated Cost = workshop invoice. Booked as expense at status "Ready".'}
+              {form.repairType === 'hybrid' && 'Part in-house, part external — the external share (Estimated Cost) is booked as expense.'}
             </p>
           </div>
 
@@ -909,9 +909,9 @@ export function RepairList() {
                   style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
                 >+ New Supplier</button>
                 <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-                  💡 Werkstatt noch unklar? Lass leer — du kannst Workshop + reale Cost auf
-                  der Detail-Seite via „+ Add Work Line" eintragen sobald die Werkstatt
-                  sich gemeldet hat. Mehrere Werkstätten pro Repair möglich.
+                  💡 Workshop not decided yet? Leave empty — you can enter the workshop +
+                  real cost on the detail page via "+ Add Work Line" once the workshop
+                  gets back to you. Multiple workshops per repair are supported.
                 </p>
               </div>
             </div>
@@ -936,7 +936,7 @@ export function RepairList() {
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: form.repairScope === 'OWN' ? '1fr' : '1fr 1fr', gap: 20, marginTop: 12 }}>
                 <Input label={form.repairType === 'internal' ? (form.repairScope === 'OWN' ? 'INTERNAL COST (BHD, OPTIONAL)' : 'ESTIMATED COST (BHD, OPTIONAL)') : 'WORKSHOP FEE (BHD, OPTIONAL)'}
-                  type="number" placeholder="später eintragen"
+                  type="number" placeholder="enter later"
                   value={form.estimatedCost || ''}
                   onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
                 {form.repairScope !== 'OWN' && (
@@ -1000,7 +1000,7 @@ export function RepairList() {
                 })()}
                 {(form.chargeToCustomer || 0) === 0 && (
                   <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                    Charge = 0 → Free repair, kein Invoice nötig. Kann direkt nach Fertigstellung auf Picked Up.
+                    Charge = 0 → Free repair, no invoice needed. Can go directly to Picked Up after completion.
                   </p>
                 )}
               </>
@@ -1072,12 +1072,12 @@ export function RepairList() {
 
       <Modal open={showQuickSupplier} onClose={() => setShowQuickSupplier(false)} title="New Supplier" width={420}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input label="NAME *" placeholder="z.B. Goldsmith Ali"
+          <Input label="NAME *" placeholder="e.g. Goldsmith Ali"
             value={quickSupplierName} onChange={e => setQuickSupplierName(e.target.value)} />
           <Input label="PHONE (OPTIONAL)" placeholder="+973…"
             value={quickSupplierPhone} onChange={e => setQuickSupplierPhone(e.target.value)} />
           <p style={{ fontSize: 11, color: '#6B7280' }}>
-            Wird im Supplier-Modul als aktiver Lieferant angelegt und sofort hier ausgewählt.
+            Will be created as an active supplier and selected here right away.
           </p>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowQuickSupplier(false)}>Cancel</Button>
@@ -1133,9 +1133,9 @@ export function RepairList() {
                 </div>
 
                 <p style={{ fontSize: 12, color: '#6B7280' }}>
-                  Diese {selectedRepairs.length} Repairs werden zu EINER Multi-Line-Invoice zusammengefasst.
-                  Jeder Repair wird mit der neuen Invoice verknüpft. Sobald die Invoice bezahlt ist, springen
-                  alle verbundenen Repairs auf "Paid".
+                  These {selectedRepairs.length} repairs will be combined into ONE multi-line invoice.
+                  Each repair is linked to the new invoice. Once the invoice is paid, all linked repairs
+                  automatically move to "Paid".
                 </p>
               </>
             );
