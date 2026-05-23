@@ -384,7 +384,7 @@ export function InvoiceDetail() {
         };
       });
     if (included.length === 0) {
-      alert('Bitte mindestens eine Position über die Checkbox auswählen.');
+      alert('Please select at least one position via the checkbox.');
       return;
     }
     try {
@@ -606,7 +606,7 @@ export function InvoiceDetail() {
           <div style={{ marginBottom: 24, padding: '12px 16px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 8 }}>
             <span style={{ fontSize: 13, color: '#AA956E', fontWeight: 500 }}>Admin edit mode</span>
             <p style={{ fontSize: 12, color: '#4B5563', marginTop: 4, lineHeight: 1.5 }}>
-              You are editing an {invoice.status === 'FINAL' ? 'already-paid' : invoice.status} invoice. Alle Änderungen werden im History-Log getrackt (User, Zeit, Old/New).
+              You are editing an {invoice.status === 'FINAL' ? 'already-paid' : invoice.status} invoice. All changes are tracked in the history log (user, time, old/new).
             </p>
           </div>
         )}
@@ -645,23 +645,23 @@ export function InvoiceDetail() {
                         if (!id) return;
                         // FINAL ist nur erlaubt wenn paid >= gross — sonst Revenue-Verfälschung.
                         if (s === 'FINAL' && invoice.paidAmount < invoice.grossAmount - 0.005) {
-                          alert(`Status FINAL nicht möglich: Outstanding ${(invoice.grossAmount - invoice.paidAmount).toFixed(3)} BHD. Zuerst Zahlung erfassen.`);
+                          alert(`Status FINAL not possible: outstanding ${(invoice.grossAmount - invoice.paidAmount).toFixed(3)} BHD. Record the payment first.`);
                           return;
                         }
                         // PARTIAL braucht zumindest paid > 0.
                         if (s === 'PARTIAL' && invoice.paidAmount <= 0) {
-                          alert('Status PARTIAL nicht möglich: keine Zahlung erfasst. Wähle DRAFT oder erfasse eine Zahlung.');
+                          alert('Status PARTIAL not possible: no payment recorded. Choose DRAFT or record a payment.');
                           return;
                         }
                         // CANCELLED auf bezahlter Invoice → paid_amount > 0 + CANCELLED ist Cashflow-Inkonsistenz.
                         // Erst Refund/Return durchführen damit paid wieder 0 ist.
                         if (s === 'CANCELLED' && invoice.paidAmount > 0.005) {
-                          alert(`Status CANCELLED nicht möglich: ${invoice.paidAmount.toFixed(3)} BHD wurden bereits gezahlt. Zuerst Return + Refund durchführen.`);
+                          alert(`Status CANCELLED not possible: ${invoice.paidAmount.toFixed(3)} BHD already paid. Do Return + Refund first.`);
                           return;
                         }
                         // DRAFT auf bezahlter Invoice → versteckt die Payment-Sichtbarkeit.
                         if (s === 'DRAFT' && invoice.paidAmount > 0.005) {
-                          alert(`Status DRAFT nicht möglich: ${invoice.paidAmount.toFixed(3)} BHD wurden bereits gezahlt. Zuerst Zahlung stornieren.`);
+                          alert(`Status DRAFT not possible: ${invoice.paidAmount.toFixed(3)} BHD already paid. Cancel the payment first.`);
                           return;
                         }
                         if (window.confirm(`Status manuell auf ${s} setzen? Wird normalerweise aus paid_amount berechnet.`)) {
@@ -678,7 +678,7 @@ export function InvoiceDetail() {
                   );
                 })}
                 <span style={{ fontSize: 11, color: '#AA956E', marginLeft: 8 }}>
-                  ⚠ nur für Korrekturen. Normalerweise reconciliert das System aus den Payments.
+                  ⚠ for corrections only. Normally the system reconciles from payments.
                 </span>
               </div>
             </div>
@@ -1249,7 +1249,7 @@ export function InvoiceDetail() {
       <Modal open={linesModal} onClose={() => setLinesModal(false)} title={`Edit Lines — ${formatInvoiceDisplayShort(invoice)}`} width={1000}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <p style={{ fontSize: 12, color: '#6B7280' }}>
-            Klick auf den Produktnamen → anderes Produkt auswählen. Quantity nur sichtbar bei Produkten mit Lager &gt; 1. Tax + Total werden live nach Schema neu berechnet. Alle Änderungen werden geloggt.
+            Click the product name → pick a different product. Quantity only visible for products with stock &gt; 1. Tax + Total are recomputed live per scheme. All changes are logged.
           </p>
           <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'visible', position: 'relative' }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.8fr) minmax(0,1.2fr) 50px minmax(0,0.9fr) minmax(0,0.9fr) 55px minmax(0,0.9fr) minmax(0,0.9fr) 44px', gap: 8, padding: '8px 10px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
@@ -1383,7 +1383,7 @@ export function InvoiceDetail() {
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <p style={{ fontSize: 12, color: '#6B7280' }}>
-                Methode oder Betrag editieren: in Felder klicken und mit Enter bestätigen. Löschen rechts.
+                Edit method or amount: click the fields and confirm with Enter. Delete on the right.
               </p>
               <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', background: '#F2F7FA', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
@@ -1646,7 +1646,7 @@ export function InvoiceDetail() {
       <Modal open={showReturn} onClose={() => setShowReturn(false)} title="Return from Customer (RET)" width={720}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <p style={{ fontSize: 12, color: '#6B7280' }}>
-            Plan §Returns: Wähle die Positionen, die der Kunde zurückgibt. Das Produkt bekommt den gewählten Status. Refund geht aus Cash/Bank.
+            Plan §Returns: Pick the positions the customer returns. The product gets the chosen status. Refund flows from Cash/Bank.
           </p>
 
           {/* Linked existing returns */}
@@ -1780,7 +1780,7 @@ export function InvoiceDetail() {
             <div className="flex gap-2">
               {[
                 { id: true, label: 'Refund jetzt zahlen' },
-                { id: false, label: 'Refund später (Status: Pending)' },
+                { id: false, label: 'Refund later (Status: Pending)' },
               ].map(o => (
                 <button key={String(o.id)} onClick={() => setReturnRefundNow(o.id)}
                   className="cursor-pointer rounded"

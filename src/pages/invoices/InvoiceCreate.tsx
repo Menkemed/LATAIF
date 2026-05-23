@@ -314,7 +314,7 @@ export function InvoiceCreate() {
               {isEditMode ? `Edit Invoice ${editInvoice ? formatInvoiceDisplayShort(editInvoice) : ''}` : 'Direct Sale'}
             </h1>
             <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>
-              {isEditMode ? 'Alle Felder bearbeitbar — Speichern überschreibt die Rechnung.' : 'Customer, products, tax, payment — all on one page.'}
+              {isEditMode ? 'All fields editable — Save overwrites the invoice.' : 'Customer, products, tax, payment — all on one page.'}
             </p>
           </div>
           <span style={{
@@ -556,7 +556,7 @@ export function InvoiceCreate() {
                         </div>
                         {c.scheme === 'MARGIN' && (
                           <div style={{ marginTop: 10, fontSize: 10, color: '#AA956E' }}>
-                            Tax-Scheme „Margin Scheme" applied: VAT 0% on Margin.
+                            Tax scheme "Margin Scheme" applied: VAT 0% on margin.
                           </div>
                         )}
                       </div>
@@ -567,7 +567,7 @@ export function InvoiceCreate() {
               })}
             </div>
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-              Tax-Scheme „Auto&quot; übernimmt die Vorgabe vom Produkt. Manuell: VAT 10% / Zero / Margin pro Zeile.
+              Tax scheme "Auto" follows the product default. Manual: VAT 10% / Zero / Margin per line.
             </p>
           </Card>
         </div>
@@ -643,7 +643,7 @@ export function InvoiceCreate() {
             </div>
             {isEditMode && (
               <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 6, fontSize: 12, color: '#7A6B4F' }}>
-                Bisher gezahlt: <strong><Bhd v={originalPaid}/> BHD</strong>. Wenn du den Betrag erhöhst, wird die Differenz als neue Zahlung gebucht. Bestehende Zahlungen werden nicht überschrieben — für detailliertes Payment-Management nutze die Detail-Seite.
+                Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page.
               </div>
             )}
             <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -677,7 +677,7 @@ export function InvoiceCreate() {
                 {invoiceType === 'INV' ? 'FINAL INVOICE (INV)' : 'PARTIAL INVOICE (PINV)'}
               </span>
               <span style={{ fontSize: 12, color: '#6B7280' }}>
-                Wird automatisch gesetzt: voll bezahlt → INV, sonst PINV. Bei späterer Vollzahlung promotet das System PINV → INV.
+                Set automatically: fully paid → INV, otherwise PINV. On later full payment the system promotes PINV → INV.
               </span>
             </div>
           </Card>
@@ -715,7 +715,7 @@ export function InvoiceCreate() {
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>NOTES (OPTIONAL)</span>
             <textarea value={notes} onChange={e => setNotes(e.target.value)}
-              rows={3} placeholder="z.B. Lieferdetails, Sonderwünsche…"
+              rows={3} placeholder="e.g. delivery details, special requests…"
               style={{ width: '100%', padding: '10px 12px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
           </Card>
         </div>
