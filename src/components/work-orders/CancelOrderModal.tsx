@@ -66,8 +66,8 @@ export function CancelOrderModal({
   return (
     <Modal open={open} onClose={onCancel} title={`Cancel Order ${order.orderNumber}`} width={620}>
       <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 18 }}>
-        Diese Order wird storniert. Lege fest, wie mit dem schon gezahlten Betrag verfahren wird,
-        und überprüfe die automatischen Folgen unten.
+        This order will be cancelled. Decide how to handle the amount already paid,
+        and review the automatic effects below.
       </p>
 
       {/* ── Geld-Handling ── */}
@@ -75,7 +75,7 @@ export function CancelOrderModal({
         <div style={{ marginBottom: 18, padding: '14px 16px',
                       background: '#FFFAF0', border: '1px solid #F0D9A8', borderRadius: 8 }}>
           <div className="flex justify-between items-center" style={{ marginBottom: 10 }}>
-            <span className="text-overline">KUNDEN-ANZAHLUNG</span>
+            <span className="text-overline">CUSTOMER DOWN PAYMENT</span>
             <span className="font-mono" style={{ fontSize: 16, fontWeight: 600, color: '#0F0F10' }}>
               <Bhd v={totalPaid}/> BHD
             </span>
@@ -83,12 +83,12 @@ export function CancelOrderModal({
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {([
-              { v: 'refund' as Choice, label: 'Refund — Geld zurück an Kunden',
-                desc: 'Cash/Bank/Benefit aus dem entsprechenden Konto raus. Customer-Deposit-Schuld geht weg.' },
-              { v: 'credit' as Choice, label: 'Als Guthaben behalten',
-                desc: 'Eintrag in customer_credits. Bei nächster Order/Invoice einlösbar. Geld bleibt in der Kasse.' },
-              { v: 'forfeit' as Choice, label: 'Storno-Gebühr / Verfall',
-                desc: 'Wird als Cancellation-Fee-Income gebucht. Geld bleibt beim Shop, Customer-Schuld erlischt.' },
+              { v: 'refund' as Choice, label: 'Refund — money back to customer',
+                desc: 'Cash/Bank/Benefit leaves the corresponding account. The customer-deposit liability is cleared.' },
+              { v: 'credit' as Choice, label: 'Keep as credit',
+                desc: 'Entry in customer_credits. Redeemable on the next order/invoice. Money stays in the till.' },
+              { v: 'forfeit' as Choice, label: 'Cancellation fee / forfeit',
+                desc: 'Booked as cancellation-fee income. Money stays with the shop, customer liability is cleared.' },
             ]).map(opt => (
               <label key={opt.v}
                 style={{ display: 'flex', gap: 10, padding: 10, borderRadius: 6,
@@ -107,7 +107,7 @@ export function CancelOrderModal({
 
           {choice === 'refund' && (
             <div style={{ marginTop: 12 }}>
-              <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>REFUND-METHODE</span>
+              <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>REFUND METHOD</span>
               <div className="flex gap-2">
                 {(['cash', 'bank', 'benefit'] as const).map(m => (
                   <button key={m} type="button" onClick={() => setRefundMethod(m)}
@@ -125,9 +125,9 @@ export function CancelOrderModal({
 
           {choice === 'credit' && (
             <div style={{ marginTop: 12 }}>
-              <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>NOTIZ (OPTIONAL)</span>
+              <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>NOTE (OPTIONAL)</span>
               <input value={note} onChange={e => setNote(e.target.value)}
-                placeholder="Verwendungszweck für das Guthaben…"
+                placeholder="Intended use of the credit…"
                 style={{ width: '100%', padding: '8px 10px', border: '1px solid #D5D9DE',
                          borderRadius: 6, fontSize: 13 }} />
             </div>
@@ -139,7 +139,7 @@ export function CancelOrderModal({
         <div style={{ marginBottom: 18, padding: '12px 14px',
                       background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8,
                       fontSize: 12, color: '#4B5563' }}>
-          Kein Geld eingenommen — die Order wird ohne Geld-Buchung storniert.
+          No money received — the order will be cancelled without any money posting.
         </div>
       )}
 
@@ -149,18 +149,18 @@ export function CancelOrderModal({
         <div style={{ padding: '12px 14px', background: '#FFF7ED',
                       border: '1px solid #F0A258', borderRadius: 8, marginBottom: 14 }}>
           <span className="text-overline" style={{ marginBottom: 8, display: 'block', color: '#9A3412' }}>
-            CUSTOM-ARBEIT BEREITS ANGEFANGEN
+            CUSTOM WORK ALREADY STARTED
           </span>
           <ul style={{ fontSize: 12, color: '#4B5563', lineHeight: 1.7, paddingLeft: 16, margin: 0 }}>
             <li>
-              <strong>A/P-Schuld {stats.realizedCostTotal.toFixed(3)} BHD</strong> beim
-              Goldsmith / Material-Supplier <strong>bleibt offen</strong> — der Supplier hat schon gearbeitet bzw.
-              geliefert. Bezahlen oder mit ihm separat verhandeln (Expense manuell stornieren falls Einigung).
+              <strong>A/P liability {stats.realizedCostTotal.toFixed(3)} BHD</strong> to the
+              goldsmith / material supplier <strong>stays open</strong> — the supplier has already
+              worked / delivered. Pay or negotiate separately (cancel the expense manually if agreed).
             </li>
             <li>
-              Das Stück wird als <strong>Lagerprodukt</strong> angelegt
-              (Wert {stats.customCostBasis.toFixed(3)} BHD, frei verkäuflich).
-              Erscheint in Collection unter der Custom-Order-Kategorie.
+              The piece is created as a <strong>stock product</strong>
+              (value {stats.customCostBasis.toFixed(3)} BHD, freely saleable).
+              Appears in Collection under the custom-order category.
             </li>
           </ul>
         </div>
@@ -170,33 +170,33 @@ export function CancelOrderModal({
       <div style={{ padding: '12px 14px', background: '#FAFBFC',
                     border: '1px solid #E5E9EE', borderRadius: 8, marginBottom: 18 }}>
         <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
-          AUTOMATISCH BEIM STORNO
+          AUTOMATIC ON CANCEL
         </span>
         <ul style={{ fontSize: 12, color: '#4B5563', lineHeight: 1.7, paddingLeft: 16, margin: 0 }}>
           {stats.costLineCount > 0 && stats.realizedCostCount === 0 && (
-            <li>{stats.costLineCount} Kosten-Position{stats.costLineCount === 1 ? '' : 'en'} (Labor/Material/Gold, noch nicht geliefert) — werden gestrichen, keine A/P entstanden</li>
+            <li>{stats.costLineCount} cost position{stats.costLineCount === 1 ? '' : 's'} (labor/material/gold, not yet delivered) — will be removed, no A/P incurred</li>
           )}
           {openGoldPayableCount > 0 && (
-            <li>{openGoldPayableCount} offene Gold-Verbindlichkeit{openGoldPayableCount === 1 ? '' : 'en'} (Gramm) — auf CANCELLED gesetzt</li>
+            <li>{openGoldPayableCount} open gold liabilit{openGoldPayableCount === 1 ? 'y' : 'ies'} (grams) — set to CANCELLED</li>
           )}
           {stats.orderedMarkerCount > 0 && (
-            <li>{stats.orderedMarkerCount} Zeile{stats.orderedMarkerCount === 1 ? '' : 'n'} „beim Supplier bestellt" — Supplier-Marker entfernt (kein realer Purchase, kein Effekt beim Supplier)</li>
+            <li>{stats.orderedMarkerCount} line{stats.orderedMarkerCount === 1 ? '' : 's'} "ordered from supplier" — supplier marker removed (no real purchase, no effect on supplier)</li>
           )}
           {stats.sourcedArrivedCount > 0 && (
             <li style={{ color: '#D97706' }}>
-              <strong>{stats.sourcedArrivedCount} Zeile{stats.sourcedArrivedCount === 1 ? '' : 'n'} bereits via Purchase beschafft</strong> —
-              das Stück bleibt im Lager (Standard-Bestand). Wenn du es retournieren willst, ist das ein
-              separater Schritt über Purchases → Return.
+              <strong>{stats.sourcedArrivedCount} line{stats.sourcedArrivedCount === 1 ? '' : 's'} already sourced via purchase</strong> —
+              the piece stays in stock (standard inventory). If you want to return it to the supplier,
+              that's a separate step via Purchases → Return.
             </li>
           )}
-          <li>Alle Order-Zeilen und die Order selbst werden auf Status CANCELLED gesetzt</li>
+          <li>All order lines and the order itself are set to status CANCELLED</li>
         </ul>
       </div>
 
       <div className="flex justify-end gap-3" style={{ paddingTop: 14, borderTop: '1px solid #E5E9EE' }}>
-        <Button variant="ghost" onClick={onCancel}>Zurück</Button>
+        <Button variant="ghost" onClick={onCancel}>Back</Button>
         <Button variant="danger" onClick={() => onConfirm(choice, choice === 'refund' ? refundMethod : undefined)}>
-          Order stornieren
+          Cancel Order
         </Button>
       </div>
     </Modal>

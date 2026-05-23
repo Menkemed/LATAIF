@@ -61,12 +61,12 @@ export function SourceItemsModal({ open, orderId, lines, onClose }: Props) {
     <Modal open={open} onClose={onClose} title="Wareneingang erfassen" width={560}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <p style={{ fontSize: 12, color: '#6B7280' }}>
-          Waehle die Posten EINER Lieferung (= ein Supplier). „Wareneingang erfassen"
-          oeffnet ein Purchase-Formular, vorbefuellt mit diesen Posten — Kosten + Zahlung
-          gibst du dort ein. Posten verschiedener Supplier nacheinander erfassen.
+          Pick the items of ONE delivery (= one supplier). "Record Arrival"
+          opens a purchase form pre-filled with these items — enter cost + payment there.
+          Record items from different suppliers one after another.
         </p>
         {lines.length === 0 && (
-          <p style={{ fontSize: 13, color: '#6B7280' }}>Keine offenen Posten zu beschaffen.</p>
+          <p style={{ fontSize: 13, color: '#6B7280' }}>No open items to source.</p>
         )}
         {groups.map(([sid, gl]) => {
           const supName = sid

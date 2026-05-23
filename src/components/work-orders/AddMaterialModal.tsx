@@ -179,7 +179,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
   // Bei Fehler: setzt error + gibt null zurueck.
   function buildEntry(): MaterialLineInput | null {
     const costNum = parseFloat(cost) || 0;
-    if (!description.trim()) { setError('Description ist Pflicht'); return null; }
+    if (!description.trim()) { setError('Description is required'); return null; }
     if (costNum <= 0) { setError('Cost > 0 erforderlich'); return null; }
     const qtyNum = kind === 'labor' ? 1 : (parseFloat(qty) || 1);
     if (qtyNum <= 0) { setError('Quantity > 0 erforderlich'); return null; }
@@ -230,7 +230,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
       if (!entry) return; // unvollstaendig → Fehler steht, abbrechen
       all = [...all, entry];
     }
-    if (all.length === 0) { setError('Mindestens eine Kostenposition hinzufuegen'); return; }
+    if (all.length === 0) { setError('Add at least one cost position'); return; }
     all.forEach(onSubmit);
     onClose();
   }
@@ -389,8 +389,8 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
                     )}
                   </>
                 ) : autoGoldCost > 0
-                  ? `Auto: ${(parseFloat(grams) || 0).toFixed(3)} g × ${purityOf(karat).toFixed(3)} × ${goldRate.toFixed(3)} BHD/g = ${autoGoldCost.toFixed(3)} BHD (Live-Spot).`
-                  : 'Goldpreis nicht verfügbar — bitte Kosten manuell eingeben.'}
+                  ? `Auto: ${(parseFloat(grams) || 0).toFixed(3)} g × ${purityOf(karat).toFixed(3)} × ${goldRate.toFixed(3)} BHD/g = ${autoGoldCost.toFixed(3)} BHD (live spot).`
+                  : 'Gold price unavailable — please enter the cost manually.'}
               </p>
             )}
           </div>
@@ -460,7 +460,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
             border: '1px dashed #0F0F10', background: 'transparent', color: '#0F0F10',
           }}
         >
-          + Position zur Liste hinzufügen
+          + Add Position to List
         </button>
 
         {/* Gesammelte Positionen */}
@@ -470,7 +470,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
               padding: '8px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE',
               fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase',
             }}>
-              Erfasste Positionen ({rows.length})
+              Recorded positions ({rows.length})
             </div>
             {rows.map((r, i) => (
               <div key={i} className="flex items-center gap-3" style={{
@@ -512,7 +512,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
         <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={handleSave}>
-            {pendingCount > 0 ? `Speichern (${pendingCount})` : 'Speichern'}
+            {pendingCount > 0 ? `Save (${pendingCount})` : 'Save'}
           </Button>
         </div>
       </div>

@@ -504,7 +504,7 @@ export function OrderDetail() {
     // + customer-facing + noch nicht invoiced sind werden gebillt.
     const billable = getBillableLines(id);
     if (billable.length === 0) {
-      alert('Nichts fertig zum Invoicen. Markiere Order-Items als „Arrived" bevor du eine Invoice erstellst.');
+      alert('Nothing ready to invoice. Mark order items as "Arrived" before creating an invoice.');
       return;
     }
 
@@ -515,9 +515,9 @@ export function OrderDetail() {
     const hasCustomLine = billable.some(l => l.materialKind === 'custom');
     if (hasCustomLine && customCostBasis <= 0) {
       alert(
-        'Custom-Stueck hat noch keine erfassten Kosten.\n\n' +
-        'Bitte erst die tatsaechlichen Kosten (Labor / Material / Gold) ueber „Add Cost" eintragen — ' +
-        'sonst wird die volle Quoted-Summe als Marge gebucht (COGS = 0).'
+        'Custom piece has no costs recorded yet.\n\n' +
+        'Please enter the actual costs (labor / material / gold) via "Add Cost" first — ' +
+        'otherwise the full quoted amount is booked as margin (COGS = 0).'
       );
       return;
     }
@@ -1027,7 +1027,7 @@ export function OrderDetail() {
                       disabled={!!quoteLine?.invoiceId} />
                     {quoteLine?.invoiceId && (
                       <span style={{ fontSize: 11, color: '#9CA3AF', marginTop: 4, display: 'block' }}>
-                        Bereits in einer Invoice — Preis nur über Storno der Invoice änderbar.
+                        Already in an invoice — price only editable after cancelling the invoice.
                       </span>
                     )}
                   </div>

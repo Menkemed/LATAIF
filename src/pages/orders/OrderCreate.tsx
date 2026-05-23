@@ -567,7 +567,7 @@ export function OrderCreate() {
     // v0.6.4 — Gold ohne Bewertung blockieren: sonst entstuende eine Gold-
     // Verbindlichkeit ohne Kostenzeile (Marge waere zu hoch).
     if ((parseFloat(extraGoldGrams) || 0) > 0 && (parseFloat(extraGoldCost) || 0) <= 0) {
-      setError('Extra-Gold: Goldpreis nicht verfügbar — bitte Kosten (BHD) für das Gold eingeben.');
+      setError('Extra gold: gold price unavailable — please enter the cost (BHD) for the gold manually.');
       return;
     }
     const order = createOrder(buildOrderPayload());
@@ -686,7 +686,7 @@ export function OrderCreate() {
           <>
             {/* v0.6.0 — Custom-Cards 3a-3d nur bei Bedarf öffnen (Quote-first) */}
             <div style={{ marginTop: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <span className="text-overline">OPTIONALE DETAILS — BEI BEDARF ÖFFNEN</span>
+              <span className="text-overline">OPTIONAL DETAILS — OPEN AS NEEDED</span>
               {([['3a', '3a · Customer Material'], ['3b', '3b · Goldsmith Labor'], ['3c', '3c · Extra Gold'], ['3d', '3d · Diamonds / Materials']] as const).map(([k, label]) => {
                 const on = openCard[k];
                 return (
@@ -707,7 +707,7 @@ export function OrderCreate() {
             <div style={{ marginTop: 16 }}>
               <Card>
                 <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>
-                  3a · CUSTOMER MATERIAL (informational, kein Asset)
+                  3a · CUSTOMER MATERIAL (informational, not an asset)
                 </span>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 2fr', gap: 16 }}>
                   <Input
@@ -738,14 +738,14 @@ export function OrderCreate() {
                     </div>
                   </div>
                   <Input
-                    label="STONES (OPTIONAL — freier Text)"
+                    label="STONES (OPTIONAL — free text)"
                     placeholder="2x 0.5ct round diamonds"
                     value={customerStones}
                     onChange={e => setCustomerStones(e.target.value)}
                   />
                 </div>
                 <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                  Wird als Memo-Block auf der Invoice gezeigt + in customer_gold_credits getrackt.
+                  Shown as a memo block on the invoice + tracked in customer_gold_credits.
                 </p>
               </Card>
             </div>
@@ -778,7 +778,7 @@ export function OrderCreate() {
                   />
                 </div>
                 <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                  Kosten sind optional — du kannst sie auch später auf der Order-Detail-Seite eintragen, sobald das Stück fertig ist.
+                  Costs are optional — you can also enter them later on the order detail page once the piece is finished.
                 </p>
               </Card>
             </div>
@@ -832,35 +832,35 @@ export function OrderCreate() {
                     options={suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '' }))}
                     value={extraGoldSupplierId}
                     onChange={setExtraGoldSupplierId}
-                    placeholder="Goldschmied wählen = sein Gold → Gold-Verbindlichkeit · leer = eigenes Gold"
+                    placeholder="Pick goldsmith = his gold → gold liability · empty = own gold"
                   />
                 </div>
                 <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <span>
                     {extraGoldSupplierId
-                      ? 'Goldschmied-Gold → Gold-Verbindlichkeit (Gramm), später in Gold oder Geld beglichen.'
-                      : 'Eigenes Gold → reine Geld-Kostenposition.'}
+                      ? 'Goldsmith gold → gold liability (grams), settled later in gold or money.'
+                      : 'Own gold → pure money cost position.'}
                   </span>
                   {(parseFloat(extraGoldGrams) || 0) > 0 && (
                     extraGoldCostTouched ? (
                       <span style={{ color: '#0F0F10' }}>
-                        Kosten manuell gesetzt.
+                        Cost set manually.
                         {autoGoldValue > 0 && (
                           <button type="button"
                             onClick={() => setExtraGoldCostTouched(false)}
                             className="cursor-pointer"
                             style={{ background: 'none', border: 'none', color: '#7E5BEF', fontSize: 11, padding: '0 0 0 6px', textDecoration: 'underline' }}>
-                            ↻ Auto-Bewertung ({autoGoldValue.toFixed(3)} BHD) übernehmen
+                            ↻ Use auto-valuation ({autoGoldValue.toFixed(3)} BHD)
                           </button>
                         )}
                       </span>
                     ) : autoGoldValue > 0 ? (
                       <span style={{ color: '#16A34A' }}>
-                        Auto-Bewertung: {(parseFloat(extraGoldGrams) || 0).toFixed(3)} g × {purityOf(extraGoldKarat).toFixed(3)} × {goldRate.toFixed(3)} BHD/g = {autoGoldValue.toFixed(3)} BHD (Live-Spot).
+                        Auto-valuation: {(parseFloat(extraGoldGrams) || 0).toFixed(3)} g × {purityOf(extraGoldKarat).toFixed(3)} × {goldRate.toFixed(3)} BHD/g = {autoGoldValue.toFixed(3)} BHD (live spot).
                       </span>
                     ) : (
                       <span style={{ color: '#DC2626' }}>
-                        Goldpreis nicht verfügbar — bitte Kosten (BHD) manuell eingeben.
+                        Gold price unavailable — please enter the cost (BHD) manually.
                       </span>
                     )
                   )}
@@ -950,7 +950,7 @@ export function OrderCreate() {
                             className="cursor-pointer"
                             style={{ background: 'none', border: '1px solid #D5D9DE', borderRadius: 6,
                                      padding: '6px 12px', fontSize: 12, color: '#0F0F10' }}>
-                            Ändern…
+                            Change…
                           </button>
                         </div>
                       );
@@ -961,15 +961,15 @@ export function OrderCreate() {
                       style={{ background: 'rgba(15,15,16,0.04)', border: '1px dashed #D5D9DE',
                                borderRadius: 8, padding: '14px 18px', fontSize: 13, color: '#0F0F10',
                                width: '100%', textAlign: 'left' }}>
-                      + Final Product definieren (Kategorie + Attribute + Foto)
+                      + Define Final Product (category + attributes + photo)
                     </button>
                   )}
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
                   <Input
-                    label="BELEG-BEZEICHNUNG (OPTIONAL)"
-                    placeholder="Erscheint auf Order-Beleg & Invoice — default = Brand + Name"
+                    label="RECEIPT DESCRIPTION (OPTIONAL)"
+                    placeholder="Appears on order receipt & invoice — default = Brand + Name"
                     value={finalProductDescription}
                     onChange={e => setFinalProductDescription(e.target.value)}
                   />
@@ -983,7 +983,7 @@ export function OrderCreate() {
                   />
                 </div>
                 <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                  Der approx. Preis den der Kunde akzeptiert — landet auf dem Order-Beleg und später 1:1 auf der Invoice.
+                  The approximate price the customer accepts — appears on the order receipt and later 1:1 on the invoice.
                 </p>
               </Card>
             </div>
@@ -1198,7 +1198,7 @@ export function OrderCreate() {
               })}
             </div>
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-              Tax-Scheme „Auto&quot; übernimmt die Vorgabe vom Produkt. Manuell: VAT 10% / Zero / Margin pro Zeile.
+              Tax scheme "Auto" follows the product default. Manual: VAT 10% / Zero / Margin per line.
             </p>
           </Card>
         </div>}
@@ -1261,7 +1261,7 @@ export function OrderCreate() {
               <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 13, color: '#0F0F10' }}>
                 <input type="checkbox" checked={fullyPaid}
                   onChange={e => setFullyPaid(e.target.checked)} />
-                Fully Paid — Kunde zahlt jetzt den vollen Betrag <span style={{ color: '#6B7280' }}>(Auftrags-Status bleibt unberührt)</span>
+                Fully Paid — customer pays the full amount now <span style={{ color: '#6B7280' }}>(order status is unaffected)</span>
               </label>
             </div>
           </Card>
@@ -1305,7 +1305,7 @@ export function OrderCreate() {
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>NOTES (OPTIONAL)</span>
             <textarea value={notes} onChange={e => setNotes(e.target.value)}
-              rows={3} placeholder="z.B. Spezial-Wünsche, Termine, Lieferdetails…"
+              rows={3} placeholder="e.g. special requests, dates, delivery details…"
               style={{ width: '100%', padding: '10px 12px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
           </Card>
         </div>

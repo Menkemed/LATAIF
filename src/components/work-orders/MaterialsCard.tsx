@@ -82,7 +82,7 @@ export function MaterialsCard({
       </div>
       {materials.length === 0 ? (
         <p style={{ fontSize: 13, color: '#6B7280', padding: '12px 0' }}>
-          Keine Material-Eintraege. Klick „Add Material" um Diamant/Stein/Gold-Piece zu erfassen.
+          No material entries. Click "Add Material" to record a diamond/stone/gold piece.
         </p>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: (showCustomerPrice
