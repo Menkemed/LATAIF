@@ -48,7 +48,7 @@ import {
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment } from '@/core/models/types';
 
 const ALL_ACCOUNTS: LedgerAccount[] = [
-  'CASH', 'BANK', 'CARD_CLEARING',
+  'CASH', 'BANK', 'CARD_CLEARING', 'BENEFIT',
   'ACCOUNTS_RECEIVABLE', 'ACCOUNTS_PAYABLE',
   'REVENUE', 'COGS', 'INVENTORY',
   'VAT_OUTPUT', 'VAT_INPUT', 'MARGIN_VAT',
@@ -58,6 +58,7 @@ const ALL_ACCOUNTS: LedgerAccount[] = [
   'COMMISSION_PAYABLE_AGENT', 'COMMISSION_PAYABLE_CONSIGNOR',
   'PARTNER_EQUITY', 'EXPENSES_OPERATING',
   'TAX_PAID', 'INTERNAL_TRANSFER',
+  'CANCELLATION_FEE_INCOME',
 ];
 
 const fmt = (n: number) => n.toFixed(3);

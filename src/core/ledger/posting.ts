@@ -54,7 +54,10 @@ export type LedgerAccount =
   | 'PARTNER_EQUITY'
   | 'EXPENSES_OPERATING'
   | 'TAX_PAID'
-  | 'INTERNAL_TRANSFER';
+  | 'INTERNAL_TRANSFER'
+  // v0.7.0 — Storno-Gebuehr / verfallene Anzahlung beim Order-Cancel. Income,
+  // separat von REVENUE damit Business-Reports Sale vs. Storno trennen koennen.
+  | 'CANCELLATION_FEE_INCOME';
 
 export type LedgerDirection = 'DEBIT' | 'CREDIT';
 
@@ -80,7 +83,11 @@ export type SourceModule =
   | 'PARTNER_TX'
   | 'TAX_PAYMENT'
   | 'STOCK_ADJUST'
-  | 'SCRAP_TRADE';
+  | 'SCRAP_TRADE'
+  // v0.7.0 — Order-Cancel Geld-Handling (Refund / Forfeit). 'credit' macht
+  // keine Ledger-Buchung — die Liability bleibt als CUSTOMER_DEPOSITS und wird
+  // beim Apply auf eine Folge-Order/Invoice aufgeloest.
+  | 'ORDER_CANCEL';
 
 export type CounterpartyType =
   | 'CUSTOMER'
@@ -1107,6 +1114,65 @@ export function postOrderPayment(
 // Reverse einen Order-Payment-Eintrag — bei Lösch oder Convert-to-Invoice.
 export function postOrderPaymentReversed(orderPaymentId: string): PostingResult {
   return reverseSource('ORDER_PAYMENT', orderPaymentId, new Date().toISOString());
+}
+
+// v0.7.0 — Order-Cancel mit Geld-Handling. Drei Optionen:
+//   refund   → Geld zurueck an Kunden:   CUSTOMER_DEPOSITS −X · CASH/BANK/BENEFIT −X
+//   forfeit  → Storno-Gebuehr (Verfall): CUSTOMER_DEPOSITS −X · CANCELLATION_FEE_INCOME +X
+//   credit   → Als Guthaben behalten — KEINE Ledger-Buchung. Die Liability bleibt
+//              als CUSTOMER_DEPOSITS und der Caller schreibt einen Domain-Eintrag
+//              in `customer_credits`, der beim naechsten Sale eingeloest wird.
+export interface OrderCancellationChoice {
+  orderId: string;
+  customerId: string;
+  totalPaid: number;
+  choice: 'refund' | 'credit' | 'forfeit';
+  refundMethod?: 'cash' | 'bank' | 'benefit';
+  occurredAt?: string;
+}
+
+export function postOrderCancellationChoice(c: OrderCancellationChoice): PostingResult | null {
+  const amount = ROUND(c.totalPaid);
+  if (amount <= 0) return null;
+  if (c.choice === 'credit') return null; // kein Ledger-Effekt
+  const now = c.occurredAt || new Date().toISOString();
+
+  if (c.choice === 'refund') {
+    const method = c.refundMethod || 'cash';
+    const cashAcc = orderPaymentCashAccountFor(method);
+    return postEntries(
+      [
+        {
+          account: 'CUSTOMER_DEPOSITS', direction: 'DEBIT', amount,
+          counterpartyType: 'CUSTOMER', counterpartyId: c.customerId,
+          metadata: { orderId: c.orderId, refundMethod: method, kind: 'order_cancel_refund' },
+        },
+        {
+          account: cashAcc, direction: 'CREDIT', amount,
+          counterpartyType: 'CUSTOMER', counterpartyId: c.customerId,
+          metadata: { orderId: c.orderId, refundMethod: method, kind: 'order_cancel_refund' },
+        },
+      ],
+      { occurredAt: now, sourceModule: 'ORDER_CANCEL', sourceId: `refund:${c.orderId}` }
+    );
+  }
+
+  // forfeit
+  return postEntries(
+    [
+      {
+        account: 'CUSTOMER_DEPOSITS', direction: 'DEBIT', amount,
+        counterpartyType: 'CUSTOMER', counterpartyId: c.customerId,
+        metadata: { orderId: c.orderId, kind: 'cancellation_fee' },
+      },
+      {
+        account: 'CANCELLATION_FEE_INCOME', direction: 'CREDIT', amount,
+        counterpartyType: 'CUSTOMER', counterpartyId: c.customerId,
+        metadata: { orderId: c.orderId, kind: 'cancellation_fee' },
+      },
+    ],
+    { occurredAt: now, sourceModule: 'ORDER_CANCEL', sourceId: `forfeit:${c.orderId}` }
+  );
 }
 
 // ── Loan / Debt ───────────────────────────────────────────────

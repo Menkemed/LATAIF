@@ -12,6 +12,7 @@ import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
 import { OrderLineEditModal, type OrderLineEditPatch } from '@/components/work-orders/OrderLineEditModal';
 import { SourceItemsModal } from '@/components/work-orders/SourceItemsModal';
+import { CancelOrderModal } from '@/components/work-orders/CancelOrderModal';
 import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -66,7 +67,7 @@ export function OrderDetail() {
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
     getBillableLines, markOrderLinesInvoiced, updateOrderLineStatus,
     addOrderLine, deleteOrderLine, updateOrderLinePrice, updateOrderLine,
-    markOrderLineOrdered } = useOrderStore();
+    markOrderLineOrdered, cancelOrderWithMoney } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
@@ -80,6 +81,8 @@ export function OrderDetail() {
   const [form, setForm] = useState<Partial<Order>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  // v0.7.0 — Delete einer paid Order laeuft via Cancel-Modal: erst Geld-Wahl, dann Hard-Delete.
+  const [pendingHardDelete, setPendingHardDelete] = useState(false);
   const [confirmAdvance, setConfirmAdvance] = useState<OrderStatus | null>(null);
   const [showMessage, setShowMessage] = useState(false);
   const [showPayment, setShowPayment] = useState(false);
@@ -406,14 +409,33 @@ export function OrderDetail() {
     }
   }
 
-  function handleCancel() {
+  function handleCancel(choice: 'refund' | 'credit' | 'forfeit', refundMethod?: 'cash' | 'bank' | 'benefit') {
     if (!id) return;
-    updateStatus(id, 'cancelled');
-    setConfirmCancel(false);
+    try {
+      cancelOrderWithMoney(id, choice, refundMethod);
+      setConfirmCancel(false);
+      // v0.7.0 — wenn der Cancel-Wizard ueber den Delete-Button getriggert wurde,
+      // direkt im Anschluss Hard-Delete + zurueck zur Liste.
+      if (pendingHardDelete) {
+        setPendingHardDelete(false);
+        deleteOrder(id);
+        navigate('/orders');
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
   }
 
   function handleDelete() {
-    if (!id) return;
+    if (!id || !order) return;
+    // v0.7.0 — Delete einer paid Order: erst Geld klar machen (Modal), dann
+    // Hard-Delete. Bei totalPaid=0 direkt loeschen wie heute.
+    if (totalPaid > 0.005) {
+      setConfirmDelete(false);
+      setConfirmCancel(true);  // Cancel-Wizard fuer Geld-Handling. Hard-Delete folgt.
+      setPendingHardDelete(true);
+      return;
+    }
     deleteOrder(id);
     navigate('/orders');
   }
@@ -1692,16 +1714,17 @@ export function OrderDetail() {
         </div>
       </Modal>
 
-      {/* Confirm Cancel Modal */}
-      <Modal open={confirmCancel} onClose={() => setConfirmCancel(false)} title="Cancel Order" width={400}>
-        <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
-          Cancel order <strong style={{ color: '#0F0F10' }}>{order.orderNumber}</strong>? This will mark the order as cancelled.
-        </p>
-        <div className="flex justify-end gap-3">
-          <Button variant="ghost" onClick={() => setConfirmCancel(false)}>Back</Button>
-          <Button variant="danger" onClick={handleCancel}>Cancel Order</Button>
-        </div>
-      </Modal>
+      {/* v0.7.0 — Cancel-Wizard mit Geld-Handling + Auto-Lifecycle-Info */}
+      <CancelOrderModal
+        open={confirmCancel}
+        order={order}
+        orderLines={orderLineList}
+        totalPaid={totalPaid}
+        sourcedLineIds={new Set(sourcedMap.keys())}
+        openGoldPayableCount={orderGoldPayables.filter(gp => gp.status === 'OPEN').length}
+        onCancel={() => { setConfirmCancel(false); setPendingHardDelete(false); }}
+        onConfirm={(choice, refundMethod) => handleCancel(choice, refundMethod)}
+      />
 
       {/* Convert-to-Invoice VAT-Scheme Picker */}
       <ConfirmTaxSchemeModal

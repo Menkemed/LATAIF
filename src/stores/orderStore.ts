@@ -12,6 +12,7 @@ import {
   postOrderPaymentReversed,
   postExpense,
   postExpenseCancelled,
+  postOrderCancellationChoice,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -85,6 +86,14 @@ interface OrderStore {
   updateOrder: (id: string, data: Partial<Order>) => void;
   updateStatus: (id: string, status: OrderStatus) => void;
   deleteOrder: (id: string) => void;
+  // v0.7.0 — Order cancellen MIT explizitem Geld-Handling und Auto-Lifecycle.
+  // Throwt wenn die Order eine FINAL/PARTIAL Invoice hat (erst Invoice stornieren).
+  // Reverst A/P-Expenses, cancelt offene Gold-Verbindlichkeiten, nullt
+  // ordered_supplier_id, setzt Lines + Order auf CANCELLED. Bei totalPaid > 0
+  // wird der gewaehlte Geld-Pfad gebucht (refund/credit/forfeit). ARRIVED-Lines
+  // via Purchase bleiben unberuehrt — Stueck bleibt im Lager (Standard-Bestand).
+  cancelOrderWithMoney: (id: string, choice: 'refund' | 'credit' | 'forfeit',
+    refundMethod?: 'cash' | 'bank' | 'benefit', note?: string) => void;
   // Lines per Order — v0.2.1 erweitert um supplier-cost + material + customer-facing flag
   rewriteOrderLines: (orderId: string, lines: Array<{
     productId?: string;
@@ -1053,6 +1062,167 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         };
       });
     } catch { return []; }
+  },
+
+  // v0.7.0 — siehe Interface-Doku. Throw bei invoiced Lines, sonst:
+  //   1. Customer-Money (totalPaid > 0) → choice-basierte Ledger-Buchung +
+  //      bei 'credit' Insert in customer_credits.
+  //   2. Cost-Line-Expenses reverten + DELETE.
+  //   3. Open gold_payables → CANCELLED.
+  //   4. ORDERED-Lines → ordered_supplier_id NULL.
+  //   5. Status → cancelled. Lines → CANCELLED.
+  cancelOrderWithMoney: (id, choice, refundMethod, note) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+
+    // 0. Order + Customer laden
+    const oRows = query(`SELECT id, customer_id, status FROM orders WHERE id = ?`, [id]);
+    if (oRows.length === 0) throw new Error(`Order ${id} nicht gefunden`);
+    const customerId = oRows[0].customer_id as string;
+    const currentStatus = oRows[0].status as OrderStatus;
+    if (currentStatus === 'cancelled') throw new Error('Order ist bereits storniert.');
+
+    // 0a. Invoiced-Block: keine Line darf invoice_id != NULL haben
+    const invoicedRows = query(
+      `SELECT COUNT(*) AS n FROM order_lines WHERE order_id = ? AND invoice_id IS NOT NULL`,
+      [id]
+    );
+    if (Number(invoicedRows[0]?.n || 0) > 0) {
+      throw new Error('Mind. eine Zeile ist bereits in einer Invoice — bitte erst die Invoice stornieren.');
+    }
+
+    // 1. totalPaid berechnen (SUM order_payments)
+    const payRows = query(`SELECT COALESCE(SUM(amount),0) AS t FROM order_payments WHERE order_id = ?`, [id]);
+    const totalPaid = Number(payRows[0]?.t || 0);
+
+    // 1a. Geld-Buchung gemaess Wahl
+    if (totalPaid > 0) {
+      if (choice === 'refund' && !refundMethod) {
+        throw new Error('Refund braucht eine Zahlmethode (Cash / Bank / Benefit).');
+      }
+      safePost(`postOrderCancellationChoice(${id}, ${choice})`, () => {
+        postOrderCancellationChoice({
+          orderId: id, customerId, totalPaid, choice, refundMethod,
+        });
+      });
+      // Bei 'credit' zusaetzlich Domain-Eintrag in customer_credits.
+      if (choice === 'credit') {
+        const creditId = uuid();
+        let branchId: string;
+        try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+        try {
+          db.run(
+            `INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status,
+               source_type, source_id, note, created_at)
+             VALUES (?, ?, ?, ?, 0, 'OPEN', 'order_cancel', ?, ?, ?)`,
+            [creditId, branchId, customerId, totalPaid, id,
+             note || `Storno Order — Guthaben zur weiteren Verrechnung`, now]
+          );
+          trackInsert('customer_credits', creditId, {
+            customerId, amount: totalPaid, sourceOrderId: id,
+          });
+        } catch (err) {
+          console.warn('[order] customer_credits insert failed:', err);
+        }
+      }
+    }
+
+    // 2. Cost-Lines analysieren: real-gebuchte A/P (expense_id != NULL) bleiben
+    //    OFFEN als Verbindlichkeit gegenueber dem Supplier. Der Goldsmith hat
+    //    bereits gearbeitet / Material geliefert — diese Schuld kann nicht
+    //    einfach geloescht werden, sie muss bezahlt oder mit dem Supplier
+    //    manuell verhandelt werden (dann macht der User die Expense-Storno selbst).
+    //    Lines OHNE expense_id (noch nie ARRIVED) haben keine A/P → einfach weg.
+    const costRows = query(
+      `SELECT id, expense_id, cost_amount, material_kind, supplier_id
+         FROM order_lines
+         WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 0`,
+      [id]
+    );
+    const realizedCosts = costRows.filter(r => r.expense_id);
+    const customCostBasis = costRows.reduce((s, r) => s + ((r.cost_amount as number) || 0), 0);
+    // expense_id auf der order_line nullen, damit die nachfolgende Status-Cascade
+    // nicht den Eindruck erweckt, die Line haenge weiter an einer Expense.
+    // Die Expense selbst BLEIBT (real A/P-Schuld).
+    for (const lr of realizedCosts) {
+      const lid = lr.id as string;
+      db.run(`UPDATE order_lines SET expense_id = NULL WHERE id = ?`, [lid]);
+      trackUpdate('order_lines', lid, { expenseId: null });
+    }
+
+    // 3. Offene Gold-Verbindlichkeiten cancellen.
+    const gpRows = query(
+      `SELECT id FROM gold_payables WHERE source_order_id = ? AND status = 'OPEN'`,
+      [id]
+    );
+    for (const gr of gpRows) {
+      const gpId = gr.id as string;
+      db.run(`UPDATE gold_payables SET status = 'CANCELLED', updated_at = ? WHERE id = ?`,
+        [now, gpId]);
+      trackUpdate('gold_payables', gpId, { status: 'CANCELLED' });
+    }
+
+    // 4. ORDERED-Lines: ordered_supplier_id nullen (Supplier-Marker wegnehmen).
+    //    Cancel-Cascade weiter unten setzt sie auf CANCELLED.
+    db.run(
+      `UPDATE order_lines SET ordered_supplier_id = NULL
+         WHERE order_id = ? AND status = 'ORDERED'`,
+      [id]
+    );
+
+    // 5. Order + Lines auf CANCELLED.
+    db.run(`UPDATE order_lines SET status = 'CANCELLED' WHERE order_id = ?`, [id]);
+    db.run(`UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?`, [now, id]);
+    trackUpdate('orders', id, { status: 'cancelled', cancelChoice: choice });
+
+    // 6. Custom-Order mit angefangener Arbeit: Stueck in Lager ueberfuehren.
+    //    Trigger: customCostBasis > 0 UND mind. eine ARRIVED Cost-Line (= realer
+    //    Arbeit/Material). Das fertige/halbfertige Stueck wird als Lagerprodukt
+    //    angelegt mit kapitalisierter Kostenbasis als purchasePrice. So bleibt
+    //    der Wert im System sichtbar und das Stueck ist weiterverkaeufbar.
+    if (customCostBasis > 0 && realizedCosts.length > 0) {
+      try {
+        const ord = query(
+          `SELECT category_id, attributes, condition, requested_brand, requested_model,
+                  agreed_price, custom_product_spec FROM orders WHERE id = ?`, [id]);
+        if (ord.length > 0) {
+          const row = ord[0];
+          let spec: Partial<Product> = {};
+          try {
+            const raw = row.custom_product_spec as string | null;
+            if (raw) spec = JSON.parse(raw) as Partial<Product>;
+          } catch { /* */ }
+          let attrs: Record<string, string | number | boolean | string[]> = {};
+          try { attrs = JSON.parse((row.attributes as string) || '{}'); } catch { /* */ }
+          const agreedPrice = (row.agreed_price as number) || 0;
+          const newProduct = useProductStore.getState().createProduct({
+            categoryId: spec.categoryId || (row.category_id as string) || '',
+            brand: spec.brand || (row.requested_brand as string) || 'Custom',
+            name: spec.name || (row.requested_model as string) || 'Custom (cancelled order)',
+            sku: spec.sku,
+            condition: spec.condition || (row.condition as string) || '',
+            attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || attrs,
+            images: spec.images || [],
+            scopeOfDelivery: spec.scopeOfDelivery || [],
+            purchasePrice: customCostBasis,
+            plannedSalePrice: agreedPrice > 0 ? agreedPrice : customCostBasis,
+            stockStatus: 'in_stock',  // frei verkaeuflich (anders als Convert: dort 'reserved')
+            taxScheme: spec.taxScheme || 'MARGIN',
+            sourceType: 'OWN',
+            notes: (spec.notes ? spec.notes + '\n\n' : '')
+              + `From cancelled custom order — capitalized costs ${customCostBasis.toFixed(3)} BHD.`,
+          });
+          console.info('[order] cancelled custom-order → product transferred to stock',
+            { orderId: id, productId: newProduct.id, value: customCostBasis });
+        }
+      } catch (err) {
+        console.error('[order] cancel: custom product overflow to stock failed:', err);
+      }
+    }
+
+    saveDatabase();
+    eventBus.emit('order.cancelled', 'order', id, { status: 'cancelled', choice });
+    get().loadOrders();
   },
 
   deleteOrder: (id) => {
