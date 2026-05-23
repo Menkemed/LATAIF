@@ -263,10 +263,11 @@ export function RepairList() {
     } else {
       if (!form.customerId) return;
     }
-    // External/Hybrid: Workshop-Supplier ist Pflicht — sonst lässt sich der
-    // Workshop-Expense bei "Ready" keinem Lieferanten zuordnen und die A/P-Bilanz
-    // platzt (Repair postet ohne supplier_id ins Ledger).
-    if ((form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId) return;
+    // v0.7.4 — Workshop optional bei Create. Discovery-Over-Time-Pattern:
+    // beim Annehmen weiss man oft Workshop+Cost noch nicht, das traegt man
+    // auf der Detail-Seite via "Add Work Line" ein wenn die Werkstatt
+    // Bescheid gibt. RepairDetail.handleStatusAdvance warnt freundlich
+    // wenn man Status flippt ohne Workshop + ohne Lines.
     const effectiveInternalCost =
       (form.repairType === 'external' || form.repairType === 'hybrid')
         ? (form.internalCost || form.estimatedCost || 0)
@@ -897,7 +898,7 @@ export function RepairList() {
               <span className="text-overline" style={{ marginBottom: 12 }}>EXTERNAL REPAIR · WORKSHOP / GOLDSMITH</span>
               <div style={{ marginTop: 12 }}>
                 <SearchSelect
-                  label="SUPPLIER *"
+                  label="SUPPLIER (OPTIONAL)"
                   placeholder="Search workshop / goldsmith..."
                   options={supplierOptions}
                   value={form.workshopSupplierId || ''}
@@ -907,13 +908,10 @@ export function RepairList() {
                   className="cursor-pointer transition-colors"
                   style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
                 >+ New Supplier</button>
-                {!form.workshopSupplierId && (
-                  <p style={{ fontSize: 11, color: '#DC2626', marginTop: 8 }}>
-                    Pflichtfeld bei {form.repairType === 'external' ? 'External' : 'Hybrid'}-Repair — bitte Workshop / Goldsmith auswählen.
-                  </p>
-                )}
-                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                  Workshop Fee wird bei Status „Ready" automatisch als Expense gebucht und beim Supplier als offene Forderung (Payable) geführt.
+                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+                  💡 Werkstatt noch unklar? Lass leer — du kannst Workshop + reale Cost auf
+                  der Detail-Seite via „+ Add Work Line" eintragen sobald die Werkstatt
+                  sich gemeldet hat. Mehrere Werkstätten pro Repair möglich.
                 </p>
               </div>
             </div>
@@ -937,8 +935,8 @@ export function RepairList() {
               </div>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: form.repairScope === 'OWN' ? '1fr' : '1fr 1fr', gap: 20, marginTop: 12 }}>
-                <Input label={form.repairType === 'internal' ? (form.repairScope === 'OWN' ? 'INTERNAL COST (BHD)' : 'ESTIMATED COST (BHD)') : 'WORKSHOP FEE (BHD)'}
-                  type="number" placeholder="0"
+                <Input label={form.repairType === 'internal' ? (form.repairScope === 'OWN' ? 'INTERNAL COST (BHD, OPTIONAL)' : 'ESTIMATED COST (BHD, OPTIONAL)') : 'WORKSHOP FEE (BHD, OPTIONAL)'}
+                  type="number" placeholder="später eintragen"
                   value={form.estimatedCost || ''}
                   onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
                 {form.repairScope !== 'OWN' && (
@@ -1059,7 +1057,6 @@ export function RepairList() {
             <Button
               variant="primary"
               onClick={handleCreate}
-              disabled={(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId}
             >
               Create Repair
             </Button>

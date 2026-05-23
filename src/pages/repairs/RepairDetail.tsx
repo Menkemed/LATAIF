@@ -359,8 +359,9 @@ export function RepairDetail() {
 
   function handleSave() {
     if (!id) return;
-    // External/Hybrid: Workshop-Supplier ist Pflicht — siehe RepairList.handleCreate.
-    if ((form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId) return;
+    // v0.7.4 — Workshop optional bei Edit (consistent mit Create). Discovery-Pattern:
+    // Workshop kommt evtl. erst spaeter via "Add Work Line". Status-Transition
+    // (handleStatusAdvance) warnt freundlich wenn man fortfaehrt ohne Workshop.
     // Internal cost mirrors actual (or estimated if actual not yet set) unless explicitly overridden.
     // Bei Hybrid ist der Fallback aber nicht erlaubt: dort ist estimatedCost = Workshop Fee
     // (separate Größe), und darf nicht in internalCost gespiegelt werden — sonst doppelt
@@ -405,7 +406,23 @@ export function RepairDetail() {
   }
 
   function handleStatusAdvance() {
-    if (!id || !nextStatus) return;
+    if (!id || !nextStatus || !repair) return;
+    // v0.7.4 — Warnung wenn External/Hybrid auf 'sent_to_workshop' oder 'ready'
+    // flippt ohne Workshop UND ohne Work-Lines. Workshop kann ueber Hauptfeld
+    // ODER ueber Lines kommen — nur wenn beides leer ist, fehlt der Supplier-
+    // Bezug fuer die A/P-Buchung.
+    const isExternalOrHybrid = repair.repairType === 'external' || repair.repairType === 'hybrid';
+    const needsWorkshopCheck = isExternalOrHybrid && (nextStatus === 'sent_to_workshop' || nextStatus === 'ready');
+    const hasNoWorkshop = !repair.workshopSupplierId && thisRepairLines.filter(l => l.status === 'OPEN').length === 0;
+    if (needsWorkshopCheck && hasNoWorkshop) {
+      const statusLabel = nextStatus === 'sent_to_workshop' ? '„Sent to Workshop"' : '„Ready"';
+      const confirmed = window.confirm(
+        `Du willst diesen Repair auf ${statusLabel} setzen, hast aber noch keinen Workshop eingetragen.\n\n` +
+        `Wenn du jetzt weiter machst, wird kein A/P beim Supplier gebucht — und du musst es spaeter manuell ueber „+ Add Work Line" nachholen.\n\n` +
+        `Trotzdem fortfahren?`
+      );
+      if (!confirmed) return;
+    }
     try {
       updateStatus(id, nextStatus);
     } catch (err) {
@@ -484,7 +501,6 @@ export function RepairDetail() {
                 <Button
                   variant="primary"
                   onClick={handleSave}
-                  disabled={(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId}
                 >
                   <Save size={14} /> Save
                 </Button>
@@ -832,8 +848,8 @@ export function RepairDetail() {
                     onChange={sid => setForm({ ...form, workshopSupplierId: sid || undefined })}
                   />
                   {(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId && (
-                    <p style={{ fontSize: 11, color: '#DC2626', marginTop: -4 }}>
-                      Pflichtfeld bei {form.repairType === 'external' ? 'External' : 'Hybrid'}-Repair.
+                    <p style={{ fontSize: 11, color: '#6B7280', marginTop: -4, lineHeight: 1.4 }}>
+                      💡 Optional — wenn leer, trag Workshop + Cost spaeter via „+ Add Work Line" ein.
                     </p>
                   )}
                   <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value || undefined })} />
