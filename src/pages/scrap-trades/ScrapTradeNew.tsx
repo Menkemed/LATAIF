@@ -19,7 +19,7 @@ export function ScrapTradeNew() {
   return (
     <PageLayout
       title="New Scrap Trade"
-      subtitle="Altgold ankaufen, sofort weiterverkaufen — nur der Spread zählt als Einkommen."
+      subtitle="Buy scrap gold and resell immediately — only the spread counts as income."
       actions={
         <Button variant="ghost" icon={<ArrowLeft size={14} />} onClick={() => navigate('/scrap-trades')}>
           Back

@@ -47,7 +47,7 @@ export class ErrorBoundary extends Component<Props, State> {
             {err.name || 'Error'}: {err.message || 'Unknown error'}
           </h1>
           <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 20 }}>
-            Die App ist nicht abgestürzt — nur dieser View. Mit Reload kommst du wieder rein.
+            The app didn't crash — only this view. Reload to come back in.
           </p>
           <pre style={{
             background: '#0F0F10', color: '#E9FF5E', padding: 16, borderRadius: 8,

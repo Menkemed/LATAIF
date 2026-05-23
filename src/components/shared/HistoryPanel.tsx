@@ -67,7 +67,7 @@ export function HistoryPanel({ entityType, entityId, title = 'History', onClose 
       <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
         {entries.length === 0 ? (
           <p style={{ fontSize: 13, color: '#6B7280', textAlign: 'center', padding: '48px 0' }}>
-            Keine Aktivität bisher.
+            No activity yet.
           </p>
         ) : (
           entries.map(e => (

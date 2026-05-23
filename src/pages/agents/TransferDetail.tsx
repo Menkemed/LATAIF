@@ -233,7 +233,7 @@ export function TransferDetail() {
                 </Button>
                 {(linkedInvoice.paidAmount || 0) <= 0.005 && (
                   <Button variant="ghost" onClick={() => {
-                    if (!window.confirm(`Convert rückgängig machen? Die Invoice wird gelöscht und der Transfer wieder auf "Sold" gesetzt.`)) return;
+                    if (!window.confirm(`Undo convert? The invoice will be deleted and the transfer reset to "Sold".`)) return;
                     try { undoTransferInvoiceConvert(transfer.id); }
                     catch (err) { alert(err instanceof Error ? err.message : String(err)); }
                   }}>
@@ -360,7 +360,7 @@ export function TransferDetail() {
             </div>
           </div>
           <Input required label="ACTUAL SALE PRICE (BHD)" type="number"
-            placeholder="Tatsächlich verkauft — darf abweichen"
+            placeholder="Actually sold — may differ"
             value={soldPrice || ''}
             onChange={e => setSoldPrice(Number(e.target.value))} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>

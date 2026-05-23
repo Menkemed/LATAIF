@@ -334,7 +334,7 @@ export function AIPage() {
                 ask(input);
               }
             }}
-            placeholder={configured ? 'Ask anything about your business — e.g. „Show me overdue invoices over 1 000 BHD"' : 'Configure API key in Settings to start.'}
+            placeholder={configured ? 'Ask anything about your business — e.g. "Show me overdue invoices over 1,000 BHD"' : 'Configure API key in Settings to start.'}
             disabled={!configured || loading}
             rows={1}
             style={{

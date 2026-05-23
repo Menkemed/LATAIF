@@ -55,7 +55,7 @@ export function SkuInput({
       {taken && suggestion && (
         <div style={{ marginTop: 6, fontSize: 12, color: '#6B7280', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
           <span>
-            Nächste freie Nummer:{' '}
+            Next free number:{' '}
             <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}>{suggestion}</span>
           </span>
           <button

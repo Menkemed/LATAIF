@@ -243,7 +243,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
 
       {/* B. Items */}
       <Card>
-        <SectionHeader title="B. Items" subtitle="Goldstücke einzeln auflisten. Foto pro Item separat." />
+        <SectionHeader title="B. Items" subtitle="List gold pieces individually. Photo per item separately." />
         <div style={{ display: 'grid', gap: 16 }}>
           {v.lines.map((line, idx) => (
             <LineEditor
@@ -314,7 +314,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
 
       {/* D. Totals + Split Payments */}
       <Card>
-        <SectionHeader title="D. Payments" subtitle="Mehrere Beträge mit verschiedenen Methoden möglich. Sum muss zum jeweiligen Total passen." />
+        <SectionHeader title="D. Payments" subtitle="Multiple amounts with different methods are possible. The sum must match the respective total." />
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
           <SplitPaymentEditor

@@ -312,7 +312,7 @@ export function ProductionPage() {
         initial={editingOutput?.spec}
         title={editingOutput ? 'Edit Output Product' : 'New Output Product'}
         submitLabel={editingOutput ? 'Update' : 'Add to Production'}
-        hint="Kategorie wählen → Brand/Name + dynamische Attribute aus der Kategorie. Production-Value gibst du danach auf der Karte ein."
+        hint="Pick category → brand/name + dynamic attributes from the category. Enter the production value on the card afterwards."
         hideFields={{
           purchasePrice: true,
           salePrice: true,
