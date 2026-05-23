@@ -70,13 +70,13 @@ const STATUS_LABELS: Record<OrderStatus, string> = {
 export function OrderCreate() {
   const navigate = useNavigate();
   const goBack = useGoBack('/orders');
-  const { createOrder } = useOrderStore();
+  const { createOrder, orders: existingOrders, loadOrders, getAllProductReservations } = useOrderStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { createGoldPayable } = useGoldStore();
 
-  useEffect(() => { loadCustomers(); loadProducts(); loadSuppliers(); loadCategories(); }, [loadCustomers, loadProducts, loadSuppliers, loadCategories]);
+  useEffect(() => { loadCustomers(); loadProducts(); loadSuppliers(); loadCategories(); loadOrders(); }, [loadCustomers, loadProducts, loadSuppliers, loadCategories, loadOrders]);
   // v0.6.0 — Live-Goldpreis fuer die provisorische COGS-Bewertung von
   // Goldschmied-Gold (wenn nur Gewicht, kein Cost eingegeben wird).
   useEffect(() => {
@@ -151,12 +151,21 @@ export function OrderCreate() {
     label: `${c.firstName} ${c.lastName}${c.company ? ` — ${c.company}` : ''}`,
     subtitle: c.phone,
   })), [customers]);
-  const productOptions = useMemo(() => products.map(p => ({
-    id: p.id,
-    label: `${p.brand} ${p.name}${p.sku ? ' · ' + p.sku : ''}`,
-    subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD`,
-    searchText: productSearchText(p),
-  })), [products]);
+  // v0.6.9 — Soft-Reservation: Stuecke die schon in anderen offenen Orders versprochen sind.
+  const productReservations = useMemo(() => getAllProductReservations(), [existingOrders, getAllProductReservations]);
+
+  const productOptions = useMemo(() => products.map(p => {
+    const res = productReservations.get(p.id);
+    const resHint = res && res.qty > 0
+      ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
+      : '';
+    return {
+      id: p.id,
+      label: `${p.brand} ${p.name}${p.sku ? ' · ' + p.sku : ''}`,
+      subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD${resHint}`,
+      searchText: productSearchText(p),
+    };
+  }), [products, productReservations]);
 
   // Phase 7 — Lot-Aggregate fuer alle in lines referenzierten Produkte cachen,
   // damit Cost-Basis fuer Margin-Scheme aus dem FIFO-Lot kommt (= naechster Sale-Cost)

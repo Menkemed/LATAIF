@@ -11,6 +11,7 @@ import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useOfferStore } from '@/stores/offerStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useOrderStore } from '@/stores/orderStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
@@ -25,6 +26,9 @@ export function OfferList() {
   const { offers, loadOffers, createOffer, updateOffer, deleteOffer } = useOfferStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts } = useProductStore();
+  // v0.6.9 — Soft-Reservation: Offer kann ein Stueck binden, das schon in einer
+  // offenen Order zugesagt ist. Hinweis im Produkt-Picker.
+  const { orders, loadOrders, getAllProductReservations } = useOrderStore();
   const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState('');
@@ -36,7 +40,9 @@ export function OfferList() {
   const [validUntil, setValidUntil] = useState('');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
 
-  useEffect(() => { loadOffers(); loadCustomers(); loadProducts(); }, [loadOffers, loadCustomers, loadProducts]);
+  useEffect(() => { loadOffers(); loadCustomers(); loadProducts(); loadOrders(); }, [loadOffers, loadCustomers, loadProducts, loadOrders]);
+
+  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
 
   // Pre-fill from URL params (e.g. /offers?product=p-1&customer=c-1)
   useEffect(() => {
@@ -67,9 +73,17 @@ export function OfferList() {
     id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone,
   })), [customers]);
 
-  const productOptions = useMemo(() => products.filter(p => p.stockStatus === 'in_stock').map(p => ({
-    id: p.id, label: `${p.brand} ${p.name}`, subtitle: `${fmt(p.plannedSalePrice || p.purchasePrice)} BHD`, meta: p.sku,
-  })), [products]);
+  const productOptions = useMemo(() => products.filter(p => p.stockStatus === 'in_stock').map(p => {
+    const res = productReservations.get(p.id);
+    const resHint = res && res.qty > 0
+      ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
+      : '';
+    return {
+      id: p.id, label: `${p.brand} ${p.name}`,
+      subtitle: `${fmt(p.plannedSalePrice || p.purchasePrice)} BHD${resHint}`,
+      meta: p.sku,
+    };
+  }), [products, productReservations]);
 
   // When products are selected, init their prices from plannedSalePrice
   useEffect(() => {

@@ -14,6 +14,7 @@ import { NewProductModal } from '@/components/products/NewProductModal';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { useProductionStore } from '@/stores/productionStore';
 import { useProductStore } from '@/stores/productStore';
+import { useOrderStore } from '@/stores/orderStore';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
 import type { Product, Category } from '@/core/models/types';
@@ -34,6 +35,9 @@ export function ProductionPage() {
   const navigate = useNavigate();
   const { records, loadRecords, createRecord, deleteRecord } = useProductionStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
+  // v0.6.9 — Soft-Reservation: Production verbraucht ein Stueck; wenn es in einer
+  // offenen Order versprochen ist, Hinweis im Input-Picker.
+  const { orders, loadOrders, getAllProductReservations } = useOrderStore();
 
   const [showNew, setShowNew] = useState(false);
   const [selectedInputIds, setSelectedInputIds] = useState<string[]>([]);
@@ -48,7 +52,9 @@ export function ProductionPage() {
   const [outputModalOpen, setOutputModalOpen] = useState(false);
   const [editingOutputKey, setEditingOutputKey] = useState<string | null>(null);
 
-  useEffect(() => { loadRecords(); loadProducts(); loadCategories(); }, [loadRecords, loadProducts, loadCategories]);
+  useEffect(() => { loadRecords(); loadProducts(); loadCategories(); loadOrders(); }, [loadRecords, loadProducts, loadCategories, loadOrders]);
+
+  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
 
   const availableProducts = useMemo(() => products.filter(p => p.stockStatus === 'in_stock'), [products]);
 
@@ -174,10 +180,17 @@ export function ProductionPage() {
             <SearchMultiSelect
               label=""
               placeholder="Search inventory..."
-              options={availableProducts.map(p => ({
-                id: p.id, label: `${p.brand} ${p.name}`,
-                subtitle: `${fmt(p.purchasePrice)} BHD`, meta: p.sku,
-              }))}
+              options={availableProducts.map(p => {
+                const res = productReservations.get(p.id);
+                const resHint = res && res.qty > 0
+                  ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
+                  : '';
+                return {
+                  id: p.id, label: `${p.brand} ${p.name}`,
+                  subtitle: `${fmt(p.purchasePrice)} BHD${resHint}`,
+                  meta: p.sku,
+                };
+              })}
               value={selectedInputIds}
               onChange={setSelectedInputIds}
               renderPreview={id => (

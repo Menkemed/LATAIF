@@ -64,10 +64,10 @@ const GRID_COLUMNS = 'minmax(0,0.9fr) minmax(0,1.1fr) minmax(0,0.8fr) minmax(0,1
 
 export function OrderList() {
   const navigate = useNavigate();
-  const { orders, loadOrders } = useOrderStore();
+  const { orders, loadOrders, getOrderIdsNeedingPurchase } = useOrderStore();
   const { addPayment } = useOrderPaymentStore();
   const { invoices, loadInvoices } = useInvoiceStore();
-  const { loadCategories, loadProducts } = useProductStore();
+  const { loadCategories, loadProducts, products } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -132,6 +132,17 @@ export function OrderList() {
     }
     return r;
   }, [orders, filterStatus, filterType, searchQuery, customers]);
+
+  // v0.6.9 — Set der Order-IDs, die noch beim Supplier bestellt werden muessen.
+  // products-Map als Argument — dieselbe Quelle wie das „Auf Lager"-Badge,
+  // damit Sidebar/OrderList/OrderDetail nicht auseinanderlaufen.
+  const needsOrderIds = useMemo(
+    () => {
+      const qtyMap = new Map(products.map(p => [p.id, p.quantity ?? 0]));
+      return getOrderIdsNeedingPurchase(qtyMap);
+    },
+    [orders, products, getOrderIdsNeedingPurchase]
+  );
 
   const activeCount = orders.filter(o => o.status !== 'completed' && o.status !== 'cancelled').length;
 
@@ -227,9 +238,21 @@ export function OrderList() {
               {fmtDate(order.createdAt)}
             </span>
 
-            {/* Order Number */}
-            <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {order.orderNumber}
+            {/* Order Number + v0.6.9 Need-to-Order Indikator */}
+            <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0,
+                                                  display: 'inline-flex', alignItems: 'center', gap: 8,
+                                                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {needsOrderIds.has(order.id) && (
+                <span
+                  className="pulse-orange"
+                  title="Mind. ein Item ohne Bestand & noch nicht beim Supplier bestellt"
+                  style={{
+                    width: 9, height: 9, borderRadius: '50%',
+                    background: '#D97706', flexShrink: 0,
+                  }}
+                />
+              )}
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{order.orderNumber}</span>
             </span>
 
             {/* v0.3.0 — Type-Badge */}

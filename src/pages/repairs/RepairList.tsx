@@ -12,6 +12,7 @@ import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useRepairStore } from '@/stores/repairStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useOrderStore } from '@/stores/orderStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
@@ -73,6 +74,9 @@ export function RepairList() {
   const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
   const { customers, loadCustomers } = useCustomerStore();
   const { categories, loadCategories, products, loadProducts } = useProductStore();
+  // v0.6.9 — Soft-Reservation: OWN-Repair greift ein eigenes Stueck ab — wenn es
+  // auf einer offenen Order liegt, Hinweis im Picker.
+  const { orders, loadOrders, getAllProductReservations } = useOrderStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
   const [showNew, setShowNew] = useState(false);
@@ -93,7 +97,9 @@ export function RepairList() {
   });
   const [searchParams, setSearchParams] = useSearchParams();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); loadEmployees(); }, [loadRepairs, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers, loadEmployees]);
+  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); loadEmployees(); loadOrders(); }, [loadRepairs, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers, loadEmployees, loadOrders]);
+
+  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
 
   const supplierOptions = useMemo(() => suppliers
     .filter(s => s.active)
@@ -114,13 +120,19 @@ export function RepairList() {
 
   const ownProductOptions = useMemo(() => products
     .filter(p => p.sourceType === 'OWN' && !p.id.startsWith('svc-repair-'))
-    .map(p => ({
-      id: p.id,
-      label: `${p.brand || ''} ${p.name || ''}`.trim() || p.id,
-      subtitle: p.sku || '',
-      meta: `${p.purchasePrice.toLocaleString('en-US')} BHD`,
-      searchText: productSearchText(p),
-    })), [products]);
+    .map(p => {
+      const res = productReservations.get(p.id);
+      const resHint = res && res.qty > 0
+        ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
+        : '';
+      return {
+        id: p.id,
+        label: `${p.brand || ''} ${p.name || ''}`.trim() || p.id,
+        subtitle: (p.sku || '') + resHint,
+        meta: `${p.purchasePrice.toLocaleString('en-US')} BHD`,
+        searchText: productSearchText(p),
+      };
+    }), [products, productReservations]);
 
   function getPaymentStyle(rep: Repair) {
     if (rep.repairScope === 'OWN') return null;

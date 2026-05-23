@@ -70,6 +70,17 @@ interface OrderStore {
   loading: boolean;
   loadOrders: () => void;
   getOrder: (id: string) => Order | undefined;
+  // v0.6.9 — "Need to Order"-Indikator: Orders mit mindestens einer Produkt-Zeile
+  // im Status PENDING, ohne Supplier-Bestellung (ordered_supplier_id NULL), und
+  // das verknuepfte Produkt hat 0 Bestand → muss noch beim Supplier bestellt werden.
+  // products MUSS uebergeben werden, damit der Quantity-Check aus DERSELBEN
+  // Quelle kommt wie die UI-Action-Zelle (productStore RAM) — sonst kann der
+  // Sidebar-Puls und das „Auf Lager"-Badge auseinanderlaufen.
+  getOrderIdsNeedingPurchase: (productQtyById: Map<string, number>) => Set<string>;
+  // v0.6.9 — Soft-Reservation: Map product_id → { qty, orderNumbers[] }, deckt nur
+  // offene Reservierungen (PENDING/ORDERED, nicht invoiced, Order aktiv). Sale-/
+  // Order-Picker zeigen das als Hinweis, sperren aber NICHT (Soft-Warnung).
+  getAllProductReservations: () => Map<string, { qty: number; orderNumbers: string[] }>;
   createOrder: (data: Partial<Omit<Order, 'lines'>> & { lines?: Array<Omit<OrderLine, 'id' | 'orderId' | 'lineTotal' | 'position'> & { newProduct?: Partial<Product> }> }) => Order;
   updateOrder: (id: string, data: Partial<Order>) => void;
   updateStatus: (id: string, status: OrderStatus) => void;
@@ -208,6 +219,71 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   },
 
   getOrder: (id) => get().orders.find(o => o.id === id),
+
+  // v0.6.9 — Orders, die noch beim Supplier bestellt werden muessen. Filter:
+  //   - Order ist aktiv (nicht cancelled/completed)
+  //   - mind. 1 Zeile mit status='PENDING'
+  //   - kundenseitige Produkt-Zeile (is_customer_facing=1, kein material_kind)
+  //   - kein ordered_supplier_id gesetzt (noch nicht „beim Supplier bestellt")
+  //   - verknuepftes Produkt hat <=0 Bestand (oder kein product_id)
+  // Die UI nutzt das fuer Sidebar-Badge, Dashboard-KPI und OrderList-Marker.
+  getOrderIdsNeedingPurchase: (productQtyById) => {
+    try {
+      // Kandidaten aus der DB: Zeilen die struktuell „muss bestellt werden"
+      // sein KOENNTEN (PENDING, kundenseitig, Produkt-Zeile, kein Supplier).
+      // Bestand wird AUSSERHALB per productQtyById gegen-gecheckt — das ist die
+      // gleiche Quelle, die die UI-Zelle anzeigt, also keine Divergenz mehr.
+      const rows = query(
+        `SELECT ol.order_id, ol.product_id
+           FROM order_lines ol
+           JOIN orders o ON o.id = ol.order_id
+          WHERE ol.status = 'PENDING'
+            AND COALESCE(ol.is_customer_facing, 1) = 1
+            AND ol.ordered_supplier_id IS NULL
+            AND ol.material_kind IS NULL
+            AND ol.product_id IS NOT NULL
+            AND o.status NOT IN ('cancelled', 'completed')`
+      );
+      const out = new Set<string>();
+      for (const r of rows) {
+        const pid = r.product_id as string;
+        const qty = productQtyById.get(pid) ?? 0;
+        if (qty <= 0) out.add(r.order_id as string);
+      }
+      return out;
+    } catch { return new Set<string>(); }
+  },
+
+  // v0.6.9 — Soft-Reservation: alle Produkt-Stuecke, die in offenen Orders
+  // (PENDING/ORDERED, kundenseitig, nicht invoiced, Order aktiv) versprochen sind.
+  // EIN Query, Map keyed by product_id. Sale-/Order-Picker zeigen den Hinweis,
+  // blockieren aber nicht — der Verkaufer entscheidet selbst.
+  getAllProductReservations: () => {
+    const m = new Map<string, { qty: number; orderNumbers: string[] }>();
+    try {
+      const rows = query(
+        `SELECT ol.product_id, ol.quantity, o.order_number
+           FROM order_lines ol
+           JOIN orders o ON o.id = ol.order_id
+          WHERE ol.status IN ('PENDING', 'ORDERED')
+            AND COALESCE(ol.is_customer_facing, 1) = 1
+            AND ol.material_kind IS NULL
+            AND ol.invoice_id IS NULL
+            AND ol.product_id IS NOT NULL
+            AND o.status NOT IN ('cancelled', 'completed')`
+      );
+      for (const r of rows) {
+        const pid = r.product_id as string;
+        const q = Math.max(1, (r.quantity as number) || 1);
+        const on = r.order_number as string;
+        const cur = m.get(pid) || { qty: 0, orderNumbers: [] };
+        cur.qty += q;
+        cur.orderNumbers.push(on);
+        m.set(pid, cur);
+      }
+    } catch { /* */ }
+    return m;
+  },
 
   createOrder: (data) => {
     const db = getDatabase();
@@ -498,6 +574,15 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         'Diese Zeile ist beim Supplier bestellt — bitte „Wareneingang erfassen" nutzen, ' +
         'damit ein Purchase angelegt wird (Kosten + Lager + A/P). Manueller ARRIVED ist gesperrt.'
       );
+    }
+
+    // v0.6.9 — Undo der Supplier-Bestellung: wenn eine ORDERED-Zeile zurueck auf
+    // PENDING geht, MUSS der ordered_supplier_id mitgenullt werden — sonst bleibt
+    // die Zeile halb-bestellt haengen (Status PENDING + supplier gesetzt) und der
+    // „Beim Supplier bestellt"-Button erscheint nicht mehr in der UI.
+    if (currentStatus === 'ORDERED' && status === 'PENDING' && orderedSupplierId) {
+      db.run(`UPDATE order_lines SET ordered_supplier_id = NULL WHERE id = ?`, [lineId]);
+      trackUpdate('order_lines', lineId, { orderedSupplierId: null });
     }
 
     db.run(`UPDATE order_lines SET status = ? WHERE id = ?`, [status, lineId]);

@@ -161,14 +161,21 @@ export function OrderDetail() {
     } catch { /* Migration evtl. noch nicht durch */ }
     return map;
   }, [customerLines, lineRefresh]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Back-to-Back — un-beschaffte Produkt-Posten: PENDING/ORDERED, nicht invoiced,
-  // echte Produkt-Zeile (kein materialKind), noch nicht via Purchase verknuepft.
+  // Back-to-Back — un-beschaffte Produkt-Posten: brauchen Wareneingang (Purchase).
+  // v0.6.9 — PENDING-Zeilen mit vorhandenem Lager-Bestand werden NICHT als
+  // sourceCandidates gezaehlt: das Produkt liegt im Regal, keine Bestellung noetig.
+  // ORDERED-Zeilen brauchen IMMER einen Wareneingang (sie sind beim Supplier
+  // bestellt). PENDING + noStock braucht einen (noch zu erstellen).
   const sourceCandidates = useMemo(
-    () => customerLines.filter(l =>
-      (l.status === 'PENDING' || l.status === 'ORDERED') &&
-      !l.invoiceId && !l.materialKind && !sourcedMap.has(l.id)
-    ),
-    [customerLines, sourcedMap]
+    () => customerLines.filter(l => {
+      if (l.invoiceId || l.materialKind || sourcedMap.has(l.id)) return false;
+      if (l.status === 'ORDERED') return true;
+      if (l.status !== 'PENDING') return false;
+      const lp = l.productId ? products.find(p => p.id === l.productId) : undefined;
+      const noStock = !lp || (lp.quantity ?? 0) <= 0;
+      return noStock;
+    }),
+    [customerLines, sourcedMap, products]
   );
 
   const order = useMemo(() => orders.find(o => o.id === id), [orders, id]);
@@ -1173,17 +1180,32 @@ export function OrderDetail() {
                         {!cancelled && !l.invoiceId && !isCancelled && perm.canManageOrders
                           && l.status === 'PENDING' && !l.materialKind && !sourcedMap.has(l.id) && (() => {
                             const lp = l.productId ? products.find(p => p.id === l.productId) : undefined;
-                            const noStock = !lp || (lp.quantity ?? 0) <= 0;
+                            const stockQty = lp?.quantity ?? 0;
+                            const noStock = !lp || stockQty <= 0;
+                            // v0.6.9 — Produkt schon auf Lager: kein Bestell-Aufruf,
+                            // stattdessen ein gruenes Auf-Lager-Badge. Bestellung ist
+                            // optional und kann via Edit/Markieren manuell ausgeloest
+                            // werden, wird aber UI-seitig nicht aktiv vorgeschlagen.
+                            if (!noStock) {
+                              return (
+                                <span title={`Direkt aus dem Lager lieferbar (${stockQty} verfuegbar)`}
+                                  style={{ fontSize: 10, padding: '3px 8px', borderRadius: 4,
+                                    background: 'rgba(22,163,74,0.10)', color: '#16A34A',
+                                    border: '1px solid rgba(22,163,74,0.35)' }}>
+                                  ✓ Auf Lager · {stockQty} Stk
+                                </span>
+                              );
+                            }
                             return (
                               <button type="button"
                                 onClick={() => { setMarkOrderedLine(l); setMarkOrderedSupplier(l.orderedSupplierId || ''); }}
-                                className="cursor-pointer"
+                                className="cursor-pointer pulse-orange"
                                 style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4,
-                                  border: `1px solid ${noStock ? '#D97706' : '#D5D9DE'}`,
-                                  color: noStock ? '#FFFFFF' : '#6B7280',
-                                  background: noStock ? '#D97706' : 'transparent' }}
-                                title="Beim Supplier bestellt markieren">
-                                Beim Supplier bestellt
+                                  border: '1px solid #D97706',
+                                  color: '#FFFFFF',
+                                  background: '#D97706' }}
+                                title="Kein Bestand — beim Supplier bestellen">
+                                ⚠ Beim Supplier bestellen
                               </button>
                             );
                           })()}

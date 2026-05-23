@@ -208,6 +208,15 @@ body { min-height: 100vh; overflow: hidden; background: var(--color-void); }
   100% { background-position: 200% 0; }
 }
 
+/* v0.6.9 — Orange Puls fuer „Need to Order"-Warnzeichen (Order ohne Supplier-
+   Bestellung + ohne Bestand). Sanftes Glow, faellt auf ohne zu nerven. */
+@keyframes pulseOrange {
+  0%   { box-shadow: 0 0 0 0 rgba(217,119,6,0.55); opacity: 1; }
+  60%  { box-shadow: 0 0 0 8px rgba(217,119,6,0); opacity: 0.85; }
+  100% { box-shadow: 0 0 0 0 rgba(217,119,6,0); opacity: 1; }
+}
+.pulse-orange { animation: pulseOrange 1.6s cubic-bezier(0.4,0,0.6,1) infinite; }
+
 .animate-fade-in { animation: fadeIn 0.5s cubic-bezier(0.25,0.1,0.25,1) forwards; }
 .animate-stagger-1 { animation-delay: 0ms; }
 .animate-stagger-2 { animation-delay: 80ms; opacity: 0; }

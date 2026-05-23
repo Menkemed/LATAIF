@@ -23,6 +23,7 @@ import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 import { useAgentStore } from '@/stores/agentStore';
 import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useOrderStore } from '@/stores/orderStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import type { Agent } from '@/core/models/types';
@@ -41,6 +42,9 @@ interface NewTransferForm {
 export function AgentList() {
   const { agents, transfers, loadAgents, loadTransfers, updateAgent, deleteAgent, createTransferForCustomer } = useAgentStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
+  // v0.6.9 — Soft-Reservation: ein an Approval gegebenes Stueck koennte schon
+  // in einer offenen Order versprochen sein. Hinweis im Picker.
+  const { orders, loadOrders, getAllProductReservations } = useOrderStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { loadEmployees } = useEmployeeStore();
@@ -56,7 +60,10 @@ export function AgentList() {
 
   const staffFilter = searchParams.get('staff') || '';
 
-  useEffect(() => { loadAgents(); loadTransfers(); loadProducts(); loadCategories(); loadCustomers(); loadInvoices(); loadEmployees(); }, [loadAgents, loadTransfers, loadProducts, loadCategories, loadCustomers, loadInvoices, loadEmployees]);
+  useEffect(() => { loadAgents(); loadTransfers(); loadProducts(); loadCategories(); loadCustomers(); loadInvoices(); loadEmployees(); loadOrders(); }, [loadAgents, loadTransfers, loadProducts, loadCategories, loadCustomers, loadInvoices, loadEmployees, loadOrders]);
+
+  // v0.6.9 — Reservierungen vorberechnen (Soft-Hint im Picker).
+  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
 
   // Transfer-Picker: Suche + Hover-Preview
   const [transferSearch, setTransferSearch] = useState('');
@@ -328,36 +335,44 @@ export function AgentList() {
                 <div style={{ padding: '16px 10px', fontSize: 12, color: '#9CA3AF', textAlign: 'center' }}>
                   {transferSearch ? 'No items match.' : 'No items in stock.'}
                 </div>
-              ) : filteredTransferProducts.map(p => (
-                <div
-                  key={p.id}
-                  onClick={() => setTransferForm({ ...transferForm, productId: p.id, ourPrice: p.plannedSalePrice || p.purchasePrice })}
-                  onMouseEnter={e => {
-                    setTransferHovered({ id: p.id, rect: (e.currentTarget as HTMLDivElement).getBoundingClientRect() });
-                  }}
-                  className="cursor-pointer rounded transition-colors"
-                  style={{
-                    padding: '8px 10px', marginBottom: 2,
-                    background: transferForm.productId === p.id ? 'rgba(15,15,16,0.06)' : 'transparent',
-                    border: `1px solid ${transferForm.productId === p.id ? '#0F0F10' : 'transparent'}`,
-                  }}>
-                  <div className="flex justify-between items-center">
-                    <div style={{ minWidth: 0, flex: 1, paddingRight: 8 }}>
-                      <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.brand} {p.name}
-                      </div>
-                      {p.sku && (
-                        <div className="font-mono" style={{ fontSize: 10, color: '#9CA3AF', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {p.sku}
+              ) : filteredTransferProducts.map(p => {
+                const res = productReservations.get(p.id);
+                return (
+                  <div
+                    key={p.id}
+                    onClick={() => setTransferForm({ ...transferForm, productId: p.id, ourPrice: p.plannedSalePrice || p.purchasePrice })}
+                    onMouseEnter={e => {
+                      setTransferHovered({ id: p.id, rect: (e.currentTarget as HTMLDivElement).getBoundingClientRect() });
+                    }}
+                    className="cursor-pointer rounded transition-colors"
+                    style={{
+                      padding: '8px 10px', marginBottom: 2,
+                      background: transferForm.productId === p.id ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      border: `1px solid ${transferForm.productId === p.id ? '#0F0F10' : 'transparent'}`,
+                    }}>
+                    <div className="flex justify-between items-center">
+                      <div style={{ minWidth: 0, flex: 1, paddingRight: 8 }}>
+                        <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {p.brand} {p.name}
                         </div>
-                      )}
+                        {p.sku && (
+                          <div className="font-mono" style={{ fontSize: 10, color: '#9CA3AF', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {p.sku}
+                          </div>
+                        )}
+                        {res && res.qty > 0 && (
+                          <div style={{ fontSize: 10, color: '#D97706', marginTop: 2 }}>
+                            🔒 {res.qty} reserviert ({res.orderNumbers.slice(0, 2).join(', ')}{res.orderNumbers.length > 2 ? '…' : ''})
+                          </div>
+                        )}
+                      </div>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#4B5563', flexShrink: 0 }}>
+                        <Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD
+                      </span>
                     </div>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#4B5563', flexShrink: 0 }}>
-                      <Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD
-                    </span>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 

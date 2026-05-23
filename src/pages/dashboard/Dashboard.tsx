@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { VIPBadge } from '@/components/ui/VIPBadge';
 import { useProductStore } from '@/stores/productStore';
+import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -40,6 +41,8 @@ function fmt(v: number): string {
 export function Dashboard() {
   const navigate = useNavigate();
   const { products, categories, loadProducts, loadCategories, getStockValue, getStockByCategory } = useProductStore();
+  // v0.6.9 — Need-to-Order Indikator (Sidebar + OrderList + Dashboard).
+  const { orders, loadOrders, getOrderIdsNeedingPurchase } = useOrderStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { partners, loadPartners } = usePartnerStore();
@@ -101,7 +104,18 @@ export function Dashboard() {
     loadCategories(); loadProducts(); loadCustomers();
     loadSuppliers(); loadPartners(); loadInvoices(); loadPurchases(); loadExpenses();
     loadTransfers(); loadSalesReturns(); loadDebts(); loadPayables(); loadScrapTrades();
-  }, [loadCategories, loadProducts, loadCustomers, loadSuppliers, loadPartners, loadInvoices, loadPurchases, loadExpenses, loadTransfers, loadSalesReturns, loadDebts, loadPayables, loadScrapTrades]);
+    loadOrders();
+  }, [loadCategories, loadProducts, loadCustomers, loadSuppliers, loadPartners, loadInvoices, loadPurchases, loadExpenses, loadTransfers, loadSalesReturns, loadDebts, loadPayables, loadScrapTrades, loadOrders]);
+
+  // v0.6.9 — Anzahl Orders die noch beim Supplier bestellt werden muessen.
+  // products-Map als Argument fuer konsistenten Quantity-Check (gleiche Quelle wie UI-Badge).
+  const needToOrderCount = useMemo(
+    () => {
+      const qtyMap = new Map(products.map(p => [p.id, p.quantity ?? 0]));
+      return getOrderIdsNeedingPurchase(qtyMap).size;
+    },
+    [orders, products, getOrderIdsNeedingPurchase]
+  );
 
   const stock = useMemo(() => getStockValue(), [products, getStockValue]);
   const stockByCat = useMemo(() => getStockByCategory(), [products, categories, getStockByCategory]);
@@ -681,7 +695,15 @@ export function Dashboard() {
 
         {/* ── SECTION: OPEN ITEMS / RISKS ── */}
         <DashSection title="Open Items" subtitle="Was Aufmerksamkeit braucht — Refunds, Verbindlichkeiten, Ausgaben">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
+            {/* v0.6.9 — Need-to-Order Erinnerung: Orders ohne Bestand + noch nicht
+                beim Supplier bestellt. Pulsierend orange wenn > 0. */}
+            <KPICard label="NEED TO ORDER" value={String(needToOrderCount)}
+              unit={needToOrderCount === 0 ? 'alle bestellt' : `order${needToOrderCount === 1 ? '' : 's'} ohne Supplier`}
+              icon={<ShoppingCart size={16} />}
+              accent={needToOrderCount > 0 ? 'orange' : 'none'}
+              className={needToOrderCount > 0 ? 'pulse-orange' : undefined}
+              onClick={() => navigate('/orders')} />
             <KPICard label="REFUND PAYABLE" value={fmt(outstandingRefunds)} unit={`BHD · ${openRefundCount} open returns`}
               icon={<FileText size={16} />} accent={outstandingRefunds > 0 ? 'urgent' : 'none'}
               onClick={() => navigate('/invoices?filter=returns')} />

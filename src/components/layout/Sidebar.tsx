@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import { ChevronDown, ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
+import { useOrderStore } from '@/stores/orderStore';
+import { useProductStore } from '@/stores/productStore';
 
 // localStorage-Key fuer expanded-Group-Persistence. Speichert ein JSON-Array
 // von Group-Labels, die der User offen lassen will.
@@ -93,6 +95,23 @@ export function Sidebar() {
   const location = useLocation();
   const { session, branches, logout, switchBranch } = useAuthStore();
   const [branchOpen, setBranchOpen] = useState(false);
+
+  // v0.6.9 — Live-Count fuer den „Need to Order"-Badge beim Orders-Menupunkt.
+  // Reagiert auf Order- + Produkt-Mutationen; berechnet wird via Store-Selektor.
+  const orders = useOrderStore(s => s.orders);
+  const loadOrders = useOrderStore(s => s.loadOrders);
+  const getOrderIdsNeedingPurchase = useOrderStore(s => s.getOrderIdsNeedingPurchase);
+  const products = useProductStore(s => s.products);
+  const loadProducts = useProductStore(s => s.loadProducts);
+  useEffect(() => { loadOrders(); loadProducts(); }, [loadOrders, loadProducts]);
+  const needToOrderCount = useMemo(
+    () => {
+      // v0.6.9 — gleiche Quelle wie OrderDetail-Action-Zelle: in-memory productStore.
+      const qtyMap = new Map(products.map(p => [p.id, p.quantity ?? 0]));
+      return getOrderIdsNeedingPurchase(qtyMap).size;
+    },
+    [orders, products, getOrderIdsNeedingPurchase]
+  );
 
   // Group-Collapse: speichert nur die EXPANDED Labels. Default = leer = alle zu.
   // Hydration aus localStorage einmal beim Mount.
@@ -273,7 +292,23 @@ export function Sidebar() {
                         }}>
                           <Icon size={15} strokeWidth={2} />
                         </span>
-                        <span>{label}</span>
+                        <span style={{ flex: 1 }}>{label}</span>
+                        {/* v0.6.9 — Orange Puls-Badge: Anzahl Orders die noch beim
+                            Supplier bestellt werden muessen (PENDING + kein Bestand). */}
+                        {to === '/orders' && needToOrderCount > 0 && (
+                          <span
+                            className="font-mono pulse-orange"
+                            title={`${needToOrderCount} Order${needToOrderCount === 1 ? '' : 's'} warten auf Supplier-Bestellung`}
+                            style={{
+                              minWidth: 22, height: 20, borderRadius: 10,
+                              padding: '0 7px',
+                              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                              background: '#D97706', color: '#FFFFFF',
+                              fontSize: 11, fontWeight: 600, lineHeight: 1,
+                              flexShrink: 0,
+                            }}
+                          >{needToOrderCount}</span>
+                        )}
                       </NavLink>
                     );
                   })}

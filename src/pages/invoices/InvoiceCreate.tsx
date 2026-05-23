@@ -15,6 +15,7 @@ import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { useOrderStore } from '@/stores/orderStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getLotsWithPurchaseNumbers, formatLotLabel, getStockAggregates, type StockLot } from '@/core/lots/lot-queries';
@@ -61,10 +62,12 @@ export function InvoiceCreate() {
   const { invoices, loadInvoices, createDirectInvoice, recordPayment, updateInvoice, rewriteInvoiceLines, getInvoicePayments } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
+  // v0.6.9 — Soft-Reservation: Map product_id → { qty, orderNumbers[] } fuer den Picker-Hinweis.
+  const { orders, loadOrders, getAllProductReservations } = useOrderStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
 
-  useEffect(() => { loadCustomers(); loadProducts(); loadCategories(); loadEmployees(); if (isEditMode) loadInvoices(); }, [loadCustomers, loadProducts, loadCategories, loadEmployees, loadInvoices, isEditMode]);
+  useEffect(() => { loadCustomers(); loadProducts(); loadCategories(); loadEmployees(); loadOrders(); if (isEditMode) loadInvoices(); }, [loadCustomers, loadProducts, loadCategories, loadEmployees, loadOrders, loadInvoices, isEditMode]);
 
   const editInvoice = useMemo(() => isEditMode ? invoices.find(i => i.id === editId) : undefined, [isEditMode, editId, invoices]);
 
@@ -124,6 +127,9 @@ export function InvoiceCreate() {
     label: `${c.firstName} ${c.lastName}${c.company ? ` — ${c.company}` : ''}`,
     subtitle: c.phone,
   })), [customers]);
+  // v0.6.9 — Reservierungen vorberechnen (Soft-Warnung im Picker).
+  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
+
   const productOptions = useMemo(() => {
     // Plan §Sales §Partial-Payment-Reservation: 'reserved' / 'consignment_reserved'
     // = schon auf einer PARTIAL-Invoice, darf nicht ein zweites Mal verkauft werden.
@@ -138,15 +144,21 @@ export function InvoiceCreate() {
     const agg = getStockAggregates(visible.map(p => p.id));
     return visible.map(p => {
       const stock = agg.get(p.id)?.totalQty ?? (p.quantity || 1);
+      // v0.6.9 — Soft-Reservation: zeige im Picker an, wenn dieses Stueck in einer
+      // offenen Order versprochen ist. Nicht blockierend — der User entscheidet.
+      const res = productReservations.get(p.id);
+      const resHint = res && res.qty > 0
+        ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
+        : '';
       return {
         id: p.id,
         label: `${p.brand} ${p.name}`,
-        subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${stock}`,
+        subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${stock}${resHint}`,
         meta: p.sku,
         searchText: productSearchText(p),
       };
     });
-  }, [products]);
+  }, [products, productReservations]);
 
   // Pro Zeile: aufgelöstes Scheme + Berechnung (Memo via direkter map)
   // Phase 3 — Cost-Snapshot kommt aus dem ausgewaehlten Lot statt aus
