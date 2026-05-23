@@ -356,6 +356,8 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     const grossSale = params.salePrice;
     const netInput = scheme === 'VAT_10' ? grossSale / (1 + rate / 100) : grossSale;
     const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
+    // v0.7.1 — NBR: MARGIN persistiert internalVat.
+    const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
 
     // 1. Find-or-Create Supplier für den Consignor (1 Person, 2 Rollen)
     const consignorSupplierId = findOrCreateSupplierForConsignor(con.consignorId);
@@ -404,7 +406,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
         purchasePrice,
         taxScheme: scheme,
         vatRate: rate,
-        vatAmount: calc.vatAmount,
+        vatAmount: persistedVat,
         lineTotal: calc.grossAmount,
       }],
       `Consignment sale · ${con.consignmentNumber}`,

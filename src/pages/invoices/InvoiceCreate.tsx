@@ -259,7 +259,10 @@ export function InvoiceCreate() {
         purchasePrice: costSnapshot,
         taxScheme: c.scheme,
         vatRate: c.vatRate,
-        vatAmount: c.vat,
+        // v0.7.1 — NBR: MARGIN persistiert internalVat (= margin × rate/(100+rate))
+        // damit MARGIN_VAT-Ledger + invoice.vatAmount-Hero korrekt. Customer-Receipt
+        // versteckt VAT bei MARGIN weiterhin (Differenzbesteuerung).
+        vatAmount: c.internalVat || c.vat,
         lineTotal: c.gross,
       };
     });

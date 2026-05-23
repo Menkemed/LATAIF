@@ -1670,6 +1670,52 @@ function runMigrations(database: Database): void {
   } catch (err) {
     console.warn('unlink_orphan_invoice_links migration failed:', err);
   }
+
+  // v0.7.1 — MARGIN-VAT Backfill: alte MARGIN-Invoice-Lines hatten `vat_amount = 0`
+  // statt internalVat (= margin × rate / (100 + rate)). Der Convert-Flow speicherte
+  // calc.vatAmount (=0 fuer MARGIN) statt calc.internalVatAmount. Folge: das
+  // MARGIN_VAT-Ledger-Konto + invoice.vatAmount-Hero waren leer fuer Custom-Convert-
+  // Invoices. NBR-Excel-Export ist nicht betroffen (rechnet selbst aus purchase/sale
+  // Snapshots), nur das Management-Reporting + Hero-Konsistenz. Idempotent.
+  try {
+    const flag = database.exec(
+      `SELECT value FROM settings WHERE key = 'migration.margin_vat_backfill_v1'`
+    );
+    const alreadyApplied = flag.length > 0 && flag[0].values.length > 0 && flag[0].values[0][0] === '1';
+    if (!alreadyApplied) {
+      // Recompute vat_amount fuer MARGIN-Lines mit 0 und positiver Marge.
+      // Formel: vat = (line_total - purchase * qty) × rate / (100 + rate), 3 Dezimal.
+      database.run(
+        `UPDATE invoice_lines
+            SET vat_amount = ROUND(
+                  (line_total - COALESCE(purchase_price_snapshot, 0) * COALESCE(quantity, 1))
+                  * COALESCE(vat_rate, 10)
+                  / (100 + COALESCE(vat_rate, 10))
+                  * 1000
+                ) / 1000.0
+          WHERE tax_scheme = 'MARGIN'
+            AND COALESCE(vat_amount, 0) = 0
+            AND line_total > COALESCE(purchase_price_snapshot, 0) * COALESCE(quantity, 1)`
+      );
+      // Re-sum invoice.vat_amount aus den korrigierten Lines, damit Hero/Liste konsistent sind.
+      database.run(
+        `UPDATE invoices
+            SET vat_amount = COALESCE((
+                  SELECT SUM(vat_amount) FROM invoice_lines WHERE invoice_id = invoices.id
+                ), 0),
+                updated_at = datetime('now')
+          WHERE id IN (
+            SELECT DISTINCT invoice_id FROM invoice_lines WHERE tax_scheme = 'MARGIN'
+          )`
+      );
+      database.run(
+        `INSERT OR REPLACE INTO settings (branch_id, key, value, category, updated_at)
+         VALUES ('branch-main', 'migration.margin_vat_backfill_v1', '1', 'system', datetime('now'))`
+      );
+    }
+  } catch (err) {
+    console.warn('margin_vat_backfill_v1 migration failed:', err);
+  }
 }
 
 // Replace old 7-category structure (watches, jewelry, bags, shoes, eyewear, services, diamonds)

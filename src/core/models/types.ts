@@ -282,7 +282,7 @@ export interface Invoice {
 
 // ── Payment ──
 
-export type PaymentMethod = 'bank_transfer' | 'cash' | 'card' | 'benefit' | 'crypto' | 'other';
+export type PaymentMethod = 'bank_transfer' | 'cash' | 'card' | 'benefit' | 'other';
 
 export interface Payment {
   id: UUID;

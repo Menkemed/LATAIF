@@ -636,6 +636,10 @@ export function OrderDetail() {
         lineNet = grossPerLine;
       }
       const calc = vatEngine.calculateNet(lineNet, (prod.purchasePrice || 0) * qty, scheme, rate);
+      // v0.7.1 — NBR: MARGIN persistiert internalVatAmount damit MARGIN_VAT-Ledger
+      // + invoice.vatAmount-Hero korrekt sind. Display-Schicht versteckt VAT bei
+      // MARGIN-Print weiterhin (gesetzliche Differenzbesteuerung).
+      const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
       invoiceLineInputs.push({
         productId: prod.id,
         quantity: qty,
@@ -643,7 +647,7 @@ export function OrderDetail() {
         purchasePrice: prod.purchasePrice || 0,
         taxScheme: scheme,
         vatRate: rate,
-        vatAmount: calc.vatAmount,
+        vatAmount: persistedVat,
         lineTotal: calc.grossAmount,
       });
     }
@@ -691,6 +695,8 @@ export function OrderDetail() {
       ? grossAgreed / (1 + vatRate / 100)
       : grossAgreed;
     const calc = vatEngine.calculateNet(netInput, prod.purchasePrice || 0, taxScheme, vatRate);
+    // v0.7.1 — NBR: siehe analoge Stelle weiter oben.
+    const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
     const invoice = createDirectInvoice(
       order.customerId,
       [{
@@ -699,7 +705,7 @@ export function OrderDetail() {
         purchasePrice: prod.purchasePrice || 0,
         taxScheme,
         vatRate,
-        vatAmount: calc.vatAmount,
+        vatAmount: persistedVat,
         lineTotal: calc.grossAmount,
       }],
       `Final invoice for order ${order.orderNumber}`,

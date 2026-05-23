@@ -158,7 +158,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const offerNet = (l.unit_price as number) || 0;
       const calc = vatEngine.calculateNet(offerNet, pp, scheme as TaxScheme, vatRate);
       const net = calc.netAmount;
-      const vatAmt = calc.vatAmount;
+      // v0.7.1 — NBR: MARGIN-Lines persistieren internalVatAmount.
+      const vatAmt = calc.internalVatAmount ?? calc.vatAmount;
       const gross = calc.grossAmount;
 
       totalPurchase += pp;
@@ -321,14 +322,17 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       return { ...l, _resolvedLotId: lotId, _resolvedCost: cost };
     });
 
-    let netAmount = 0, totalVat = 0, totalPurchase = 0;
+    let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
     for (const l of resolvedLines) {
       const qty = Math.max(1, l.quantity || 1);
       netAmount += l.unitPrice * qty;
       totalVat += l.vatAmount;
       totalPurchase += l._resolvedCost * qty;
+      // v0.7.1 — invoice-level gross direkt aus line.lineTotal aufsummieren.
+      // Bei MARGIN ist lineTotal = net (kunde zahlt net), und vatAmount ist der
+      // interne Margin-VAT — `net + vat` waere falsch.
+      grossAmount += l.lineTotal;
     }
-    const grossAmount = netAmount + totalVat;
     const margin = netAmount - totalPurchase;
 
     // Determine tax scheme: if all lines same scheme, use that; otherwise 'mixed'
@@ -587,7 +591,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       return { ...l, _resolvedLotId: lotId, _resolvedCost: cost };
     });
 
-    let netAmount = 0, totalVat = 0, totalPurchase = 0;
+    let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
     const stmt = db.prepare(
       `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
         vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
@@ -599,6 +603,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       netAmount += l.unitPrice * qty;
       totalVat += l.vatAmount * qty;
       totalPurchase += l._resolvedCost * qty;
+      // v0.7.1 — siehe createDirectInvoice: lineTotal direkt aufsummieren statt
+      // net+vat zu rechnen (MARGIN hat lineTotal=net, vatAmount=internalVat).
+      grossAmount += l.lineTotal;
     });
     stmt.free();
 
@@ -622,7 +629,6 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (isStillUnpaid) reserveProductIfDepleted(pid);
     }
 
-    const grossAmount = netAmount + totalVat;
     const margin = netAmount - totalPurchase;
     const schemes = new Set(lines.map(l => l.taxScheme));
     const taxScheme = schemes.size === 1 ? [...schemes][0] : 'mixed';

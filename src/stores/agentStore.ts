@@ -466,6 +466,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
     const netInput = scheme === 'VAT_10' ? settlementGross / (1 + rate / 100) : settlementGross;
     const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
+    // v0.7.1 — NBR: MARGIN persistiert internalVat (siehe OrderDetail/InvoiceCreate).
+    const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
 
     // Invoice anlegen — eine einzelne Line mit dem Produkt-Snapshot.
     const inv = useInvoiceStore.getState();
@@ -477,7 +479,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         purchasePrice,
         taxScheme: scheme,
         vatRate: rate,
-        vatAmount: calc.vatAmount,
+        vatAmount: persistedVat,
         lineTotal: calc.grossAmount,
       }],
       `Agent settlement · transfer ${transfer.transferNumber}`,
@@ -580,13 +582,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }
       const netInput = scheme === 'VAT_10' ? settlementGross / (1 + rate / 100) : settlementGross;
       const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
+      // v0.7.1 — NBR: MARGIN persistiert internalVat.
+      const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
       return {
         productId: t.productId,
         unitPrice: calc.netAmount,
         purchasePrice,
         taxScheme: scheme,
         vatRate: rate,
-        vatAmount: calc.vatAmount,
+        vatAmount: persistedVat,
         lineTotal: calc.grossAmount,
       };
     });

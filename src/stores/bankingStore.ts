@@ -113,7 +113,7 @@ function accountFor(method: string | null | undefined): BankAccount {
   const m = String(method).toLowerCase();
   if (m === 'cash') return 'cash';
   if (m === 'benefit') return 'benefit';
-  // card, bank, bank_transfer, crypto → bank
+  // card, bank, bank_transfer → bank
   return 'bank';
 }
 

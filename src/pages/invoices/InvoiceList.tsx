@@ -490,7 +490,7 @@ export function InvoiceList() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>METHOD</span>
             <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
-              {['bank_transfer', 'cash', 'card', 'benefit', 'crypto'].map(m => (
+              {['bank_transfer', 'cash', 'card', 'benefit'].map(m => (
                 <button key={m} onClick={() => setPayMethod(m)}
                   className="cursor-pointer rounded" style={{
                     padding: '6px 14px', fontSize: 12,

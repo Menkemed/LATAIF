@@ -48,7 +48,7 @@ const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
   { value: 'bank_transfer', label: 'Bank Transfer' },
   { value: 'cash', label: 'Cash' },
   { value: 'card', label: 'Card' },
-  { value: 'crypto', label: 'Crypto' },
+  { value: 'benefit', label: 'Benefit' },
 ];
 
 export function InvoiceDetail() {
@@ -862,7 +862,7 @@ export function InvoiceDetail() {
                           {payList.map(p => {
                             const methodLabel = ({
                               cash: 'Cash', bank: 'Bank', bank_transfer: 'Bank Transfer',
-                              card: 'Card', benefit: 'Benefit', crypto: 'Crypto', other: 'Other',
+                              card: 'Card', benefit: 'Benefit', other: 'Other',
                             } as Record<string, string>)[p.method] || p.method;
                             return (
                               <div key={p.id} className="flex justify-between items-center"
@@ -1404,7 +1404,7 @@ export function InvoiceDetail() {
                       <option value="bank">Bank</option>
                       <option value="bank_transfer">Bank Transfer</option>
                       <option value="card">Card</option>
-                      <option value="crypto">Crypto</option>
+                      <option value="benefit">Benefit</option>
                       <option value="other">Other</option>
                     </select>
                     <input defaultValue={p.notes || ''}

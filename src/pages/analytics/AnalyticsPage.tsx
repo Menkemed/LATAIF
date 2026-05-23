@@ -484,15 +484,15 @@ export function AnalyticsPage() {
        FROM payments WHERE branch_id = ? GROUP BY method`,
       [branchId]
     );
-    let cashReceived = 0, bankReceived = 0, cardReceived = 0, cryptoReceived = 0, otherReceived = 0;
+    let cashReceived = 0, bankReceived = 0, cardReceived = 0, benefitReceived = 0, otherReceived = 0;
     for (const row of payByMethod) {
       const m = row.method as string;
       const amt = (row.total as number) || 0;
       if (m === 'cash') cashReceived += amt;
       else if (m === 'bank_transfer') bankReceived += amt;
       else if (m === 'card') cardReceived += amt;
-      else if (m === 'crypto') cryptoReceived += amt;
-      else otherReceived += amt;
+      else if (m === 'benefit') benefitReceived += amt;
+      else otherReceived += amt; // legacy 'crypto' etc.
     }
     const cardFeeLost = Math.round(cardReceived * cardFeeRate / 100 * 100) / 100;
     const cardNetToBank = cardReceived - cardFeeLost;
@@ -886,7 +886,7 @@ export function AnalyticsPage() {
       repairRevenue: repRev, consignmentComm, agentCommTotal,
       outstandingPayments,
       // Cashflow
-      cashReceived, bankReceived, cardReceived, cryptoReceived, otherReceived,
+      cashReceived, bankReceived, cardReceived, benefitReceived, otherReceived,
       cardFeeRate, cardFeeLost, cardNetToBank,
       cashBalance, bankBalance, totalLiquid,
       openingCash, openingBank,
@@ -1473,7 +1473,7 @@ export function AnalyticsPage() {
                 <TableRow label="Card payments received (gross)" value={`${fmtDec(finance.cardReceived, 2)} BHD`} color="#4B5563" />
                 <TableRow label={`Card processing fees (${fmtDec(finance.cardFeeRate, 2)}%)`} value={`- ${fmtDec(finance.cardFeeLost, 2)} BHD`} color="#AA6E6E" />
                 <TableRow label="Card → Bank (net)" value={`${fmtDec(finance.cardNetToBank, 2)} BHD`} color="#7EAA6E" />
-                {finance.cryptoReceived > 0 && <TableRow label="Crypto received" value={`${fmtDec(finance.cryptoReceived, 2)} BHD`} color="#4B5563" />}
+                {finance.benefitReceived > 0 && <TableRow label="Benefit received" value={`${fmtDec(finance.benefitReceived, 2)} BHD`} color="#4B5563" />}
                 {(finance.productEkCash + finance.productEkBank) > 0 && <TableRow label="Product purchases (EK paid out, manual)" value={`- ${fmtDec(finance.productEkCash + finance.productEkBank, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.purchasePaidCash + finance.purchasePaidBank) > 0 && <TableRow label="Supplier payments (Purchases module)" value={`- ${fmtDec(finance.purchasePaidCash + finance.purchasePaidBank, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.expenseCash + finance.expenseBank) > 0 && <TableRow label="Operating expenses" value={`- ${fmtDec(finance.expenseCash + finance.expenseBank, 2)} BHD`} color="#AA6E6E" />}
