@@ -19,10 +19,27 @@ interface KPICardProps {
 // - Große Zahl mit kleiner Decimal/Unit
 // - Trend-Pill (grün hoch / rot runter) wenn trend gegeben
 export function KPICard({ label, value, unit, trend, icon, accent = 'none', onClick, tooltip, className }: KPICardProps) {
-  // Zahl formatieren mit Decimal-Differenzierung (5,567.00 → 5,567 + .00)
-  const numString = typeof value === 'number'
-    ? value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
-    : String(value);
+  // v0.7.9 — Decimal-Differenzierung: Ganzzahl gross, Dezimalteil klein (0.7em)
+  // analog zu <Bhd>-Konvention. Vorher wurde "180.000" einheitlich gross
+  // dargestellt; jetzt "180" gross + ".000" auf 70% der Hoehe.
+  //
+  // - number-input: ganzzahl-Format ohne Decimals (bisheriges Verhalten).
+  // - string-input: bei "x.yyy"-Form aufteilen (z.B. fmt(180) = "180.000"
+  //   wird zu intPart="180" + decimalPart=".000"). Sonst as-is rendern.
+  let intPart: string;
+  let decimalPart = '';
+  if (typeof value === 'number') {
+    intPart = value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  } else {
+    const str = String(value);
+    const m = str.match(/^([-+]?[\d,]+)(\.\d+)$/);
+    if (m) {
+      intPart = m[1];
+      decimalPart = m[2];
+    } else {
+      intPart = str;
+    }
+  }
 
   const accentColors: Record<string, { bg: string; fg: string }> = {
     blue:    { bg: 'rgba(61,127,255,0.10)',  fg: '#3D7FFF' },
@@ -89,7 +106,10 @@ export function KPICard({ label, value, unit, trend, icon, accent = 'none', onCl
           fontSize: 32, fontWeight: 600, letterSpacing: '-0.025em',
           color: '#0F0F10', lineHeight: 1.1,
         }}>
-          {numString}
+          {intPart}
+          {decimalPart && (
+            <span style={{ fontSize: '0.7em', color: '#6B7280', fontWeight: 500 }}>{decimalPart}</span>
+          )}
         </div>
         {trendDisplay}
       </div>
