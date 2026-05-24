@@ -108,7 +108,10 @@ export function KPICard({ label, value, unit, trend, icon, accent = 'none', onCl
         }}>
           {intPart}
           {decimalPart && (
-            <span style={{ fontSize: '0.7em', color: '#6B7280', fontWeight: 500 }}>{decimalPart}</span>
+            // Konsistent mit Bhd: nur Groesse reduzieren, Farbe + Weight vom
+            // Parent erben — damit Decimal-Teil identisch schwarz bleibt wie
+            // ueberall sonst und nicht grau wirkt.
+            <span style={{ fontSize: '0.7em' }}>{decimalPart}</span>
           )}
         </div>
         {trendDisplay}
