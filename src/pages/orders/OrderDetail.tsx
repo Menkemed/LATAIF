@@ -22,6 +22,8 @@ import { useProductStore } from '@/stores/productStore';
 import { formatProductMultiLine } from '@/core/utils/product-format';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import { useExpenseStore } from '@/stores/expenseStore';
+import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { query } from '@/core/db/helpers';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
@@ -73,6 +75,10 @@ export function OrderDetail() {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { goldPayables, loadGoldPayables, createGoldPayable, deleteGoldPayable } = useGoldStore();
   const { products, loadProducts, createProduct } = useProductStore();
+  // v0.7.7 — expenseStore: A/P-Chip-Klick auf einer Cost-Line oeffnet das Pay-
+  // Modal in-place. Cross-Store-Reload triggert nach Submit den lineRefresh-Tick.
+  const { expenses, loadExpenses } = useExpenseStore();
+  const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
   // Plan §Order §Convert: Wenn die Order kein verlinktes Produkt hat (manuell beschrieben),
   // wird beim Convert eines automatisch erzeugt und hier gehalten — wird vom VAT-Modal +
   // handleConfirmFinalInvoice anstelle von linkedProduct verwendet.
@@ -115,7 +121,7 @@ export function OrderDetail() {
   const { createDirectInvoice, invoices, loadInvoices } = useInvoiceStore();
   const perm = usePermission();
 
-  useEffect(() => { loadOrders(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadGoldPayables(); }, [loadOrders, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadGoldPayables]);
+  useEffect(() => { loadOrders(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadGoldPayables(); loadExpenses(); }, [loadOrders, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadGoldPayables, loadExpenses]);
   useEffect(() => { if (id) loadPayments(id); }, [id, loadPayments]);
 
   const payments = useMemo(() => (id ? paymentsByOrder[id] || [] : []), [id, paymentsByOrder]);
@@ -1356,13 +1362,42 @@ export function OrderDetail() {
                           <Bhd v={l.costAmount || 0}/>
                         </span>
                         <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          {isGoldDebt
-                            ? <span style={{ color: '#7E5BEF' }} title="Goldschmied-Gold — Gramm-Schuld, siehe Gold-Verbindlichkeiten unten">Gold-Schuld</span>
-                            : !l.supplierId
-                            ? <span style={{ color: '#9CA3AF' }}>own cost</span>
-                            : l.expenseId
-                              ? <span style={{ color: '#16A34A' }}>A/P booked</span>
-                              : <span style={{ color: '#D97706' }}>pending</span>}
+                          {(() => {
+                            // v0.7.7 — A/P-Chip mit Live-Status aus expenses + Klick-zum-Zahlen.
+                            // OrderLine.paymentStatus existiert nicht im Type (anders als RepairLine),
+                            // daher hier zur Render-Zeit aus expenses.find() ableiten.
+                            if (isGoldDebt) {
+                              return <span style={{ color: '#7E5BEF' }} title="Goldschmied-Gold — Gramm-Schuld, siehe Gold-Verbindlichkeiten unten">Gold-Schuld</span>;
+                            }
+                            if (!l.supplierId) {
+                              return <span style={{ color: '#9CA3AF' }}>own cost</span>;
+                            }
+                            if (!l.expenseId) {
+                              return <span style={{ color: '#D97706' }}>pending</span>;
+                            }
+                            const exp = expenses.find(e => e.id === l.expenseId);
+                            const status = exp?.status;
+                            const paid = exp?.paidAmount || 0;
+                            const total = exp?.amount || 0;
+                            if (status === 'PAID' || (total > 0 && paid >= total - 0.005)) {
+                              return <span style={{ color: '#16A34A' }} title="Supplier expense fully paid">✓ Paid</span>;
+                            }
+                            const isPartial = paid > 0.005;
+                            return (
+                              <button
+                                onClick={() => setPayExpenseId(l.expenseId!)}
+                                className="cursor-pointer"
+                                style={{
+                                  background: isPartial ? 'rgba(217,119,6,0.08)' : 'rgba(15,15,16,0.04)',
+                                  border: `1px solid ${isPartial ? 'rgba(217,119,6,0.4)' : '#D5D9DE'}`,
+                                  color: isPartial ? '#D97706' : '#0F0F10',
+                                  fontSize: 11, padding: '3px 10px', borderRadius: 4,
+                                }}
+                                title="Click to record payment for this supplier expense">
+                                {isPartial ? 'Partial · Pay' : 'Unpaid · Pay'}
+                              </button>
+                            );
+                          })()}
                         </span>
                         {!isCancelled && perm.canManageOrders ? (
                           <button
@@ -1691,6 +1726,15 @@ export function OrderDetail() {
           onClose={() => { setSettleGold(null); loadGoldPayables(); }}
         />
       )}
+
+      {/* v0.7.7 — Pay-Expense Modal aus A/P-Chip-Klick. recordExpensePayment
+          triggert Cross-Store-Reload, der lineRefresh-Tick bumpt nach Submit
+          damit der Chip live auf "✓ Paid" flippt. */}
+      <PayExpenseModal
+        expenseId={payExpenseId}
+        onClose={() => setPayExpenseId(null)}
+        onPaid={() => setLineRefresh(k => k + 1)}
+      />
 
       {customer && (
         <MessagePreviewModal

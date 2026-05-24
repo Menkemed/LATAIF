@@ -11,6 +11,11 @@ import { Input } from '@/components/ui/Input';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useRecurringExpenseStore } from '@/stores/recurringExpenseStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
+// v0.7.7 — Shared Pay-Modal. Vorher war das Pay-UI inline in dieser Datei;
+// jetzt teilen ExpenseList / SupplierDetail / RepairDetail / OrderDetail
+// dasselbe Modal damit eine Aenderung an der Payment-UX nur an einer Stelle
+// passiert.
+import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import type { Expense, ExpenseCategory, RecurringExpenseTemplate } from '@/core/models/types';
 import { matchesDeep } from '@/core/utils/deep-search';
 
@@ -47,7 +52,7 @@ const STATUS_STYLE: Record<DisplayStatus, { fg: string; bg: string }> = {
 };
 
 export function ExpenseList() {
-  const { expenses, loadExpenses, createExpense, updateExpense, deleteExpense, recordExpensePayment, getTotalsByCategory } = useExpenseStore();
+  const { expenses, loadExpenses, createExpense, updateExpense, deleteExpense, getTotalsByCategory } = useExpenseStore();
   const {
     templates: recurringTemplates,
     loadTemplates: loadRecurringTemplates,
@@ -100,10 +105,9 @@ export function ExpenseList() {
   }, [searchParams, setSearchParams]);
   const [confirmDeleteTemplate, setConfirmDeleteTemplate] = useState<string | null>(null);
 
-  // Record-Payment-Modal-State
+  // v0.7.7 — Record-Payment-State: nur noch die ID, das Modal verwaltet
+  // Amount/Method selbst und ruft recordExpensePayment direkt.
   const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
-  const [payAmount, setPayAmount] = useState<number>(0);
-  const [payMethod, setPayMethod] = useState<'cash' | 'bank' | 'benefit'>('bank');
 
   useEffect(() => {
     loadExpenses();
@@ -214,22 +218,7 @@ export function ExpenseList() {
   }
 
   function openPaymentModal(expenseId: string) {
-    const exp = expenses.find(e => e.id === expenseId);
-    if (!exp) return;
     setPayExpenseId(expenseId);
-    setPayAmount(Math.max(0, exp.amount - (exp.paidAmount || 0)));
-    setPayMethod(exp.paymentMethod || 'bank');
-  }
-
-  function handleRecordPayment() {
-    if (!payExpenseId || payAmount <= 0) return;
-    try {
-      recordExpensePayment(payExpenseId, payAmount, payMethod);
-      setPayExpenseId(null);
-      setPayAmount(0);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    }
   }
 
   return (
@@ -821,48 +810,13 @@ export function ExpenseList() {
         </div>
       </Modal>
 
-      {/* Record Payment Modal */}
-      <Modal open={!!payExpenseId} onClose={() => setPayExpenseId(null)} title="Record Expense Payment" width={420}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {(() => {
-            const exp = expenses.find(e => e.id === payExpenseId);
-            if (!exp) return null;
-            const remaining = Math.max(0, exp.amount - (exp.paidAmount || 0));
-            return (
-              <div style={{ padding: '10px 12px', background: '#F2F7FA', borderRadius: 8, fontSize: 12, color: '#4B5563' }}>
-                <div className="flex justify-between"><span>Expense:</span><span className="font-mono" style={{ color: '#0F0F10' }}>{exp.expenseNumber}</span></div>
-                <div className="flex justify-between" style={{ marginTop: 4 }}><span>Total:</span><span className="font-mono"><Bhd v={exp.amount}/> BHD</span></div>
-                <div className="flex justify-between" style={{ marginTop: 4 }}><span>Already paid:</span><span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={exp.paidAmount || 0}/> BHD</span></div>
-                <div className="flex justify-between" style={{ marginTop: 4 }}><span>Remaining:</span><span className="font-mono" style={{ color: '#DC2626' }}><Bhd v={remaining}/> BHD</span></div>
-              </div>
-            );
-          })()}
-          <Input required label="PAYMENT AMOUNT (BHD)" type="number" step="0.01"
-            value={payAmount || ''} onChange={e => setPayAmount(parseFloat(e.target.value) || 0)} />
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
-            <div className="flex gap-2" style={{ marginTop: 6 }}>
-              {(['cash', 'bank'] as const).map(m => {
-                const active = payMethod === m;
-                return (
-                  <button key={m} onClick={() => setPayMethod(m)}
-                    className="cursor-pointer rounded"
-                    style={{
-                      padding: '8px 16px', fontSize: 13,
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                      color: active ? '#0F0F10' : '#6B7280',
-                      background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                    }}>{m === 'cash' ? 'Cash' : 'Bank'}</button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setPayExpenseId(null)}>Cancel</Button>
-            <Button variant="primary" onClick={handleRecordPayment} disabled={payAmount <= 0}>Record Payment</Button>
-          </div>
-        </div>
-      </Modal>
+      {/* v0.7.7 — Pay-Expense Modal jetzt aus shared component.
+          Ein UX/Bugfix passiert nur an einer Stelle (PayExpenseModal),
+          alle vier Konsumenten (Expenses/Supplier/Repair/Order) sehen ihn. */}
+      <PayExpenseModal
+        expenseId={payExpenseId}
+        onClose={() => setPayExpenseId(null)}
+      />
 
       {/* Delete Confirm */}
       <Modal open={!!confirmDelete} onClose={() => setConfirmDelete(null)} title="Delete Expense" width={380}>

@@ -16,8 +16,11 @@ import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
+import { useExpenseStore } from '@/stores/expenseStore';
 import { useGoldStore } from '@/stores/goldStore';
 import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
+import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
+import { PaySupplierModal } from '@/components/expenses/PaySupplierModal';
 import type { GoldPayable } from '@/core/models/types';
 import { query } from '@/core/db/helpers';
 import type { Supplier } from '@/core/models/types';
@@ -37,6 +40,16 @@ export function SupplierDetail() {
   const goBack = useGoBack('/suppliers');
   const { suppliers, loadSuppliers, updateSupplier, deleteSupplier, getLedger } = useSupplierStore();
   const { purchases, loadPurchases } = usePurchaseStore();
+  // v0.7.7 — Pay-direkt-am-Supplier. expenses + recordExpensePayment kommen
+  // via Store; Modal lebt in src/components/expenses/PayExpenseModal.
+  // expenses-Array als Dep fuer die workshopExpenses-Liste, damit nach einer
+  // Pay-Aktion (state-Update via recordExpensePayment) die Tabelle live re-
+  // rendert ohne F5.
+  const { expenses, loadExpenses } = useExpenseStore();
+  const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
+  // v0.7.7 — Bulk-Pay an den Supplier (FIFO + Override). Boolean reicht;
+  // supplierId kommt direkt aus dem URL-Param.
+  const [showPaySupplierModal, setShowPaySupplierModal] = useState(false);
   // v0.4.4 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
   // bei jeder Mutation seine Referenz. In einer useEffect-Dependency + loadAll()
   // im Effect → Endlos-Loop (SupplierDetail fror beim Oeffnen ein, zeigte
@@ -51,7 +64,7 @@ export function SupplierDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
-  useEffect(() => { loadSuppliers(); loadPurchases(); goldLoadAll(); }, [loadSuppliers, loadPurchases, goldLoadAll]);
+  useEffect(() => { loadSuppliers(); loadPurchases(); loadExpenses(); goldLoadAll(); }, [loadSuppliers, loadPurchases, loadExpenses, goldLoadAll]);
 
   // Plan repair-multi-supplier — Gold-Buckets fuer diesen Supplier
   const goldOwedSummary = useMemo(() => id ? getGoldOwedBySupplier(id) : [], [id, getGoldOwedBySupplier, goldPayables]);
@@ -82,7 +95,11 @@ export function SupplierDetail() {
     if (supplier) setForm({ ...supplier });
   }, [supplier]);
 
-  const ledger = useMemo(() => id ? getLedger(id) : { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 }, [id, getLedger, purchases]);
+  // v0.7.7 — expenses als Dep, damit Pay-Action auf Workshop-Expenses die KPIs
+  // (TOTAL PAID / OUTSTANDING) live aktualisiert. Vorher trigger nur Purchase-
+  // Aenderungen einen Re-Calc, Workshop-Expense-Payments wurden in der KPI
+  // ignoriert obwohl getLedger() sie summiert.
+  const ledger = useMemo(() => id ? getLedger(id) : { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 }, [id, getLedger, purchases, expenses]);
 
   const supplierPurchases = useMemo(
     () => id ? purchases.filter(p => p.supplierId === id).sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate)) : [],
@@ -165,7 +182,9 @@ export function SupplierDetail() {
         sourceNumber: (r.order_number as string) || (r.repair_number as string) || undefined,
       }));
     } catch { return []; }
-  }, [id, purchases]);
+    // expenses-Array als Dep: nach recordExpensePayment aendert sich der Store,
+    // das useMemo re-queryt die DB und die Pay-Buttons aktualisieren live.
+  }, [id, purchases, expenses]);
 
   if (!supplier) {
     return (
@@ -290,12 +309,23 @@ export function SupplierDetail() {
         </div>
 
         {/* Ledger KPIs (Plan §Supplier §3 + §4 + §10 + §Purchase Returns §8) */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 32 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 16 }}>
           <KPICard label="TOTAL PURCHASES" value={fmt(ledger.totalPurchases)} unit="BHD" />
           <KPICard label="TOTAL PAID" value={fmt(ledger.totalPaid)} unit="BHD" />
           <KPICard label="OUTSTANDING" value={fmt(ledger.outstandingBalance)} unit={`BHD · ${supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length + workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length} open`} />
           <KPICard label="CREDIT BALANCE" value={fmt(ledger.creditBalance)} unit="BHD available" />
         </div>
+
+        {/* v0.7.7 — Bulk-Pay Action. Sichtbar wenn mindestens eine offene
+            Workshop/Service-Expense existiert. Inventory-Purchases laufen
+            weiter ueber PurchaseDetail (separater Payment-Flow). */}
+        {workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length > 0 && (
+          <div style={{ marginBottom: 32, display: 'flex', justifyContent: 'flex-end' }}>
+            <Button variant="primary" onClick={() => setShowPaySupplierModal(true)}>
+              💰 Pay Supplier — Bulk
+            </Button>
+          </div>
+        )}
 
         {/* Purchases List */}
         <Card>
@@ -332,7 +362,7 @@ export function SupplierDetail() {
           <div style={{ marginTop: 24 }}>
             <Card>
               <span className="text-overline" style={{ marginBottom: 12 }}>WORKSHOP &amp; SERVICE COSTS ({workshopExpenses.length})</span>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.8fr 0.8fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12, marginTop: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.8fr 0.8fr 1fr 1fr 1fr 1fr 0.8fr', gap: 12, fontSize: 12, marginTop: 12 }}>
                 <span className="text-overline">EXPENSE #</span>
                 <span className="text-overline">DESCRIPTION</span>
                 <span className="text-overline">SOURCE</span>
@@ -340,12 +370,14 @@ export function SupplierDetail() {
                 <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
                 <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>PAID</span>
                 <span className="text-overline">STATUS</span>
+                <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
                 {workshopExpenses.map(e => {
                   const remaining = Math.max(0, e.amount - e.paidAmount);
                   // Link nur wenn die Quelle noch existiert (JOIN lieferte eine Nummer).
                   const target = (e.linkId && e.sourceNumber)
                     ? (e.module === 'order' ? `/orders/${e.linkId}` : `/repairs/${e.linkId}`)
                     : null;
+                  const canPay = e.status !== 'PAID' && e.status !== 'CANCELLED' && remaining > 0;
                   return (
                     <div key={e.id} style={{ display: 'contents' }}>
                       <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{e.expenseNumber}</span>
@@ -366,6 +398,22 @@ export function SupplierDetail() {
                         fontWeight: remaining > 0 ? 600 : 400,
                       }}>
                         {e.status === 'PAID' ? 'Paid' : remaining > 0 ? `${fmt(remaining)} pending` : e.status}
+                      </span>
+                      <span style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', textAlign: 'right' }}>
+                        {canPay ? (
+                          <button
+                            onClick={() => setPayExpenseId(e.id)}
+                            style={{
+                              fontSize: 11, padding: '4px 12px', border: '1px solid #0F0F10',
+                              borderRadius: 4, background: '#0F0F10', color: '#FFFFFF',
+                              cursor: 'pointer', fontWeight: 500,
+                            }}
+                            title="Record payment for this expense">
+                            Pay
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: 11, color: '#9CA3AF' }}>—</span>
+                        )}
                       </span>
                     </div>
                   );
@@ -545,6 +593,24 @@ export function SupplierDetail() {
         mode={settleModal.mode}
         payable={settleModal.payable}
         onClose={() => setSettleModal({ open: false, mode: 'settle_supplier_return' })}
+      />
+
+      {/* v0.7.7 — Pay-direkt-am-Supplier. recordExpensePayment triggert auch
+          die Cross-Store-Reloads (Repair- + Order-Detail), damit dort der
+          A/P-Chip ohne F5 auf "Paid" flippt. */}
+      <PayExpenseModal
+        expenseId={payExpenseId}
+        onClose={() => setPayExpenseId(null)}
+      />
+
+      {/* v0.7.7 — Bulk-Pay an den Supplier: eine Summe (z.B. 50 BHD),
+          FIFO-Allocation auf alle offenen Workshop-Expenses. Erzeugt N
+          recordExpensePayment-Calls, jede Expense kriegt ihren eigenen
+          sauberen Ledger-Eintrag. */}
+      <PaySupplierModal
+        supplierId={showPaySupplierModal ? supplier.id : null}
+        supplierName={supplier.name}
+        onClose={() => setShowPaySupplierModal(false)}
       />
     </div>
   );

@@ -27,8 +27,8 @@ import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Repair, RepairStatus, RepairLine } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
-import { MaterialsCard } from '@/components/work-orders/MaterialsCard';
 import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
+import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 
 function fmt(v: number): string {
@@ -37,6 +37,22 @@ function fmt(v: number): string {
 
 // Plan §Repair §6: RECEIVED → IN_PROGRESS → (SENT_TO_WORKSHOP if external) → READY → DELIVERED.
 // Flow extended um SENT_TO_WORKSHOP wenn external; sonst direkt ready.
+// v0.7.6 — Kind-Icons fuer COSTS / MATERIALS, parallel zu OrderDetail.
+const COST_KIND_META: Record<string, { icon: string; label: string }> = {
+  labor:   { icon: '🔨', label: 'Labor' },
+  diamond: { icon: '💎', label: 'Diamond' },
+  stone:   { icon: '🔮', label: 'Stone' },
+  gold:    { icon: '🥇', label: 'Gold' },
+  service: { icon: '🛠', label: 'Service' },
+  polishing: { icon: '✨', label: 'Polishing' },
+  spare_part: { icon: '⚙️', label: 'Spare Part' },
+  gold_work: { icon: '🥇', label: 'Gold Work' },
+  stone_setting: { icon: '💎', label: 'Stone Setting' },
+  engraving: { icon: '🖋', label: 'Engraving' },
+  plating: { icon: '✨', label: 'Plating' },
+  other: { icon: '🔧', label: 'Other' },
+};
+
 // OWN-scope endet bei 'ready' — kein Pickup, da das Produkt sowieso bei uns bleibt.
 function getStatusFlow(repairType: string | undefined, scope?: 'CUSTOMER' | 'OWN'): RepairStatus[] {
   const base: RepairStatus[] = ['received', 'diagnosed', 'in_progress'];
@@ -171,6 +187,11 @@ export function RepairDetail() {
   });
   // v0.2.1 — Material-Modal fuer Diamond/Stone/Gold-Piece im Repair
   const [showAddMaterialModal, setShowAddMaterialModal] = useState(false);
+  // v0.7.7 — Pay-Modal fuer A/P-Chip-Klick. Klick auf "Unpaid"/"Partial" oeffnet
+  // PayExpenseModal in-place (statt zum Supplier zu navigieren). User behaelt
+  // Repair-Kontext, recordExpensePayment triggert Cross-Store-Reload, sodass
+  // Chip nach Submit live auf "✓ Paid" flippt.
+  const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
 
   const [settleModal, setSettleModal] = useState<{
     open: boolean; mode: SettleGoldMode; payable?: GoldPayable; credit?: CustomerGoldCredit;
@@ -1110,182 +1131,164 @@ export function RepairDetail() {
             )}
           </Card>
 
-          {/* Plan repair-multi-supplier — Work Lines section (external/hybrid).
-              Multi-Supplier-Tracking: jede Zeile ist ein eigener Lieferant +
-              Cost + Payment-Status. Beim Status >= IN_PROGRESS wird je Line
-              eine eigene Expense gebucht (Supplier-A/P). */}
-          {/* v0.7.6 — WORK LINES jetzt auch bei Internal-Repairs sichtbar. Fall:
-              Repair startet intern, spaeter kommt externer Bedarf (Diamond-Setter,
-              Spare-Part-Supplier). User klickt "+ Add Work Line" → handleAddLine
-              schaltet den repairType automatisch auf 'hybrid' (siehe Z.~200).
-              Vorher war die Section bei Internal komplett ausgeblendet → User
-              musste erst Edit machen + Type umstellen. Unintuitiv. */}
+          {/* v0.7.6 — Unified COSTS / MATERIALS Card (Order-Style). Vorher
+              waren WORK LINES + MATERIALS USED + GOLD USED jeweils eigene Cards
+              mit unterschiedlichen Spalten. Jetzt einheitliches Schema:
+              KIND | SOURCE | DESCRIPTION | COST/CT | COST | A/P | DELETE.
+              In-house Pseudo-Row + alle expliziten Lines + Footer (Total + Margin). */}
           {(() => {
-            // v0.7.6 — Implizite "In-house"-Pseudo-Zeile fuer interne Arbeit.
-            // Sichtbar IMMER wenn Repair-Type 'internal' oder 'hybrid' ist — egal
-            // wieviele explizite Lines existieren oder ob internalCost > 0.
-            // Repraesentiert die Tatsache, dass interne Arbeit Teil des Repairs
-            // ist; verschwindet nur bei 'external' (rein extern, keine in-house).
             const explicitLines = thisRepairLines.filter(l => l.status !== 'CANCELLED');
             const inHouseCost = (repair.internalCost
               ?? (repair.repairType === 'internal' ? repair.estimatedCost : 0)
               ?? 0);
             const showInHouseRow = repair.repairType === 'internal' || repair.repairType === 'hybrid';
             const totalLineCount = explicitLines.length + (showInHouseRow ? 1 : 0);
+            const totalCost = explicitLines.reduce((s, l) => s + (l.costAmount || 0), 0) + inHouseCost;
+            const charge = repair.chargeToCustomer || 0;
+            const margin = charge - totalCost;
             return (
-          <div style={{ marginTop: 20 }}>
+          <div style={{ marginTop: 24, gridColumn: '1 / -1' }}>
             <Card>
-              <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
-                <span className="text-overline">WORK LINES ({totalLineCount})</span>
-                <button onClick={() => setShowAddLineModal(true)}
-                  className="cursor-pointer"
-                    style={{ padding: '6px 12px', fontSize: 12, borderRadius: 6,
-                             border: '1px solid #0F0F10', background: 'transparent', color: '#0F0F10' }}>
-                    + Add Work Line
-                  </button>
+              <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+                <span className="text-overline">COSTS / MATERIALS ({totalLineCount})</span>
+                <div className="flex gap-2">
+                  <Button variant="secondary" onClick={() => setShowAddLineModal(true)}>
+                    <span style={{ fontSize: 14, marginRight: 4 }}>+</span> Add Work
+                  </Button>
+                  <Button variant="secondary" onClick={() => setShowAddMaterialModal(true)}>
+                    <span style={{ fontSize: 14, marginRight: 4 }}>+</span> Add Material
+                  </Button>
                 </div>
-                {totalLineCount === 0 ? (
-                  <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click "Add Work Line" to register an in-house or workshop position.</p>
-                ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
-                    <span className="text-overline">L#</span>
-                    <span className="text-overline">SUPPLIER</span>
-                    <span className="text-overline">WORK TYPE</span>
-                    <span className="text-overline">DESCRIPTION</span>
-                    <span className="text-overline" style={{ textAlign: 'right' }}>COST</span>
-                    <span className="text-overline">PAYMENT</span>
-                    <span className="text-overline">ACTIONS</span>
-                    {/* v0.7.6 — In-house Pseudo-Zeile zuerst (wenn aktiv). Lebt aus
-                        repair.internalCost — kein eigener Datensatz, kein Cancel-
-                        Button. User kann den Betrag im Edit-Modus aendern. */}
-                    {showInHouseRow && (
-                      <div style={{ display: 'contents' }}>
-                        <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', padding: '10px 0', borderTop: '1px solid #E5E9EE', whiteSpace: 'nowrap' }}>
-                          {repair.repairNumber}-IN
+              </div>
+              {totalLineCount === 0 ? (
+                <p style={{ fontSize: 13, color: '#6B7280', padding: '8px 0' }}>
+                  No costs recorded yet. Add labor, diamond, stone or gold positions — A/P at the
+                  supplier is booked automatically once the repair moves to In Progress.
+                </p>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 1.2fr 1.5fr 0.8fr 0.9fr 0.9fr 40px', gap: 10, fontSize: 12 }}>
+                  <span className="text-overline">KIND</span>
+                  <span className="text-overline">SUPPLIER</span>
+                  <span className="text-overline">DESCRIPTION</span>
+                  <span className="text-overline" style={{ textAlign: 'right' }}>COST/CT</span>
+                  <span className="text-overline" style={{ textAlign: 'right' }}>COST</span>
+                  <span className="text-overline">A/P</span>
+                  <span />
+
+                  {/* In-house Pseudo-Row (immer wenn repair_type internal/hybrid) */}
+                  {showInHouseRow && (
+                    <div style={{ display: 'contents' }}>
+                      <span style={{ fontSize: 12, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>🏠 In-house</span>
+                      <span style={{ fontSize: 12, color: '#9CA3AF', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                        — own work
+                      </span>
+                      <span style={{ fontSize: 13, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                        Internal labor / own work
+                      </span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>—</span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                        <Bhd v={inHouseCost}/>
+                      </span>
+                      <span style={{ fontSize: 11, color: '#9CA3AF', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>own cost</span>
+                      <span style={{ borderTop: '1px solid #E5E9EE' }} />
+                    </div>
+                  )}
+
+                  {/* Explizite Work/Material Lines */}
+                  {explicitLines.map((l: RepairLine) => {
+                    const km = COST_KIND_META[l.materialKind || l.workType || 'other'] || COST_KIND_META.other;
+                    const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
+                    const supName = sup?.name || l.materialDetails?.supplierName;
+                    const totalCt = (l.materialDetails?.ct || 0) * (l.materialDetails?.qty || 0);
+                    const perCt = (l.materialKind === 'diamond' || l.materialKind === 'stone') && totalCt > 0
+                      ? (l.costAmount || 0) / totalCt : 0;
+                    // Goldsmith-Gold: keine supplierId auf Line (Gold-Schuld lebt als gold_payable),
+                    // aber materialDetails.supplierName erinnert an den Goldsmith.
+                    const isGoldDebt = l.materialKind === 'gold' && !l.supplierId
+                      && (l.materialDetails?.weightGrams || 0) > 0 && !!l.materialDetails?.supplierName;
+                    return (
+                      <div key={l.id} style={{ display: 'contents' }}>
+                        <span style={{ fontSize: 12, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>{km.icon} {km.label}</span>
+                        <span style={{ fontSize: 12, color: supName ? '#0F0F10' : '#9CA3AF',
+                                       padding: '10px 0', borderTop: '1px solid #E5E9EE',
+                                       cursor: sup ? 'pointer' : 'default' }}
+                          onClick={() => sup && navigate(`/suppliers/${sup.id}`)}>
+                          {supName || '— own cost'}
                         </span>
-                        <span style={{ fontSize: 12, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          — own work
+                        <span style={{ fontSize: 13, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {l.description || '—'}
                         </span>
-                        <span style={{ fontSize: 12, color: '#4B5563', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          In-house
-                        </span>
-                        <span style={{ fontSize: 12, color: '#6B7280', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          Internal labor / own work
+                        <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {perCt > 0 ? <Bhd v={perCt}/> : '—'}
                         </span>
                         <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          <Bhd v={inHouseCost}/>
+                          <Bhd v={l.costAmount || 0}/>
                         </span>
-                        <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE', color: '#9CA3AF' }}>
-                          — (no A/P)
+                        <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {isGoldDebt
+                            ? <span style={{ color: '#7E5BEF' }} title="Goldsmith gold — gram debt, see Gold liabilities below">Gold debt</span>
+                            : !l.supplierId
+                            ? <span style={{ color: '#9CA3AF' }}>own cost</span>
+                            : !l.expenseId
+                            ? <span style={{ color: '#D97706' }}>pending</span>
+                            : l.paymentStatus === 'PAID'
+                              ? <span style={{ color: '#16A34A' }} title="Supplier expense fully paid">✓ Paid</span>
+                              : (
+                                // v0.7.7 — Klickbarer Chip: Unpaid/Partial -> oeffnet
+                                // PayExpenseModal direkt aus Repair-Kontext.
+                                <button
+                                  onClick={() => setPayExpenseId(l.expenseId!)}
+                                  className="cursor-pointer"
+                                  style={{
+                                    background: l.paymentStatus === 'PARTIALLY_PAID' ? 'rgba(217,119,6,0.08)' : 'rgba(15,15,16,0.04)',
+                                    border: `1px solid ${l.paymentStatus === 'PARTIALLY_PAID' ? 'rgba(217,119,6,0.4)' : '#D5D9DE'}`,
+                                    color: l.paymentStatus === 'PARTIALLY_PAID' ? '#D97706' : '#0F0F10',
+                                    fontSize: 11, padding: '3px 10px', borderRadius: 4,
+                                  }}
+                                  title="Click to record payment for this supplier expense">
+                                  {l.paymentStatus === 'PARTIALLY_PAID' ? 'Partial · Pay' : 'Unpaid · Pay'}
+                                </button>
+                              )}
                         </span>
-                        <div style={{ padding: '8px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6 }}>
-                          <span style={{ fontSize: 10, color: '#9CA3AF' }} title="Edit via repair details">edit on header</span>
-                        </div>
+                        <button
+                          onClick={() => {
+                            if (!confirm('Remove this entry? Any linked gold liability + supplier expense will also be removed.')) return;
+                            try { cancelRepairLine(l.id); }
+                            catch (err) { alert(err instanceof Error ? err.message : String(err)); }
+                          }}
+                          className="cursor-pointer"
+                          style={{ background: 'none', border: 'none', color: '#DC2626', borderTop: '1px solid #E5E9EE', padding: '10px 0' }}
+                          title="Remove this cost / material">
+                          <Trash2 size={14} />
+                        </button>
                       </div>
-                    )}
-                    {thisRepairLines.filter(l => l.status !== 'CANCELLED').map((l: RepairLine) => {
-                      const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
-                      return (
-                        <div key={l.id} style={{ display: 'contents' }}>
-                          {/* v0.1.48 — Volle Sub-Number REP-…-L# fuer Nachverfolgbarkeit
-                              (auch im Supplier-/Expense-Kontext eindeutig). v0.4.4 — Spalte
-                              auf max-content + nowrap, damit sie nicht vertikal umbricht. */}
-                          <span className="font-mono" style={{ fontSize: 12, color: '#6B7280',
-                                         padding: '10px 0', borderTop: '1px solid #E5E9EE', whiteSpace: 'nowrap',
-                                         textDecoration: l.status === 'CANCELLED' ? 'line-through' : 'none' }}>
-                            {repair.repairNumber}-L{l.position}
-                          </span>
-                          <span style={{ fontSize: 12, color: l.status === 'CANCELLED' ? '#9CA3AF' : '#0F0F10',
-                                         padding: '10px 0', borderTop: '1px solid #E5E9EE',
-                                         textDecoration: l.status === 'CANCELLED' ? 'line-through' : 'none',
-                                         cursor: sup ? 'pointer' : 'default' }}
-                            onClick={() => sup && navigate(`/suppliers/${sup.id}`)}>
-                            {sup?.name || '—'}
-                          </span>
-                          <span style={{ fontSize: 12, color: '#4B5563', padding: '10px 0', borderTop: '1px solid #E5E9EE',
-                                         textTransform: 'capitalize' }}>
-                            {(l.workType || 'other').replace(/_/g, ' ')}
-                          </span>
-                          <span style={{ fontSize: 12, color: '#6B7280', padding: '10px 0', borderTop: '1px solid #E5E9EE',
-                                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {l.description || '—'}
-                          </span>
-                          <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right',
-                                                                padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                            <Bhd v={l.costAmount}/>
-                          </span>
-                          <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE',
-                                         color: l.paymentStatus === 'PAID' ? '#16A34A'
-                                              : l.paymentStatus === 'PARTIALLY_PAID' ? '#D97706'
-                                              : '#6B7280' }}>
-                            {l.expenseId ? (l.paymentStatus || 'UNPAID') : '— (uncommitted)'}
-                          </span>
-                          <div style={{ padding: '8px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6 }}>
-                            {l.status === 'OPEN' && (
-                              <button onClick={() => {
-                                if (!confirm('Remove this work line? Any linked gold liability + supplier expense will also be removed.')) return;
-                                try { cancelRepairLine(l.id); }
-                                catch (err) { alert(err instanceof Error ? err.message : String(err)); }
-                              }}
-                                style={{ fontSize: 10, padding: '3px 8px', border: '1px solid rgba(220,38,38,0.3)',
-                                         borderRadius: 4, background: 'transparent', color: '#DC2626', cursor: 'pointer' }}>
-                                Cancel
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                {linesTotalCost > 0 && (
-                  <div className="flex justify-between" style={{
-                    marginTop: 12, paddingTop: 12, borderTop: '1px solid #0F0F10', fontSize: 13,
-                  }}>
-                    <span style={{ color: '#0F0F10' }}>Total external cost</span>
-                    <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={linesTotalCost}/> BHD</span>
-                  </div>
-                )}
-              </Card>
-            </div>
+                    );
+                  })}
+                </div>
+              )}
+              {totalLineCount > 0 && (
+                <div className="flex items-center justify-between" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                  <span style={{ fontSize: 12, color: '#6B7280' }}>
+                    Total Cost&nbsp;
+                    <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={totalCost}/> BHD</span>
+                  </span>
+                  {charge > 0 && (
+                    <span style={{ fontSize: 13, color: '#6B7280' }}>
+                      Margin&nbsp;
+                      <span className="font-mono" style={{ color: margin >= 0 ? '#16A34A' : '#DC2626' }}><Bhd v={margin}/> BHD</span>
+                    </span>
+                  )}
+                </div>
+              )}
+            </Card>
+          </div>
             );
           })()}
-
-          {/* v0.2.1 — Materials Used Card (Diamond/Stone/Gold-Piece-Verbrauch) */}
-          <div style={{ marginTop: 20 }}>
-            <MaterialsCard
-              title="MATERIALS USED"
-              lines={thisRepairLines
-                .filter(l => l.status !== 'CANCELLED' && l.materialKind && l.materialKind !== 'labor')
-                .map(l => {
-                  const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
-                  return {
-                    id: l.id,
-                    position: l.position,
-                    materialKind: l.materialKind,
-                    materialDetails: l.materialDetails,
-                    description: l.description,
-                    supplierId: l.supplierId,
-                    supplierName: sup?.name || l.materialDetails?.supplierName,
-                    costAmount: l.costAmount,
-                    status: l.status,
-                  };
-                })}
-              onAdd={() => setShowAddMaterialModal(true)}
-              onRemove={(lineId) => {
-                if (!confirm('Remove this material entry? Any linked gold liability + supplier expense will also be removed.')) return;
-                try { cancelRepairLine(lineId); }
-                catch (err) { alert(err instanceof Error ? err.message : String(err)); }
-              }}
-              showCustomerPrice={false}
-              canEdit={true}
-            />
-          </div>
 
           {/* Plan repair-multi-supplier — Gold-Used Block (Workshop + Customer Gold).
               Workshop-Gold legt eine gold_payable an. Customer-Gold-Rest entweder
               zurueck, als Credit, oder vom Shop behalten. */}
-          <div style={{ marginTop: 20 }}>
+          <div style={{ marginTop: 20, gridColumn: '1 / -1' }}>
             <Card>
               <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
                 <span className="text-overline">
@@ -1628,6 +1631,14 @@ export function RepairDetail() {
         credit={settleModal.credit}
         repairId={repair.id}
         onClose={() => setSettleModal({ open: false, mode: 'settle_supplier_return' })}
+      />
+
+      {/* v0.7.7 — Pay-Modal: oeffnet vom A/P-Chip-Klick aus. recordExpensePayment
+          triggert Cross-Store-Reload (Repair-Lines + Order-Lines), sodass nach
+          Submit der Chip live auf ✓ Paid flippt. */}
+      <PayExpenseModal
+        expenseId={payExpenseId}
+        onClose={() => setPayExpenseId(null)}
       />
 
       {/* v0.2.1 — AddMaterialModal: Diamond/Stone/Gold-Piece -> repair_line */}

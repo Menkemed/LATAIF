@@ -285,6 +285,25 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
         exp.supplierId
       );
     });
+
+    // v0.7.7 — Cross-Store-Propagation: wenn diese Expense an einer
+    // repair_line / order_line haengt, deren paymentStatus mit-aktualisieren
+    // damit die Source-Detail-Pages (RepairDetail / OrderDetail) sofort
+    // "Paid" statt "A/P booked" zeigen — ohne dass der User refreshen muss.
+    // Per feedback_linked_records_lifecycle.md: cross-store mutations refresh
+    // dependent UIs.
+    try {
+      const linkedRepairLine = query('SELECT id FROM repair_lines WHERE expense_id = ? LIMIT 1', [id])[0];
+      if (linkedRepairLine) {
+        import('@/stores/repairStore').then(m => m.useRepairStore.getState().loadRepairLines());
+      }
+      const linkedOrderLine = query('SELECT id FROM order_lines WHERE expense_id = ? LIMIT 1', [id])[0];
+      if (linkedOrderLine) {
+        import('@/stores/orderStore').then(m => m.useOrderStore.getState().loadOrders());
+      }
+    } catch (err) {
+      console.warn('[expense] cross-store reload failed:', err);
+    }
   },
 
   getExpensePayments: (id) => {
