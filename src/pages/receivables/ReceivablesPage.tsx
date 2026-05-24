@@ -308,7 +308,9 @@ export function ReceivablesPage() {
               </span>
             </div>
 
-            {/* CLIENT */}
+            {/* CLIENT — v0.7.7: visuell als Link erkennbar (Underline +
+                ExternalLink-Icon analog zur Reference-Spalte). Klick navigiert
+                zum Client-Detail. */}
             <div style={{ minWidth: 0 }}>
               {row.customerId ? (
                 <span
@@ -316,13 +318,24 @@ export function ReceivablesPage() {
                   className="cursor-pointer"
                   style={{
                     fontSize: 14, color: '#0F0F10',
+                    textDecoration: 'underline',
+                    textUnderlineOffset: 3,
+                    textDecorationColor: 'rgba(15,15,16,0.20)',
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    display: 'block',
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
                   }}
-                  onMouseEnter={(e) => { e.currentTarget.style.color = '#3D7FFF'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.color = '#0F0F10'; }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = '#3D7FFF';
+                    e.currentTarget.style.textDecorationColor = 'rgba(61,127,255,0.50)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = '#0F0F10';
+                    e.currentTarget.style.textDecorationColor = 'rgba(15,15,16,0.20)';
+                  }}
+                  title={`Open ${row.customerName}`}
                 >
                   {row.customerName}
+                  <ExternalLink size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
                 </span>
               ) : (
                 <span style={{ fontSize: 14, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
