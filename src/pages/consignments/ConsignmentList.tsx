@@ -994,7 +994,7 @@ export function ConsignmentList() {
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>PRICING</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
-              <Input label="AGREED PRICE (BHD)" type="number" placeholder="Optional \u2014 set at sale"
+              <Input label="AGREED PRICE (BHD)" type="number" placeholder={'Optional \u2014 set at sale'}
                 value={form.agreedPrice}
                 onChange={e => setForm({ ...form, agreedPrice: e.target.value })} />
               <Input label="MINIMUM PRICE (BHD)" type="number" placeholder="Optional"

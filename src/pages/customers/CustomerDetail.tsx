@@ -333,7 +333,7 @@ export function CustomerDetail() {
                   </div>
                   <div style={{ marginTop: 6 }}>
                     <span style={{ padding: '2px 10px', fontSize: 11, borderRadius: 999, color: stageColor.fg, background: stageColor.bg }}>
-                      \u25CF {customer.salesStage.charAt(0).toUpperCase() + customer.salesStage.slice(1)}
+                      {'\u25CF'} {customer.salesStage.charAt(0).toUpperCase() + customer.salesStage.slice(1)}
                     </span>
                   </div>
                   <div className="flex flex-col" style={{ marginTop: 14, gap: 6 }}>
@@ -883,7 +883,7 @@ export function CustomerDetail() {
                   )}
                   {(customer.budgetMin || customer.budgetMax) && (
                     <div style={{ marginTop: 12, fontSize: 12, color: '#6B7280' }}>
-                      Budget: <Bhd v={customer.budgetMin || 0}/> \u2013 <Bhd v={customer.budgetMax || 0}/> BHD
+                      Budget: <Bhd v={customer.budgetMin || 0}/> {'\u2013'} <Bhd v={customer.budgetMax || 0}/> BHD
                     </div>
                   )}
                 </Card>
@@ -935,7 +935,7 @@ export function CustomerDetail() {
                 }
               }} />
             <span style={{ fontSize: 11, color: '#9CA3AF', marginTop: 4, display: 'block' }}>
-              Tip: \u2318 / Ctrl + Enter to save
+              Tip: {'\u2318'} / Ctrl + Enter to save
             </span>
           </div>
           <div className="flex justify-between" style={{ alignItems: 'center' }}>

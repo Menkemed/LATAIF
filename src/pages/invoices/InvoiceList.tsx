@@ -271,7 +271,7 @@ export function InvoiceList() {
               setSearchParams(next, { replace: true });
             }} className="cursor-pointer transition-colors flex items-center gap-1"
               style={{ padding: '6px 12px', fontSize: 12, borderRadius: 999, border: '1px solid #DC2626', background: 'rgba(220,38,38,0.06)', color: '#DC2626' }}>
-              \u2715 Clear client filter
+              {'\u2715'} Clear client filter
             </button>
           )}
           {staffFilter && (
@@ -281,7 +281,7 @@ export function InvoiceList() {
               setSearchParams(next, { replace: true });
             }} className="cursor-pointer transition-colors flex items-center gap-1"
               style={{ padding: '6px 12px', fontSize: 12, borderRadius: 999, border: '1px solid #715DE3', background: 'rgba(113,93,227,0.06)', color: '#715DE3' }}>
-              \u2715 Clear staff filter
+              {'\u2715'} Clear staff filter
             </button>
           )}
           {!staffFilter && employees.length > 0 && (

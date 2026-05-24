@@ -173,7 +173,7 @@ export function CreditNoteDetail() {
                             </div>
                           )}
                           <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
-                            Qty {rl.quantity} \u00d7 <Bhd v={rl.unitPrice}/> BHD
+                            Qty {rl.quantity} {'\u00d7'} <Bhd v={rl.unitPrice}/> BHD
                           </div>
                         </div>
                         <span className="font-mono" style={{ fontSize: 13, color: '#DC2626' }}>−<Bhd v={rl.quantity * rl.unitPrice}/> BHD</span>
@@ -211,7 +211,7 @@ export function CreditNoteDetail() {
                     {formatInvoiceDisplayShort(inv)}
                     <ExternalLink size={11} style={{ opacity: 0.5 }} />
                   </Link>
-                ) : <span style={{ fontSize: 13, color: '#6B7280' }}>{cn.invoiceId.slice(0, 12)}\u2026</span>}
+                ) : <span style={{ fontSize: 13, color: '#6B7280' }}>{cn.invoiceId.slice(0, 12)}{'\u2026'}</span>}
               </div>
               {ret && (
                 <div>
