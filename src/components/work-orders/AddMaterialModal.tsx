@@ -126,10 +126,15 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, allowLabor, loadSuppliers]);
 
-  const supplierOptions = useMemo(() =>
-    suppliers.filter(s => s.active).map(s => ({
+  // v0.7.6 — Explizite In-house-Option (Shop / Own Stock) als ersten Eintrag.
+  // Verhindert "vergessene" Supplier-Auswahl die still als own gebucht wird.
+  // Sentinel '__INHOUSE__' wird beim Submit zu undefined uebersetzt.
+  const supplierOptions = useMemo(() => [
+    { id: '__INHOUSE__', label: '🏠 Shop / Own Stock', subtitle: 'No supplier — material from own inventory', meta: '' },
+    ...suppliers.filter(s => s.active).map(s => ({
       id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
-    })), [suppliers]);
+    })),
+  ], [suppliers]);
 
   const totalCt = (parseFloat(qty) || 0) * (parseFloat(ct) || 0);
 
@@ -180,17 +185,21 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
   function buildEntry(): MaterialLineInput | null {
     const costNum = parseFloat(cost) || 0;
     if (!description.trim()) { setError('Description is required'); return null; }
-    if (costNum <= 0) { setError('Cost > 0 erforderlich'); return null; }
+    if (costNum <= 0) { setError('Cost > 0 required'); return null; }
     const qtyNum = kind === 'labor' ? 1 : (parseFloat(qty) || 1);
-    if (qtyNum <= 0) { setError('Quantity > 0 erforderlich'); return null; }
+    if (qtyNum <= 0) { setError('Quantity > 0 required'); return null; }
+    // v0.7.6 — explizite Quellen-Auswahl Pflicht (Shop OR Supplier).
+    if (!supplierId) { setError('Pick source: 🏠 Shop / Own Stock OR a supplier'); return null; }
 
+    // v0.7.6 — Sentinel '__INHOUSE__' → undefined (eigener Bestand).
+    const realSupplierId = supplierId === '__INHOUSE__' ? undefined : (supplierId || undefined);
     const data: MaterialLineInput = {
       materialKind: kind,
       description: description.trim(),
       quantity: qtyNum,
       totalCost: costNum,
-      supplierId: supplierId || undefined,
-      supplierName: supplierId ? (suppliers.find(s => s.id === supplierId)?.name || undefined) : undefined,
+      supplierId: realSupplierId,
+      supplierName: realSupplierId ? (suppliers.find(s => s.id === realSupplierId)?.name || undefined) : undefined,
     };
     if (kind === 'diamond' || kind === 'stone') {
       const ctNum = parseFloat(ct) || 0;
@@ -432,20 +441,25 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
           </div>
         )}
 
-        {/* Supplier picker */}
+        {/* Supplier picker — v0.7.6 explizite In-house-Auswahl Pflicht */}
         <div>
           <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
-            SUPPLIER (OPTIONAL — wenn gesetzt: A/P wird gebucht)
+            SOURCE *
           </span>
           <SearchSelect
             options={supplierOptions}
             value={supplierId}
             onChange={(id) => setSupplierId(id)}
-            placeholder="Pick a supplier — leer = aus eigenem Bestand"
+            placeholder="Pick: Shop / Own Stock OR a supplier"
           />
-          {supplierId && (
+          {supplierId === '__INHOUSE__' && (
+            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+              ℹ️ From own stock — no A/P booking.
+            </p>
+          )}
+          {supplierId && supplierId !== '__INHOUSE__' && (
             <p style={{ fontSize: 11, color: '#16A34A', marginTop: 6 }}>
-              ✓ A/P-Schuld an {suppliers.find(s => s.id === supplierId)?.name} wird gebucht.
+              ✓ A/P liability at {suppliers.find(s => s.id === supplierId)?.name} will be booked.
             </p>
           )}
         </div>

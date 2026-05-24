@@ -103,6 +103,10 @@ export function RepairDetail() {
   const [form, setForm] = useState<Partial<Repair>>({});
   // 2026-05-16 — Number-Type-Dialog vor Repair→Invoice Convert.
   const [numberDialogOpen, setNumberDialogOpen] = useState(false);
+  // v0.7.6 — Tax-Scheme Picker vor Convert. User soll vor Invoice-Erstellung
+  // ZERO ↔ VAT_10 wechseln koennen ohne erst den Repair zu editieren.
+  const [taxSchemeDialog, setTaxSchemeDialog] = useState(false);
+  const [pendingTaxScheme, setPendingTaxScheme] = useState<'ZERO' | 'VAT_10'>('ZERO');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -118,10 +122,13 @@ export function RepairDetail() {
   }, [loadRepairs, loadCustomers, loadProducts, loadCategories, loadInvoices,
       loadSuppliers, loadExpenses, loadEmployees, loadRepairLines, goldLoadAll]);
 
-  const supplierOptions = useMemo(() => suppliers
-    .filter(s => s.active)
-    .map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
-    [suppliers]);
+  // v0.7.6 — Explizite In-house-Option als ersten Eintrag, damit User nicht
+  // versehentlich "leer" laesst und still als own-work bucht wird. Sentinel-
+  // ID '__INHOUSE__' wird beim Save zu undefined (= null in DB) uebersetzt.
+  const supplierOptions = useMemo(() => [
+    { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: 'No supplier — own labor / own stock', meta: '' },
+    ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
+  ], [suppliers]);
 
   const repair = useMemo(() => repairs.find(r => r.id === id), [repairs, id]);
   const customer = useMemo(() => repair ? customers.find(c => c.id === repair.customerId) : null, [repair, customers]);
@@ -197,10 +204,15 @@ export function RepairDetail() {
   }
 
   function handleAddLine() {
-    if (!id) return;
+    if (!id || !repair) return;
     const cost = parseFloat(newLineForm.cost) || 0;
+    // v0.7.6 — Sentinel '__INHOUSE__' uebersetzen zu null (in-house Arbeit).
+    // Echte supplier_id ungleich __INHOUSE__ wird durchgereicht.
+    const realSupplierId = newLineForm.supplierId === '__INHOUSE__'
+      ? undefined
+      : (newLineForm.supplierId || undefined);
     addRepairLine(id, {
-      supplierId: newLineForm.supplierId || undefined,
+      supplierId: realSupplierId,
       workType: newLineForm.workType,
       description: newLineForm.description || undefined,
       costAmount: cost,
@@ -314,7 +326,14 @@ export function RepairDetail() {
         return;
       }
     }
-    // Number-Type-Dialog vor dem eigentlichen Create.
+    // v0.7.6 — Erst Tax-Scheme-Dialog. Default = aktuelle Repair-taxScheme.
+    setPendingTaxScheme(repair.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10');
+    setTaxSchemeDialog(true);
+  }
+
+  // v0.7.6 — User bestaetigt Tax-Scheme → weiter zu Number-Type-Dialog.
+  function confirmTaxSchemeAndProceed() {
+    setTaxSchemeDialog(false);
     setNumberDialogOpen(true);
   }
 
@@ -328,7 +347,13 @@ export function RepairDetail() {
     const productId = getOrCreateRepairServiceProductId(branchId);
 
     const grossCharge = repair.chargeToCustomer!;
-    const scheme = repair.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10';
+    // v0.7.6 — User-bestaetigtes Schema (aus taxSchemeDialog) statt repair.taxScheme.
+    // Wenn anders als gespeicherten, wird der Repair auch auf das neue Schema
+    // persistiert damit nachfolgende Views konsistent sind.
+    const scheme = pendingTaxScheme;
+    if (scheme !== repair.taxScheme) {
+      updateRepair(id, { taxScheme: scheme });
+    }
     const rate = scheme === 'VAT_10' ? 10 : 0;
     // chargeToCustomer ist gross-incl-VAT. Bei VAT_10 → Net = gross/1.1.
     const netAmount = scheme === 'VAT_10' ? grossCharge / (1 + rate / 100) : grossCharge;
@@ -837,7 +862,8 @@ export function RepairDetail() {
                       ))}
                     </div>
                   </div>
-                  {/* Plan §Repair §Workshop-as-Supplier: Picker statt Free-Text. */}
+                  {/* Plan §Repair §Workshop-as-Supplier: Picker statt Free-Text.
+                      v0.7.6 — __INHOUSE__ Sentinel uebersetzt zu undefined. */}
                   <SearchSelect
                     label={(form.repairType === 'external' || form.repairType === 'hybrid')
                       ? 'WORKSHOP / GOLDSMITH (SUPPLIER) *'
@@ -845,7 +871,7 @@ export function RepairDetail() {
                     placeholder="Search supplier..."
                     options={supplierOptions}
                     value={form.workshopSupplierId || ''}
-                    onChange={sid => setForm({ ...form, workshopSupplierId: sid || undefined })}
+                    onChange={sid => setForm({ ...form, workshopSupplierId: (sid && sid !== '__INHOUSE__') ? sid : undefined })}
                   />
                   {(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId && (
                     <p style={{ fontSize: 11, color: '#6B7280', marginTop: -4, lineHeight: 1.4 }}>
@@ -1088,20 +1114,38 @@ export function RepairDetail() {
               Multi-Supplier-Tracking: jede Zeile ist ein eigener Lieferant +
               Cost + Payment-Status. Beim Status >= IN_PROGRESS wird je Line
               eine eigene Expense gebucht (Supplier-A/P). */}
-          {(repair.repairType === 'external' || repair.repairType === 'hybrid') && (
-            <div style={{ marginTop: 20 }}>
-              <Card>
-                <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
-                  <span className="text-overline">WORK LINES ({thisRepairLines.filter(l => l.status === 'OPEN').length})</span>
-                  <button onClick={() => setShowAddLineModal(true)}
-                    className="cursor-pointer"
+          {/* v0.7.6 — WORK LINES jetzt auch bei Internal-Repairs sichtbar. Fall:
+              Repair startet intern, spaeter kommt externer Bedarf (Diamond-Setter,
+              Spare-Part-Supplier). User klickt "+ Add Work Line" → handleAddLine
+              schaltet den repairType automatisch auf 'hybrid' (siehe Z.~200).
+              Vorher war die Section bei Internal komplett ausgeblendet → User
+              musste erst Edit machen + Type umstellen. Unintuitiv. */}
+          {(() => {
+            // v0.7.6 — Implizite "In-house"-Pseudo-Zeile fuer interne Arbeit.
+            // Sichtbar IMMER wenn Repair-Type 'internal' oder 'hybrid' ist — egal
+            // wieviele explizite Lines existieren oder ob internalCost > 0.
+            // Repraesentiert die Tatsache, dass interne Arbeit Teil des Repairs
+            // ist; verschwindet nur bei 'external' (rein extern, keine in-house).
+            const explicitLines = thisRepairLines.filter(l => l.status !== 'CANCELLED');
+            const inHouseCost = (repair.internalCost
+              ?? (repair.repairType === 'internal' ? repair.estimatedCost : 0)
+              ?? 0);
+            const showInHouseRow = repair.repairType === 'internal' || repair.repairType === 'hybrid';
+            const totalLineCount = explicitLines.length + (showInHouseRow ? 1 : 0);
+            return (
+          <div style={{ marginTop: 20 }}>
+            <Card>
+              <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
+                <span className="text-overline">WORK LINES ({totalLineCount})</span>
+                <button onClick={() => setShowAddLineModal(true)}
+                  className="cursor-pointer"
                     style={{ padding: '6px 12px', fontSize: 12, borderRadius: 6,
                              border: '1px solid #0F0F10', background: 'transparent', color: '#0F0F10' }}>
                     + Add Work Line
                   </button>
                 </div>
-                {thisRepairLines.length === 0 ? (
-                  <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click "Add Work Line" to register a supplier/workshop position.</p>
+                {totalLineCount === 0 ? (
+                  <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No work lines yet — click "Add Work Line" to register an in-house or workshop position.</p>
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1.4fr 0.8fr 1.6fr 0.8fr 0.9fr 1fr', gap: 12, fontSize: 12 }}>
                     <span className="text-overline">L#</span>
@@ -1111,7 +1155,35 @@ export function RepairDetail() {
                     <span className="text-overline" style={{ textAlign: 'right' }}>COST</span>
                     <span className="text-overline">PAYMENT</span>
                     <span className="text-overline">ACTIONS</span>
-                    {thisRepairLines.map((l: RepairLine) => {
+                    {/* v0.7.6 — In-house Pseudo-Zeile zuerst (wenn aktiv). Lebt aus
+                        repair.internalCost — kein eigener Datensatz, kein Cancel-
+                        Button. User kann den Betrag im Edit-Modus aendern. */}
+                    {showInHouseRow && (
+                      <div style={{ display: 'contents' }}>
+                        <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', padding: '10px 0', borderTop: '1px solid #E5E9EE', whiteSpace: 'nowrap' }}>
+                          {repair.repairNumber}-IN
+                        </span>
+                        <span style={{ fontSize: 12, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          — own work
+                        </span>
+                        <span style={{ fontSize: 12, color: '#4B5563', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          In-house
+                        </span>
+                        <span style={{ fontSize: 12, color: '#6B7280', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          Internal labor / own work
+                        </span>
+                        <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          <Bhd v={inHouseCost}/>
+                        </span>
+                        <span style={{ fontSize: 11, padding: '10px 0', borderTop: '1px solid #E5E9EE', color: '#9CA3AF' }}>
+                          — (no A/P)
+                        </span>
+                        <div style={{ padding: '8px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6 }}>
+                          <span style={{ fontSize: 10, color: '#9CA3AF' }} title="Edit via repair details">edit on header</span>
+                        </div>
+                      </div>
+                    )}
+                    {thisRepairLines.filter(l => l.status !== 'CANCELLED').map((l: RepairLine) => {
                       const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
                       return (
                         <div key={l.id} style={{ display: 'contents' }}>
@@ -1151,8 +1223,9 @@ export function RepairDetail() {
                           <div style={{ padding: '8px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6 }}>
                             {l.status === 'OPEN' && (
                               <button onClick={() => {
-                                if (!confirm('Cancel this work line? If a payment was made, use Cancel + Replace.')) return;
-                                cancelRepairLine(l.id);
+                                if (!confirm('Remove this work line? Any linked gold liability + supplier expense will also be removed.')) return;
+                                try { cancelRepairLine(l.id); }
+                                catch (err) { alert(err instanceof Error ? err.message : String(err)); }
                               }}
                                 style={{ fontSize: 10, padding: '3px 8px', border: '1px solid rgba(220,38,38,0.3)',
                                          borderRadius: 4, background: 'transparent', color: '#DC2626', cursor: 'pointer' }}>
@@ -1175,14 +1248,15 @@ export function RepairDetail() {
                 )}
               </Card>
             </div>
-          )}
+            );
+          })()}
 
           {/* v0.2.1 — Materials Used Card (Diamond/Stone/Gold-Piece-Verbrauch) */}
           <div style={{ marginTop: 20 }}>
             <MaterialsCard
               title="MATERIALS USED"
               lines={thisRepairLines
-                .filter(l => l.materialKind && l.materialKind !== 'labor')
+                .filter(l => l.status !== 'CANCELLED' && l.materialKind && l.materialKind !== 'labor')
                 .map(l => {
                   const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
                   return {
@@ -1198,6 +1272,11 @@ export function RepairDetail() {
                   };
                 })}
               onAdd={() => setShowAddMaterialModal(true)}
+              onRemove={(lineId) => {
+                if (!confirm('Remove this material entry? Any linked gold liability + supplier expense will also be removed.')) return;
+                try { cancelRepairLine(lineId); }
+                catch (err) { alert(err instanceof Error ? err.message : String(err)); }
+              }}
               showCustomerPrice={false}
               canEdit={true}
             />
@@ -1349,12 +1428,52 @@ export function RepairDetail() {
         onConfirm={executeRepairInvoiceCreate}
       />
 
+      {/* v0.7.6 — Tax-Scheme-Dialog vor Convert. User kann ZERO ↔ VAT_10
+          umschalten ohne Repair vorher zu editieren. */}
+      <Modal open={taxSchemeDialog} onClose={() => setTaxSchemeDialog(false)} title="Choose Tax Scheme" width={460}>
+        <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 14 }}>
+          Pick the tax scheme for this invoice. <strong>VAT 10%</strong> decomposes the gross
+          charge into net + VAT. <strong>Zero</strong> treats the full amount as VAT-free.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
+          {(['ZERO', 'VAT_10'] as const).map(s => (
+            <label key={s}
+              style={{ display: 'flex', gap: 10, padding: 12, borderRadius: 6,
+                       border: `1px solid ${pendingTaxScheme === s ? '#0F0F10' : '#D5D9DE'}`,
+                       background: pendingTaxScheme === s ? 'rgba(15,15,16,0.04)' : 'transparent',
+                       cursor: 'pointer' }}>
+              <input type="radio" checked={pendingTaxScheme === s}
+                onChange={() => setPendingTaxScheme(s)} style={{ marginTop: 2 }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>
+                  {s === 'ZERO' ? '0% (No VAT)' : 'VAT 10%'}
+                </div>
+                <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                  {s === 'ZERO'
+                    ? 'No VAT booking — full charge is net.'
+                    : 'Charge is gross. Decomposed: net = charge / 1.10, VAT = charge − net.'}
+                </div>
+              </div>
+            </label>
+          ))}
+        </div>
+        <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+          <Button variant="ghost" onClick={() => setTaxSchemeDialog(false)}>Cancel</Button>
+          <Button variant="primary" onClick={confirmTaxSchemeAndProceed}>Next: Choose Number Type</Button>
+        </div>
+      </Modal>
+
       {/* Plan repair-multi-supplier — Add-Line Modal */}
       <Modal open={showAddLineModal} onClose={() => setShowAddLineModal(false)} title="Add Work Line" width={520}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ padding: '10px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 6, fontSize: 12, color: '#4B5563', lineHeight: 1.5 }}>
+            💡 Pick <strong>🏠 In-house</strong> for internal work (no A/P booking) or a
+            <strong> supplier</strong> for external work (A/P booked at supplier). The
+            repair type (Internal / External / Hybrid) is derived automatically.
+          </div>
           <SearchSelect
-            label="SUPPLIER / WORKSHOP"
-            placeholder="Pick supplier..."
+            label="WORK SOURCE *"
+            placeholder="Pick: In-house OR a supplier"
             options={supplierOptions}
             value={newLineForm.supplierId}
             onChange={sid => setNewLineForm({ ...newLineForm, supplierId: sid })}
@@ -1389,7 +1508,7 @@ export function RepairDetail() {
           <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowAddLineModal(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleAddLine}
-              disabled={!newLineForm.supplierId || !parseFloat(newLineForm.cost)}>
+              disabled={!newLineForm.supplierId || (!parseFloat(newLineForm.cost) && !newLineForm.description.trim())}>
               Add Line
             </Button>
           </div>
@@ -1517,8 +1636,15 @@ export function RepairDetail() {
         onClose={() => setShowAddMaterialModal(false)}
         showCustomerPrice={false}
         onSubmit={(data) => {
-          addRepairLine(repair.id, {
-            supplierId: data.supplierId || undefined,
+          // v0.7.6 — Goldsmith-Gold (Kind='gold' + Supplier + Gramm) wird als
+          // gold_payable (Gramm-Schuld) gebucht statt als BHD-A/P beim Supplier.
+          // Die repair_line traegt dann KEINEN Supplier-Link (sonst Doppel-A/P),
+          // behaelt aber costAmount fuer Margin-Calculation. Konsistent zum
+          // OrderDetail-Pfad (Z.243). Settlement-Type 'return_gold' default —
+          // der User kann spaeter auf 'pay_money' wechseln im Gold-Bucket.
+          const goldAsPayable = data.materialKind === 'gold' && !!data.supplierId && (data.weightGrams || 0) > 0;
+          const newLine = addRepairLine(repair.id, {
+            supplierId: goldAsPayable ? undefined : (data.supplierId || undefined),
             workType: 'service',
             description: data.description,
             costAmount: data.totalCost,
@@ -1532,6 +1658,19 @@ export function RepairDetail() {
               supplierName: data.supplierName,
             },
           });
+          if (goldAsPayable && data.supplierId) {
+            createGoldPayable({
+              supplierId: data.supplierId,
+              sourceRepairId: repair.id,
+              // v0.7.6 — line-level link, damit cancelRepairLine die Gold-Schuld
+              // sauber mitloeschen kann (analog Order-Pattern).
+              sourceRepairLineId: newLine.id,
+              weightGrams: data.weightGrams!,
+              karat: data.karat || '22K',
+              // Default: settle by returning gold. User can pivot to pay_money later.
+              settlementType: 'return_gold',
+            });
+          }
         }}
       />
     </div>

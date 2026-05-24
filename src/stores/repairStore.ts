@@ -1203,32 +1203,45 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     get().recomputeRepairAggregates(line.repairId);
   },
 
-  cancelRepairLine: (lineId, notes) => {
+  cancelRepairLine: (lineId, _notes) => {
+    // v0.7.6 — Lifecycle: Cancel = komplettes Delete inkl. aller verknuepften
+    // Records. User-Spec (analog deleteOrderLine): die Zeile verschwindet, mit
+    // ihr die gold_payable(s) + die supplier-Expense. P&L-konsistent: kein
+    // strikethrough-Zombie mehr, kein "Cancelled but ledger floating".
     const db = getDatabase();
     const now = new Date().toISOString();
     const line = get().repairLines.find(l => l.id === lineId);
     if (!line) return;
     if (line.status === 'CANCELLED') return;
 
-    db.run(
-      `UPDATE repair_lines SET status = 'CANCELLED', notes = COALESCE(notes, '') || ?, updated_at = ? WHERE id = ?`,
-      [' · ' + (notes || 'Cancelled'), now, lineId]
+    // 1) Linked gold_payable(s) per line-level FK — OPEN/CANCELLED dürfen mitgehen,
+    //    bereits FULFILLED-Schulden blockieren (sonst floatet die Settlement-Expense).
+    const linkedGp = query(
+      `SELECT id, status FROM gold_payables WHERE source_repair_line_id = ?`,
+      [lineId]
     );
-    trackUpdate('repair_lines', lineId, { status: 'CANCELLED' });
+    if (linkedGp.some(g => g.status !== 'OPEN' && g.status !== 'CANCELLED')) {
+      throw new Error('Die Gold-Verbindlichkeit dieser Zeile wurde bereits beglichen — bitte erst die Verbindlichkeit rückabwickeln.');
+    }
+    for (const g of linkedGp) {
+      db.run(`DELETE FROM gold_payables WHERE id = ?`, [g.id as string]);
+      trackDelete('gold_payables', g.id as string);
+    }
 
-    // Linkierte Expense canceln falls vorhanden — reverseSource reversed den
-    // A/P-Post via hasReversalFor-Guard idempotent (multi-cycle safe nach Patch).
+    // 2) Linkierte Expense reversen + loeschen (inkl. Payments, sonst orphan FKs).
     if (line.expenseId) {
-      db.run(
-        `UPDATE expenses SET status = 'CANCELLED' WHERE id = ?`,
-        [line.expenseId]
-      );
-      trackUpdate('expenses', line.expenseId, { status: 'CANCELLED', fromRepairLineCancel: lineId });
       safePost(`reverseSource(EXPENSE,${line.expenseId}) [line-cancel]`, () => {
         if (hasReversalFor('EXPENSE', line.expenseId!)) return;
         reverseSource('EXPENSE', line.expenseId!, now);
       });
+      db.run(`DELETE FROM expense_payments WHERE expense_id = ?`, [line.expenseId]);
+      db.run(`DELETE FROM expenses WHERE id = ?`, [line.expenseId]);
+      trackDelete('expenses', line.expenseId);
     }
+
+    // 3) Die repair_line selbst loeschen (statt Status-Flag).
+    db.run(`DELETE FROM repair_lines WHERE id = ?`, [lineId]);
+    trackDelete('repair_lines', lineId);
 
     saveDatabase();
     get().loadRepairLines();
@@ -1239,6 +1252,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   // aus den OPEN Lines abgeleitet, damit alle bestehenden Read-Pfade
   // (supplierStore.getLedger, Reports, etc.) ohne Code-Aenderung weiter
   // funktionieren. Bei N Lines (>1) gilt: workshop_supplier_id=NULL, actual_cost=SUM.
+  // v0.7.6 — repair_type wird PROMOTET aber nie DEMOTET. User-Intent
+  // bleibt erhalten (kein Flip-Flop bei Cancel der letzten externen Line):
+  //   Internal + 1. External-Line → wird Hybrid
+  //   External + 1. Interne-Line → wird Hybrid
+  //   Hybrid → bleibt Hybrid (auch wenn alle externen gecanceled werden)
   recomputeRepairAggregates: (repairId) => {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -1246,11 +1264,19 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const supplierIds = Array.from(new Set(lines.map(l => l.supplierId).filter(Boolean) as string[]));
     const totalCost = lines.reduce((s, l) => s + (l.costAmount || 0), 0);
     const newSupplierId = supplierIds.length === 1 ? supplierIds[0] : null;
+    const hasExternalLine = lines.some(l => !!l.supplierId);
+    const hasInternalLine = lines.some(l => !l.supplierId);
+    // Aktuellen Typ lesen für Promote-Only-Logik.
+    const currentRow = query('SELECT repair_type FROM repairs WHERE id = ?', [repairId])[0];
+    const currentType = (currentRow?.repair_type as Repair['repairType']) || 'internal';
+    let newType: Repair['repairType'] = currentType;
+    if (currentType === 'internal' && hasExternalLine) newType = 'hybrid';
+    else if (currentType === 'external' && hasInternalLine) newType = 'hybrid';
     db.run(
-      `UPDATE repairs SET workshop_supplier_id = ?, actual_cost = ?, updated_at = ? WHERE id = ?`,
-      [newSupplierId, totalCost, now, repairId]
+      `UPDATE repairs SET workshop_supplier_id = ?, actual_cost = ?, repair_type = ?, updated_at = ? WHERE id = ?`,
+      [newSupplierId, totalCost, newType, now, repairId]
     );
-    trackUpdate('repairs', repairId, { workshopSupplierId: newSupplierId, actualCost: totalCost, recomputedFromLines: true });
+    trackUpdate('repairs', repairId, { workshopSupplierId: newSupplierId, actualCost: totalCost, repairType: newType, recomputedFromLines: true });
     saveDatabase();
     get().loadRepairs();
   },

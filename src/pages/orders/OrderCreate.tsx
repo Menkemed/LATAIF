@@ -758,14 +758,17 @@ export function OrderCreate() {
                 <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>3b · GOLDSMITH WORK / LABOR — COST (OPTIONAL)</span>
                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
                   <div>
-                    <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SUPPLIER (OPTIONAL — A/P)</span>
+                    <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SOURCE *</span>
                     <SearchSelect
-                      options={suppliers.filter(s => s.active).map(s => ({
-                        id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
-                      }))}
+                      options={[
+                        { id: '__INHOUSE__', label: '🏠 In-house / Own labor', subtitle: 'No supplier — own goldsmith work', meta: '' },
+                        ...suppliers.filter(s => s.active).map(s => ({
+                          id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
+                        })),
+                      ]}
                       value={goldsmithSupplierId}
-                      onChange={setGoldsmithSupplierId}
-                      placeholder="Pick a goldsmith — or leave empty"
+                      onChange={(sid) => setGoldsmithSupplierId(sid === '__INHOUSE__' ? '' : sid)}
+                      placeholder="Pick: In-house OR a goldsmith"
                     />
                   </div>
                   <Input
@@ -827,12 +830,15 @@ export function OrderCreate() {
                   />
                 </div>
                 <div style={{ marginTop: 12 }}>
-                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>GOLDSMITH / SUPPLIER (OPTIONAL)</span>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>GOLD SOURCE *</span>
                   <SearchSelect
-                    options={suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '' }))}
+                    options={[
+                      { id: '__INHOUSE__', label: '🏠 Own Gold / Shop Stock', subtitle: 'From own precious_metals — pure cost position', meta: '' },
+                      ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: '' })),
+                    ]}
                     value={extraGoldSupplierId}
-                    onChange={setExtraGoldSupplierId}
-                    placeholder="Pick goldsmith = his gold → gold liability · empty = own gold"
+                    onChange={(sid) => setExtraGoldSupplierId(sid === '__INHOUSE__' ? '' : sid)}
+                    placeholder="Pick: Own Gold OR a goldsmith (creates gold liability)"
                   />
                 </div>
                 <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>

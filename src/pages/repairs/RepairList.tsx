@@ -101,10 +101,11 @@ export function RepairList() {
 
   const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
 
-  const supplierOptions = useMemo(() => suppliers
-    .filter(s => s.active)
-    .map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
-    [suppliers]);
+  // v0.7.6 — In-house Sentinel als erste Option (consistent mit RepairDetail).
+  const supplierOptions = useMemo(() => [
+    { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: 'No supplier — own labor / own stock', meta: '' },
+    ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
+  ], [suppliers]);
 
   const [showQuickSupplier, setShowQuickSupplier] = useState(false);
   const [quickSupplierName, setQuickSupplierName] = useState('');
@@ -898,11 +899,11 @@ export function RepairList() {
               <span className="text-overline" style={{ marginBottom: 12 }}>EXTERNAL REPAIR · WORKSHOP / GOLDSMITH</span>
               <div style={{ marginTop: 12 }}>
                 <SearchSelect
-                  label="SUPPLIER (OPTIONAL)"
-                  placeholder="Search workshop / goldsmith..."
+                  label="WORK SOURCE"
+                  placeholder="Pick: In-house OR a workshop / goldsmith"
                   options={supplierOptions}
                   value={form.workshopSupplierId || ''}
-                  onChange={sid => setForm({ ...form, workshopSupplierId: sid || undefined })}
+                  onChange={sid => setForm({ ...form, workshopSupplierId: (sid && sid !== '__INHOUSE__') ? sid : undefined })}
                 />
                 <button onClick={() => setShowQuickSupplier(true)}
                   className="cursor-pointer transition-colors"
