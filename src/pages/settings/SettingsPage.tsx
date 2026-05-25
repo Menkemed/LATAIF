@@ -193,7 +193,11 @@ function CompanyTab() {
 function TaxTab() {
   const branchId = currentBranchId();
   const role = useAuthStore(s => s.session?.role);
-  const isOwner = role === 'owner';
+  // v0.7.13 — Bug-Fix: UserRole-Typ ist UPPERCASE ('ADMIN'/'MANAGER'/'SALES'/
+  // 'ACCOUNTANT'), 'owner' gibt's nicht. Vorher war `isOwner` immer false →
+  // Opening-Balance-Felder waren dauerhaft disabled fuer JEDEN. Jetzt ADMIN
+  // erlaubt (= der Besitzer/Owner-Rolle in unserer Hierarchie).
+  const isOwner = role === 'ADMIN';
   const [stdRate, setStdRate] = useState('');
   const [marginRate, setMarginRate] = useState('');
   const [marginEnabled, setMarginEnabled] = useState(true);
@@ -202,13 +206,19 @@ function TaxTab() {
   const [fyStartMonth, setFyStartMonth] = useState('');
   const [openingCash, setOpeningCash] = useState('');
   const [openingBank, setOpeningBank] = useState('');
+  // v0.7.13 — Benefit Opening-Balance. Benefit ist eigenes Banking-Konto (App-
+  // Transfer), nicht Debit-Card. Vorher fehlte das Feld in Settings → User
+  // konnte seinen BenefitPay-Bestand nicht als Baseline einpflegen.
+  const [openingBenefit, setOpeningBenefit] = useState('');
   const [monthlyTarget, setMonthlyTarget] = useState('');
   // Plan §Settings §3.D Payment + §3.H Partner
   const [defaultInflowAccount, setDefaultInflowAccount] = useState('bank');
   const [defaultOutflowAccount, setDefaultOutflowAccount] = useState('bank');
   const [methodCashEnabled, setMethodCashEnabled] = useState(true);
   const [methodBankEnabled, setMethodBankEnabled] = useState(true);
-  const [methodCardEnabled, setMethodCardEnabled] = useState(true);
+  // v0.7.13 — Card → Benefit. Card war eine Legacy-Methode die im
+  // Benefit-Refactor entfernt wurde; das UI-Toggle zeigte sie aber immer noch.
+  const [methodBenefitEnabled, setMethodBenefitEnabled] = useState(true);
   const [partnerProfitShareDefault, setPartnerProfitShareDefault] = useState('0');
   const [partnerReportPeriod, setPartnerReportPeriod] = useState('monthly');
   const [partnerWarnLimit, setPartnerWarnLimit] = useState('0');
@@ -223,12 +233,13 @@ function TaxTab() {
     setFyStartMonth(getSetting(branchId, 'finance.fiscal_year_start_month') || '1');
     setOpeningCash(getSetting(branchId, 'finance.opening_cash') || '0');
     setOpeningBank(getSetting(branchId, 'finance.opening_bank') || '0');
+    setOpeningBenefit(getSetting(branchId, 'finance.opening_benefit') || '0');
     setMonthlyTarget(getSetting(branchId, 'finance.monthly_target') || '');
     setDefaultInflowAccount(getSetting(branchId, 'payment.default_inflow_account') || 'bank');
     setDefaultOutflowAccount(getSetting(branchId, 'payment.default_outflow_account') || 'bank');
     setMethodCashEnabled((getSetting(branchId, 'payment.method_cash_enabled') || '1') !== '0');
     setMethodBankEnabled((getSetting(branchId, 'payment.method_bank_enabled') || '1') !== '0');
-    setMethodCardEnabled((getSetting(branchId, 'payment.method_card_enabled') || '1') !== '0');
+    setMethodBenefitEnabled((getSetting(branchId, 'payment.method_benefit_enabled') || '1') !== '0');
     setPartnerProfitShareDefault(getSetting(branchId, 'partner.profit_share_default') || '0');
     setPartnerReportPeriod(getSetting(branchId, 'partner.report_period') || 'monthly');
     setPartnerWarnLimit(getSetting(branchId, 'partner.warn_limit') || '0');
@@ -245,13 +256,14 @@ function TaxTab() {
     setSetting(branchId, 'payment.default_outflow_account', defaultOutflowAccount, 'payment');
     setSetting(branchId, 'payment.method_cash_enabled', methodCashEnabled ? '1' : '0', 'payment');
     setSetting(branchId, 'payment.method_bank_enabled', methodBankEnabled ? '1' : '0', 'payment');
-    setSetting(branchId, 'payment.method_card_enabled', methodCardEnabled ? '1' : '0', 'payment');
+    setSetting(branchId, 'payment.method_benefit_enabled', methodBenefitEnabled ? '1' : '0', 'payment');
     setSetting(branchId, 'partner.profit_share_default', partnerProfitShareDefault, 'partner');
     setSetting(branchId, 'partner.report_period', partnerReportPeriod, 'partner');
     setSetting(branchId, 'partner.warn_limit', partnerWarnLimit, 'partner');
     if (isOwner) {
       setSetting(branchId, 'finance.opening_cash', openingCash || '0', 'finance');
       setSetting(branchId, 'finance.opening_bank', openingBank || '0', 'finance');
+      setSetting(branchId, 'finance.opening_benefit', openingBenefit || '0', 'finance');
     }
     setSetting(branchId, 'finance.monthly_target', (monthlyTarget || '').trim(), 'finance');
     setSaved('Tax, payment & partner settings saved.');
@@ -335,8 +347,8 @@ function TaxTab() {
             <span className="text-overline">OPENING BALANCES (STATUS QUO)</span>
             <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>
               {isOwner
-                ? 'Starting balance for cash and bank at the moment you begin using LATAIF. Used as the baseline for the cashflow calculation.'
-                : 'Only the owner can edit opening balances.'}
+                ? 'Starting balance for cash, bank, and Benefit at the moment you begin using LATAIF. Used as the baseline for the cashflow calculation.'
+                : 'Only an Admin can edit opening balances.'}
             </p>
           </div>
           <FieldRow label="Opening Cash">
@@ -355,6 +367,15 @@ function TaxTab() {
                 placeholder="0" style={{ maxWidth: 160 }} disabled={!isOwner}
               />
               <span style={{ fontSize: 13, color: '#6B7280' }}>BHD in bank accounts</span>
+            </div>
+          </FieldRow>
+          <FieldRow label="Opening Benefit">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Input
+                type="number" step="0.01" value={openingBenefit} onChange={e => setOpeningBenefit(e.target.value)}
+                placeholder="0" style={{ maxWidth: 160 }} disabled={!isOwner}
+              />
+              <span style={{ fontSize: 13, color: '#6B7280' }}>BHD in BenefitPay app balance</span>
             </div>
           </FieldRow>
 
@@ -394,7 +415,7 @@ function TaxTab() {
                 <input type="checkbox" checked={methodBankEnabled} onChange={e => setMethodBankEnabled(e.target.checked)} /> Bank transfer
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                <input type="checkbox" checked={methodCardEnabled} onChange={e => setMethodCardEnabled(e.target.checked)} /> Card
+                <input type="checkbox" checked={methodBenefitEnabled} onChange={e => setMethodBenefitEnabled(e.target.checked)} /> Benefit
               </label>
             </div>
           </FieldRow>
@@ -403,6 +424,7 @@ function TaxTab() {
               style={{ background: '#F2F7FA', border: '1px solid #D5D9DE', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
               <option value="cash">Cash</option>
               <option value="bank">Bank</option>
+              <option value="benefit">Benefit</option>
             </select>
           </FieldRow>
           <FieldRow label="Default outflow account">
@@ -410,6 +432,7 @@ function TaxTab() {
               style={{ background: '#F2F7FA', border: '1px solid #D5D9DE', borderRadius: 8, color: '#0F0F10', padding: '10px 12px', fontSize: 13, minWidth: 160 }}>
               <option value="cash">Cash</option>
               <option value="bank">Bank</option>
+              <option value="benefit">Benefit</option>
             </select>
           </FieldRow>
 

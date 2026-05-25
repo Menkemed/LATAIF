@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { TrendingUp, Package, Users, FileText, ShoppingCart, Plus, CreditCard, Wallet, AlertTriangle, Landmark, UserPlus, RefreshCw } from 'lucide-react';
+import { TrendingUp, Package, Users, FileText, ShoppingCart, Plus, CreditCard, Wallet, AlertTriangle, Landmark, UserPlus, RefreshCw, Smartphone } from 'lucide-react';
 import { useBankingStore } from '@/stores/bankingStore';
 import { KPICard } from '@/components/ui/KPICard';
 import { Card } from '@/components/ui/Card';
@@ -196,20 +196,28 @@ export function Dashboard() {
   // Opening-Balances aus Settings.
   const accountBalances = useMemo(() => {
     try {
+      // v0.7.13 — Benefit als drittes Konto inkludieren. Vorher fehlte
+      // 'finance.opening_benefit' komplett im SELECT → der BenefitPay-
+      // Bestand wurde nie aufaddiert.
       const settingsRows = query(
-        `SELECT key, value FROM settings WHERE key = 'finance.opening_cash' OR key = 'finance.opening_bank'`,
+        `SELECT key, value FROM settings WHERE key IN ('finance.opening_cash', 'finance.opening_bank', 'finance.opening_benefit')`,
         []
       );
-      let cash = 0, bank = 0;
+      let cash = 0, bank = 0, benefit = 0;
       for (const r of settingsRows) {
         const v = parseFloat((r.value as string) || '0') || 0;
         if (r.key === 'finance.opening_cash') cash = v;
         else if (r.key === 'finance.opening_bank') bank = v;
+        else if (r.key === 'finance.opening_benefit') benefit = v;
       }
       const live = getBalances();
-      return { cash: cash + live.cash, bank: bank + live.bank };
+      return {
+        cash: cash + live.cash,
+        bank: bank + live.bank,
+        benefit: benefit + live.benefit,
+      };
     } catch {
-      return { cash: 0, bank: 0 };
+      return { cash: 0, bank: 0, benefit: 0 };
     }
   }, [getBalances, invoices, purchases, allExpenses]);
 
@@ -272,8 +280,10 @@ export function Dashboard() {
   if (supplierPayables > 0) {
     alerts.push({ key: 'sup-debt', level: 'warn', text: `${fmt(supplierPayables)} BHD owed to suppliers` });
   }
-  if (accountBalances.cash + accountBalances.bank < 1000) {
-    alerts.push({ key: 'low-cash', level: 'urgent', text: 'Cash + Bank below 1,000 BHD' });
+  // v0.7.13 — Liquiditaets-Check inkludiert Benefit (BenefitPay App-Balance)
+  // weil das fuer den User echt verfuegbare Liquiditaet ist, kein Card-Fee.
+  if (accountBalances.cash + accountBalances.bank + accountBalances.benefit < 1000) {
+    alerts.push({ key: 'low-cash', level: 'urgent', text: 'Total liquidity below 1,000 BHD' });
   }
 
   const openPurchases = purchases.filter(p => p.status === 'UNPAID' || p.status === 'PARTIALLY_PAID').length;
@@ -678,10 +688,11 @@ export function Dashboard() {
         </DashSection>
 
         {/* ── SECTION: CASH FLOW ── */}
-        <DashSection title="Cash Flow" subtitle="Cash on hand, bank and outstanding amounts">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
+        <DashSection title="Cash Flow" subtitle="Cash, bank, Benefit and outstanding amounts">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 16 }}>
             <KPICard label="CASH" value={fmt(accountBalances.cash)} unit="BHD" icon={<Wallet size={16} />} accent="green" onClick={() => navigate('/banking')} />
             <KPICard label="BANK" value={fmt(accountBalances.bank)} unit="BHD" icon={<Landmark size={16} />} accent="blue" onClick={() => navigate('/banking')} />
+            <KPICard label="BENEFIT" value={fmt(accountBalances.benefit)} unit="BHD" icon={<Smartphone size={16} />} accent="orange" onClick={() => navigate('/banking')} />
             <KPICard label="RECEIVABLES"
               value={fmt(customerReceivables)}
               unit={arSummary.clientCount === 0
