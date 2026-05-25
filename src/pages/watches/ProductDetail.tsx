@@ -334,8 +334,13 @@ export function ProductDetail() {
 
   function validate(): Record<string, string> {
     const e: Record<string, string> = {};
-    if (!form.brand?.trim()) e.brand = 'Required';
-    if (!form.name?.trim()) e.name = 'Required';
+    // v0.7.16 — Brand/Name nur bei branded-Kategorien Pflicht (analog NewProductModal).
+    // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
+    const brandedRequired = !(form.categoryId === 'cat-gold-jewelry' || form.categoryId === 'cat-accessory');
+    if (brandedRequired) {
+      if (!form.brand?.trim()) e.brand = 'Required';
+      if (!form.name?.trim()) e.name = 'Required';
+    }
     if (!form.categoryId) e.categoryId = 'Pick a category';
     if (!form.condition?.trim()) e.condition = 'Required';
     if (form.purchasePrice == null || isNaN(form.purchasePrice) || form.purchasePrice <= 0) {
@@ -679,12 +684,25 @@ export function ProductDetail() {
                   </div>
                 </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                <div id="field-brand">
-                  <Input label="BRAND *" value={form.brand || ''} error={errors.brand} onChange={e => { setForm({ ...form, brand: e.target.value }); if (errors.brand) setErrors({ ...errors, brand: '' }); }} />
-                </div>
-                <div id="field-name">
-                  <Input label="NAME / MODEL *" value={form.name || ''} error={errors.name} onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
-                </div>
+                {(() => {
+                  // v0.7.16 — Brand/Name optional bei unbranded Gold-Schmuck.
+                  // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
+    const brandedRequired = !(form.categoryId === 'cat-gold-jewelry' || form.categoryId === 'cat-accessory');
+                  return (
+                    <>
+                      <div id="field-brand">
+                        <Input label={brandedRequired ? 'BRAND *' : 'BRAND (OPTIONAL)'}
+                          value={form.brand || ''} error={errors.brand}
+                          onChange={e => { setForm({ ...form, brand: e.target.value }); if (errors.brand) setErrors({ ...errors, brand: '' }); }} />
+                      </div>
+                      <div id="field-name">
+                        <Input label={brandedRequired ? 'NAME / MODEL *' : 'NAME / MODEL (OPTIONAL)'}
+                          value={form.name || ''} error={errors.name}
+                          onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
+                      </div>
+                    </>
+                  );
+                })()}
                 <SkuInput value={form.sku || ''} onChange={v => { setForm({ ...form, sku: v }); if (errors.sku) setErrors({ ...errors, sku: '' }); }} excludeProductId={id} />
                 <Input label="QUANTITY (UNITS)" type="number" min="0"
                   value={form.quantity ?? 1}

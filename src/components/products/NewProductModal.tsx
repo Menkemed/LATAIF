@@ -100,7 +100,11 @@ export function NewProductModal({
     if (!form.categoryId) missing.push('Category');
     // v0.6.8 — Brand/Name nur bei branded-Kategorien Pflicht. Bei unbranded
     // Gold-Schmuck reicht ein freier Bezeichner (Attribute beschreiben das Stueck).
-    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-original-gold-jewelry');
+    // v0.7.16 — unbranded Kategorien (Brand+Name optional): cat-gold-jewelry
+    // (handgemachtes Diamant-Schmuck) + cat-accessory (gemischtes Sortiment
+    // mit vielen no-name Stuecken). Rest = branded (Watch, Original Gold,
+    // Branded Gold, Spare Part) -> Brand+Name Pflicht.
+    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
     if (brandedRequired) {
       if (!form.brand?.trim()) missing.push('Brand');
       if (!form.name?.trim()) missing.push('Name');
@@ -189,7 +193,11 @@ export function NewProductModal({
         {/* Brand + Name. v0.6.8 — bei unbranded Gold-Schmuck (selbst geschmiedet)
             sind Brand/Name optional; bei Watch/Branded usw. weiter Pflicht. */}
         {(() => {
-          const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-original-gold-jewelry');
+          // v0.7.16 — unbranded Kategorien (Brand+Name optional): cat-gold-jewelry
+    // (handgemachtes Diamant-Schmuck) + cat-accessory (gemischtes Sortiment
+    // mit vielen no-name Stuecken). Rest = branded (Watch, Original Gold,
+    // Branded Gold, Spare Part) -> Brand+Name Pflicht.
+    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
           return (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <Input required={brandedRequired} label={brandedRequired ? 'BRAND' : 'BRAND (OPTIONAL)'}

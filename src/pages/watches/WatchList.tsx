@@ -325,8 +325,14 @@ export function WatchList() {
     // sonst muss der User später nochmal im Edit ran. Foto bleibt optional.
     const errs: Record<string, string> = {};
     if (!form.categoryId) errs.categoryId = 'Required';
-    if (!form.brand?.trim()) errs.brand = 'Required';
-    if (!form.name?.trim()) errs.name = 'Required';
+    // v0.7.16 — Brand/Name nur bei branded-Kategorien Pflicht (analog NewProductModal
+    // v0.6.8). Gold-Diamond Jewellery + Original Gold sind handgemacht ohne Brand.
+    // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
+    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
+    if (brandedRequired) {
+      if (!form.brand?.trim()) errs.brand = 'Required';
+      if (!form.name?.trim()) errs.name = 'Required';
+    }
     // Condition ist optional (2026-05-17) — kein Required-Check mehr.
     if (selectedCat) {
       for (const attr of selectedCat.attributes) {
@@ -601,17 +607,29 @@ export function WatchList() {
             </div>
           </div>
 
-          {/* Universal Fields */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-            <div id="new-field-brand">
-              <Input required label="BRAND" placeholder="e.g. Rolex, Hermes, Cartier" value={form.brand || ''} error={errors.brand}
-                onChange={e => { setForm({ ...form, brand: e.target.value }); if (errors.brand) setErrors({ ...errors, brand: '' }); }} />
-            </div>
-            <div id="new-field-name">
-              <Input required label="NAME / MODEL" placeholder="e.g. Submariner, Birkin 30" value={form.name || ''} error={errors.name}
-                onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
-            </div>
-          </div>
+          {/* Universal Fields — v0.7.16: branded-Pflicht analog NewProductModal */}
+          {(() => {
+            // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
+    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                <div id="new-field-brand">
+                  <Input required={brandedRequired}
+                    label={brandedRequired ? 'BRAND' : 'BRAND (OPTIONAL)'}
+                    placeholder={brandedRequired ? 'e.g. Rolex, Hermes, Cartier' : 'leer = unbranded'}
+                    value={form.brand || ''} error={errors.brand}
+                    onChange={e => { setForm({ ...form, brand: e.target.value }); if (errors.brand) setErrors({ ...errors, brand: '' }); }} />
+                </div>
+                <div id="new-field-name">
+                  <Input required={brandedRequired}
+                    label={brandedRequired ? 'NAME / MODEL' : 'NAME / MODEL (OPTIONAL)'}
+                    placeholder={brandedRequired ? 'e.g. Submariner, Birkin 30' : 'leer = Beleg nimmt Beschreibung'}
+                    value={form.name || ''} error={errors.name}
+                    onChange={e => { setForm({ ...form, name: e.target.value }); if (errors.name) setErrors({ ...errors, name: '' }); }} />
+                </div>
+              </div>
+            );
+          })()}
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20 }}>
             <SkuInput value={form.sku || ''} onChange={v => setForm({ ...form, sku: v })} />
             <Input label="QUANTITY" type="number" placeholder="1" value={form.quantity || 1}

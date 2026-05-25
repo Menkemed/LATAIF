@@ -117,9 +117,10 @@ export const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
   ],
 
   // ── ORIGINAL GOLD JEWELRY ────────────────────────────────────────
+  // v0.7.16 — branded category (eigene Hersteller); Brand+Name Pflicht.
   'cat-original-gold-jewelry': [
-    { key: 'brand', label: 'Brand', type: 'text', coreField: 'itemBrand' },
-    { key: 'name', label: 'Name / Model', type: 'text', coreField: 'itemModel' },
+    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
+    { key: 'name', label: 'Name / Model', type: 'text', required: true, coreField: 'itemModel' },
     { key: 'item_type', label: 'Type', type: 'select',
       options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch'],
       required: true },
@@ -141,9 +142,11 @@ export const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
   ],
 
   // ── ACCESSORY ────────────────────────────────────────────────────
+  // v0.7.16 — unbranded (gemischtes Sortiment mit vielen no-name Stuecken);
+  // Brand+Name optional.
   'cat-accessory': [
-    { key: 'brand', label: 'Brand', type: 'text', required: true, coreField: 'itemBrand' },
-    { key: 'name', label: 'Name / Model', type: 'text', required: true, coreField: 'itemModel' },
+    { key: 'brand', label: 'Brand', type: 'text', coreField: 'itemBrand' },
+    { key: 'name', label: 'Name / Model', type: 'text', coreField: 'itemModel' },
     { key: 'item_type', label: 'Item Type', type: 'select',
       options: ['Handbag', 'Eyeglass', 'Wallet', 'Lighter', 'Cufflinks', 'Prayer Beads', 'Walking Stick', 'Pen', 'Key Holder', 'Other'],
     },

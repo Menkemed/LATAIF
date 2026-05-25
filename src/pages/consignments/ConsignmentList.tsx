@@ -277,8 +277,13 @@ export function ConsignmentList() {
       return;
     }
     const missing: string[] = [];
-    if (!productForm.brand?.trim()) missing.push('Brand');
-    if (!productForm.name?.trim()) missing.push('Name');
+    // v0.7.16 — Brand/Name nur bei branded-Kategorien Pflicht.
+    // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
+    const brandedRequired = !(productForm.categoryId === 'cat-gold-jewelry' || productForm.categoryId === 'cat-accessory');
+    if (brandedRequired) {
+      if (!productForm.brand?.trim()) missing.push('Brand');
+      if (!productForm.name?.trim()) missing.push('Name');
+    }
     // Condition ist optional (2026-05-17) — kein Required-Check mehr.
     if (selectedCat) {
       for (const attr of selectedCat.attributes) {
@@ -785,15 +790,25 @@ export function ConsignmentList() {
               </div>
             </div>
 
-            {/* Brand + Name */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-              <Input required label="BRAND" placeholder="e.g. Rolex, Hermes, Cartier"
-                value={productForm.brand || ''}
-                onChange={e => setProductForm(p => ({ ...p, brand: e.target.value }))} />
-              <Input required label="NAME / MODEL" placeholder="e.g. Submariner, Birkin 30"
-                value={productForm.name || ''}
-                onChange={e => setProductForm(p => ({ ...p, name: e.target.value }))} />
-            </div>
+            {/* Brand + Name — v0.7.16: branded-Pflicht analog NewProductModal */}
+            {(() => {
+              // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
+    const brandedRequired = !(productForm.categoryId === 'cat-gold-jewelry' || productForm.categoryId === 'cat-accessory');
+              return (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <Input required={brandedRequired}
+                    label={brandedRequired ? 'BRAND' : 'BRAND (OPTIONAL)'}
+                    placeholder={brandedRequired ? 'e.g. Rolex, Hermes, Cartier' : 'leer = unbranded'}
+                    value={productForm.brand || ''}
+                    onChange={e => setProductForm(p => ({ ...p, brand: e.target.value }))} />
+                  <Input required={brandedRequired}
+                    label={brandedRequired ? 'NAME / MODEL' : 'NAME / MODEL (OPTIONAL)'}
+                    placeholder={brandedRequired ? 'e.g. Submariner, Birkin 30' : 'leer = Beleg nimmt Beschreibung'}
+                    value={productForm.name || ''}
+                    onChange={e => setProductForm(p => ({ ...p, name: e.target.value }))} />
+                </div>
+              );
+            })()}
             <div style={{ marginTop: 16 }}>
               <SkuInput value={productForm.sku || ''}
                 onChange={v => setProductForm(p => ({ ...p, sku: v }))} />
