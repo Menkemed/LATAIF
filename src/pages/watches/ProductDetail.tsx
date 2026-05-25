@@ -1231,6 +1231,27 @@ export function ProductDetail() {
                         </div>
                       );
                     }
+                    // v0.7.14 — Boolean → Yes/No-Toggle.
+                    if (attr.type === 'boolean') {
+                      const cur = formAttrs[attr.key];
+                      return (
+                        <div key={attr.key} id={`field-${errKey}`} style={{ padding: hasErr ? 8 : '8px 0', border: hasErr ? '1px solid #DC2626' : undefined, borderBottom: hasErr ? '1px solid #DC2626' : '1px solid #E5E9EE', borderRadius: hasErr ? 8 : 0 }}>
+                          <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>{attr.label}{reqMark}</span>
+                          <div className="flex gap-2">
+                            {[true, false].map(opt => (
+                              <button key={String(opt)} type="button" onClick={() => { setFormAttrs({ ...formAttrs, [attr.key]: opt }); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
+                                className="cursor-pointer"
+                                style={{
+                                  padding: '3px 10px', fontSize: 11, borderRadius: 4, border: 'none',
+                                  background: cur === opt ? 'rgba(15,15,16,0.1)' : 'transparent',
+                                  color: cur === opt ? '#0F0F10' : '#6B7280',
+                                }}>{opt ? 'Yes' : 'No'}</button>
+                            ))}
+                          </div>
+                          {hasErr && <span style={{ fontSize: 12, color: '#DC2626', display: 'block', marginTop: 4 }}>{errors[errKey]}</span>}
+                        </div>
+                      );
+                    }
                     return (
                       <div key={attr.key} id={`field-${errKey}`} style={{ padding: '6px 0', borderBottom: '1px solid #E5E9EE' }}>
                         <Input
@@ -1244,12 +1265,13 @@ export function ProductDetail() {
                     );
                   }
 
-                  // Read-only
-                  if (!val && val !== 0) return null;
+                  // Read-only — v0.7.14: boolean → Yes/No statt "true"/"false".
+                  if (val === undefined || val === null || val === '') return null;
+                  const displayVal = attr.type === 'boolean' ? (val ? 'Yes' : 'No') : String(val);
                   return (
                     <div key={attr.key} className="flex justify-between" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
                       <span style={{ fontSize: 13, color: '#6B7280' }}>{attr.label}</span>
-                      <span style={{ fontSize: 13, color: '#0F0F10' }}>{String(val)}{attr.unit ? ` ${attr.unit}` : ''}</span>
+                      <span style={{ fontSize: 13, color: '#0F0F10' }}>{displayVal}{attr.unit ? ` ${attr.unit}` : ''}</span>
                     </div>
                   );
                 })}

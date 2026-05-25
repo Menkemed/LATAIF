@@ -832,6 +832,30 @@ export function ConsignmentList() {
                         </div>
                       );
                     }
+                    // v0.7.14 — Boolean → Yes/No-Toggle.
+                    if (attr.type === 'boolean') {
+                      const val = productForm.attributes?.[attr.key];
+                      return (
+                        <div key={attr.key}>
+                          <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                            {attr.label.toUpperCase()}
+                            {attr.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                          </span>
+                          <div className="flex gap-2" style={{ marginTop: 6 }}>
+                            {[true, false].map(opt => (
+                              <button key={String(opt)} type="button" onClick={() => updateAttr(attr.key, opt)}
+                                className="cursor-pointer rounded"
+                                style={{
+                                  padding: '4px 14px', fontSize: 11, borderRadius: 999,
+                                  border: `1px solid ${val === opt ? '#0F0F10' : '#D5D9DE'}`,
+                                  color: val === opt ? '#0F0F10' : '#6B7280',
+                                  background: val === opt ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                }}>{opt ? 'Yes' : 'No'}</button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    }
                     return (
                       <div key={attr.key}>
                         <Input

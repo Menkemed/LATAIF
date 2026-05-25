@@ -917,8 +917,12 @@ export function OrderCreate() {
                     (() => {
                       const cat = categories.find(c => c.id === customProductSpec.categoryId);
                       const attrs = customProductSpec.attributes || {};
+                      // v0.7.14 — boolean (z.B. Diamonds) hat oft `false` als
+                      // gueltigen Wert — vorher filterten wir das raus, weil
+                      // String(false).trim() = "false" passt zwar, aber wir
+                      // nutzen jetzt eine type-aware Filter-Logik.
                       const attrEntries = Object.entries(attrs)
-                        .filter(([, v]) => v != null && String(v).trim() !== '')
+                        .filter(([, v]) => v !== null && v !== undefined && v !== '')
                         .slice(0, 3);
                       const thumb = (customProductSpec.images || [])[0];
                       return (
@@ -943,12 +947,16 @@ export function OrderCreate() {
                             </div>
                             {attrEntries.length > 0 && (
                               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6 }}>
-                                {attrEntries.map(([k, v]) => (
-                                  <span key={k} style={{ fontSize: 11, color: '#6B7280' }}>
-                                    <span style={{ textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: 4, color: '#9CA3AF' }}>{k}</span>
-                                    {String(v)}
-                                  </span>
-                                ))}
+                                {attrEntries.map(([k, v]) => {
+                                  // v0.7.14 — boolean → Yes/No; sonst String()
+                                  const display = typeof v === 'boolean' ? (v ? 'Yes' : 'No') : String(v);
+                                  return (
+                                    <span key={k} style={{ fontSize: 11, color: '#6B7280' }}>
+                                      <span style={{ textTransform: 'uppercase', letterSpacing: '0.04em', marginRight: 4, color: '#9CA3AF' }}>{k}</span>
+                                      {display}
+                                    </span>
+                                  );
+                                })}
                               </div>
                             )}
                           </div>

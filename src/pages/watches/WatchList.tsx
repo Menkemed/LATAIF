@@ -658,6 +658,31 @@ export function WatchList() {
                       </div>
                     );
                   }
+                  // v0.7.14 — Boolean → Yes/No-Toggle.
+                  if (attr.type === 'boolean') {
+                    const val = form.attributes?.[attr.key];
+                    return (
+                      <div key={attr.key} id={`new-field-${errKey}`} style={{ padding: hasErr ? 8 : 0, border: hasErr ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
+                        <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                          {attr.label.toUpperCase()}
+                          {attr.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                        </span>
+                        <div className="flex gap-2" style={{ marginTop: 6 }}>
+                          {[true, false].map(opt => (
+                            <button key={String(opt)} type="button" onClick={() => { updateAttr(attr.key, opt); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
+                              className="cursor-pointer rounded"
+                              style={{
+                                padding: '4px 14px', fontSize: 11, borderRadius: 999,
+                                border: `1px solid ${val === opt ? '#0F0F10' : '#D5D9DE'}`,
+                                color: val === opt ? '#0F0F10' : '#6B7280',
+                                background: val === opt ? 'rgba(15,15,16,0.06)' : 'transparent',
+                              }}>{opt ? 'Yes' : 'No'}</button>
+                          ))}
+                        </div>
+                        {hasErr && <span style={{ fontSize: 12, color: '#DC2626', display: 'block', marginTop: 4 }}>{errors[errKey]}</span>}
+                      </div>
+                    );
+                  }
                   return (
                     <div key={attr.key} id={`new-field-${errKey}`}>
                       <Input
