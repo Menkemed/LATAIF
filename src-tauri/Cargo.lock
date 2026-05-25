@@ -2005,7 +2005,7 @@ dependencies = [
 
 [[package]]
 name = "lataif"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "axum",
  "bcrypt",
