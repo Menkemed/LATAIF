@@ -1552,6 +1552,11 @@ function runMigrations(database: Database): void {
     // NOT-LIKE-Guard — laeuft jeden Startup, matched aber nichts wenn schon drin.
     `UPDATE categories SET condition_options = '["New","Pre-Owned","Vintage"]'
        WHERE id = 'cat-gold-jewelry' AND condition_options NOT LIKE '%New%'`,
+    // v0.7.10 — Cost+Split Consignment-Modus: shop's profit-share in % wenn
+    // commissionType = 'cost_split'. NULL fuer andere Modi. Default 50 wird in
+    // der UI/Store-Logik gesetzt, nicht als DB-Default (damit klar bleibt:
+    // alte Consignments waren NIE cost_split).
+    `ALTER TABLE consignments ADD COLUMN excess_split_pct INTEGER`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

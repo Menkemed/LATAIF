@@ -533,10 +533,17 @@ export interface Consignment {
   productId: UUID;
   agreedPrice: number;
   minimumPrice?: number;
-  commissionType?: 'percent' | 'fixed' | 'consignor_fixed';
+  // v0.7.10 — 'cost_split': consignor nennt seinen Kost (= agreedPrice),
+  // alles drueber wird mit shopPct (excessSplitPct) geteilt. Default 50.
+  // Below cost: wie consignor_fixed → block + shortfall-confirmation,
+  // consignor kriegt vollen cost, shop schluckt Loss als Expense.
+  commissionType?: 'percent' | 'fixed' | 'consignor_fixed' | 'cost_split';
   commissionValue?: number;
   commissionRate: number;
   commissionAmount?: number;
+  /** Shop's share of profit (%) for 'cost_split' mode. Default 50. NULL/undefined
+   *  for other commission types. Inverse: consignor's share = 100 - excessSplitPct. */
+  excessSplitPct?: number;
   payoutAmount?: number;
   payoutStatus: 'pending' | 'partial' | 'paid' | 'returned';
   payoutPaidAmount?: number;  // Plan §8 #2 — Partial Payouts

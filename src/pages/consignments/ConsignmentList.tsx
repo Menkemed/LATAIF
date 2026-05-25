@@ -58,10 +58,14 @@ export function ConsignmentList() {
   const [showNew, setShowNew] = useState(false);
   const [showPrintAll, setShowPrintAll] = useState(false);
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
-  // Plan 2026-05 §Consignment-Refactor: nur noch 2 Modelle.
-  //  'percent'           — Commission % to us
-  //  'consignor_fixed'   — Agreed Price + Excess to us (Consignor garantiert agreedPrice)
-  const [commissionType, setCommissionType] = useState<'percent' | 'consignor_fixed'>('percent');
+  // v0.7.10 — Drei Payout-Modelle:
+  //  'percent'           — Commission % to us (Shop zieht X% vom Verkaufspreis ab)
+  //  'consignor_fixed'   — Agreed Price + Excess to us (Consignor garantiert agreedPrice, Shop kriegt 100% des Excess)
+  //  'cost_split'        — Cost + Split with Consignor (Consignor nennt seinen Kost; Profit drueber wird mit Shop geteilt, default 50/50)
+  const [commissionType, setCommissionType] = useState<'percent' | 'consignor_fixed' | 'cost_split'>('percent');
+  // Nur fuer cost_split: Shop's Anteil am Profit in %. Default 50 = 50/50.
+  // 100 wuerde sich wie consignor_fixed verhalten, 0 wuerde Shop nichts geben.
+  const [excessSplitPct, setExcessSplitPct] = useState<string>('50');
 
   // Quick-action modals
   const [soldModal, setSoldModal] = useState<string | null>(null);
@@ -218,11 +222,17 @@ export function ConsignmentList() {
   // Live calculation (Vorschau bei Verkauf zum Agreed Price)
   const agreedNum = Number(form.agreedPrice) || 0;
   const rateNum = Number(form.commissionRate) || 0;
+  const splitPctNum = Number(excessSplitPct) || 0;
   let commission: number; let payout: number;
   if (commissionType === 'consignor_fixed') {
     // Model 2: Consignor gets Agreed Price, we keep amount above.
     // Bei „Sold to Agreed Price"-Vorschau ist die Marge 0 — Excess entsteht erst
     // wenn tatsächlicher Verkaufspreis > agreed.
+    payout = agreedNum;
+    commission = 0;
+  } else if (commissionType === 'cost_split') {
+    // v0.7.10 — cost_split bei Sale = Cost ist die Marge 0 (kein Profit).
+    // Echte Aufteilung passiert erst bei Sale > Cost im recordSale-Flow.
     payout = agreedNum;
     commission = 0;
   } else {
@@ -237,6 +247,8 @@ export function ConsignmentList() {
       agreedPrice: '', minimumPrice: '', commissionRate: '15',
       expiryDate: '', notes: '', consignorSearch: '', staffId: '',
     });
+    setCommissionType('percent');
+    setExcessSplitPct('50');
     const firstCat = categories[0] || null;
     setSelectedCat(firstCat);
     setProductForm({
@@ -317,6 +329,9 @@ export function ConsignmentList() {
       notes: form.notes,
       staffId: form.staffId,
       commissionType,
+      // v0.7.10 — nur bei cost_split relevant. Range-Clamp passiert beim Senden
+      // in den Store; hier nimm einfach den User-Input.
+      excessSplitPct: Number(excessSplitPct) || 50,
     };
 
     // Modal sofort zu + Form leeren in DIESEM Tick — React commit'tet den
@@ -357,7 +372,11 @@ export function ConsignmentList() {
           commissionType: snapshot.commissionType,
           // Model 2 (consignor_fixed): kein separates commission_value — agreedPrice IST der Payout.
           // Model 1 (percent): commissionRate = % to us.
+          // Model 3 (cost_split): commissionRate ignoriert; agreedPrice = Cost, excessSplitPct = Shop's Profit-Share.
           commissionRate: snapshot.commissionType === 'percent' ? rateVal : 0,
+          excessSplitPct: snapshot.commissionType === 'cost_split'
+            ? Math.max(0, Math.min(100, snapshot.excessSplitPct))
+            : undefined,
           expiryDate: snapshot.expiryDate || undefined,
           notes: snapshot.notes || undefined,
           staffId: snapshot.staffId || undefined,
@@ -1004,7 +1023,7 @@ export function ConsignmentList() {
             <div style={{ marginTop: 16 }}>
               <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>PAYOUT MODEL</span>
               <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
-                {(['percent', 'consignor_fixed'] as const).map(t => (
+                {(['percent', 'consignor_fixed', 'cost_split'] as const).map(t => (
                   <button key={t} onClick={() => setCommissionType(t)}
                     className="cursor-pointer rounded transition-all duration-200"
                     style={{
@@ -1013,13 +1032,19 @@ export function ConsignmentList() {
                       color: commissionType === t ? '#0F0F10' : '#6B7280',
                       background: commissionType === t ? 'rgba(15,15,16,0.06)' : 'transparent',
                     }}>
-                    {t === 'percent' ? 'Commission % to us' : 'Agreed Price + Excess to us'}
+                    {t === 'percent'
+                      ? 'Commission % to us'
+                      : t === 'consignor_fixed'
+                      ? 'Agreed Price + Excess to us'
+                      : 'Cost + Split with Consignor'}
                   </button>
                 ))}
               </div>
               <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
                 {commissionType === 'consignor_fixed'
                   ? 'Consignor gets the Agreed Price guaranteed — anything we sell above goes to us. Below agreed creates a Consignor-Loss expense.'
+                  : commissionType === 'cost_split'
+                  ? 'Consignor names his cost (= Agreed Price). Profit above his cost is split with him — by default 50/50. He gets his cost guaranteed; below-cost sales create a Consignor-Loss expense.'
                   : 'We keep a percentage of the actual sale price — consignor gets the rest.'}
               </p>
             </div>
@@ -1033,19 +1058,36 @@ export function ConsignmentList() {
                   onChange={e => setForm({ ...form, commissionRate: e.target.value })} />
               </div>
             )}
+            {commissionType === 'cost_split' && (
+              <div style={{ marginTop: 16 }}>
+                <Input
+                  label="SHOP'S SHARE OF PROFIT (%)"
+                  type="number"
+                  placeholder="50"
+                  value={excessSplitPct}
+                  onChange={e => setExcessSplitPct(e.target.value)} />
+                <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 6, lineHeight: 1.5 }}>
+                  Anything above the consignor's cost is split: shop keeps {splitPctNum}%, consignor gets {Math.max(0, 100 - splitPctNum)}%.
+                </p>
+              </div>
+            )}
 
             {/* Live Calculation */}
-            {agreedNum > 0 && (commissionType === 'consignor_fixed' || rateNum > 0) && (
+            {agreedNum > 0 && (commissionType === 'consignor_fixed' || commissionType === 'cost_split' || rateNum > 0) && (
               <div className="rounded font-mono" style={{
                 marginTop: 16, padding: 16, background: '#F2F7FA',
                 border: '1px solid #E5E9EE', fontSize: 13,
               }}>
                 <div style={{ marginBottom: 4, color: '#6B7280', fontSize: 11, letterSpacing: '0.04em' }}>
-                  IF SOLD AT AGREED PRICE
+                  {commissionType === 'cost_split' ? 'IF SOLD AT COST (BREAKEVEN)' : 'IF SOLD AT AGREED PRICE'}
                 </div>
                 <div className="flex justify-between" style={{ marginTop: 10 }}>
                   <span style={{ color: '#6B7280' }}>
-                    {commissionType === 'percent' ? `Commission (${fmtPct(rateNum)}%)` : 'Our margin (excess)'}
+                    {commissionType === 'percent'
+                      ? `Commission (${fmtPct(rateNum)}%)`
+                      : commissionType === 'cost_split'
+                      ? `Our share (no profit yet)`
+                      : 'Our margin (excess)'}
                   </span>
                   <span style={{ color: '#0F0F10' }}><Bhd v={commission}/> BHD</span>
                 </div>
@@ -1053,6 +1095,33 @@ export function ConsignmentList() {
                   <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
                   <span style={{ color: '#7EAA6E' }}><Bhd v={payout}/> BHD</span>
                 </div>
+                {commissionType === 'cost_split' && agreedNum > 0 && (() => {
+                  // Beispiel: 50% drueber Cost, damit der User sieht wie's bei
+                  // realem Profit aussieht. Skaliert mit dem Cost.
+                  const sampleSale = agreedNum * 1.5;
+                  const sampleProfit = sampleSale - agreedNum;
+                  const shopShare = sampleProfit * (splitPctNum / 100);
+                  const consignorShare = agreedNum + sampleProfit * ((100 - splitPctNum) / 100);
+                  return (
+                    <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px dashed #D5D9DE' }}>
+                      <div style={{ color: '#6B7280', fontSize: 11, letterSpacing: '0.04em', marginBottom: 6 }}>
+                        EXAMPLE: SOLD AT <Bhd v={sampleSale}/> BHD (cost +50%)
+                      </div>
+                      <div className="flex justify-between" style={{ marginTop: 4 }}>
+                        <span style={{ color: '#6B7280' }}>Profit above cost</span>
+                        <span style={{ color: '#0F0F10' }}><Bhd v={sampleProfit}/> BHD</span>
+                      </div>
+                      <div className="flex justify-between" style={{ marginTop: 4 }}>
+                        <span style={{ color: '#6B7280' }}>→ Shop ({splitPctNum}%)</span>
+                        <span style={{ color: '#0F0F10' }}><Bhd v={shopShare}/> BHD</span>
+                      </div>
+                      <div className="flex justify-between" style={{ marginTop: 4 }}>
+                        <span style={{ color: '#6B7280' }}>→ Consignor</span>
+                        <span style={{ color: '#7EAA6E' }}><Bhd v={consignorShare}/> BHD</span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>

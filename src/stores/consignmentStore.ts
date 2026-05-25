@@ -127,10 +127,11 @@ function rowToConsignment(row: Record<string, unknown>): Consignment {
     productId: row.product_id as string,
     agreedPrice: (row.agreed_price as number) || 0,
     minimumPrice: row.minimum_price as number | undefined,
-    commissionType: (row.commission_type as 'percent' | 'fixed' | 'consignor_fixed' | undefined) || 'percent',
+    commissionType: (row.commission_type as 'percent' | 'fixed' | 'consignor_fixed' | 'cost_split' | undefined) || 'percent',
     commissionValue: row.commission_value as number | undefined,
     commissionRate: (row.commission_rate as number) || 15,
     commissionAmount: row.commission_amount as number | undefined,
+    excessSplitPct: row.excess_split_pct as number | undefined,
     payoutAmount: row.payout_amount as number | undefined,
     payoutPaidAmount: (row.payout_paid_amount as number) || 0,
     payoutStatus: (row.payout_status as Consignment['payoutStatus']) || 'pending',
@@ -191,7 +192,10 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       const agreed = Number(data.agreedPrice) || 0;
       const rate = Number(data.commissionRate ?? 15);
       const ctype = (data.commissionType || 'percent') as string;
-      const expectedCost = ctype === 'consignor_fixed'
+      // v0.7.10 — cost_split: expected cost = consignor's cost floor (= agreedPrice),
+      // analog zu consignor_fixed. Excess wird ggf. spaeter beim Sale gesplittet,
+      // aendert aber nicht den Erwartungswert beim Intake.
+      const expectedCost = (ctype === 'consignor_fixed' || ctype === 'cost_split')
         ? agreed
         : Math.max(0, agreed * (1 - rate / 100));
       if (expectedCost > 0) {
@@ -205,14 +209,18 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     db.run(
       `INSERT INTO consignments (id, branch_id, consignment_number, consignor_id, product_id,
         agreed_price, minimum_price, commission_rate, commission_type, commission_value,
+        excess_split_pct,
         status, agreement_date, expiry_date,
         notes, staff_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, consignmentNumber, data.consignorId, data.productId,
        data.agreedPrice || 0, data.minimumPrice || null,
        data.commissionRate || 15,
        data.commissionType || 'percent',
        data.commissionValue ?? null,
+       // Nur fuer cost_split persistieren; sonst NULL (kein Drift in der Semantik
+       // bei anderen Modi).
+       data.commissionType === 'cost_split' ? (data.excessSplitPct ?? 50) : null,
        data.agreementDate || now.split('T')[0], data.expiryDate || null,
        data.notes || null, data.staffId || null, now, now, userId]
     );
@@ -262,6 +270,20 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     if (con.commissionType === 'consignor_fixed') {
       payout = con.commissionValue || 0;
       commission = salePrice - payout;
+    } else if (con.commissionType === 'cost_split') {
+      // v0.7.10 — wird vom neuen recordSale-Pfad bevorzugt verwendet, aber
+      // markSold (Legacy) muss konsistent rechnen: Profit ueber Cost gemaess
+      // shopPct splitten.
+      const cost = con.agreedPrice || 0;
+      const shopPct = con.excessSplitPct ?? 50;
+      if (salePrice >= cost) {
+        const profit = salePrice - cost;
+        commission = profit * (shopPct / 100);
+        payout = cost + profit * ((100 - shopPct) / 100);
+      } else {
+        payout = cost;
+        commission = salePrice - cost; // negative = Verlust
+      }
     } else if (con.commissionType === 'fixed') {
       commission = con.commissionValue || 0;
       payout = salePrice - commission;
@@ -313,9 +335,10 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     }
 
     const isAgreedExcess = con.commissionType === 'consignor_fixed';
+    const isCostSplit = con.commissionType === 'cost_split';
     const isPercent = con.commissionType === 'percent' || !con.commissionType;
-    if (!isAgreedExcess && !isPercent) {
-      throw new Error(`Unsupported commission type "${con.commissionType}" — use percent or consignor_fixed (Agreed+Excess)`);
+    if (!isAgreedExcess && !isPercent && !isCostSplit) {
+      throw new Error(`Unsupported commission type "${con.commissionType}" — use percent / consignor_fixed / cost_split`);
     }
 
     // Payout/Loss berechnen
@@ -325,6 +348,28 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     if (isPercent) {
       ourCommission = params.salePrice * ((con.commissionRate || 0) / 100);
       consignorPayout = params.salePrice - ourCommission;
+    } else if (isCostSplit) {
+      // v0.7.10 — cost_split: consignor nennt seinen Kost (= agreedPrice),
+      // alles drueber wird mit excessSplitPct (shop %) gesplittet. Below cost
+      // analog zu consignor_fixed (Garantie + Loss-Expense), damit sich der
+      // Modus konsistent verhaelt mit dem User-Mental-Modell "ich kriege
+      // mindestens meinen Kost zurueck".
+      const cost = con.agreedPrice || 0;
+      const shopPct = con.excessSplitPct ?? 50;
+      if (params.salePrice >= cost) {
+        const profit = params.salePrice - cost;
+        ourCommission = profit * (shopPct / 100);
+        consignorPayout = cost + profit * ((100 - shopPct) / 100);
+      } else {
+        if (!params.acknowledgeShortfall) {
+          throw new Error(
+            `Sale ${params.salePrice} below consignor's cost ${cost}. Confirm shortfall (acknowledgeShortfall=true) — will be recorded as Consignor Loss expense.`
+          );
+        }
+        consignorPayout = cost;
+        consignorLoss = cost - params.salePrice;
+        ourCommission = -consignorLoss;
+      }
     } else {
       // Model 2: Agreed Price + Excess to us
       const agreed = con.agreedPrice || 0;
