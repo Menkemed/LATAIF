@@ -21,9 +21,12 @@ import type { CustomerGoldCredit } from '@/core/models/types';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useDebtStore } from '@/stores/debtStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import { useSupplierStore } from '@/stores/supplierStore';
+import { usePurchaseStore } from '@/stores/purchaseStore';
 import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
 import { query } from '@/core/db/helpers';
+import { Truck } from 'lucide-react';
 import type { Customer, VIPLevel, SalesStage, CustomerType } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
@@ -130,6 +133,11 @@ export function CustomerDetail() {
   const getGoldCreditByCustomer = useGoldStore(s => s.getGoldCreditByCustomer);
   const getGoldCreditsByCustomer = useGoldStore(s => s.getGoldCreditsByCustomer);
   const allGoldCredits = useGoldStore(s => s.customerGoldCredits);
+  // v0.7.12 — Cross-Link Customer ↔ Supplier: wenn der Customer parallel als
+  // Supplier auch existiert (z.B. weil er Consignment-Ware verkauft hat),
+  // zeigen wir hier seine Supplier-Sicht (was wir IHM schulden).
+  const { suppliers, loadSuppliers } = useSupplierStore();
+  const { purchases, loadPurchases } = usePurchaseStore();
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; credit?: CustomerGoldCredit }>({ open: false, mode: 'return_customer' });
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Customer>>({});
@@ -142,10 +150,42 @@ export function CustomerDetail() {
 
   useEffect(() => {
     loadCustomers(); loadProducts(); loadSalesReturns(); loadDebts(); loadInvoices();
+    loadSuppliers(); loadPurchases();
     goldLoadAll();
-  }, [loadCustomers, loadProducts, loadSalesReturns, loadDebts, loadInvoices, goldLoadAll]);
+  }, [loadCustomers, loadProducts, loadSalesReturns, loadDebts, loadInvoices, loadSuppliers, loadPurchases, goldLoadAll]);
 
   const customer = useMemo(() => customers.find(c => c.id === id), [customers, id]);
+
+  // v0.7.12 — Match auf Supplier-Mirror via Phone (primaer) + Name (Fallback).
+  // Gleiche Logik wie findOrCreateSupplierForConsignor im consignmentStore.
+  // Wenn gefunden → 'Also as Supplier' Card mit offenen Payables-Summe + Link.
+  const linkedSupplier = useMemo(() => {
+    if (!customer) return undefined;
+    const norm = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
+    const phoneA = norm(customer.phone);
+    if (phoneA) {
+      const byPhone = suppliers.find(s => norm(s.phone) === phoneA);
+      if (byPhone) return byPhone;
+    }
+    const fullName = `${customer.firstName} ${customer.lastName}`.trim().toLowerCase();
+    if (fullName) {
+      return suppliers.find(s => (s.name || '').trim().toLowerCase() === fullName);
+    }
+    return undefined;
+  }, [customer, suppliers]);
+
+  // Offene Payables-Summe aus Purchases dieses Supplier-Mirrors.
+  const linkedSupplierOutstanding = useMemo(() => {
+    if (!linkedSupplier) return { amount: 0, openCount: 0 };
+    const ours = purchases.filter(p =>
+      p.supplierId === linkedSupplier.id &&
+      p.status !== 'PAID' && p.status !== 'CANCELLED'
+    );
+    return {
+      amount: ours.reduce((s, p) => s + (p.remainingAmount || 0), 0),
+      openCount: ours.length,
+    };
+  }, [linkedSupplier, purchases]);
 
   // Plan repair-multi-supplier — Gold-Credits dieses Kunden
   const goldCreditSummary = useMemo(() => id ? getGoldCreditByCustomer(id) : [], [id, getGoldCreditByCustomer, allGoldCredits]);
@@ -369,7 +409,55 @@ export function CustomerDetail() {
               </div>
             </div>
           </Card>
-        ) : (
+        ) : null}
+
+        {/* v0.7.12 \u2014 Cross-Link: Also as Supplier. Sichtbar wenn der Customer
+            parallel als Supplier existiert (typisch nach Consignment-Sale). Klick
+            navigiert zur Supplier-Sicht damit man die A/P-Sicht behandeln kann. */}
+        {!editing && linkedSupplier && (
+          <div style={{ marginTop: 16 }}>
+            <button
+              onClick={() => navigate(`/suppliers/${linkedSupplier.id}`)}
+              className="cursor-pointer w-full text-left"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '14px 18px', borderRadius: 12,
+                border: '1px solid rgba(113,93,227,0.30)',
+                background: 'rgba(113,93,227,0.05)',
+                gap: 16,
+              }}
+              title="Open the supplier view to manage what we owe this person"
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: 8,
+                  background: 'rgba(113,93,227,0.10)', color: '#715DE3',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <Truck size={16} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>
+                    Also as Supplier {'\u00b7'} {linkedSupplier.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                    {linkedSupplierOutstanding.openCount > 0
+                      ? `We owe ${linkedSupplierOutstanding.openCount} unpaid amount${linkedSupplierOutstanding.openCount === 1 ? '' : 's'} (Consignor payouts, Workshop fees, etc.)`
+                      : 'No outstanding payables to this person right now.'}
+                  </div>
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div className="font-mono" style={{ fontSize: 16, color: linkedSupplierOutstanding.amount > 0 ? '#DC2626' : '#6B7280', fontWeight: 600 }}>
+                  <Bhd v={linkedSupplierOutstanding.amount}/> BHD
+                </div>
+                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>open payables {'\u00b7'} click to open {'\u2197'}</div>
+              </div>
+            </button>
+          </div>
+        )}
+
+        {editing ? (
           /* Edit Mode — full edit form */
           <Card>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -515,7 +603,7 @@ export function CustomerDetail() {
               )}
             </div>
           </Card>
-        )}
+        ) : null}
 
         {!editing && (
           <>

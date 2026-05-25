@@ -1,7 +1,9 @@
 // Plan §Supplier §8: Detail-View mit Ledger + Purchase/Payment/Return-Historie
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Building2, Edit3, Save, Trash2 } from 'lucide-react';
+import { ArrowLeft, Building2, Edit3, Save, Trash2, User } from 'lucide-react';
+import { useCustomerStore } from '@/stores/customerStore';
+import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -50,6 +52,10 @@ export function SupplierDetail() {
   // v0.7.7 — Bulk-Pay an den Supplier (FIFO + Override). Boolean reicht;
   // supplierId kommt direkt aus dem URL-Param.
   const [showPaySupplierModal, setShowPaySupplierModal] = useState(false);
+  // v0.7.12 — Cross-Link Supplier → Customer-Mirror. Spiegel-Logik zur
+  // CustomerDetail-Seite (Phone primaer, Name Fallback).
+  const { customers, loadCustomers } = useCustomerStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
   // v0.4.4 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
   // bei jeder Mutation seine Referenz. In einer useEffect-Dependency + loadAll()
   // im Effect → Endlos-Loop (SupplierDetail fror beim Oeffnen ein, zeigte
@@ -64,7 +70,9 @@ export function SupplierDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
-  useEffect(() => { loadSuppliers(); loadPurchases(); loadExpenses(); goldLoadAll(); }, [loadSuppliers, loadPurchases, loadExpenses, goldLoadAll]);
+  useEffect(() => {
+    loadSuppliers(); loadPurchases(); loadExpenses(); loadCustomers(); loadInvoices(); goldLoadAll();
+  }, [loadSuppliers, loadPurchases, loadExpenses, loadCustomers, loadInvoices, goldLoadAll]);
 
   // Plan repair-multi-supplier — Gold-Buckets fuer diesen Supplier
   const goldOwedSummary = useMemo(() => id ? getGoldOwedBySupplier(id) : [], [id, getGoldOwedBySupplier, goldPayables]);
@@ -90,6 +98,42 @@ export function SupplierDetail() {
   }, [supplierGoldPayables]);
 
   const supplier = useMemo(() => suppliers.find(s => s.id === id), [suppliers, id]);
+
+  // v0.7.12 — Cross-Link Supplier → Customer-Mirror. Matching-Logik identisch
+  // zu CustomerDetail (Phone primaer, Name Fallback). Wenn Supplier auch als
+  // Customer existiert (typisch bei Consignor-Auto-Mirror), zeigen wir eine
+  // Card mit offenen Receivables + Link zum Customer-Profil.
+  const linkedCustomer = useMemo(() => {
+    if (!supplier) return undefined;
+    const norm = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
+    const phoneA = norm(supplier.phone);
+    if (phoneA) {
+      const byPhone = customers.find(c => norm(c.phone) === phoneA);
+      if (byPhone) return byPhone;
+    }
+    const fullName = (supplier.name || '').trim().toLowerCase();
+    if (fullName) {
+      return customers.find(c => `${c.firstName} ${c.lastName}`.trim().toLowerCase() === fullName);
+    }
+    return undefined;
+  }, [supplier, customers]);
+
+  // Offene Receivables aus Invoices dieses Customer-Mirrors.
+  const linkedCustomerReceivable = useMemo(() => {
+    if (!linkedCustomer) return { amount: 0, openCount: 0 };
+    // Invoice hat kein PAID-status; "voll bezahlt" = paidAmount >= grossAmount.
+    const ours = invoices.filter(i => {
+      if (i.customerId !== linkedCustomer.id) return false;
+      if (i.status === 'CANCELLED') return false;
+      const gross = i.grossAmount || 0;
+      const paid = i.paidAmount || 0;
+      return gross > 0 && paid < gross - 0.005;
+    });
+    return {
+      amount: ours.reduce((s, i) => s + Math.max(0, (i.grossAmount || 0) - (i.paidAmount || 0)), 0),
+      openCount: ours.length,
+    };
+  }, [linkedCustomer, invoices]);
 
   useEffect(() => {
     if (supplier) setForm({ ...supplier });
@@ -308,6 +352,52 @@ export function SupplierDetail() {
           </div>
         </div>
 
+        {/* v0.7.12 — Cross-Link Supplier → Customer-Mirror. Sichtbar wenn
+            dieselbe Person auch als Customer existiert. Zeigt offene
+            Receivables-Summe + Link zum Customer-Profil. */}
+        {linkedCustomer && (
+          <div style={{ marginBottom: 16 }}>
+            <button
+              onClick={() => navigate(`/clients/${linkedCustomer.id}`)}
+              className="cursor-pointer w-full text-left"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '14px 18px', borderRadius: 12,
+                border: '1px solid rgba(61,127,255,0.30)',
+                background: 'rgba(61,127,255,0.05)',
+                gap: 16,
+              }}
+              title="Open the customer view to see invoices, receivables, and gold credits"
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: 8,
+                  background: 'rgba(61,127,255,0.10)', color: '#3D7FFF',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <User size={16} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>
+                    Also as Customer {'·'} {linkedCustomer.firstName} {linkedCustomer.lastName}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                    {linkedCustomerReceivable.openCount > 0
+                      ? `${linkedCustomerReceivable.openCount} unpaid invoice${linkedCustomerReceivable.openCount === 1 ? '' : 's'} on the customer side.`
+                      : 'No outstanding receivables from this person right now.'}
+                  </div>
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div className="font-mono" style={{ fontSize: 16, color: linkedCustomerReceivable.amount > 0 ? '#3D7FFF' : '#6B7280', fontWeight: 600 }}>
+                  <Bhd v={linkedCustomerReceivable.amount}/> BHD
+                </div>
+                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>open receivables {'·'} click to open {'↗'}</div>
+              </div>
+            </button>
+          </div>
+        )}
+
         {/* Ledger KPIs (Plan §Supplier §3 + §4 + §10 + §Purchase Returns §8) */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 16 }}>
           <KPICard label="TOTAL PURCHASES" value={fmt(ledger.totalPurchases)} unit="BHD" />
@@ -316,10 +406,12 @@ export function SupplierDetail() {
           <KPICard label="CREDIT BALANCE" value={fmt(ledger.creditBalance)} unit="BHD available" />
         </div>
 
-        {/* v0.7.7 — Bulk-Pay Action. Sichtbar wenn mindestens eine offene
-            Workshop/Service-Expense existiert. Inventory-Purchases laufen
-            weiter ueber PurchaseDetail (separater Payment-Flow). */}
-        {workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length > 0 && (
+        {/* v0.7.12 — Bulk-Pay Action erweitert: sichtbar wenn IRGENDWAS offen
+            ist (Workshop/Service-Expense, Consignor-Loss-Expense, Purchase).
+            Vorher nur workshopExpenses → Consignor-Payouts via Purchase blieben
+            aussen vor und brauchten manuelle PurchaseDetail-Klicks. */}
+        {(workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length > 0
+          || supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length > 0) && (
           <div style={{ marginBottom: 32, display: 'flex', justifyContent: 'flex-end' }}>
             <Button variant="primary" onClick={() => setShowPaySupplierModal(true)}>
               💰 Pay Supplier — Bulk
