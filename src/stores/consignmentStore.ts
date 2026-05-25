@@ -740,6 +740,26 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     const db = getDatabase();
     const now = new Date().toISOString();
 
+    // v0.7.11 — Idempotenz-Guard: doppelter Aufruf (z.B. double-click oder
+    // versehentlicher Re-Run via UI/Eval) sonst → mehrere CN + RET pro Invoice
+    // + verkorkster Ledger. Erkenne über bereits existierende sales_returns
+    // dieser Invoice mit dem Consignment-Reason. Auch hartes Status-Match
+    // 'returned' triggert hier (consignment ist schon zurueck).
+    if (con.status === 'returned') {
+      console.warn(`[markReturnedAfterSale] ${con.consignmentNumber} already returned, skipping.`);
+      return;
+    }
+    if (con.invoiceId) {
+      const existingRet = query(
+        `SELECT id FROM sales_returns WHERE invoice_id = ? AND notes LIKE ? LIMIT 1`,
+        [con.invoiceId, `%Consignment post-sale return (${con.consignmentNumber})%`]
+      );
+      if (existingRet.length > 0) {
+        console.warn(`[markReturnedAfterSale] ${con.consignmentNumber} already has return ${existingRet[0].id}, skipping duplicate.`);
+        return;
+      }
+    }
+
     if (!con.invoiceId || !con.salePrice) {
       // Kein Invoice verknüpft oder noch nicht verkauft — Fallback auf normale Rückgabe
       get().markReturned(id);
@@ -800,24 +820,67 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     if (disposition === 'RETURN_TO_OWNER') {
       db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, con.productId]);
       get().updateConsignment(id, { status: 'returned' });
+      // v0.7.11 — Consignor-Purchase cancellen: wir haben die Ware an den
+      // Consignor zurueckgegeben, also schulden wir ihm nichts mehr. Vorher
+      // blieb der Purchase auf UNPAID stehen (Phantom-A/P).
+      // KEEP_AS_OWN-Pfad cancelt absichtlich NICHT — dort behalten wir die
+      // Ware und der Consignor erwartet seine Auszahlung.
+      try {
+        const purRows = query(
+          `SELECT id FROM purchases WHERE notes LIKE ? AND status != 'CANCELLED' LIMIT 1`,
+          [`%${con.consignmentNumber}%`]
+        );
+        if (purRows.length > 0) {
+          const purchaseId = purRows[0].id as string;
+          usePurchaseStore.getState().cancelPurchase(purchaseId);
+        }
+        // Loss-Expense (bei Below-Cost-Sale) auch cancellen — sonst bleibt der
+        // ConsignorLoss in Reports stehen obwohl der gesamte Sale rueckgaengig.
+        const expRows = query(
+          `SELECT id FROM expenses
+           WHERE related_module = 'consignment' AND related_entity_id = ?
+             AND category = 'ConsignorLoss' AND status != 'CANCELLED'
+           LIMIT 1`,
+          [id]
+        );
+        if (expRows.length > 0) {
+          const expenseId = expRows[0].id as string;
+          useExpenseStore.getState().updateExpense(expenseId, { status: 'CANCELLED' });
+        }
+      } catch (e) {
+        console.warn('[markReturnedAfterSale RETURN_TO_OWNER] purchase/expense cancel failed:', e);
+      }
     } else {
-      // KEEP_AS_OWN: purchase_price = sale_price (Plan §13B)
+      // v0.7.11 — KEEP_AS_OWN: Cost-Basis = consignor_payout, NICHT sale_price.
+      //
+      // Vorher war's auf con.salePrice gesetzt (Plan §13B Annahme). Das ueberschaetzt
+      // unsere echten Cash-Kosten, weil der Buyer-Refund den Sale-Cash neutralisiert.
+      // Cash-Trace:
+      //    + sale_price  (vom Buyer)
+      //    - sale_price  (Refund an Buyer)
+      //    - payoutAmount (Auszahlung an Consignor, die wir noch schulden)
+      //    = -payoutAmount netto
+      //
+      // Also kostet uns die Uhr in echter Cash payoutAmount — das ist auch
+      // die Hoehe der A/P (purchases.total_amount) die offen bleibt. Beide
+      // muessen uebereinstimmen, sonst sind Margin + MARGIN_VAT bei der naechsten
+      // Verkaeufung falsch (z.B. Cost-Basis 1500 statt 1250 → 250 Profit gehen
+      // als 0 Margin durch die Kasse, MARGIN_VAT geht verloren).
+      const costBasis = con.payoutAmount ?? con.salePrice ?? 0;
       db.run(
         `UPDATE products SET stock_status = 'in_stock', source_type = 'OWN',
-         purchase_price = COALESCE(?, purchase_price), updated_at = ? WHERE id = ?`,
-        [con.salePrice ?? null, now, con.productId]
+         purchase_price = ?, updated_at = ? WHERE id = ?`,
+        [costBasis, now, con.productId]
       );
-      // Phase 5 — neuer Stock-Lot an Sale-Preis als Acquisition-Cost. Spiegelt
-      // die Logik von salesReturnStore.applyDisposition KEEP_AS_OWN. Originaler
-      // Lot der Sale-Konsumption bleibt EXHAUSTED — wir haben die Ware effektiv
-      // zum Sale-Preis "zurueckgekauft".
-      if (con.salePrice && con.salePrice > 0) {
+      // Phase 5 — neuer Stock-Lot an consignor_payout-Preis als Acquisition-
+      // Cost. Originaler Lot der Sale-Konsumption bleibt EXHAUSTED.
+      if (costBasis > 0) {
         db.run(
           `INSERT INTO stock_lots
              (id, branch_id, product_id, purchase_id, purchase_line_id,
               unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
            VALUES (?, ?, ?, NULL, NULL, ?, 1, 1, 'ACTIVE', ?, ?)`,
-          [uuid(), branchId, con.productId, con.salePrice, now.split('T')[0], now]
+          [uuid(), branchId, con.productId, costBasis, now.split('T')[0], now]
         );
       }
       get().updateConsignment(id, { status: 'returned' });

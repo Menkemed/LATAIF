@@ -870,10 +870,10 @@ export function ConsignmentDetail() {
       </Modal>
 
       {/* ── Post-Sale Return Modal (Plan §Commission §13) ── */}
-      <Modal open={postSaleReturnModal} onClose={() => setPostSaleReturnModal(false)} title="Post-Sale Return" width={500}>
+      <Modal open={postSaleReturnModal} onClose={() => setPostSaleReturnModal(false)} title="Buyer Returns the Item" width={520}>
         <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 16, lineHeight: 1.5 }}>
-          Plan §Commission §13: The end customer is returning <strong style={{ color: '#0F0F10' }}>{productLabel}</strong>.
-          Pick the disposition:
+          The buyer is returning <strong style={{ color: '#0F0F10' }}>{productLabel}</strong>.
+          What should happen with the item?
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
           <button onClick={() => setPostSaleDisposition('RETURN_TO_OWNER')}
@@ -883,8 +883,10 @@ export function ConsignmentDetail() {
               border: `1px solid ${postSaleDisposition === 'RETURN_TO_OWNER' ? '#0F0F10' : '#D5D9DE'}`,
               background: postSaleDisposition === 'RETURN_TO_OWNER' ? 'rgba(15,15,16,0.06)' : 'transparent',
             }}>
-            <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>A · Return to Owner</div>
-            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Goods leave your system. Product = RETURNED, Consignment = RETURNED_TO_OWNER.</div>
+            <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>{'↩'} Give back to consignor</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.5 }}>
+              Goods leave our system back to <strong>{consignorName}</strong>. Our A/P to him gets cancelled (we owe nothing anymore {'—'} he has his watch back). No inventory effect for us.
+            </div>
           </button>
           <button onClick={() => setPostSaleDisposition('KEEP_AS_OWN')}
             className="cursor-pointer text-left"
@@ -893,12 +895,14 @@ export function ConsignmentDetail() {
               border: `1px solid ${postSaleDisposition === 'KEEP_AS_OWN' ? '#0F0F10' : '#D5D9DE'}`,
               background: postSaleDisposition === 'KEEP_AS_OWN' ? 'rgba(15,15,16,0.06)' : 'transparent',
             }}>
-            <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>B · Keep as Own</div>
-            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>Stays with you. source_type → OWN, purchase_price = sale_price (<Bhd v={consignment.salePrice || 0}/> BHD).</div>
+            <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>{'📦'} Keep in our inventory</div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.5 }}>
+              Item becomes our own stock. Our A/P to <strong>{consignorName}</strong> (<Bhd v={consignment.payoutAmount || 0}/> BHD) stays open {'—'} we still owe him that. Cost basis for re-sale = <Bhd v={consignment.payoutAmount || 0}/> BHD.
+            </div>
           </button>
         </div>
         <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12, color: '#4B5563', marginBottom: 16 }}>
-          Ein Sales Return (RET) wird automatisch für die Invoice {consignment.invoiceId ? `${consignment.invoiceId.slice(0, 8)}...` : '\u2014'} erzeugt. VAT + Paid-Amount werden korrigiert.
+          A Credit Note + Sales Return will be created automatically to refund the buyer for the original sale.
         </div>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setPostSaleReturnModal(false)}>Cancel</Button>
