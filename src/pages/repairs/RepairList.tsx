@@ -264,6 +264,35 @@ export function RepairList() {
     } else {
       if (!form.customerId) return;
     }
+    // v0.7.15 — Erzwinge die `required: true` Flags aus REPAIR_FIELDS.
+    // Vorher war die rote * nur visuell, Submit ging trotzdem durch ohne
+    // Brand/Name/etc. — fuer OWN-Scope skip wir die Validierung (Produkt
+    // ist schon ausgewaehlt, seine Daten sind komplett).
+    if (form.repairScope !== 'OWN' && form.itemCategoryId) {
+      const missing: string[] = [];
+      for (const f of activeFields) {
+        if (!f.required) continue;
+        // dependsOn beachten — wenn Parent nicht passt, Feld nicht required.
+        if (f.dependsOn) {
+          const dep = form.itemAttributes?.[f.dependsOn.key];
+          if (!dep || !f.dependsOn.valueIncludes.includes(String(dep))) continue;
+        }
+        const v = f.coreField
+          ? (form[f.coreField] as string | undefined) || ''
+          : form.itemAttributes?.[f.key];
+        if (f.type === 'number') {
+          if (typeof v !== 'number' || isNaN(v) || v === 0) missing.push(f.label);
+        } else if (f.type === 'boolean') {
+          if (v === undefined || v === null) missing.push(f.label);
+        } else {
+          if (!String(v ?? '').trim()) missing.push(f.label);
+        }
+      }
+      if (missing.length > 0) {
+        alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
+        return;
+      }
+    }
     // v0.7.4 — Workshop optional bei Create. Discovery-Over-Time-Pattern:
     // beim Annehmen weiss man oft Workshop+Cost noch nicht, das traegt man
     // auf der Detail-Seite via "Add Work Line" ein wenn die Werkstatt
@@ -690,9 +719,15 @@ export function RepairList() {
                 {activeFields.length > 0 && (
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
                     {activeFields.map(field => {
+                      // v0.7.15 — Conditional Visibility (dependsOn) wie in Collection.
+                      // Z.B. Karat-Selektor erst sichtbar wenn Material = Gold-Variante.
+                      if (field.dependsOn) {
+                        const depVal = form.itemAttributes?.[field.dependsOn.key];
+                        if (!depVal || !field.dependsOn.valueIncludes.includes(String(depVal))) return null;
+                      }
                       const value = field.coreField
                         ? (form[field.coreField] as string | undefined) || ''
-                        : (form.itemAttributes?.[field.key] as string | number | undefined) ?? '';
+                        : (form.itemAttributes?.[field.key] as string | number | boolean | undefined) ?? '';
                       if (field.type === 'select' && field.options) {
                         return (
                           <div key={field.key}>
@@ -715,6 +750,34 @@ export function RepairList() {
                                       color: sel ? '#0F0F10' : '#6B7280',
                                       background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
                                     }}>{opt}</button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      }
+                      // v0.7.15 — Boolean → Yes/No-Toggle. Spiegel des Watch/
+                      // Diamonds-Patterns aus Collection (v0.7.14).
+                      if (field.type === 'boolean') {
+                        return (
+                          <div key={field.key}>
+                            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                              {field.label.toUpperCase()}
+                              {field.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                            </span>
+                            <div className="flex gap-2" style={{ marginTop: 6 }}>
+                              {[true, false].map(opt => {
+                                const sel = value === opt;
+                                return (
+                                  <button key={String(opt)} type="button"
+                                    onClick={() => setRepairAttr(field.key, opt)}
+                                    className="cursor-pointer rounded"
+                                    style={{
+                                      padding: '4px 14px', fontSize: 11, borderRadius: 999,
+                                      border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
+                                      color: sel ? '#0F0F10' : '#6B7280',
+                                      background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                    }}>{opt ? 'Yes' : 'No'}</button>
                                 );
                               })}
                             </div>

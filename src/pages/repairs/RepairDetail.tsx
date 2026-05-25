@@ -1012,8 +1012,16 @@ export function RepairDetail() {
                       .filter(f => !f.coreField)
                       .map(f => {
                         const v = repair.itemAttributes?.[f.key];
-                        if (v === undefined || v === '') return null;
-                        const display = f.unit ? `${v} ${f.unit}` : String(v);
+                        if (v === undefined || v === null || v === '') return null;
+                        // v0.7.15 — dependsOn beim Display respektieren: wenn
+                        // Parent-Wert nicht passt, Feld nicht anzeigen.
+                        if (f.dependsOn) {
+                          const dep = repair.itemAttributes?.[f.dependsOn.key];
+                          if (!dep || !f.dependsOn.valueIncludes.includes(String(dep))) return null;
+                        }
+                        // v0.7.15 — boolean → Yes/No, sonst String(v).
+                        const valStr = f.type === 'boolean' ? (v ? 'Yes' : 'No') : String(v);
+                        const display = f.unit ? `${valStr} ${f.unit}` : valStr;
                         return <div key={f.key}>{renderField(f.label, display)}</div>;
                       });
                   })()}
@@ -1737,9 +1745,14 @@ function RepairItemEditor({ form, setForm, categories }: RepairItemEditorProps) 
       {activeFields.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
           {activeFields.map(field => {
+            // v0.7.15 — Conditional Visibility (dependsOn).
+            if (field.dependsOn) {
+              const depVal = form.itemAttributes?.[field.dependsOn.key];
+              if (!depVal || !field.dependsOn.valueIncludes.includes(String(depVal))) return null;
+            }
             const value = field.coreField
               ? (form[field.coreField] as string | undefined) || ''
-              : (form.itemAttributes?.[field.key] as string | number | undefined) ?? '';
+              : (form.itemAttributes?.[field.key] as string | number | boolean | undefined) ?? '';
             if (field.type === 'select' && field.options) {
               return (
                 <div key={field.key}>
@@ -1760,6 +1773,33 @@ function RepairItemEditor({ form, setForm, categories }: RepairItemEditorProps) 
                             color: sel ? '#0F0F10' : '#6B7280',
                             background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
                           }}>{opt}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            }
+            // v0.7.15 — Boolean → Yes/No-Toggle.
+            if (field.type === 'boolean') {
+              return (
+                <div key={field.key}>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                    {field.label.toUpperCase()}
+                    {field.required && <span style={{ color: '#DC2626', marginLeft: 4 }}>*</span>}
+                  </span>
+                  <div className="flex gap-2" style={{ marginTop: 6 }}>
+                    {[true, false].map(opt => {
+                      const sel = value === opt;
+                      return (
+                        <button key={String(opt)} type="button"
+                          onClick={() => setAttr(field.key, opt)}
+                          className="cursor-pointer rounded"
+                          style={{
+                            padding: '4px 14px', fontSize: 11, borderRadius: 999,
+                            border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
+                            color: sel ? '#0F0F10' : '#6B7280',
+                            background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                          }}>{opt ? 'Yes' : 'No'}</button>
                       );
                     })}
                   </div>
