@@ -622,7 +622,8 @@ export function ProductDetail() {
                 </div>
               </div>
             ) : product.images.length > 0 ? (
-              <img src={product.images[0]} alt="" style={{ width: '100%', height: 400, objectFit: 'cover' }} />
+              // v0.7.17 — `contain` damit das volle User-Foto sichtbar bleibt.
+              <img src={product.images[0]} alt="" style={{ width: '100%', height: 400, objectFit: 'contain', background: '#F2F7FA' }} />
             ) : (
               <div className="flex items-center justify-center" style={{ height: 400 }}>
                 <Package size={64} strokeWidth={0.8} style={{ color: '#6B7280' }} />

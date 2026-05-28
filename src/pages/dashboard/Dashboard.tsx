@@ -900,7 +900,8 @@ export function Dashboard() {
                     <div className="flex items-center justify-center relative"
                       style={{ height: 160, background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', overflow: 'hidden' }}>
                       {p.images.length > 0 ? (
-                        <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        // v0.7.17 — `contain` damit das ganze Foto sichtbar bleibt.
+                        <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
                       ) : (
                         <Package size={32} strokeWidth={1} style={{ color: '#6B7280' }} />
                       )}

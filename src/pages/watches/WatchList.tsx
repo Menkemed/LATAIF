@@ -514,7 +514,9 @@ export function WatchList() {
                 <div className="flex items-center justify-center relative"
                   style={{ height: 180, background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', overflow: 'hidden' }}>
                   {p.images.length > 0 ? (
-                    <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    // v0.7.17 — `contain` statt `cover`: User-Foto bleibt vollstaendig sichtbar
+                    // (vorher schnitt `cover` Raender ab um die Karte zu fuellen).
+                    <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
                   ) : (
                     <Package size={36} strokeWidth={1} style={{ color: '#6B7280' }} />
                   )}
