@@ -35,13 +35,14 @@ export function ProductHoverCard({ product, categories }: ProductHoverCardProps)
         overflow: 'hidden',
       }}
     >
-      {/* Cover Photo */}
+      {/* Cover Photo — v0.7.18: `contain` damit das volle Foto sichtbar bleibt
+          (vorher schnitt `cover` die Raender ab). */}
       {cover ? (
         <div style={{ width: '100%', height: 160, background: '#F2F7FA', overflow: 'hidden' }}>
           <img
             src={cover}
             alt=""
-            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+            style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
           />
         </div>
       ) : (
