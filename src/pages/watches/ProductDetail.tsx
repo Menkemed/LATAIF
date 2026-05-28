@@ -11,6 +11,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
+import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -46,6 +47,8 @@ export function ProductDetail() {
   const [showHistory, setShowHistory] = useState(false);
   const [lotsExpanded, setLotsExpanded] = useState(true);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // v0.7.19 — Foto-Lightbox (Hero + Gallery-Thumbs anklickbar)
+  const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
   const perm = usePermission();
 
   useEffect(() => { loadCategories(); loadProducts(); loadRepairs(); loadInvoices(); loadPurchases(); }, [loadCategories, loadProducts, loadRepairs, loadInvoices, loadPurchases]);
@@ -623,7 +626,12 @@ export function ProductDetail() {
               </div>
             ) : product.images.length > 0 ? (
               // v0.7.17 — `contain` damit das volle User-Foto sichtbar bleibt.
-              <img src={product.images[0]} alt="" style={{ width: '100%', height: 400, objectFit: 'contain', background: '#F2F7FA' }} />
+              // v0.7.19 — Klick oeffnet Lightbox.
+              <img
+                src={product.images[0]} alt=""
+                onClick={() => setLightboxIdx(0)}
+                style={{ width: '100%', height: 400, objectFit: 'contain', background: '#F2F7FA', cursor: 'zoom-in' }}
+              />
             ) : (
               <div className="flex items-center justify-center" style={{ height: 400 }}>
                 <Package size={64} strokeWidth={0.8} style={{ color: '#6B7280' }} />
@@ -632,16 +640,34 @@ export function ProductDetail() {
             {!editing && product.images.length > 1 && (
               <div className="flex gap-2" style={{ padding: '8px 12px', borderTop: '1px solid #E5E9EE' }}>
                 {product.images.slice(1, 5).map((img, i) => (
-                  <div key={i} className="rounded" style={{ width: 56, height: 56, overflow: 'hidden', border: '1px solid #E5E9EE' }}>
+                  <div
+                    key={i}
+                    className="rounded"
+                    onClick={() => setLightboxIdx(i + 1)}
+                    style={{ width: 56, height: 56, overflow: 'hidden', border: '1px solid #E5E9EE', cursor: 'zoom-in' }}
+                  >
                     <img src={img} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   </div>
                 ))}
                 {product.images.length > 5 && (
-                  <div className="rounded flex items-center justify-center" style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E5E9EE', fontSize: 11, color: '#6B7280' }}>
+                  <div
+                    className="rounded flex items-center justify-center"
+                    onClick={() => setLightboxIdx(5)}
+                    style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E5E9EE', fontSize: 11, color: '#6B7280', cursor: 'zoom-in' }}
+                  >
                     +{product.images.length - 5}
                   </div>
                 )}
               </div>
+            )}
+            {/* v0.7.19 Foto-Lightbox */}
+            {lightboxIdx !== null && product.images.length > 0 && (
+              <ImageLightbox
+                images={product.images}
+                index={lightboxIdx}
+                onClose={() => setLightboxIdx(null)}
+                alt={`${product.brand || ''} ${product.name || ''}`.trim()}
+              />
             )}
           </div>
 
