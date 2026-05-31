@@ -33,7 +33,7 @@ export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/collection');
-  const { products, categories, loadProducts, loadCategories, updateProduct, deleteProduct, nextAvailableSku, isSkuTaken } = useProductStore();
+  const { products, categories, loadProducts, loadCategories, updateProduct, deleteProduct, nextAvailableSku, isSkuTaken, getProductLinks } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
@@ -49,6 +49,12 @@ export function ProductDetail() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   // v0.7.19 — Foto-Lightbox (Hero + Gallery-Thumbs anklickbar)
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+  // v0.7.20 — Verknuepfungen fuer den Delete-Dialog. Verknuepfte Produkte
+  // (Invoice/Purchase/Consignment/Production/...) sind nicht loeschbar.
+  const deleteLinks = useMemo(
+    () => (confirmDelete && id) ? (getProductLinks([id]).get(id) || []) : [],
+    [confirmDelete, id, getProductLinks]
+  );
   const perm = usePermission();
 
   useEffect(() => { loadCategories(); loadProducts(); loadRepairs(); loadInvoices(); loadPurchases(); }, [loadCategories, loadProducts, loadRepairs, loadInvoices, loadPurchases]);
@@ -432,8 +438,15 @@ export function ProductDetail() {
 
   function handleDelete() {
     if (!id) return;
-    deleteProduct(id);
-    navigate('/collection');
+    try {
+      deleteProduct(id);
+      navigate('/collection');
+    } catch (e) {
+      // Sollte nicht passieren — der Delete-Button ist bei verknuepften Produkten
+      // disabled. Safety-Net falls sich der Link-Status zwischendurch aenderte.
+      setConfirmDelete(false);
+      alert(e instanceof Error ? e.message : String(e));
+    }
   }
 
   function renderField(label: string, value: React.ReactNode, editField?: React.ReactNode) {
@@ -1512,14 +1525,44 @@ export function ProductDetail() {
         )}
       </div>
 
-      <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Item" width={400}>
-        <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
-          Delete <strong style={{ color: '#0F0F10' }}>{product.brand} {product.name}</strong>? This cannot be undone.
-        </p>
-        <div className="flex justify-end gap-3">
-          <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
-          <Button variant="danger" onClick={handleDelete}>Delete</Button>
-        </div>
+      <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Item" width={420}>
+        {deleteLinks.length > 0 ? (
+          <>
+            {/* v0.7.20 — Verknuepftes Produkt: nicht loeschbar, Grund anzeigen. */}
+            <div style={{
+              padding: '12px 14px', borderRadius: 8, marginBottom: 20,
+              background: '#FFF7ED', border: '1px solid #FED7AA',
+              color: '#9A6B3F', fontSize: 13, lineHeight: 1.5,
+            }}>
+              <strong style={{ color: '#0F0F10' }}>{product.brand} {product.name}</strong> is linked to
+              existing records and <strong>cannot be deleted</strong>:
+              <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {deleteLinks.map((l, i) => (
+                  <span key={i} style={{
+                    fontSize: 11, padding: '2px 9px', borderRadius: 999,
+                    background: '#FFFFFF', border: '1px solid #FED7AA', color: '#9A6B3F',
+                  }}>{l.label}{l.count > 1 ? ` ×${l.count}` : ''}</span>
+                ))}
+              </div>
+              <div style={{ marginTop: 10, fontSize: 12 }}>
+                Remove it from those records first (e.g. cancel the invoice/purchase) — then it can be deleted.
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Close</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
+              Delete <strong style={{ color: '#0F0F10' }}>{product.brand} {product.name}</strong>? This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+              <Button variant="danger" onClick={handleDelete}>Delete</Button>
+            </div>
+          </>
+        )}
       </Modal>
 
       <HistoryDrawer

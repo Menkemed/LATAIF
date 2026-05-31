@@ -11,6 +11,67 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // mehr importiert.
 import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
 
+// ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
+// Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
+// NICHT geloescht werden (sonst verwaisen Rechnungen/Einkaeufe/Lots etc.).
+// Wichtig: stock_lots zaehlt mit, blockt aber nie ein sauber manuell angelegtes
+// Produkt — Lots entstehen ausschliesslich aus Purchase/Consignment/Return.
+// production_inputs + production_outputs teilen sich das Label "Production".
+const PRODUCT_LINK_TABLES: { table: string; label: string }[] = [
+  { table: 'invoice_lines', label: 'Invoice' },
+  { table: 'purchase_lines', label: 'Purchase' },
+  { table: 'offer_lines', label: 'Offer' },
+  { table: 'consignments', label: 'Consignment' },
+  { table: 'agent_transfers', label: 'Agent Transfer' },
+  { table: 'repairs', label: 'Repair' },
+  { table: 'sales_return_lines', label: 'Sales Return' },
+  { table: 'orders', label: 'Order' },
+  { table: 'order_lines', label: 'Order' },
+  { table: 'production_inputs', label: 'Production' },
+  { table: 'production_outputs', label: 'Production' },
+  { table: 'stock_lots', label: 'Stock Lot' },
+];
+
+export interface ProductLink { label: string; count: number; }
+
+/**
+ * Liefert pro productId die Liste der verknuepften Record-Typen (nur die mit
+ * count > 0). Leeres Array = nirgends referenziert = loeschbar. Labels werden
+ * dedupliziert (z.B. production_inputs + production_outputs → 1x "Production").
+ * Batched (100er) damit der IN(...)-Query bei vielen IDs nicht zu lang wird.
+ */
+function queryProductLinks(ids: string[]): Map<string, ProductLink[]> {
+  const result = new Map<string, ProductLink[]>();
+  if (ids.length === 0) return result;
+  const cols = PRODUCT_LINK_TABLES
+    .map((t, i) => `(SELECT COUNT(*) FROM ${t.table} WHERE product_id = products.id) AS c${i}`)
+    .join(', ');
+  const BATCH = 100;
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const slice = ids.slice(i, i + BATCH);
+    const placeholders = slice.map(() => '?').join(', ');
+    const sql = `SELECT id, ${cols} FROM products WHERE id IN (${placeholders})`;
+    try {
+      const rows = query(sql, slice);
+      for (const r of rows) {
+        const rec = r as Record<string, unknown>;
+        const links: ProductLink[] = [];
+        PRODUCT_LINK_TABLES.forEach((t, idx) => {
+          const n = Number(rec[`c${idx}`] || 0);
+          if (n <= 0) return;
+          const existing = links.find(l => l.label === t.label);
+          if (existing) existing.count += n;
+          else links.push({ label: t.label, count: n });
+        });
+        result.set(r.id as string, links);
+      }
+    } catch (err) {
+      console.warn('[queryProductLinks] batch query failed:', err);
+    }
+  }
+  return result;
+}
+
 interface ProductStore {
   products: Product[];
   categories: Category[];
@@ -64,6 +125,20 @@ interface ProductStore {
    * linked records gewinnen +1000 Punkte (siehe spec).
    */
   getLinkedRecordCounts: (productIds?: string[]) => Map<string, number>;
+  /**
+   * Liefert pro productId die verknuepften Record-Typen (label + count), nur
+   * die mit count > 0. Leeres Array = loeschbar. Genutzt von der Collection-
+   * Loeschfunktion: linked Produkte werden mit Hinweis blockiert, saubere
+   * Produkte (leeres Array) sind nach Bestaetigung loeschbar.
+   */
+  getProductLinks: (productIds?: string[]) => Map<string, ProductLink[]>;
+  /**
+   * Bulk-Loeschung. Re-prueft jede ID gegen ALLE Link-Tabellen; verknuepfte
+   * werden uebersprungen (blocked), nur saubere geloescht. Gibt deleted-IDs +
+   * blocked-Liste (mit Grund) zurueck. Speichert + reloaded nur wenn etwas
+   * geloescht wurde.
+   */
+  deleteProducts: (ids: string[]) => { deleted: string[]; blocked: { id: string; reason: string }[] };
 }
 
 function rowToCategory(row: Record<string, unknown>): Category {
@@ -459,23 +534,13 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   },
 
   deleteProduct: (id) => {
-    // Referenz-Check — Produkt darf nicht gelöscht werden wenn in Invoice/Order/Repair etc. verwendet.
-    const refs = query(
-      `SELECT
-         (SELECT COUNT(*) FROM invoice_lines       WHERE product_id = ?) AS invoice_lines,
-         (SELECT COUNT(*) FROM consignments        WHERE product_id = ?) AS consignments,
-         (SELECT COUNT(*) FROM agent_transfers     WHERE product_id = ?) AS agent_transfers,
-         (SELECT COUNT(*) FROM repairs             WHERE product_id = ?) AS repairs,
-         (SELECT COUNT(*) FROM sales_return_lines  WHERE product_id = ?) AS return_lines,
-         (SELECT COUNT(*) FROM orders              WHERE product_id = ?) AS orders`,
-      [id, id, id, id, id, id]
-    );
-    const r = refs[0] || {};
-    const linked = ['invoice_lines', 'consignments', 'agent_transfers', 'repairs', 'return_lines', 'orders']
-      .map(k => ({ k, n: Number((r as Record<string, unknown>)[k] || 0) }))
-      .filter(x => x.n > 0);
-    if (linked.length > 0) {
-      const detail = linked.map(x => `${x.n} ${x.k}`).join(', ');
+    // Referenz-Check ueber ALLE Link-Tabellen (SSOT: PRODUCT_LINK_TABLES).
+    // Vorher wurden nur 6 von 12 geprueft → ein Produkt aus einem Purchase
+    // (purchase_lines + stock_lots) konnte faelschlich geloescht werden und
+    // verwaiste diese Records. Jetzt vollstaendig.
+    const links = queryProductLinks([id]).get(id) || [];
+    if (links.length > 0) {
+      const detail = links.map(l => `${l.count}× ${l.label}`).join(', ');
       throw new Error(`Cannot delete product with linked records: ${detail}.`);
     }
     const db = getDatabase();
@@ -483,6 +548,33 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     saveDatabase();
     trackDelete('products', id);
     get().loadProducts();
+  },
+
+  getProductLinks: (productIds) => {
+    const ids = productIds && productIds.length > 0 ? productIds : get().products.map(p => p.id);
+    return queryProductLinks(ids);
+  },
+
+  deleteProducts: (ids) => {
+    const linkMap = queryProductLinks(ids);
+    const db = getDatabase();
+    const deleted: string[] = [];
+    const blocked: { id: string; reason: string }[] = [];
+    for (const id of ids) {
+      const links = linkMap.get(id) || [];
+      if (links.length > 0) {
+        blocked.push({ id, reason: links.map(l => l.label).join(', ') });
+        continue;
+      }
+      db.run('DELETE FROM products WHERE id = ?', [id]);
+      trackDelete('products', id);
+      deleted.push(id);
+    }
+    if (deleted.length > 0) {
+      saveDatabase();
+      get().loadProducts();
+    }
+    return { deleted, blocked };
   },
 
   mergeIntoExisting: (sourceId, targetId) => {
@@ -528,37 +620,15 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   },
 
   getLinkedRecordCounts: (productIds) => {
-    const result = new Map<string, number>();
+    // Reuse SSOT-Link-Check (alle 12 Tabellen) und summiere die counts pro
+    // Produkt. Vorher waren hier nur 6 Tabellen → Cluster-Master-Selection
+    // konnte ein real verknuepftes Produkt als "frei" einstufen.
     const ids = productIds && productIds.length > 0 ? productIds : get().products.map(p => p.id);
-    if (ids.length === 0) return result;
-    // SQL.js mag keine Array-Bindings, also baue WHERE id IN (?, ?, ...) dynamisch.
-    // 100er-Batches damit der Query nicht zu lang wird.
-    const BATCH = 100;
-    for (let i = 0; i < ids.length; i += BATCH) {
-      const slice = ids.slice(i, i + BATCH);
-      const placeholders = slice.map(() => '?').join(', ');
-      // Subqueries summieren alle linked-table-Hits pro product. Wenn 0 → kein
-      // linked record. Wenn >0 → darf nicht gelöscht werden.
-      const sql = `
-        SELECT id,
-          (SELECT COUNT(*) FROM invoice_lines       WHERE product_id = products.id) +
-          (SELECT COUNT(*) FROM consignments        WHERE product_id = products.id) +
-          (SELECT COUNT(*) FROM agent_transfers     WHERE product_id = products.id) +
-          (SELECT COUNT(*) FROM repairs             WHERE product_id = products.id) +
-          (SELECT COUNT(*) FROM sales_return_lines  WHERE product_id = products.id) +
-          (SELECT COUNT(*) FROM orders              WHERE product_id = products.id)
-          AS linked_count
-        FROM products
-        WHERE id IN (${placeholders})
-      `;
-      try {
-        const rows = query(sql, slice);
-        for (const r of rows) {
-          result.set(r.id as string, Number(r.linked_count) || 0);
-        }
-      } catch (err) {
-        console.warn('[getLinkedRecordCounts] batch query failed:', err);
-      }
+    const result = new Map<string, number>();
+    const linkMap = queryProductLinks(ids);
+    for (const id of ids) {
+      const links = linkMap.get(id) || [];
+      result.set(id, links.reduce((sum, l) => sum + l.count, 0));
     }
     return result;
   },

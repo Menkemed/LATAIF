@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Package } from 'lucide-react';
+import { Package, Trash2, X, Check, Link2 } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -229,7 +229,7 @@ export function WatchList() {
     products, categories, loadProducts, loadCategories, createProduct,
     searchQuery, setSearchQuery, filterCategory, setFilterCategory,
     filterStatus, setFilterStatus, getStockValue, nextAvailableSku,
-    isSkuTaken, findPossibleDuplicates,
+    isSkuTaken, findPossibleDuplicates, getProductLinks, deleteProducts,
   } = useProductStore();
   const [showNew, setShowNew] = useState(false);
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
@@ -251,7 +251,52 @@ export function WatchList() {
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
 
+  // ── Multi-Select + Delete (v0.7.20) ──
+  // selectMode aktiviert Checkboxen auf den Karten. linksMap haelt pro Produkt
+  // die Verknuepfungen (leeres Array = loeschbar); verknuepfte Produkte sind
+  // nicht selektierbar und zeigen ein Link-Badge. confirmDelete oeffnet den
+  // Bestaetigungs-Dialog. deleteResult zeigt das Ergebnis nach dem Loeschen.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [linksMap, setLinksMap] = useState<Map<string, { label: string; count: number }[]>>(new Map());
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   useEffect(() => { loadCategories(); loadProducts(); }, [loadCategories, loadProducts]);
+
+  // Beim Aktivieren des Select-Modus: Verknuepfungen aller Produkte laden, damit
+  // wir linked vs. loeschbar pro Karte anzeigen koennen. Beim Verlassen: Reset.
+  useEffect(() => {
+    if (selectMode) {
+      setLinksMap(getProductLinks());
+    } else {
+      setSelectedIds(new Set());
+      setLinksMap(new Map());
+    }
+  }, [selectMode, products, getProductLinks]);
+
+  const isLinked = (id: string) => (linksMap.get(id)?.length ?? 0) > 0;
+  const toggleSelect = (id: string) => {
+    if (isLinked(id)) return; // verknuepfte Produkte koennen nicht selektiert werden
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  function performDelete() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) { setConfirmDelete(false); return; }
+    const { deleted, blocked } = deleteProducts(ids);
+    setConfirmDelete(false);
+    setSelectMode(false);
+    setSelectedIds(new Set());
+    // blocked sollte leer sein (linked Items sind nicht selektierbar) — aber als
+    // Sicherheitsnetz melden falls sich zwischen Auswahl und Loeschen was aenderte.
+    if (blocked.length > 0) {
+      alert(`${deleted.length} item(s) deleted.\n${blocked.length} skipped — they are linked to records and cannot be deleted.`);
+    }
+  }
 
   // Live Duplicate Detection — sobald Brand/Name/SKU/Ref/Serial sich
   // stabilisieren (800ms ohne Eingabe), öffnet das Side-by-Side automatisch.
@@ -425,6 +470,25 @@ export function WatchList() {
           <Button variant="ghost" onClick={() => navigate('/settings?tab=duplicates')}>
             Find Duplicates
           </Button>
+          {/* v0.7.20 — Select/Delete-Modus. Im Select-Modus: Cancel + Delete (N). */}
+          {selectMode ? (
+            <>
+              <Button variant="ghost" onClick={() => setSelectMode(false)}>
+                <X size={14} /> Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => setConfirmDelete(true)}
+                disabled={selectedIds.size === 0}
+              >
+                <Trash2 size={14} /> Delete ({selectedIds.size})
+              </Button>
+            </>
+          ) : (
+            <Button variant="ghost" onClick={() => setSelectMode(true)}>
+              <Trash2 size={14} /> Select
+            </Button>
+          )}
           <Button variant="secondary" onClick={() => navigate('/import')}>Import Excel</Button>
           <Button variant="primary" onClick={() => openNew()}>New Item</Button>
         </div>
@@ -509,8 +573,26 @@ export function WatchList() {
               .filter(Boolean)
               .join(' \u00b7 ');
 
+            // v0.7.20 — Select-Modus: Karte selektierbar (saubere Produkte) oder
+            // als verknuepft markiert (nicht loeschbar). Klick toggelt Auswahl
+            // statt zur Detailseite zu navigieren.
+            const linked = isLinked(p.id);
+            const selected = selectedIds.has(p.id);
+            const links = linksMap.get(p.id) || [];
+            const reason = Array.from(new Set(links.map(l => l.label))).slice(0, 3).join(' · ');
+
             return (
-              <Card key={p.id} hoverable noPadding onClick={() => navigate(`/collection/${p.id}`)}>
+              <Card
+                key={p.id}
+                hoverable={!selectMode || !linked}
+                noPadding
+                onClick={() => selectMode ? toggleSelect(p.id) : navigate(`/collection/${p.id}`)}
+                style={selectMode ? {
+                  border: selected ? '2px solid #0F0F10' : linked ? '1px solid #E5E9EE' : '1px solid #D5D9DE',
+                  opacity: linked ? 0.6 : 1,
+                  cursor: linked ? 'not-allowed' : 'pointer',
+                } : undefined}
+              >
                 <div className="flex items-center justify-center relative"
                   style={{ height: 180, background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', overflow: 'hidden' }}>
                   {p.images.length > 0 ? (
@@ -520,9 +602,34 @@ export function WatchList() {
                   ) : (
                     <Package size={36} strokeWidth={1} style={{ color: '#6B7280' }} />
                   )}
+                  {/* v0.7.20 — Select-Modus Overlays: Checkbox (saubere) oder Link-Badge (verknuepft). */}
+                  {selectMode && (
+                    linked ? (
+                      <span className="absolute flex items-center gap-1" style={{
+                        top: 12, left: 12, fontSize: 10, padding: '3px 8px', borderRadius: 999,
+                        background: '#FFFFFF', color: '#6B7280', border: '1px solid #D5D9DE',
+                        zIndex: 2,
+                      }} title={`Linked to: ${reason} — cannot be deleted`}>
+                        <Link2 size={11} /> Linked
+                      </span>
+                    ) : (
+                      <span className="absolute flex items-center justify-center" style={{
+                        top: 12, left: 12, width: 24, height: 24, borderRadius: 999,
+                        background: selected ? '#0F0F10' : '#FFFFFF',
+                        border: `1.5px solid ${selected ? '#0F0F10' : '#D5D9DE'}`,
+                        zIndex: 2,
+                      }}>
+                        {selected && <Check size={14} style={{ color: '#FFFFFF' }} strokeWidth={3} />}
+                      </span>
+                    )
+                  )}
+                  {/* v0.7.20 — im Select-Modus gehoert die obere linke Ecke der
+                      Checkbox/Linked-Badge; Kategorie-Chip rutscht dann eine Zeile
+                      tiefer (top 44 statt 12), damit er sichtbar bleibt aber die
+                      (breitere) "Linked"-Badge nicht ueberlappt. */}
                   {cat && (
                     <span className="absolute" style={{
-                      top: 12, left: 12, fontSize: 10, padding: '2px 10px', borderRadius: 999,
+                      top: selectMode ? 44 : 12, left: 12, fontSize: 10, padding: '2px 10px', borderRadius: 999,
                       background: cat.color + '15', color: cat.color, border: `1px solid ${cat.color}30`,
                     }}>{cat.name}</span>
                   )}
@@ -982,6 +1089,53 @@ export function WatchList() {
           setDuplicateMatches([]);
         }}
       />
+
+      {/* v0.7.20 — Bestaetigung Bulk-Delete. Listet die ausgewaehlten (sauberen)
+          Produkte; nur diese werden geloescht. Verknuepfte sind gar nicht erst
+          selektierbar. */}
+      <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete items?" width={480}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{
+            padding: '10px 14px', borderRadius: 8,
+            background: '#FDF2F2', border: '1px solid #F5D5D5',
+            color: '#AA6E6E', fontSize: 13, lineHeight: 1.5,
+          }}>
+            You are about to permanently delete <strong>{selectedIds.size}</strong> item{selectedIds.size === 1 ? '' : 's'}.
+            This <strong>cannot be undone</strong>. Only items with no links (not used in any
+            invoice, purchase, consignment, production, etc.) can be deleted.
+          </div>
+          <div style={{ maxHeight: '40vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {Array.from(selectedIds).map(id => {
+              const p = products.find(x => x.id === id);
+              if (!p) return null;
+              return (
+                <div key={id} className="flex items-center gap-3" style={{
+                  padding: '8px 10px', borderRadius: 8, background: '#F2F7FA', border: '1px solid #E5E9EE',
+                }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 6, overflow: 'hidden', background: '#FFFFFF', border: '1px solid #E5E9EE', flexShrink: 0 }}
+                    className="flex items-center justify-center">
+                    {p.images.length > 0
+                      ? <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                      : <Package size={16} strokeWidth={1.2} style={{ color: '#9CA3AF' }} />}
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {`${p.brand || ''} ${p.name || ''}`.trim() || '(unnamed)'}
+                    </div>
+                    {p.sku && <div className="font-mono" style={{ fontSize: 11, color: '#6B7280' }}>{p.sku}</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
+            <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button variant="primary" onClick={performDelete}>
+              <Trash2 size={14} /> Delete {selectedIds.size} item{selectedIds.size === 1 ? '' : 's'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </PageLayout>
   );
 }
