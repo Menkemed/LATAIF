@@ -21,10 +21,7 @@ import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
-
-function fmt(v: number | null | undefined): string {
-  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
+import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
 
 function fmtPct(v: number | null | undefined): string {
   return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -161,19 +158,14 @@ export function ConsignmentDetail() {
   const editCommission = editAgreed * (editRate / 100);
   const editPayout = editAgreed - editCommission;
 
-  // Sale modal calculations (Plan 2026-05 §Consignment-Refactor)
+  // Sale modal calculations — SSOT economics (percent/consignor_fixed/cost_split).
   const salePriceNum = Number(soldPrice) || 0;
-  const isAgreedExcess = consignment.commissionType === 'consignor_fixed';
-  let saleCommission: number; let salePayout: number;
-  if (isAgreedExcess) {
-    salePayout = consignment.agreedPrice;          // Garantie
-    saleCommission = salePriceNum - consignment.agreedPrice;  // kann negativ sein = Loss
-  } else {
-    saleCommission = salePriceNum * (consignment.commissionRate / 100);
-    salePayout = salePriceNum - saleCommission;
-  }
-  const saleNeedsAck = isAgreedExcess && salePriceNum > 0 && salePriceNum < consignment.agreedPrice;
-  const saleShortfall = saleNeedsAck ? consignment.agreedPrice - salePriceNum : 0;
+  const saleEcon = computeConsignmentSale(consignment, salePriceNum);
+  const saleCommission = saleEcon.commission;
+  const salePayout = saleEcon.payout;
+  // Shortfall (Verkauf unter Floor) gilt für consignor_fixed UND cost_split.
+  const saleNeedsAck = salePriceNum > 0 && saleEcon.belowFloor;
+  const saleShortfall = saleNeedsAck ? saleEcon.loss : 0;
   const buyerIsConsignor = !!soldBuyer && soldBuyer === consignment.consignorId;
 
   // Linked invoice (no useMemo needed — simple lookup, can stay after early return).
@@ -570,7 +562,7 @@ export function ConsignmentDetail() {
             </div>
             <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
               <span style={{ color: '#6B7280' }}>
-                {isAgreedExcess ? `Our margin (above agreed)` : `Commission (${fmtPct(consignment.commissionRate)}%)`}
+                {commissionLineLabel(consignment)}
               </span>
               <span className="font-mono" style={{ color: (consignment.commissionAmount || 0) < 0 ? '#DC2626' : '#0F0F10' }}>
                 <Bhd v={consignment.commissionAmount || 0}/> BHD
@@ -670,28 +662,33 @@ export function ConsignmentDetail() {
           </Card>
         )}
 
-        {/* Active: Expected Payout Preview */}
-        {consignment.status === 'active' && (
-          <Card style={{ padding: 14, marginBottom: 18 }}>
-            <div style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 8 }}>
-              If Sold at Agreed Price
-            </div>
-            <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
-              <span style={{ color: '#6B7280' }}>
-                {isAgreedExcess ? 'Our margin (excess above agreed)' : `Commission (${fmtPct(consignment.commissionRate)}%)`}
-              </span>
-              <span className="font-mono" style={{ color: '#0F0F10' }}>
-                <Bhd v={isAgreedExcess ? 0 : consignment.agreedPrice * (consignment.commissionRate / 100)}/> BHD
-              </span>
-            </div>
-            <div className="flex justify-between" style={{ fontSize: 13 }}>
-              <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
-              <span className="font-mono" style={{ color: '#7EAA6E' }}>
-                <Bhd v={isAgreedExcess ? consignment.agreedPrice : consignment.agreedPrice - consignment.agreedPrice * (consignment.commissionRate / 100)}/> BHD
-              </span>
-            </div>
-          </Card>
-        )}
+        {/* Active: Expected Payout Preview — SSOT-Projektion zum Agreed/Cost-Preis.
+            cost_split @ Kost = Breakeven (Marge 0, Payout = Kost). */}
+        {consignment.status === 'active' && (() => {
+          const proj = computeConsignmentSale(consignment, consignment.agreedPrice);
+          const isCostSplit = consignment.commissionType === 'cost_split';
+          return (
+            <Card style={{ padding: 14, marginBottom: 18 }}>
+              <div style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.04em', textTransform: 'uppercase', marginBottom: 8 }}>
+                {isCostSplit ? 'If Sold at Cost (Breakeven)' : 'If Sold at Agreed Price'}
+              </div>
+              <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
+                <span style={{ color: '#6B7280' }}>
+                  {commissionLineLabel(consignment)}
+                </span>
+                <span className="font-mono" style={{ color: '#0F0F10' }}>
+                  <Bhd v={proj.commission}/> BHD
+                </span>
+              </div>
+              <div className="flex justify-between" style={{ fontSize: 13 }}>
+                <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
+                <span className="font-mono" style={{ color: '#7EAA6E' }}>
+                  <Bhd v={proj.payout}/> BHD
+                </span>
+              </div>
+            </Card>
+          );
+        })()}
 
         {/* Meta Footer Card — Transfer-Detail-Style: alle Detail-Felder + Notes */}
         <Card style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
@@ -703,8 +700,8 @@ export function ConsignmentDetail() {
               value={<><Bhd v={consignment.agreedPrice}/> BHD</>} />
             <KvCell label="Minimum Price"
               value={consignment.minimumPrice != null ? <><Bhd v={consignment.minimumPrice}/> BHD</> : '—'} />
-            <KvCell label="Commission Rate"
-              value={consignment.commissionType === 'consignor_fixed' ? 'Agreed + Excess (Model 2)' : `${fmtPct(consignment.commissionRate)}%`} />
+            <KvCell label="Commission"
+              value={commissionModelLabel(consignment)} />
           </div>
           {consignment.notes && (
             <div style={{ borderTop: '1px solid #F0F2F5', paddingTop: 10 }}>
@@ -742,7 +739,7 @@ export function ConsignmentDetail() {
             }}>
               <div className="flex justify-between" style={{ marginBottom: 8 }}>
                 <span style={{ color: '#6B7280' }}>
-                  {isAgreedExcess ? `Our margin (above agreed ${fmt(consignment.agreedPrice)})` : `Commission (${fmtPct(consignment.commissionRate)}%)`}
+                  {commissionLineLabel(consignment)}
                 </span>
                 <span style={{ color: saleCommission < 0 ? '#DC2626' : '#0F0F10' }}><Bhd v={saleCommission}/> BHD</span>
               </div>
@@ -771,7 +768,7 @@ export function ConsignmentDetail() {
               fontSize: 12, color: '#DC2626',
             }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                ⚠ Sale <Bhd v={saleShortfall}/> BHD below agreed price
+                ⚠ Sale <Bhd v={saleShortfall}/> BHD below {consignment.commissionType === 'cost_split' ? "consignor's cost" : 'agreed price'}
               </div>
               <div style={{ marginBottom: 10, color: '#7A2A2A' }}>
                 Consignor still receives <Bhd v={consignment.agreedPrice}/> BHD —

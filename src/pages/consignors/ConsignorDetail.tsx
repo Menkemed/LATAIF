@@ -18,10 +18,7 @@ import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useSupplierStore } from '@/stores/supplierStore';
-
-function fmtPct(v: number | null | undefined): string {
-  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-}
+import { commissionModelLabel } from '@/core/consignment/economics';
 
 export function ConsignorDetail() {
   const { id } = useParams<{ id: string }>();
@@ -230,11 +227,10 @@ export function ConsignorDetail() {
                           <td style={{ padding: '12px 16px' }}>
                             <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={con.agreedPrice}/></span>
                             <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>BHD</span>
-                            {con.commissionRate > 0 && (
-                              <span style={{ fontSize: 10, color: '#6B7280', display: 'block', marginTop: 2 }}>
-                                {fmtPct(con.commissionRate)}% commission
-                              </span>
-                            )}
+                            {/* v0.7.21 — Modell-Label statt nur Rate; cost_split = "Cost + N% split". */}
+                            <span style={{ fontSize: 10, color: '#6B7280', display: 'block', marginTop: 2 }}>
+                              {commissionModelLabel(con)}
+                            </span>
                           </td>
                           <td style={{ padding: '12px 16px' }}>
                             {saleValue != null ? (

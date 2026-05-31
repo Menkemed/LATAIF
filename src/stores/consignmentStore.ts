@@ -12,6 +12,7 @@ import { useInvoiceStore } from './invoiceStore';
 import { usePurchaseStore } from './purchaseStore';
 import { useExpenseStore } from './expenseStore';
 import { vatEngine } from '@/core/tax/vat-engine';
+import { computeConsignmentSale } from '@/core/consignment/economics';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -334,60 +335,26 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       );
     }
 
-    const isAgreedExcess = con.commissionType === 'consignor_fixed';
-    const isCostSplit = con.commissionType === 'cost_split';
-    const isPercent = con.commissionType === 'percent' || !con.commissionType;
-    if (!isAgreedExcess && !isPercent && !isCostSplit) {
-      throw new Error(`Unsupported commission type "${con.commissionType}" — use percent / consignor_fixed / cost_split`);
+    // Unsupported-Type-Guard bleibt (legacy 'fixed' o.ä. nie über recordSale).
+    const ctype = con.commissionType || 'percent';
+    if (ctype !== 'percent' && ctype !== 'consignor_fixed' && ctype !== 'cost_split') {
+      throw new Error(`Unsupported commission type "${ctype}" — use percent / consignor_fixed / cost_split`);
     }
 
-    // Payout/Loss berechnen
-    let consignorPayout: number;
-    let ourCommission: number;
-    let consignorLoss = 0;
-    if (isPercent) {
-      ourCommission = params.salePrice * ((con.commissionRate || 0) / 100);
-      consignorPayout = params.salePrice - ourCommission;
-    } else if (isCostSplit) {
-      // v0.7.10 — cost_split: consignor nennt seinen Kost (= agreedPrice),
-      // alles drueber wird mit excessSplitPct (shop %) gesplittet. Below cost
-      // analog zu consignor_fixed (Garantie + Loss-Expense), damit sich der
-      // Modus konsistent verhaelt mit dem User-Mental-Modell "ich kriege
-      // mindestens meinen Kost zurueck".
-      const cost = con.agreedPrice || 0;
-      const shopPct = con.excessSplitPct ?? 50;
-      if (params.salePrice >= cost) {
-        const profit = params.salePrice - cost;
-        ourCommission = profit * (shopPct / 100);
-        consignorPayout = cost + profit * ((100 - shopPct) / 100);
-      } else {
-        if (!params.acknowledgeShortfall) {
-          throw new Error(
-            `Sale ${params.salePrice} below consignor's cost ${cost}. Confirm shortfall (acknowledgeShortfall=true) — will be recorded as Consignor Loss expense.`
-          );
-        }
-        consignorPayout = cost;
-        consignorLoss = cost - params.salePrice;
-        ourCommission = -consignorLoss;
-      }
-    } else {
-      // Model 2: Agreed Price + Excess to us
-      const agreed = con.agreedPrice || 0;
-      if (params.salePrice >= agreed) {
-        consignorPayout = agreed;
-        ourCommission = params.salePrice - agreed;
-      } else {
-        // Sale UNTER Agreed → Variante B: Consignor-Loss-Expense
-        if (!params.acknowledgeShortfall) {
-          throw new Error(
-            `Sale ${params.salePrice} below agreed ${agreed}. Confirm shortfall (acknowledgeShortfall=true) — will be recorded as Consignor Loss expense.`
-          );
-        }
-        consignorPayout = agreed;                      // volle Garantie
-        consignorLoss = agreed - params.salePrice;     // Differenz = Loss
-        ourCommission = -consignorLoss;                // negative Marge
-      }
+    // Payout/Loss/Commission — SSOT: computeConsignmentSale (core/consignment/economics.ts).
+    // Dieselbe Funktion nutzen alle Anzeige-Vorschauen, damit Buchung == Vorschau.
+    const econ = computeConsignmentSale(con, params.salePrice);
+    // Verkauf unter dem Consignor-Floor (Kost bei cost_split / Agreed bei
+    // consignor_fixed) muss explizit bestätigt werden — sonst Abbruch, damit
+    // kein versehentlicher Consignor-Loss gebucht wird (Variante B).
+    if (econ.belowFloor && !params.acknowledgeShortfall) {
+      throw new Error(
+        `Sale ${params.salePrice} below consignor floor ${econ.floor}. Confirm shortfall (acknowledgeShortfall=true) — will be recorded as Consignor Loss expense.`
+      );
     }
+    const consignorPayout = econ.payout;
+    const ourCommission = econ.commission;
+    const consignorLoss = econ.loss;
 
     // Tax-Scheme + VAT-Berechnung für Buyer-Invoice (ähnlich agentStore convertTransferToInvoice)
     const prodRows = query(

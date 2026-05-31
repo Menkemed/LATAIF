@@ -25,6 +25,7 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
+import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
 
 // SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
 // fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
@@ -647,7 +648,8 @@ export function ConsignmentList() {
                       <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>BHD</span>
                     </td>
                     <td style={{ padding: '14px 18px' }}>
-                      <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{fmtPct(con.commissionRate)}%</span>
+                      {/* v0.7.21 — Modell-Label statt nur Rate; cost_split zeigt "Cost + N% split". */}
+                      <span style={{ fontSize: 12, color: '#0F0F10' }}>{commissionModelLabel(con)}</span>
                       {con.commissionAmount != null && (
                         <span className="font-mono" style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 2 }}>
                           <Bhd v={con.commissionAmount}/> BHD
@@ -1240,19 +1242,11 @@ export function ConsignmentList() {
             const con = consignments.find(c => c.id === soldModal);
             if (!con) return null;
             const sp = Number(soldPrice);
-            const isAgreedExcess = con.commissionType === 'consignor_fixed';
-            let comm: number; let po: number;
-            if (isAgreedExcess) {
-              const agreed = con.agreedPrice || 0;
-              po = agreed;                          // volle Garantie
-              comm = sp - agreed;                   // kann negativ werden = Loss
-            } else {
-              comm = sp * ((con.commissionRate || 0) / 100);
-              po = sp - comm;
-            }
-            const modelLabel = isAgreedExcess
-              ? `Our margin (above agreed ${fmt(con.agreedPrice)} BHD)`
-              : `Commission (${fmtPct(con.commissionRate)}%)`;
+            // v0.7.21 — SSOT-Economics statt eigener Verzweigung (cost_split inkl.).
+            const econ = computeConsignmentSale(con, sp);
+            const comm = econ.commission;
+            const po = econ.payout;
+            const modelLabel = commissionLineLabel(con);
             return (
               <div className="rounded font-mono" style={{
                 padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
