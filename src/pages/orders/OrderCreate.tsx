@@ -120,9 +120,12 @@ export function OrderCreate() {
   // persistiert; Convert in OrderDetail erzeugt damit das Collection-Produkt.
   const [customProductSpec, setCustomProductSpec] = useState<Partial<Product> | undefined>(undefined);
   const [showCustomProductModal, setShowCustomProductModal] = useState(false);
-  // v0.6.7 — VAT-Schema wird NICHT mehr beim Order-Anlegen gewaehlt; Quote bleibt
-  // immer brutto (= was der Kunde zahlt). Die finale Wahl Margin/VAT_10/Zero passiert
-  // beim Convert-to-Invoice ueber den ConfirmTaxSchemeModal (analog Normal-Orders).
+  // v0.7.24 — VAT-Schema-Vorwahl schon beim Order-Anlegen (Karte 3e). Setzt NUR
+  // den Default auf der Quote-Line; der Quote bleibt IMMER brutto (= was der Kunde
+  // zahlt). Die finale Bestaetigung/Override passiert weiterhin beim Convert via
+  // ConfirmTaxSchemeModal (der diese Vorwahl vorselektiert). Default = MARGIN
+  // (Differenzbesteuerung — der Normalfall fuer Gold/Schmuck).
+  const [customTaxScheme, setCustomTaxScheme] = useState<'MARGIN' | 'VAT_10' | 'ZERO'>('MARGIN');
   // Diamond/Stone Materials werden lokal als Liste gefuehrt — beim createOrder
   // werden sie als order_lines mit material_kind/material_details persistiert.
   const [materialLines, setMaterialLines] = useState<Array<MaterialLineInput & { _id: string }>>([]);
@@ -194,14 +197,21 @@ export function OrderCreate() {
     };
   });
 
-  // v0.5.0 — Custom/Mixed: der Quoted Price (approx.) wird als MARGIN-Position
-  // behandelt (gross == net, kein on-top VAT). Die endgueltige VAT-Behandlung
-  // entscheidet der User beim Convert-to-Invoice (ConfirmTaxSchemeModal).
-  const quoteGross = (orderType === 'custom' || orderType === 'mixed')
+  // v0.7.24 — Custom/Mixed: der Quoted Price ist BRUTTO (Endpreis). Je nach
+  // 3e-VAT-Vorwahl wird er fuer die Live-Vorschau in Netto + VAT zerlegt — exakt
+  // wie eine Produkt-Zeile. Total bleibt in JEDEM Fall = Brutto-Quote.
+  //   VAT_10 : net = quote/1.10, vat = quote - net   (customer-facing, sichtbar)
+  //   ZERO   : net = quote, vat = 0
+  //   MARGIN : net = quote, vat = 0 — die Marge-VAT ist intern + kostenabhaengig
+  //            und wird (wie bei MARGIN-Produktzeilen) NICHT in der VAT-Summe
+  //            gezeigt; final erst beim Convert-to-Invoice.
+  const quoteGrossInput = (orderType === 'custom' || orderType === 'mixed')
     ? (parseFloat(quotedPrice) || 0)
     : 0;
-  const subtotal = computed.reduce((s, c) => s + c.net, 0) + quoteGross;
-  const totalVat = computed.reduce((s, c) => s + c.vat, 0);
+  const quoteNet = customTaxScheme === 'VAT_10' ? quoteGrossInput / 1.10 : quoteGrossInput;
+  const quoteVat = customTaxScheme === 'VAT_10' ? quoteGrossInput - quoteNet : 0;
+  const subtotal = computed.reduce((s, c) => s + c.net, 0) + quoteNet;
+  const totalVat = computed.reduce((s, c) => s + c.vat, 0) + quoteVat;
   const total = subtotal + totalVat;
   const remaining = Math.max(0, total - (fullyPaid ? total : depositAmount));
 
@@ -290,6 +300,7 @@ export function OrderCreate() {
     setCustomerGoldGrams('');
     setCustomerStones('');
     setFinalProductDescription('');
+    setCustomTaxScheme('MARGIN');
     setMaterialLines([]);
   }
 
@@ -419,8 +430,10 @@ export function OrderCreate() {
         description: desc,
         quantity: 1,
         unitPrice: quote,
-        taxScheme: 'MARGIN',
-        vatRate: 10,
+        // v0.7.24 — Schema aus der 3e-Vorwahl (Default MARGIN). Quote bleibt brutto;
+        // bei VAT_10 dekomponiert der Convert das Brutto (OrderDetail), KEINE Doppel-VAT.
+        taxScheme: customTaxScheme,
+        vatRate: customTaxScheme === 'ZERO' ? 0 : 10,
         isCustomerFacing: true,
         materialKind: 'custom',
         costAmount: 0,
@@ -996,6 +1009,42 @@ export function OrderCreate() {
                     onChange={e => setQuotedPrice(e.target.value)}
                   />
                 </div>
+
+                {/* v0.7.24 — VAT-Schema-Vorwahl. Quoted Price ist IMMER der Endpreis
+                    (brutto); die Wahl bestimmt nur die VAT-Behandlung. Beim Convert
+                    wird sie pro Zeile nochmal bestaetigt (ConfirmTaxSchemeModal). */}
+                <div style={{ marginTop: 14 }}>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>VAT SCHEME</span>
+                  <div className="flex gap-2">
+                    {([
+                      { v: 'MARGIN', label: 'Margin', sub: 'Margin scheme' },
+                      { v: 'VAT_10', label: 'VAT 10%', sub: 'Gross incl. 10%' },
+                      { v: 'ZERO',   label: 'Zero',    sub: 'No VAT' },
+                    ] as const).map(o => (
+                      <button
+                        key={o.v}
+                        type="button"
+                        onClick={() => setCustomTaxScheme(o.v)}
+                        className="cursor-pointer rounded transition-all duration-200"
+                        style={{
+                          padding: '8px 14px', fontSize: 13, fontWeight: 500, flex: 1, textAlign: 'center',
+                          border: `1px solid ${customTaxScheme === o.v ? '#0F0F10' : '#D5D9DE'}`,
+                          color: customTaxScheme === o.v ? '#0F0F10' : '#6B7280',
+                          background: customTaxScheme === o.v ? 'rgba(15,15,16,0.06)' : 'transparent',
+                        }}
+                      >
+                        {o.label}
+                        <div style={{ fontSize: 10, fontWeight: 400, color: '#9CA3AF', marginTop: 2 }}>{o.sub}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                    {customTaxScheme === 'MARGIN' && 'Quoted price = final price. VAT applies internally only on the margin (sale - cost).'}
+                    {customTaxScheme === 'VAT_10' && 'Quoted price is gross, includes 10% VAT (net = quote / 1.10).'}
+                    {customTaxScheme === 'ZERO' && 'Quoted price = final price. No VAT (e.g. export / 0% goods).'}
+                  </p>
+                </div>
+
                 <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
                   The approximate price the customer accepts — appears on the order receipt and later 1:1 on the invoice.
                 </p>
@@ -1241,6 +1290,13 @@ export function OrderCreate() {
                 </div>
               </div>
             </div>
+            {/* v0.7.24 — Klarstellung: die VAT hier ist NUR informativ (Anzeige, damit
+                der Kunde sieht, dass VAT anfaellt). Sie wird NICHT im Steuer-/VAT-Report
+                gezaehlt — das passiert erst, wenn der Order zur Rechnung wird und diese
+                FINAL (voll bezahlt) ist. */}
+            <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 10 }}>
+              VAT is informational only - it is recorded on the invoice and only counts in the tax report once FINAL (fully paid).
+            </p>
           </Card>
         </div>
 
