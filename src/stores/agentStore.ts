@@ -8,6 +8,7 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { vatEngine } from '@/core/tax/vat-engine';
+import { computeAgentTransferSale } from '@/core/agent/economics';
 import {
   postAgentSettlementPayment,
   postAgentSettlementPaymentReversed,
@@ -37,14 +38,14 @@ interface AgentStore {
   deleteAgent: (id: string) => void;
   createTransfer: (data: Partial<AgentTransfer>) => AgentTransfer;
   updateTransfer: (id: string, data: Partial<AgentTransfer>) => void;
-  markTransferSold: (id: string, actualPrice: number, buyerInfo?: string) => void;
+  markTransferSold: (id: string, actualPrice: number, buyerInfo?: string, acknowledgeBelowPrice?: boolean) => void;
   // Vereinfachtes Approval-Flow (User-Spec): vom Customer ausgehend einen
   // Agent-Account finden oder anlegen. Im neuen Flow ist "Approval" =
   // automatisch erzeugter Account pro Customer beim ersten Transfer.
   findOrCreateAgentForCustomer: (customerId: string) => Agent;
   // Zentrale Transfer-Erzeugung aus Customer-Sicht: legt bei Bedarf den Agent
   // an, dann den Transfer (ohne Commission). Nutzt unter der Haube createTransfer.
-  createTransferForCustomer: (data: { customerId: string; productId: string; ourPrice: number; returnBy?: string; notes?: string; staffId?: string }) => AgentTransfer;
+  createTransferForCustomer: (data: { customerId: string; productId: string; ourPrice: number; returnBy?: string; notes?: string; staffId?: string; settlementModel?: 'full' | 'split'; excessSplitPct?: number }) => AgentTransfer;
   markTransferReturned: (id: string) => void;
   // Plan §Agent §4: Teilzahlungen. Wenn amount < settlementAmount → status='partial'.
   markTransferSettled: (id: string, amount?: number, method?: 'cash' | 'bank') => void;
@@ -86,6 +87,9 @@ function rowToTransfer(row: Record<string, unknown>): AgentTransfer {
     agentId: row.agent_id as string, productId: row.product_id as string,
     agentPrice: (row.agent_price as number) || 0,
     minimumPrice: row.minimum_price as number | undefined,
+    // v0.7.22 — Approval-Abrechnungsmodell (default 'full' = altes Verhalten).
+    settlementModel: (row.settlement_model as 'full' | 'split' | undefined) || 'full',
+    excessSplitPct: row.excess_split_pct as number | undefined,
     commissionRate: (row.commission_rate as number) || 10,
     commissionType: (row.commission_type as 'percent' | 'fixed' | undefined) || 'percent',
     commissionValue: row.commission_value as number | undefined,
@@ -201,12 +205,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     db.run(
       `INSERT INTO agent_transfers (id, branch_id, transfer_number, agent_id, product_id,
         agent_price, minimum_price, commission_rate, commission_type, commission_value,
+        settlement_model, excess_split_pct,
         status, transferred_at, return_by,
         notes, staff_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'transferred', ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'transferred', ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, transferNumber, data.agentId, data.productId,
        data.agentPrice || 0, data.minimumPrice || null, data.commissionRate || 10,
        data.commissionType || 'percent', data.commissionValue ?? null,
+       // v0.7.22 — split nur explizit; excess_split_pct nur bei 'split' (sonst NULL).
+       data.settlementModel || 'full',
+       data.settlementModel === 'split' ? (data.excessSplitPct ?? 50) : null,
        now, data.returnBy || null, data.notes || null, data.staffId || null, now, now, userId]
     );
     saveDatabase();
@@ -225,6 +233,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       agentPrice: 'agent_price', minimumPrice: 'minimum_price', commissionRate: 'commission_rate',
       commissionType: 'commission_type', commissionValue: 'commission_value',
       commissionPaidFrom: 'commission_paid_from',
+      settlementModel: 'settlement_model', excessSplitPct: 'excess_split_pct',
       status: 'status', returnBy: 'return_by', actualSalePrice: 'actual_sale_price',
       buyerInfo: 'buyer_info', commissionAmount: 'commission_amount',
       settlementAmount: 'settlement_amount',
@@ -250,17 +259,31 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     get().loadTransfers();
   },
 
-  markTransferSold: (id, actualPrice, buyerInfo) => {
+  markTransferSold: (id, actualPrice, buyerInfo, acknowledgeBelowPrice) => {
     const transfer = get().getTransfer(id);
     if (!transfer) return;
-    // Vereinfachter Flow (User-Spec): Commission-Logik entfernt. Settlement = actualPrice.
-    // Der actualPrice darf vom ourPrice (= agentPrice) abweichen — z.B. tatsächlicher
-    // Verkauf 280k bei vereinbarten 285k.
-    const settlement = actualPrice;
+    // v0.7.22 — SSOT-Economics (core/agent/economics.ts):
+    //  'full'  → settlement = actualPrice (altes Verhalten, kein Split)
+    //  'split' → settlement = Our Price + Shop-Anteil am Überschuss; Kunde behält Rest.
+    const econ = computeAgentTransferSale(transfer, actualPrice);
+    // Verkauf UNTER Our Price (nur 'split') braucht Bestätigung — wir bekommen
+    // dann nur den tatsächlichen Erlös, kein Split (User-Entscheidung: "wir tragen
+    // die Differenz").
+    if (econ.belowPrice && !acknowledgeBelowPrice) {
+      throw new Error(
+        `Sale ${actualPrice} below Our Price ${econ.ourPrice}. Confirm (acknowledgeBelowPrice=true) — we receive only the actual amount, no split.`
+      );
+    }
+    const settlement = econ.ourSettlement;
     const now = new Date().toISOString();
 
     get().updateTransfer(id, {
       status: 'sold', actualSalePrice: actualPrice, buyerInfo,
+      // commissionAmount bleibt 0: das Feld bedeutet "Provision die WIR auszahlen"
+      // (so wertet es AnalyticsPage als "Approval Commissions Paid Out"). Bei 'split'
+      // zahlen wir nichts aus — der Kunde behält seinen Anteil selbst aus seinem Erlös.
+      // Die Kunden-Marge ist bei Bedarf aus (actualSalePrice − settlementAmount)
+      // bzw. computeAgentTransferSale().customerShare ableitbar.
       commissionAmount: 0, settlementAmount: settlement, soldAt: now,
     });
 
@@ -658,7 +681,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   // finden oder anlegen. Ein Customer hat 0..1 Agent-Account.
   findOrCreateAgentForCustomer: (customerId) => {
     if (!customerId) throw new Error('customerId is required.');
-    const existing = get().agents.find(a => a.customerId === customerId);
+    // 1) Schnell: im geladenen State suchen.
+    let existing = get().agents.find(a => a.customerId === customerId);
+    // 2) Robust: falls nicht im State, gegen die DB prüfen. Ohne diesen Schritt
+    //    legte ein veralteter/leerer in-memory State (Reload-Race, zweiter Tab,
+    //    Sync, separate Modul-Instanz) einen ZWEITEN Agent für denselben Customer
+    //    an → doppelte Approval-Karten. Ein Customer = genau ein Approval-Agent.
+    if (!existing) {
+      const rows = query(`SELECT id FROM agents WHERE customer_id = ? LIMIT 1`, [customerId]);
+      if (rows.length > 0) {
+        get().loadAgents();
+        existing = get().agents.find(a => a.customerId === customerId);
+      }
+    }
     if (existing) {
       // Ist der Agent inaktiv (nach voller Settlement-History), reaktivieren —
       // ein neuer Transfer macht den Account wieder lebendig.
@@ -682,7 +717,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     });
   },
 
-  createTransferForCustomer: ({ customerId, productId, ourPrice, returnBy, notes, staffId }) => {
+  createTransferForCustomer: ({ customerId, productId, ourPrice, returnBy, notes, staffId, settlementModel, excessSplitPct }) => {
     const agent = get().findOrCreateAgentForCustomer(customerId);
     return get().createTransfer({
       agentId: agent.id,
@@ -691,6 +726,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       returnBy,
       notes,
       staffId,
+      // v0.7.22 — Abrechnungsmodell durchreichen (default 'full').
+      settlementModel: settlementModel || 'full',
+      excessSplitPct,
       // Commission-Logik wurde entfernt — Stub-Werte, damit DB-Spalten gefüllt sind.
       commissionType: 'percent',
       commissionRate: 0,

@@ -598,8 +598,15 @@ export interface AgentTransfer {
   transferNumber: string;
   agentId: UUID;
   productId: UUID;
-  agentPrice: number;
+  agentPrice: number;              // "Our Price" — der Betrag, den wir mindestens bekommen wollen
   minimumPrice?: number;
+  // v0.7.22 — Approval-Abrechnungsmodell:
+  //  'full'  (default) = Kunde schuldet uns den vollen Verkaufspreis (altes Verhalten)
+  //  'split' = wir kriegen Our Price + excessSplitPct% vom Überschuss; Kunde behält den Rest.
+  //            Verkauf unter Our Price: wir bekommen nur den tatsächlichen Erlös (kein Split).
+  settlementModel?: 'full' | 'split';
+  /** Shop-Anteil am Überschuss (%) bei settlementModel='split'. Default 50 (= 50/50). */
+  excessSplitPct?: number;
   commissionRate: number;
   commissionType?: 'percent' | 'fixed';
   commissionValue?: number;

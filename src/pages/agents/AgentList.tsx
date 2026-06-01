@@ -37,6 +37,10 @@ interface NewTransferForm {
   returnBy?: string;
   notes?: string;
   staffId?: string;
+  // v0.7.22 — Abrechnungsmodell: 'full' (Kunde schuldet vollen Betrag) vs.
+  // 'split' (Our Price + Überschuss-Split). excessSplitPct = Shop-Anteil %.
+  settlementModel?: 'full' | 'split';
+  excessSplitPct?: number;
 }
 
 export function AgentList() {
@@ -120,6 +124,9 @@ export function AgentList() {
       returnBy: transferForm.returnBy,
       notes: transferForm.notes,
       staffId: transferForm.staffId,
+      // v0.7.22 — Abrechnungsmodell durchreichen (default 'full').
+      settlementModel: transferForm.settlementModel || 'full',
+      excessSplitPct: transferForm.settlementModel === 'split' ? (transferForm.excessSplitPct ?? 50) : undefined,
     });
     setShowNewTransfer(false);
     setTransferForm({});
@@ -170,9 +177,12 @@ export function AgentList() {
             const totalGiven = myTransfers
               .filter(t => t.status !== 'returned')
               .reduce((s, t) => s + (t.agentPrice || 0), 0);
+            // v0.7.22 — "Total Sold" = was uns aus den Verkäufen ZUSTEHT (settlementAmount),
+            // nicht der Brutto-Verkaufspreis. Bei 'split' ist das Our Price + unser Anteil
+            // (Kunden-Marge zählt NICHT als unsere Forderung). 'full': settlement = sale.
             const totalSold = myTransfers
               .filter(t => t.status === 'sold' || t.status === 'settled')
-              .reduce((s, t) => s + ((t.actualSalePrice ?? t.agentPrice) || 0), 0);
+              .reduce((s, t) => s + ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0), 0);
             const totalPaid = myTransfers.reduce((s, t) => {
               if (t.invoiceId) {
                 const inv = invoices.find(i => i.id === t.invoiceId);
@@ -376,9 +386,49 @@ export function AgentList() {
             </div>
           </div>
 
-          <Input required label="OUR PRICE (BHD)" type="number" placeholder="Agreed amount we want to receive"
+          <Input required label="OUR PRICE (BHD)" type="number" placeholder="Amount we want to receive"
             value={transferForm.ourPrice || ''}
             onChange={e => setTransferForm({ ...transferForm, ourPrice: Number(e.target.value) || undefined })} />
+
+          {/* v0.7.22 — Abrechnungsmodell: Full vs. Our Price + Split. */}
+          <div>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SETTLEMENT MODEL</span>
+            <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+              {([
+                { key: 'full', label: 'Full amount to us' },
+                { key: 'split', label: 'Our Price + Split' },
+              ] as const).map(m => {
+                const active = (transferForm.settlementModel || 'full') === m.key;
+                return (
+                  <button key={m.key} type="button"
+                    onClick={() => setTransferForm({ ...transferForm, settlementModel: m.key })}
+                    className="cursor-pointer rounded-lg transition-all"
+                    style={{
+                      padding: '8px 14px', fontSize: 12,
+                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                      color: active ? '#0F0F10' : '#6B7280',
+                      background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                    }}>{m.label}</button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+              {(transferForm.settlementModel || 'full') === 'full'
+                ? 'Customer owes us the full sale price — no profit share for them.'
+                : 'We get Our Price; anything above it is split. Below Our Price: we receive only the actual amount.'}
+            </div>
+          </div>
+
+          {(transferForm.settlementModel === 'split') && (
+            <div>
+              <Input label="SHOP'S SHARE OF EXCESS (%)" type="number" placeholder="50"
+                value={transferForm.excessSplitPct ?? 50}
+                onChange={e => setTransferForm({ ...transferForm, excessSplitPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })} />
+              <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                Above Our Price: shop keeps {transferForm.excessSplitPct ?? 50}%, customer keeps {Math.max(0, 100 - (transferForm.excessSplitPct ?? 50))}%.
+              </div>
+            </div>
+          )}
 
           <Input label="RETURN BY (DATE)" type="date" value={transferForm.returnBy || ''} onChange={e => setTransferForm({ ...transferForm, returnBy: e.target.value })} />
 

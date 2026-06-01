@@ -1424,7 +1424,9 @@ export function AnalyticsPage() {
               <TableRow
                 label="Consignment Commissions"
                 value={`${fmt(finance.consignmentComm)} BHD`}
-                color="#7EAA6E"
+                /* v0.7.22 — bei cost_split-Shortfall ist die Marge negativ (Verlust);
+                   dann rot statt grün, sonst wirkt ein Verlust wie eine Einnahme. */
+                color={finance.consignmentComm < 0 ? '#AA6E6E' : '#7EAA6E'}
               />
               <TableRow
                 label="Approval Commissions (Paid Out)"

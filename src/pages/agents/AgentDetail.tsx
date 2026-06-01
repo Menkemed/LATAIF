@@ -51,9 +51,11 @@ export function AgentDetail() {
     const totalGiven = myTransfers
       .filter(t => t.status !== 'returned')
       .reduce((s, t) => s + (t.agentPrice || 0), 0);
+    // v0.7.22 — "Total Sold" = settlementAmount (was uns zusteht), nicht Brutto-
+    // Verkaufspreis. Bei 'split' zählt die Kunden-Marge nicht als unsere Forderung.
     const totalSold = myTransfers
       .filter(t => t.status === 'sold' || t.status === 'settled')
-      .reduce((s, t) => s + ((t.actualSalePrice ?? t.agentPrice) || 0), 0);
+      .reduce((s, t) => s + ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0), 0);
     const totalPaid = myTransfers.reduce((s, t) => {
       if (t.invoiceId) {
         const inv = invoices.find(i => i.id === t.invoiceId);

@@ -1557,6 +1557,10 @@ function runMigrations(database: Database): void {
     // der UI/Store-Logik gesetzt, nicht als DB-Default (damit klar bleibt:
     // alte Consignments waren NIE cost_split).
     `ALTER TABLE consignments ADD COLUMN excess_split_pct INTEGER`,
+    // v0.7.22 — Approval "Our Price + Split": settlement_model 'full' (default,
+    // altes Verhalten) vs. 'split'; excess_split_pct = Shop-Anteil am Überschuss.
+    `ALTER TABLE agent_transfers ADD COLUMN settlement_model TEXT DEFAULT 'full'`,
+    `ALTER TABLE agent_transfers ADD COLUMN excess_split_pct INTEGER`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

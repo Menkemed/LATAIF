@@ -19,6 +19,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
+import { computeAgentTransferSale, settlementLineLabel, settlementModelLabel } from '@/core/agent/economics';
 import { useAgentStore } from '@/stores/agentStore';
 import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -74,6 +75,8 @@ export function TransferDetail() {
   // Modal-State (analog zur TransferTable, aber pro Transfer)
   const [soldOpen, setSoldOpen] = useState(false);
   const [soldPrice, setSoldPrice] = useState(0);
+  // v0.7.22 — Bestätigung bei Verkauf unter Our Price (nur 'split').
+  const [soldAck, setSoldAck] = useState(false);
   const [convertOpen, setConvertOpen] = useState(false);
   const [convertCustomerId, setConvertCustomerId] = useState('');
   const [convertMode, setConvertMode] = useState<'existing' | 'auto'>('existing');
@@ -338,6 +341,17 @@ export function TransferDetail() {
             <KvCell label="Settlement Amount"
               value={transfer.settlementAmount ? <><Bhd v={transfer.settlementAmount}/> BHD</> : '—'} />
             <KvCell label="Settlement Status" value={(transfer.settlementStatus || 'pending').toUpperCase()} />
+            {/* v0.7.22 — Abrechnungsmodell + (bei split) Kunden-Marge. Die Marge
+                wird aus dem SSOT-Helper abgeleitet (nicht persistiert), damit
+                commission_amount sauber "was wir auszahlen" = 0 bleibt. */}
+            <KvCell label="Settlement Model" value={settlementModelLabel(transfer)} />
+            {(() => {
+              const sold = transfer.actualSalePrice || 0;
+              const custShare = sold > 0 ? computeAgentTransferSale(transfer, sold).customerShare : 0;
+              return (transfer.settlementModel === 'split') && custShare > 0 ? (
+                <KvCell label="Customer Keeps" value={<><Bhd v={custShare}/> BHD</>} />
+              ) : null;
+            })()}
           </div>
           {transfer.notes && (
             <div style={{ borderTop: '1px solid #F0F2F5', paddingTop: 10 }}>
@@ -351,25 +365,78 @@ export function TransferDetail() {
       </div>
 
       {/* Sold Modal */}
-      <Modal open={soldOpen} onClose={() => setSoldOpen(false)} title="Record Sale" width={420}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
-            <div className="flex justify-between">
-              <span style={{ color: '#6B7280' }}>Our Price (vereinbart)</span>
-              <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={transfer.agentPrice || 0}/> BHD</span>
+      <Modal open={soldOpen} onClose={() => { setSoldOpen(false); setSoldAck(false); }} title="Record Sale" width={420}>
+        {(() => {
+          // v0.7.22 — SSOT-Vorschau: Settlement an uns + Kunden-Anteil je nach Modell.
+          const econ = computeAgentTransferSale(transfer, soldPrice);
+          const isSplit = (transfer.settlementModel || 'full') === 'split';
+          const needsAck = isSplit && soldPrice > 0 && econ.belowPrice;
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
+                <div className="flex justify-between" style={{ marginBottom: isSplit ? 4 : 0 }}>
+                  <span style={{ color: '#6B7280' }}>Our Price</span>
+                  <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={transfer.agentPrice || 0}/> BHD</span>
+                </div>
+                {isSplit && (
+                  <div className="flex justify-between">
+                    <span style={{ color: '#6B7280' }}>Model</span>
+                    <span style={{ color: '#0F0F10' }}>{settlementModelLabel(transfer)}</span>
+                  </div>
+                )}
+              </div>
+              <Input required label="ACTUAL SALE PRICE (BHD)" type="number"
+                placeholder="Actually sold — may differ"
+                value={soldPrice || ''}
+                onChange={e => { setSoldPrice(Number(e.target.value)); setSoldAck(false); }} />
+
+              {/* Live-Vorschau */}
+              {soldPrice > 0 && (
+                <div className="rounded font-mono" style={{
+                  padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
+                }}>
+                  <div className="flex justify-between" style={{ marginBottom: isSplit ? 8 : 0 }}>
+                    <span style={{ color: '#6B7280' }}>{settlementLineLabel(transfer)}</span>
+                    <span style={{ color: '#0F0F10' }}><Bhd v={econ.ourSettlement}/> BHD</span>
+                  </div>
+                  {isSplit && (
+                    <div className="flex justify-between">
+                      <span style={{ color: '#6B7280' }}>Customer keeps</span>
+                      <span style={{ color: '#7EAA6E' }}><Bhd v={econ.customerShare}/> BHD</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Unter-Preis-Warnung (nur split) */}
+              {needsAck && (
+                <div style={{
+                  padding: '12px 14px', borderRadius: 8,
+                  background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
+                  fontSize: 12, color: '#DC2626',
+                }}>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                    ⚠ Sale below Our Price (<Bhd v={transfer.agentPrice || 0}/> BHD)
+                  </div>
+                  <div style={{ marginBottom: 10, color: '#7A2A2A' }}>
+                    No split — we receive only the actual amount (<Bhd v={soldPrice}/> BHD).
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 12 }}>
+                    <input type="checkbox" checked={soldAck} onChange={e => setSoldAck(e.target.checked)} />
+                    <span>I confirm the below-price sale</span>
+                  </label>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                <Button variant="ghost" onClick={() => { setSoldOpen(false); setSoldAck(false); }}>Cancel</Button>
+                <Button variant="primary" onClick={() => {
+                  if (soldPrice > 0) { markTransferSold(transfer.id, soldPrice, undefined, soldAck); setSoldOpen(false); setSoldAck(false); }
+                }} disabled={soldPrice <= 0 || (needsAck && !soldAck)}>Confirm Sale</Button>
+              </div>
             </div>
-          </div>
-          <Input required label="ACTUAL SALE PRICE (BHD)" type="number"
-            placeholder="Actually sold — may differ"
-            value={soldPrice || ''}
-            onChange={e => setSoldPrice(Number(e.target.value))} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setSoldOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={() => {
-              if (soldPrice > 0) { markTransferSold(transfer.id, soldPrice); setSoldOpen(false); }
-            }} disabled={soldPrice <= 0}>Confirm Sale</Button>
-          </div>
-        </div>
+          );
+        })()}
       </Modal>
 
       {/* Convert Modal */}
