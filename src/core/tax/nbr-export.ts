@@ -42,21 +42,80 @@ function customerLabel(c: Customer | undefined): string {
   return c.company ? `${base} (${c.company})` : base;
 }
 
+// v0.7.23 — Zahlungen pro Invoice (fuer Finalisierungs-Datum + Audit-Notiz).
+export interface NbrPayment {
+  amount: number;
+  method: string;
+  receivedAt: string;
+}
+export type PaymentsByInvoice = Map<string, NbrPayment[]>;
+
+/**
+ * Finalisierungs-Datum = Tag an dem die Rechnung VOLL bezahlt wurde.
+ * = Datum der spaetesten Zahlung. Das ist der Steuer-Zeitpunkt (NBR-Periode).
+ * Fallback (Alt-Daten ohne Payment-Zeilen, 0-BHD-Rechnung): issuedAt/createdAt.
+ */
+export function invoiceFinalizationDate(inv: Invoice, payments?: NbrPayment[]): string {
+  if (payments && payments.length > 0) {
+    let max = '';
+    for (const p of payments) {
+      if (p.receivedAt && p.receivedAt > max) max = p.receivedAt;
+    }
+    if (max) return max;
+  }
+  return inv.issuedAt || inv.createdAt;
+}
+
+/**
+ * Audit-Hinweis fuer die Steuer-Tabelle: urspruengliches Erstelldatum + alle
+ * Teilzahlungen (Betrag/Datum/Methode). Macht transparent, dass eine im Maerz
+ * gemeldete Rechnung schon im Januar erstellt wurde.
+ */
+function paymentNote(inv: Invoice, payments?: NbrPayment[]): string {
+  const issued = fmtDate(inv.issuedAt || inv.createdAt);
+  const base = `Issued ${issued}`;
+  if (!payments || payments.length === 0) return base;
+  const sorted = [...payments].sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : 0));
+  const payStr = sorted
+    .map(p => `${round3(p.amount).toFixed(3)} (${fmtDate(p.receivedAt)}, ${p.method})`)
+    .join('; ');
+  return `${base} · Payments: ${payStr}`;
+}
+
+// Interne Audit-Spalte rechts neben dem offiziellen NBR-Raster. NOTE_COL=13 laesst
+// 1 Spalte Abstand nach dem breitesten Abschnitt (Margin = 12 Spalten, Index 0-11),
+// damit klar ist: das ist eine interne Anmerkung, kein Teil des amtlichen Rasters.
+const NOTE_COL = 13;
+function rowWithNote(cells: (string | number | null)[], note: string): (string | number | null)[] {
+  const row = cells.slice();
+  while (row.length < NOTE_COL) row.push('');
+  row[NOTE_COL] = note;
+  return row;
+}
+
 interface MonthInvoices {
   year: number;
   month: number; // 0-11
   invoices: Invoice[];
 }
 
-function groupByMonth(year: number, invoices: Invoice[], selectedIds?: Set<string>): MonthInvoices[] {
+function groupByMonth(year: number, invoices: Invoice[], selectedIds?: Set<string>, paymentsByInvoice?: PaymentsByInvoice): MonthInvoices[] {
   const result: MonthInvoices[] = MONTHS.map((_, i) => ({ year, month: i, invoices: [] }));
   for (const inv of invoices) {
-    const iso = inv.issuedAt || inv.createdAt;
+    // v0.7.23 — Nur FINAL (voll bezahlte) Rechnungen in den NBR-Steuer-Export.
+    // Konsistent mit Dashboard + Plan §Sales §3 ("nur Final zählt für Umsatz/Steuer").
+    // PARTIAL (= erstellt, aber noch nicht voll bezahlt) wird erst nach Vollzahlung
+    // zur FINAL und erscheint dann. Vorher fälschlich auch PARTIAL exportiert.
+    if (inv.status !== 'FINAL') continue;
+    if (selectedIds && !selectedIds.has(inv.id)) continue;
+    // v0.7.23 — Steuer-Periode = Tag der Vollzahlung (Finalisierung), NICHT das
+    // urspruengliche Erstell-/Rechnungsdatum. Eine im Januar erstellte, erst im
+    // Maerz voll bezahlte Rechnung erscheint im Maerz-Sheet (Steuer-Zeitpunkt).
+    const iso = invoiceFinalizationDate(inv, paymentsByInvoice?.get(inv.id));
     if (!iso) continue;
     const d = new Date(iso);
+    if (isNaN(d.getTime())) continue;
     if (d.getFullYear() !== year) continue;
-    if (inv.status === 'CANCELLED' || inv.status === 'DRAFT') continue;
-    if (selectedIds && !selectedIds.has(inv.id)) continue;
     result[d.getMonth()].invoices.push(inv);
   }
   return result;
@@ -66,12 +125,13 @@ function buildMonthSheet(
   bucket: MonthInvoices,
   customers: Customer[],
   products: Product[],
+  paymentsByInvoice?: PaymentsByInvoice,
 ): AOA {
   const rows: AOA = [];
 
   // ── SECTION 1: Standard Rated Sales at 10% ──
   rows.push(['Standard Rated Sales at 10% (Line 1 of the VAT Return)']);
-  rows.push([
+  rows.push(rowWithNote([
     'VAT Return Field Number',
     'Invoice Number',
     'Invoice Date',
@@ -82,7 +142,7 @@ function buildMonthSheet(
     'Total BHD (Exclusive of VAT)',
     'VAT Amount',
     'Total BHD (Inclusive of VAT)',
-  ]);
+  ], 'Internal Note — Original Invoice Date & Payments'));
 
   let stdNet = 0, stdVat = 0, stdGross = 0;
 
@@ -93,13 +153,16 @@ function buildMonthSheet(
     const vatAcc = customer?.vatAccountNumber || '';
     const personalId = customer?.personalId || '';
     const name = customerLabel(customer);
-    const date = fmtDate(inv.issuedAt || inv.createdAt);
+    const pays = paymentsByInvoice?.get(inv.id);
+    // v0.7.23 — angezeigtes Datum = Tag der Vollzahlung (Steuer-Zeitpunkt).
+    const date = fmtDate(invoiceFinalizationDate(inv, pays));
+    const note = paymentNote(inv, pays);
 
     for (const line of stdLines) {
       const net = round3(line.unitPrice);
       const vat = round3(line.vatAmount);
       const gross = round3(line.lineTotal);
-      rows.push([
+      rows.push(rowWithNote([
         '',
         inv.invoiceNumber,
         date,
@@ -110,7 +173,7 @@ function buildMonthSheet(
         net,
         vat,
         gross,
-      ]);
+      ], note));
       stdNet += net;
       stdVat += vat;
       stdGross += gross;
@@ -128,7 +191,7 @@ function buildMonthSheet(
 
   // ── SECTION 2: Profit Margin Scheme Sales ──
   rows.push(['Profit Margin Scheme Sales (Line 1 of the VAT Return)']);
-  rows.push([
+  rows.push(rowWithNote([
     'VAT Return Field Number',
     'Invoice Number',
     'Invoice Date',
@@ -141,7 +204,7 @@ function buildMonthSheet(
     'Total BHD (Profit)',
     'VAT Amount',
     'Total BHD (Exclusive of VAT)',
-  ]);
+  ], 'Internal Note — Original Invoice Date & Payments'));
 
   let mPurchase = 0, mSelling = 0, mProfit = 0, mVat = 0, mExcl = 0;
 
@@ -152,7 +215,10 @@ function buildMonthSheet(
     const vatAcc = customer?.vatAccountNumber || '';
     const personalId = customer?.personalId || '';
     const name = customerLabel(customer);
-    const date = fmtDate(inv.issuedAt || inv.createdAt);
+    const pays = paymentsByInvoice?.get(inv.id);
+    // v0.7.23 — angezeigtes Datum = Tag der Vollzahlung (Steuer-Zeitpunkt).
+    const date = fmtDate(invoiceFinalizationDate(inv, pays));
+    const note = paymentNote(inv, pays);
 
     for (const line of mLines) {
       const purchase = round3(line.purchasePriceSnapshot);
@@ -161,7 +227,7 @@ function buildMonthSheet(
       const vatOnProfit = profit > 0 ? round3(profit - profit / (1 + (line.vatRate || 10) / 100)) : 0;
       const exclVat = round3(profit - vatOnProfit);
 
-      rows.push([
+      rows.push(rowWithNote([
         '',
         inv.invoiceNumber,
         date,
@@ -174,7 +240,7 @@ function buildMonthSheet(
         profit,
         vatOnProfit,
         exclVat,
-      ]);
+      ], note));
 
       mPurchase += purchase;
       mSelling += selling;
@@ -197,7 +263,7 @@ function buildMonthSheet(
 
   // ── SECTION 3: Zero-Rated Domestic Sales ──
   rows.push(['Zero-Rated Domestic Sales (Line 4 of the VAT Return)']);
-  rows.push([
+  rows.push(rowWithNote([
     'VAT Return Field Number',
     'Invoice Number',
     'Invoice Date',
@@ -206,7 +272,7 @@ function buildMonthSheet(
     'Client Name',
     'Good/Service Description',
     'Total BHD (exclusive of VAT)',
-  ]);
+  ], 'Internal Note — Original Invoice Date & Payments'));
 
   let zTotal = 0;
 
@@ -217,11 +283,14 @@ function buildMonthSheet(
     const vatAcc = customer?.vatAccountNumber || '';
     const personalId = customer?.personalId || '';
     const name = customerLabel(customer);
-    const date = fmtDate(inv.issuedAt || inv.createdAt);
+    const pays = paymentsByInvoice?.get(inv.id);
+    // v0.7.23 — angezeigtes Datum = Tag der Vollzahlung (Steuer-Zeitpunkt).
+    const date = fmtDate(invoiceFinalizationDate(inv, pays));
+    const note = paymentNote(inv, pays);
 
     for (const line of zLines) {
       const amount = round3(line.lineTotal);
-      rows.push([
+      rows.push(rowWithNote([
         '',
         inv.invoiceNumber,
         date,
@@ -230,7 +299,7 @@ function buildMonthSheet(
         name,
         productLabel(products, line.productId),
         amount,
-      ]);
+      ], note));
       zTotal += amount;
     }
   }
@@ -248,13 +317,13 @@ function buildMonthSheet(
  * Generate the NBR VAT Excel file for a given year.
  * Downloads the file as `LATAIF_NBR_VAT_<year>.xlsx`.
  */
-export function exportNbrVatReport(year: number, invoices: Invoice[], customers: Customer[], products: Product[], selectedInvoiceIds?: string[]) {
+export function exportNbrVatReport(year: number, invoices: Invoice[], customers: Customer[], products: Product[], selectedInvoiceIds?: string[], paymentsByInvoice?: PaymentsByInvoice) {
   const wb = XLSX.utils.book_new();
   const selectedSet = selectedInvoiceIds ? new Set(selectedInvoiceIds) : undefined;
-  const buckets = groupByMonth(year, invoices, selectedSet);
+  const buckets = groupByMonth(year, invoices, selectedSet, paymentsByInvoice);
 
   for (const bucket of buckets) {
-    const sheetData = buildMonthSheet(bucket, customers, products);
+    const sheetData = buildMonthSheet(bucket, customers, products, paymentsByInvoice);
     const ws = XLSX.utils.aoa_to_sheet(sheetData);
 
     // Column widths (in characters)
@@ -271,6 +340,8 @@ export function exportNbrVatReport(year: number, invoices: Invoice[], customers:
       { wch: 14 },
       { wch: 14 },
       { wch: 14 },
+      { wch: 3 },   // gap (col M) — trennt amtliches Raster von interner Notiz
+      { wch: 52 },  // Internal Note — Original Invoice Date & Payments (col N)
     ];
 
     const sheetName = `${MONTHS[bucket.month]}${year}`;

@@ -15,7 +15,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { exportCsv } from '@/core/utils/export-file';
-import { exportNbrVatReport } from '@/core/tax/nbr-export';
+import { exportNbrVatReport, invoiceFinalizationDate } from '@/core/tax/nbr-export';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { query } from '@/core/db/helpers';
 import { Bhd } from '@/components/ui/Bhd';
@@ -85,16 +85,37 @@ export function InvoiceList() {
   const [nbrSelected, setNbrSelected] = useState<Set<string>>(new Set());
   const [nbrResult, setNbrResult] = useState<{ filename: string; invoiceCount: number; totals: { standardNet: number; standardVat: number; marginProfit: number; zeroRated: number } } | null>(null);
 
-  // Invoices in scope for the selected year (excluding draft/cancelled)
+  // v0.7.23 — Alle Payments gebuendelt (eine Query). Liefert das Finalisierungs-
+  // Datum (Tag der Vollzahlung = spaeteste Zahlung) fuer Kandidaten-Filter + Export.
+  const nbrPaymentsByInvoice = useMemo(() => {
+    const map = new Map<string, { amount: number; method: string; receivedAt: string }[]>();
+    try {
+      const rows = query('SELECT invoice_id, amount, method, received_at FROM payments');
+      for (const r of rows) {
+        const iid = r.invoice_id as string;
+        const arr = map.get(iid) || [];
+        arr.push({ amount: (r.amount as number) || 0, method: r.method as string, receivedAt: r.received_at as string });
+        map.set(iid, arr);
+      }
+    } catch { /* keine Payments-Tabelle / leer */ }
+    return map;
+  }, [invoices]);
+
+  // v0.7.23 — NBR-Kandidaten: nur FINAL (voll bezahlt), gruppiert nach dem
+  // Finalisierungs-JAHR (Tag der Vollzahlung) — exakt wie der Export. So zeigt der
+  // Dialog nur, was auch wirklich exportiert wird (keine PARTIAL-Verwirrung).
   const nbrCandidates = useMemo(() => {
     return invoices.filter(inv => {
-      const iso = inv.issuedAt || inv.createdAt;
-      if (!iso) return false;
-      if (new Date(iso).getFullYear() !== nbrYear) return false;
-      if (inv.status === 'CANCELLED' || inv.status === 'DRAFT') return false;
-      return true;
-    }).sort((a, b) => (a.issuedAt || a.createdAt).localeCompare(b.issuedAt || b.createdAt));
-  }, [invoices, nbrYear]);
+      if (inv.status !== 'FINAL') return false;
+      const finIso = invoiceFinalizationDate(inv, nbrPaymentsByInvoice.get(inv.id));
+      if (!finIso) return false;
+      return new Date(finIso).getFullYear() === nbrYear;
+    }).sort((a, b) => {
+      const fa = invoiceFinalizationDate(a, nbrPaymentsByInvoice.get(a.id));
+      const fb = invoiceFinalizationDate(b, nbrPaymentsByInvoice.get(b.id));
+      return fa.localeCompare(fb);
+    });
+  }, [invoices, nbrYear, nbrPaymentsByInvoice]);
 
   // When modal opens or year/candidates change, default select all non-butterfly invoices
   useEffect(() => {
@@ -211,7 +232,7 @@ export function InvoiceList() {
   }
 
   function handleNbrExport() {
-    const result = exportNbrVatReport(nbrYear, invoices, customers, products, Array.from(nbrSelected));
+    const result = exportNbrVatReport(nbrYear, invoices, customers, products, Array.from(nbrSelected), nbrPaymentsByInvoice);
     setNbrResult(result);
   }
 
@@ -527,7 +548,7 @@ export function InvoiceList() {
           {/* Invoice Selection */}
           <div>
             <div className="flex justify-between items-center" style={{ marginBottom: 8 }}>
-              <span className="text-overline">INVOICES IN {nbrYear} · {nbrSelected.size}/{nbrCandidates.length} selected</span>
+              <span className="text-overline">FINALIZED IN {nbrYear} · {nbrSelected.size}/{nbrCandidates.length} selected</span>
               <div className="flex gap-2">
                 <button onClick={() => setNbrSelected(new Set(nbrCandidates.map(i => i.id)))}
                   className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11 }}>Select all</button>
@@ -541,7 +562,7 @@ export function InvoiceList() {
             </div>
             <div style={{ maxHeight: 280, overflowY: 'auto', border: '1px solid #E5E9EE', borderRadius: 8 }}>
               {nbrCandidates.length === 0 && (
-                <p style={{ padding: 16, fontSize: 12, color: '#6B7280', textAlign: 'center' }}>No issued invoices for {nbrYear}.</p>
+                <p style={{ padding: 16, fontSize: 12, color: '#6B7280', textAlign: 'center' }}>No fully-paid (FINAL) invoices finalized in {nbrYear}.</p>
               )}
               {nbrCandidates.map(inv => {
                 const cust = customers.find(c => c.id === inv.customerId);
@@ -551,7 +572,7 @@ export function InvoiceList() {
                     style={{ padding: '8px 12px', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
                     <input type="checkbox" checked={checked} onChange={() => toggleNbrInvoice(inv.id)} style={{ accentColor: '#0F0F10' }} />
                     <span className="font-mono" style={{ color: '#0F0F10', minWidth: 110 }}>{formatInvoiceDisplayShort(inv)}</span>
-                    <span style={{ color: '#6B7280', minWidth: 72 }}>{(inv.issuedAt || inv.createdAt).split('T')[0]}</span>
+                    <span style={{ color: '#6B7280', minWidth: 72 }} title="Finalisiert am (Tag der Vollzahlung)">{invoiceFinalizationDate(inv, nbrPaymentsByInvoice.get(inv.id)).split('T')[0]}</span>
                     <span style={{ color: '#0F0F10', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {cust ? `${cust.firstName} ${cust.lastName}` : '—'}
                       {cust?.personalId && <span style={{ color: '#6B7280', marginLeft: 6 }}>({cust.personalId})</span>}
