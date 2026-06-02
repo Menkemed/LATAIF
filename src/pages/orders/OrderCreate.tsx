@@ -1380,25 +1380,41 @@ export function OrderCreate() {
           </Card>
         </div>
 
-        {/* 7. SUMMARY BOX */}
-        <div style={{ marginTop: 24, padding: '20px 24px', background: 'linear-gradient(135deg, #1A1A1F 0%, #08080A 100%)', borderRadius: 12, border: '1px solid #2A2A30', color: '#FFFFFF' }}>
-          <span style={{ fontSize: 11, color: '#8E8E97', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Summary</span>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginTop: 12 }}>
-            <div>
-              <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>AGREED PRICE</div>
-              <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}><Bhd v={total}/> BHD</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>DEPOSIT</div>
-              <div className="font-mono" style={{ fontSize: 18, color: '#7EAA6E' }}><Bhd v={fullyPaid ? total : depositAmount}/> BHD</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>REMAINING</div>
-              <div className="font-mono" style={{ fontSize: 18, color: remaining > 0 ? '#AA956E' : '#7EAA6E' }}><Bhd v={remaining}/> BHD</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10, color: '#8E8E97', marginBottom: 4 }}>METHOD</div>
-              <div style={{ fontSize: 18, color: '#FFFFFF', textTransform: 'capitalize' }}>{paymentMethod}</div>
+        {/* 7. SUMMARY BOX — Premium Lila-Card im Dashboard-Spot-Look (Two-Tone-Glow) */}
+        <div style={{
+          position: 'relative',
+          marginTop: 24,
+          padding: '24px 28px',
+          borderRadius: 20,
+          background: 'linear-gradient(135deg, #5B3DCC 0%, #715DE3 50%, #8B7AE8 100%)',
+          border: '1px solid rgba(255,255,255,0.10)',
+          overflow: 'hidden',
+          boxShadow: '0 16px 48px rgba(91,61,204,0.25)',
+          color: '#FFFFFF',
+        }}>
+          {/* Two-tone glow blobs (wie Dashboard-Spot-Card) */}
+          <div style={{ position: 'absolute', left: -80, bottom: -120, width: 320, height: 320, background: 'radial-gradient(circle, rgba(236,72,153,0.55) 0%, rgba(236,72,153,0) 70%)', filter: 'blur(20px)', pointerEvents: 'none' }} />
+          <div style={{ position: 'absolute', right: -100, top: -100, width: 280, height: 280, background: 'radial-gradient(circle, rgba(115,217,237,0.35) 0%, rgba(115,217,237,0) 70%)', filter: 'blur(30px)', pointerEvents: 'none' }} />
+
+          <div style={{ position: 'relative', zIndex: 1 }}>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.75)', letterSpacing: '0.10em', textTransform: 'uppercase', fontWeight: 600 }}>Summary</span>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginTop: 12 }}>
+              <div>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>AGREED PRICE</div>
+                <div className="font-mono" style={{ fontSize: 18, color: '#FFFFFF' }}><Bhd v={total}/> BHD</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>DEPOSIT</div>
+                <div className="font-mono" style={{ fontSize: 18, color: '#86E5A4' }}><Bhd v={fullyPaid ? total : depositAmount}/> BHD</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>REMAINING</div>
+                <div className="font-mono" style={{ fontSize: 18, color: remaining > 0 ? '#FFD27D' : '#86E5A4' }}><Bhd v={remaining}/> BHD</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>METHOD</div>
+                <div style={{ fontSize: 18, color: '#FFFFFF', textTransform: 'capitalize' }}>{paymentMethod}</div>
+              </div>
             </div>
           </div>
         </div>
