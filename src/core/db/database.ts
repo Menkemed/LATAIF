@@ -383,18 +383,18 @@ function runMigrations(database: Database): void {
     // Bestehende Watch-Produkte mit condition="New" auf "Unworn" umstellen.
     `UPDATE products SET condition = 'Unworn' WHERE category_id = 'cat-watch' AND condition = 'New'`,
     // WATCH — 2026-05-17: material erweitert + Diamonds/Description sortiert + Ref/Serial/Bezel optional.
+    // 2026-06-03: 'diamonds' (Boolean) + 'movement' (Caliber) entfernt — laeuft bei jedem Start,
+    //   setzt die Watch-Attribute idempotent neu, daher fallen die zwei Felder auch in bestehenden DBs weg.
     `UPDATE categories SET attributes = '[
       {"key":"reference_number","label":"Reference Number","type":"text","required":false,"showInList":true},
       {"key":"case_diameter_mm","label":"Case Diameter","type":"number","unit":"mm","required":true,"showInList":true},
       {"key":"serial_number","label":"Serial Number","type":"text","required":false,"showInList":true},
       {"key":"dial","label":"Dial","type":"text","required":true,"showInList":false},
       {"key":"bezel","label":"Bezel","type":"text","required":false,"showInList":false},
-      {"key":"diamonds","label":"Diamonds","type":"boolean","required":false,"showInList":false},
       {"key":"material","label":"Material","type":"select","options":["Steel","Solid Gold","Two-Tone Steel/Gold","Platinum","Titanium","Ceramic","Bronze","Carbon","DLC Steel","Plated","Ceramic & Steel","Ceramic & Gold","Titanium & Gold","Titanium & Ceramic"],"required":true,"showInList":true},
       {"key":"karat_color","label":"Karat & Color","type":"select","options":["18K Yellow","18K Rose","18K White","14K Yellow","14K Rose","14K White","9K Yellow","9K Rose"],"required":true,"showInList":true,"dependsOn":{"key":"material","valueIncludes":["Solid Gold","Two-Tone Steel/Gold","Ceramic & Gold","Titanium & Gold"]}},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false},
       {"key":"strap_type","label":"Strap Type","type":"select","options":["Leather","Rubber"],"required":false,"showInList":false},
-      {"key":"movement","label":"Movement / Caliber","type":"text","required":false,"showInList":false},
       {"key":"year","label":"Year","type":"number","required":false,"showInList":false}
     ]' WHERE id = 'cat-watch'`,
     // Remap altes Material auf neue Optionen (idempotent):

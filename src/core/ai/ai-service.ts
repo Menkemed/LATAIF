@@ -335,8 +335,8 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
     // 'model' attribute removed 2026-05-17 — Duplikat zum Universal-Feld name.
     // karat_color hängt von material ab (Gold-Anteil) — vom Caller per dependsOn gefiltert.
     // 2026-05-17: reference_number, serial_number, bezel optional (Vintage/Custom).
-    required: ['case_diameter_mm', 'dial', 'material', 'karat_color', 'diamonds', 'strap_type'],
-    optional: ['reference_number', 'serial_number', 'bezel', 'movement', 'year', 'description'],
+    required: ['case_diameter_mm', 'dial', 'material', 'karat_color', 'strap_type'],
+    optional: ['reference_number', 'serial_number', 'bezel', 'year', 'description'],
     conditionOptions: ['Unworn', 'Pre-Owned', 'Vintage'],
     scopeOptions: ['Box', 'Papers', 'Warranty Card', 'Extra Links', 'Pouch'],
     notes: [
@@ -344,7 +344,7 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
       // Model gehört in den Universal-`name`-Feld, nicht in attributes.
       'NB: the full collector name (with nickname, e.g. "Submariner Date \'Hulk\'", "GMT-Master II \'Pepsi\'", "Daytona \'Paul Newman\'", "Royal Oak Jumbo", "Nautilus 5711") goes into the top-level "name" field, NOT into attributes.',
       'case_diameter_mm = case width in millimetres (number only, e.g. 36, 40, 41, 42). Estimate from proportions vs crown/lugs if not stated. Common sizes: Submariner 40-41, Datejust 36/41, Daytona 40, GMT 40, Nautilus 40, Royal Oak 39-41, AP Offshore 42-44, Speedmaster 42. NEVER guess wider than 50.',
-      'material ∈ {Steel, Solid Gold, Two-Tone Steel/Gold, Platinum, Titanium, Ceramic, Bronze, Carbon, DLC Steel, Plated, Ceramic & Steel, Ceramic & Gold, Titanium & Gold, Titanium & Ceramic}. karat_color ∈ {18K Yellow, 18K Rose, 18K White, 14K Yellow, 14K Rose, 14K White, 9K Yellow, 9K Rose} — ONLY return this when material has a gold component (Solid Gold, Two-Tone Steel/Gold, Ceramic & Gold, Titanium & Gold); otherwise null. strap_type ∈ {Leather, Rubber}. diamonds is boolean. movement = caliber if visible/known (e.g. "Cal. 3135", "Cal. 9461MC"). year = approximate production year (number).',
+      'material ∈ {Steel, Solid Gold, Two-Tone Steel/Gold, Platinum, Titanium, Ceramic, Bronze, Carbon, DLC Steel, Plated, Ceramic & Steel, Ceramic & Gold, Titanium & Gold, Titanium & Ceramic}. karat_color ∈ {18K Yellow, 18K Rose, 18K White, 14K Yellow, 14K Rose, 14K White, 9K Yellow, 9K Rose} — ONLY return this when material has a gold component (Solid Gold, Two-Tone Steel/Gold, Ceramic & Gold, Titanium & Gold); otherwise null. strap_type ∈ {Leather, Rubber}. year = approximate production year (number).',
     ].join(' '),
   },
   'cat-gold-jewelry': {
@@ -510,7 +510,7 @@ Process:
         - Camera distance / perspective: if image is shot top-down (orthographic) the ratios above are reliable; if angled, dial appears compressed — account for foreshortening and prefer reference-derived size.
         Write your chosen calibration anchor in notes ("scale anchor: 17cm wrist" or "scale anchor: 20mm strap").
      **(f) DISTINCTIVE 41 vs 36 GUIDE** (Datejust pain point, summary): apply (d) + (e). 36mm DJ has visually prominent crown (crown_case_ratio ~0.12, classic dial-marker-to-edge gap), 41mm DJ has more-square dial-vs-bezel proportion (bezel_dial_ratio ~1.13) with proportionally smaller crown. Count 5-minute markers vs dial edge gap as tie-breaker.
-  4. Plus: caliber/movement, year range, complications (chronograph, GMT, moonphase, day-date, perpetual calendar), dial color + indices, bezel material, strap type.
+  4. Plus: year range, complications (chronograph, GMT, moonphase, day-date, perpetual calendar), dial color + indices, bezel material, strap type.
 - For branded jewelry: maker, collection, variant, metal, stones
 - For unbranded gold: weight (estimate from image), karat (estimate), craft style
 - For accessories: maker, collection, leather/material, hardware, edition
@@ -549,7 +549,7 @@ Respond with JSON ONLY, no markdown. Structure:
   "attributes": { ${spec.required.map(k => `"${k}": null`).concat(spec.optional.map(k => `"${k}": null`)).join(', ')} }
 }
 
-Set fields to null/empty ONLY if truly indeterminable. Never guess serial numbers. For numeric fields (weight, karat numerical like "18K"→18, caseSize, year, price) return numbers, not strings. For booleans (diamonds, box, papers, certificate) return true/false. For selects return the exact string from the allowed options.`;
+Set fields to null/empty ONLY if truly indeterminable. Never guess serial numbers. For numeric fields (weight, karat numerical like "18K"→18, caseSize, year, price) return numbers, not strings. For booleans (box, papers, certificate) return true/false. For selects return the exact string from the allowed options.`;
 
   const watchExtra = params.categoryId === 'cat-watch'
     ? '\n\nFor this WATCH, the three CRITICAL fields are reference_number (exact factory ref like "126610LN", not "Submariner"), the top-level "name" field (full collector name including nickname like "Submariner Date \'Hulk\'" — NOT inside attributes), and case_diameter_mm (numeric mm of the case). Look carefully at: dial bottom text, caseback engravings, between-lugs marking, crown engraving, papers/box if visible. If you cannot read the reference, infer it from dial config + bezel + case + hands combination. Never return a family name as the reference.'

@@ -43,7 +43,6 @@ export const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
     { key: 'case_diameter_mm', label: 'Case Diameter', type: 'number', unit: 'mm' },
     { key: 'dial', label: 'Dial', type: 'text' },
     { key: 'bezel', label: 'Bezel', type: 'text' },
-    { key: 'diamonds', label: 'Diamonds', type: 'boolean' },
     { key: 'material', label: 'Material', type: 'select',
       options: [
         'Steel',
@@ -70,7 +69,6 @@ export const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
       },
     },
     { key: 'strap_type', label: 'Strap Type', type: 'select', options: ['Leather', 'Rubber'] },
-    { key: 'movement', label: 'Movement / Caliber', type: 'text' },
     { key: 'year', label: 'Year', type: 'number' },
     { key: 'description', label: 'Description', type: 'text' },
   ],
