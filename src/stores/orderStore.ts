@@ -7,6 +7,8 @@ import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNu
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { useProductStore } from '@/stores/productStore';
+import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
+import { normalizeCardBrand } from '@/core/finance/card-fees';
 import {
   postOrderPayment,
   postOrderPaymentReversed,
@@ -425,17 +427,20 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     let initialPaymentId: string | null = null;
     const paidAt = data.depositDate || now.split('T')[0];
     const method = data.paymentMethod || 'cash';
+    // v0.7.26 — Karten-Brand des Deposits (nur bei method 'card').
+    const depositBrand = method === 'card' ? normalizeCardBrand(data.cardBrand) : null;
     if (initialPaid > 0) {
       initialPaymentId = uuid();
       db.run(
-        `INSERT INTO order_payments (id, order_id, amount, paid_at, method, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO order_payments (id, order_id, amount, paid_at, method, card_brand, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           initialPaymentId,
           id,
           initialPaid,
           paidAt,
           method,
+          depositBrand,
           data.fullyPaid ? 'Initial full payment' : 'Initial deposit',
           now,
         ]
@@ -457,6 +462,15 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
           { id: payId, orderId: id, amount: initialPaid, method, paidAt },
           customerId
         );
+      });
+    }
+
+    // v0.7.26 — Karten-Gebuehr fuer Deposit buchen (brand-genau). created_at = now
+    // matcht den order_payments-Insert → bankingStore nettet die Order-Bank-Zeile.
+    if (depositBrand && initialPaid > 0) {
+      bookCardFee({
+        branchId, userId, amount: initialPaid, brand: depositBrand,
+        relatedModule: 'order', relatedEntityId: id, label: orderNumber, createdAt: now,
       });
     }
 
@@ -1238,6 +1252,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         postOrderPaymentReversed(opId);
       });
     }
+    // v0.7.26 — Order-Karten-Gebuehren reversen (Bank zurueck), sonst bliebe der
+    // CardFee-Bank-Abgang nach dem Order-Loeschen stehen.
+    reverseCardFees('order', id);
     // v0.3.1 — Order-Line-A/P-Expenses (gebucht bei ARRIVED via commitOrderLineExpenses)
     // vor dem Loeschen der order_lines storno-reversen + entfernen. Sonst bliebe die
     // Supplier-Schuld als Orphan-Expense ohne Quelle im Ledger haengen.

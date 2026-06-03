@@ -8,11 +8,12 @@ import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
+import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
+import { bookCardFee } from '@/core/finance/card-fee-booking';
 import {
   postInvoiceIssued,
   postInvoicePayment,
   postInvoiceCancelled,
-  postExpense,
   postExpenseCancelled,
   hasLedgerEntries,
   hasReversalFor,
@@ -38,7 +39,7 @@ interface InvoiceStore {
   createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   rewriteInvoiceLines: (id: string, lines: { productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[]) => void;
-  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean) => void;
+  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand) => void;
   setSpecialMark: (invoiceId: string, special: boolean) => void;
   // Plan §Edit: einzelne Payments später ändern oder löschen.
   updatePayment: (paymentId: string, invoiceId: string, data: { amount?: number; method?: string; notes?: string; receivedAt?: string }) => void;
@@ -652,7 +653,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     get().loadInvoices();
   },
 
-  recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal) => {
+  recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal, cardBrand) => {
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Payment amount must be a positive number.');
     }
@@ -666,10 +667,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
+    // v0.7.26 — Karten-Brand nur bei 'card' merken; steuert die Gebuehren-Rate.
+    const cardBrandValue: CardBrand | null = method === 'card' ? normalizeCardBrand(cardBrand) : null;
     db.run(
-      `INSERT INTO payments (id, branch_id, invoice_id, amount, method, reference, received_at, notes, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-      [paymentId, branchId, invoiceId, amount, method, now, notes || null, now, userId]
+      `INSERT INTO payments (id, branch_id, invoice_id, amount, method, card_brand, reference, received_at, notes, created_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+      [paymentId, branchId, invoiceId, amount, method, cardBrandValue, now, notes || null, now, userId]
     );
 
     // Plan §Sales §12: bei Vollzahlung Auto-Konvertierung Partial → Final.
@@ -740,54 +743,14 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Invoice-Nummer traegt (finalInvoiceLabel). created_at bleibt `now` und
     // matcht damit weiterhin den payments-Insert (bankingStore Card-Fee-Netting).
     if (method === 'card' && amount > 0) {
-      const rateRow = query(
-        `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.card_fee_rate'`,
-        [branchId]
-      );
-      const feeRate = parseFloat((rateRow[0]?.value as string) || '2.2') || 0;
-      const fee = Math.round(amount * feeRate) / 100;
-      if (fee > 0) {
-        const expenseId = uuid();
-        const expenseNumber = getNextDocumentNumber('EXP');
-        // Beschreibung referenziert die Invoice-Nummer (No: 000009 / PINV-…) statt
-        // eines opaquen Payment-UUID-Fragments — Card-Fee ist so der Verkaufs-
-        // Rechnung zuzuordnen und matcht die Bank-Zeile.
-        const feeInvLabel = finalInvoiceLabel || invoiceId.slice(0, 8);
-        const expenseDescription = `Card fee · ${feeInvLabel} · ${feeRate}% of ${amount.toFixed(3)} BHD`;
-        const expenseDate = now.split('T')[0];
-        db.run(
-          `INSERT INTO expenses (id, branch_id, expense_number, category, amount, payment_method,
-            expense_date, description, related_module, related_entity_id, created_at, created_by)
-           VALUES (?, ?, ?, 'CardFees', ?, 'bank', ?, ?, 'invoice', ?, ?, ?)`,
-          [expenseId, branchId, expenseNumber, fee, expenseDate,
-           expenseDescription,
-           invoiceId, now, userId]
-        );
-        trackInsert('expenses', expenseId, { category: 'CardFees', amount: fee, auto: true, invoiceId });
-
-        // Ledger-Post fuer Auto-Card-Fee. Status 'PENDING' (paidAmount 0) — dieser
-        // Expense wird in einem zweiten Schritt manuell bezahlt (oder von einer
-        // Card-Reconciliation-Routine). Posting ergibt EXPENSES_OPERATING vs A/P.
-        const cardFeeExpense: Expense = {
-          id: expenseId,
-          expenseNumber,
-          branchId,
-          category: 'CardFees',
-          amount: fee,
-          paidAmount: 0,
-          paymentMethod: 'bank',
-          expenseDate,
-          description: expenseDescription,
-          relatedModule: 'invoice',
-          relatedEntityId: invoiceId,
-          status: 'PENDING',
-          createdAt: now,
-        };
-        safePost(`postExpense(${expenseId}) [card-fee]`, () => {
-          if (hasLedgerEntries('EXPENSE', expenseId)) return;
-          postExpense(cardFeeExpense);
-        });
-      }
+      // v0.7.26 — Auto-CardFees ueber den SSOT-Helper (brand-genaue Rate 2,2%/2,5%).
+      // created_at = `now` matcht den payments-Insert → bankingStore nettet die
+      // Bank-Zeile korrekt. Label nutzt die finale Invoice-Nummer (No: 000009/PINV-…).
+      bookCardFee({
+        branchId, userId, amount, brand: cardBrandValue ?? 'normal',
+        relatedModule: 'invoice', relatedEntityId: invoiceId,
+        label: finalInvoiceLabel || invoiceId.slice(0, 8), createdAt: now,
+      });
     }
 
     saveDatabase();

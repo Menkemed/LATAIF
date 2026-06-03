@@ -95,6 +95,8 @@ export function OrderDetail() {
   const [payAmount, setPayAmount] = useState('');
   const [payDate, setPayDate] = useState(new Date().toISOString().split('T')[0]);
   const [payMethod, setPayMethod] = useState('cash');
+  // v0.7.26 — Karten-Brand fuer Order-Folgezahlung (nur bei method 'card').
+  const [payCardBrand, setPayCardBrand] = useState<'normal' | 'amex'>('normal');
   const [payNote, setPayNote] = useState('');
   const [showInvoiceVatConfirm, setShowInvoiceVatConfirm] = useState(false);
   // v0.6.7 — VAT-Picker auch fuer persistierte Multi-Line-Orders, damit der User
@@ -230,6 +232,7 @@ export function OrderDetail() {
       amount: amt,
       paidAt: payDate,
       method: payMethod,
+      cardBrand: payMethod === 'card' ? payCardBrand : undefined,
       note: payNote || undefined,
     });
     setPayAmount(''); setPayNote(''); setPayDate(new Date().toISOString().split('T')[0]);
@@ -456,7 +459,7 @@ export function OrderDetail() {
   ) {
     const inv = useInvoiceStore.getState();
     const poolRows = query(
-      `SELECT id, amount, method FROM order_payments
+      `SELECT id, amount, method, card_brand FROM order_payments
          WHERE order_id = ? AND converted_to_invoice = 0
          ORDER BY paid_at ASC, created_at ASC`,
       [orderId],
@@ -482,11 +485,16 @@ export function OrderDetail() {
     const cap = Math.min(pool, invoiceTotal);
     let budget = cap;
     let lastMethod = 'cash';
+    let lastBrand: 'normal' | 'amex' | undefined;
     for (const r of poolRows) {
       if (budget <= 0.005) break;
       const take = Math.min(Number(r.amount || 0), budget);
       lastMethod = (r.method as string) || 'cash';
-      inv.recordPayment(invoiceId, take, lastMethod, `Carried over from order ${orderNumber}`);
+      // v0.7.26 — Karten-Brand der Order-Zahlung mitnehmen: die Order-CardFee wurde
+      // beim Convert reversed (markConvertedToInvoice); die Invoice bucht hier eine
+      // frische CardFee mit der richtigen Rate (Amex 2,5% / Normal 2,2%).
+      lastBrand = lastMethod === 'card' ? ((r.card_brand as 'normal' | 'amex') || 'normal') : undefined;
+      inv.recordPayment(invoiceId, take, lastMethod, `Carried over from order ${orderNumber}`, undefined, lastBrand);
       budget -= take;
     }
 
@@ -498,6 +506,7 @@ export function OrderDetail() {
         amount: remainder,
         paidAt: new Date().toISOString().split('T')[0],
         method: lastMethod,
+        cardBrand: lastBrand,
         note: `Deposit remainder after partial invoice for order ${orderNumber}`,
       });
     }
@@ -1650,6 +1659,23 @@ export function OrderDetail() {
                   }}>{m.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}</button>
               ))}
             </div>
+            {/* v0.7.26 — Karten-Brand bei Card-Zahlung (Normal 2,2% / Amex 2,5%). */}
+            {payMethod === 'card' && (
+              <div className="flex gap-2" style={{ marginTop: 10 }}>
+                {(['normal', 'amex'] as const).map(b => {
+                  const on = payCardBrand === b;
+                  return (
+                    <button key={b} type="button" onClick={() => setPayCardBrand(b)}
+                      className="cursor-pointer rounded"
+                      style={{ padding: '6px 12px', fontSize: 12,
+                        border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
+                        color: on ? '#0F0F10' : '#6B7280',
+                        background: on ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      }}>{b === 'amex' ? 'Amex' : 'Normal'}</button>
+                  );
+                })}
+              </div>
+            )}
           </div>
           <Input label="NOTE (optional)" value={payNote} onChange={e => setPayNote(e.target.value)} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>

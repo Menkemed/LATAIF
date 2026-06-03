@@ -28,6 +28,8 @@ import {
 } from '@/core/ledger/posting';
 import { restoreLot, syncProductQuantity } from '@/core/lots/lot-queries';
 import type { CreditNote } from '@/core/models/types';
+import { refundCardFeePortion } from '@/core/finance/card-fee-booking';
+import { computeCardFee, normalizeCardBrand } from '@/core/finance/card-fees';
 
 // Wenn sich CN.cash_refund_amount oder refund_method nach erstem Posting aendert,
 // urspruengliche Buchung reverten + neu posten — sonst zeigen CASH/BANK-Salden im
@@ -277,7 +279,10 @@ interface SalesReturnStore {
   approveReturn: (id: string) => void;
   rejectReturn: (id: string) => void;
   refundReturn: (id: string, partialAmount?: number) => void;
-  recordRefundPayment: (returnId: string, amount: number, method: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other', date?: string) => void;
+  // deductCardFee (Slice 5): bei method cash/bank zieht es die anteilige Original-
+  // Karten-Gebuehr vom Refund ab (Kunde traegt sie). Bei method 'card' wird die Gebuehr
+  // immer anteilig erstattet (Flag irrelevant).
+  recordRefundPayment: (returnId: string, amount: number, method: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other', date?: string, deductCardFee?: boolean) => void;
   deleteReturn: (id: string) => void;
   getInvoiceReturnSummary: (invoiceId: string, invoiceGross: number, invoicePaid?: number) => {
     returns: SalesReturn[];
@@ -288,6 +293,8 @@ interface SalesReturnStore {
     refundState: RefundStatus;
   };
   getCustomerRefundPayable: (customerId: string) => number;
+  // Slice 5 — Karten-Zahlungs-Info der Original-Invoice (fuer die 3-Wege-Refund-UI).
+  getInvoiceCardInfo: (invoiceId: string) => { cardPaid: number; brand: 'normal' | 'amex'; activeFee: number };
   getReturnedQtyForLine: (invoiceLineId: string) => number;
 }
 
@@ -581,7 +588,7 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
   // ── Record Refund Payment ────────────────────────────────
   // Cash fließt tatsächlich → Banking ↓, refund_paid_amount ↑, CN-Split-Update.
   // Auto-approve, falls noch REQUESTED, damit CN garantiert existiert wenn Geld bewegt wird.
-  recordRefundPayment: (returnId, amount, method, date) => {
+  recordRefundPayment: (returnId, amount, method, date, deductCardFee) => {
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Refund payment amount must be a positive number.');
     }
@@ -660,6 +667,42 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       console.warn('[Return] credit note update failed:', e);
     }
 
+    // ── SLICE 5 — Karten-Gebuehr beim Refund (3-Wege) ─────────────────────
+    // Nur wenn die Original-Invoice (anteilig) per Karte gezahlt wurde.
+    //   ① method 'card'                  → Processor erstattet Gebuehr (DR CARD_CLEARING)
+    //   ③ method cash/bank + deductFee   → Kunde traegt Gebuehr   (DR CASH/BANK)
+    //   ② method cash/bank ohne Flag     → Shop frisst Gebuehr    (nichts buchen)
+    // Die anteilige Gebuehr bezieht sich auf DIESEN Refund-Betrag (cappedAmount),
+    // gecapped auf den Karten-Anteil — so summieren mehrere Teil-Refunds nie ueber die
+    // Original-Gebuehr hinaus, und refundCardFeePortion cappt zusaetzlich am Rest.
+    try {
+      const cardRow = query(
+        `SELECT COALESCE(SUM(amount),0) AS paid, MAX(card_brand) AS brand
+           FROM payments WHERE invoice_id = ? AND method = 'card'`,
+        [r.invoiceId]
+      )[0];
+      const cardPaid = Number(cardRow?.paid || 0);
+      const feeRelevant = method === 'card' || (deductCardFee && (method === 'cash' || method === 'bank'));
+      if (cardPaid > 0 && feeRelevant) {
+        let branchId: string; let userId: string;
+        try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+        try { userId = currentUserId(); } catch { userId = 'system'; }
+        const brand = normalizeCardBrand((cardRow?.brand as string) || undefined);
+        const feeBase = Math.min(cappedAmount, cardPaid);
+        const proportionalFee = computeCardFee(branchId, feeBase, brand);
+        if (proportionalFee > 0) {
+          const debitAccount: 'CASH' | 'BANK' | 'CARD_CLEARING' =
+            method === 'card' ? 'CARD_CLEARING' : (method === 'cash' ? 'CASH' : 'BANK');
+          refundCardFeePortion({
+            branchId, userId, invoiceId: r.invoiceId, feeAmount: proportionalFee,
+            debitAccount, sourceId: `cardfee-refund:${returnId}:${uuid()}`, occurredAt: now,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[Return] card-fee refund handling failed:', e);
+    }
+
     // Invoice RETURNED setzen, wenn Forderung durch Cash + CN-Cancel vollständig gedeckt.
     try {
       const invCheck = query(
@@ -727,11 +770,59 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       );
     }
 
-    // Verknüpfte Credit-Note(s) löschen — Cascade.
+    // ── Ledger-Reversierung (v0.7.26) ───────────────────────────────────────
+    // deleteReturn revertiert Lager/VAT/LTV — das LEDGER muss analog zurueck, sonst
+    // bleiben Cash-Refund + CN-Buchungen als verwaiste Eintraege stehen (Saldo falsch).
     const cnRows = query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [id]);
     for (const cn of cnRows) {
-      trackDelete('credit_notes', cn.id as string);
+      const cnId = cn.id as string;
+      // CN-Cash/Revenue/AR zurueckdrehen (nur die aktive, nicht-reversierte Buchung).
+      try {
+        if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
+          reverseSource('CREDIT_NOTE', cnId, now);
+        }
+      } catch (err) { console.error(`[ledger] deleteReturn CN reverse failed:`, err); }
+      trackDelete('credit_notes', cnId);
     }
+
+    // Slice 5 — Karten-Gebuehr-Erstattungen dieses Returns reversieren (Ledger + Tabelle).
+    // Die REFUND-Eintraege (sourceId `cardfee-refund:<returnId>:<uuid>`) zurueckdrehen und
+    // die decrementierte CardFee-Expense der Invoice wieder auffuellen.
+    try {
+      const feeSrcs = query(
+        `SELECT DISTINCT source_id FROM ledger_entries
+           WHERE source_module = 'REFUND' AND source_id LIKE ?`,
+        [`cardfee-refund:${id}:%`]
+      );
+      let feeRestored = 0;
+      for (const fs of feeSrcs) {
+        const sid = fs.source_id as string;
+        if (!hasLedgerEntries('REFUND', sid) || hasReversalFor('REFUND', sid)) continue;
+        const amtRow = query(
+          `SELECT COALESCE(SUM(amount),0) a FROM ledger_entries
+             WHERE source_module='REFUND' AND source_id=? AND account='EXPENSES_OPERATING'
+               AND direction='CREDIT' AND reverses_entry_id IS NULL`,
+          [sid]
+        );
+        reverseSource('REFUND', sid, now); // DR EXPENSES / CR account — Gebuehr-Erstattung zurueck
+        feeRestored += Number(amtRow[0]?.a || 0);
+      }
+      if (feeRestored > 0.0005) {
+        const feeRows = query(
+          `SELECT id, amount FROM expenses
+             WHERE category='CardFees' AND related_module='invoice' AND related_entity_id=?
+             ORDER BY created_at DESC LIMIT 1`,
+          [r.invoiceId]
+        );
+        if (feeRows.length) {
+          const fid = feeRows[0].id as string;
+          const newAmt = Math.round(((Number(feeRows[0].amount) || 0) + feeRestored) * 1000) / 1000;
+          db.run(`UPDATE expenses SET amount = ?, paid_amount = ?, status = 'PAID' WHERE id = ?`, [newAmt, newAmt, fid]);
+          trackUpdate('expenses', fid, { cardFeeRestored: feeRestored, reason: 'return-deleted' });
+        }
+      }
+    } catch (err) { console.error('[ledger] deleteReturn card-fee reverse failed:', err); }
+
     db.run(`DELETE FROM credit_notes WHERE sales_return_id = ?`, [id]);
     db.run(`DELETE FROM sales_return_lines WHERE return_id = ?`, [id]);
     db.run(`DELETE FROM sales_returns WHERE id = ?`, [id]);
@@ -811,6 +902,33 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     return get().returns
       .filter(r => r.customerId === customerId && r.status !== 'REJECTED')
       .reduce((sum, r) => sum + Math.max(0, (r.refundAmount || 0) - (r.refundPaidAmount || 0)), 0);
+  },
+
+  // Slice 5 — Karten-Zahlungs-Info der Original-Invoice fuer die Refund-UI:
+  //   cardPaid  = per Karte gezahlter Betrag der Invoice
+  //   brand     = Karten-Brand (normal/amex) fuer die Gebuehren-Rate
+  //   activeFee = aktuell aktive (nicht stornierte) CardFee der Invoice
+  getInvoiceCardInfo: (invoiceId) => {
+    try {
+      const pay = query(
+        `SELECT COALESCE(SUM(amount),0) AS paid, MAX(card_brand) AS brand
+           FROM payments WHERE invoice_id = ? AND method = 'card'`,
+        [invoiceId]
+      )[0];
+      const fee = query(
+        `SELECT COALESCE(SUM(amount),0) AS fee FROM expenses
+           WHERE category = 'CardFees' AND related_module = 'invoice'
+             AND related_entity_id = ? AND status != 'CANCELLED'`,
+        [invoiceId]
+      )[0];
+      return {
+        cardPaid: Number(pay?.paid || 0),
+        brand: normalizeCardBrand((pay?.brand as string) || undefined),
+        activeFee: Number(fee?.fee || 0),
+      };
+    } catch {
+      return { cardPaid: 0, brand: 'normal', activeFee: 0 };
+    }
   },
 
   getReturnedQtyForLine: (invoiceLineId) => {

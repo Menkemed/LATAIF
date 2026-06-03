@@ -479,8 +479,10 @@ export interface Repair {
   actualCost?: number;
   internalCost: number;
   chargeToCustomer?: number;
-  customerPaidFrom?: 'cash' | 'bank' | 'benefit' | null;
+  customerPaidFrom?: 'cash' | 'bank' | 'card' | 'benefit' | null;
   internalPaidFrom?: 'cash' | 'bank' | 'benefit' | null;
+  // v0.7.26 — Karten-Brand fuer die Repair-Kundenzahlung (Gebuehren-Rate normal/amex).
+  customerCardBrand?: 'normal' | 'amex' | null;
   // Plan §8 — Repair customer payment tracking
   customerPaidAmount?: number;
   customerPaymentStatus?: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
@@ -961,6 +963,7 @@ export interface Order {
   depositDate?: string;
   remainingAmount?: number;
   paymentMethod?: 'cash' | 'bank' | 'card' | 'benefit';
+  cardBrand?: 'normal' | 'amex';   // v0.7.26 — Deposit-Karten-Brand (nur bei paymentMethod 'card')
   fullyPaid?: boolean;
   supplierName?: string;
   supplierPrice?: number;

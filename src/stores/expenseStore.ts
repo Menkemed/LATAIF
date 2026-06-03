@@ -319,6 +319,9 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
   getTotalsByCategory: () => {
     const out: Partial<Record<ExpenseCategory, number>> = {};
     for (const e of get().expenses) {
+      // v0.7.26 — stornierte (reversierte) Expenses zaehlen NICHT in die Kategorie-
+      // Summen (z.B. reversierte CardFees). Konsistent mit totalPaid/totalUnpaid.
+      if (e.status === 'CANCELLED') continue;
       out[e.category] = (out[e.category] || 0) + e.amount;
     }
     return out as Record<ExpenseCategory, number>;
@@ -327,7 +330,8 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
   getMonthlyTotal: (year, month) => {
     const prefix = `${year}-${String(month).padStart(2, '0')}`;
     return get().expenses
-      .filter(e => (e.expenseDate || '').startsWith(prefix))
+      // v0.7.26 — stornierte Expenses raus aus dem Monats-Total.
+      .filter(e => e.status !== 'CANCELLED' && (e.expenseDate || '').startsWith(prefix))
       .reduce((s, e) => s + e.amount, 0);
   },
 }));

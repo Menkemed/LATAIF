@@ -1471,14 +1471,15 @@ export interface RepairPaymentLike {
                          // also UUID per Aufruf erzeugt; Reconciliation linkt via metadata.repairId.
   repairId: string;
   amount: number;
-  method: 'cash' | 'bank' | 'card';
+  method: 'cash' | 'bank' | 'card' | 'benefit';
   paidAt: string;
   customerId?: string;
 }
 
-function repairCashAccountFor(method: 'cash' | 'bank' | 'card'): LedgerAccount {
+function repairCashAccountFor(method: 'cash' | 'bank' | 'card' | 'benefit'): LedgerAccount {
   if (method === 'cash') return 'CASH';
   if (method === 'card') return 'CARD_CLEARING';
+  if (method === 'benefit') return 'BENEFIT';
   return 'BANK';
 }
 

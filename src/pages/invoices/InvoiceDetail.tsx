@@ -30,6 +30,8 @@ import logoUrl from '@/assets/logo.png';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
+import { computeCardFee } from '@/core/finance/card-fees';
+import { currentBranchId } from '@/core/db/helpers';
 import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
@@ -83,7 +85,7 @@ export function InvoiceDetail() {
 
   // Sales Return state
   const { returns: salesReturns, loadReturns: loadSalesReturns, createReturn: createSalesReturn, refundReturn: refundSalesReturn,
-    getInvoiceReturnSummary, recordRefundPayment, getReturnedQtyForLine } = useSalesReturnStore();
+    getInvoiceReturnSummary, recordRefundPayment, getReturnedQtyForLine, getInvoiceCardInfo } = useSalesReturnStore();
   const { creditNotes, loadCreditNotes } = useCreditNoteStore();
   const [showReturn, setShowReturn] = useState(false);
   const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number }>>({});
@@ -95,17 +97,21 @@ export function InvoiceDetail() {
   const [returnRefundNow, setReturnRefundNow] = useState(true); // Toggle: Refund sofort oder offen lassen
 
   // Plan §Returns Fix — Refund-Payment-Modal statt window.prompt()
-  const [refundPayModal, setRefundPayModal] = useState<{ returnId: string; outstanding: number } | null>(null);
+  const [refundPayModal, setRefundPayModal] = useState<{ returnId: string; outstanding: number; cardPaid: number; cardBrand: 'normal' | 'amex' } | null>(null);
   const [refundPayAmount, setRefundPayAmount] = useState('');
   const [refundPayMethod, setRefundPayMethod] = useState<'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other'>('bank');
+  // Slice 5 — bei cash/bank-Refund einer karten-gezahlten Invoice: Gebuehr abziehen (Kunde traegt)?
+  const [refundDeductFee, setRefundDeductFee] = useState(false);
 
   // Payment modal
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('bank_transfer');
+  // v0.7.26 — Karten-Brand (nur bei method === 'card'); steuert die Gebuehr (2,2% vs 2,5%).
+  const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
   // 2026-05-16 — Pending payment that will trigger Final → Number-Type-Dialog.
-  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ amount: number; method: PaymentMethod } | null>(null);
+  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ amount: number; method: PaymentMethod; cardBrand?: 'normal' | 'amex' } | null>(null);
 
   // Cancel confirm
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -418,10 +424,10 @@ export function InvoiceDetail() {
     // Wird die Invoice mit dieser Zahlung final? → Number-Type-Dialog vorher.
     const willGoFinal = invoice.status !== 'FINAL' && (invoice.paidAmount + amount) >= invoice.grossAmount - 0.005;
     if (willGoFinal) {
-      setPendingFinalPayment({ amount, method: paymentMethod });
+      setPendingFinalPayment({ amount, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined });
       return;
     }
-    recordPayment(id, amount, paymentMethod);
+    recordPayment(id, amount, paymentMethod, undefined, undefined, paymentMethod === 'card' ? cardBrand : undefined);
     setPaymentOpen(false);
     setPaymentAmount('');
     setPaymentMethod('bank_transfer');
@@ -431,7 +437,7 @@ export function InvoiceDetail() {
     const pending = pendingFinalPayment;
     setPendingFinalPayment(null);
     if (!id || !pending) return;
-    recordPayment(id, pending.amount, pending.method, undefined, specialMark);
+    recordPayment(id, pending.amount, pending.method, undefined, specialMark, pending.cardBrand);
     setPaymentOpen(false);
     setPaymentAmount('');
     setPaymentMethod('bank_transfer');
@@ -1226,9 +1232,12 @@ export function InvoiceDetail() {
                               // Industry-Standard: Cash-Refund max = was Customer tatsächlich gezahlt hat.
                               const customerPaid = invoice.paidAmount || 0;
                               const cappedDefault = Math.min(outstanding, customerPaid);
-                              setRefundPayModal({ returnId: r.id, outstanding: cappedDefault });
+                              // Slice 5 — Karten-Info der Original-Invoice fuer die 3-Wege-Refund-UI.
+                              const ci = getInvoiceCardInfo(r.invoiceId);
+                              setRefundPayModal({ returnId: r.id, outstanding: cappedDefault, cardPaid: ci.cardPaid, cardBrand: ci.brand });
                               setRefundPayAmount(cappedDefault.toFixed(3));
                               setRefundPayMethod((r.refundMethod as 'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other') || 'bank');
+                              setRefundDeductFee(false);
                             }}
                               className="cursor-pointer" style={{ padding: '4px 10px', fontSize: 11, border: '1px solid #7EAA6E', color: '#7EAA6E', borderRadius: 4, background: 'none' }}>
                               Record Refund Payment
@@ -1455,6 +1464,26 @@ export function InvoiceDetail() {
                 >{m.label}</button>
               ))}
             </div>
+            {/* v0.7.26 — Karten-Brand bei Card-Zahlung (Normal 2,2% / Amex 2,5%). */}
+            {paymentMethod === 'card' && (
+              <div className="flex gap-2" style={{ marginTop: 10 }}>
+                {([
+                  { id: 'normal', label: 'Normal' },
+                  { id: 'amex', label: 'Amex' },
+                ] as const).map(b => {
+                  const on = cardBrand === b.id;
+                  return (
+                    <button key={b.id} type="button" onClick={() => setCardBrand(b.id)}
+                      className="cursor-pointer"
+                      style={{ padding: '6px 14px', fontSize: 12, borderRadius: 6,
+                        border: on ? '1px solid #0F0F10' : '1px solid #D5D9DE',
+                        background: on ? 'rgba(15,15,16,0.08)' : 'transparent',
+                        color: on ? '#0F0F10' : '#6B7280',
+                      }}>{b.label}</button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
         <div className="flex justify-end gap-3">
@@ -1627,15 +1656,42 @@ export function InvoiceDetail() {
                 })}
               </div>
             </div>
+            {/* Slice 5 — 3-Wege-Karten-Refund: nur wenn die Original-Invoice per Karte gezahlt wurde. */}
+            {refundPayModal.cardPaid > 0 && (() => {
+              const baseAmt = Math.min(parseFloat(refundPayAmount) || 0, refundPayModal.cardPaid);
+              let fee = 0;
+              try { fee = computeCardFee(currentBranchId(), baseAmt, refundPayModal.cardBrand); } catch { fee = 0; }
+              if (refundPayMethod === 'card') {
+                return (
+                  <div style={{ padding: 10, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE', fontSize: 12, color: '#4B5563' }}>
+                    Original paid by {refundPayModal.cardBrand === 'amex' ? 'Amex' : 'card'}. The proportional processing fee{' '}
+                    <b><Bhd v={fee}/> BHD</b> is refunded too (original card payment reversed).
+                  </div>
+                );
+              }
+              if (refundPayMethod === 'cash' || refundPayMethod === 'bank') {
+                const net = Math.max(0, (parseFloat(refundPayAmount) || 0) - fee);
+                return (
+                  <label className="flex items-start gap-2" style={{ fontSize: 12, color: '#4B5563', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={refundDeductFee} onChange={e => setRefundDeductFee(e.target.checked)} style={{ marginTop: 2 }} />
+                    <span>Deduct card fee <b><Bhd v={fee}/> BHD</b> from refund (customer bears it).{' '}
+                      {refundDeductFee && <>Net paid out: <b><Bhd v={net}/> BHD</b></>}</span>
+                  </label>
+                );
+              }
+              return null;
+            })()}
             <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setRefundPayModal(null)}>Cancel</Button>
               <Button variant="primary" onClick={() => {
                 const amt = parseFloat(refundPayAmount);
                 if (!amt || amt <= 0) return;
                 const capped = Math.min(amt, refundPayModal.outstanding);
-                recordRefundPayment(refundPayModal.returnId, capped, refundPayMethod);
+                // deductCardFee nur bei cash/bank relevant; bei 'card' erstattet der Store die Gebuehr ohnehin.
+                recordRefundPayment(refundPayModal.returnId, capped, refundPayMethod, undefined, refundDeductFee);
                 setRefundPayModal(null);
                 setRefundPayAmount('');
+                setRefundDeductFee(false);
               }}>Record Payment</Button>
             </div>
           </div>

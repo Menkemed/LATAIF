@@ -137,8 +137,12 @@ export function cashflow(
   const card     = balanceOf('CARD_CLEARING', f);
   const refunds  = balanceOf('REFUNDS', f);
   const taxPaid  = balanceOf('TAX_PAID', f);
+  // v0.7.26 — Karten-Gebuehren werden direkt gegen CARD_CLEARING gebucht
+  // (DR EXPENSES_OPERATING / CR CARD_CLEARING), d.h. `card` ist hier BEREITS NETTO.
+  // Das dedizierte CARD_FEES-Konto bleibt in diesem Modell ungenutzt (=0). Deshalb
+  // darf cardFees NICHT erneut von netInflow abgezogen werden (sonst Doppel-Abzug).
   const cardFees = balanceOf('CARD_FEES', f);
-  const netInflow = cash + bank + card - refunds - cardFees - taxPaid;
+  const netInflow = cash + bank + card - refunds - taxPaid;
   return { cash, bank, card, refunds, taxPaid, cardFees, netInflow };
 }
 

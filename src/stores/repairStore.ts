@@ -18,12 +18,130 @@ import {
   hasReversalFor,
 } from '@/core/ledger/posting';
 import type { Expense } from '@/core/models/types';
+import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
+import { normalizeCardBrand } from '@/core/finance/card-fees';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
     console.error(`[ledger] ${label} failed:`, err);
   }
+}
+
+// ── SSOT: Repair-Kundenzahlung ↔ Ledger (Slice 4 / v0.7.26) ──────────────────
+// Bindet das Formular-Feld `customer_paid_from` (cash/bank/card/benefit) als
+// VOLLE Zahlung von `charge_to_customer` ans zentrale Ledger an — idempotent.
+// Modell: gesetztes customerPaidFrom = "Kunde hat den vollen Charge per dieser
+// Methode bezahlt" (binär; deckt sich mit der Analytics-Annahme).
+//
+// Idempotenz via gespeicherter sourceId (customer_payment_ledger_id):
+//   • reverse, wenn die zuvor gebuchte Zahlung wegfällt oder sich (Betrag/Methode/
+//     Brand) ändert — inkl. Karten-Gebühr.
+//   • (re)post die gewünschte Zahlung, wenn neu oder geändert.
+// Nicht gebucht (→ reverse-only) bei: scope OWN, charge<=0, kein customerPaidFrom,
+// ODER invoiceId gesetzt (dann ist die Invoice SSOT für das Geld — verhindert
+// Doppelzählung bei Repair→Invoice-Konvertierung).
+//
+// CR-Seite = REVENUE (kein VAT-Split — wie postRepairPayment bereits modelliert).
+// Karten-Zahlung bucht zusätzlich bookCardFee('repair'); Banking nettet die Gebühr.
+// prevBrand: der Karten-Brand VOR diesem Update (aus updateRepair-`before`-Snapshot).
+// Noetig, weil customer_card_brand vom Formular-Update bereits ueberschrieben wird —
+// sonst bliebe eine reine Brand-Aenderung (normal↔amex) unentdeckt und die Gebuehr
+// (2,2% vs 2,5%) wuerde nicht neu gebucht.
+function syncRepairCustomerPayment(repairId: string, prevBrand?: string | null): void {
+  const db = getDatabase();
+  let branchId: string; let userId: string;
+  try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+  try { userId = currentUserId(); } catch { userId = 'system'; }
+
+  const rows = query(
+    `SELECT customer_id, repair_number, repair_scope, invoice_id, charge_to_customer,
+            customer_paid_from, customer_card_brand,
+            customer_paid_amount, customer_payment_method, customer_payment_ledger_id
+       FROM repairs WHERE id = ?`,
+    [repairId]
+  );
+  if (!rows.length) return;
+  const r = rows[0];
+
+  const charge = Number(r.charge_to_customer) || 0;
+  const paidFrom = (r.customer_paid_from as string | null) || null;
+  const scope = (r.repair_scope as string | null) || null;
+  const invoiceId = (r.invoice_id as string | null) || null;
+  const VALID = ['cash', 'bank', 'card', 'benefit'];
+
+  // Gewünschter (Soll-)Zustand:
+  const eligible = !invoiceId && scope !== 'OWN' && charge > 0 && !!paidFrom && VALID.includes(paidFrom);
+  const desiredAmount = eligible ? charge : 0;
+  const desiredMethod = eligible ? (paidFrom as 'cash' | 'bank' | 'card' | 'benefit') : null;
+  const desiredBrand = desiredMethod === 'card'
+    ? normalizeCardBrand((r.customer_card_brand as string | null) || undefined)
+    : null;
+
+  // Gebuchter (Ist-)Zustand:
+  const postedId = (r.customer_payment_ledger_id as string | null) || null;
+  const postedAmount = Number(r.customer_paid_amount) || 0;
+  const postedMethod = (r.customer_payment_method as string | null) || null;
+  // Posted-Brand = der zuvor gebuchte Brand (prevBrand), NICHT die bereits ueberschriebene
+  // Spalte. Fallback auf die Spalte, falls kein prevBrand uebergeben wurde.
+  const postedBrand = normalizeCardBrand(
+    (prevBrand !== undefined ? prevBrand : (r.customer_card_brand as string | null)) || undefined
+  );
+
+  const changed = !!postedId && (
+    Math.abs(postedAmount - desiredAmount) > 0.0005 ||
+    postedMethod !== desiredMethod ||
+    (desiredMethod === 'card' && postedBrand !== desiredBrand)
+  );
+  const needReverse = !!postedId && (desiredAmount <= 0 || changed);
+  const needPost = desiredAmount > 0 && (!postedId || changed);
+  if (!needReverse && !needPost) return;
+
+  const now = new Date().toISOString();
+  const payDate = now.split('T')[0];
+
+  if (needReverse && postedId) {
+    safePost(`reverseRepairPayment(${postedId})`, () => {
+      if (hasLedgerEntries('REPAIR_PAYMENT', postedId) && !hasReversalFor('REPAIR_PAYMENT', postedId)) {
+        reverseSource('REPAIR_PAYMENT', postedId, now);
+      }
+    });
+    if (postedMethod === 'card') reverseCardFees('repair', repairId);
+    db.run(
+      `UPDATE repairs SET customer_payment_ledger_id = NULL, customer_paid_amount = 0,
+         customer_payment_status = 'UNPAID', updated_at = ? WHERE id = ?`,
+      [now, repairId]
+    );
+    trackUpdate('repairs', repairId, { repairPaymentReversed: postedId });
+  }
+
+  if (needPost && desiredMethod) {
+    const payId = uuid();
+    safePost(`postRepairPayment(${payId})`, () => {
+      if (hasLedgerEntries('REPAIR_PAYMENT', payId)) return;
+      postRepairPayment({
+        id: payId, repairId, amount: desiredAmount, method: desiredMethod,
+        paidAt: payDate, customerId: (r.customer_id as string) || undefined,
+      });
+    });
+    if (desiredMethod === 'card' && desiredBrand) {
+      bookCardFee({
+        branchId, userId, amount: desiredAmount, brand: desiredBrand,
+        relatedModule: 'repair', relatedEntityId: repairId,
+        label: (r.repair_number as string) || repairId.slice(0, 8), createdAt: now,
+      });
+    }
+    const status = desiredAmount >= charge - 0.005 ? 'PAID' : 'PARTIALLY_PAID';
+    db.run(
+      `UPDATE repairs SET customer_payment_ledger_id = ?, customer_paid_amount = ?,
+         customer_payment_method = ?, customer_payment_date = ?, customer_payment_status = ?,
+         updated_at = ? WHERE id = ?`,
+      [payId, desiredAmount, desiredMethod, payDate, status, now, repairId]
+    );
+    trackUpdate('repairs', repairId, { repairPaymentPosted: payId, amount: desiredAmount, method: desiredMethod });
+  }
+
+  saveDatabase();
 }
 
 // Hybrid-Margin-Bug: Bei Hybrid fließen BEIDE Kostenarten ein — der interne Anteil
@@ -419,7 +537,8 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     actualCost: row.actual_cost as number | undefined,
     internalCost: (row.internal_cost as number) || 0,
     chargeToCustomer: row.charge_to_customer as number | undefined,
-    customerPaidFrom: (row.customer_paid_from as 'cash' | 'bank' | null) ?? null,
+    customerPaidFrom: (row.customer_paid_from as 'cash' | 'bank' | 'card' | 'benefit' | null) ?? null,
+    customerCardBrand: (row.customer_card_brand as 'normal' | 'amex' | null) ?? null,
     internalPaidFrom: (row.internal_paid_from as 'cash' | 'bank' | null) ?? null,
     customerPaidAmount: (row.customer_paid_amount as number) || 0,
     customerPaymentStatus: (row.customer_payment_status as 'UNPAID' | 'PARTIALLY_PAID' | 'PAID') || 'UNPAID',
@@ -580,6 +699,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       estimatedCost: 'estimated_cost', actualCost: 'actual_cost',
       internalCost: 'internal_cost', chargeToCustomer: 'charge_to_customer',
       customerPaidFrom: 'customer_paid_from', internalPaidFrom: 'internal_paid_from',
+      customerCardBrand: 'customer_card_brand',
       margin: 'margin', status: 'status',
       receivedAt: 'received_at', diagnosedAt: 'diagnosed_at',
       startedAt: 'started_at', completedAt: 'completed_at',
@@ -620,6 +740,12 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     if (supplierWasMissing && supplierNowSet && isExternalOrHybrid) {
       reconcileRepairSupplier(id, data.workshopSupplierId as string);
     }
+
+    // Slice 4 — Kundenzahlung ans Ledger synchronisieren (idempotent). Deckt auch
+    // die Repair→Invoice-Konvertierung ab: updateRepair({invoiceId}) → sync sieht
+    // invoiceId gesetzt → reversiert die Repair-Buchung (Invoice wird SSOT).
+    // before?.customerCardBrand = Brand VOR dem Update (Brand-Aenderung erkennen).
+    syncRepairCustomerPayment(id, before?.customerCardBrand ?? null);
 
     get().loadRepairs();
   },
@@ -895,9 +1021,27 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
        WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`,
       [id]
     );
+
+    // Slice 4 — die Repair-KUNDENZAHLUNG (REPAIR_PAYMENT-Quelle, KEIN Expense) vor
+    // dem Loeschen erfassen, um sie danach zu reversieren. Die zugehoerige Karten-
+    // Gebuehr (CardFees-Expense) wird bereits von der Expense-Reverse-Schleife unten
+    // mit-reversiert — hier NICHT doppelt anfassen.
+    const payRow = query(
+      `SELECT customer_payment_ledger_id FROM repairs WHERE id = ?`, [id]
+    );
+    const payLedgerId = (payRow[0]?.customer_payment_ledger_id as string | null) || null;
+
     db.run(`DELETE FROM repairs WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('repairs', id);
+
+    if (payLedgerId) {
+      safePost(`reverseRepairPayment(${payLedgerId}) [repair-delete]`, () => {
+        if (hasLedgerEntries('REPAIR_PAYMENT', payLedgerId) && !hasReversalFor('REPAIR_PAYMENT', payLedgerId)) {
+          reverseSource('REPAIR_PAYMENT', payLedgerId, new Date().toISOString());
+        }
+      });
+    }
 
     // Reverse fuer jeden zugehoerigen Workshop-Expense — sonst bleibt A/P-Buchung
     // im Ledger trotz geloeschtem Repair stehen (Supplier-Saldo zu hoch).

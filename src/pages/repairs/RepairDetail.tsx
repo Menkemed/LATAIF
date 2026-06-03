@@ -431,6 +431,8 @@ export function RepairDetail() {
       internalCost: effectiveInternal,
       chargeToCustomer: form.chargeToCustomer,
       customerPaidFrom: form.customerPaidFrom ?? null,
+      // v0.7.26 — Brand nur bei Card relevant; sonst NULL (steuert die Gebuehren-Rate).
+      customerCardBrand: form.customerPaidFrom === 'card' ? (form.customerCardBrand ?? 'normal') : null,
       internalPaidFrom: form.internalPaidFrom ?? null,
       margin: computedMargin,
       repairType: form.repairType,
@@ -795,7 +797,7 @@ export function RepairDetail() {
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>CUSTOMER PAID WITH</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {([null, 'cash', 'bank', 'benefit'] as const).map(o => {
+                      {([null, 'cash', 'bank', 'card', 'benefit'] as const).map(o => {
                         const active = (form.customerPaidFrom ?? null) === o;
                         return (
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, customerPaidFrom: o })}
@@ -804,10 +806,27 @@ export function RepairDetail() {
                               border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                               color: active ? '#0F0F10' : '#6B7280',
                               background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                            }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : o === 'bank' ? 'Bank' : 'Benefit'}</button>
+                            }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : o === 'bank' ? 'Bank' : o === 'card' ? 'Card' : 'Benefit'}</button>
                         );
                       })}
                     </div>
+                    {/* v0.7.26 — Karten-Brand bestimmt die Gebuehren-Rate (Normal 2,2% / Amex 2,5%). */}
+                    {form.customerPaidFrom === 'card' && (
+                      <div className="flex gap-2" style={{ marginTop: 8 }}>
+                        {(['normal', 'amex'] as const).map(b => {
+                          const active = (form.customerCardBrand ?? 'normal') === b;
+                          return (
+                            <button key={b} type="button" onClick={() => setForm({ ...form, customerCardBrand: b })}
+                              className="cursor-pointer rounded transition-all"
+                              style={{ padding: '6px 12px', fontSize: 11,
+                                border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                                color: active ? '#0F0F10' : '#6B7280',
+                                background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                              }}>{b === 'normal' ? 'Normal (Visa / MC)' : 'Amex'}</button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -839,7 +858,14 @@ export function RepairDetail() {
                   {repair.customerPaidFrom && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">CUSTOMER PAID WITH</span>
-                      <span style={{ fontSize: 13, color: '#4B5563' }}>{repair.customerPaidFrom === 'cash' ? 'Cash' : 'Bank'}</span>
+                      <span style={{ fontSize: 13, color: '#4B5563' }}>{
+                        repair.customerPaidFrom === 'cash' ? 'Cash'
+                        : repair.customerPaidFrom === 'bank' ? 'Bank'
+                        : repair.customerPaidFrom === 'benefit' ? 'Benefit'
+                        : repair.customerPaidFrom === 'card'
+                          ? `Card (${repair.customerCardBrand === 'amex' ? 'Amex' : 'Normal'})`
+                          : repair.customerPaidFrom
+                      }</span>
                     </div>
                   )}
                   {repair.internalPaidFrom && (

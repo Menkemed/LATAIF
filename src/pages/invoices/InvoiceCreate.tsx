@@ -81,6 +81,8 @@ export function InvoiceCreate() {
   const [lineTotalDrafts, setLineTotalDrafts] = useState<Record<number, string>>({});
   const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
   const [paymentMethod, setPaymentMethod] = useState<Method>('cash');
+  // v0.7.26 — Karten-Brand (nur relevant wenn method === 'card'); steuert die Gebuehr (2,2% vs 2,5%).
+  const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
   const [paidAmount, setPaidAmount] = useState<number>(0);
   const [notes, setNotes] = useState('');
   const [staffId, setStaffId] = useState<string>('');
@@ -275,7 +277,7 @@ export function InvoiceCreate() {
       rewriteInvoiceLines(editInvoice.id, payload);
       const delta = paidAmount - originalPaid;
       if (delta > 0.001) {
-        recordPayment(editInvoice.id, delta, paymentMethod, undefined, specialMark);
+        recordPayment(editInvoice.id, delta, paymentMethod, undefined, specialMark, paymentMethod === 'card' ? cardBrand : undefined);
       }
       if (thenPrint) {
         navigate(`/invoices/${editInvoice.id}?print=1`);
@@ -289,7 +291,7 @@ export function InvoiceCreate() {
     if (!inv) { setError('Failed to create invoice'); return; }
 
     if (paidAmount > 0) {
-      recordPayment(inv.id, paidAmount, paymentMethod, undefined, specialMark);
+      recordPayment(inv.id, paidAmount, paymentMethod, undefined, specialMark, paymentMethod === 'card' ? cardBrand : undefined);
     }
 
     if (thenPrint) {
@@ -625,6 +627,26 @@ export function InvoiceCreate() {
                     );
                   })}
                 </div>
+                {/* v0.7.26 — Karten-Brand: Normal (Visa/MC/Debit) 2,2% vs Amex 2,5%. */}
+                {paymentMethod === 'card' && (
+                  <div className="flex gap-2" style={{ marginTop: 10 }}>
+                    {([
+                      { id: 'normal', label: 'Normal' },
+                      { id: 'amex', label: 'Amex' },
+                    ] as const).map(b => {
+                      const on = cardBrand === b.id;
+                      return (
+                        <button key={b.id} type="button" onClick={() => setCardBrand(b.id)}
+                          className="cursor-pointer rounded"
+                          style={{ padding: '6px 14px', fontSize: 12,
+                            border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
+                            color: on ? '#0F0F10' : '#6B7280',
+                            background: on ? 'rgba(15,15,16,0.06)' : 'transparent',
+                          }}>{b.label}</button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <Input label="PAID AMOUNT (BHD)" type="number" step="0.001"
                 value={paidAmount || ''} onChange={e => setPaidAmount(parseFloat(e.target.value) || 0)} />

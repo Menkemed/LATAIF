@@ -298,7 +298,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
               expense_date, description, expense_number, category, created_at
        FROM expenses
        WHERE branch_id = ? AND status != 'CANCELLED' AND COALESCE(paid_amount, 0) > 0
-         AND NOT (category = 'CardFees' AND related_module = 'invoice')`,
+         AND NOT (category = 'CardFees' AND related_module IN ('invoice', 'order', 'repair'))`,
       [branchId]
     );
     for (const e of expenses) {
@@ -496,9 +496,17 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     }
 
     // Plan §8 #9 — Order-Payments (Anzahlungen + Zahlungen vor Invoice-Erstellung)
+    // v0.7.26 — Karten-Anzahlungen NETTO zeigen (Brutto − gebuchte CardFee), analog
+    // zu den Invoice-Zahlungen. Match ueber CardFees/related_module='order' + den
+    // identischen created_at-Timestamp (bookCardFee schreibt denselben `now`).
     const orderPay = safeQuery('order_payments',
       `SELECT op.id, op.amount, op.method, op.paid_at, op.order_id, o.order_number,
-              COALESCE(op.converted_to_invoice, 0) AS converted, op.created_at AS created_at
+              COALESCE(op.converted_to_invoice, 0) AS converted, op.created_at AS created_at,
+              (SELECT COALESCE(SUM(e.amount), 0) FROM expenses e
+                 WHERE e.category = 'CardFees' AND e.related_module = 'order'
+                   AND e.related_entity_id = op.order_id
+                   AND e.created_at = op.created_at
+                   AND e.status != 'CANCELLED') AS card_fee
          FROM order_payments op JOIN orders o ON o.id = op.order_id
          WHERE o.branch_id = ?`,
       [branchId]
@@ -507,24 +515,30 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       // Bereits in Invoice konvertiert? Dann dort schon gezählt — skip.
       if (Number(p.converted) === 1) continue;
       const date = (p.paid_at as string) || '';
+      const method = (p.method as string) || '';
+      const gross = (p.amount as number) || 0;
+      const fee = method.toLowerCase() === 'card' ? ((p.card_fee as number) || 0) : 0;
       txs.push({
         id: `opay-${p.id}`,
         date,
         createdAt: (p.created_at as string) || date,
         type: 'SALES_IN',
-        account: accountFor(p.method as string),
-        amount: (p.amount as number) || 0,
+        account: accountFor(method),
+        amount: gross - fee,
         flow: 'in',
         relatedModule: 'order',
         relatedEntityId: p.order_id as string,
-        description: `Order payment · ${p.order_number || ''} · ${p.method}`,
+        description: `Order payment · ${p.order_number || ''} · ${method}${fee > 0 ? ` (net of ${fee.toFixed(3)} card fee)` : ''}`,
       });
     }
 
     // Plan §8 #9 — Repair Customer-Payments (direkt auf repair.customer_paid_amount).
     // Abzüglich bereits in einer verknüpften Invoice gezählter Beträge (invoice_id gesetzt & FINAL).
     const repairPay = safeQuery('repair_payments',
-      `SELECT r.id, r.repair_number, r.customer_paid_amount, r.customer_payment_method, r.customer_payment_date, r.invoice_id, r.updated_at
+      `SELECT r.id, r.repair_number, r.customer_paid_amount, r.customer_payment_method, r.customer_payment_date, r.invoice_id, r.updated_at,
+         (SELECT COALESCE(SUM(e.amount),0) FROM expenses e
+            WHERE e.category = 'CardFees' AND e.related_module = 'repair'
+              AND e.related_entity_id = r.id AND e.status != 'CANCELLED') AS card_fee
          FROM repairs r WHERE r.branch_id = ? AND r.customer_paid_amount > 0`,
       [branchId]
     );
@@ -532,17 +546,21 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
       // Wenn an eine Invoice gekoppelt → Zahlung läuft via invoice.payments (doppelt vermeiden).
       if (r.invoice_id) continue;
       const date = (r.customer_payment_date as string) || '';
+      // v0.7.26 — Karten-Zahlung netto: gebuchte CardFee abziehen (Processor zieht sofort ab).
+      const method = (r.customer_payment_method as string) || '';
+      const gross = (r.customer_paid_amount as number) || 0;
+      const fee = method.toLowerCase() === 'card' ? ((r.card_fee as number) || 0) : 0;
       txs.push({
         id: `rpay-${r.id}`,
         date,
         createdAt: (r.updated_at as string) || date,
         type: 'SALES_IN',
-        account: accountFor(r.customer_payment_method as string),
-        amount: (r.customer_paid_amount as number) || 0,
+        account: accountFor(method),
+        amount: gross - fee,
         flow: 'in',
         relatedModule: 'repair',
         relatedEntityId: r.id as string,
-        description: `Repair charge · ${r.repair_number || ''}`,
+        description: `Repair charge · ${r.repair_number || ''}${fee > 0 ? ` (net of ${fee.toFixed(3)} card fee)` : ''}`,
       });
     }
 

@@ -129,6 +129,10 @@ function runMigrations(database: Database): void {
     `INSERT OR IGNORE INTO settings (branch_id, key, value, category, updated_at)
      SELECT 'branch-main', 'finance.card_fee_rate', '2.2', 'finance', datetime('now')
      WHERE NOT EXISTS (SELECT 1 FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.card_fee_rate')`,
+    // v0.7.26 — zweite Karten-Rate fuer Amex (American Express), default 2.5%.
+    `INSERT OR IGNORE INTO settings (branch_id, key, value, category, updated_at)
+     SELECT 'branch-main', 'finance.card_fee_rate_amex', '2.5', 'finance', datetime('now')
+     WHERE NOT EXISTS (SELECT 1 FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.card_fee_rate_amex')`,
     `INSERT OR IGNORE INTO settings (branch_id, key, value, category, updated_at)
      SELECT 'branch-main', 'finance.fiscal_year_start_month', '1', 'finance', datetime('now')
      WHERE NOT EXISTS (SELECT 1 FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.fiscal_year_start_month')`,
@@ -184,6 +188,13 @@ function runMigrations(database: Database): void {
      WHERE NOT EXISTS (SELECT 1 FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.opening_bank')`,
     `ALTER TABLE repairs ADD COLUMN customer_paid_from TEXT`,
     `ALTER TABLE repairs ADD COLUMN internal_paid_from TEXT`,
+    // v0.7.26 — Repair-Kundenzahlung sauber ans Ledger anbinden (Slice 4):
+    //   customer_payment_ledger_id = sourceId der aktiven REPAIR_PAYMENT-Buchung
+    //     (fuer idempotentes reverse/repost bei Edit/Storno/Convert).
+    //   customer_card_brand = Karten-Brand (normal/amex) fuer die Gebuehren-Rate
+    //     beim (Re-)Posten einer Karten-Zahlung.
+    `ALTER TABLE repairs ADD COLUMN customer_payment_ledger_id TEXT`,
+    `ALTER TABLE repairs ADD COLUMN customer_card_brand TEXT`,
     `ALTER TABLE agent_transfers ADD COLUMN commission_type TEXT DEFAULT 'percent'`,
     `ALTER TABLE agent_transfers ADD COLUMN commission_value REAL`,
     `ALTER TABLE agent_transfers ADD COLUMN commission_paid_from TEXT`,
@@ -1561,6 +1572,11 @@ function runMigrations(database: Database): void {
     // altes Verhalten) vs. 'split'; excess_split_pct = Shop-Anteil am Überschuss.
     `ALTER TABLE agent_transfers ADD COLUMN settlement_model TEXT DEFAULT 'full'`,
     `ALTER TABLE agent_transfers ADD COLUMN excess_split_pct INTEGER`,
+    // v0.7.26 — Karten-Brand (normal/amex) je Invoice-Zahlung. Methode bleibt 'card';
+    // nur die Gebuehren-Rate unterscheidet sich (normal 2,2% / amex 2,5%).
+    `ALTER TABLE payments ADD COLUMN card_brand TEXT`,
+    // v0.7.26 — Karten-Brand auf Order-Zahlungen (Deposit + Folgezahlungen).
+    `ALTER TABLE order_payments ADD COLUMN card_brand TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

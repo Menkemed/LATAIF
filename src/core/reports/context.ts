@@ -195,12 +195,20 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     else if (m === 'bank_transfer') bankReceived += amt;
     else if (m === 'card') cardReceived += amt;
   }
-  const cardFeeRateRow = firstRow(
-    `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.card_fee_rate'`,
-    [branchId]
+  // v0.7.26 — Brand-genaue Karten-Gebuehr: TATSAECHLICH gebuchte CardFees (Amex 2,5%
+  // / Normal 2,2%) statt Pauschal-Schaetzung. Periodengenau ueber die zugehoerige
+  // Zahlung (gemeinsamer created_at-Timestamp + invoice_id) auf received_at gefiltert,
+  // damit die Gebuehr in derselben Periode wie ihr Brutto liegt. CANCELLED raus.
+  const cardFeeRow = firstRow(
+    `SELECT COALESCE(SUM(e.amount), 0) AS fee
+       FROM expenses e
+       JOIN payments p ON p.created_at = e.created_at AND p.invoice_id = e.related_entity_id
+      WHERE e.branch_id = ? AND e.category = 'CardFees' AND e.status != 'CANCELLED'
+        AND e.related_module = 'invoice'
+        AND p.received_at >= ? AND p.received_at < ?`,
+    [branchId, startISO, endISO]
   );
-  const cardFeeRate = parseFloat((cardFeeRateRow?.value as string) || '2.2') || 2.2;
-  const cardFeesLost = Math.round(cardReceived * cardFeeRate) / 100;
+  const cardFeesLost = Math.round(num(cardFeeRow, 'fee') * 1000) / 1000;
 
   const taxPaidRow = firstRow(
     `SELECT COALESCE(SUM(amount), 0) AS total

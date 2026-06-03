@@ -473,12 +473,6 @@ export function AnalyticsPage() {
     const outstandingPayments = openValue;
 
     // ── Cashflow: Cash vs Bank vs Card (with fee deduction) ──
-    const cardFeeRow = qry(
-      `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.card_fee_rate'`,
-      [branchId]
-    );
-    const cardFeeRate = parseFloat((cardFeeRow[0]?.value as string) || '2.2') || 2.2;
-
     const payByMethod = qry(
       `SELECT method, COALESCE(SUM(amount),0) as total
        FROM payments WHERE branch_id = ? GROUP BY method`,
@@ -494,8 +488,21 @@ export function AnalyticsPage() {
       else if (m === 'benefit') benefitReceived += amt;
       else otherReceived += amt; // legacy 'crypto' etc.
     }
-    const cardFeeLost = Math.round(cardReceived * cardFeeRate / 100 * 100) / 100;
+    // v0.7.26 — Brand-genaue Karten-Gebuehr: die TATSAECHLICH gebuchten CardFees
+    // (Amex 2,5% / Normal 2,2%) summieren statt pauschal mit einer Einzelrate zu
+    // schaetzen. So stimmt Analytics exakt mit Ledger + Banking ueberein (CANCELLED
+    // ausgeschlossen). Karten-Zahlungen vor dem Feature haben keine gebuchte Gebuehr
+    // -> 0 (korrekt; real wurde keine gebucht, Banking nettet sie ebenfalls nicht).
+    const invCardFeeRow = qry(
+      `SELECT COALESCE(SUM(amount),0) as fee FROM expenses
+       WHERE branch_id = ? AND category = 'CardFees' AND status != 'CANCELLED'
+         AND related_module = 'invoice'`,
+      [branchId]
+    );
+    const cardFeeLost = Math.round(num(invCardFeeRow[0] || {}, 'fee') * 1000) / 1000;
     const cardNetToBank = cardReceived - cardFeeLost;
+    // Effektive (gemischte) Rate nur fuer die Anzeige.
+    const cardFeeRate = cardReceived > 0 ? Math.round((cardFeeLost / cardReceived) * 10000) / 100 : 0;
     // Quarterly tax paid (outflow)
     const taxPaidRows = qry(
       `SELECT year, quarter, amount, source FROM tax_payments WHERE branch_id = ?`,
@@ -570,17 +577,34 @@ export function AnalyticsPage() {
     // Repair cashflow
     let repairCashIn = 0, repairBankIn = 0, repairCashOut = 0, repairBankOut = 0;
     try {
+      // v0.7.26 — invoice_id IS NULL: konvertierte Repairs laufen ueber invoice.payments
+      // (Doppelzaehlung vermeiden, deckt sich mit bankingStore `if (r.invoice_id) continue`).
       const rpIn = qry(
         `SELECT customer_paid_from, COALESCE(SUM(charge_to_customer),0) as total
          FROM repairs WHERE branch_id = ? AND status IN ('ready','picked_up')
-         AND customer_paid_from IS NOT NULL AND charge_to_customer > 0 GROUP BY customer_paid_from`,
+         AND customer_paid_from IS NOT NULL AND charge_to_customer > 0
+         AND invoice_id IS NULL GROUP BY customer_paid_from`,
         [branchId]
       );
       for (const r of rpIn) {
         const t = (r.total as number) || 0;
         if (r.customer_paid_from === 'cash') repairCashIn += t;
         else if (r.customer_paid_from === 'bank') repairBankIn += t;
+        else if (r.customer_paid_from === 'card') repairBankIn += t; // brutto; Gebuehr unten netto abziehen
+        // 'benefit' → BENEFIT-Konto (separater Geldtopf, in dieser cash/bank-Cashflow-Sicht nicht gefuehrt)
       }
+      // v0.7.26 — Repair-Karten-Gebuehr brand-genau aus den ECHTEN CardFees abziehen
+      // (gleiche Scope wie rpIn: ready/picked_up, nicht invoice-gekoppelt). Karte settled
+      // netto an die Bank.
+      const repairCardFeeRow = qry(
+        `SELECT COALESCE(SUM(e.amount),0) as fee FROM expenses e
+         JOIN repairs r ON r.id = e.related_entity_id
+         WHERE e.branch_id = ? AND e.category = 'CardFees' AND e.status != 'CANCELLED'
+           AND e.related_module = 'repair' AND r.invoice_id IS NULL
+           AND r.status IN ('ready','picked_up')`,
+        [branchId]
+      );
+      repairBankIn -= Math.round(num(repairCardFeeRow[0] || {}, 'fee') * 1000) / 1000;
       const rpOut = qry(
         `SELECT internal_paid_from, COALESCE(SUM(internal_cost),0) as total
          FROM repairs WHERE branch_id = ? AND internal_paid_from IS NOT NULL
@@ -658,8 +682,20 @@ export function AnalyticsPage() {
         const m = (r.method as string) || 'cash';
         if (m === 'cash') orderDepositCash += t;
         else if (m === 'bank_transfer') orderDepositBank += t;
-        else if (m === 'card') orderDepositBank += t * (1 - cardFeeRate / 100);
+        else if (m === 'card') orderDepositBank += t; // brutto; Gebuehr unten brand-genau abziehen
       }
+      // v0.7.26 — Karten-Gebuehr der noch NICHT konvertierten Order-Anzahlungen
+      // brand-genau aus den TATSAECHLICH gebuchten CardFees abziehen. Konvertierte
+      // Anzahlungen sind als CardFee CANCELLED (status-Filter), cancelled-Orders via
+      // Join raus -> Scope deckt sich mit der order_payments-Query oben.
+      const ordCardFeeRow = qry(
+        `SELECT COALESCE(SUM(e.amount),0) as fee FROM expenses e
+         JOIN orders o ON o.id = e.related_entity_id
+         WHERE e.branch_id = ? AND e.category = 'CardFees' AND e.status != 'CANCELLED'
+           AND e.related_module = 'order' AND o.status != 'cancelled'`,
+        [branchId]
+      );
+      orderDepositBank -= Math.round(num(ordCardFeeRow[0] || {}, 'fee') * 1000) / 1000;
     } catch { /* ignore */ }
 
     // Phase 1 — Purchase payments (Plan §Purchases §8), Cash/Bank ↓

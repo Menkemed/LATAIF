@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackDelete, trackPayment } from '@/core/sync/track';
 import { useOrderStore } from '@/stores/orderStore';
 import {
@@ -10,6 +10,8 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
+import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -56,6 +58,7 @@ export interface OrderPayment {
   amount: number;
   paidAt: string;
   method?: string;
+  cardBrand?: CardBrand;   // v0.7.26 — nur bei method === 'card'
   reference?: string;
   note?: string;
   createdAt: string;
@@ -81,6 +84,7 @@ function rowToPayment(r: Record<string, unknown>): OrderPayment {
     amount: (r.amount as number) || 0,
     paidAt: r.paid_at as string,
     method: r.method as string | undefined,
+    cardBrand: (r.card_brand as CardBrand | null) || undefined,
     reference: r.reference as string | undefined,
     note: r.note as string | undefined,
     createdAt: r.created_at as string,
@@ -109,10 +113,12 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     const db = getDatabase();
     const id = uuid();
     const now = new Date().toISOString();
+    // v0.7.26 — Karten-Brand nur bei method 'card'; steuert die Gebuehren-Rate.
+    const brand: CardBrand | null = p.method === 'card' ? normalizeCardBrand(p.cardBrand) : null;
     db.run(
-      `INSERT INTO order_payments (id, order_id, amount, paid_at, method, reference, note, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, p.orderId, p.amount, p.paidAt, p.method || null, p.reference || null, p.note || null, now]
+      `INSERT INTO order_payments (id, order_id, amount, paid_at, method, card_brand, reference, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, p.orderId, p.amount, p.paidAt, p.method || null, brand, p.reference || null, p.note || null, now]
     );
     reconcileOrderFromPayments(p.orderId);
     saveDatabase();
@@ -133,11 +139,22 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
       );
     });
 
+    // v0.7.26 — Karten-Gebuehr buchen (brand-genau). created_at = now matcht den
+    // order_payments-Insert → bankingStore nettet die Order-Bank-Zeile netto.
+    if (brand) {
+      let branchId = 'branch-main', userId = 'user-owner';
+      try { branchId = currentBranchId(); userId = currentUserId(); } catch { /* defaults */ }
+      const orderNumber = (query('SELECT order_number FROM orders WHERE id = ?', [p.orderId])[0]?.order_number as string) || p.orderId.slice(0, 8);
+      bookCardFee({ branchId, userId, amount: p.amount, brand, relatedModule: 'order', relatedEntityId: p.orderId, label: orderNumber, createdAt: now });
+    }
+
     return { id, createdAt: now, ...p };
   },
 
   deletePayment: (id, orderId) => {
     const db = getDatabase();
+    // v0.7.26 — method + created_at merken (fuer evtl. CardFee-Reversal nach Delete).
+    const before = query('SELECT method, created_at FROM order_payments WHERE id = ?', [id])[0];
     db.run(`DELETE FROM order_payments WHERE id = ?`, [id]);
     reconcileOrderFromPayments(orderId);
     saveDatabase();
@@ -151,6 +168,11 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
       if (hasReversalFor('ORDER_PAYMENT', id)) return;
       postOrderPaymentReversed(id);
     });
+
+    // v0.7.26 — War es eine Karten-Zahlung, die zugehoerige CardFee mit-reversen.
+    if (before && (before.method as string) === 'card' && before.created_at) {
+      reverseCardFees('order', orderId, before.created_at as string);
+    }
   },
 
   markConvertedToInvoice: (orderId) => {
@@ -167,6 +189,10 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
         postOrderPaymentReversed(opId);
       });
     }
+    // v0.7.26 — Order-CardFees reversen: die Gebuehr wandert beim Convert auf die
+    // Invoice (carryOver ruft recordPayment(card, brand) → frische CardFee dort).
+    // Keine Doppelbuchung; Banking-Netting bleibt korrekt.
+    reverseCardFees('order', orderId);
     db.run(`UPDATE order_payments SET converted_to_invoice = 1 WHERE order_id = ?`, [orderId]);
     saveDatabase();
   },

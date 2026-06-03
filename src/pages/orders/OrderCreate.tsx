@@ -142,6 +142,8 @@ export function OrderCreate() {
   const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
   const [depositAmount, setDepositAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'card' | 'benefit'>('cash');
+  // v0.7.26 — Deposit-Karten-Brand (nur relevant bei paymentMethod 'card').
+  const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
   const [fullyPaid, setFullyPaid] = useState(false);
   const [expectedDelivery, setExpectedDelivery] = useState('');
   const [status, setStatus] = useState<OrderStatus>('pending');
@@ -284,6 +286,7 @@ export function OrderCreate() {
     setLines([{ mode: 'existing', description: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
     setDepositAmount(0);
     setPaymentMethod('cash');
+    setCardBrand('normal');
     setFullyPaid(false);
     setExpectedDelivery('');
     setStatus('pending');
@@ -566,6 +569,7 @@ export function OrderCreate() {
       depositPaid: depositAmount > 0 || fullyPaid,
       depositDate: depositAmount > 0 || fullyPaid ? new Date().toISOString().split('T')[0] : undefined,
       paymentMethod,
+      cardBrand: paymentMethod === 'card' ? cardBrand : undefined,
       fullyPaid,
       expectedDelivery: expectedDelivery || undefined,
       status,
@@ -1325,6 +1329,23 @@ export function OrderCreate() {
                     );
                   })}
                 </div>
+                {/* v0.7.26 — Karten-Brand bei Card-Anzahlung (Normal 2,2% / Amex 2,5%). */}
+                {paymentMethod === 'card' && (
+                  <div className="flex gap-2" style={{ marginTop: 10 }}>
+                    {(['normal', 'amex'] as const).map(b => {
+                      const on = cardBrand === b;
+                      return (
+                        <button key={b} type="button" onClick={() => setCardBrand(b)}
+                          className="cursor-pointer rounded"
+                          style={{ padding: '6px 14px', fontSize: 12,
+                            border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
+                            color: on ? '#0F0F10' : '#6B7280',
+                            background: on ? 'rgba(15,15,16,0.06)' : 'transparent',
+                          }}>{b === 'amex' ? 'Amex' : 'Normal'}</button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
             <div style={{ marginTop: 16 }}>

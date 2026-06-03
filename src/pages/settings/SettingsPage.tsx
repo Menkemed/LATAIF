@@ -203,6 +203,7 @@ function TaxTab() {
   const [marginEnabled, setMarginEnabled] = useState(true);
   const [defaultScheme, setDefaultScheme] = useState('');
   const [cardFeeRate, setCardFeeRate] = useState('');
+  const [amexFeeRate, setAmexFeeRate] = useState('');
   const [fyStartMonth, setFyStartMonth] = useState('');
   const [openingCash, setOpeningCash] = useState('');
   const [openingBank, setOpeningBank] = useState('');
@@ -230,6 +231,7 @@ function TaxTab() {
     setMarginEnabled((getSetting(branchId, 'tax.margin_enabled') || '1') !== '0');
     setDefaultScheme(getSetting(branchId, 'tax.default_scheme') || 'MARGIN');
     setCardFeeRate(getSetting(branchId, 'finance.card_fee_rate') || '2.2');
+    setAmexFeeRate(getSetting(branchId, 'finance.card_fee_rate_amex') || '2.5');
     setFyStartMonth(getSetting(branchId, 'finance.fiscal_year_start_month') || '1');
     setOpeningCash(getSetting(branchId, 'finance.opening_cash') || '0');
     setOpeningBank(getSetting(branchId, 'finance.opening_bank') || '0');
@@ -251,6 +253,7 @@ function TaxTab() {
     setSetting(branchId, 'tax.margin_enabled', marginEnabled ? '1' : '0', 'tax');
     setSetting(branchId, 'tax.default_scheme', defaultScheme, 'tax');
     setSetting(branchId, 'finance.card_fee_rate', cardFeeRate, 'finance');
+    setSetting(branchId, 'finance.card_fee_rate_amex', amexFeeRate, 'finance');
     setSetting(branchId, 'finance.fiscal_year_start_month', fyStartMonth, 'finance');
     setSetting(branchId, 'payment.default_inflow_account', defaultInflowAccount, 'payment');
     setSetting(branchId, 'payment.default_outflow_account', defaultOutflowAccount, 'payment');
@@ -321,9 +324,18 @@ function TaxTab() {
           </FieldRow>
           <FieldRow label="Card Processing Fee">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, color: '#6B7280', minWidth: 150 }}>Normal (Visa / MC / Debit)</span>
               <Input
                 type="number" step="0.01" value={cardFeeRate} onChange={e => setCardFeeRate(e.target.value)}
-                placeholder="2.2" style={{ maxWidth: 100 }}
+                placeholder="2.2" style={{ maxWidth: 90 }}
+              />
+              <span style={{ fontSize: 13, color: '#6B7280' }}>%</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+              <span style={{ fontSize: 12, color: '#6B7280', minWidth: 150 }}>Amex (American Express)</span>
+              <Input
+                type="number" step="0.01" value={amexFeeRate} onChange={e => setAmexFeeRate(e.target.value)}
+                placeholder="2.5" style={{ maxWidth: 90 }}
               />
               <span style={{ fontSize: 13, color: '#6B7280' }}>% deducted by bank on every card payment</span>
             </div>
