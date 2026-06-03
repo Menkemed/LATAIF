@@ -1,4 +1,6 @@
 mod sync;
+#[cfg(windows)]
+mod printing;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -39,6 +41,21 @@ async fn discover_lan_servers(timeout_secs: Option<u64>) -> Result<Vec<String>, 
     Ok(sync::discover_lan_servers(timeout_secs.unwrap_or(3)).await)
 }
 
+// Raw-Druck von ZPL an einen benannten Drucker (Zebra-Tags). Windows-only;
+// auf anderen Plattformen ein sauberer Fehler statt Compile-Bruch.
+#[tauri::command]
+fn print_raw_zpl(printer: String, zpl: String) -> Result<u32, String> {
+    #[cfg(windows)]
+    {
+        printing::print_raw(&printer, zpl.as_bytes())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (printer, zpl);
+        Err("Raw-Druck wird nur unter Windows unterstützt.".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -63,7 +80,8 @@ pub fn run() {
             sync_server_start,
             sync_server_stop,
             sync_server_status,
-            discover_lan_servers
+            discover_lan_servers,
+            print_raw_zpl
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
