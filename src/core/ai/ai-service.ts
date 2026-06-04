@@ -364,7 +364,7 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
     optional: ['weight', 'diamond_weight', 'model_number', 'serial_number', 'certificate', 'box', 'description'],
     conditionOptions: ['New', 'Pre-Owned', 'Vintage'],
     scopeOptions: ['Box', 'Certificate', 'Papers', 'Pouch', 'Receipt'],
-    notes: 'karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color (Mix = Two-Tone; 24K/22K/21K only Yellow; Silver for non-gold). item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. weight in grams (optional). certificate and box are booleans. size can be ring-size or "Small"/"Medium" etc.',
+    notes: 'karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color (Mix = Two-Tone; 24K/22K/21K only Yellow; Silver for non-gold). item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. weight in grams (optional). certificate and box are booleans. size can be ring-size or "Small"/"Medium" etc. description = keep it SHORT (max ~17 chars, only the essentials) — it prints on a physical tag and longer text gets cut off.',
   },
   'cat-original-gold-jewelry': {
     name: 'ORIGINAL_GOLD_JEWELRY',
