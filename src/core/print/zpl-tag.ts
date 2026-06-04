@@ -155,6 +155,43 @@ function buildOriginalJewelryFace(p: Product): TagFace {
   return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
 }
 
+// ── Accessory (2026-06-04) — Scan-Tag mit Barcode ──
+// Unten: Serial, Model No (nur wenn vorhanden → sonst hoch), Papers/Year.
+// HINWEIS: Accessory-Schema hat KEIN year-Feld → aktuell nur "PAPERS" (Year erscheint nur falls je vorhanden).
+function buildAccessoryFace(p: Product): TagFace {
+  const a = (p.attributes || {}) as Record<string, unknown>;
+  const sku = fit(up(p.sku || ''));
+  const barcode = String(p.sku || '').trim();
+  const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
+
+  const details: string[] = [];
+  if (a.serial_number) details.push(fit(`SN ${up(a.serial_number)}`));
+  if (a.model_number) details.push(fit(`MODEL ${up(a.model_number)}`));
+  const hasPapers = (p.scopeOfDelivery || []).includes('Papers');
+  const year = a.year ? String(a.year) : '';
+  const papersYear = [hasPapers ? 'PAPERS' : '', year].filter(Boolean).join(' ');
+  if (papersYear) details.push(fit(papersYear));
+
+  return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
+}
+
+// ── Spare Part (2026-06-04) — Scan-Tag mit Barcode ──
+// Unten: Part Type, Material, Original/Copy, Description.
+function buildSparePartFace(p: Product): TagFace {
+  const a = (p.attributes || {}) as Record<string, unknown>;
+  const sku = fit(up(p.sku || ''));
+  const barcode = String(p.sku || '').trim();
+  const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
+
+  const details: string[] = [];
+  if (a.part_type) details.push(fit(up(a.part_type)));
+  if (a.material) details.push(fit(up(a.material)));
+  if (a.original_or_copy) details.push(fit(up(a.original_or_copy)));
+  if (a.description) details.push(fit(up(a.description)));
+
+  return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
+}
+
 // ── Generischer Fallback für andere Kategorien (noch ohne eigenes Layout) ──
 function buildGenericFace(p: Product, category?: Category): TagFace {
   const a = (p.attributes || {}) as Record<string, unknown>;
@@ -182,6 +219,8 @@ export function buildProductFace(p: Product, category?: Category): TagFace {
   if (category?.id === 'cat-gold-jewelry' || category?.name === 'Gold-Diamond Jewellery') return buildGoldJewelryFace(p);
   if (category?.id === 'cat-branded-gold-jewelry' || category?.name === 'Branded Gold Jewelry') return buildBrandedJewelryFace(p);
   if (category?.id === 'cat-original-gold-jewelry' || category?.name === 'Original Gold Jewelry') return buildOriginalJewelryFace(p);
+  if (category?.id === 'cat-accessory' || category?.name === 'Accessory') return buildAccessoryFace(p);
+  if (category?.id === 'cat-spare-part' || category?.name === 'Spare Part') return buildSparePartFace(p);
   return buildGenericFace(p, category);
 }
 

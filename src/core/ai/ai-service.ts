@@ -391,7 +391,7 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
     optional: [],
     conditionOptions: ['New', 'Pre-Owned', 'Refurbished'],
     scopeOptions: ['Packaging'],
-    notes: 'The compatible model/family (e.g. "Rolex Submariner Dial", "AP Royal Oak Strap") goes into the top-level "name" field. part_type ∈ {Dial, Bezel, Links, Crown, Strap, Buckle, Caseback, Movement, Crystal, Box, Other}. material ∈ {Steel, 18K YG, 18K RG, 18K WG, 14K YG, 14K RG, 14K WG, Steel/18K YG, Steel/18K RG, Steel/18K WG, Steel/14K YG, Steel/14K RG, Steel/14K WG} — YG/RG/WG = Yellow/Rose/White Gold; Steel/<gold> = Bicolor (e.g. Rolesor links). original_or_copy ∈ {Original, Copy}.',
+    notes: 'The compatible model/family (e.g. "Rolex Submariner Dial", "AP Royal Oak Strap") goes into the top-level "name" field. part_type ∈ {Dial, Bezel, Links, Crown, Strap, Buckle, Caseback, Movement, Crystal, Box, Other}. material ∈ {Steel, 18K YG, 18K RG, 18K WG, 14K YG, 14K RG, 14K WG, Steel/18K YG, Steel/18K RG, Steel/18K WG, Steel/14K YG, Steel/14K RG, Steel/14K WG} — YG/RG/WG = Yellow/Rose/White Gold; Steel/<gold> = Bicolor (e.g. Rolesor links). original_or_copy ∈ {Original, Copy}. description = keep it SHORT (max ~17 chars, only the essentials) — it prints on a physical tag and longer text gets cut off.',
   },
 };
 
