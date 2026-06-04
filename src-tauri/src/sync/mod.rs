@@ -5,15 +5,21 @@ async fn serve_mobile_page() -> Html<&'static str> {
     Html(mobile_page::MOBILE_HTML)
 }
 
-// ZXing (reiner JS-Barcode-Decoder) lokal ausliefern — Fallback fuer Browser
-// ohne natives BarcodeDetector (Windows-Desktop, iOS/Safari). Kein CDN noetig.
-async fn serve_zxing() -> impl axum::response::IntoResponse {
+// zxing-wasm (WebAssembly-Barcode-Decoder, zuverlaessiger als JS-ZXing, auch iOS)
+// lokal ausliefern: JS-Glue + .wasm-Binary. Kein CDN noetig (offline-LAN-tauglich).
+async fn serve_zxing_wasm_js() -> impl axum::response::IntoResponse {
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "application/javascript; charset=utf-8",
         )],
-        include_str!("zxing.min.js"),
+        include_str!("zxing-wasm.js"),
+    )
+}
+async fn serve_zxing_wasm() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/wasm")],
+        include_bytes!("zxing_reader.wasm").as_slice(),
     )
 }
 
@@ -107,7 +113,8 @@ impl SyncServer {
         let app = Router::new()
             .nest("/api", routes::api_routes())
             .route("/mobile", axum::routing::get(serve_mobile_page))
-            .route("/zxing.js", axum::routing::get(serve_zxing))
+            .route("/zxing-wasm.js", axum::routing::get(serve_zxing_wasm_js))
+            .route("/zxing_reader.wasm", axum::routing::get(serve_zxing_wasm))
             .route("/", axum::routing::get(serve_root))
             .layer(body_limit)
             .layer(cors)

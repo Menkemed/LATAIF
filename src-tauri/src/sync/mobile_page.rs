@@ -352,17 +352,18 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     btn.onclick = () => { stopScan(); screen('modePicker'); };
   });
 
-  // ── Live Barcode Scanner ──
-  // Braucht "secure context" (HTTPS oder localhost). Nutzt natives BarcodeDetector
-  // (schnell, v.a. Android) — sonst ZXing-Fallback (reines JS, laeuft auf PC/iOS/allem).
-  let scanStream = null, scanRunning = false, scanDetector = null, zxingReader = null;
-  function loadZxing() {
+  // ── Live Barcode Scanner (zxing-wasm) ──
+  // Kamera braucht "secure context" (HTTPS oder localhost). Dekodiert per zxing-wasm
+  // (WebAssembly — zuverlaessiger als JS-ZXing, auch auf iOS Safari). Eigener Frame-Loop:
+  // Video -> Canvas -> ImageData -> readBarcodesFromImageData.
+  let scanStream = null, scanRunning = false, scanBusy = false, scanCanvas = null, wasmConfigured = false;
+  function loadWasm() {
     return new Promise((resolve, reject) => {
-      if (window.ZXing) return resolve();
+      if (window.ZXingWASM) return resolve();
       const s = document.createElement('script');
-      s.src = '/zxing.js';
+      s.src = '/zxing-wasm.js';
       s.onload = resolve;
-      s.onerror = () => reject(new Error('could not load /zxing.js'));
+      s.onerror = () => reject(new Error('could not load /zxing-wasm.js'));
       document.head.appendChild(s);
     });
   }
@@ -378,32 +379,54 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       }
       return setText('scanMsg', 'Camera unavailable in this browser.');
     }
-    // IMMER ZXing (reines JS, zuverlaessig, ueberall gleich). Das native BarcodeDetector ist
-    // auf vielen Android-Geraeten ein nicht-funktionierender Stub -> Kamera an, aber kein Decode.
     try {
       setText('scanMsg', 'Starting camera...');
-      await loadZxing();
-      const hints = new Map();
-      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.QR_CODE,
-        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.UPC_A,
-        ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.DATA_MATRIX,
-      ]);
-      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-      zxingReader = new ZXing.BrowserMultiFormatReader(hints);
-      const constraints = { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } };
+      await loadWasm();
+      if (!wasmConfigured) {
+        ZXingWASM.setZXingModuleOverrides({ locateFile: (path, prefix) => (typeof path === 'string' && path.endsWith('.wasm')) ? '/zxing_reader.wasm' : ((prefix || '') + path) });
+        wasmConfigured = true;
+      }
+      scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } });
+      const v = $('scanVideo');
+      v.srcObject = scanStream;
+      await v.play();
+      scanCanvas = document.createElement('canvas');
       scanRunning = true;
-      await zxingReader.decodeFromConstraints(constraints, $('scanVideo'), (result) => {
-        if (result && scanRunning) onScan(result.getText());
-      });
       setText('scanMsg', '');
+      scanLoop();
     } catch (e) {
       setText('scanMsg', 'Scanner could not start: ' + (e && e.message ? e.message : e));
     }
   }
+  async function scanLoop() {
+    if (!scanRunning) return;
+    const v = $('scanVideo');
+    if (!scanBusy && v && v.videoWidth > 0) {
+      scanBusy = true;
+      try {
+        const w = v.videoWidth, h = v.videoHeight;
+        scanCanvas.width = w; scanCanvas.height = h;
+        const ctx = scanCanvas.getContext('2d');
+        ctx.drawImage(v, 0, 0, w, h);
+        const img = ctx.getImageData(0, 0, w, h);
+        const results = await ZXingWASM.readBarcodesFromImageData(img, {
+          tryHarder: true,
+          formats: ['QRCode', 'Code128', 'EAN-13', 'UPC-A', 'Code39', 'DataMatrix'],
+          maxNumberOfSymbols: 1,
+        });
+        if (scanRunning && results && results.length && results[0].text) {
+          scanBusy = false;
+          onScan(results[0].text);
+          return;
+        }
+      } catch (_) { /* keep trying */ }
+      scanBusy = false;
+    }
+    setTimeout(scanLoop, 180);
+  }
   function onScan(value) {
     scanRunning = false;
-    if (zxingReader) { try { zxingReader.reset(); } catch (_) {} }
+    stopScan();
     if (navigator.vibrate) navigator.vibrate(80);
     $('scanValue').textContent = value;
     $('scanDetails').innerHTML = 'Looking up…';
@@ -447,8 +470,8 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   }
   function stopScan() {
     scanRunning = false;
+    scanBusy = false;
     if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
-    if (zxingReader) { try { zxingReader.reset(); } catch (_) {} zxingReader = null; }
   }
   const scanAgainBtn = $('scanAgainBtn');
   if (scanAgainBtn) scanAgainBtn.onclick = () => { hide('scanResult'); stopScan(); startScan(); };
