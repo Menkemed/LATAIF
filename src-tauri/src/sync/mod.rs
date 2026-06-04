@@ -34,6 +34,8 @@ pub mod models;
 pub mod routes;
 
 const MDNS_SERVICE: &str = "_lataif-sync._tcp.local.";
+// HTTPS-Port fuer die Mobile-Seite (Live-Kamera am Handy braucht secure context).
+const HTTPS_PORT: u16 = 3443;
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
@@ -52,6 +54,8 @@ pub struct SyncServer {
     /// Server pullen kann ohne expliziten Login. Wird per Tauri-Command an
     /// das JS-Frontend ausgeliefert (autoLanSetup speichert es als Sync-Token).
     pub self_token: Mutex<Option<String>>,
+    /// HTTPS-Serve-Task (Mobile-Live-Kamera braucht secure context), separater Port.
+    pub https_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl SyncServer {
@@ -64,6 +68,7 @@ impl SyncServer {
             mdns: Mutex::new(None),
             db_path,
             self_token: Mutex::new(None),
+            https_handle: Mutex::new(None),
         }
     }
 
@@ -107,6 +112,7 @@ impl SyncServer {
             .layer(body_limit)
             .layer(cors)
             .with_state(state);
+        let https_app = app.clone();
 
         let addr = format!("0.0.0.0:{}", self.port);
         let listener = tokio::net::TcpListener::bind(&addr)
@@ -125,6 +131,45 @@ impl SyncServer {
 
         *self.shutdown_tx.lock().await = Some(shutdown_tx);
         *self.handle.lock().await = Some(handle);
+
+        // HTTPS-Server fuer die Mobile-Seite (Live-Kamera am Handy braucht secure context).
+        // Selbst-signiertes Zertifikat fuer die aktuelle LAN-IP + localhost, bei jedem Start frisch.
+        // Faellt der TLS-Setup aus, laeuft HTTP unveraendert weiter.
+        // rustls 0.23 braucht einen prozessweiten Crypto-Provider, sonst panickt der TLS-Aufbau.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let https_task = {
+            let ip_str = local_ip_address::local_ip()
+                .map(|i| i.to_string())
+                .unwrap_or_else(|_| "127.0.0.1".to_string());
+            let mut sans = vec![ip_str, "localhost".to_string(), "127.0.0.1".to_string()];
+            sans.dedup();
+            match rcgen::generate_simple_self_signed(sans) {
+                Ok(certified) => {
+                    let cert_der = certified.cert.der().to_vec();
+                    let key_der = certified.key_pair.serialize_der();
+                    match axum_server::tls_rustls::RustlsConfig::from_der(vec![cert_der], key_der).await {
+                        Ok(tls_config) => {
+                            let https_addr: std::net::SocketAddr = ([0, 0, 0, 0], HTTPS_PORT).into();
+                            Some(tokio::spawn(async move {
+                                let _ = axum_server::bind_rustls(https_addr, tls_config)
+                                    .serve(https_app.into_make_service())
+                                    .await;
+                            }))
+                        }
+                        Err(e) => {
+                            eprintln!("[sync] HTTPS disabled (TLS config: {e})");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[sync] HTTPS disabled (cert: {e})");
+                    None
+                }
+            }
+        };
+        *self.https_handle.lock().await = https_task;
+
         *running = true;
 
         // Advertise via mDNS
@@ -163,6 +208,9 @@ impl SyncServer {
             let _ = tx.send(());
         }
         if let Some(handle) = self.handle.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.https_handle.lock().await.take() {
             handle.abort();
         }
 

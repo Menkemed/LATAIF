@@ -363,7 +363,13 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     setText('scanMsg', '');
     hide('scanResult');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return setText('scanMsg', 'Camera needs HTTPS or localhost. On the PC open http://localhost:3001/mobile; phones need HTTPS.');
+      // Ueber HTTP (Handy im LAN) sperrt der Browser die Kamera — auf die HTTPS-Seite bruecken.
+      if (location.protocol === 'http:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        $('scanMsg').innerHTML = 'The camera needs a secure connection. <a href="https://' + location.hostname + ':3443/mobile" style="color:#C6A36D; font-weight:600; text-decoration:underline;">Tap to open the secure (HTTPS) page</a>, accept the certificate warning once, then Check Item again.';
+        $('scanMsg').classList.remove('hidden');
+        return;
+      }
+      return setText('scanMsg', 'Camera unavailable in this browser.');
     }
     // Schneller Weg: natives BarcodeDetector (Android Chrome).
     if ('BarcodeDetector' in window) {
