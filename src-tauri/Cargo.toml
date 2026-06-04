@@ -1,6 +1,6 @@
 [package]
 name = "lataif"
-version = "0.7.31"
+version = "0.7.32"
 description = "LATAIF — Luxury Trading Operating System"
 authors = ["LATAIF"]
 edition = "2021"
@@ -36,3 +36,7 @@ tracing = "0.1"
 # LAN auto-discovery
 mdns-sd = "0.13"
 local-ip-address = "0.6"
+
+# HTTPS fuer die Mobile-Seite (Live-Kamera braucht secure context) — selbst-signiert
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rcgen = "0.13"
