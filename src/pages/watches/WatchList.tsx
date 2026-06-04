@@ -10,7 +10,8 @@ import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
-import { printMultipleHangtags } from '@/core/pdf/hangtag';
+import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
+import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { getStockAggregates, type LotAggregate } from '@/core/lots/lot-queries';
@@ -260,6 +261,11 @@ export function WatchList() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [linksMap, setLinksMap] = useState<Map<string, { label: string; count: number }[]>>(new Map());
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // v0.7.27 — ZPL-Bulk-Tag-Druck (gerade Anzahl: 2 Tags pro Vorschub)
+  const [showBulkPrint, setShowBulkPrint] = useState(false);
+  const [bulkPrinter, setBulkPrinter] = useState(getTagPrinterName());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   useEffect(() => { loadCategories(); loadProducts(); }, [loadCategories, loadProducts]);
 
@@ -451,19 +457,7 @@ export function WatchList() {
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by brand, name, SKU..."
       actions={
         <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <Button variant="ghost" onClick={() => {
-            const tags = filtered.map(p => ({
-              sku: p.sku || p.id.slice(0, 12),
-              brand: p.brand,
-              price: p.plannedSalePrice || p.purchasePrice,
-              currency: p.purchaseCurrency || 'BHD',
-              name: p.name,
-              material: String(p.attributes.case_material || p.attributes.material || ''),
-              size: String(p.attributes.case_size || p.attributes.size || ''),
-              description: String(p.attributes.description_3 || p.condition || ''),
-            })).filter(t => t.sku);
-            if (tags.length > 0) printMultipleHangtags(tags);
-          }}>Print Tags ({filtered.length})</Button>
+          <Button variant="ghost" disabled={filtered.length === 0} onClick={() => { setBulkError(null); setBulkPrinter(getTagPrinterName()); setShowBulkPrint(true); }}>Print Tags ({filtered.length})</Button>
           <Button variant="ghost" onClick={() => exportProductsToExcel(filtered, categories)}>
             Export Excel ({filtered.length})
           </Button>
@@ -1135,6 +1129,54 @@ export function WatchList() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      {/* v0.7.27 — ZPL-Bulk-Tag-Druck (gerade Anzahl, 2 Tags pro Vorschub) */}
+      <Modal open={showBulkPrint} onClose={() => setShowBulkPrint(false)} title="Print Tags (Zebra ZPL)" width={440}>
+        {(() => {
+          const productCount = filtered.length;
+          const tagCount = productCount % 2 === 1 ? productCount + 1 : productCount;
+          return (
+            <>
+              {!canRawPrint() && (
+                <div style={{ padding: '10px 12px', borderRadius: 8, marginBottom: 16, background: '#FFF7ED', border: '1px solid #FED7AA', color: '#9A6B3F', fontSize: 12.5, lineHeight: 1.5 }}>
+                  Raw printing only works in the <strong>desktop app</strong>, not the browser preview.
+                </div>
+              )}
+              <div style={{ padding: '12px 14px', borderRadius: 8, marginBottom: 16, background: '#F9FAFB', border: '1px solid #E5E7EB', fontSize: 13, color: '#374151', lineHeight: 1.6 }}>
+                <div><strong style={{ color: '#0F0F10' }}>{productCount}</strong> product{productCount === 1 ? '' : 's'} in the current view.</div>
+                <div>Prints <strong style={{ color: '#0F0F10' }}>{tagCount}</strong> tag{tagCount === 1 ? '' : 's'} (1 per product){tagCount !== productCount ? ' — rounded up to an even number (+1 spare of the last item) so no label is wasted' : ''}.</div>
+                <div style={{ marginTop: 6, fontSize: 12, color: '#6B7280' }}>2 tags share one feed strip, so the total is always even.</div>
+              </div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>PRINTER</label>
+                <Input value={bulkPrinter} onChange={e => setBulkPrinter(e.target.value)} placeholder="Zebra ZD220 (203 dpi) - ZPL" />
+              </div>
+              {bulkError && (
+                <div style={{ padding: '8px 12px', borderRadius: 8, marginBottom: 14, background: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C', fontSize: 12.5 }}>{bulkError}</div>
+              )}
+              <div className="flex justify-end gap-3">
+                <Button variant="ghost" onClick={() => setShowBulkPrint(false)}>Cancel</Button>
+                <Button variant="primary" disabled={bulkBusy || productCount === 0} onClick={async () => {
+                  setBulkBusy(true); setBulkError(null);
+                  try {
+                    setTagPrinterName(bulkPrinter);
+                    const items = filtered.map(p => ({ product: p, category: getCat(p.categoryId) }));
+                    if (items.length === 0) throw new Error('No products to print.');
+                    if (items.length % 2 === 1) items.push(items[items.length - 1]); // gerade machen
+                    const zpl = buildBatchTagsZpl(items);
+                    await printRawZpl(zpl, bulkPrinter);
+                    setShowBulkPrint(false);
+                  } catch (e) {
+                    setBulkError(e instanceof Error ? e.message : String(e));
+                  } finally {
+                    setBulkBusy(false);
+                  }
+                }}>{bulkBusy ? 'Printing...' : `Print ${tagCount}`}</Button>
+              </div>
+            </>
+          );
+        })()}
       </Modal>
     </PageLayout>
   );

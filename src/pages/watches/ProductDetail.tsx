@@ -20,7 +20,6 @@ import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { query } from '@/core/db/helpers';
 import { usePermission } from '@/hooks/usePermission';
 import { vatEngine } from '@/core/tax/vat-engine';
-import { printHangtag } from '@/core/pdf/hangtag';
 import { buildProductFace, buildProductTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -500,22 +499,6 @@ export function ProductDetail() {
                   setAiLoading(false);
                 }} disabled={aiLoading}><Sparkles size={14} /> {aiLoading ? 'Analyzing...' : 'AI Price'}</Button>
                 {perm.canEditProducts && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>}
-                <Button variant="ghost" onClick={() => {
-                  if (!product) return;
-                  const mat = (product.attributes.case_material || product.attributes.material || product.attributes.metal || '') as string;
-                  const sz = (product.attributes.case_size || product.attributes.size || product.attributes.size_eu || '') as string;
-                  const desc = (product.attributes.description_3 || product.condition || '') as string;
-                  printHangtag({
-                    sku: product.sku || product.id.slice(0, 12),
-                    brand: product.brand,
-                    price: product.plannedSalePrice || product.purchasePrice,
-                    currency: product.purchaseCurrency || 'BHD',
-                    name: product.name,
-                    material: mat ? String(mat) : undefined,
-                    size: sz ? String(sz) : undefined,
-                    description: desc ? String(desc) : undefined,
-                  });
-                }}><Tag size={14} /> Hangtag</Button>
                 <Button variant="ghost" onClick={() => { setPrintError(null); setPrinterName(getTagPrinterName()); setShowPrintTag(true); }}><Tag size={14} /> Print Tag</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 <Button variant="primary" onClick={() => navigate(`/offers?product=${id}`)}>Create Offer</Button>
@@ -1596,8 +1579,11 @@ export function ProductDetail() {
                   <Input value={printerName} onChange={e => setPrinterName(e.target.value)} placeholder="Zebra ZD220 (203 dpi) - ZPL" />
                 </div>
                 <div>
-                  <label style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>QUANTITY (TAGS)</label>
-                  <Input type="number" min={1} value={String(printQty)} onChange={e => setPrintQty(Math.max(1, parseInt(e.target.value, 10) || 1))} />
+                  <label style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>QUANTITY (EVEN — 2 tags per feed)</label>
+                  <Input type="number" min={2} step={2} value={String(printQty)} onChange={e => {
+                    const n = parseInt(e.target.value, 10) || 2;
+                    setPrintQty(Math.max(2, n % 2 === 0 ? n : n + 1)); // immer gerade (2 Tags/Feld)
+                  }} />
                 </div>
               </div>
               {printError && (
