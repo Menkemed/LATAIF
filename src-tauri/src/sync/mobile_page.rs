@@ -89,6 +89,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     <button class="mode-btn" data-mode="collection">📦&nbsp; New Collection Item<span>Add a product to inventory</span></button>
     <button class="mode-btn" data-mode="repair">🔧&nbsp; New Repair Intake<span>Customer item handed in for repair</span></button>
     <button class="mode-btn" data-mode="purchase">🛒&nbsp; Purchase Photo<span>Snap the item — finish the purchase on desktop</span></button>
+    <button class="mode-btn" data-mode="scan">🔍&nbsp; Scan a Tag<span>Live barcode scan — read a printed tag's SKU</span></button>
   </div>
   <a href="#" class="logout" id="logoutLink">Sign out</a>
 </div>
@@ -246,6 +247,27 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   <button id="bSaveBtn">Send to Purchase Inbox</button>
 </div>
 
+<!-- ─────────── Live Barcode Scanner (Test) ─────────── -->
+<div id="scanScreen" class="hidden">
+  <button class="back" data-back>‹ Back</button>
+  <div class="brand" style="margin-top: 4px;">
+    <h1>LATAIF</h1>
+    <p>Scan Tag</p>
+  </div>
+  <div id="scanMsg" class="error hidden"></div>
+  <div class="card" style="padding: 0; overflow: hidden;">
+    <video id="scanVideo" playsinline muted style="width:100%; display:block; background:#000; aspect-ratio:3/4; object-fit:cover;"></video>
+  </div>
+  <div id="scanResult" class="card hidden" style="text-align:center;">
+    <label style="margin-bottom:6px;">Scanned</label>
+    <div id="scanValue" style="font-size:24px; font-weight:600; color:#C6A36D; font-family:monospace; word-break:break-all;"></div>
+    <button id="scanAgainBtn" class="ghost" style="margin-top:14px;">Scan again</button>
+  </div>
+  <p style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">
+    Hold a printed tag in front of the rear camera. Camera access needs HTTPS or localhost.
+  </p>
+</div>
+
 <script>
 (function () {
   const TOKEN_KEY = 'lataif_mobile_token';
@@ -257,7 +279,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   const hide = (id) => $(id).classList.add('hidden');
   const setText = (id, t) => { const el = $(id); el.textContent = t; if (t) el.classList.remove('hidden'); else el.classList.add('hidden'); };
 
-  const SCREENS = ['login', 'modePicker', 'formCollection', 'formRepair', 'formPurchase'];
+  const SCREENS = ['login', 'modePicker', 'formCollection', 'formRepair', 'formPurchase', 'scanScreen'];
   function screen(id) { SCREENS.forEach(s => hide(s)); show(id); window.scrollTo({ top: 0 }); }
 
   // Foto-State pro Modus.
@@ -316,11 +338,57 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       if (mode === 'collection') screen('formCollection');
       else if (mode === 'repair') screen('formRepair');
       else if (mode === 'purchase') screen('formPurchase');
+      else if (mode === 'scan') { screen('scanScreen'); startScan(); }
     };
   });
   document.querySelectorAll('[data-back]').forEach(btn => {
-    btn.onclick = () => screen('modePicker');
+    btn.onclick = () => { stopScan(); screen('modePicker'); };
   });
+
+  // ── Live Barcode Scanner (getUserMedia + BarcodeDetector) ──
+  // Braucht "secure context" (HTTPS oder localhost) — sonst ist mediaDevices nicht da.
+  let scanStream = null, scanRunning = false, scanDetector = null;
+  async function startScan() {
+    setText('scanMsg', '');
+    hide('scanResult');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return setText('scanMsg', 'Camera needs HTTPS or localhost. To test now, open this page on the PC via http://localhost:3001/mobile. For phones we set up HTTPS.');
+    }
+    if (!('BarcodeDetector' in window)) {
+      return setText('scanMsg', 'Live scan not supported on this browser (e.g. iOS/Safari). Test on Android Chrome — iOS gets a ZXing fallback later.');
+    }
+    try {
+      scanDetector = new BarcodeDetector({ formats: ['code_128', 'ean_13', 'upc_a', 'qr_code'] });
+      scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      const v = $('scanVideo');
+      v.srcObject = scanStream;
+      await v.play();
+      scanRunning = true;
+      loopScan();
+    } catch (e) {
+      setText('scanMsg', 'Camera failed: ' + (e && e.message ? e.message : e));
+    }
+  }
+  async function loopScan() {
+    if (!scanRunning) return;
+    try {
+      const codes = await scanDetector.detect($('scanVideo'));
+      if (codes && codes.length) { onScan(codes[0].rawValue); return; }
+    } catch (_) { /* transient decode error — keep going */ }
+    requestAnimationFrame(loopScan);
+  }
+  function onScan(value) {
+    scanRunning = false;
+    if (navigator.vibrate) navigator.vibrate(80);
+    $('scanValue').textContent = value;
+    show('scanResult');
+  }
+  function stopScan() {
+    scanRunning = false;
+    if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+  }
+  const scanAgainBtn = $('scanAgainBtn');
+  if (scanAgainBtn) scanAgainBtn.onclick = () => { hide('scanResult'); scanRunning = true; loopScan(); };
 
   // ── Perceptual Hash (pHash) — selbe Logik wie desktop/src/core/utils/image-hash.ts.
   // Wird beim Collection-Save mitgeschickt, damit der Desktop-SyncDuplicateGuard
