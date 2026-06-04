@@ -21,10 +21,19 @@ const PAD_A_LOWER_Y = [216, 236, 256, 276, 294];
 const ZPL_HEAD = '^XA\n^CI28\n^PW663\n^LL296\n^LH0,0\n^MD30\n^PR2\n';
 const ZPL_FOOT = '^XZ\n';
 
-/** Eine fertig gerenderte Tag-Seite: bis zu 5 Zeilen obere + 5 untere Falt-Hälfte. */
+/** Eine fertig gerenderte Tag-Seite. Generisches Slot-Layout ODER (Watch) Barcode-Layout. */
 export interface TagFace {
-  upper: string[]; // Identität (SKU/Brand/Model/Ref/Serial)
-  lower: string[]; // Specs (Metall/Dial/Bezel/Preis/Included)
+  upper: string[]; // generisches Slot-Layout: obere Falt-Hälfte
+  lower: string[]; // generisches Slot-Layout: untere Falt-Hälfte
+  watch?: WatchTagContent; // Watch-Kategorie: eigenes Scan-Layout mit Barcode
+}
+
+/** Watch-Tag: SKU + Barcode + Preis (obere Hälfte), Details (untere Hälfte). */
+interface WatchTagContent {
+  sku: string;
+  barcode: string; // codierter Wert = rohe SKU (Case-sensitiv für den Scanner)
+  price: string;
+  details: string[]; // REF, SN, Papers/Warranty, Year
 }
 
 // ── Text-Helfer ──
@@ -34,67 +43,41 @@ function up(v: unknown): string {
 function fit(s: string): string {
   return s.length > MAX_CHARS ? s.slice(0, MAX_CHARS) : s;
 }
-/** Hängt ein Kontext-Wort an (z.B. "DIAL"/"BEZEL") — aber nur wenn es noch in 17 Zeichen passt. */
-function withSuffix(value: string, suffix: string): string {
-  if (!value) return '';
-  if (value.includes(suffix)) return value;
-  const combined = `${value} ${suffix}`;
-  return combined.length <= MAX_CHARS ? combined : value;
-}
 /** ZPL-Steuerzeichen aus Nutzdaten entschärfen (^ ~ \ und Zeilenumbrüche). */
 function zplEscape(s: string): string {
   return s.replace(/[\r\n]+/g, ' ').replace(/\^/g, ' ').replace(/~/g, '-').replace(/\\/g, '/');
 }
 
-// ── Watch: Material + Karat zu EINER Metall-Zeile (Karat ist nur die Gold-Verfeinerung) ──
-function karatShort(karat: unknown): string {
-  const s = String(karat ?? '').trim();
-  if (!s) return '';
-  const m = s.match(/(\d+)\s*K\s+(\w+)/i);
-  if (m) return `${m[1]}K ${m[2][0].toUpperCase()}G`; // "18K Yellow" → "18K YG"
-  return s.toUpperCase();
-}
-function metalLine(material: unknown, karat: unknown): string {
-  const mat = String(material ?? '').trim();
-  if (!mat) return '';
-  const k = karatShort(karat);
-  switch (mat) {
-    case 'Solid Gold': return k || 'GOLD';
-    case 'Two-Tone Steel/Gold': return k ? `STEEL/${k}` : 'STEEL/GOLD';
-    case 'Ceramic & Gold': return k ? `CERAMIC/${k}` : 'CERAMIC/GOLD';
-    case 'Titanium & Gold': return k ? `TI/${k}` : 'TI/GOLD';
-    default: return mat.toUpperCase(); // Steel, Titanium, Ceramic, Platinum, … (kein Gold)
-  }
+
+// ── Papers/Warranty: zeigt, was die Uhr tatsächlich hat (aus scopeOfDelivery) ──
+function papersWarranty(scope?: string[]): string {
+  const s = scope || [];
+  const hasPapers = s.includes('Papers');
+  const hasWarranty = s.includes('Warranty Card');
+  if (hasPapers && hasWarranty) return 'PAPERS + WARRANTY';
+  if (hasWarranty) return 'WARRANTY CARD';
+  if (hasPapers) return 'PAPERS';
+  return '';
 }
 
-// ── Watch-Tag-Layout (final gelockt, am Rolex 116243 abgenommen) ──
+// ── Watch-Tag-Layout (2026-06-04, physisch abgenommen) — Scan-Tag mit Barcode ──
+// Obere Falt-Hälfte: SKU, Barcode (codiert die SKU), Preis.
+// Untere Falt-Hälfte: REF, SN, Papers/Warranty, Year.
+// Brand/Name/Dial/Bezel/Material kommen bewusst NICHT aufs Tag (Inventar-/Scan-Fokus).
 function buildWatchFace(p: Product): TagFace {
   const a = (p.attributes || {}) as Record<string, unknown>;
+  const sku = fit(up(p.sku || ''));
+  const barcode = String(p.sku || '').trim(); // roher SKU-Wert für den Scanner
+  const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
 
-  // Obere Hälfte = Identität (max 5)
-  const upper: string[] = [];
-  if (p.sku) upper.push(fit(up(p.sku)));
-  if (p.brand) upper.push(fit(up(p.brand)));
-  if (p.name) upper.push(fit(up(p.name)));
-  if (a.reference_number) upper.push(fit(`REF ${up(a.reference_number)}`));
-  if (a.serial_number) upper.push(fit(`SN ${up(a.serial_number)}`));
+  const details: string[] = [];
+  if (a.reference_number) details.push(fit(`REF ${up(a.reference_number)}`));
+  if (a.serial_number) details.push(fit(`SN ${up(a.serial_number)}`));
+  const pw = papersWarranty(p.scopeOfDelivery);
+  if (pw) details.push(fit(pw));
+  if (a.year) details.push(fit(`YEAR ${a.year}`));
 
-  // Untere Hälfte = Specs (max 5). Reihenfolge: Metall, Dial, Bezel, [Description], Preis, Included+Year.
-  const lower: string[] = [];
-  const metal = metalLine(a.material, a.karat_color);
-  if (metal) lower.push(fit(metal));
-  if (a.dial) lower.push(fit(withSuffix(up(a.dial), 'DIAL')));
-  if (a.bezel) lower.push(fit(withSuffix(up(a.bezel), 'BEZEL')));
-  const price = p.plannedSalePrice || p.purchasePrice || 0;
-  lower.push(fit(`BD ${Math.round(price)}`));
-  const incl = (p.scopeOfDelivery || []).map(up).join(' ');
-  const year = a.year ? String(a.year) : '';
-  const inclYear = fit([incl, year].filter(Boolean).join(' '));
-  if (inclYear) lower.push(inclYear);
-
-  // Description (Prosa) kommt bewusst NICHT aufs Tag — bleibt im Produkt-Record.
-  // (Die AI wird angewiesen, lange Beschreibungen ins description-Feld zu legen.)
-  return { upper: upper.slice(0, 5), lower: lower.slice(0, 5) };
+  return { upper: [], lower: [], watch: { sku, barcode, price, details: details.slice(0, 5) } };
 }
 
 // ── Generischer Fallback für andere Kategorien (noch ohne eigenes Layout) ──
@@ -132,15 +115,29 @@ function foLines(x: number, ys: number[], lines: string[]): string {
   }
   return z;
 }
+// Watch-Scan-Layout: SKU + Barcode + Preis (oben), Details (unten). Positionen physisch
+// abgenommen 2026-06-04. Pad A = Pad B + 90 in y (yOff), x kommt vom Aufrufer.
+function renderWatchPad(x: number, yOff: number, w: WatchTagContent): string {
+  let z = '';
+  if (w.sku) z += `^FO${x},${20 + yOff}${FONT}^FD${zplEscape(w.sku)}^FS\n`;
+  if (w.barcode) z += `^FO${x},${40 + yOff}^BY1^BCN,55,N,N,N^FD${zplEscape(w.barcode)}^FS\n`;
+  if (w.price) z += `^FO${x},${100 + yOff}${FONT}^FD${zplEscape(w.price)}^FS\n`;
+  let ly = 126 + yOff;
+  for (const d of w.details) { z += `^FO${x},${ly}${FONT}^FD${zplEscape(d)}^FS\n`; ly += 20; }
+  return z;
+}
+
+// Ein Pad rendern — Watch-Barcode-Layout (yOff) oder generisches Slot-Layout (upperY/lowerY).
+function renderPad(x: number, upperY: number[], lowerY: number[], yOff: number, face: TagFace): string {
+  if (face.watch) return renderWatchPad(x, yOff, face.watch);
+  return foLines(x, upperY, face.upper) + foLines(x, lowerY, face.lower);
+}
+
 /** Ein Feld (Vorschub-Einheit) = Pad B (oben-rechts) + Pad A (unten-links). Pad A optional (ungerade Anzahl). */
 function renderField(tagB: TagFace, tagA: TagFace | null): string {
   let z = ZPL_HEAD;
-  z += foLines(PAD_B_X, PAD_B_UPPER_Y, tagB.upper);
-  z += foLines(PAD_B_X, PAD_B_LOWER_Y, tagB.lower);
-  if (tagA) {
-    z += foLines(PAD_A_X, PAD_A_UPPER_Y, tagA.upper);
-    z += foLines(PAD_A_X, PAD_A_LOWER_Y, tagA.lower);
-  }
+  z += renderPad(PAD_B_X, PAD_B_UPPER_Y, PAD_B_LOWER_Y, 0, tagB);
+  if (tagA) z += renderPad(PAD_A_X, PAD_A_UPPER_Y, PAD_A_LOWER_Y, 90, tagA);
   z += ZPL_FOOT;
   return z;
 }
