@@ -454,8 +454,14 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     let html = '';
     if (p.brand) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase;">' + esc(p.brand) + '</div>';
     html += '<div style="font-size:20px; font-weight:600; color:#EAEAEA; margin:2px 0;">' + esc(p.name || '—') + '</div>';
-    const price = fmtPrice(p.planned_sale_price);
-    if (price) html += '<div style="font-size:22px; font-weight:600; color:#C6A36D; margin-bottom:6px;">' + price + '</div>';
+    const sale = fmtPrice(p.planned_sale_price);
+    if (sale) html += '<div style="font-size:22px; font-weight:600; color:#C6A36D; margin-bottom:6px;">' + sale + '</div>';
+    // Preise
+    add('Cost', fmtPrice(p.purchase_price));
+    add('Sale', fmtPrice(p.planned_sale_price));
+    add('Min', fmtPrice(p.min_sale_price));
+    add('Max', fmtPrice(p.max_sale_price));
+    // Stammdaten
     add('SKU', p.sku);
     add('Category', p.category_name || p.category_id);
     add('Condition', p.condition);
@@ -465,7 +471,10 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     html += rows.join('');
     let imgs = [];
     try { imgs = typeof p.images === 'string' ? JSON.parse(p.images) : (p.images || []); } catch (_) {}
-    if (imgs && imgs.length) html += '<img src="' + esc(imgs[0]) + '" style="width:100%; border-radius:8px; margin-top:14px;" />';
+    const img0 = (imgs && imgs.length) ? String(imgs[0] || '') : '';
+    if (/^(data:|https?:)/.test(img0)) {
+      html += '<img src="' + esc(img0) + '" onerror="this.style.display=\'none\'" style="width:100%; border-radius:8px; margin-top:14px;" />';
+    }
     return html;
   }
   function stopScan() {
