@@ -49,6 +49,12 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   .mode-btn:active { border-color: #C6A36D; }
   .back { display: inline-flex; align-items: center; gap: 4px; background: transparent; color: #A1A1AA;
     border: none; width: auto; padding: 0; font-size: 13px; font-weight: 400; margin-bottom: 4px; }
+  /* Scan-Overlay: Rahmen + animierte Linie (zeigt "hier scannt's") */
+  .scan-frame { position: absolute; top: 16%; bottom: 16%; left: 9%; right: 9%; border: 2px solid rgba(198,163,109,0.95);
+    border-radius: 12px; box-shadow: 0 0 0 2000px rgba(0,0,0,0.30); overflow: hidden; pointer-events: none; }
+  .scan-line { position: absolute; left: 0; right: 0; height: 2px; background: #C6A36D; box-shadow: 0 0 8px 1px #C6A36D;
+    animation: scanmove 2.2s ease-in-out infinite; }
+  @keyframes scanmove { 0% { top: 6%; } 50% { top: 94%; } 100% { top: 6%; } }
 </style>
 </head>
 <body>
@@ -255,8 +261,9 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     <p>Check Item</p>
   </div>
   <div id="scanMsg" class="error hidden"></div>
-  <div class="card" style="padding: 0; overflow: hidden;">
+  <div class="card" style="padding: 0; overflow: hidden; position: relative;">
     <video id="scanVideo" playsinline muted style="width:100%; display:block; background:#000; aspect-ratio:3/4; object-fit:cover;"></video>
+    <div class="scan-frame"><div class="scan-line"></div></div>
   </div>
   <div id="scanResult" class="card hidden">
     <div id="scanValue" style="font-size:12px; color:#6B6B73; font-family:monospace; text-align:center; margin-bottom:10px; word-break:break-all;"></div>
@@ -371,48 +378,28 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       }
       return setText('scanMsg', 'Camera unavailable in this browser.');
     }
-    // Schneller Weg: natives BarcodeDetector (Android Chrome).
-    if ('BarcodeDetector' in window) {
-      try {
-        scanDetector = new BarcodeDetector({ formats: ['code_128', 'ean_13', 'upc_a', 'qr_code'] });
-        scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-        const v = $('scanVideo');
-        v.srcObject = scanStream;
-        await v.play();
-        scanRunning = true;
-        loopScan();
-        return;
-      } catch (e) {
-        return setText('scanMsg', 'Camera failed: ' + (e && e.message ? e.message : e));
-      }
-    }
-    // Fallback: ZXing (PC-Desktop, iOS/Safari, jeder Browser). ZXing macht getUserMedia selbst.
+    // IMMER ZXing (reines JS, zuverlaessig, ueberall gleich). Das native BarcodeDetector ist
+    // auf vielen Android-Geraeten ein nicht-funktionierender Stub -> Kamera an, aber kein Decode.
     try {
+      setText('scanMsg', 'Starting camera...');
       await loadZxing();
-      // Format-Hints + TRY_HARDER — sonst liest ZXing CODE128 aus dem Live-Bild schlecht.
       const hints = new Map();
       hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.EAN_13,
-        ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.QR_CODE,
+        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.QR_CODE,
+        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.UPC_A,
+        ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.DATA_MATRIX,
       ]);
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
       zxingReader = new ZXing.BrowserMultiFormatReader(hints);
-      // Hoehere Aufloesung hilft beim Lesen kleiner Strichcodes.
       const constraints = { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } };
+      scanRunning = true;
       await zxingReader.decodeFromConstraints(constraints, $('scanVideo'), (result) => {
-        if (result) onScan(result.getText());
+        if (result && scanRunning) onScan(result.getText());
       });
+      setText('scanMsg', '');
     } catch (e) {
       setText('scanMsg', 'Scanner could not start: ' + (e && e.message ? e.message : e));
     }
-  }
-  async function loopScan() {
-    if (!scanRunning) return;
-    try {
-      const codes = await scanDetector.detect($('scanVideo'));
-      if (codes && codes.length) { onScan(codes[0].rawValue); return; }
-    } catch (_) { /* transient decode error — keep going */ }
-    requestAnimationFrame(loopScan);
   }
   function onScan(value) {
     scanRunning = false;
