@@ -383,8 +383,17 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     // Fallback: ZXing (PC-Desktop, iOS/Safari, jeder Browser). ZXing macht getUserMedia selbst.
     try {
       await loadZxing();
-      zxingReader = new ZXing.BrowserMultiFormatReader();
-      await zxingReader.decodeFromConstraints({ video: { facingMode: 'environment' } }, $('scanVideo'), (result) => {
+      // Format-Hints + TRY_HARDER — sonst liest ZXing CODE128 aus dem Live-Bild schlecht.
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        ZXing.BarcodeFormat.CODE_128, ZXing.BarcodeFormat.EAN_13,
+        ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.QR_CODE,
+      ]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+      // Hoehere Aufloesung hilft beim Lesen kleiner Strichcodes.
+      const constraints = { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } };
+      await zxingReader.decodeFromConstraints(constraints, $('scanVideo'), (result) => {
         if (result) onScan(result.getText());
       });
     } catch (e) {
