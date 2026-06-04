@@ -135,6 +135,26 @@ function buildBrandedJewelryFace(p: Product): TagFace {
   return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
 }
 
+// ── Original Gold Jewelry (2026-06-04) — Scan-Tag mit Barcode ──
+// Unten: Serial, Ref (model_number, nur wenn vorhanden), Size (nur Nummer), Certificate/Year.
+function buildOriginalJewelryFace(p: Product): TagFace {
+  const a = (p.attributes || {}) as Record<string, unknown>;
+  const sku = fit(up(p.sku || ''));
+  const barcode = String(p.sku || '').trim();
+  const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
+
+  const details: string[] = [];
+  if (a.serial_number) details.push(fit(`SN ${up(a.serial_number)}`));
+  if (a.model_number) details.push(fit(`REF ${up(a.model_number)}`)); // model_number, als "REF" angezeigt
+  if (a.size != null && a.size !== '') details.push(fit(up(a.size))); // nur die Nummer
+  const hasCert = (p.scopeOfDelivery || []).includes('Certificate');
+  const year = a.year ? String(a.year) : '';
+  const certYear = [hasCert ? 'CERTIFICATE' : '', year].filter(Boolean).join(' ');
+  if (certYear) details.push(fit(certYear));
+
+  return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
+}
+
 // ── Generischer Fallback für andere Kategorien (noch ohne eigenes Layout) ──
 function buildGenericFace(p: Product, category?: Category): TagFace {
   const a = (p.attributes || {}) as Record<string, unknown>;
@@ -161,6 +181,7 @@ export function buildProductFace(p: Product, category?: Category): TagFace {
   if (category?.id === 'cat-watch' || category?.name === 'Watch') return buildWatchFace(p);
   if (category?.id === 'cat-gold-jewelry' || category?.name === 'Gold-Diamond Jewellery') return buildGoldJewelryFace(p);
   if (category?.id === 'cat-branded-gold-jewelry' || category?.name === 'Branded Gold Jewelry') return buildBrandedJewelryFace(p);
+  if (category?.id === 'cat-original-gold-jewelry' || category?.name === 'Original Gold Jewelry') return buildOriginalJewelryFace(p);
   return buildGenericFace(p, category);
 }
 
