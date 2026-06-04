@@ -85,8 +85,6 @@ function buildWatchFace(p: Product): TagFace {
   if (metal) lower.push(fit(metal));
   if (a.dial) lower.push(fit(withSuffix(up(a.dial), 'DIAL')));
   if (a.bezel) lower.push(fit(withSuffix(up(a.bezel), 'BEZEL')));
-  let descIdx = -1;
-  if (a.description) { descIdx = lower.length; lower.push(fit(up(a.description))); }
   const price = p.plannedSalePrice || p.purchasePrice || 0;
   lower.push(fit(`BD ${Math.round(price)}`));
   const incl = (p.scopeOfDelivery || []).map(up).join(' ');
@@ -94,9 +92,8 @@ function buildWatchFace(p: Product): TagFace {
   const inclYear = fit([incl, year].filter(Boolean).join(' '));
   if (inclYear) lower.push(inclYear);
 
-  // Bei Überlauf >5 fällt zuerst Description weg (das einzige "weiche" Feld).
-  if (lower.length > 5 && descIdx >= 0) lower.splice(descIdx, 1);
-
+  // Description (Prosa) kommt bewusst NICHT aufs Tag — bleibt im Produkt-Record.
+  // (Die AI wird angewiesen, lange Beschreibungen ins description-Feld zu legen.)
   return { upper: upper.slice(0, 5), lower: lower.slice(0, 5) };
 }
 
