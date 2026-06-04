@@ -345,28 +345,50 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     btn.onclick = () => { stopScan(); screen('modePicker'); };
   });
 
-  // ── Live Barcode Scanner (getUserMedia + BarcodeDetector) ──
-  // Braucht "secure context" (HTTPS oder localhost) — sonst ist mediaDevices nicht da.
-  let scanStream = null, scanRunning = false, scanDetector = null;
+  // ── Live Barcode Scanner ──
+  // Braucht "secure context" (HTTPS oder localhost). Nutzt natives BarcodeDetector
+  // (schnell, v.a. Android) — sonst ZXing-Fallback (reines JS, laeuft auf PC/iOS/allem).
+  let scanStream = null, scanRunning = false, scanDetector = null, zxingReader = null;
+  function loadZxing() {
+    return new Promise((resolve, reject) => {
+      if (window.ZXing) return resolve();
+      const s = document.createElement('script');
+      s.src = '/zxing.js';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('could not load /zxing.js'));
+      document.head.appendChild(s);
+    });
+  }
   async function startScan() {
     setText('scanMsg', '');
     hide('scanResult');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return setText('scanMsg', 'Camera needs HTTPS or localhost. To test now, open this page on the PC via http://localhost:3001/mobile. For phones we set up HTTPS.');
+      return setText('scanMsg', 'Camera needs HTTPS or localhost. On the PC open http://localhost:3001/mobile; phones need HTTPS.');
     }
-    if (!('BarcodeDetector' in window)) {
-      return setText('scanMsg', 'Live scan not supported on this browser (e.g. iOS/Safari). Test on Android Chrome — iOS gets a ZXing fallback later.');
+    // Schneller Weg: natives BarcodeDetector (Android Chrome).
+    if ('BarcodeDetector' in window) {
+      try {
+        scanDetector = new BarcodeDetector({ formats: ['code_128', 'ean_13', 'upc_a', 'qr_code'] });
+        scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        const v = $('scanVideo');
+        v.srcObject = scanStream;
+        await v.play();
+        scanRunning = true;
+        loopScan();
+        return;
+      } catch (e) {
+        return setText('scanMsg', 'Camera failed: ' + (e && e.message ? e.message : e));
+      }
     }
+    // Fallback: ZXing (PC-Desktop, iOS/Safari, jeder Browser). ZXing macht getUserMedia selbst.
     try {
-      scanDetector = new BarcodeDetector({ formats: ['code_128', 'ean_13', 'upc_a', 'qr_code'] });
-      scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-      const v = $('scanVideo');
-      v.srcObject = scanStream;
-      await v.play();
-      scanRunning = true;
-      loopScan();
+      await loadZxing();
+      zxingReader = new ZXing.BrowserMultiFormatReader();
+      await zxingReader.decodeFromConstraints({ video: { facingMode: 'environment' } }, $('scanVideo'), (result) => {
+        if (result) onScan(result.getText());
+      });
     } catch (e) {
-      setText('scanMsg', 'Camera failed: ' + (e && e.message ? e.message : e));
+      setText('scanMsg', 'Scanner could not start: ' + (e && e.message ? e.message : e));
     }
   }
   async function loopScan() {
@@ -379,6 +401,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   }
   function onScan(value) {
     scanRunning = false;
+    if (zxingReader) { try { zxingReader.reset(); } catch (_) {} }
     if (navigator.vibrate) navigator.vibrate(80);
     $('scanValue').textContent = value;
     $('scanDetails').innerHTML = 'Looking up…';
@@ -423,9 +446,10 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   function stopScan() {
     scanRunning = false;
     if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+    if (zxingReader) { try { zxingReader.reset(); } catch (_) {} zxingReader = null; }
   }
   const scanAgainBtn = $('scanAgainBtn');
-  if (scanAgainBtn) scanAgainBtn.onclick = () => { hide('scanResult'); scanRunning = true; loopScan(); };
+  if (scanAgainBtn) scanAgainBtn.onclick = () => { hide('scanResult'); stopScan(); startScan(); };
 
   // ── Perceptual Hash (pHash) — selbe Logik wie desktop/src/core/utils/image-hash.ts.
   // Wird beim Collection-Save mitgeschickt, damit der Desktop-SyncDuplicateGuard

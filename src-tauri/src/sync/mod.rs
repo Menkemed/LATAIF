@@ -5,6 +5,18 @@ async fn serve_mobile_page() -> Html<&'static str> {
     Html(mobile_page::MOBILE_HTML)
 }
 
+// ZXing (reiner JS-Barcode-Decoder) lokal ausliefern — Fallback fuer Browser
+// ohne natives BarcodeDetector (Windows-Desktop, iOS/Safari). Kein CDN noetig.
+async fn serve_zxing() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("zxing.min.js"),
+    )
+}
+
 // v0.4.1 — "/" zeigt eine neutrale Landing-Seite, NICHT die Mobile-Capture.
 // So landet niemand am Counter versehentlich in der Mobile-Version; die
 // Capture-Seite ist ausschliesslich unter /mobile erreichbar.
@@ -90,6 +102,7 @@ impl SyncServer {
         let app = Router::new()
             .nest("/api", routes::api_routes())
             .route("/mobile", axum::routing::get(serve_mobile_page))
+            .route("/zxing.js", axum::routing::get(serve_zxing))
             .route("/", axum::routing::get(serve_root))
             .layer(body_limit)
             .layer(cors)
