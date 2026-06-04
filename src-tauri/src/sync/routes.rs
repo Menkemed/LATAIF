@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     middleware,
     routing::{get, post},
@@ -15,6 +15,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/sync/push", post(sync_push))
         .route("/sync/pull", get(sync_pull))
         .route("/me", get(get_me))
+        .route("/products/by-sku/{sku}", get(product_by_sku))
         .route_layer(middleware::from_fn(auth::auth_middleware));
 
     Router::new()
@@ -178,4 +179,69 @@ async fn sync_pull(
     let last_sync_id = changes.last().map(|c| c.id).unwrap_or(since_id);
 
     Ok(Json(SyncPullResponse { changes, last_sync_id }))
+}
+
+// "Check Item": Produkt per SKU im Changelog finden und volle Details zurueckgeben.
+// Der Changelog speichert bei insert/update die KOMPLETTE Produktzeile als JSON
+// (siehe trackChange im Frontend), daher reicht ein json_extract auf '$.sku'.
+async fn product_by_sku(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(sku): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().await;
+
+    // Neuste Changelog-Zeile mit dieser SKU (gibt record_id + volle Daten).
+    let found: Result<(String, String), _> = db
+        .prepare(
+            "SELECT record_id, data FROM sync_changelog
+             WHERE tenant_id = ?1 AND table_name = 'products'
+               AND json_extract(data, '$.sku') = ?2
+             ORDER BY id DESC LIMIT 1",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_row(rusqlite::params![claims.tenant_id, sku], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+        });
+    let (record_id, data) = found.map_err(|_| StatusCode::NOT_FOUND)?;
+
+    // Wurde das Produkt seither geloescht? (neuste Aktion fuer die record_id pruefen)
+    let latest_action: Result<String, _> = db
+        .prepare(
+            "SELECT action FROM sync_changelog
+             WHERE tenant_id = ?1 AND table_name = 'products' AND record_id = ?2
+             ORDER BY id DESC LIMIT 1",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_row(rusqlite::params![claims.tenant_id, record_id], |row| row.get(0))
+        });
+    if latest_action.unwrap_or_default() == "delete" {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let mut product: serde_json::Value =
+        serde_json::from_str(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Kategorie-Name aufloesen (fuer die Anzeige).
+    if let Some(cat_id) = product
+        .get("category_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+    {
+        let cat_name: Result<String, _> = db
+            .prepare(
+                "SELECT json_extract(data, '$.name') FROM sync_changelog
+                 WHERE tenant_id = ?1 AND table_name = 'categories' AND record_id = ?2
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_row(rusqlite::params![claims.tenant_id, cat_id], |row| row.get(0))
+            });
+        if let Ok(name) = cat_name {
+            product["category_name"] = serde_json::Value::String(name);
+        }
+    }
+
+    Ok(Json(product))
 }

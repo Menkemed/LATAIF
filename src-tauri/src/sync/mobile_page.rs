@@ -89,7 +89,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     <button class="mode-btn" data-mode="collection">📦&nbsp; New Collection Item<span>Add a product to inventory</span></button>
     <button class="mode-btn" data-mode="repair">🔧&nbsp; New Repair Intake<span>Customer item handed in for repair</span></button>
     <button class="mode-btn" data-mode="purchase">🛒&nbsp; Purchase Photo<span>Snap the item — finish the purchase on desktop</span></button>
-    <button class="mode-btn" data-mode="scan">🔍&nbsp; Scan a Tag<span>Live barcode scan — read a printed tag's SKU</span></button>
+    <button class="mode-btn" data-mode="scan">🔍&nbsp; Check Item<span>Scan a tag — see full product details</span></button>
   </div>
   <a href="#" class="logout" id="logoutLink">Sign out</a>
 </div>
@@ -252,16 +252,16 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   <button class="back" data-back>‹ Back</button>
   <div class="brand" style="margin-top: 4px;">
     <h1>LATAIF</h1>
-    <p>Scan Tag</p>
+    <p>Check Item</p>
   </div>
   <div id="scanMsg" class="error hidden"></div>
   <div class="card" style="padding: 0; overflow: hidden;">
     <video id="scanVideo" playsinline muted style="width:100%; display:block; background:#000; aspect-ratio:3/4; object-fit:cover;"></video>
   </div>
-  <div id="scanResult" class="card hidden" style="text-align:center;">
-    <label style="margin-bottom:6px;">Scanned</label>
-    <div id="scanValue" style="font-size:24px; font-weight:600; color:#C6A36D; font-family:monospace; word-break:break-all;"></div>
-    <button id="scanAgainBtn" class="ghost" style="margin-top:14px;">Scan again</button>
+  <div id="scanResult" class="card hidden">
+    <div id="scanValue" style="font-size:12px; color:#6B6B73; font-family:monospace; text-align:center; margin-bottom:10px; word-break:break-all;"></div>
+    <div id="scanDetails"></div>
+    <button id="scanAgainBtn" class="ghost" style="margin-top:16px;">Scan again</button>
   </div>
   <p style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">
     Hold a printed tag in front of the rear camera. Camera access needs HTTPS or localhost.
@@ -381,7 +381,44 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     scanRunning = false;
     if (navigator.vibrate) navigator.vibrate(80);
     $('scanValue').textContent = value;
+    $('scanDetails').innerHTML = 'Looking up…';
     show('scanResult');
+    lookupProduct(value);
+  }
+  async function lookupProduct(sku) {
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch('/api/products/by-sku/' + encodeURIComponent(sku), { headers: { Authorization: 'Bearer ' + token } });
+      if (res.status === 404) { $('scanDetails').innerHTML = '<div style="color:#AA6E6E; text-align:center;">No product found for this SKU.</div>'; return; }
+      if (!res.ok) { $('scanDetails').textContent = 'Lookup failed (' + res.status + ').'; return; }
+      $('scanDetails').innerHTML = renderProduct(await res.json());
+    } catch (e) {
+      $('scanDetails').textContent = 'Lookup error: ' + (e && e.message ? e.message : e);
+    }
+  }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+  function fmtPrice(v) { return (v != null && v !== '') ? 'BD ' + Number(v).toLocaleString('en-US') : ''; }
+  function renderProduct(p) {
+    let attrs = {};
+    try { attrs = typeof p.attributes === 'string' ? JSON.parse(p.attributes) : (p.attributes || {}); } catch (_) {}
+    const rows = [];
+    const add = (label, val) => { if (val !== undefined && val !== null && val !== '') rows.push('<div style="display:flex; justify-content:space-between; gap:14px; padding:7px 0; border-top:1px solid #1A1A1F;"><span style="color:#6B6B73;">' + esc(label) + '</span><span style="text-align:right; color:#EAEAEA;">' + esc(val) + '</span></div>'); };
+    let html = '';
+    if (p.brand) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase;">' + esc(p.brand) + '</div>';
+    html += '<div style="font-size:20px; font-weight:600; color:#EAEAEA; margin:2px 0;">' + esc(p.name || '—') + '</div>';
+    const price = fmtPrice(p.planned_sale_price);
+    if (price) html += '<div style="font-size:22px; font-weight:600; color:#C6A36D; margin-bottom:6px;">' + price + '</div>';
+    add('SKU', p.sku);
+    add('Category', p.category_name || p.category_id);
+    add('Condition', p.condition);
+    add('Status', (p.stock_status || '').replace(/_/g, ' '));
+    add('Location', p.storage_location);
+    Object.keys(attrs).forEach(k => add(k.replace(/_/g, ' '), attrs[k]));
+    html += rows.join('');
+    let imgs = [];
+    try { imgs = typeof p.images === 'string' ? JSON.parse(p.images) : (p.images || []); } catch (_) {}
+    if (imgs && imgs.length) html += '<img src="' + esc(imgs[0]) + '" style="width:100%; border-radius:8px; margin-top:14px;" />';
+    return html;
   }
   function stopScan() {
     scanRunning = false;
