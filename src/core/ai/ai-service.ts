@@ -355,7 +355,7 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
     optional: ['diamond_weight', 'description'],
     conditionOptions: ['Pre-Owned', 'Vintage'],
     scopeOptions: ['Box', 'Certificate', 'Pouch'],
-    notes: 'weight in grams (number). karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color into a single value (24K/22K/21K only exist in Yellow). Mix = Two-Tone. Silver for non-gold silver items. item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch, Bar, Coin} (Bar/Coin for investment-grade pieces). diamond_weight in carats.',
+    notes: 'weight in grams (number). karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color into a single value (24K/22K/21K only exist in Yellow). Mix = Two-Tone. Silver for non-gold silver items. item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch, Bar, Coin} (Bar/Coin for investment-grade pieces). diamond_weight in carats. description = keep it SHORT (max ~17 chars, only the essentials like "SOLITAIRE" or "TENNIS BRACELET") — it prints on a physical tag and longer text gets cut off.',
   },
   'cat-branded-gold-jewelry': {
     name: 'BRANDED_GOLD_JEWELRY',

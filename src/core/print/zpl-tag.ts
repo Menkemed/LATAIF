@@ -25,15 +25,15 @@ const ZPL_FOOT = '^XZ\n';
 export interface TagFace {
   upper: string[]; // generisches Slot-Layout: obere Falt-Hälfte
   lower: string[]; // generisches Slot-Layout: untere Falt-Hälfte
-  watch?: WatchTagContent; // Watch-Kategorie: eigenes Scan-Layout mit Barcode
+  scan?: ScanTagContent; // Barcode-Scan-Layout (Watch, Gold-Jewelry, …)
 }
 
-/** Watch-Tag: SKU + Barcode + Preis (obere Hälfte), Details (untere Hälfte). */
-interface WatchTagContent {
+/** Barcode-Scan-Tag: SKU + Barcode + Preis (obere Hälfte), Details (untere Hälfte). */
+interface ScanTagContent {
   sku: string;
   barcode: string; // codierter Wert = rohe SKU (Case-sensitiv für den Scanner)
   price: string;
-  details: string[]; // REF, SN, Papers/Warranty, Year
+  details: string[]; // kategorie-spezifische Detailzeilen
 }
 
 // ── Text-Helfer ──
@@ -77,7 +77,40 @@ function buildWatchFace(p: Product): TagFace {
   if (pw) details.push(fit(pw));
   if (a.year) details.push(fit(`YEAR ${a.year}`));
 
-  return { upper: [], lower: [], watch: { sku, barcode, price, details: details.slice(0, 5) } };
+  return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
+}
+
+// ── Gold-Jewelry: Karat & Color kurz (18K Yellow → 18K YG, 18K Mix → 18K MIX, Silver → SILVER) ──
+function karatShortJewelry(karat: unknown): string {
+  const s = String(karat ?? '').trim();
+  if (!s) return '';
+  const m = s.match(/(\d+)\s*K\s+(\w+)/i);
+  if (m) {
+    const color = m[2].toLowerCase();
+    if (color === 'mix') return `${m[1]}K MIX`;
+    return `${m[1]}K ${color[0].toUpperCase()}G`; // Yellow→YG, Rose→RG, White→WG
+  }
+  return s.toUpperCase(); // Silver
+}
+
+// ── Gold-Diamond Jewellery (2026-06-04, abgenommen) — Scan-Tag mit Barcode ──
+// Oben: SKU, Barcode, Preis. Unten: Weight/Carat, Item Type + Karat, Description.
+function buildGoldJewelryFace(p: Product): TagFace {
+  const a = (p.attributes || {}) as Record<string, unknown>;
+  const sku = fit(up(p.sku || ''));
+  const barcode = String(p.sku || '').trim();
+  const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
+
+  const details: string[] = [];
+  const w = (a.weight != null && a.weight !== '') ? `${a.weight}G` : '';
+  const ct = (a.diamond_weight != null && a.diamond_weight !== '') ? `${a.diamond_weight}CT` : '';
+  const wc = [w, ct].filter(Boolean).join(' / ');
+  if (wc) details.push(fit(wc));
+  const itemKarat = [a.item_type ? up(a.item_type) : '', karatShortJewelry(a.karat)].filter(Boolean).join(' ');
+  if (itemKarat) details.push(fit(itemKarat));
+  if (a.description) details.push(fit(up(a.description)));
+
+  return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
 }
 
 // ── Generischer Fallback für andere Kategorien (noch ohne eigenes Layout) ──
@@ -101,10 +134,11 @@ function buildGenericFace(p: Product, category?: Category): TagFace {
   return { upper: upper.slice(0, 5), lower: lower.slice(0, 5) };
 }
 
-/** Baut eine Tag-Seite für ein Produkt — Watch-Layout oder generischer Fallback. */
+/** Baut eine Tag-Seite für ein Produkt — kategorie-spezifisches Layout oder generischer Fallback. */
 export function buildProductFace(p: Product, category?: Category): TagFace {
-  const isWatch = category?.id === 'cat-watch' || category?.name === 'Watch';
-  return isWatch ? buildWatchFace(p) : buildGenericFace(p, category);
+  if (category?.id === 'cat-watch' || category?.name === 'Watch') return buildWatchFace(p);
+  if (category?.id === 'cat-gold-jewelry' || category?.name === 'Gold-Diamond Jewellery') return buildGoldJewelryFace(p);
+  return buildGenericFace(p, category);
 }
 
 // ── ZPL-Rendering ──
@@ -115,9 +149,9 @@ function foLines(x: number, ys: number[], lines: string[]): string {
   }
   return z;
 }
-// Watch-Scan-Layout: SKU + Barcode + Preis (oben), Details (unten). Positionen physisch
+// Barcode-Scan-Layout: SKU + Barcode + Preis (oben), Details (unten). Positionen physisch
 // abgenommen 2026-06-04. Pad A = Pad B + 90 in y (yOff), x kommt vom Aufrufer.
-function renderWatchPad(x: number, yOff: number, w: WatchTagContent): string {
+function renderScanPad(x: number, yOff: number, w: ScanTagContent): string {
   let z = '';
   if (w.sku) z += `^FO${x},${20 + yOff}${FONT}^FD${zplEscape(w.sku)}^FS\n`;
   if (w.barcode) z += `^FO${x},${40 + yOff}^BY1^BCN,55,N,N,N^FD${zplEscape(w.barcode)}^FS\n`;
@@ -127,9 +161,9 @@ function renderWatchPad(x: number, yOff: number, w: WatchTagContent): string {
   return z;
 }
 
-// Ein Pad rendern — Watch-Barcode-Layout (yOff) oder generisches Slot-Layout (upperY/lowerY).
+// Ein Pad rendern — Barcode-Scan-Layout (yOff) oder generisches Slot-Layout (upperY/lowerY).
 function renderPad(x: number, upperY: number[], lowerY: number[], yOff: number, face: TagFace): string {
-  if (face.watch) return renderWatchPad(x, yOff, face.watch);
+  if (face.scan) return renderScanPad(x, yOff, face.scan);
   return foLines(x, upperY, face.upper) + foLines(x, lowerY, face.lower);
 }
 
