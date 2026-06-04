@@ -455,12 +455,10 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     if (p.brand) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase;">' + esc(p.brand) + '</div>';
     html += '<div style="font-size:20px; font-weight:600; color:#EAEAEA; margin:2px 0;">' + esc(p.name || '—') + '</div>';
     const sale = fmtPrice(p.planned_sale_price);
-    if (sale) html += '<div style="font-size:22px; font-weight:600; color:#C6A36D; margin-bottom:6px;">' + sale + '</div>';
-    // Preise
-    add('Cost', fmtPrice(p.purchase_price));
-    add('Sale', fmtPrice(p.planned_sale_price));
-    add('Min', fmtPrice(p.min_sale_price));
-    add('Max', fmtPrice(p.max_sale_price));
+    if (sale) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.06em; text-transform:uppercase;">Sale Price</div><div style="font-size:22px; font-weight:600; color:#C6A36D; margin-bottom:8px;">' + sale + '</div>';
+    // Preise: Cost Price, Sale Price, Min Sale Price
+    add('Cost Price', fmtPrice(p.purchase_price));
+    add('Min Sale Price', fmtPrice(p.min_sale_price));
     // Stammdaten
     add('SKU', p.sku);
     add('Category', p.category_name || p.category_id);
