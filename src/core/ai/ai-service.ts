@@ -378,10 +378,10 @@ const CATEGORY_SPECS: Record<AiCategoryId, {
   'cat-accessory': {
     name: 'ACCESSORY',
     required: ['item_type', 'color', 'material', 'description'],
-    optional: ['model_number', 'serial_number', 'box', 'papers'],
+    optional: ['model_number', 'serial_number', 'year', 'box', 'papers'],
     conditionOptions: ['New', 'Pre-Owned'],
     scopeOptions: ['Box', 'Dust Bag', 'Pouch', 'Papers'],
-    notes: 'item_type ∈ {Handbag, Eyeglass, Wallet, Lighter, Cufflinks, Prayer Beads, Walking Stick, Pen, Key Holder, Other}. material e.g. "Leather", "Canvas", "Metal". color free text. box and papers are booleans.',
+    notes: 'item_type ∈ {Handbag, Eyeglass, Wallet, Lighter, Cufflinks, Prayer Beads, Walking Stick, Pen, Key Holder, Other}. material e.g. "Leather", "Canvas", "Metal". color free text. box and papers are booleans. year = production or purchase year if known (number).',
   },
   'cat-spare-part': {
     name: 'SPARE_PART',

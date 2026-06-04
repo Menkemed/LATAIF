@@ -124,6 +124,8 @@ const ACCESSORY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'description', label: 'Description', type: 'text', required: true, showInList: false },
   { key: 'model_number', label: 'Model No', type: 'text', required: false, showInList: false },
   { key: 'serial_number', label: 'Serial No', type: 'text', required: false, showInList: false },
+  // 2026-06-04: Year ergänzt (für das Tag — Papers/Year).
+  { key: 'year', label: 'Year', type: 'number', required: false, showInList: false },
 ];
 
 // Plan §4.6 SPARE_PART — 2026-05-17: Box ergänzt; Material differenziert nach Karat+Color

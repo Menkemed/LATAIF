@@ -153,6 +153,7 @@ export const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
     { key: 'model_number', label: 'Model No', type: 'text' },
     { key: 'serial_number', label: 'Serial No', type: 'text', coreField: 'itemSerial' },
     { key: 'description', label: 'Description', type: 'text' },
+    { key: 'year', label: 'Year', type: 'number' },
   ],
 
   // ── SPARE PART ───────────────────────────────────────────────────

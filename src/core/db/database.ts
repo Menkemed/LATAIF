@@ -376,7 +376,8 @@ function runMigrations(database: Database): void {
       {"key":"material","label":"Material","type":"text","required":true,"showInList":true},
       {"key":"description","label":"Description","type":"text","required":true,"showInList":false},
       {"key":"model_number","label":"Model No","type":"text","required":false,"showInList":false},
-      {"key":"serial_number","label":"Serial No","type":"text","required":false,"showInList":false}
+      {"key":"serial_number","label":"Serial No","type":"text","required":false,"showInList":false},
+      {"key":"year","label":"Year","type":"number","required":false,"showInList":false}
     ]' WHERE id = 'cat-accessory'`,
     // WATCH — 2026-05-17: "New" aus Condition entfernt (Unworn ist die korrekte Bezeichnung).
     `UPDATE categories SET condition_options = '["Unworn","Pre-Owned","Vintage"]' WHERE id = 'cat-watch'`,
