@@ -20,8 +20,6 @@ import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { query } from '@/core/db/helpers';
 import { usePermission } from '@/hooks/usePermission';
 import { vatEngine } from '@/core/tax/vat-engine';
-import { buildProductFace, buildProductTagsZpl } from '@/core/print/zpl-tag';
-import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
@@ -46,12 +44,6 @@ export function ProductDetail() {
   const [aiBusy, setAiBusy] = useState(false);
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
-  // v0.7.27 — ZPL-Tag-Druck (Zebra ZD220, nativer Raw-Print)
-  const [showPrintTag, setShowPrintTag] = useState(false);
-  const [printQty, setPrintQty] = useState(2);
-  const [printerName, setPrinterName] = useState(getTagPrinterName());
-  const [printBusy, setPrintBusy] = useState(false);
-  const [printError, setPrintError] = useState<string | null>(null);
   const [lotsExpanded, setLotsExpanded] = useState(true);
   const [errors, setErrors] = useState<Record<string, string>>({});
   // v0.7.19 — Foto-Lightbox (Hero + Gallery-Thumbs anklickbar)
@@ -499,7 +491,6 @@ export function ProductDetail() {
                   setAiLoading(false);
                 }} disabled={aiLoading}><Sparkles size={14} /> {aiLoading ? 'Analyzing...' : 'AI Price'}</Button>
                 {perm.canEditProducts && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>}
-                <Button variant="ghost" onClick={() => { setPrintError(null); setPrinterName(getTagPrinterName()); setShowPrintTag(true); }}><Tag size={14} /> Print Tag</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 <Button variant="primary" onClick={() => navigate(`/offers?product=${id}`)}>Create Offer</Button>
               </>
@@ -1555,60 +1546,6 @@ export function ProductDetail() {
             </div>
           </>
         )}
-      </Modal>
-
-      {/* v0.7.27 — ZPL-Tag-Druck (Zebra ZD220) */}
-      <Modal open={showPrintTag} onClose={() => setShowPrintTag(false)} title="Print Tag (Zebra ZPL)" width={420}>
-        {(() => {
-          const face = product ? buildProductFace(product, category || undefined) : { upper: [], lower: [] };
-          return (
-            <>
-              {!canRawPrint() && (
-                <div style={{ padding: '10px 12px', borderRadius: 8, marginBottom: 16, background: '#FFF7ED', border: '1px solid #FED7AA', color: '#9A6B3F', fontSize: 12.5, lineHeight: 1.5 }}>
-                  Raw printing only works in the <strong>desktop app</strong>, not the browser preview. The tag preview below is accurate.
-                </div>
-              )}
-              <div style={{ fontFamily: 'monospace', fontSize: 12, lineHeight: 1.45, background: '#FAFAFA', border: '1px solid #E5E7EB', borderRadius: 8, padding: '12px 14px', marginBottom: 16, width: 'fit-content', minWidth: 200 }}>
-                {face.upper.map((l, i) => <div key={`u${i}`}>{l || ' '}</div>)}
-                <div style={{ borderTop: '1px dashed #9CA3AF', margin: '6px 0' }} />
-                {face.lower.map((l, i) => <div key={`l${i}`}>{l || ' '}</div>)}
-              </div>
-              <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
-                <div>
-                  <label style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>PRINTER</label>
-                  <Input value={printerName} onChange={e => setPrinterName(e.target.value)} placeholder="Zebra ZD220 (203 dpi) - ZPL" />
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>QUANTITY (EVEN — 2 tags per feed)</label>
-                  <Input type="number" min={2} step={2} value={String(printQty)} onChange={e => {
-                    const n = parseInt(e.target.value, 10) || 2;
-                    setPrintQty(Math.max(2, n % 2 === 0 ? n : n + 1)); // immer gerade (2 Tags/Feld)
-                  }} />
-                </div>
-              </div>
-              {printError && (
-                <div style={{ padding: '8px 12px', borderRadius: 8, marginBottom: 14, background: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C', fontSize: 12.5 }}>{printError}</div>
-              )}
-              <div className="flex justify-end gap-3">
-                <Button variant="ghost" onClick={() => setShowPrintTag(false)}>Cancel</Button>
-                <Button variant="primary" disabled={printBusy} onClick={async () => {
-                  if (!product) return;
-                  setPrintBusy(true); setPrintError(null);
-                  try {
-                    setTagPrinterName(printerName);
-                    const zpl = buildProductTagsZpl(product, category || undefined, printQty);
-                    await printRawZpl(zpl, printerName);
-                    setShowPrintTag(false);
-                  } catch (e) {
-                    setPrintError(e instanceof Error ? e.message : String(e));
-                  } finally {
-                    setPrintBusy(false);
-                  }
-                }}>{printBusy ? 'Printing...' : 'Print'}</Button>
-              </div>
-            </>
-          );
-        })()}
       </Modal>
 
       <HistoryDrawer

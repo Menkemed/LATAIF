@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Package, Trash2, X, Check, Link2 } from 'lucide-react';
+import { Package, Trash2, X, Check, Link2, Tag } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -261,7 +261,10 @@ export function WatchList() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [linksMap, setLinksMap] = useState<Map<string, { label: string; count: number }[]>>(new Map());
   const [confirmDelete, setConfirmDelete] = useState(false);
-  // v0.7.27 — ZPL-Bulk-Tag-Druck (gerade Anzahl: 2 Tags pro Vorschub)
+  // v0.7.28 — ZPL-Tag-Druck: eigener Auswahl-Modus (alle Produkte wählbar, KEINE
+  // Link-Sperre wie beim Löschen). Markierte Produkte → Batch-Druck (gerade Anzahl).
+  const [printMode, setPrintMode] = useState(false);
+  const [printSelectedIds, setPrintSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkPrint, setShowBulkPrint] = useState(false);
   const [bulkPrinter, setBulkPrinter] = useState(getTagPrinterName());
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -284,6 +287,14 @@ export function WatchList() {
   const toggleSelect = (id: string) => {
     if (isLinked(id)) return; // verknuepfte Produkte koennen nicht selektiert werden
     setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  // Druck-Auswahl: KEINE Link-Sperre — jedes Produkt darf ein Tag bekommen.
+  const togglePrintSelect = (id: string) => {
+    setPrintSelectedIds(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
@@ -457,15 +468,22 @@ export function WatchList() {
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by brand, name, SKU..."
       actions={
         <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <Button variant="ghost" disabled={filtered.length === 0} onClick={() => { setBulkError(null); setBulkPrinter(getTagPrinterName()); setShowBulkPrint(true); }}>Print Tags ({filtered.length})</Button>
-          <Button variant="ghost" onClick={() => exportProductsToExcel(filtered, categories)}>
-            Export Excel ({filtered.length})
-          </Button>
-          <Button variant="ghost" onClick={() => navigate('/settings?tab=duplicates')}>
-            Find Duplicates
-          </Button>
-          {/* v0.7.20 — Select/Delete-Modus. Im Select-Modus: Cancel + Delete (N). */}
-          {selectMode ? (
+          {printMode ? (
+            <>
+              <Button variant="ghost" onClick={() => { setPrintMode(false); setPrintSelectedIds(new Set()); }}>
+                <X size={14} /> Cancel
+              </Button>
+              <Button variant="ghost" onClick={() => setPrintSelectedIds(prev =>
+                prev.size === filtered.length ? new Set() : new Set(filtered.map(p => p.id))
+              )}>
+                {printSelectedIds.size === filtered.length && filtered.length > 0 ? 'Clear all' : 'Select all'}
+              </Button>
+              <Button variant="primary" disabled={printSelectedIds.size === 0}
+                onClick={() => { setBulkError(null); setBulkPrinter(getTagPrinterName()); setShowBulkPrint(true); }}>
+                <Tag size={14} /> Print Tags ({printSelectedIds.size})
+              </Button>
+            </>
+          ) : selectMode ? (
             <>
               <Button variant="ghost" onClick={() => setSelectMode(false)}>
                 <X size={14} /> Cancel
@@ -479,12 +497,23 @@ export function WatchList() {
               </Button>
             </>
           ) : (
-            <Button variant="ghost" onClick={() => setSelectMode(true)}>
-              <Trash2 size={14} /> Select
-            </Button>
+            <>
+              <Button variant="ghost" disabled={filtered.length === 0} onClick={() => { setPrintSelectedIds(new Set()); setPrintMode(true); }}>
+                <Tag size={14} /> Print Tags
+              </Button>
+              <Button variant="ghost" onClick={() => exportProductsToExcel(filtered, categories)}>
+                Export Excel ({filtered.length})
+              </Button>
+              <Button variant="ghost" onClick={() => navigate('/settings?tab=duplicates')}>
+                Find Duplicates
+              </Button>
+              <Button variant="ghost" onClick={() => setSelectMode(true)}>
+                <Trash2 size={14} /> Select
+              </Button>
+              <Button variant="secondary" onClick={() => navigate('/import')}>Import Excel</Button>
+              <Button variant="primary" onClick={() => openNew()}>New Item</Button>
+            </>
           )}
-          <Button variant="secondary" onClick={() => navigate('/import')}>Import Excel</Button>
-          <Button variant="primary" onClick={() => openNew()}>New Item</Button>
         </div>
       }
     >
@@ -572,16 +601,20 @@ export function WatchList() {
             // statt zur Detailseite zu navigieren.
             const linked = isLinked(p.id);
             const selected = selectedIds.has(p.id);
+            const pSelected = printSelectedIds.has(p.id);
             const links = linksMap.get(p.id) || [];
             const reason = Array.from(new Set(links.map(l => l.label))).slice(0, 3).join(' · ');
 
             return (
               <Card
                 key={p.id}
-                hoverable={!selectMode || !linked}
+                hoverable={printMode ? true : (!selectMode || !linked)}
                 noPadding
-                onClick={() => selectMode ? toggleSelect(p.id) : navigate(`/collection/${p.id}`)}
-                style={selectMode ? {
+                onClick={() => printMode ? togglePrintSelect(p.id) : selectMode ? toggleSelect(p.id) : navigate(`/collection/${p.id}`)}
+                style={printMode ? {
+                  border: pSelected ? '2px solid #0F0F10' : '1px solid #D5D9DE',
+                  cursor: 'pointer',
+                } : selectMode ? {
                   border: selected ? '2px solid #0F0F10' : linked ? '1px solid #E5E9EE' : '1px solid #D5D9DE',
                   opacity: linked ? 0.6 : 1,
                   cursor: linked ? 'not-allowed' : 'pointer',
@@ -597,6 +630,16 @@ export function WatchList() {
                     <Package size={36} strokeWidth={1} style={{ color: '#6B7280' }} />
                   )}
                   {/* v0.7.20 — Select-Modus Overlays: Checkbox (saubere) oder Link-Badge (verknuepft). */}
+                  {printMode && (
+                    <span className="absolute flex items-center justify-center" style={{
+                      top: 12, left: 12, width: 24, height: 24, borderRadius: 999,
+                      background: pSelected ? '#0F0F10' : '#FFFFFF',
+                      border: `1.5px solid ${pSelected ? '#0F0F10' : '#D5D9DE'}`,
+                      zIndex: 2,
+                    }}>
+                      {pSelected && <Check size={14} style={{ color: '#FFFFFF' }} strokeWidth={3} />}
+                    </span>
+                  )}
                   {selectMode && (
                     linked ? (
                       <span className="absolute flex items-center gap-1" style={{
@@ -623,7 +666,7 @@ export function WatchList() {
                       (breitere) "Linked"-Badge nicht ueberlappt. */}
                   {cat && (
                     <span className="absolute" style={{
-                      top: selectMode ? 44 : 12, left: 12, fontSize: 10, padding: '2px 10px', borderRadius: 999,
+                      top: (selectMode || printMode) ? 44 : 12, left: 12, fontSize: 10, padding: '2px 10px', borderRadius: 999,
                       background: cat.color + '15', color: cat.color, border: `1px solid ${cat.color}30`,
                     }}>{cat.name}</span>
                   )}
@@ -1134,7 +1177,8 @@ export function WatchList() {
       {/* v0.7.27 — ZPL-Bulk-Tag-Druck (gerade Anzahl, 2 Tags pro Vorschub) */}
       <Modal open={showBulkPrint} onClose={() => setShowBulkPrint(false)} title="Print Tags (Zebra ZPL)" width={440}>
         {(() => {
-          const productCount = filtered.length;
+          const selProducts = filtered.filter(p => printSelectedIds.has(p.id));
+          const productCount = selProducts.length;
           const tagCount = productCount % 2 === 1 ? productCount + 1 : productCount;
           return (
             <>
@@ -1144,7 +1188,7 @@ export function WatchList() {
                 </div>
               )}
               <div style={{ padding: '12px 14px', borderRadius: 8, marginBottom: 16, background: '#F9FAFB', border: '1px solid #E5E7EB', fontSize: 13, color: '#374151', lineHeight: 1.6 }}>
-                <div><strong style={{ color: '#0F0F10' }}>{productCount}</strong> product{productCount === 1 ? '' : 's'} in the current view.</div>
+                <div><strong style={{ color: '#0F0F10' }}>{productCount}</strong> product{productCount === 1 ? '' : 's'} selected.</div>
                 <div>Prints <strong style={{ color: '#0F0F10' }}>{tagCount}</strong> tag{tagCount === 1 ? '' : 's'} (1 per product){tagCount !== productCount ? ' — rounded up to an even number (+1 spare of the last item) so no label is wasted' : ''}.</div>
                 <div style={{ marginTop: 6, fontSize: 12, color: '#6B7280' }}>2 tags share one feed strip, so the total is always even.</div>
               </div>
@@ -1161,12 +1205,14 @@ export function WatchList() {
                   setBulkBusy(true); setBulkError(null);
                   try {
                     setTagPrinterName(bulkPrinter);
-                    const items = filtered.map(p => ({ product: p, category: getCat(p.categoryId) }));
-                    if (items.length === 0) throw new Error('No products to print.');
+                    const items = selProducts.map(p => ({ product: p, category: getCat(p.categoryId) }));
+                    if (items.length === 0) throw new Error('No products selected.');
                     if (items.length % 2 === 1) items.push(items[items.length - 1]); // gerade machen
                     const zpl = buildBatchTagsZpl(items);
                     await printRawZpl(zpl, bulkPrinter);
                     setShowBulkPrint(false);
+                    setPrintMode(false);
+                    setPrintSelectedIds(new Set());
                   } catch (e) {
                     setBulkError(e instanceof Error ? e.message : String(e));
                   } finally {
