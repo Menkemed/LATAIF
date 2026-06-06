@@ -385,6 +385,29 @@ export function postInvoiceIssued(invoice: Invoice): PostingResult {
         metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId },
       });
     }
+    // H-01 — Wareneinsatz (COGS) je Line: DR COGS / CR INVENTORY zum Cost-Snapshot.
+    // purchasePriceSnapshot ist Cost PRO STUECK -> mal quantity. Ohne diese Buchung
+    // bleibt der Ledger-Profit brutto (Revenue ohne Wareneinsatz) und INVENTORY
+    // waechst monoton. Das Paar ist fuer sich balanciert (DR=CR), Reversal laeuft
+    // automatisch ueber reverseSource('INVOICE') bei Cancel/Delete.
+    const cogsQty = Math.max(1, line.quantity || 1);
+    const cogsCost = ROUND((line.purchasePriceSnapshot || 0) * cogsQty);
+    if (cogsCost > 0) {
+      entries.push({
+        account: 'COGS',
+        direction: 'DEBIT',
+        amount: cogsCost,
+        sourceLineId: line.id,
+        metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId, kind: 'cogs' },
+      });
+      entries.push({
+        account: 'INVENTORY',
+        direction: 'CREDIT',
+        amount: cogsCost,
+        sourceLineId: line.id,
+        metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId, kind: 'cogs' },
+      });
+    }
   }
   return postEntries(entries, {
     occurredAt,
