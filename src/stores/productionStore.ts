@@ -16,6 +16,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postExpensePayment, hasLedgerEntries } from '@/core/ledger/posting';
+import { getActiveLots, consumeLot, syncProductQuantity } from '@/core/lots/lot-queries';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -195,6 +196,12 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
       };
       inStmt.run([uuid(), id, p.id, JSON.stringify(snapshot), p.purchasePrice]);
       db.run(`UPDATE products SET stock_status = 'consumed', updated_at = ? WHERE id = ?`, [now, p.id]);
+      // H-04 — Input-Lots leeren, sonst bleiben sie ACTIVE (qty_remaining>0) und
+      // erscheinen als Phantom-Bestand (ueber Lot-Pfad verkaufbar) + ueberzaehlen
+      // den Bestandswert (Input-Wert steckt zusaetzlich im Output). consumeLot treibt
+      // jedes aktive Lot auf 0/EXHAUSTED (reversibel via restoreLot), danach sync.
+      for (const lot of getActiveLots(p.id)) consumeLot(lot.id, lot.qtyRemaining);
+      syncProductQuantity(p.id);
     }
     inStmt.free();
 
