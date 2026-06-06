@@ -181,14 +181,20 @@ async fn sync_pull(
     Ok(Json(SyncPullResponse { changes, last_sync_id }))
 }
 
-// "Check Item": Produkt per SKU im Changelog finden und volle Details zurueckgeben.
-// Der Changelog speichert bei insert/update die KOMPLETTE Produktzeile als JSON
-// (siehe trackChange im Frontend), daher reicht ein json_extract auf '$.sku'.
+// "Check Item": Produkt per SKU nachschlagen und volle Details (inkl. Foto) zurueckgeben.
+// PRIMAER aus der Frontend-DB (lataif.db) `products`-Tabelle lesen — die ist die SSOT
+// mit aktuellem, vollstaendigem Bild. Der Sync-Changelog transportiert Bilder unzuverlaessig
+// (Bild landet teils nie/veraltet in der gepushten Zeile), daher dient er nur als Fallback.
 async fn product_by_sku(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Path(sku): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // 1) Direkt aus lataif.db (read-only). Liefert immer das aktuelle Bild.
+    if let Some(p) = product_from_frontend_db(&state.frontend_db_path, &sku) {
+        return Ok(Json(p));
+    }
+    // 2) Fallback: bisheriger Changelog-Lookup in der Sync-Server-DB.
     let db = state.db.lock().await;
 
     // Neuste Changelog-Zeile mit dieser SKU (gibt record_id + volle Daten).
@@ -244,4 +250,78 @@ async fn product_by_sku(
     }
 
     Ok(Json(product))
+}
+
+// Zahlen-Spalte tolerant lesen: Real/Integer → Zahl, numerischer Text → geparst,
+// alles andere (NULL, leerer Text, der String "null" aus Alt-Daten) → None.
+// Verhindert, dass query_row an einem als TEXT gespeicherten Preisfeld scheitert.
+fn col_num(r: &rusqlite::Row, idx: usize) -> Option<f64> {
+    use rusqlite::types::ValueRef;
+    match r.get_ref(idx) {
+        Ok(ValueRef::Real(f)) => Some(f),
+        Ok(ValueRef::Integer(i)) => Some(i as f64),
+        Ok(ValueRef::Text(t)) => std::str::from_utf8(t).ok().and_then(|s| s.trim().parse::<f64>().ok()),
+        _ => None,
+    }
+}
+
+// Produkt direkt aus der Frontend-DB (lataif.db) `products`-Tabelle lesen — read-only,
+// damit der laufende sql.js-Schreiber nicht blockiert wird. Liefert das Produkt-JSON in
+// genau der Form, die die Mobile-Seite (renderProduct) erwartet: images/attributes/
+// scope_of_delivery bleiben JSON-Strings, Preise als Zahl. None => Caller nutzt Fallback.
+fn product_from_frontend_db(
+    db_path: &std::path::Path,
+    sku: &str,
+) -> Option<serde_json::Value> {
+    use rusqlite::OpenFlags;
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+
+    let mut product = conn
+        .prepare(
+            "SELECT brand, name, sku, condition, scope_of_delivery, storage_location,
+                    purchase_price, planned_sale_price, min_sale_price, max_sale_price,
+                    stock_status, images, attributes, category_id
+             FROM products WHERE sku = ?1 LIMIT 1",
+        )
+        .ok()?
+        .query_row(rusqlite::params![sku], |r| {
+            Ok(serde_json::json!({
+                "brand":             r.get::<_, Option<String>>(0)?,
+                "name":              r.get::<_, Option<String>>(1)?,
+                "sku":               r.get::<_, Option<String>>(2)?,
+                "condition":         r.get::<_, Option<String>>(3)?,
+                "scope_of_delivery": r.get::<_, Option<String>>(4)?,
+                "storage_location":  r.get::<_, Option<String>>(5)?,
+                "purchase_price":    col_num(r, 6),
+                "planned_sale_price": col_num(r, 7),
+                "min_sale_price":    col_num(r, 8),
+                "max_sale_price":    col_num(r, 9),
+                "stock_status":      r.get::<_, Option<String>>(10)?,
+                "images":            r.get::<_, Option<String>>(11)?,
+                "attributes":        r.get::<_, Option<String>>(12)?,
+                "category_id":       r.get::<_, Option<String>>(13)?,
+            }))
+        })
+        .ok()?;
+
+    // Kategorie-Name aufloesen (fuer die Anzeige) — fehlt sie, bleibt category_id.
+    if let Some(cat_id) = product
+        .get("category_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+    {
+        if let Ok(name) = conn.query_row(
+            "SELECT name FROM categories WHERE id = ?1",
+            rusqlite::params![cat_id],
+            |r| r.get::<_, String>(0),
+        ) {
+            product["category_name"] = serde_json::Value::String(name);
+        }
+    }
+
+    Some(product)
 }

@@ -46,6 +46,10 @@ const HTTPS_PORT: u16 = 3443;
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     pub jwt_secret: String,
+    /// Pfad zur Frontend-DB (lataif.db) im selben app_data_dir. Der Mobile-"Check Item"-
+    /// Lookup liest Produkte direkt aus deren `products`-Tabelle (read-only) — die ist die
+    /// SSOT mit aktuellem, vollstaendigem Bild. Der Sync-Changelog verliert teils Bilder.
+    pub frontend_db_path: std::path::PathBuf,
 }
 
 pub struct SyncServer {
@@ -102,9 +106,17 @@ impl SyncServer {
         ).map_err(|_| "Self-token generation failed".to_string())?;
         *self.self_token.lock().await = Some(self_token);
 
+        // Frontend-DB liegt als lataif.db im selben Ordner wie die Sync-Server-DB.
+        let frontend_db_path = self
+            .db_path
+            .parent()
+            .map(|p| p.join("lataif.db"))
+            .unwrap_or_else(|| std::path::PathBuf::from("lataif.db"));
+
         let state = Arc::new(AppState {
             db: Mutex::new(conn),
             jwt_secret,
+            frontend_db_path,
         });
 
         let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);

@@ -445,7 +445,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     }
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
-  function fmtPrice(v) { return (v != null && v !== '') ? 'BD ' + Number(v).toLocaleString('en-US') : ''; }
+  function fmtPrice(v) { const n = Number(v); return (v != null && v !== '' && Number.isFinite(n)) ? 'BD ' + n.toLocaleString('en-US') : ''; }
   function renderProduct(p) {
     let attrs = {};
     try { attrs = typeof p.attributes === 'string' ? JSON.parse(p.attributes) : (p.attributes || {}); } catch (_) {}
