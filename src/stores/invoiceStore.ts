@@ -134,6 +134,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (offerRows.length === 0) throw new Error('Offer not found');
     const offer = offerRows[0];
 
+    // H-03 — Doppelumwandlung verhindern. Prüft die invoices-Tabelle DIREKT
+    // (nicht offer.invoice_id), damit ein nach Invoice-DELETE verwaister Link
+    // keine legitime Re-Konvertierung blockiert. Storno setzt invoice_id selbst
+    // zurück; eine stornierte (CANCELLED) Rechnung blockiert daher absichtlich nicht.
+    const existingInv = query(
+      `SELECT invoice_number FROM invoices WHERE offer_id = ? AND status != 'CANCELLED' LIMIT 1`,
+      [offerId]
+    );
+    if (existingInv.length > 0) {
+      throw new Error(`Dieses Angebot wurde bereits in Rechnung ${existingInv[0].invoice_number as string} umgewandelt.`);
+    }
+
     const offerLineRows = query('SELECT ol.*, p.purchase_price FROM offer_lines ol JOIN products p ON p.id = ol.product_id WHERE ol.offer_id = ?', [offerId]);
 
     const invoiceNumber = get().getNextInvoiceNumber();

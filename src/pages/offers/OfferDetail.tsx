@@ -84,7 +84,7 @@ export function OfferDetail() {
 
   const canEdit = offer.status === 'draft';
   const canDelete = offer.status === 'draft' || offer.status === 'rejected';
-  const canCreateInvoice = offer.status === 'accepted';
+  const canCreateInvoice = offer.status === 'accepted' && !offer.invoiceId;
 
   function handleSave() {
     if (!id) return;
