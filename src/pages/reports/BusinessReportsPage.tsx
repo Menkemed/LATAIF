@@ -17,6 +17,7 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
 import { getStockAggregates } from '@/core/lots/lot-queries';
+import { receivablesBreakdown } from '@/core/finance/receivables';
 import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -336,19 +337,21 @@ export function BusinessReportsPage() {
   }, [suppliers]);
 
   // ── Receivables Report (Plan §Reports §G)
+  // SSOT: receivablesBreakdown() deckt ALLE Forderungsquellen ab (Invoice,
+  // Consignment, Approval-Sold ohne Invoice, offene Repairs), ist Credit-Note-
+  // bereinigt und damit identisch zur Dashboard-RECEIVABLES-KPI. Die alte
+  // Variante zählte nur PARTIAL-Invoices und unterschlug Approval/Consignment/Repair.
   const receivablesReport = useMemo(() => {
-    const partial = invoices.filter(i => i.status === 'PARTIAL');
+    const rows = receivablesBreakdown();
     const byCustomer: Record<string, { name: string; outstanding: number; count: number }> = {};
-    for (const inv of partial) {
-      const c = customers.find(x => x.id === inv.customerId);
-      const name = c ? `${c.firstName} ${c.lastName}` : inv.customerId.slice(0, 8);
-      const e = byCustomer[inv.customerId] || { name, outstanding: 0, count: 0 };
-      e.outstanding += Math.max(0, inv.grossAmount - inv.paidAmount); e.count += 1;
-      byCustomer[inv.customerId] = e;
+    for (const r of rows) {
+      const e = byCustomer[r.customerId] || { name: r.customerName, outstanding: 0, count: 0 };
+      e.outstanding += r.open; e.count += 1;
+      byCustomer[r.customerId] = e;
     }
-    const total = Object.values(byCustomer).reduce((s, v) => s + v.outstanding, 0);
+    const total = rows.reduce((s, r) => s + r.open, 0);
     return { total, byCustomer: Object.values(byCustomer) };
-  }, [invoices, customers]);
+  }, [invoices, customers, repairs, transfers, consignments]);
 
   // ── Partner Report (Plan §Reports §H)
   const partnerReport = useMemo(() => {
@@ -532,7 +535,7 @@ export function BusinessReportsPage() {
         ]};
       case 'receivables':
         return { title: 'Receivables Report', rows: [
-          ['Customer', 'Partial invoices', 'Outstanding'],
+          ['Customer', 'Open items', 'Outstanding'],
           ...receivablesReport.byCustomer.map(c => [c.name, String(c.count), c.outstanding.toFixed(2)]),
           ['', '', ''],
           ['Total outstanding', '', receivablesReport.total.toFixed(2)],
@@ -837,7 +840,7 @@ export function BusinessReportsPage() {
                 <div key={c.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                   <span style={{ color: '#0F0F10' }}>{c.name}</span>
                   <div className="flex gap-6">
-                    <span style={{ color: '#6B7280' }}>{c.count} partial inv.</span>
+                    <span style={{ color: '#6B7280' }}>{c.count} open</span>
                     <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={c.outstanding}/> BHD</span>
                   </div>
                 </div>
