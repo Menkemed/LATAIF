@@ -232,13 +232,17 @@ function foLines(x: number, ys: number[], lines: string[]): string {
   }
   return z;
 }
-// Barcode-Scan-Layout: SKU + Barcode + Preis (oben), Details (unten). Positionen physisch
-// abgenommen 2026-06-04. Pad A = Pad B + 90 in y (yOff), x kommt vom Aufrufer.
+// Scan-Layout mit QR-Code (statt CODE128) — QR scannt am Handy zuverlaessiger als
+// der feine ^BY1-Barcode. QR ist quadratisch (^BQN,2,3 ≈ 63 dots ≈ 8 mm), darum:
+//   Zeile 1: SKU (volle Breite oben)
+//   QR links unter der SKU, PREIS rechts daneben (mittig zum QR)
+//   Details in der unteren Falt-Haelfte (unveraendert ab y126).
+// QR codiert die rohe SKU (case-sensitiv) — der Scanner-Lookup bleibt identisch.
 function renderScanPad(x: number, yOff: number, w: ScanTagContent): string {
   let z = '';
   if (w.sku) z += `^FO${x},${20 + yOff}${FONT}^FD${zplEscape(w.sku)}^FS\n`;
-  if (w.barcode) z += `^FO${x},${40 + yOff}^BY1^BCN,55,N,N,N^FD${zplEscape(w.barcode)}^FS\n`;
-  if (w.price) z += `^FO${x},${100 + yOff}${FONT}^FD${zplEscape(w.price)}^FS\n`;
+  if (w.barcode) z += `^FO${x},${42 + yOff}^BQN,2,3^FDMA,${zplEscape(w.barcode)}^FS\n`;
+  if (w.price) z += `^FO${x + 72},${66 + yOff}${FONT}^FD${zplEscape(w.price)}^FS\n`;
   let ly = 126 + yOff;
   for (const d of w.details) { z += `^FO${x},${ly}${FONT}^FD${zplEscape(d)}^FS\n`; ly += 20; }
   return z;
