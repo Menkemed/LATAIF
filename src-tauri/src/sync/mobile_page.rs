@@ -446,33 +446,49 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
   function fmtPrice(v) { const n = Number(v); return (v != null && v !== '' && Number.isFinite(n)) ? 'BD ' + n.toLocaleString('en-US') : ''; }
+  // Spec-Felder: feste Anzeige-Reihenfolge (User-Wunsch). 'description' wird immer ans
+  // Ende gehaengt; nicht gelistete Keys folgen davor. HIDE = entfernte/interne Felder
+  // (diamonds + movement gibt es nicht mehr; Bild-Hilfsfelder nie zeigen).
+  const ATTR_HIDE = new Set(['diamonds','diamond','movement','image_hash','image_embedding','image_description']);
+  const ATTR_ORDER = ['reference_number','serial_number','model_number','item_type','part_type','dial','bezel','material','case_material','karat','karat_color','case_diameter_mm','case_size','size','weight','diamond_weight','original_or_copy','certificate','strap_type','color','box','papers','year','included','description'];
+  const ATTR_LABEL = { reference_number:'Ref', serial_number:'Serial', model_number:'Model', case_diameter_mm:'Case Size', karat_color:'Karat Color', diamond_weight:'Diamond Ct', original_or_copy:'Original/Copy', item_type:'Item Type' };
+  function prettyAttr(k) { return ATTR_LABEL[k] || k.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()); }
   function renderProduct(p) {
     let attrs = {};
     try { attrs = typeof p.attributes === 'string' ? JSON.parse(p.attributes) : (p.attributes || {}); } catch (_) {}
     const rows = [];
     const add = (label, val) => { if (val !== undefined && val !== null && val !== '') rows.push('<div style="display:flex; justify-content:space-between; gap:14px; padding:7px 0; border-top:1px solid #1A1A1F;"><span style="color:#6B6B73;">' + esc(label) + '</span><span style="text-align:right; color:#EAEAEA;">' + esc(val) + '</span></div>'); };
     let html = '';
+    // 1) Foto ganz oben
+    let imgs = [];
+    try { imgs = typeof p.images === 'string' ? JSON.parse(p.images) : (p.images || []); } catch (_) {}
+    const img0 = (imgs && imgs.length) ? String(imgs[0] || '') : '';
+    if (/^(data:|https?:)/.test(img0)) {
+      html += '<img src="' + esc(img0) + '" onerror="this.style.display=\'none\'" style="width:100%; border-radius:8px; margin-bottom:14px;" />';
+    }
+    // 2) Marke + Name
     if (p.brand) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase;">' + esc(p.brand) + '</div>';
     html += '<div style="font-size:20px; font-weight:600; color:#EAEAEA; margin:2px 0;">' + esc(p.name || '—') + '</div>';
+    // 3) Sale Price (prominent)
     const sale = fmtPrice(p.planned_sale_price);
     if (sale) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.06em; text-transform:uppercase;">Sale Price</div><div style="font-size:22px; font-weight:600; color:#C6A36D; margin-bottom:8px;">' + sale + '</div>';
-    // Preise: Cost Price, Sale Price, Min Sale Price
-    add('Cost Price', fmtPrice(p.purchase_price));
+    // 4) Min Sale, dann Cost (User-Reihenfolge)
     add('Min Sale Price', fmtPrice(p.min_sale_price));
-    // Stammdaten
+    add('Cost Price', fmtPrice(p.purchase_price));
+    // 5) Stammdaten
     add('SKU', p.sku);
     add('Category', p.category_name || p.category_id);
     add('Condition', p.condition);
     add('Status', (p.stock_status || '').replace(/_/g, ' '));
     add('Location', p.storage_location);
-    Object.keys(attrs).forEach(k => add(k.replace(/_/g, ' '), attrs[k]));
+    // 6) Specs in fester Reihenfolge; diamonds/movement raus; description zuletzt
+    const keys = Object.keys(attrs).filter(k => !ATTR_HIDE.has(k) && attrs[k] != null && attrs[k] !== '');
+    const ordered = [];
+    for (const k of ATTR_ORDER) if (k !== 'description' && keys.indexOf(k) !== -1) ordered.push(k);
+    for (const k of keys) if (k !== 'description' && ATTR_ORDER.indexOf(k) === -1) ordered.push(k);
+    if (keys.indexOf('description') !== -1) ordered.push('description');
+    ordered.forEach(k => { let v = attrs[k]; if (typeof v === 'boolean') v = v ? 'Yes' : 'No'; add(prettyAttr(k), v); });
     html += rows.join('');
-    let imgs = [];
-    try { imgs = typeof p.images === 'string' ? JSON.parse(p.images) : (p.images || []); } catch (_) {}
-    const img0 = (imgs && imgs.length) ? String(imgs[0] || '') : '';
-    if (/^(data:|https?:)/.test(img0)) {
-      html += '<img src="' + esc(img0) + '" onerror="this.style.display=\'none\'" style="width:100%; border-radius:8px; margin-top:14px;" />';
-    }
     return html;
   }
   function stopScan() {
