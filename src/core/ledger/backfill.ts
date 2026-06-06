@@ -9,6 +9,7 @@
 
 import {
   postInvoiceIssued,
+  postInvoiceCogsBackfill,
   postInvoicePayment,
   postInvoiceCancelled,
   postCreditNote,
@@ -124,6 +125,85 @@ export function backfillInvoices(branchId: string): BackfillResult {
         postInvoiceCancelled(invoice);
       }
     });
+  }
+  return res;
+}
+
+// ── Invoice COGS (Weg A / #1) ─────────────────────────────────
+//
+// Traegt fuer bereits-gepostete (aktive) Invoices das fehlende COGS/INVENTORY-
+// Paar nach. Guards:
+//   - hasLedgerEntries('INVOICE', id): nur aktive Sales (cancelled = alles
+//     reversed → false → skip, bleibt netto-null).
+//   - hasInvoiceCogs(id): bereits COGS vorhanden → skip (idempotent, kein
+//     Doppel-Paar; deckt sowohl Post-H-01-Invoices als auch fruehere Re-Runs ab).
+function hasInvoiceCogs(invoiceId: string): boolean {
+  return query(
+    `SELECT 1 FROM ledger_entries
+      WHERE source_module = 'INVOICE' AND source_id = ?
+        AND account = 'COGS' AND reverses_entry_id IS NULL
+      LIMIT 1`,
+    [invoiceId]
+  ).length > 0;
+}
+
+export function backfillInvoiceCogs(branchId: string): BackfillResult {
+  const res = emptyResult('invoice_cogs');
+  const rows = query(`SELECT * FROM invoices WHERE branch_id = ?`, [branchId]);
+  res.total = rows.length;
+  for (const r of rows) {
+    const id = r.id as string;
+    // Nur aktive, schon gepostete Sales; cancelled (alles reversed) ueberspringen.
+    if (!hasLedgerEntries('INVOICE', id)) { res.skipped++; continue; }
+    if (hasInvoiceCogs(id)) { res.skipped++; continue; }
+
+    const lineRows = query(
+      `SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY position`,
+      [id]
+    );
+    const lines: InvoiceLine[] = lineRows.map(lr => ({
+      id: lr.id as string,
+      invoiceId: id,
+      productId: (lr.product_id as string | null) || '',
+      quantity: Number(lr.quantity || 1),
+      unitPrice: Number(lr.unit_price || 0),
+      purchasePriceSnapshot: Number(lr.purchase_price_snapshot || 0),
+      vatRate: Number(lr.vat_rate || 0),
+      taxScheme: (lr.tax_scheme as InvoiceLine['taxScheme']) || 'MARGIN',
+      vatAmount: Number(lr.vat_amount || 0),
+      lineTotal: Number(lr.line_total || 0),
+      position: Number(lr.position || 0),
+    }));
+    if (lines.length === 0) { res.skipped++; continue; }
+
+    const invoice: Invoice = {
+      id,
+      invoiceNumber: r.invoice_number as string,
+      customerId: r.customer_id as string,
+      status: (r.status as Invoice['status']) || 'FINAL',
+      currency: ((r.currency as string) || 'BHD') as Invoice['currency'],
+      netAmount: Number(r.net_amount || 0),
+      vatRateSnapshot: Number(r.vat_rate_snapshot || 0),
+      vatAmount: Number(r.vat_amount || 0),
+      grossAmount: Number(r.gross_amount || 0),
+      taxSchemeSnapshot: (r.tax_scheme_snapshot as Invoice['taxSchemeSnapshot']) || undefined,
+      paidAmount: Number(r.paid_amount || 0),
+      issuedAt: r.issued_at as string,
+      lines,
+      createdAt: r.created_at as string,
+    };
+
+    // postInvoiceCogsBackfill gibt null zurueck, wenn keine Cost-Zeile (Service-only) →
+    // dann als skip zaehlen statt als posted. Inline try/catch statt safeStep, damit
+    // posted/skipped/failed sich nicht ueberschneiden.
+    try {
+      const posted = postInvoiceCogsBackfill(invoice);
+      if (posted !== null) res.posted++;
+      else res.skipped++;
+    } catch (err) {
+      res.failed++;
+      res.errors.push(`inv-cogs ${invoice.invoiceNumber}: ${(err as Error).message}`);
+    }
   }
   return res;
 }
@@ -872,6 +952,7 @@ export function backfillConsignmentPayouts(branchId: string): BackfillResult {
 export function backfillAll(branchId: string): BackfillResult[] {
   return [
     backfillInvoices(branchId),
+    backfillInvoiceCogs(branchId),
     backfillInvoicePayments(branchId),
     backfillCreditNotes(branchId),
     backfillPurchases(branchId),

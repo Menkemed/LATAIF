@@ -10,6 +10,7 @@ import { currentBranchId, query } from '@/core/db/helpers';
 import {
   backfillAll,
   backfillInvoices,
+  backfillInvoiceCogs,
   backfillInvoicePayments,
   backfillCreditNotes,
   backfillPurchases,
@@ -162,6 +163,7 @@ export function BackfillPage() {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <Button onClick={runAll} disabled={running}>{running ? '…' : 'Backfill ALL'}</Button>
           <Button onClick={withBranch(backfillInvoices)} disabled={running}>Invoices</Button>
+          <Button onClick={withBranch(backfillInvoiceCogs)} disabled={running}>Invoice-COGS</Button>
           <Button onClick={withBranch(backfillInvoicePayments)} disabled={running}>Invoice-Payments</Button>
           <Button onClick={withBranch(backfillCreditNotes)} disabled={running}>Credit-Notes</Button>
           <Button onClick={withBranch(backfillPurchases)} disabled={running}>Purchases</Button>

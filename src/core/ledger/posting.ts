@@ -417,6 +417,48 @@ export function postInvoiceIssued(invoice: Invoice): PostingResult {
   });
 }
 
+// ── Historischer COGS-Nachtrag (Weg A / #1) ───────────────────
+//
+// Fuer bereits-gepostete Invoices, die VOR der H-01-Aenderung nur AR/REVENUE/VAT
+// hatten. Postet NUR das per-Line COGS/INVENTORY-Paar (gleiche Formel wie
+// postInvoiceIssued) unter sourceModule='INVOICE' → wird von
+// postInvoiceCancelled=reverseSource automatisch mit-storniert. KEIN Re-Run von
+// postInvoiceIssued (das wuerde AR/REVENUE/VAT duplizieren). Gibt null zurueck,
+// wenn keine Cost-Zeile existiert (Caller skippt). Idempotenz liegt beim Caller
+// (COGS-Existenz-Check), damit re-runs keine doppelten Paare schreiben.
+export function postInvoiceCogsBackfill(invoice: Invoice): PostingResult | null {
+  if (!invoice.lines || invoice.lines.length === 0) return null;
+  const occurredAt = invoice.issuedAt ?? invoice.createdAt;
+  const entries: LedgerEntryInput[] = [];
+  for (const line of invoice.lines) {
+    const qty = Math.max(1, line.quantity || 1);
+    const cost = ROUND((line.purchasePriceSnapshot || 0) * qty);
+    if (cost > 0) {
+      entries.push({
+        account: 'COGS',
+        direction: 'DEBIT',
+        amount: cost,
+        sourceLineId: line.id,
+        metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId, kind: 'cogs', backfill: true },
+      });
+      entries.push({
+        account: 'INVENTORY',
+        direction: 'CREDIT',
+        amount: cost,
+        sourceLineId: line.id,
+        metadata: { invoiceNumber: invoice.invoiceNumber, productId: line.productId, kind: 'cogs', backfill: true },
+      });
+    }
+  }
+  if (entries.length === 0) return null;
+  return postEntries(entries, {
+    occurredAt,
+    sourceModule: 'INVOICE',
+    sourceId: invoice.id,
+    currency: invoice.currency,
+  });
+}
+
 // ── Payment (Customer-Zahlung gegen Invoice) ──────────────────
 //
 //   DEBIT  CASH/BANK/CARD_CLEARING  by amount
