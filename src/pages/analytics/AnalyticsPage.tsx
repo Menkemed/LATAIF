@@ -425,10 +425,11 @@ export function AnalyticsPage() {
     const netVatOwed = Math.max(0, netVatBalance);
     const vatRefundDue = Math.max(0, -netVatBalance);
 
-    // Open invoices (issued or partially_paid)
+    // Open invoices — PARTIAL = nicht voll bezahlt. 'issued'/'partially_paid'
+    // waren Alt-Status (siehe database.ts Migration) und sind zu PARTIAL migriert.
     const open = qry(
       `SELECT COUNT(*) as cnt, COALESCE(SUM(gross_amount - paid_amount),0) as outstanding
-       FROM invoices WHERE branch_id = ? AND status IN ('issued','partially_paid')`,
+       FROM invoices WHERE branch_id = ? AND status = 'PARTIAL'`,
       [branchId]
     );
     const o = open[0] || {};
@@ -438,7 +439,7 @@ export function AnalyticsPage() {
     // Paid invoices
     const paid = qry(
       `SELECT COUNT(*) as cnt, COALESCE(SUM(paid_amount),0) as total_paid
-       FROM invoices WHERE branch_id = ? AND status = 'paid'`,
+       FROM invoices WHERE branch_id = ? AND status = 'FINAL'`,
       [branchId]
     );
     const p = paid[0] || {};
