@@ -10,7 +10,7 @@ import type { CreditNote } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackDelete } from '@/core/sync/track';
-import { postCreditNote, hasLedgerEntries } from '@/core/ledger/posting';
+import { postCreditNote, hasLedgerEntries, reverseSource } from '@/core/ledger/posting';
 
 interface CreditNoteStore {
   creditNotes: CreditNote[];
@@ -163,6 +163,14 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
 
   deleteCreditNote: (id) => {
     const db = getDatabase();
+    // H-02 — Ledger-Storno VOR dem Löschen, sonst bleiben REVENUE/AR/VAT/Cash-
+    // Buchungen der Credit Note verwaist (SSOT-Korruption, per UI nicht reparierbar).
+    // hasLedgerEntries() ist false für Alt-CNs ohne Ledger → die löschen normal weiter.
+    // Bewusst KEIN Fehler-Swallow: schlägt der Storno fehl, läuft der DELETE NICHT —
+    // sonst entstünden genau die Waisen, die wir verhindern wollen.
+    if (hasLedgerEntries('CREDIT_NOTE', id)) {
+      reverseSource('CREDIT_NOTE', id, new Date().toISOString());
+    }
     db.run('DELETE FROM credit_notes WHERE id = ?', [id]);
     saveDatabase();
     trackDelete('credit_notes', id);
