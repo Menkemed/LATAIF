@@ -22,6 +22,7 @@ import { trackInsert, trackUpdate, trackStatusChange, trackRefund, trackDelete }
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import {
   postCreditNote,
+  postSalesReturnCogs,
   reverseSource,
   hasLedgerEntries,
   hasReversalFor,
@@ -431,6 +432,20 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     // Plan 2026-05 §C: Disposition beim Anlegen anwenden — Ware ist physisch retour.
     applyDisposition(db, input.lines, disposition, now, branchId);
 
+    // Slice 2 — Wareneinsatz (COGS) zurueckdrehen, NUR wenn die Ware real wieder
+    // Verkaufsbestand wird (IN_STOCK). Bei KEEP_AS_OWN/WRITE_OFF/RETURN_TO_OWNER
+    // bleibt der Original-COGS gueltig. Self-Guard in postSalesReturnCogs: ohne
+    // gebuchten Original-COGS (Legacy) passiert nichts.
+    if (disposition === 'IN_STOCK') {
+      try {
+        postSalesReturnCogs(
+          id,
+          input.lines.map(l => ({ invoiceLineId: l.invoiceLineId, productId: l.productId, quantity: l.quantity })),
+          now
+        );
+      } catch (err) { console.error('[ledger] postSalesReturnCogs failed:', err); }
+    }
+
     saveDatabase();
     trackInsert('sales_returns', id, { returnNumber, invoiceId: input.invoiceId, total });
     get().loadReturns();
@@ -541,6 +556,13 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     const now = new Date().toISOString();
     // Disposition revertieren (Ware war beim Anlegen schon umgebucht).
     revertDisposition(db, r.lines, r.productDisposition || 'IN_STOCK', now);
+    // Slice 2 — COGS-Umkehr der Return spiegeln (greift nur wenn IN_STOCK gepostet
+    // wurde; guarded + idempotent).
+    try {
+      if (hasLedgerEntries('SALES_RETURN_COGS', id) && !hasReversalFor('SALES_RETURN_COGS', id)) {
+        reverseSource('SALES_RETURN_COGS', id, now);
+      }
+    } catch (err) { console.error('[ledger] SALES_RETURN_COGS reverse failed:', err); }
     db.run(`UPDATE sales_returns SET status = 'REJECTED' WHERE id = ?`, [id]);
     saveDatabase();
     trackStatusChange('sales_returns', id, r.status, 'REJECTED');
@@ -773,6 +795,13 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     // ── Ledger-Reversierung (v0.7.26) ───────────────────────────────────────
     // deleteReturn revertiert Lager/VAT/LTV — das LEDGER muss analog zurueck, sonst
     // bleiben Cash-Refund + CN-Buchungen als verwaiste Eintraege stehen (Saldo falsch).
+    // Slice 2 — Waren-Seite (COGS-Umkehr) der Return spiegeln. Bei bereits-rejected
+    // Returns ist sie schon reversiert → hasReversalFor-Guard macht es idempotent.
+    try {
+      if (hasLedgerEntries('SALES_RETURN_COGS', id) && !hasReversalFor('SALES_RETURN_COGS', id)) {
+        reverseSource('SALES_RETURN_COGS', id, now);
+      }
+    } catch (err) { console.error('[ledger] deleteReturn SALES_RETURN_COGS reverse failed:', err); }
     const cnRows = query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [id]);
     for (const cn of cnRows) {
       const cnId = cn.id as string;

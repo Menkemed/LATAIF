@@ -84,6 +84,11 @@ export type SourceModule =
   | 'TAX_PAYMENT'
   | 'STOCK_ADJUST'
   | 'SCRAP_TRADE'
+  // Waren-Seite einer Sales-Return: dreht den Wareneinsatz (COGS) der Original-
+  // Invoice-Line zurueck, wenn die Ware real wieder Bestand wird (Disposition
+  // IN_STOCK). Eigener sourceModule, gekeyt auf returnId — bewusst NICHT unter
+  // CREDIT_NOTE, weil repostCreditNoteFromCnId CN-Eintraege reverst+neu-postet.
+  | 'SALES_RETURN_COGS'
   // v0.7.0 — Order-Cancel Geld-Handling (Refund / Forfeit). 'credit' macht
   // keine Ledger-Buchung — die Liability bleibt als CUSTOMER_DEPOSITS und wird
   // beim Apply auf eine Folge-Order/Invoice aufgeloest.
@@ -456,6 +461,66 @@ export function postInvoiceCogsBackfill(invoice: Invoice): PostingResult | null 
     sourceModule: 'INVOICE',
     sourceId: invoice.id,
     currency: invoice.currency,
+  });
+}
+
+// ── Sales-Return: Wareneinsatz (COGS) zurueckdrehen ───────────
+//
+// Spiegel zum Verkaufs-Abgang: kommt die Ware real wieder in den Verkaufs-
+// bestand (Disposition IN_STOCK), wird der seinerzeit gebuchte COGS proportional
+// zur retournierten Menge zurueckgedreht (DR INVENTORY / CR COGS). Der Original-
+// COGS wird aus dem Ledger der Invoice-Line gelesen (source_line_id) — gibt es
+// keinen (Legacy / nicht gebackfillt), passiert nichts (Self-Guard, kein
+// negatives COGS). Eigener sourceModule SALES_RETURN_COGS/returnId → reject/delete
+// spiegelt ueber reverseSource('SALES_RETURN_COGS', returnId).
+
+// Summe der nicht-reversierten Original-COGS einer Invoice-Line.
+function getInvoiceLineCogs(invoiceLineId: string): number {
+  const row = query(
+    `SELECT COALESCE(SUM(amount), 0) AS cogs
+       FROM ledger_entries
+      WHERE source_module = 'INVOICE' AND account = 'COGS'
+        AND source_line_id = ? AND reverses_entry_id IS NULL`,
+    [invoiceLineId]
+  )[0];
+  return Number(row?.cogs || 0);
+}
+
+export function postSalesReturnCogs(
+  returnId: string,
+  lines: { invoiceLineId: string; productId?: string; quantity: number }[],
+  occurredAt: string,
+): PostingResult | null {
+  const entries: LedgerEntryInput[] = [];
+  for (const l of lines) {
+    if (!l.invoiceLineId) continue;
+    const origCogs = getInvoiceLineCogs(l.invoiceLineId);
+    if (origCogs <= 0) continue; // nie gebucht → nichts zu reversieren
+    const origQty = Number(
+      query(`SELECT quantity FROM invoice_lines WHERE id = ?`, [l.invoiceLineId])[0]?.quantity || 0
+    );
+    const reverseCost = origQty > 0 ? ROUND(origCogs * (l.quantity || 0) / origQty) : 0;
+    if (reverseCost <= 0) continue;
+    entries.push({
+      account: 'INVENTORY',
+      direction: 'DEBIT',
+      amount: reverseCost,
+      sourceLineId: l.invoiceLineId,
+      metadata: { returnId, productId: l.productId, kind: 'cogs_reversal' },
+    });
+    entries.push({
+      account: 'COGS',
+      direction: 'CREDIT',
+      amount: reverseCost,
+      sourceLineId: l.invoiceLineId,
+      metadata: { returnId, productId: l.productId, kind: 'cogs_reversal' },
+    });
+  }
+  if (entries.length === 0) return null;
+  return postEntries(entries, {
+    occurredAt,
+    sourceModule: 'SALES_RETURN_COGS',
+    sourceId: returnId,
   });
 }
 
