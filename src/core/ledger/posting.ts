@@ -1628,6 +1628,7 @@ export interface AgentTransferSoldLike {
   transferId: string;
   amount: number;
   soldAt: string;
+  cost?: number;   // H-01-Geschwister: Wareneinsatz (Lot-Cost) fuer DR COGS / CR INVENTORY.
 }
 
 export function postAgentTransferSold(transfer: AgentTransferSoldLike, customerId: string): PostingResult {
@@ -1638,31 +1639,48 @@ export function postAgentTransferSold(transfer: AgentTransferSoldLike, customerI
   if (!customerId) {
     throw new Error('postAgentTransferSold: customerId required to post receivable.');
   }
-  return postEntries(
-    [
-      {
-        account: 'ACCOUNTS_RECEIVABLE',
-        direction: 'DEBIT',
-        amount,
-        counterpartyType: 'CUSTOMER',
-        counterpartyId: customerId,
-        metadata: { transferId: transfer.transferId },
-      },
-      {
-        account: 'REVENUE',
-        direction: 'CREDIT',
-        amount,
-        counterpartyType: 'CUSTOMER',
-        counterpartyId: customerId,
-        metadata: { transferId: transfer.transferId },
-      },
-    ],
+  const entries: LedgerEntryInput[] = [
     {
-      occurredAt: transfer.soldAt,
-      sourceModule: 'AGENT_TRANSFER_SOLD',
-      sourceId: transfer.transferId,
-    }
-  );
+      account: 'ACCOUNTS_RECEIVABLE',
+      direction: 'DEBIT',
+      amount,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: customerId,
+      metadata: { transferId: transfer.transferId },
+    },
+    {
+      account: 'REVENUE',
+      direction: 'CREDIT',
+      amount,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: customerId,
+      metadata: { transferId: transfer.transferId },
+    },
+  ];
+  // H-01-Geschwister: Wareneinsatz (COGS) auch beim Agent-Direktverkauf buchen.
+  // Ohne diese Buchung bleibt der Ledger-Profit brutto und INVENTORY waechst.
+  // Paar ist fuer sich balanciert; Reversal laeuft automatisch ueber
+  // reverseSource('AGENT_TRANSFER_SOLD') (returned/delete/convert).
+  const cogsCost = ROUND(transfer.cost || 0);
+  if (cogsCost > 0) {
+    entries.push({
+      account: 'COGS',
+      direction: 'DEBIT',
+      amount: cogsCost,
+      metadata: { transferId: transfer.transferId, kind: 'cogs' },
+    });
+    entries.push({
+      account: 'INVENTORY',
+      direction: 'CREDIT',
+      amount: cogsCost,
+      metadata: { transferId: transfer.transferId, kind: 'cogs' },
+    });
+  }
+  return postEntries(entries, {
+    occurredAt: transfer.soldAt,
+    sourceModule: 'AGENT_TRANSFER_SOLD',
+    sourceId: transfer.transferId,
+  });
 }
 
 export function postAgentTransferSoldReversed(transferId: string, occurredAt?: string): PostingResult {

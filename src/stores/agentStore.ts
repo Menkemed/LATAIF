@@ -17,6 +17,7 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -305,9 +306,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const agent = get().getAgent(transfer.agentId);
     const customerId = agent?.customerId;
     if (customerId) {
+      // H-01-Geschwister: Wareneinsatz (Lot-Cost) mitgeben, damit der Sold-Post
+      // DR COGS / CR INVENTORY bucht. fifoCost = Cost des aeltesten aktiven Lots
+      // (Agent-Sale ist 1 Stueck). Kein Lot → 0 → COGS-Guard ueberspringt.
+      const soldCost = deriveProductCostFromLots(transfer.productId)?.fifoCost ?? 0;
       safePost(`postAgentTransferSold(${id})`, () => {
         if (hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) return;
-        postAgentTransferSold({ transferId: id, amount: settlement, soldAt: now }, customerId);
+        postAgentTransferSold({ transferId: id, amount: settlement, soldAt: now, cost: soldCost }, customerId);
       });
     }
 
