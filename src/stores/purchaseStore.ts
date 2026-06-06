@@ -15,7 +15,7 @@ import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
-import { syncProductQuantity } from '@/core/lots/lot-queries';
+import { consumeLot, getAvailableStock, syncProductQuantity } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
@@ -712,10 +712,37 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       [newTotal, newPaid, remainingPayable, newStatus, now, purchase.id]
     );
 
-    // Remove returned products from inventory (Plan §6 Inventarlogik — Ware wird entfernt oder angepasst)
+    // H-07 — Rueckgabe an den Lieferanten: die Ware verlaesst unseren Bestand.
+    // Korrekt ueber die Stock-Lots reduzieren (NICHT stock_status='sold' setzen —
+    // das waere Verkauf an einen Kunden, das Gegenteil). Pro Return-Line das Lot
+    // der Purchase-Line (1 Lot/Line) um die zurueckgegebene Menge senken (gekappt
+    // auf qty_remaining, nie negativ), dann products.quantity aus den ACTIVE-Lots
+    // ableiten. Spiegelt cancelPurchase (Lots runter + sync, Status unberuehrt).
+    const returnAffectedProducts = new Set<string>();
     for (const line of ret.lines) {
-      if (line.productId) {
-        db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
+      if (line.purchaseLineId) {
+        const lotRow = query(
+          `SELECT id, qty_remaining FROM stock_lots
+             WHERE purchase_line_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+             ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+          [line.purchaseLineId]
+        )[0];
+        if (lotRow) {
+          const reduce = Math.min(Math.max(0, line.quantity), Number(lotRow.qty_remaining) || 0);
+          if (reduce > 0) consumeLot(lotRow.id as string, reduce);
+        }
+      }
+      if (line.productId) returnAffectedProducts.add(line.productId);
+    }
+    for (const pid of returnAffectedProducts) {
+      syncProductQuantity(pid);
+      // Bestand 0 → das Produkt hat unseren verfuegbaren Bestand verlassen.
+      // Status auf 'returned' (NICHT 'sold' — das waere Kundenverkauf), Konvention
+      // wie salesReturnStore/consignmentStore. Bei Restbestand > 0 Status unberuehrt
+      // lassen (Teil-Rueckgabe bleibt 'in_stock'). Verhindert Phantom-Bestand
+      // (quantity bleibt durch syncProductQuantity's Legacy-Schutz stehen).
+      if (getAvailableStock(pid) === 0) {
+        db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, pid]);
       }
     }
 
