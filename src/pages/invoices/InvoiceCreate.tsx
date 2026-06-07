@@ -139,7 +139,10 @@ export function InvoiceCreate() {
     const visible = products.filter(p =>
       p.stockStatus !== 'sold' &&
       p.stockStatus !== 'reserved' &&
-      p.stockStatus !== 'consignment_reserved'
+      p.stockStatus !== 'consignment_reserved' &&
+      // with_agent = physisch beim Agenten, nicht im Laden → nicht direkt
+      // verkaufbar (sonst Doppel-Verplanung). Erst Agent-Return → in_stock.
+      p.stockStatus !== 'with_agent'
     );
     // Phase 7: "stock N" zeigt Lot-Total (echte verfuegbare Stuecke) statt
     // legacy product.quantity. Eine Query fuer alle Produkte (Bulk).
