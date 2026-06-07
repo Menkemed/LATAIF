@@ -18,6 +18,7 @@ import { useRepairStore } from '@/stores/repairStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
 import { getStockAggregates } from '@/core/lots/lot-queries';
 import { receivablesBreakdown } from '@/core/finance/receivables';
+import { computeSalesMetrics } from '@/core/reports/sales-metrics';
 import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -168,46 +169,32 @@ export function BusinessReportsPage() {
   // Refunds (cash gezahlt auf FINAL-Invoices, im Periode-Range) ziehen Gross/Net/VAT
   // proportional ab — sonst zeigt der Sales-Report inflated Umsatz.
   const salesReport = useMemo(() => {
+    // Phase 2 — gross/net/vat/count aus dem zentralen SSOT computeSalesMetrics.
+    // Regel (FINAL-only, Refunds anteilig ab, VAT nur VAT_10) lebt dort EINMAL.
+    const m = computeSalesMetrics(filteredInvoices, salesReturns, periodRange);
+    // byMonth bleibt report-spezifisch lokal (liefert die Funktion bewusst nicht):
+    // Brutto je Monat aus FINAL-Invoices, Cash-Refunds im Refund-Monat abgezogen.
     const finalInvs = filteredInvoices.filter(i => i.status === 'FINAL');
     const finalIds = new Set(finalInvs.map(i => i.id));
-    const finalById = new Map(finalInvs.map(i => [i.id, i]));
-    const gross = finalInvs.reduce((s, i) => s + i.grossAmount, 0);
-    // M-11: kundensichtbare VAT = nur VAT_10-Lines. Der Header vat_amount mischt
-    // intern den MARGIN-VAT (Differenzbesteuerung, nicht auf der Rechnung ausgewiesen)
-    // hinein → würde "VAT COLLECTED" überhöhen. Margin-VAT steht separat im taxReport.
-    const vat = finalInvs.reduce((s, i) => s + (i.lines || []).reduce(
-      (ls, l) => ls + (l.taxScheme === 'VAT_10' ? (l.vatAmount || 0) : 0), 0), 0);
-    const net = finalInvs.reduce((s, i) => s + i.netAmount, 0);
     const byMonth: Record<string, number> = {};
     for (const i of finalInvs) {
-      const m = (i.issuedAt || i.createdAt || '').substring(0, 7);
-      byMonth[m] = (byMonth[m] || 0) + i.grossAmount;
+      const mo = (i.issuedAt || i.createdAt || '').substring(0, 7);
+      byMonth[mo] = (byMonth[mo] || 0) + i.grossAmount;
     }
-    let refundCash = 0, refundNet = 0, refundVat = 0;
     for (const r of salesReturns) {
       if (!finalIds.has(r.invoiceId)) continue;
       const paid = r.refundPaidAmount || 0;
       if (paid <= 0) continue;
       const when = r.refundPaidDate || r.returnDate;
       if (when && (when < periodRange.from.split('T')[0] || when > periodRange.to.split('T')[0])) continue;
-      const inv = finalById.get(r.invoiceId)!;
-      const g = inv.grossAmount || 0;
-      refundCash += paid;
-      if (g > 0) {
-        refundNet += paid * ((inv.netAmount || 0) / g);
-        // M-11: nur VAT_10-Anteil zurückziehen (konsistent mit salesReport.vat oben)
-        const invVat10 = (inv.lines || []).reduce(
-          (ls, l) => ls + (l.taxScheme === 'VAT_10' ? (l.vatAmount || 0) : 0), 0);
-        refundVat += paid * (invVat10 / g);
-      }
       const mKey = (when || '').substring(0, 7);
       if (mKey) byMonth[mKey] = (byMonth[mKey] || 0) - paid;
     }
     return {
-      count: finalInvs.length,
-      gross: gross - refundCash,
-      vat: vat - refundVat,
-      net: net - refundNet,
+      count: m.count,
+      gross: m.gross,
+      vat: m.vat,
+      net: m.net,
       byMonth,
     };
   }, [filteredInvoices, salesReturns, periodRange]);
@@ -216,13 +203,13 @@ export function BusinessReportsPage() {
   // Refunds: pro-rata Profit-Anteil abziehen wenn KEIN Category-Filter aktiv (Filter
   // bricht die Aggregation, bleibt unverändert — würde sonst falsch zuordnen).
   const profitReport = useMemo(() => {
-    const finalInvs = filteredInvoices.filter(i => i.status === 'FINAL');
-    const finalIds = new Set(finalInvs.map(i => i.id));
-    const finalById = new Map(finalInvs.map(i => [i.id, i]));
     let profit = 0, cost = 0;
-    for (const i of finalInvs) {
-      if (categoryFilter) {
-        // Nur Zeilen mit Kategorie-Filter-Match
+    if (categoryFilter) {
+      // Kategorie-Filter: per-Line aggregieren (die SSOT-Funktion filtert nicht nach
+      // Kategorie). Refunds bleiben hier wie bisher unberücksichtigt (Filter bricht die
+      // Zuordnung — würde sonst falsch verteilen).
+      const finalInvs = filteredInvoices.filter(i => i.status === 'FINAL');
+      for (const i of finalInvs) {
         for (const l of i.lines) {
           const prod = products.find(p => p.id === l.productId);
           if (prod?.categoryId === categoryFilter) {
@@ -230,22 +217,12 @@ export function BusinessReportsPage() {
             cost += (l.purchasePriceSnapshot || 0) * Math.max(1, l.quantity || 1);
           }
         }
-      } else {
-        profit += (i.marginSnapshot || 0);
-        cost += (i.purchasePriceSnapshot || 0);
       }
-    }
-    if (!categoryFilter) {
-      for (const r of salesReturns) {
-        if (!finalIds.has(r.invoiceId)) continue;
-        const paid = r.refundPaidAmount || 0;
-        if (paid <= 0) continue;
-        const when = r.refundPaidDate || r.returnDate;
-        if (when && (when < periodRange.from.split('T')[0] || when > periodRange.to.split('T')[0])) continue;
-        const inv = finalById.get(r.invoiceId)!;
-        const g = inv.grossAmount || 0;
-        if (g > 0) profit -= paid * ((inv.marginSnapshot || 0) / g);
-      }
+    } else {
+      // Phase 2 — profit/cost aus dem zentralen SSOT (FINAL-only, Refunds anteilig ab).
+      const m = computeSalesMetrics(filteredInvoices, salesReturns, periodRange);
+      profit = m.profit;
+      cost = m.cost;
     }
     const margin = salesReport.gross > 0 ? (profit / salesReport.gross) * 100 : 0;
     return { profit, cost, margin };
