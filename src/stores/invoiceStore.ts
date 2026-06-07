@@ -834,7 +834,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       }
     }
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
-    for (const pid of deleteProductsToSync) syncProductQuantity(pid);
+    for (const pid of deleteProductsToSync) {
+      syncProductQuantity(pid);
+      // M-05 — wie im Cancel-Branch: 'reserved' → 'in_stock' wenn der Lot wieder
+      // Bestand hat. Sonst bleibt das Produkt nach Invoice-Delete unverkaeuflich.
+      unreserveProductIfRestored(pid);
+    }
     db.run(`DELETE FROM payments WHERE invoice_id = ?`, [id]);
     // Order ↔ Invoice entkoppeln BEVOR die Invoice geloescht wird — sql.js
     // erzwingt ON DELETE SET NULL nicht zuverlaessig, sonst bleiben
