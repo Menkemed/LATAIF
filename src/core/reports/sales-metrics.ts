@@ -14,7 +14,34 @@
 // (loest die SQL-vs-JS-Huerde — die LOGIK ist zentral, die Datenbeschaffung bleibt
 // beim jeweiligen Report). Customer-/Kategorie-Filter sind Sache des Aufrufers
 // (vorgefilterte Liste reinreichen).
-import type { Invoice, SalesReturn } from '@/core/models/types';
+//
+// Schmale Input-Interfaces (nur die gelesenen Felder): so passen sowohl die vollen
+// Store-Objekte (Invoice[]/SalesReturn[] — strukturell zuweisbar) als auch von SQL
+// gebaute Minimal-Objekte (z.B. context.ts/headless) ohne Cast.
+
+export interface SalesMetricsLine {
+  taxScheme: string;
+  vatAmount: number;
+}
+
+export interface SalesMetricsInvoice {
+  id: string;
+  status: string;
+  grossAmount: number;
+  netAmount: number;
+  marginSnapshot?: number;
+  purchasePriceSnapshot?: number;
+  issuedAt?: string;
+  createdAt?: string;
+  lines: SalesMetricsLine[];
+}
+
+export interface SalesMetricsReturn {
+  invoiceId: string;
+  refundPaidAmount: number;
+  refundPaidDate?: string;
+  returnDate?: string;
+}
 
 export interface SalesPeriod {
   from: string;   // ISO (inklusive)
@@ -32,20 +59,20 @@ export interface SalesMetrics {
 
 // Kundensichtbare VAT einer Rechnung = nur VAT_10-Lines (Differenzbesteuerung/MARGIN
 // traegt internen VAT, der nicht auf der Rechnung ausgewiesen ist — siehe M-11).
-function vat10Of(inv: Invoice): number {
+function vat10Of(inv: SalesMetricsInvoice): number {
   return (inv.lines || []).reduce(
     (s, l) => s + (l.taxScheme === 'VAT_10' ? (l.vatAmount || 0) : 0), 0);
 }
 
-function invoiceInPeriod(inv: Invoice, period: SalesPeriod): boolean {
+function invoiceInPeriod(inv: SalesMetricsInvoice, period: SalesPeriod): boolean {
   const when = inv.issuedAt || inv.createdAt;
   if (!when) return true;   // ohne Datum: nicht ausschliessen (wie salesReport)
   return when >= period.from && when <= period.to;
 }
 
 export function computeSalesMetrics(
-  invoices: Invoice[],
-  salesReturns: SalesReturn[],
+  invoices: SalesMetricsInvoice[],
+  salesReturns: SalesMetricsReturn[],
   period: SalesPeriod,
 ): SalesMetrics {
   const finalInvs = invoices.filter(i => i.status === 'FINAL' && invoiceInPeriod(i, period));
