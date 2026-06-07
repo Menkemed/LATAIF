@@ -138,7 +138,10 @@ function nextTradeNumber(branchId: string): string {
   return `SGT-${String(max + 1).padStart(6, '0')}`;
 }
 
-function latestUnreversedTransactionFor(tradeId: string): string | null {
+// L-14: ALLE noch nicht reversierten Transaktionen eines Trades (ohne LIMIT).
+// editTrade/cancelTrade muessen jede offene Buchungs-Transaktion zurueckdrehen,
+// sonst bleiben aeltere unreversierte Transaktionen als Ledger-Leichen stehen.
+function allUnreversedTransactionsFor(tradeId: string): string[] {
   const rows = query(
     `SELECT le.transaction_id, MIN(le.recorded_at) AS ts
        FROM ledger_entries le
@@ -149,11 +152,10 @@ function latestUnreversedTransactionFor(tradeId: string): string | null {
           SELECT 1 FROM ledger_entries r WHERE r.reverses_entry_id = le.id
         )
    GROUP BY le.transaction_id
-   ORDER BY ts DESC
-      LIMIT 1`,
+   ORDER BY ts ASC`,
     [tradeId]
   );
-  return rows.length > 0 ? (rows[0].transaction_id as string) : null;
+  return rows.map(r => r.transaction_id as string);
 }
 
 // Backfill: für jeden bestehenden scrap_trades-Eintrag ohne Lines/Payments
@@ -427,9 +429,8 @@ export const useScrapTradeStore = create<ScrapTradeStore>((set, get) => ({
     insertLines(db, id, input.lines, now);
     insertPayments(db, id, input.paymentsOut, input.paymentsIn, now);
 
-    // Ledger reverse + repost
-    const lastTxId = latestUnreversedTransactionFor(id);
-    if (lastTxId) reverseTransaction(lastTxId, now);
+    // Ledger reverse + repost — alle offenen Transaktionen zurueckdrehen (L-14)
+    for (const txId of allUnreversedTransactionsFor(id)) reverseTransaction(txId, now);
     postScrapTrade({
       id,
       tradeDate: input.tradeDate,
@@ -451,8 +452,7 @@ export const useScrapTradeStore = create<ScrapTradeStore>((set, get) => ({
       [now, id]
     );
 
-    const lastTxId = latestUnreversedTransactionFor(id);
-    if (lastTxId) reverseTransaction(lastTxId, now);
+    for (const txId of allUnreversedTransactionsFor(id)) reverseTransaction(txId, now);
     saveDatabase();
 
     set(s => ({

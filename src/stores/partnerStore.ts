@@ -172,7 +172,7 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
       [now, id]
     );
     saveDatabase();
-    trackInsert('partner_transactions', id, { paymentStatus: 'PAID', paidAt: now });
+    trackUpdate('partner_transactions', id, { paymentStatus: 'PAID', paidAt: now });
     get().loadTransactions();
   },
 
