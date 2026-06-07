@@ -103,6 +103,8 @@ export function OrderDetail() {
   // beim Convert-to-Invoice pro Zeile umschalten kann (Custom-Quote eingeschlossen).
   const [showPersistedVatConfirm, setShowPersistedVatConfirm] = useState(false);
   const [pendingBillable, setPendingBillable] = useState<OrderLine[]>([]);
+  // M-07 — Option 3: beim Convert kann der User den Auftrag direkt abschliessen.
+  const [markCompleteOnConvert, setMarkCompleteOnConvert] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   // 2026-05-16 — Pending action waiting for Number-Type selection.
   const [pendingNumberAction, setPendingNumberAction] = useState<((special: boolean) => Promise<void>) | null>(null);
@@ -681,6 +683,16 @@ export function OrderDetail() {
     );
     // v0.3.0 — invoicte Lines mit der Invoice verknuepfen (partial invoicing).
     markOrderLinesInvoiced(billableLines.map(l => l.id), invoice.id);
+    // M-07 — Option 3: "Auftrag abschliessen" angehakt → die invoicten Positionen
+    // auf DELIVERED setzen. recomputeOrderStatus (in updateOrderLineStatus) rollt die
+    // Order auf 'completed', sobald ALLE kundenseitigen Lines DELIVERED sind; bei
+    // Teil-Convert bleibt sie 'arrived'. Default leer → unveraendertes Verhalten.
+    if (markCompleteOnConvert) {
+      for (const l of billableLines) {
+        try { updateOrderLineStatus(l.id, 'DELIVERED'); }
+        catch (err) { console.warn('[order] mark-complete-on-convert failed:', err); }
+      }
+    }
     updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
     // v0.3.1 — Deposit-Pool auf die Invoice anrechnen, gedeckelt aufs Invoice-Total.
@@ -1300,6 +1312,16 @@ export function OrderDetail() {
                       }}>
                         ✓ Alle Items fertig — Convert erzeugt EINE kombinierte Invoice fuer alle {billable.length}.
                       </div>
+                    )}
+                    {billable.length > 0 && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 13, color: '#4B5563', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={markCompleteOnConvert}
+                          onChange={e => setMarkCompleteOnConvert(e.target.checked)}
+                        />
+                        Auftrag mit dieser Rechnung als abgeschlossen markieren
+                      </label>
                     )}
                     <div className="flex items-center justify-between">
                       <span style={{ fontSize: 12, color: '#6B7280' }}>
