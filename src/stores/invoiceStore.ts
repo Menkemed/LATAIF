@@ -456,24 +456,35 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     // Plan §8 #6 — bei Stornierung verknüpfte Auto-Expenses (Card-Fees etc.) als CANCELLED markieren.
     if (data.status === 'CANCELLED') {
+      // M-04 — wurde die Invoice bereits via Return/Credit-Note rueckabgewickelt,
+      // haben CN (Geld) + SALES_RETURN_COGS (COGS) + restoreLot (Stock) alles
+      // umgekehrt. Ein zusaetzlicher postInvoiceCancelled + Lot-Restore wuerde
+      // REVENUE/VAT/COGS/AR DOPPELT reversen (live bewiesen). Daher Ledger-Reverse
+      // + Stock-Restore ueberspringen, sobald eine Credit-Note existiert. Die
+      // strukturelle Entkopplung (Offer/Order/Auto-Expense) laeuft unabhaengig weiter.
+      const reversedByReturn =
+        (Number(query(`SELECT COUNT(*) c FROM credit_notes WHERE invoice_id = ?`, [id])[0]?.c) || 0) > 0;
+
       // Phase 3 — Stock-Lots restoren: jede invoice_line gibt ihren Bestand zurueck.
       // Phase 7 Sync: products.quantity nach Restore nachziehen.
-      const lotLines = db.exec(
-        `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
-        [id]
-      );
-      const cancelProductsToSync = new Set<string>();
-      if (lotLines.length > 0) {
-        for (const row of lotLines[0].values) {
-          const [lotId, productId, qty] = row as [string | null, string | null, number];
-          if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
-          if (productId) cancelProductsToSync.add(productId);
+      if (!reversedByReturn) {
+        const lotLines = db.exec(
+          `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
+          [id]
+        );
+        const cancelProductsToSync = new Set<string>();
+        if (lotLines.length > 0) {
+          for (const row of lotLines[0].values) {
+            const [lotId, productId, qty] = row as [string | null, string | null, number];
+            if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
+            if (productId) cancelProductsToSync.add(productId);
+          }
         }
-      }
-      for (const pid of cancelProductsToSync) {
-        syncProductQuantity(pid);
-        // Stornierung: 'reserved' → 'in_stock' (war ja noch nicht 'sold').
-        unreserveProductIfRestored(pid);
+        for (const pid of cancelProductsToSync) {
+          syncProductQuantity(pid);
+          // Stornierung: 'reserved' → 'in_stock' (war ja noch nicht 'sold').
+          unreserveProductIfRestored(pid);
+        }
       }
 
       // Vor dem UPDATE Auto-Expenses fuer Reverse-Posting einsammeln (sonst sind sie nach
@@ -502,12 +513,15 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       db.run(`UPDATE orders SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
       saveDatabase();
 
-      // ZIEL.md §3a — Ledger-Storno bei Invoice-Cancel.
-      safePost(`postInvoiceCancelled(${id})`, () => {
-        if (!hasLedgerEntries('INVOICE', id)) return;     // nie gepostet → nichts zu reverten
-        if (hasReversalFor('INVOICE', id)) return;        // bereits storniert
-        postInvoiceCancelled({ id } as Invoice);
-      });
+      // ZIEL.md §3a — Ledger-Storno bei Invoice-Cancel. M-04: nur wenn KEIN Return
+      // die Rueckabwicklung schon gebucht hat (sonst Doppel-Reverse von REVENUE/VAT/COGS/AR).
+      if (!reversedByReturn) {
+        safePost(`postInvoiceCancelled(${id})`, () => {
+          if (!hasLedgerEntries('INVOICE', id)) return;     // nie gepostet → nichts zu reverten
+          if (hasReversalFor('INVOICE', id)) return;        // bereits storniert
+          postInvoiceCancelled({ id } as Invoice);
+        });
+      }
 
       // Auto-Expenses (Card-Fees etc.) ebenfalls reverten — sonst Doppelbuchung im Ledger.
       for (const er of linkedExpenses) {
