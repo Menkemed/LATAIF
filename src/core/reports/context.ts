@@ -6,6 +6,7 @@
 
 import { query } from '@/core/db/helpers';
 import { computeSalesMetrics, type SalesMetrics } from '@/core/reports/sales-metrics';
+import { canonicalLoanDirection } from '@/core/models/types';
 
 // ── Period helpers ──────────────────────────────────────────
 
@@ -434,23 +435,25 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     [branchId]
   );
 
-  // ── Debts ──────────────────────────────────────────────
-  const debtsOwedToUs = firstRow(
-    `SELECT COALESCE(SUM(d.amount - COALESCE(p.paid, 0)), 0) AS remaining
-     FROM debts d
-     LEFT JOIN (SELECT debt_id, SUM(amount) AS paid FROM debt_payments GROUP BY debt_id) p
-       ON p.debt_id = d.id
-     WHERE d.branch_id = ? AND d.direction = 'we_lend' AND d.status = 'open'`,
+  // ── Debts ── M-14: kanonische Direction/Status statt harter Legacy-Strings
+  // ('we_lend'/'we_borrow'/'open'). Sonst fielen kanonische MONEY_GIVEN/MONEY_RECEIVED
+  // UND teil-rueckgezahlte (PARTIALLY_REPAID) Kredite raus. Deckt sich mit
+  // ReconciliationPage (domainLoanReceivable/Payable) + Dashboard: nur CANCELLED
+  // ausschliessen, outstanding = amount - paid (REPAID traegt damit 0).
+  const debtRows = query(
+    `SELECT d.direction, d.amount,
+            COALESCE((SELECT SUM(amount) FROM debt_payments WHERE debt_id = d.id), 0) AS paid
+       FROM debts d
+      WHERE d.branch_id = ? AND UPPER(COALESCE(d.status, 'OPEN')) != 'CANCELLED'`,
     [branchId]
   );
-  const debtsWeOwe = firstRow(
-    `SELECT COALESCE(SUM(d.amount - COALESCE(p.paid, 0)), 0) AS remaining
-     FROM debts d
-     LEFT JOIN (SELECT debt_id, SUM(amount) AS paid FROM debt_payments GROUP BY debt_id) p
-       ON p.debt_id = d.id
-     WHERE d.branch_id = ? AND d.direction = 'we_borrow' AND d.status = 'open'`,
-    [branchId]
-  );
+  let debtsOwedToUs = 0, debtsWeOwe = 0;
+  for (const r of debtRows) {
+    const outstanding = Math.max(0, (Number(r.amount) || 0) - (Number(r.paid) || 0));
+    if (outstanding <= 0) continue;
+    if (canonicalLoanDirection(r.direction as string) === 'MONEY_GIVEN') debtsOwedToUs += outstanding;
+    else debtsWeOwe += outstanding;
+  }
 
   // ── Previous period (optional) ─────────────────────────
   let previousPeriod: ReportContext['previousPeriod'];
@@ -498,8 +501,8 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
       activeConsignmentValue: num(opsConsignments, 'val'),
     },
     debts: {
-      owedToUs: num(debtsOwedToUs, 'remaining'),
-      weOwe: num(debtsWeOwe, 'remaining'),
+      owedToUs: debtsOwedToUs,
+      weOwe: debtsWeOwe,
     },
     previousPeriod,
   };
