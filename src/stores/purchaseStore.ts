@@ -23,6 +23,7 @@ import {
   postPurchaseCancelled,
   postEntries,
   reverseSource,
+  getPurchaseLineInputSplit,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -892,14 +893,39 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     safePost(`postPurchaseReturn(${id})`, () => {
       if (hasLedgerEntries('PURCHASE_RETURN', id)) return;
       const entries: Parameters<typeof postEntries>[0] = [];
-      if (ret.totalAmount > 0) {
+      // F-PRC-03 — INVENTORY-Gutschrift in netto + VAT_INPUT splitten, proportional
+      // aus der Original-PURCHASE-Buchung pro Line gespiegelt. Ohne Split bliebe die
+      // Vorsteuer (VAT_INPUT) dauerhaft zu hoch. Bilanz-sicher: totalNet = total − vat.
+      let totalVat = 0;
+      for (const line of ret.lines) {
+        if (!line.purchaseLineId) continue;
+        const { net, vat } = getPurchaseLineInputSplit(line.purchaseLineId);
+        const origGross = net + vat;
+        if (vat > 0 && origGross > 0) {
+          const lineReturn = Math.max(0, line.quantity) * line.unitPrice;
+          totalVat += Math.round(vat * Math.min(1, lineReturn / origGross) * 1000) / 1000;
+        }
+      }
+      totalVat = Math.min(totalVat, ret.totalAmount);
+      const totalNet = Math.round((ret.totalAmount - totalVat) * 1000) / 1000;
+      if (totalNet > 0.0005) {
         entries.push({
           account: 'INVENTORY',
           direction: 'CREDIT',
-          amount: ret.totalAmount,
+          amount: totalNet,
           counterpartyType: 'SUPPLIER',
           counterpartyId: purchase.supplierId,
-          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber },
+          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, side: 'inventory-net' },
+        });
+      }
+      if (totalVat > 0.0005) {
+        entries.push({
+          account: 'VAT_INPUT',
+          direction: 'CREDIT',
+          amount: totalVat,
+          counterpartyType: 'SUPPLIER',
+          counterpartyId: purchase.supplierId,
+          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, side: 'vat-input' },
         });
       }
       if (apReduction > 0.005) {

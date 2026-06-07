@@ -972,6 +972,28 @@ export function postPurchaseReceived(purchase: Purchase): PostingResult {
   });
 }
 
+// F-PRC-03 — Gebuchter Netto/VAT-Split einer Purchase-Line aus dem Ledger.
+// purchase_lines tragen keinen VAT; die Wahrheit ist die Original-PURCHASE-Buchung
+// (INVENTORY=netto, VAT_INPUT=vat), gekeyt ueber source_line_id = purchase_line.id.
+// Wird vom Purchase-Return genutzt, um die Vorsteuer korrekt mit zurueckzudrehen.
+// Liefert {0,0}, wenn nie gebucht (legacy) -> Caller faellt auf reines INVENTORY zurueck.
+export function getPurchaseLineInputSplit(purchaseLineId: string): { net: number; vat: number } {
+  const rows = query(
+    `SELECT account, COALESCE(SUM(amount), 0) AS amt
+       FROM ledger_entries
+      WHERE source_module = 'PURCHASE' AND source_line_id = ? AND direction = 'DEBIT'
+        AND reverses_entry_id IS NULL AND account IN ('INVENTORY', 'VAT_INPUT')
+      GROUP BY account`,
+    [purchaseLineId]
+  );
+  let net = 0, vat = 0;
+  for (const r of rows) {
+    if (r.account === 'INVENTORY') net = Number(r.amt) || 0;
+    else if (r.account === 'VAT_INPUT') vat = Number(r.amt) || 0;
+  }
+  return { net, vat };
+}
+
 // ── Purchase Payment (Zahlung an Lieferanten) ─────────────────
 //
 //   DEBIT  ACCOUNTS_PAYABLE      by amount
