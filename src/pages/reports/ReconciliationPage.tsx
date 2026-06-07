@@ -221,6 +221,7 @@ const SOURCE_TABLE_MAP: Record<string, string> = {
   PURCHASE_PAYMENT: 'purchase_payments',
   EXPENSE: 'expenses',
   EXPENSE_PAYMENT: 'expense_payments',
+  METAL_PAYMENT: 'metal_payments',
   ORDER_PAYMENT: 'order_payments',
   LOAN: 'debts',
   LOAN_PAYMENT: 'debt_payments',

@@ -12,6 +12,7 @@ import {
   postExpense,
   postExpensePayment,
   postExpenseCancelled,
+  reverseSource,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -234,6 +235,24 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
 
   deleteExpense: (id) => {
     const db = getDatabase();
+    const now = new Date().toISOString();
+    // M-03 — Ledger-Storno VOR dem Löschen. Erst jede Zahlung (DR AP / CR Cash),
+    // dann die Expense selbst (DR EXPENSES / CR AP). Sonst bleiben EXPENSES/AP/
+    // Cash dauerhaft verfälscht (Cancel-Pfad reverst korrekt — nur Delete fehlte).
+    const pays = query('SELECT id FROM expense_payments WHERE expense_id = ?', [id]);
+    for (const p of pays) {
+      const payId = p.id as string;
+      safePost(`reverseExpensePayment(${payId})`, () => {
+        if (!hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
+        if (hasReversalFor('EXPENSE_PAYMENT', payId)) return;
+        reverseSource('EXPENSE_PAYMENT', payId, now);
+      });
+    }
+    safePost(`reverseExpense(${id})`, () => {
+      if (!hasLedgerEntries('EXPENSE', id)) return;
+      if (hasReversalFor('EXPENSE', id)) return;
+      reverseSource('EXPENSE', id, now);
+    });
     db.run('DELETE FROM expense_payments WHERE expense_id = ?', [id]);
     db.run('DELETE FROM expenses WHERE id = ?', [id]);
     saveDatabase();

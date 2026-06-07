@@ -4,7 +4,7 @@ import type { PreciousMetal, MetalStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getSetting } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { postMetalPayment, hasLedgerEntries } from '@/core/ledger/posting';
+import { postMetalPayment, postMetalPaymentReversed, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { useGoldStore } from '@/stores/goldStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 
@@ -228,6 +228,18 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
 
   deleteMetal: (id) => {
     const db = getDatabase();
+    // M-02 — Ledger-Storno VOR dem Löschen: jede Metal-Zahlung reverst ihr
+    // Paar (DR CASH/BANK / CR REVENUE). Sonst bleiben Cash & Revenue als
+    // unsichtbarer Orphan verfälscht (Domain-Row weg, Ledger bleibt).
+    const pays = query('SELECT id FROM metal_payments WHERE metal_id = ?', [id]);
+    for (const p of pays) {
+      const payId = p.id as string;
+      safePost(`postMetalPaymentReversed(${payId})`, () => {
+        if (!hasLedgerEntries('METAL_PAYMENT', payId)) return;
+        if (hasReversalFor('METAL_PAYMENT', payId)) return;
+        postMetalPaymentReversed(payId);
+      });
+    }
     db.run('DELETE FROM precious_metals WHERE id = ?', [id]);
     saveDatabase();
     trackDelete('precious_metals', id);
