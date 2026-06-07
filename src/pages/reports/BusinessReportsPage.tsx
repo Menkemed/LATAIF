@@ -172,7 +172,11 @@ export function BusinessReportsPage() {
     const finalIds = new Set(finalInvs.map(i => i.id));
     const finalById = new Map(finalInvs.map(i => [i.id, i]));
     const gross = finalInvs.reduce((s, i) => s + i.grossAmount, 0);
-    const vat = finalInvs.reduce((s, i) => s + i.vatAmount, 0);
+    // M-11: kundensichtbare VAT = nur VAT_10-Lines. Der Header vat_amount mischt
+    // intern den MARGIN-VAT (Differenzbesteuerung, nicht auf der Rechnung ausgewiesen)
+    // hinein → würde "VAT COLLECTED" überhöhen. Margin-VAT steht separat im taxReport.
+    const vat = finalInvs.reduce((s, i) => s + (i.lines || []).reduce(
+      (ls, l) => ls + (l.taxScheme === 'VAT_10' ? (l.vatAmount || 0) : 0), 0), 0);
     const net = finalInvs.reduce((s, i) => s + i.netAmount, 0);
     const byMonth: Record<string, number> = {};
     for (const i of finalInvs) {
@@ -191,7 +195,10 @@ export function BusinessReportsPage() {
       refundCash += paid;
       if (g > 0) {
         refundNet += paid * ((inv.netAmount || 0) / g);
-        refundVat += paid * ((inv.vatAmount || 0) / g);
+        // M-11: nur VAT_10-Anteil zurückziehen (konsistent mit salesReport.vat oben)
+        const invVat10 = (inv.lines || []).reduce(
+          (ls, l) => ls + (l.taxScheme === 'VAT_10' ? (l.vatAmount || 0) : 0), 0);
+        refundVat += paid * (invVat10 / g);
       }
       const mKey = (when || '').substring(0, 7);
       if (mKey) byMonth[mKey] = (byMonth[mKey] || 0) - paid;

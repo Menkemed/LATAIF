@@ -166,7 +166,8 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     `SELECT COUNT(*) AS cnt,
             COALESCE(SUM(gross_amount), 0) AS gross,
             COALESCE(SUM(net_amount), 0)  AS net,
-            COALESCE(SUM(vat_amount), 0)  AS vat,
+            COALESCE(SUM((SELECT COALESCE(SUM(il.vat_amount), 0) FROM invoice_lines il
+                          WHERE il.invoice_id = invoices.id AND il.tax_scheme = 'VAT_10')), 0) AS vat,
             COALESCE(SUM(margin_snapshot), 0) AS profit
      FROM invoices
      WHERE branch_id = ? AND status != 'CANCELLED' AND status != 'DRAFT'
