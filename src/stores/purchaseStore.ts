@@ -15,13 +15,14 @@ import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
-import { consumeLot, getAvailableStock, syncProductQuantity } from '@/core/lots/lot-queries';
+import { consumeLot, restoreLot, getAvailableStock, syncProductQuantity } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
   postPurchasePayment,
   postPurchaseCancelled,
   postEntries,
+  reverseSource,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -219,6 +220,83 @@ function computeStatus(total: number, paid: number, cancelled = false): Purchase
   if (paid <= 0) return 'UNPAID';
   if (paid >= total) return 'PAID';
   return 'PARTIALLY_PAID';
+}
+
+// Slice 4a — Spiegelt confirmReturn vollstaendig zurueck. Wird von cancelReturn UND
+// deleteReturn aufgerufen, wenn der Return bereits CONFIRMED/COMPLETED war (DRAFT hat
+// keine Effekte). Reihenfolge: verbrauchten Credit blockieren -> Ledger -> Lots ->
+// Produkt-Status -> Purchase-Totals -> ungenutzten Credit entfernen. Ohne diese
+// Umkehr blieben INVENTORY/AP/Cash-Buchungen, konsumierte Lots, OPEN Supplier-Credits
+// und reduzierte Purchase-Totals verwaist (Verknuepfte-Records-Lifecycle).
+function reverseConfirmedPurchaseReturn(
+  db: SqlDb,
+  ret: PurchaseReturn,
+  purchase: Purchase | undefined,
+  now: string,
+): void {
+  // 1. Verbrauchten Supplier-Credit blockieren — sonst inkonsistenter Lieferanten-Saldo.
+  const creditRows = query(
+    `SELECT id, used_amount FROM supplier_credits WHERE source_return_id = ?`,
+    [ret.id]
+  );
+  for (const c of creditRows) {
+    if (Number(c.used_amount || 0) > 0.005) {
+      throw new Error(
+        'Return kann nicht storniert werden: der Supplier-Credit aus dieser Rueckgabe wurde bereits (teilweise) verrechnet.'
+      );
+    }
+  }
+
+  // 2. Ledger-Storno (INVENTORY/AP/Cash der PURCHASE_RETURN-Buchung). Guarded + idempotent.
+  try {
+    if (hasLedgerEntries('PURCHASE_RETURN', ret.id) && !hasReversalFor('PURCHASE_RETURN', ret.id)) {
+      reverseSource('PURCHASE_RETURN', ret.id, now);
+    }
+  } catch (err) { console.error('[ledger] reverse PURCHASE_RETURN failed:', err); }
+
+  // 3. Lots zurueck: je Line die beim Confirm konsumierte Menge wieder freigeben
+  //    (restoreLot cappt bei qty_total). Lot ueber purchase_line_id (1 Lot/Line).
+  const affected = new Set<string>();
+  for (const line of ret.lines) {
+    if (line.purchaseLineId) {
+      const lotRow = query(
+        `SELECT id FROM stock_lots
+           WHERE purchase_line_id = ? AND status != 'CANCELLED'
+           ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+        [line.purchaseLineId]
+      )[0];
+      if (lotRow) restoreLot(lotRow.id as string, Math.max(0, line.quantity));
+    }
+    if (line.productId) affected.add(line.productId);
+  }
+
+  // 4. Produkt-Status: Bestand wieder da -> zurueck auf 'in_stock' (confirmReturn hatte
+  //    bei 0 Bestand 'returned' gesetzt).
+  for (const pid of affected) {
+    syncProductQuantity(pid);
+    if (getAvailableStock(pid) > 0) {
+      db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, pid]);
+    }
+  }
+
+  // 5. Purchase-Totals wiederherstellen (Spiegel zu confirmReturn: total += ret.total,
+  //    paid += refund). getPurchase liefert die bereits reduzierten Werte.
+  if (purchase) {
+    const restoredTotal = purchase.totalAmount + ret.totalAmount;
+    const restoredPaid = purchase.paidAmount + (ret.refundAmount || 0);
+    const restoredRemaining = Math.max(0, restoredTotal - restoredPaid);
+    const restoredStatus = computeStatus(restoredTotal, restoredPaid, purchase.status === 'CANCELLED');
+    db.run(
+      `UPDATE purchases SET total_amount = ?, paid_amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
+      [restoredTotal, restoredPaid, restoredRemaining, restoredStatus, now, purchase.id]
+    );
+  }
+
+  // 6. Ungenutzten Supplier-Credit dieser Return entfernen.
+  for (const c of creditRows) {
+    db.run(`DELETE FROM supplier_credits WHERE id = ?`, [c.id as string]);
+    trackDelete('supplier_credits', c.id as string);
+  }
 }
 
 // ── Back-to-Back Beschaffung: Order-Line Status-Sync ──────────────────────
@@ -851,17 +929,37 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     const db = getDatabase();
     const ret = get().getReturn(id);
     if (!ret) return;
+    if (ret.status === 'CANCELLED') return; // idempotent
+    const now = new Date().toISOString();
+    const prevStatus = ret.status;
+    // Slice 4a — war der Return schon ausgefuehrt? Dann ALLE Effekte spiegeln,
+    // sonst bleiben Ledger/Lots/Credits/Totals verwaist. Wirft, wenn ein bereits
+    // verbrauchter Supplier-Credit den Reverse blockiert.
+    if (prevStatus === 'CONFIRMED' || prevStatus === 'COMPLETED') {
+      reverseConfirmedPurchaseReturn(db, ret, get().getPurchase(ret.purchaseId), now);
+    }
     db.run(`UPDATE purchase_returns SET status = 'CANCELLED' WHERE id = ?`, [id]);
     saveDatabase();
-    trackStatusChange('purchase_returns', id, ret.status, 'CANCELLED');
+    trackStatusChange('purchase_returns', id, prevStatus, 'CANCELLED');
+    get().loadPurchases();
     get().loadReturns();
   },
 
   deleteReturn: (id) => {
     const db = getDatabase();
+    const ret = get().getReturn(id);
+    const now = new Date().toISOString();
+    // Slice 4a — bereits ausgefuehrte Returns vor dem Loeschen vollstaendig spiegeln
+    // (sonst verwaiste Ledger/Lots/Credits/Totals). DRAFT/CANCELLED/REJECTED haben
+    // keine aktiven Effekte.
+    if (ret && (ret.status === 'CONFIRMED' || ret.status === 'COMPLETED')) {
+      reverseConfirmedPurchaseReturn(db, ret, get().getPurchase(ret.purchaseId), now);
+    }
+    db.run(`DELETE FROM purchase_return_lines WHERE return_id = ?`, [id]);
     db.run(`DELETE FROM purchase_returns WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('purchase_returns', id);
+    get().loadPurchases();
     get().loadReturns();
   },
 }));
