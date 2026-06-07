@@ -90,10 +90,15 @@ function domainAP(branchId: string): number {
      WHERE branch_id = ? AND status != 'CANCELLED'`,
     [branchId]
   );
+  // M-23: CardFees ausschliessen. Sie buchen DR EXPENSES_OPERATING / CR CARD_CLEARING
+  // (kein AP-Bein, Processor zieht sofort ab) UND haben keine expense_payments-Row.
+  // In expActive zaehlen wuerde domainAP permanent um Sigma aktive CardFees aufblaehen,
+  // ohne Gegenabzug in expPayments — reiner Reconciliation-Mismatch. Ledger-AP ist 0
+  // fuer CardFees, also gehoeren sie auch domain-seitig nicht in die AP-Summe.
   const expActive = query(
     `SELECT COALESCE(SUM(amount), 0) AS t
      FROM expenses
-     WHERE branch_id = ? AND status != 'CANCELLED'`,
+     WHERE branch_id = ? AND status != 'CANCELLED' AND category != 'CardFees'`,
     [branchId]
   );
   const purPayments = query(
