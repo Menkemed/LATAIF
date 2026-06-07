@@ -447,9 +447,13 @@ export function AnalyticsPage() {
     const paidValue = num(p, 'total_paid');
 
     // Revenue from repairs (completed or picked_up with charge)
+    // M-09 — invoice_id IS NULL: konvertierte Repairs laufen ueber die Invoice
+    // (paidValue) — sonst Doppelzaehlung von Umsatz UND Profit. Deckt sich mit
+    // dem Cashflow-Block unten (`AND invoice_id IS NULL`).
     const repairRev = qry(
       `SELECT COALESCE(SUM(charge_to_customer),0) as rev, COALESCE(SUM(margin),0) as profit
-       FROM repairs WHERE branch_id = ? AND status IN ('ready','picked_up') AND charge_to_customer > 0`,
+       FROM repairs WHERE branch_id = ? AND status IN ('ready','picked_up') AND charge_to_customer > 0
+       AND invoice_id IS NULL`,
       [branchId]
     );
     const repRev = num(repairRev[0] || {}, 'rev');
