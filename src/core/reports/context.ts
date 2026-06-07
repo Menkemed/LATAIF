@@ -267,7 +267,7 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     `SELECT p.brand AS brand,
             COUNT(il.id) AS units,
             COALESCE(SUM(il.line_total), 0) AS revenue,
-            COALESCE(SUM(il.line_total - il.purchase_price_snapshot), 0) AS profit
+            COALESCE(SUM(il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1)), 0) AS profit
      FROM invoice_lines il
      JOIN invoices i ON i.id = il.invoice_id
      JOIN products p ON p.id = il.product_id
@@ -286,7 +286,7 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     `SELECT c.name AS category,
             COUNT(il.id) AS units,
             COALESCE(SUM(il.line_total), 0) AS revenue,
-            COALESCE(SUM(il.line_total - il.purchase_price_snapshot), 0) AS profit
+            COALESCE(SUM(il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1)), 0) AS profit
      FROM invoice_lines il
      JOIN invoices i ON i.id = il.invoice_id
      JOIN products p ON p.id = il.product_id
@@ -304,7 +304,7 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
 
   const topProducts = rows(
     `SELECT p.brand AS brand, p.name AS name, il.line_total AS sale_price,
-            (il.line_total - il.purchase_price_snapshot) AS profit
+            (il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1)) AS profit
      FROM invoice_lines il
      JOIN invoices i ON i.id = il.invoice_id
      JOIN products p ON p.id = il.product_id

@@ -219,8 +219,8 @@ export function BusinessReportsPage() {
         for (const l of i.lines) {
           const prod = products.find(p => p.id === l.productId);
           if (prod?.categoryId === categoryFilter) {
-            profit += l.unitPrice - (l.purchasePriceSnapshot || 0);
-            cost += l.purchasePriceSnapshot || 0;
+            profit += (l.unitPrice - (l.purchasePriceSnapshot || 0)) * Math.max(1, l.quantity || 1);
+            cost += (l.purchasePriceSnapshot || 0) * Math.max(1, l.quantity || 1);
           }
         }
       } else {
@@ -271,7 +271,7 @@ export function BusinessReportsPage() {
       for (const l of i.lines) {
         if (l.taxScheme === 'VAT_10') vat10 += l.vatAmount;
         else if (l.taxScheme === 'MARGIN') {
-          const profit = Math.max(0, l.unitPrice - l.purchasePriceSnapshot);
+          const profit = Math.max(0, (l.unitPrice - l.purchasePriceSnapshot) * Math.max(1, l.quantity || 1));
           marginVat += profit * 10 / 110;
         } else if (l.taxScheme === 'ZERO') zero += l.lineTotal;
       }

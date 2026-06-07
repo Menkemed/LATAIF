@@ -221,8 +221,11 @@ function buildMonthSheet(
     const note = paymentNote(inv, pays);
 
     for (const line of mLines) {
-      const purchase = round3(line.purchasePriceSnapshot);
-      const selling = round3(line.lineTotal);   // customer-facing price (incl. margin VAT)
+      // M-10 — purchasePriceSnapshot ist Cost PRO STUECK, lineTotal ist GESAMT.
+      // Cost mal Menge, damit Margin-VAT bei qty>1 stimmt (vorher zu hoch).
+      const qty = Math.max(1, line.quantity || 1);
+      const purchase = round3(line.purchasePriceSnapshot * qty);
+      const selling = round3(line.lineTotal);   // customer-facing price (incl. margin VAT, gesamt)
       const profit = round3(selling - purchase);
       const vatOnProfit = profit > 0 ? round3(profit - profit / (1 + (line.vatRate || 10) / 100)) : 0;
       const exclVat = round3(profit - vatOnProfit);
@@ -360,7 +363,7 @@ export function exportNbrVatReport(year: number, invoices: Invoice[], customers:
             acc.standardNet += line.unitPrice;
             acc.standardVat += line.vatAmount;
           } else if (line.taxScheme === 'MARGIN') {
-            acc.marginProfit += (line.lineTotal - line.purchasePriceSnapshot);
+            acc.marginProfit += (line.lineTotal - line.purchasePriceSnapshot * Math.max(1, line.quantity || 1));
           } else if (line.taxScheme === 'ZERO') {
             acc.zeroRated += line.lineTotal;
           }
