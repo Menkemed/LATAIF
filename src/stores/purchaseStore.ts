@@ -682,7 +682,18 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // Pieces (invoice_lines.lot_id) bleiben verknuepft — der historische
     // Cost-Snapshot ist Eigentum der Invoice, nicht des Lots.
     db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE purchase_id = ?`, [id]);
-    for (const pid of affectedProductIds) syncProductQuantity(pid);
+    for (const pid of affectedProductIds) {
+      syncProductQuantity(pid);
+      // F-PRC-01 — sonst bleibt stock_status='in_stock' bei 0 Lots stehen (Phantom:
+      // Produkt zeigt "auf Lager", ist aber leer). Nur in_stock-Produkte anfassen,
+      // damit sold/consumed/returned nicht ueberschrieben werden.
+      if (getAvailableStock(pid) === 0) {
+        db.run(
+          `UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`,
+          [now, pid]
+        );
+      }
+    }
     // Back-to-Back: verknuepfte ARRIVED-Order-Zeilen zurueck auf PENDING.
     if (p.sourceOrderId) revertLinkedOrderLines(db, id);
     saveDatabase();
@@ -701,6 +712,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
   deletePurchase: (id) => {
     const db = getDatabase();
+    const now = new Date().toISOString();
     // Phase 7 Sync: betroffene Produkte VOR Cancel/Delete sammeln.
     const affectedRows = query(
       `SELECT DISTINCT product_id FROM stock_lots WHERE purchase_id = ?`,
@@ -716,7 +728,16 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // dem DELETE, da die Link-Zeilen in purchase_lines mit-cascaded werden.
     revertLinkedOrderLines(db, id);
     db.run(`DELETE FROM purchases WHERE id = ?`, [id]);
-    for (const pid of affectedProductIds) syncProductQuantity(pid);
+    for (const pid of affectedProductIds) {
+      syncProductQuantity(pid);
+      // F-PRC-01 — Phantom-Status vermeiden (siehe cancelPurchase).
+      if (getAvailableStock(pid) === 0) {
+        db.run(
+          `UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`,
+          [now, pid]
+        );
+      }
+    }
     saveDatabase();
     trackDelete('purchases', id);
     get().loadPurchases();
