@@ -284,13 +284,32 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
   // Bei Produkten mit quantity > 1 wird pro Line 1 Stück abgezogen; erst bei Bestand = 0 status='sold'.
   const invoiceLines = query(`SELECT product_id, unit_price FROM invoice_lines WHERE invoice_id = ?`, [event.entityId]);
   for (const line of invoiceLines) {
-    db.run(
-      `UPDATE products SET
-         quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,
-         stock_status = CASE WHEN COALESCE(quantity,1) > 1 THEN stock_status ELSE 'sold' END,
-         last_sale_price = ?, updated_at = ? WHERE id = ?`,
-      [line.unit_price, now, line.product_id]
-    );
+    const pid = line.product_id;
+    // M-06 — Lot-getrackte Produkte: quantity wird bereits von consumeLot +
+    // syncProductQuantity beim Sale verwaltet. Hier NICHT nochmal abziehen, sonst
+    // Doppelreduktion bei qty>1 (und nicht-idempotent gegen mehrfaches invoice.paid).
+    const hasLots = (Number(query(
+      `SELECT COUNT(*) c FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED'`,
+      [pid]
+    )[0]?.c) || 0) > 0;
+    if (hasLots) {
+      // Nur Status ableiten: 'sold' wenn kein Lot-Bestand mehr, sonst unveraendert.
+      db.run(
+        `UPDATE products SET
+           stock_status = CASE WHEN COALESCE(quantity,0) <= 0 THEN 'sold' ELSE stock_status END,
+           last_sale_price = ?, updated_at = ? WHERE id = ?`,
+        [line.unit_price, now, pid]
+      );
+    } else {
+      // Legacy-Produkte ohne Lots: altes quantity-aware Verhalten unveraendert.
+      db.run(
+        `UPDATE products SET
+           quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,
+           stock_status = CASE WHEN COALESCE(quantity,1) > 1 THEN stock_status ELSE 'sold' END,
+           last_sale_price = ?, updated_at = ? WHERE id = ?`,
+        [line.unit_price, now, pid]
+      );
+    }
   }
 
   // Update customer KPIs
