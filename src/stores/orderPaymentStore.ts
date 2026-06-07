@@ -25,7 +25,9 @@ function safePost(label: string, fn: () => void): void {
 function reconcileOrderFromPayments(orderId: string): void {
   const db = getDatabase();
   const now = new Date().toISOString();
-  const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE order_id = ?`, [orderId]);
+  // M-08 — converted Payments (Geld zur Invoice gewandert) zaehlen nicht mehr zum
+  // Order-Saldo; deckt sich mit Banking/Analytics/Reconciliation.
+  const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0`, [orderId]);
   const totalPaid = Number(sumRow[0]?.t || 0);
 
   const orderRow = query(`SELECT agreed_price FROM orders WHERE id = ?`, [orderId]);
@@ -62,6 +64,7 @@ export interface OrderPayment {
   reference?: string;
   note?: string;
   createdAt: string;
+  convertedToInvoice?: boolean;   // M-08 — true wenn beim Convert ans Invoice abgegeben
 }
 
 interface OrderPaymentStore {
@@ -88,6 +91,7 @@ function rowToPayment(r: Record<string, unknown>): OrderPayment {
     reference: r.reference as string | undefined,
     note: r.note as string | undefined,
     createdAt: r.created_at as string,
+    convertedToInvoice: !!r.converted_to_invoice,
   };
 }
 
@@ -199,6 +203,7 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
 
   totalPaid: (orderId) => {
     const list = get().paymentsByOrder[orderId] || [];
-    return list.reduce((sum, p) => sum + p.amount, 0);
+    // M-08 — converted Payments ausschliessen (konsistent zu reconcileOrderFromPayments).
+    return list.filter(p => !p.convertedToInvoice).reduce((sum, p) => sum + p.amount, 0);
   },
 }));

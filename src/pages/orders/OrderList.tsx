@@ -95,7 +95,8 @@ export function OrderList() {
     const m = new Map<string, number>();
     try {
       const rows = query(
-        `SELECT order_id, COALESCE(SUM(amount), 0) AS t FROM order_payments GROUP BY order_id`
+        // M-08 — converted Payments (zur Invoice abgegeben) nicht mitzaehlen.
+        `SELECT order_id, COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE COALESCE(converted_to_invoice, 0) = 0 GROUP BY order_id`
       );
       rows.forEach(r => m.set(r.order_id as string, Number(r.t || 0)));
     } catch { /* table might not exist on first load */ }

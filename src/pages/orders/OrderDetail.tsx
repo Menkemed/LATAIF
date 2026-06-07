@@ -128,6 +128,9 @@ export function OrderDetail() {
 
   const payments = useMemo(() => (id ? paymentsByOrder[id] || [] : []), [id, paymentsByOrder]);
   const totalPaid = useMemo(() => payments.reduce((s, p) => s + p.amount, 0), [payments]);
+  // M-08 — angezeigter offener Saldo: konvertierte Order-Payments (Geld zur Invoice
+  // gewandert) ausschliessen. totalPaid (roh) bleibt fuer Flow-Logik (Convert/Delete/Cancel).
+  const totalPaidActive = useMemo(() => payments.filter(p => !p.convertedToInvoice).reduce((s, p) => s + p.amount, 0), [payments]);
   // v0.3.0 — Order-Lines fuer das Fulfillment-Grid (re-lädt bei lineRefresh)
   const orderLineList = useMemo(
     () => (id ? getOrderLines(id) : []),
@@ -220,8 +223,8 @@ export function OrderDetail() {
   const nextStatus = getNextStatus(order.status);
   const isCancelled = order.status === 'cancelled';
   const isCompleted = order.status === 'completed';
-  const remaining = (order.agreedPrice || 0) - totalPaid;
-  const fullyPaid = (order.agreedPrice || 0) > 0 && totalPaid >= (order.agreedPrice || 0);
+  const remaining = (order.agreedPrice || 0) - totalPaidActive;
+  const fullyPaid = (order.agreedPrice || 0) > 0 && totalPaidActive >= (order.agreedPrice || 0);
 
   function handleAddPayment() {
     if (!id) return;
@@ -309,7 +312,7 @@ export function OrderDetail() {
         ]},
         { title: 'Pricing', lines: [
           { label: 'Quoted / Agreed Price (approx.)', value: `${fmt(order.agreedPrice)} BHD`, bold: true },
-          { label: 'Deposit Paid', value: `${fmt(totalPaid)} BHD` },
+          { label: 'Deposit Paid', value: `${fmt(totalPaidActive)} BHD` },
           { label: 'Remaining', value: `${fmt(Math.max(0, remaining))} BHD` },
         ]},
       ],
@@ -360,8 +363,8 @@ export function OrderDetail() {
           ...(p.note ? [{ label: 'Note', value: p.note }] : []),
         ]},
         { title: 'Balance', lines: [
-          { label: 'Total Paid (incl. this)', value: `${fmt(totalPaid)} BHD` },
-          ...(order.agreedPrice ? [{ label: 'Remaining', value: `${fmt(Math.max(0, order.agreedPrice - totalPaid))} BHD` }] : []),
+          { label: 'Total Paid (incl. this)', value: `${fmt(totalPaidActive)} BHD` },
+          ...(order.agreedPrice ? [{ label: 'Remaining', value: `${fmt(Math.max(0, order.agreedPrice - totalPaidActive))} BHD` }] : []),
         ]},
       ],
       footer: 'Thank you for your payment.',
@@ -878,7 +881,7 @@ export function OrderDetail() {
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">TOTAL PAID</span>
                 <span className="font-display" style={{ fontSize: 20, color: fullyPaid ? '#7EAA6E' : '#AA956E' }}>
-                  <Bhd v={totalPaid}/> BHD
+                  <Bhd v={totalPaidActive}/> BHD
                 </span>
               </div>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
