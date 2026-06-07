@@ -1939,6 +1939,34 @@ export function postConsignmentPayoutReversed(payoutId: string): PostingResult {
   return reverseSource('CONSIGNMENT_PAYOUT', payoutId, new Date().toISOString());
 }
 
+// M-22: Reversiert ALLE noch aktiven CONSIGNMENT_PAYOUT-Buchungen eines Consignments.
+// Die Payout-source_ids sind synthetisch (uuid) und werden nirgends persistiert — wir
+// finden sie ueber die metadata (jeder Payout-Entry traegt consignmentId). So bleiben
+// beim Teardown (cancelSale / deleteConsignment) kein Pseudo-Aufwand + Cash-Abgang
+// haengen. Guarded ueber hasReversalFor -> idempotent. Gibt Anzahl reversierter Payouts.
+export function reverseConsignmentPayouts(consignmentId: string, occurredAt: string): number {
+  const db = getDatabase();
+  const r = db.exec(
+    `SELECT DISTINCT source_id FROM ledger_entries
+      WHERE source_module = 'CONSIGNMENT_PAYOUT' AND reverses_entry_id IS NULL
+        AND metadata_json LIKE ?`,
+    [`%"consignmentId":"${consignmentId}"%`]
+  );
+  if (!r.length || !r[0].values.length) return 0;
+  let count = 0;
+  for (const row of r[0].values) {
+    const sid = row[0] as string;
+    if (hasReversalFor('CONSIGNMENT_PAYOUT', sid)) continue;
+    try {
+      reverseSource('CONSIGNMENT_PAYOUT', sid, occurredAt);
+      count++;
+    } catch (e) {
+      console.warn(`[reverseConsignmentPayouts] skip ${sid}:`, e);
+    }
+  }
+  return count;
+}
+
 // ── Scrap Gold Quick Trade ───────────────────────────────────
 //
 // Brutto-Booking mit Spread-Income: Echte Cash-Bewegungen pro Split

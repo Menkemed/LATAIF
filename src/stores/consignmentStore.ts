@@ -5,7 +5,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { postConsignmentPayout, postCreditNote, hasLedgerEntries, hasReversalFor, reverseSource } from '@/core/ledger/posting';
+import { postConsignmentPayout, postCreditNote, hasLedgerEntries, hasReversalFor, reverseSource, reverseConsignmentPayouts } from '@/core/ledger/posting';
 import type { CreditNote } from '@/core/models/types';
 import { useSupplierStore } from './supplierStore';
 import { useInvoiceStore } from './invoiceStore';
@@ -589,6 +589,16 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       console.warn('[cancelSale] loss-expense cancel failed:', e);
     }
 
+    // 3b. M-22 — Consignor-Payout(s) reversen. Bei Teil-Payout bleibt der Status
+    // 'sold' (recordPartialPayout), also ist cancelSale erreichbar OBWOHL schon Geld
+    // an den Consignor floss. Ohne Reverse blieben Pseudo-Aufwand + Cash-Abgang
+    // haengen. Guarded + idempotent (findet die synthetischen source_ids ueber metadata).
+    try {
+      reverseConsignmentPayouts(id, now);
+    } catch (e) {
+      console.warn('[cancelSale] payout reversal failed:', e);
+    }
+
     // 4. Consignment zurück auf 'active', Sale-Felder leeren.
     db.run(
       `UPDATE consignments SET
@@ -909,10 +919,19 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
 
   deleteConsignment: (id) => {
     const db = getDatabase();
+    const now = new Date().toISOString();
     const con = get().getConsignment(id);
     if (con && con.status === 'active') {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
-        [new Date().toISOString(), con.productId]);
+        [now, con.productId]);
+    }
+    // M-22 — ein bereits (teil/voll) ausgezahltes Consignment kann heute via Delete
+    // entfernt werden (kein Status-Guard, L-05). Payout-Ledger sonst verwaist:
+    // synthetische source_ids ueber metadata finden + guarded reversen.
+    try {
+      reverseConsignmentPayouts(id, now);
+    } catch (e) {
+      console.warn('[deleteConsignment] payout reversal failed:', e);
     }
     db.run(`DELETE FROM consignments WHERE id = ?`, [id]);
     saveDatabase();
