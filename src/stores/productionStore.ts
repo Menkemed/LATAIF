@@ -15,8 +15,8 @@ import type { ProductionRecord, ProductionInput, ProductionOutput, Product, Expe
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { postExpense, postExpensePayment, hasLedgerEntries } from '@/core/ledger/posting';
-import { getActiveLots, consumeLot, syncProductQuantity } from '@/core/lots/lot-queries';
+import { postExpense, postExpensePayment, reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
+import { getActiveLots, consumeLot, restoreLot, syncProductQuantity } from '@/core/lots/lot-queries';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -241,6 +241,16 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
         ]
       );
       outStmt.run([uuid(), id, pId, Number(o.value) || 0]);
+      // F-PRD-03 — Output bekommt ein Stock-Lot (Cost-Provenance + Lot-Bestandswert
+      // bleibt erhalten: Input-Lots geleert ⇄ Output-Lot zum gleichen Wert). unit_cost
+      // = Output-Wert, purchase_id NULL (kein Einkauf), qty 1.
+      db.run(
+        `INSERT INTO stock_lots (id, branch_id, product_id, purchase_id, purchase_line_id,
+           unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
+         VALUES (?, ?, ?, NULL, NULL, ?, 1, 1, 'ACTIVE', ?, ?)`,
+        [uuid(), branchId, pId, Number(o.value) || 0, prodDate, now]
+      );
+      syncProductQuantity(pId);
     }
     outStmt.free();
 
@@ -332,6 +342,76 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
 
   deleteRecord: (id) => {
     const db = getDatabase();
+    const now = new Date().toISOString();
+    const rec = get().getRecord(id);
+    // Kein Record geladen → reiner Row-Delete (Alt-Verhalten, nichts zu spiegeln).
+    if (!rec) {
+      db.run('DELETE FROM production_records WHERE id = ?', [id]);
+      saveDatabase();
+      trackDelete('production_records', id);
+      get().loadRecords();
+      return;
+    }
+
+    // F-PRD-04 — Block-Guard: ein Output, der nicht mehr in_stock ist (verkauft/
+    // verbraucht/an Agent), darf nicht still verschwinden. "Verbrauchte blockieren".
+    for (const o of rec.outputs) {
+      if (!o.productId) continue;
+      const st = (query(`SELECT stock_status FROM products WHERE id = ?`, [o.productId])[0]?.stock_status as string) || '';
+      if (st && st !== 'in_stock') {
+        throw new Error(
+          `Production ${rec.recordNumber} kann nicht geloescht werden: Output-Produkt ist bereits '${st}' (verkauft/verbraucht).`
+        );
+      }
+    }
+
+    // 1. Inputs zurueck: Produkt wieder in_stock + geleerte Lots auffuellen (createRecord
+    //    hatte sie via consumeLot geleert). restoreLot cappt bei qty_total.
+    for (const inp of rec.inputs) {
+      if (!inp.productId) continue;
+      db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, inp.productId]);
+      const lots = query(
+        `SELECT id, qty_total, qty_remaining FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED'`,
+        [inp.productId]
+      );
+      for (const l of lots) {
+        const total = Number(l.qty_total) || 0;
+        const rem = Number(l.qty_remaining) || 0;
+        if (rem < total) restoreLot(l.id as string, total - rem);
+      }
+      syncProductQuantity(inp.productId);
+    }
+
+    // 2. Outputs entfernen: Produkt + dessen Production-Lot (purchase_id NULL) loeschen.
+    for (const o of rec.outputs) {
+      if (!o.productId) continue;
+      db.run(`DELETE FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL`, [o.productId]);
+      db.run(`DELETE FROM products WHERE id = ?`, [o.productId]);
+      trackDelete('products', o.productId);
+    }
+
+    // 3. Auto-Expense (Labor/Overhead) reversen, falls completeRecord eine erzeugt hat.
+    const expRows = query(`SELECT id FROM expenses WHERE related_module = 'production' AND related_entity_id = ?`, [id]);
+    for (const e of expRows) {
+      const expId = e.id as string;
+      for (const p of query(`SELECT id FROM expense_payments WHERE expense_id = ?`, [expId])) {
+        const payId = p.id as string;
+        if (hasLedgerEntries('EXPENSE_PAYMENT', payId) && !hasReversalFor('EXPENSE_PAYMENT', payId)) {
+          safePost(`reverse EXPENSE_PAYMENT(${payId})`, () => reverseSource('EXPENSE_PAYMENT', payId, now));
+        }
+        db.run(`DELETE FROM expense_payments WHERE id = ?`, [payId]);
+        trackDelete('expense_payments', payId);
+      }
+      if (hasLedgerEntries('EXPENSE', expId) && !hasReversalFor('EXPENSE', expId)) {
+        safePost(`reverse EXPENSE(${expId})`, () => reverseSource('EXPENSE', expId, now));
+      }
+      db.run(`DELETE FROM expenses WHERE id = ?`, [expId]);
+      trackDelete('expenses', expId);
+    }
+
+    // 4. Inputs/Outputs-Zeilen + Record loeschen.
+    db.run(`DELETE FROM production_inputs WHERE record_id = ?`, [id]);
+    db.run(`DELETE FROM production_outputs WHERE record_id = ?`, [id]);
     db.run('DELETE FROM production_records WHERE id = ?', [id]);
     saveDatabase();
     trackDelete('production_records', id);
