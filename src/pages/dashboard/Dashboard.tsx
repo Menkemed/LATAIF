@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { TrendingUp, Package, Users, FileText, ShoppingCart, Plus, CreditCard, Wallet, AlertTriangle, Landmark, UserPlus, RefreshCw, Smartphone } from 'lucide-react';
+import { TrendingUp, Package, Users, FileText, ShoppingCart, Plus, CreditCard, Wallet, AlertTriangle, Landmark, UserPlus, RefreshCw, Smartphone, Coins } from 'lucide-react';
 import { useBankingStore } from '@/stores/bankingStore';
 import { KPICard } from '@/components/ui/KPICard';
 import { Card } from '@/components/ui/Card';
@@ -26,6 +26,7 @@ import { query, currentBranchId } from '@/core/db/helpers';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { receivablesSummary, type ReceivableSource } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
+import { computeSalesMetrics } from '@/core/reports/sales-metrics';
 
 function getGreeting(): string {
   const h = new Date().getHours();
@@ -130,31 +131,20 @@ export function Dashboard() {
     if (!when) return true;
     return when >= periodStart && when <= periodEnd;
   }), [invoices, periodStart, periodEnd]);
-  // Refund-Abzug: Cash-Refunds auf FINAL-Invoices, datiert per refund_paid_date (oder return_date
-  // als Fallback) im Zeitraum. Sonst zeigt das Dashboard inflated Revenue weil Refunds nirgends
-  // einlaufen — User-Spec: Invoice paid = +, Refund = − im selben Topf.
+  // FINAL-Invoice-Lookup (von currentMonthRevenue + monthlyTarget genutzt fuer
+  // die Refund-Zuordnung pro Monat).
   const finalInvoiceMap = useMemo(() => {
     const m = new Map<string, typeof invoices[number]>();
     for (const i of invoices) if (i.status === 'FINAL') m.set(i.id, i);
     return m;
   }, [invoices]);
-  const refundsByPeriod = useMemo(() => {
-    let cash = 0, profit = 0;
-    for (const r of salesReturns) {
-      const inv = finalInvoiceMap.get(r.invoiceId);
-      if (!inv) continue;
-      const paid = r.refundPaidAmount || 0;
-      if (paid <= 0) continue;
-      const when = r.refundPaidDate || r.returnDate;
-      if (when && (when < periodStart.split('T')[0] || when > periodEnd.split('T')[0])) continue;
-      cash += paid;
-      // Pro-rata: Anteil der Marge entspricht Anteil am Brutto.
-      const gross = inv.grossAmount || 0;
-      const margin = inv.marginSnapshot || 0;
-      if (gross > 0) profit += paid * (margin / gross);
-    }
-    return { cash, profit };
-  }, [salesReturns, finalInvoiceMap, periodStart, periodEnd]);
+  // M-15 — Revenue/Profit kommen aus dem zentralen SSOT computeSalesMetrics
+  // (FINAL-only, Refunds anteilig ab, VAT nur VAT_10). Scrap-Spread wird SEPARAT
+  // ausgewiesen (eigene KPI-Card), nicht mehr in den Umsatz gemischt.
+  const salesMetrics = useMemo(
+    () => computeSalesMetrics(invoices, salesReturns, { from: periodStart, to: periodEnd }),
+    [invoices, salesReturns, periodStart, periodEnd]
+  );
   // Scrap Gold Spread: nur completed Trades im Zeitraum. Pro Spec zählt
   // der Spread (Profit) als Income/Revenue — niemals der volle Sale Price.
   const scrapSpreadInPeriod = useMemo(() => {
@@ -170,14 +160,9 @@ export function Dashboard() {
     return sum;
   }, [scrapTrades, periodStart, periodEnd]);
 
-  const totalRevenue = useMemo(
-    () => finalInvoices.reduce((s, i) => s + i.grossAmount, 0) - refundsByPeriod.cash + scrapSpreadInPeriod,
-    [finalInvoices, refundsByPeriod, scrapSpreadInPeriod]
-  );
-  const totalProfit = useMemo(
-    () => finalInvoices.reduce((s, i) => s + (i.marginSnapshot || 0), 0) - refundsByPeriod.profit + scrapSpreadInPeriod,
-    [finalInvoices, refundsByPeriod, scrapSpreadInPeriod]
-  );
+  // M-15: nur Rechnungs-Umsatz/-Profit aus dem SSOT, KEIN Scrap (eigene Card unten).
+  const totalRevenue = salesMetrics.gross;
+  const totalProfit = salesMetrics.profit;
   // Plan §Dashboard §3.A+B: durchschnittlicher Verkauf + Margin %
   const avgSale = useMemo(() => finalInvoices.length > 0 ? totalRevenue / finalInvoices.length : 0, [finalInvoices, totalRevenue]);
   const marginPct = useMemo(() => totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0, [totalRevenue, totalProfit]);
@@ -672,9 +657,10 @@ export function Dashboard() {
 
         {/* ── SECTION: PERFORMANCE ── */}
         <DashSection title="Performance" subtitle="Revenue, profit and stock for the selected period">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 20 }}>
             <KPICard label="REVENUE (FINAL)" value={fmt(totalRevenue)} unit={`BHD · ${finalInvoices.length} inv.`} icon={<TrendingUp size={16} />} accent="green" onClick={() => navigate('/invoices?filter=FINAL')} />
             <KPICard label="PROFIT" value={fmt(totalProfit)} unit={`BHD · ${marginPct.toFixed(1)}% margin`} icon={<TrendingUp size={16} />} accent="purple" onClick={() => navigate('/business-reports')} />
+            <KPICard label="SCRAP SPREAD" value={fmt(scrapSpreadInPeriod)} unit="BHD · gold trades" icon={<Coins size={16} />} accent="orange" onClick={() => navigate('/scrap-trades')} />
             <KPICard label="AVG SALE" value={fmt(avgSale)} unit="BHD per invoice" icon={<FileText size={16} />} onClick={() => navigate('/invoices')} />
             <KPICard
               label="STOCK VALUE"
