@@ -86,7 +86,7 @@ export function bookCardFee(args: BookCardFeeArgs): string | null {
           metadata: { expenseNumber, category: 'CardFees' },
         },
       ],
-      { occurredAt: expenseDate, sourceModule: 'EXPENSE', sourceId: expenseId, branchId, userId }
+      { occurredAt: createdAt, sourceModule: 'EXPENSE', sourceId: expenseId, branchId, userId }
     );
   });
   return expenseId;
