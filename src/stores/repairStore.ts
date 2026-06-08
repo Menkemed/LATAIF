@@ -457,8 +457,6 @@ interface RepairStore {
   updateRepairLine: (lineId: string, data: Partial<RepairLine>) => void;
   cancelRepairLine: (lineId: string, notes?: string) => void;
   recomputeRepairAggregates: (repairId: string) => void;
-  // Plan §8 #1 — Customer-Charge Payment-Tracking
-  recordCustomerPayment: (id: string, amount: number, method: 'cash' | 'bank' | 'card', date?: string) => void;
   // User-Spec §Repair Bulk-Invoice: mehrere READY-Repairs eines Customers in
   // EINE gemeinsame Multi-Line-Invoice. Validiert atomisch: alle ready, kein
   // invoiceId, alle gleicher Customer, charge>0. Linkt invoiceId auf jedem Repair.
@@ -1089,48 +1087,6 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     get().loadRepairs();
     get().loadRepairLines();
-  },
-
-  // Plan §8 #1 — Customer-Charge Payment-Tracking. Akkumuliert Zahlungen, leitet Status ab.
-  recordCustomerPayment: (id, amount, method, date) => {
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error('Repair payment amount must be a positive number.');
-    }
-    const db = getDatabase();
-    const r = get().getRepair(id);
-    if (!r) return;
-    const charge = r.chargeToCustomer || 0;
-    const newPaid = Math.min(charge > 0 ? charge : Number.MAX_SAFE_INTEGER, (r.customerPaidAmount || 0) + amount);
-    const newStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' =
-      charge > 0 && newPaid >= charge - 0.005 ? 'PAID'
-      : newPaid > 0 ? 'PARTIALLY_PAID'
-      : 'UNPAID';
-    const now = new Date().toISOString();
-    const payDate = date || now.split('T')[0];
-    db.run(
-      `UPDATE repairs SET customer_paid_amount = ?, customer_payment_status = ?,
-         customer_payment_method = ?, customer_payment_date = ?, updated_at = ?
-       WHERE id = ?`,
-      [newPaid, newStatus, method, payDate, now, id]
-    );
-    saveDatabase();
-    trackUpdate('repairs', id, { customerPayment: amount, method, date: payDate, status: newStatus });
-    eventBus.emit('repair.payment_received' as any, 'repair', id, { amount, method, totalPaid: newPaid, status: newStatus });
-    get().loadRepairs();
-
-    // ZIEL.md §3a — Repair-Customer-Payment ans Ledger.
-    // Nur wenn KEINE Invoice gekoppelt ist — sonst läuft die Bezahlung über
-    // invoice_payments (matcht bankingStore-Filter `if (r.invoice_id) continue`).
-    if (!r.invoiceId) {
-      const paymentId = uuid();
-      safePost(`postRepairPayment(${paymentId})`, () => {
-        if (hasLedgerEntries('REPAIR_PAYMENT', paymentId)) return;
-        postRepairPayment({
-          id: paymentId, repairId: id, amount, method,
-          paidAt: payDate, customerId: r.customerId,
-        });
-      });
-    }
   },
 
   createCombinedRepairInvoice: (repairIds) => {
