@@ -1090,10 +1090,11 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     const now = new Date().toISOString();
 
     // 0. Order + Customer laden
-    const oRows = query(`SELECT id, customer_id, status FROM orders WHERE id = ?`, [id]);
+    const oRows = query(`SELECT id, customer_id, status, product_id FROM orders WHERE id = ?`, [id]);
     if (oRows.length === 0) throw new Error(`Order ${id} nicht gefunden`);
     const customerId = oRows[0].customer_id as string;
     const currentStatus = oRows[0].status as OrderStatus;
+    const linkedProductId = (oRows[0].product_id as string | null) || null;  // L-07
     if (currentStatus === 'cancelled') throw new Error('Order ist bereits storniert.');
 
     // 0a. Invoiced-Block: keine Line darf invoice_id != NULL haben
@@ -1114,31 +1115,32 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       if (choice === 'refund' && !refundMethod) {
         throw new Error('Refund braucht eine Zahlmethode (Cash / Bank / Benefit).');
       }
+      // L-06 — der customer_credits-Insert (= die einloesbare Gutschrift fuer die
+      // bereits erhaltene Anzahlung) darf NICHT mehr still per console.warn schlucken:
+      // schlaegt er fehl, bricht der ganze Storno ab (Error bubbelt), BEVOR die Order
+      // auf 'cancelled' gesetzt wird. Sonst waere die Order storniert, aber die
+      // Anzahlung haette keinen Domain-Credit zum Einloesen (Geld-Phantom). Insert vor
+      // dem (fuer 'credit' wirkungslosen) Post — Reihenfolge-Konvention ZIEL.md §3a.
+      if (choice === 'credit') {
+        const creditId = uuid();
+        let branchId: string;
+        try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+        db.run(
+          `INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status,
+             source_type, source_id, note, created_at)
+           VALUES (?, ?, ?, ?, 0, 'OPEN', 'order_cancel', ?, ?, ?)`,
+          [creditId, branchId, customerId, totalPaid, id,
+           note || `Storno Order — Guthaben zur weiteren Verrechnung`, now]
+        );
+        trackInsert('customer_credits', creditId, {
+          customerId, amount: totalPaid, sourceOrderId: id,
+        });
+      }
       safePost(`postOrderCancellationChoice(${id}, ${choice})`, () => {
         postOrderCancellationChoice({
           orderId: id, customerId, totalPaid, choice, refundMethod,
         });
       });
-      // Bei 'credit' zusaetzlich Domain-Eintrag in customer_credits.
-      if (choice === 'credit') {
-        const creditId = uuid();
-        let branchId: string;
-        try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
-        try {
-          db.run(
-            `INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status,
-               source_type, source_id, note, created_at)
-             VALUES (?, ?, ?, ?, 0, 'OPEN', 'order_cancel', ?, ?, ?)`,
-            [creditId, branchId, customerId, totalPaid, id,
-             note || `Storno Order — Guthaben zur weiteren Verrechnung`, now]
-          );
-          trackInsert('customer_credits', creditId, {
-            customerId, amount: totalPaid, sourceOrderId: id,
-          });
-        } catch (err) {
-          console.warn('[order] customer_credits insert failed:', err);
-        }
-      }
     }
 
     // 2. Cost-Lines analysieren: real-gebuchte A/P (expense_id != NULL) bleiben
@@ -1189,12 +1191,27 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     db.run(`UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?`, [now, id]);
     trackUpdate('orders', id, { status: 'cancelled', cancelChoice: choice });
 
+    // 5b. L-07 — ein per Convert-Vorbereitung erzeugtes 'reserved' Custom-Produkt
+    //     (order.product_id, OrderDetail.handleConvert) wieder freigeben, sonst haengt
+    //     es nach dem Storno fuer immer in 'reserved'. Wird so eines freigegeben,
+    //     ueberspringen wir den Overflow-Create unten (sonst Duplikat fuer dasselbe Stueck).
+    let freedReservedProduct = false;
+    if (linkedProductId) {
+      const pr = query(`SELECT stock_status FROM products WHERE id = ?`, [linkedProductId]);
+      if (pr.length > 0 && pr[0].stock_status === 'reserved') {
+        db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
+          [now, linkedProductId]);
+        trackUpdate('products', linkedProductId, { stockStatus: 'in_stock' });
+        freedReservedProduct = true;
+      }
+    }
+
     // 6. Custom-Order mit angefangener Arbeit: Stueck in Lager ueberfuehren.
     //    Trigger: customCostBasis > 0 UND mind. eine ARRIVED Cost-Line (= realer
     //    Arbeit/Material). Das fertige/halbfertige Stueck wird als Lagerprodukt
     //    angelegt mit kapitalisierter Kostenbasis als purchasePrice. So bleibt
     //    der Wert im System sichtbar und das Stueck ist weiterverkaeufbar.
-    if (customCostBasis > 0 && realizedCosts.length > 0) {
+    if (!freedReservedProduct && customCostBasis > 0 && realizedCosts.length > 0) {
       try {
         const ord = query(
           `SELECT category_id, attributes, condition, requested_brand, requested_model,
