@@ -476,6 +476,16 @@ export function AnalyticsPage() {
     );
     const consignmentComm = num(conComm[0] || {}, 'comm');
 
+    // L-15 — Scrap Gold Spread als EIGENER Revenue-Stream (Entscheid A: Scrap bleibt
+    // separat, nie in netRevenue gemischt). Nur completed Trades; Income = Spread
+    // (Profit), NIEMALS der volle Sale-Price. All-time, konsistent zum Analytics-Ansatz.
+    const scrapRow = qry(
+      `SELECT COALESCE(SUM(profit),0) as spread
+       FROM scrap_trades WHERE branch_id = ? AND status = 'completed'`,
+      [branchId]
+    );
+    const scrapSpread = num(scrapRow[0] || {}, 'spread');
+
     // Agent commissions (what we pay out to agents)
     const agentComm = qry(
       `SELECT COALESCE(SUM(commission_amount),0) as comm
@@ -934,7 +944,7 @@ export function AnalyticsPage() {
     return {
       netRevenue, grossRevenue, totalVat, totalInputVat, netVatOwed, vatRefundDue, profitAfterVat,
       openCount, openValue, paidCount, paidValue,
-      repairRevenue: repRev, consignmentComm, agentCommTotal,
+      repairRevenue: repRev, consignmentComm, agentCommTotal, scrapSpread,
       outstandingPayments,
       // Cashflow
       cashReceived, bankReceived, cardReceived, benefitReceived, otherReceived,
@@ -1473,6 +1483,13 @@ export function AnalyticsPage() {
                 label="Repair Revenue"
                 value={`${fmt(finance.repairRevenue)} BHD`}
                 color="#0F0F10"
+              />
+              <TableRow
+                label="Scrap Gold Spread"
+                value={`${fmt(finance.scrapSpread)} BHD`}
+                /* L-15 — Spread (Profit), nie voller Sale-Price; eigener Stream
+                   (Entscheid A). Rot bei Verlust-Trades, sonst gruen. */
+                color={finance.scrapSpread < 0 ? '#AA6E6E' : '#7EAA6E'}
               />
               <TableRow
                 label="Consignment Commissions"
