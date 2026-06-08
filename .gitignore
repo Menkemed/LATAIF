@@ -38,3 +38,6 @@ Thumbs.db
 
 # Local backups
 src.backup-*/
+
+# QA-Pruefberichte (bewusst lokal, nie committen)
+QA-Pruefbericht-*.md
