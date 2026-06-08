@@ -147,7 +147,7 @@ function applyDisposition(
       syncProductQuantity(line.productId);
     } else {
       const newStatus = disposition === 'UNDER_REPAIR' ? 'in_repair'
-        : disposition === 'WRITE_OFF' ? 'sold'
+        : disposition === 'WRITE_OFF' ? 'write_off'
         : 'in_stock';
       db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [newStatus, now, line.productId]);
     }

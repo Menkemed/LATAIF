@@ -79,7 +79,7 @@ export function ProductDetail() {
     // Lot-Bestand konzeptionell ungültig (Daten-Inkonsistenz möglich). Die Card
     // wird ausgeblendet, damit kein "Available"-Badge bei verkauften Items steht.
     const p = products.find(pp => pp.id === id);
-    if (p && ['sold', 'reserved', 'consignment_reserved', 'consumed'].includes(p.stockStatus)) {
+    if (p && ['sold', 'reserved', 'consignment_reserved', 'consumed', 'write_off'].includes(p.stockStatus)) {
       return [];
     }
     return lots;

@@ -70,7 +70,7 @@ export type CanonicalStockStatus = 'IN_STOCK' | 'RESERVED' | 'SOLD' | 'GIVEN_TO_
 export type StockStatus =
   | CanonicalStockStatus
   | 'in_stock' | 'reserved' | 'offered' | 'sold' | 'consignment' | 'consignment_reserved'
-  | 'in_repair' | 'with_agent' | 'on_order' | 'consumed';
+  | 'in_repair' | 'with_agent' | 'on_order' | 'consumed' | 'write_off';
 
 export function canonicalStockStatus(s: StockStatus | string | undefined | null): CanonicalStockStatus {
   const v = String(s || '').toLowerCase();

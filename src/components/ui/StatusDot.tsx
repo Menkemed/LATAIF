@@ -36,6 +36,7 @@ const colorMap: Record<string, string> = {
   in_repair: '#AA956E',
   with_agent: '#6E8AAA',
   on_order: '#0F0F10',
+  write_off: '#AA6E6E',
   // Consignment
   paid_out: '#7EAA6E',
   returned: '#6B7280',

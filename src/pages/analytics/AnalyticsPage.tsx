@@ -1061,6 +1061,7 @@ export function AnalyticsPage() {
     in_repair: 'In Repair',
     consignment: 'Consignment',
     on_order: 'On Order',
+    write_off: 'Write-Off',
   };
 
   const statusColors: Record<string, string> = {
@@ -1072,6 +1073,7 @@ export function AnalyticsPage() {
     in_repair: '#AA6E6E',
     consignment: '#9B7ECB',
     on_order: '#6B7280',
+    write_off: '#AA6E6E',
   };
 
   const vipLabels: Record<number, string> = {
