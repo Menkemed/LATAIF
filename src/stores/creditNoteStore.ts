@@ -95,6 +95,18 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     if (Math.abs(sumComponents - input.totalAmount) > 0.005) {
       throw new Error(`Credit note components (${sumComponents.toFixed(3)}) must equal total (${input.totalAmount.toFixed(3)}).`);
     }
+    // L-01 — Store-Credit ('credit') als Refund-Methode ist noch NICHT sauber
+    // modelliert: es gibt kein Customer-Credit-Liability-Konto und keine Einloesung.
+    // Der Cash-Anteil lief bisher faelschlich auf BANK (Geld floss nie) UND es entstand
+    // kein einloesbares Guthaben (Domain-Record fehlt) → Geld-Verlust. Bis das richtig
+    // gebaut ist (eigenes Thema): bei cashRefund > 0 hart ablehnen. Die Return-UI bietet
+    // 'credit' nicht mehr an; dieser Riegel deckt Alt-Daten/programmatische Pfade ab.
+    if (input.refundMethod === 'credit' && (input.cashRefundAmount || 0) > 0) {
+      throw new Error(
+        "Refund-Methode 'credit' (Store-Guthaben) ist noch nicht unterstuetzt — " +
+        "bitte Cash / Bank / Card / Benefit waehlen (L-01)."
+      );
+    }
     // CN-Summe (kumulativ inkl. existierender CNs für diese Invoice) darf Invoice-Brutto nicht überschreiten.
     // Sonst entsteht Phantom-Refund wenn mehrere Returns auf einer Invoice CNs erzeugen.
     const invRow = query('SELECT gross_amount FROM invoices WHERE id = ?', [input.invoiceId])[0];

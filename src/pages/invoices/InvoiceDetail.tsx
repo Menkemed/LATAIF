@@ -1641,9 +1641,10 @@ export function InvoiceDetail() {
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
               <div className="flex gap-2 flex-wrap" style={{ marginTop: 6 }}>
-                {(['cash', 'bank', 'card', 'benefit', 'credit', 'other'] as const).map(m => {
+                {/* L-01 — 'credit' (Store-Guthaben) entfernt bis sauber modelliert. */}
+                {(['cash', 'bank', 'card', 'benefit', 'other'] as const).map(m => {
                   const active = refundPayMethod === m;
-                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : m === 'credit' ? 'Credit' : 'Other';
+                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : 'Other';
                   return (
                     <button key={m} type="button" onClick={() => setRefundPayMethod(m)}
                       className="cursor-pointer rounded"
@@ -1776,9 +1777,10 @@ export function InvoiceDetail() {
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND METHOD</span>
               <div className="flex gap-2" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                {(['cash', 'bank', 'card', 'benefit', 'credit', 'other'] as const).map(m => {
+                {/* L-01 — 'credit' (Store-Guthaben / Credit Note) entfernt bis sauber modelliert. */}
+                {(['cash', 'bank', 'card', 'benefit', 'other'] as const).map(m => {
                   const active = returnRefundMethod === m;
-                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : m === 'credit' ? 'Credit Note' : 'Other';
+                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : 'Other';
                   return (
                     <button key={m} onClick={() => setReturnRefundMethod(m)} className="cursor-pointer rounded"
                       style={{ padding: '7px 14px', fontSize: 12,
