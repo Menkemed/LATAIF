@@ -23,6 +23,7 @@ import { GaugeChart } from '@/components/charts/GaugeChart';
 import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
 import { query, currentBranchId } from '@/core/db/helpers';
+import { balanceOf } from '@/core/ledger/queries';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { receivablesSummary, type ReceivableSource } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
@@ -50,7 +51,7 @@ export function Dashboard() {
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { loadExpenses, getTotalsByCategory, expenses: allExpenses } = useExpenseStore();
-  const { loadTransfers, getBalances } = useBankingStore();
+  const { loadTransfers } = useBankingStore();
   const { returns: salesReturns, loadReturns: loadSalesReturns } = useSalesReturnStore();
   const { trades: scrapTrades, loadTrades: loadScrapTrades } = useScrapTradeStore();
   const { debts, loadDebts } = useDebtStore();
@@ -177,34 +178,25 @@ export function Dashboard() {
     [partners]
   );
 
-  // Plan §Dashboard §3.D: Cash & Bank — präzise aus bankingStore (alle Transaction-Types) +
-  // Opening-Balances aus Settings.
+  // M-12 Phase 2 — Cash/Bank/Benefit aus dem Ledger-SSOT (balanceOf) statt
+  // settings-Opening + bankingStore-Aggregat. Das Opening lebt jetzt im Ledger
+  // (postOpeningBalances / Backfill-Button auf /ledger-backfill) — NICHT mehr
+  // separat aus settings addiert (sonst Doppelzählung). Karten-Geld liegt auf
+  // CARD_CLEARING (brutto−Gebühr) und wird wie bisher in die Bank-Liquidität
+  // eingerechnet (Parität zur alten bankingStore-Sicht). bankingStore bleibt die
+  // Transaktions-Liste der Banking-Page.
   const accountBalances = useMemo(() => {
     try {
-      // v0.7.13 — Benefit als drittes Konto inkludieren. Vorher fehlte
-      // 'finance.opening_benefit' komplett im SELECT → der BenefitPay-
-      // Bestand wurde nie aufaddiert.
-      const settingsRows = query(
-        `SELECT key, value FROM settings WHERE key IN ('finance.opening_cash', 'finance.opening_bank', 'finance.opening_benefit')`,
-        []
-      );
-      let cash = 0, bank = 0, benefit = 0;
-      for (const r of settingsRows) {
-        const v = parseFloat((r.value as string) || '0') || 0;
-        if (r.key === 'finance.opening_cash') cash = v;
-        else if (r.key === 'finance.opening_bank') bank = v;
-        else if (r.key === 'finance.opening_benefit') benefit = v;
-      }
-      const live = getBalances();
+      const branchId = currentBranchId();
       return {
-        cash: cash + live.cash,
-        bank: bank + live.bank,
-        benefit: benefit + live.benefit,
+        cash: balanceOf('CASH', { branchId }),
+        bank: balanceOf('BANK', { branchId }) + balanceOf('CARD_CLEARING', { branchId }),
+        benefit: balanceOf('BENEFIT', { branchId }),
       };
     } catch {
       return { cash: 0, bank: 0, benefit: 0 };
     }
-  }, [getBalances, invoices, purchases, allExpenses]);
+  }, [invoices, purchases, allExpenses, salesReturns]);
 
   // Plan §Dashboard §3.F: Total + Monthly + Top Kategorien.
   // v0.6.0 — kapitalisierte Kategorien (Inventory) zaehlen NICHT als laufende
