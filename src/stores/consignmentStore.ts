@@ -921,13 +921,21 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     const db = getDatabase();
     const now = new Date().toISOString();
     const con = get().getConsignment(id);
+    // L-05 — Store-Guard: nur aktive Consignments sind loeschbar. Ein sold/paid_out/
+    // returned-Consignment haengt an Auto-Invoice + Auto-Purchase (+ ggf. Payouts);
+    // ein blosser DELETE wuerde diese Ledger-Records verwaisen lassen. Korrekter
+    // Teardown = cancelSale (reverst Invoice+Purchase+Payouts). Die UI zeigt Delete
+    // ohnehin nur bei 'active'; dieser Guard schuetzt programmatische/kuenftige Pfade.
+    if (con && con.status !== 'active') {
+      throw new Error(`Consignment ${con.consignmentNumber} is "${con.status}" — nur aktive Consignments koennen geloescht werden. Bitte zuerst "Cancel Sale".`);
+    }
     if (con && con.status === 'active') {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
         [now, con.productId]);
     }
-    // M-22 — ein bereits (teil/voll) ausgezahltes Consignment kann heute via Delete
-    // entfernt werden (kein Status-Guard, L-05). Payout-Ledger sonst verwaist:
-    // synthetische source_ids ueber metadata finden + guarded reversen.
+    // M-22 — Edge-Fall: 'con' ist nicht mehr im Store (null), aber im Ledger haengen
+    // noch Payouts. Nach dem L-05-Guard gelangen nur noch active (= ohne Payouts) oder
+    // null-con-Faelle hierher; der Reverse raeumt verwaiste Payouts idempotent ab.
     try {
       reverseConsignmentPayouts(id, now);
     } catch (e) {
