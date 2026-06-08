@@ -1366,17 +1366,44 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const newSupplierId = supplierIds.length === 1 ? supplierIds[0] : null;
     const hasExternalLine = lines.some(l => !!l.supplierId);
     const hasInternalLine = lines.some(l => !l.supplierId);
-    // Aktuellen Typ lesen für Promote-Only-Logik.
-    const currentRow = query('SELECT repair_type FROM repairs WHERE id = ?', [repairId])[0];
+    // Aktuellen Typ + Margin-Inputs lesen (Promote-Only-Logik + L-13).
+    const currentRow = query(
+      'SELECT repair_type, charge_to_customer, internal_cost, estimated_cost FROM repairs WHERE id = ?',
+      [repairId]
+    )[0];
     const currentType = (currentRow?.repair_type as Repair['repairType']) || 'internal';
     let newType: Repair['repairType'] = currentType;
     if (currentType === 'internal' && hasExternalLine) newType = 'hybrid';
     else if (currentType === 'external' && hasInternalLine) newType = 'hybrid';
-    db.run(
-      `UPDATE repairs SET workshop_supplier_id = ?, actual_cost = ?, repair_type = ?, updated_at = ? WHERE id = ?`,
-      [newSupplierId, totalCost, newType, now, repairId]
-    );
-    trackUpdate('repairs', repairId, { workshopSupplierId: newSupplierId, actualCost: totalCost, repairType: newType, recomputedFromLines: true });
+
+    // L-13 — Margin nach Line-Edit mitfuehren, sonst liest Analytics (SUM(margin))
+    // veraltet. Gleiche Kostenbasis + Guard wie der Status-Handler (Z.~844): nur
+    // CUSTOMER-scope (charge>0), Kosten via computeRepairTotalCost (zaehlt internalCost).
+    const charge = Number(currentRow?.charge_to_customer) || 0;
+    const fields = ['workshop_supplier_id = ?', 'actual_cost = ?', 'repair_type = ?', 'updated_at = ?'];
+    const values: (string | number | null)[] = [newSupplierId, totalCost, newType, now];
+    let newMargin: number | undefined;
+    if (charge > 0) {
+      const costForMargin = computeRepairTotalCost(
+        {
+          repairType: newType,
+          internalCost: Number(currentRow?.internal_cost) || 0,
+          estimatedCost: Number(currentRow?.estimated_cost) || 0,
+        },
+        totalCost,
+      );
+      if (costForMargin > 0) {
+        newMargin = charge - costForMargin;
+        fields.push('margin = ?');
+        values.push(newMargin);
+      }
+    }
+    values.push(repairId);
+    db.run(`UPDATE repairs SET ${fields.join(', ')} WHERE id = ?`, values);
+    trackUpdate('repairs', repairId, {
+      workshopSupplierId: newSupplierId, actualCost: totalCost, repairType: newType,
+      recomputedFromLines: true, ...(newMargin !== undefined ? { margin: newMargin } : {}),
+    });
     saveDatabase();
     get().loadRepairs();
   },
