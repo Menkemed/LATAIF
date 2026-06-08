@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/Button';
 import { currentBranchId, query } from '@/core/db/helpers';
 import {
   backfillAll,
+  backfillOpeningBalances,
   backfillInvoices,
   backfillInvoiceCogs,
   backfillInvoicePayments,
@@ -162,6 +163,7 @@ export function BackfillPage() {
       <Card className="mb-4">
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <Button onClick={runAll} disabled={running}>{running ? '…' : 'Backfill ALL'}</Button>
+          <Button onClick={withBranch(backfillOpeningBalances)} disabled={running}>Opening-Balances</Button>
           <Button onClick={withBranch(backfillInvoices)} disabled={running}>Invoices</Button>
           <Button onClick={withBranch(backfillInvoiceCogs)} disabled={running}>Invoice-COGS</Button>
           <Button onClick={withBranch(backfillInvoicePayments)} disabled={running}>Invoice-Payments</Button>

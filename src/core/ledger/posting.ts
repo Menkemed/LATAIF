@@ -57,7 +57,11 @@ export type LedgerAccount =
   | 'INTERNAL_TRANSFER'
   // v0.7.0 — Storno-Gebuehr / verfallene Anzahlung beim Order-Cancel. Income,
   // separat von REVENUE damit Business-Reports Sale vs. Storno trennen koennen.
-  | 'CANCELLATION_FEE_INCOME';
+  | 'CANCELLATION_FEE_INCOME'
+  // M-12 Phase 1 — Eigenkapital-Gegenkonto fuer Opening-Balances (Geschaeftsstart-
+  // Bestand auf CASH/BANK/BENEFIT). CREDIT-natur (Equity); wird NIE als Cash-Konto
+  // gelesen, dient nur als Gegenbuchung damit balanceOf('CASH'/...) das Opening enthaelt.
+  | 'OPENING_BALANCE_EQUITY';
 
 export type LedgerDirection = 'DEBIT' | 'CREDIT';
 
@@ -92,7 +96,10 @@ export type SourceModule =
   // v0.7.0 — Order-Cancel Geld-Handling (Refund / Forfeit). 'credit' macht
   // keine Ledger-Buchung — die Liability bleibt als CUSTOMER_DEPOSITS und wird
   // beim Apply auf eine Folge-Order/Invoice aufgeloest.
-  | 'ORDER_CANCEL';
+  | 'ORDER_CANCEL'
+  // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
+  // gekeyt auf `opening:<branchId>`.
+  | 'OPENING_BALANCE';
 
 export type CounterpartyType =
   | 'CUSTOMER'
@@ -2065,4 +2072,58 @@ export function postScrapTrade(trade: ScrapTradePostInput): PostingResult | null
 
 export function postScrapTradeReversed(tradeId: string): PostingResult {
   return reverseSource('SCRAP_TRADE', tradeId, new Date().toISOString());
+}
+
+// ── M-12 Phase 1 — Opening-Balances (settings → Ledger) ──────
+//
+// Bucht den Geschaeftsstart-Bestand (Cash/Bank/Benefit) als EINE Transaktion ins
+// Ledger, gespeist aus settings.finance.opening_* — so enthaelt balanceOf('CASH'/
+// 'BANK'/'BENEFIT') das Opening (das bisher nur in den Anzeigen addiert, nicht im
+// Ledger gebucht war). ADDITIV: aendert keine Domain-Daten und keine Anzeige.
+//   DR CASH/BANK/BENEFIT (je > 0) / CR OPENING_BALANCE_EQUITY (Summe)
+// Stichtag = fixe fruehe ISO (vor allen realen Transaktionen), damit Perioden-
+// Cashflow das Opening NICHT als In-Perioden-Flow zaehlt; all-time balanceOf
+// enthaelt es korrekt.
+// Idempotent via hasLedgerEntries('OPENING_BALANCE', `opening:<branchId>`) → postet
+// genau einmal. Gibt true zurueck wenn gepostet, false wenn uebersprungen (schon
+// vorhanden / kein Opening gesetzt).
+// ⚠️ Aendert sich das Opening spaeter in den Settings, muss reverse+repost erfolgen
+//    (Phase 2 / eigenes Feature) — der Guard postet bewusst nur einmal.
+const OPENING_BALANCE_DATE = '2000-01-01T00:00:00.000Z';
+
+export function postOpeningBalances(branchId?: string, userId?: string): boolean {
+  const bId = branchId ?? currentBranchId();
+  const sourceId = `opening:${bId}`;
+  if (hasLedgerEntries('OPENING_BALANCE', sourceId)) return false;
+
+  const rows = query(
+    `SELECT key, value FROM settings
+       WHERE branch_id = ? AND key IN
+         ('finance.opening_cash','finance.opening_bank','finance.opening_benefit')`,
+    [bId]
+  );
+  let cash = 0, bank = 0, benefit = 0;
+  for (const r of rows) {
+    const v = ROUND(Number(r.value) || 0);
+    if (r.key === 'finance.opening_cash') cash = v;
+    else if (r.key === 'finance.opening_bank') bank = v;
+    else if (r.key === 'finance.opening_benefit') benefit = v;
+  }
+  const total = ROUND(cash + bank + benefit);
+  if (total <= 0) return false; // kein Opening gesetzt → nichts zu buchen
+
+  const entries: LedgerEntryInput[] = [];
+  if (cash > 0)    entries.push({ account: 'CASH',    direction: 'DEBIT', amount: cash,    metadata: { kind: 'opening_balance' } });
+  if (bank > 0)    entries.push({ account: 'BANK',    direction: 'DEBIT', amount: bank,    metadata: { kind: 'opening_balance' } });
+  if (benefit > 0) entries.push({ account: 'BENEFIT', direction: 'DEBIT', amount: benefit, metadata: { kind: 'opening_balance' } });
+  entries.push({ account: 'OPENING_BALANCE_EQUITY', direction: 'CREDIT', amount: total, metadata: { kind: 'opening_balance' } });
+
+  postEntries(entries, {
+    occurredAt: OPENING_BALANCE_DATE,
+    sourceModule: 'OPENING_BALANCE',
+    sourceId,
+    branchId: bId,
+    userId,
+  });
+  return true;
 }

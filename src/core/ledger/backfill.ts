@@ -32,6 +32,7 @@ import {
   postAgentSettlementPaymentReversed,
   postAgentTransferSold,
   postConsignmentPayout,
+  postOpeningBalances,
   hasLedgerEntries,
   hasReversalFor,
   reverseSource,
@@ -949,8 +950,25 @@ export function backfillConsignmentPayouts(branchId: string): BackfillResult {
 
 // ── Top-Level Orchestrator ────────────────────────────────────
 
+// ── M-12 Phase 1 — Opening-Balances (settings → Ledger) ──────
+// Idempotentes Seed-Posting des Geschaeftsstart-Bestands. postOpeningBalances
+// ist selbst guarded (hasLedgerEntries) → posted/skipped spiegelt das wider.
+export function backfillOpeningBalances(branchId: string): BackfillResult {
+  const res = emptyResult('opening_balances');
+  res.total = 1;
+  try {
+    const posted = postOpeningBalances(branchId);
+    if (posted) res.posted++; else res.skipped++;
+  } catch (err) {
+    res.failed++;
+    res.errors.push(`opening: ${(err as Error).message}`);
+  }
+  return res;
+}
+
 export function backfillAll(branchId: string): BackfillResult[] {
   return [
+    backfillOpeningBalances(branchId),
     backfillInvoices(branchId),
     backfillInvoiceCogs(branchId),
     backfillInvoicePayments(branchId),
