@@ -17,7 +17,15 @@ export function canonicalTaxScheme(s: string | undefined | null): TaxSchemeCanon
   if (s === 'margin') return 'MARGIN';
   if (s === 'exempt') return 'ZERO';
   if (s === 'VAT_10' || s === 'ZERO' || s === 'MARGIN') return s;
-  return 'MARGIN'; // safe default
+  // L-16 — kein stiller MARGIN-Fallback mehr. Jeder Pfad liefert garantiert ein
+  // gueltiges Scheme: Produkt-Default + Import = MARGIN, Repair = ZERO/VAT_10,
+  // 'auto' wird in Invoice/Order VOR Engine UND vor dem Speichern aufgeloest. Ein
+  // unbekannter/leerer Wert ist daher ein echter Daten-/Code-Bug → laut scheitern
+  // statt still falsch zu besteuern.
+  throw new Error(
+    `canonicalTaxScheme: ungueltiges tax_scheme ${JSON.stringify(s)} — erwartet ` +
+    `VAT_10 / ZERO / MARGIN (oder Legacy standard / margin / exempt).`
+  );
 }
 
 // ── Category System ──
