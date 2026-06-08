@@ -332,3 +332,38 @@ export function getStockAggregates(productIds?: string[]): Map<string, LotAggreg
   }
   return map;
 }
+
+// L-18 — SSOT fuer die Lagerwert-Bewertung (Asset). EINE Hybrid-Regel fuer ALLE
+// Reports (Dashboard, BusinessReports, Analytics, Exec-Summary, AI): pro Stueck der
+// echte Lot-Wert (qty_remaining × unit_cost), sonst Fallback purchase_price × quantity
+// (Legacy-/lot-lose Produkte vor Backfill). So zaehlen alle Reports Menge UND Lot-
+// Kosten identisch — vorher wich SUM(purchase_price) (ohne qty/Lot) ab. Schmales
+// Input-Interface, damit volle Product[] UND SQL-Minimal-Objekte ohne Cast passen.
+export interface StockItem {
+  id: string;
+  purchasePrice?: number;
+  quantity?: number;
+  plannedSalePrice?: number;
+}
+
+export interface StockValuation {
+  cost: number;        // Bestandswert zu Einkauf (Asset)
+  plannedSale: number; // geplanter Verkaufswert (VK)
+  count: number;       // Stueckzahl (qty, nicht Produkt-Count)
+}
+
+export function computeStockValuation(
+  items: StockItem[],
+  agg?: Map<string, LotAggregate>,
+): StockValuation {
+  const a = agg || getStockAggregates(items.map(i => i.id));
+  let cost = 0, plannedSale = 0, count = 0;
+  for (const p of items) {
+    const lot = a.get(p.id);
+    const qty = p.quantity || 1;
+    if (lot) { cost += lot.totalValue; count += lot.totalQty; }
+    else     { cost += (p.purchasePrice || 0) * qty; count += qty; }
+    plannedSale += (p.plannedSalePrice || 0) * qty;
+  }
+  return { cost, plannedSale, count };
+}

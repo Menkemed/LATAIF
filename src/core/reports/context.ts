@@ -5,6 +5,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import { query } from '@/core/db/helpers';
+import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { computeSalesMetrics, type SalesMetrics } from '@/core/reports/sales-metrics';
 import { canonicalLoanDirection } from '@/core/models/types';
 
@@ -270,19 +271,32 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
 
   // ── Stock (live snapshot, not period-scoped) ───────────
   // Plan §Commission §5: nur OWN-Ware zählt als Asset.
-  const stockRow = firstRow(
-    `SELECT COUNT(*) AS cnt,
-            COALESCE(SUM(purchase_price), 0) AS purchase_value,
-            COALESCE(SUM(planned_sale_price), 0) AS planned_sale_value,
-            COALESCE(AVG(days_in_stock), 0) AS avg_days
-     FROM products
-     WHERE branch_id = ? AND stock_status = 'in_stock' AND source_type = 'OWN'`,
+  // L-18 — zentrale Hybrid-Bewertung (Lot, sonst pp×qty) via computeStockValuation,
+  // konsistent mit Dashboard/BusinessReports/Analytics. SQL laedt nur die Felder.
+  const stockItems = rows(
+    `SELECT p.id, p.purchase_price, p.quantity, p.planned_sale_price,
+            COALESCE(c.name, 'Uncategorized') AS cat_name
+       FROM products p
+       LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.branch_id = ? AND p.stock_status = 'in_stock' AND p.source_type = 'OWN'`,
     [branchId]
-  );
-  const totalItems = num(stockRow, 'cnt');
-  const totalPurchaseValue = num(stockRow, 'purchase_value');
-  const totalPlannedSaleValue = num(stockRow, 'planned_sale_value');
-  const avgDaysInStock = num(stockRow, 'avg_days');
+  ).map(r => ({
+    id: r.id as string,
+    purchasePrice: num(r, 'purchase_price'),
+    quantity: num(r, 'quantity') || 1,
+    plannedSalePrice: num(r, 'planned_sale_price'),
+    catName: r.cat_name as string,
+  }));
+  const stockAgg = getStockAggregates(stockItems.map(i => i.id));
+  const stockVal = computeStockValuation(stockItems, stockAgg);
+  const totalItems = stockVal.count;
+  const totalPurchaseValue = stockVal.cost;
+  const totalPlannedSaleValue = stockVal.plannedSale;
+  const avgDaysInStock = num(firstRow(
+    `SELECT COALESCE(AVG(days_in_stock), 0) AS avg_days
+       FROM products WHERE branch_id = ? AND stock_status = 'in_stock' AND source_type = 'OWN'`,
+    [branchId]
+  ), 'avg_days');
 
   const slowMovers = rows(
     `SELECT id, brand, name, days_in_stock, purchase_price
@@ -298,17 +312,17 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     purchasePrice: num(r, 'purchase_price'),
   }));
 
-  const stockByCat = rows(
-    `SELECT c.name AS category, COUNT(p.id) AS cnt, COALESCE(SUM(p.purchase_price), 0) AS val
-     FROM products p JOIN categories c ON c.id = p.category_id
-     WHERE p.branch_id = ? AND p.stock_status = 'in_stock' AND p.source_type = 'OWN'
-     GROUP BY c.id ORDER BY val DESC`,
-    [branchId]
-  ).map(r => ({
-    category: r.category as string,
-    count: num(r, 'cnt'),
-    purchaseValue: num(r, 'val'),
-  }));
+  // L-18 — gleiche Hybrid-Regel pro Kategorie, EIN agg fuer alle.
+  const sbcGroups = new Map<string, typeof stockItems>();
+  for (const it of stockItems) {
+    const arr = sbcGroups.get(it.catName) || ([] as typeof stockItems);
+    arr.push(it);
+    sbcGroups.set(it.catName, arr);
+  }
+  const stockByCat = [...sbcGroups.entries()].map(([category, items]) => {
+    const v = computeStockValuation(items, stockAgg);
+    return { category, count: v.count, purchaseValue: v.cost };
+  }).sort((a, b) => b.purchaseValue - a.purchaseValue);
 
   // ── Sales breakdown (period-scoped) ────────────────────
   const salesByBrand = rows(

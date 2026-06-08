@@ -11,6 +11,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { query, currentBranchId } from '@/core/db/helpers';
+import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { exportCsv } from '@/core/utils/export-file';
 
@@ -314,29 +315,40 @@ export function AnalyticsPage() {
 
     // Total stock value (EK = purchase, VK = planned sale)
     // Plan §Commission §5: nur OWN-Ware zählt als Asset.
-    const totals = qry(
-      `SELECT COUNT(*) as cnt,
-              COALESCE(SUM(purchase_price),0) as ek,
-              COALESCE(SUM(planned_sale_price),0) as vk
-       FROM products WHERE branch_id = ? AND stock_status = 'in_stock' AND source_type = 'OWN'`,
+    // L-18 — zentrale Hybrid-Bewertung (Lot, sonst pp×qty) via computeStockValuation,
+    // konsistent mit Dashboard/BusinessReports. SQL laedt nur die Felder; die Regel ist zentral.
+    const stockItems = qry(
+      `SELECT p.id, p.purchase_price, p.quantity, p.planned_sale_price,
+              COALESCE(c.name, 'Uncategorized') AS cat_name, COALESCE(c.color, '#0F0F10') AS cat_color
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.category_id
+        WHERE p.branch_id = ? AND p.stock_status = 'in_stock' AND p.source_type = 'OWN'`,
       [branchId]
-    );
-    const t = totals[0] || {};
-    const totalItems = num(t, 'cnt');
-    const totalEK = num(t, 'ek');
-    const totalVK = num(t, 'vk');
+    ).map(r => ({
+      id: r.id as string,
+      purchasePrice: num(r, 'purchase_price'),
+      quantity: num(r, 'quantity') || 1,
+      plannedSalePrice: num(r, 'planned_sale_price'),
+      catName: r.cat_name as string,
+      catColor: r.cat_color as string,
+    }));
+    const stockAgg = getStockAggregates(stockItems.map(i => i.id));
+    const totalVal = computeStockValuation(stockItems, stockAgg);
+    const totalItems = totalVal.count;
+    const totalEK = totalVal.cost;
+    const totalVK = totalVal.plannedSale;
 
-    // Items by category
-    // Plan §Commission §5: nur OWN-Ware.
-    const byCat = qry(
-      `SELECT c.name, c.color, COUNT(p.id) as cnt,
-              COALESCE(SUM(p.purchase_price),0) as value
-       FROM products p
-       JOIN categories c ON c.id = p.category_id
-       WHERE p.branch_id = ? AND p.stock_status = 'in_stock' AND p.source_type = 'OWN'
-       GROUP BY c.id ORDER BY value DESC`,
-      [branchId]
-    );
+    // Items by category — gleiche Hybrid-Regel, EIN agg fuer alle.
+    const catGroups = new Map<string, { name: string; color: string; items: typeof stockItems }>();
+    for (const it of stockItems) {
+      const g = catGroups.get(it.catName) || { name: it.catName, color: it.catColor, items: [] as typeof stockItems };
+      g.items.push(it);
+      catGroups.set(it.catName, g);
+    }
+    const byCat = [...catGroups.values()].map(g => {
+      const v = computeStockValuation(g.items, stockAgg);
+      return { name: g.name, color: g.color, cnt: v.count, value: v.cost };
+    }).sort((a, b) => b.value - a.value);
 
     // Slow movers (> 90 days in stock)
     const slow = qry(

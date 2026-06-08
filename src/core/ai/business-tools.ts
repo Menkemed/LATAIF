@@ -12,6 +12,7 @@ import { useOfferStore } from '@/stores/offerStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { canonicalStockStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
+import { computeStockValuation } from '@/core/lots/lot-queries';
 import type { Invoice, Customer, Product } from '@/core/models/types';
 
 // ── Renderable block types (return shape) ───────────────────
@@ -261,7 +262,11 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
     .reduce((s, e) => s + (e.amount || 0), 0);
   const purchasesTotal = purchases.filter(p => inP(p.purchaseDate || p.createdAt)).reduce((s, p) => s + (p.totalAmount || 0), 0);
 
-  const inventoryValue = products.filter(p => canonicalStockStatus(p.stockStatus) === 'IN_STOCK').reduce((s, p) => s + (p.purchasePrice || 0), 0);
+  // L-18 — zentrale Hybrid-Bewertung (Lot, sonst pp×qty) + nur OWN (Consignment ist
+  // kein eigenes Asset) — konsistent mit Dashboard/BusinessReports/Analytics.
+  const inventoryValue = computeStockValuation(
+    products.filter(p => canonicalStockStatus(p.stockStatus) === 'IN_STOCK' && p.sourceType === 'OWN')
+  ).cost;
 
   // Top 3 customers by revenue this month
   const custAgg = new Map<string, number>();

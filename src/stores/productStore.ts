@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type { Product, Category, StockStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { getStockAggregates } from '@/core/lots/lot-queries';
+import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // pHash entfernt 2026-05-18 — Duplicate-Detection laeuft jetzt nur ueber
@@ -684,20 +684,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const inStock = get().products.filter(p =>
       (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
     );
-    const agg = getStockAggregates(inStock.map(p => p.id));
-    let purchaseTotal = 0, saleTotal = 0, count = 0;
-    for (const p of inStock) {
-      const a = agg.get(p.id);
-      if (a) {
-        purchaseTotal += a.totalValue;
-        count += a.totalQty;
-      } else {
-        purchaseTotal += p.purchasePrice * (p.quantity || 1);
-        count += p.quantity || 1;
-      }
-      saleTotal += (p.plannedSalePrice || 0) * (p.quantity || 1);
-    }
-    return { purchaseTotal, saleTotal, count };
+    // L-18 — zentrale Bewertung via computeStockValuation (Lot, sonst pp×qty).
+    const v = computeStockValuation(inStock);
+    return { purchaseTotal: v.cost, saleTotal: v.plannedSale, count: v.count };
   },
 
   getStockByCategory: () => {
