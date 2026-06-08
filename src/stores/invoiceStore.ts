@@ -566,7 +566,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     for (const l of lines) {
       const qty = Math.max(1, l.quantity || 1);
       preNet += l.unitPrice * qty;
-      preVat += l.vatAmount * qty;
+      preVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
     }
     const newGross = preNet + preVat;
     const inv0 = get().getInvoice(id);
@@ -628,7 +628,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const qty = Math.max(1, l.quantity || 1);
       stmt.run([uuid(), id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
       netAmount += l.unitPrice * qty;
-      totalVat += l.vatAmount * qty;
+      totalVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
       totalPurchase += l._resolvedCost * qty;
       // v0.7.1 — siehe createDirectInvoice: lineTotal direkt aufsummieren statt
       // net+vat zu rechnen (MARGIN hat lineTotal=net, vatAmount=internalVat).

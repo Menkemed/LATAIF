@@ -241,17 +241,19 @@ export function InvoiceDetail() {
       const rate = Number(merged.vatRate) || 0;
       const net = Number(merged.unitPrice) || 0;
       const qty = Math.max(1, Number(merged.quantity) || 1);
-      // VAT pro Einheit; lineTotal = qty × (net + vat) für VAT_10, qty × net für MARGIN/ZERO
+      // L-17 — vatAmount PRO LINE (createDirect-Konvention), nicht pro Stück: sonst
+      // doppelt rewriteInvoiceLines die VAT bei qty>1. lineNet = net × qty.
+      const lineNet = net * qty;
       if (merged.taxScheme === 'VAT_10') {
-        merged.vatAmount = Math.round(net * (rate / 100) * 1000) / 1000;
-        merged.lineTotal = (net + merged.vatAmount) * qty;
+        merged.vatAmount = Math.round(lineNet * (rate / 100) * 1000) / 1000;
+        merged.lineTotal = lineNet + merged.vatAmount;
       } else if (merged.taxScheme === 'MARGIN') {
-        const margin = Math.max(0, net - (Number(merged.purchasePrice) || 0));
-        merged.vatAmount = Math.round(margin * (rate / (100 + rate)) * 1000) / 1000;
-        merged.lineTotal = net * qty;
+        const marginLine = Math.max(0, net - (Number(merged.purchasePrice) || 0)) * qty;
+        merged.vatAmount = Math.round(marginLine * (rate / (100 + rate)) * 1000) / 1000;
+        merged.lineTotal = lineNet;
       } else {
         merged.vatAmount = 0;
-        merged.lineTotal = net * qty;
+        merged.lineTotal = lineNet;
       }
       return merged;
     }));
