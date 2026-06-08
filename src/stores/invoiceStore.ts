@@ -426,6 +426,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   updateInvoice: (id, data) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // L-03: Status VOR dem UPDATE festhalten, um den echten Uebergang -> FINAL zu
+    // erkennen. invoice.paid (und damit der Customer-LTV-Increment) darf nur beim
+    // Uebergang feuern, nicht beim Re-Save eines bereits FINALen Beleges.
+    const prevStatusBeforeUpdate = data.status === 'FINAL'
+      ? ((query('SELECT status FROM invoices WHERE id = ?', [id])[0]?.status as string) || null)
+      : null;
     const fields: string[] = [];
     const values: unknown[] = [];
 
@@ -550,7 +556,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       }
     }
 
-    if (data.status === 'FINAL') {
+    if (data.status === 'FINAL' && prevStatusBeforeUpdate !== 'FINAL') {
       eventBus.emit('invoice.paid', 'invoice', id, {});
     }
     get().loadInvoices();
@@ -759,7 +765,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       }
 
       if (wasFullyPaid) {
-        eventBus.emit('invoice.paid', 'invoice', invoiceId, { amount: newPaid, tip });
+        // L-03: invoice.paid NUR beim echten Uebergang -> FINAL emittieren. Sonst
+        // feuert es bei jeder Zusatz-/Tip-Zahlung auf einen bereits FINALen Beleg
+        // erneut, und der einzige Consumer (customer-KPI-Handler) zaehlt Revenue/
+        // Profit/PurchaseCount doppelt (Produkt-/Task-Logik dort ist schon idempotent).
+        if (prevStatus !== 'FINAL') {
+          eventBus.emit('invoice.paid', 'invoice', invoiceId, { amount: newPaid, tip });
+        }
         eventBus.emit('payment.received', 'payment', paymentId, { invoiceId, amount });
       }
     }
