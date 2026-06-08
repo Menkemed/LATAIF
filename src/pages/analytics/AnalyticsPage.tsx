@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   TrendingUp, Package, Users, FileText,
   DollarSign, Clock, BarChart3, PieChart,
-  Wallet, Building2, CheckCircle2,
+  Wallet, Building2, CheckCircle2, Smartphone,
 } from 'lucide-react';
 import { v4 as uuid } from 'uuid';
 import { KPICard } from '@/components/ui/KPICard';
@@ -11,6 +11,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { query, currentBranchId } from '@/core/db/helpers';
+import { balanceOf } from '@/core/ledger/queries';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { exportCsv } from '@/core/utils/export-file';
@@ -835,21 +836,17 @@ export function AnalyticsPage() {
       }
     } catch { /* ignore */ }
 
-    const cashBalance = openingCash + cashReceived + borrowedInCash + debtRepaidToUsCash
-                      + repairCashIn + consignSaleCash + orderDepositCash + purchaseRefundCash
-                      + partnerInvestCash + bankToCash + benefitToCash + agentSettleCash
-                      - lentOutCash - debtRepaidByUsCash - taxPaidFromCash - productEkCash
-                      - repairCashOut - consignPayoutCash
-                      - purchasePaidCash - expenseCash - salesRefundCash
-                      - partnerWithdrawCash - cashToBank - cashToBenefit;
-    const bankBalance = openingBank + bankReceived + cardNetToBank + borrowedInBank + debtRepaidToUsBank
-                      + repairBankIn + consignSaleBank + orderDepositBank + purchaseRefundBank
-                      + partnerInvestBank + cashToBank + benefitToBank + agentSettleBank
-                      - lentOutBank - debtRepaidByUsBank - taxPaidFromBank - productEkBank
-                      - repairBankOut - consignPayoutBank - salesRefundBank
-                      - partnerWithdrawBank - bankToCash - bankToBenefit
-                      - purchasePaidBank - expenseBank;
-    const totalLiquid = cashBalance + bankBalance;
+    // M-12 Phase 2 — Cash/Bank/Benefit-Saldo aus dem Ledger-SSOT (balanceOf), All-Time
+    // (dieses Memo ist nicht periodengefiltert, gleiche Semantik wie die bisherige
+    // Hand-Aggregation). Karten-Geld liegt auf CARD_CLEARING (brutto−Gebühr) und wird
+    // wie bisher in die Bank-Liquidität eingerechnet (Parität zur alten cardNetToBank-
+    // Sicht). Opening lebt jetzt im Ledger (postOpeningBalances / Backfill-Button) —
+    // die settings-basierten openingCash/openingBank dienen nur noch der Info-Zeile.
+    // Die vielen Flow-Variablen oben bleiben für die CASH-&-BANK-BREAKDOWN-Zeilen.
+    const cashBalance = balanceOf('CASH', { branchId });
+    const bankBalance = balanceOf('BANK', { branchId }) + balanceOf('CARD_CLEARING', { branchId });
+    const benefitBalance = balanceOf('BENEFIT', { branchId });
+    const totalLiquid = cashBalance + bankBalance + benefitBalance;
 
     // ── Quarterly VAT (owed) ──
     // vat = Output-VAT (aus Sales), inputVat = Vorsteuer (aus Purchases),
@@ -949,7 +946,7 @@ export function AnalyticsPage() {
       // Cashflow
       cashReceived, bankReceived, cardReceived, benefitReceived, otherReceived,
       cardFeeRate, cardFeeLost, cardNetToBank,
-      cashBalance, bankBalance, totalLiquid,
+      cashBalance, bankBalance, benefitBalance, totalLiquid,
       openingCash, openingBank,
       productEkCash, productEkBank,
       purchasePaidCash, purchasePaidBank,
@@ -1514,7 +1511,7 @@ export function AnalyticsPage() {
             {/* ═══ CASHFLOW ═══ */}
             <div style={{ marginTop: 32 }}>
               <h2 className="font-display" style={{ fontSize: 20, color: '#0F0F10', marginBottom: 16 }}>Cashflow</h2>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20, marginBottom: 20 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20, marginBottom: 20 }}>
                 <KPICard
                   label="CASH BALANCE"
                   value={fmtDec(finance.cashBalance, 2)}
@@ -1526,6 +1523,12 @@ export function AnalyticsPage() {
                   value={fmtDec(finance.bankBalance, 2)}
                   unit="BHD (incl. cards net of fees)"
                   icon={<Building2 size={16} />}
+                />
+                <KPICard
+                  label="BENEFIT BALANCE"
+                  value={fmtDec(finance.benefitBalance, 2)}
+                  unit="BHD (BenefitPay)"
+                  icon={<Smartphone size={16} />}
                 />
                 <KPICard
                   label="TOTAL LIQUID"
