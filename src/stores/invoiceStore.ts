@@ -13,6 +13,7 @@ import { bookCardFee } from '@/core/finance/card-fee-booking';
 import {
   postInvoiceIssued,
   postInvoicePayment,
+  postInvoicePaymentReversed,
   postInvoiceCancelled,
   postExpenseCancelled,
   hasLedgerEntries,
@@ -843,6 +844,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
        WHERE related_module = 'invoice' AND related_entity_id = ? AND status != 'CANCELLED'`,
       [id]
     );
+    // M-12 Prerequisite — Payment-IDs VOR dem payments-Delete einsammeln, damit ihre
+    // Ledger-Legs (DR CASH/BANK/BENEFIT / CR AR) unten mit-reversiert werden koennen.
+    // Sonst bleibt das Geldkonto im Ledger stehen waehrend bankingStore die geloeschte
+    // Row fallen laesst → Geldkonto-Drift (balanceOf != bankingStore).
+    const linkedPaymentIds = query(
+      `SELECT id FROM payments WHERE invoice_id = ?`, [id]
+    ).map(r => r.id as string);
     // Phase 3 — Stock-Lots restoren bevor invoice_lines weg sind.
     // Phase 7 Sync: betroffene Produkte sammeln, am Ende sync.
     const deleteProductsToSync = new Set<string>();
@@ -907,6 +915,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         if (!hasLedgerEntries('EXPENSE', expId)) return;
         if (hasReversalFor('EXPENSE', expId)) return;
         postExpenseCancelled(expForReverse);
+      });
+    }
+
+    // M-12 Prerequisite — die Geld-Legs jeder geloeschten Zahlung mit-reversieren,
+    // damit CASH/BANK/BENEFIT im Ledger dem bankingStore folgt (geguardet + idempotent).
+    for (const pid of linkedPaymentIds) {
+      safePost(`postInvoicePaymentReversed(${pid}) [invoice-delete]`, () => {
+        if (!hasLedgerEntries('PAYMENT', pid)) return;
+        if (hasReversalFor('PAYMENT', pid)) return;
+        postInvoicePaymentReversed(pid);
       });
     }
 
@@ -982,6 +1000,15 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     }
     saveDatabase();
     trackDelete('payments', paymentId);
+
+    // M-12 Prerequisite — die Geld-Legs dieser Zahlung im Ledger mit-reversieren,
+    // sonst bleibt CASH/BANK/BENEFIT stehen obwohl die payment-Row weg ist (geguardet).
+    safePost(`postInvoicePaymentReversed(${paymentId}) [payment-delete]`, () => {
+      if (!hasLedgerEntries('PAYMENT', paymentId)) return;
+      if (hasReversalFor('PAYMENT', paymentId)) return;
+      postInvoicePaymentReversed(paymentId);
+    });
+
     get().loadInvoices();
   },
 }));

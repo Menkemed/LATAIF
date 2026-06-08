@@ -572,6 +572,14 @@ export function postInvoicePayment(
   );
 }
 
+// Reverse einer Invoice-Customer-Zahlung — bei deletePayment oder deleteInvoice.
+// Spiegelt das etablierte postXReversed-Muster (Order/Loan/Repair/Metal/Agent/Partner).
+// Ohne das blieb die PAYMENT-Bewegung (DR CASH/BANK/BENEFIT / CR AR) im Ledger stehen,
+// waehrend bankingStore die geloeschte payment-Row fallen liess → Geldkonto-Drift (M-12).
+export function postInvoicePaymentReversed(paymentId: string, occurredAt?: string): PostingResult {
+  return reverseSource('PAYMENT', paymentId, occurredAt || new Date().toISOString());
+}
+
 // ── Credit Note (Storno-Rechnung / Sales Return) ──────────────
 //
 // Logik: Der CN-Total wird in zwei Teile gespalten:
