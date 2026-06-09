@@ -439,11 +439,15 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
     // via recordRefundPayment() auch im Cashflow auftauchen (Plan §Returns Fix).
     // Fix 2026-05: sales_returns hat KEIN updated_at — vorher silent empty wegen
     // safeQuery-Schluck. Nur created_at + refund_paid_date.
+    // L-01: refund_method='credit' ausschliessen — Store-Guthaben ist KEIN Geldabfluss
+    // (bucht CR CUSTOMER_CREDIT, kein Cash/Bank). Sonst Phantom-Bank-Zeile im Log
+    // (accountFor('credit')→'bank'). Analog zur purchase_returns-Query.
     const salesRet = safeQuery('sales_returns',
       `SELECT id, refund_amount, refund_paid_amount, refund_paid_date, refund_method, return_date, return_number, invoice_id, created_at,
               (SELECT cn.id FROM credit_notes cn WHERE cn.sales_return_id = sales_returns.id LIMIT 1) AS credit_note_id
        FROM sales_returns WHERE branch_id = ? AND status != 'REJECTED'
-         AND (refund_paid_amount > 0 OR refund_amount > 0)`,
+         AND (refund_paid_amount > 0 OR refund_amount > 0)
+         AND COALESCE(refund_method, '') != 'credit'`,
       [branchId]
     );
     for (const r of salesRet) {

@@ -95,18 +95,10 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     if (Math.abs(sumComponents - input.totalAmount) > 0.005) {
       throw new Error(`Credit note components (${sumComponents.toFixed(3)}) must equal total (${input.totalAmount.toFixed(3)}).`);
     }
-    // L-01 — Store-Credit ('credit') als Refund-Methode ist noch NICHT sauber
-    // modelliert: es gibt kein Customer-Credit-Liability-Konto und keine Einloesung.
-    // Der Cash-Anteil lief bisher faelschlich auf BANK (Geld floss nie) UND es entstand
-    // kein einloesbares Guthaben (Domain-Record fehlt) → Geld-Verlust. Bis das richtig
-    // gebaut ist (eigenes Thema): bei cashRefund > 0 hart ablehnen. Die Return-UI bietet
-    // 'credit' nicht mehr an; dieser Riegel deckt Alt-Daten/programmatische Pfade ab.
-    if (input.refundMethod === 'credit' && (input.cashRefundAmount || 0) > 0) {
-      throw new Error(
-        "Refund-Methode 'credit' (Store-Guthaben) ist noch nicht unterstuetzt — " +
-        "bitte Cash / Bank / Card / Benefit waehlen (L-01)."
-      );
-    }
+    // L-01-Echtfix (Credit-Modell Slice 2): 'credit' wird jetzt sauber unterstuetzt —
+    // postCreditNote bucht den cashRefund-Anteil auf CUSTOMER_CREDIT (Liability, via
+    // Slice 1) statt faelschlich auf BANK, und unten wird eine einloesbare
+    // customer_credits-Row angelegt. Der frühere Riegel/Throw entfaellt.
     // CN-Summe (kumulativ inkl. existierender CNs für diese Invoice) darf Invoice-Brutto nicht überschreiten.
     // Sonst entsteht Phantom-Refund wenn mehrere Returns auf einer Invoice CNs erzeugen.
     const invRow = query('SELECT gross_amount FROM invoices WHERE id = ?', [input.invoiceId])[0];
@@ -168,6 +160,26 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
       if (!hasLedgerEntries('CREDIT_NOTE', id)) postCreditNote(cn);
     } catch (err) {
       console.error(`[ledger] postCreditNote(${id}) failed:`, err);
+    }
+
+    // L-01-Echtfix — Store-Guthaben: bei refundMethod='credit' eine einloesbare
+    // customer_credits-Row anlegen (Spiegel des supplier_credits-Musters). Nur der
+    // bereits BEZAHLTE Anteil (cashRefundAmount) wird Guthaben; receivableCancel ist
+    // reine AR-Stornierung. source_id=CN-id → deleteReturn baut die Row symmetrisch ab.
+    // Der Ledger-Post CR CUSTOMER_CREDIT lief bereits via postCreditNote.
+    if (input.refundMethod === 'credit' && (input.cashRefundAmount || 0) > 0) {
+      const creditId = uuid();
+      db.run(
+        `INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status,
+           source_type, source_id, note, created_at, created_by)
+         VALUES (?, ?, ?, ?, 0, 'OPEN', 'sales_return', ?, ?, ?, ?)`,
+        [creditId, branchId, input.customerId, input.cashRefundAmount, id,
+         `Store-Guthaben aus Return (CN ${number})`, now, userId]
+      );
+      trackInsert('customer_credits', creditId, {
+        customerId: input.customerId, amount: input.cashRefundAmount, sourceCnId: id,
+      });
+      saveDatabase();
     }
 
     return cn;

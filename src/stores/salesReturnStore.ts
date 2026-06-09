@@ -811,6 +811,24 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
           reverseSource('CREDIT_NOTE', cnId, now);
         }
       } catch (err) { console.error(`[ledger] deleteReturn CN reverse failed:`, err); }
+      // L-01-Echtfix — das aus diesem CN entstandene Store-Guthaben symmetrisch abbauen
+      // (Ledger CR CUSTOMER_CREDIT wurde oben reversiert). NUR wenn unverbraucht
+      // (used_amount=0); teil-eingeloestes Guthaben (erst mit Slice 3 möglich) bleibt
+      // stehen, damit kein bereits genutztes Guthaben verschwindet.
+      try {
+        const ccRows = query(
+          `SELECT id, used_amount FROM customer_credits WHERE source_type = 'sales_return' AND source_id = ?`,
+          [cnId]
+        );
+        for (const cc of ccRows) {
+          if (Number(cc.used_amount || 0) <= 0.005) {
+            db.run(`DELETE FROM customer_credits WHERE id = ?`, [cc.id as string]);
+            trackDelete('customer_credits', cc.id as string);
+          } else {
+            console.warn(`[Return] customer_credit ${(cc.id as string).slice(0,8)} teil-eingeloest — bleibt bestehen`);
+          }
+        }
+      } catch (err) { console.error('[Return] deleteReturn customer_credit teardown failed:', err); }
       trackDelete('credit_notes', cnId);
     }
 
