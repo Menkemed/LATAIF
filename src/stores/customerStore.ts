@@ -21,6 +21,8 @@ interface CustomerStore {
   deleteCustomer: (id: string) => void;
   // Plan §Customer §4: pro Kunde offene Beträge aggregieren.
   getOutstanding: (customerId: string) => { outstanding: number; invoiceCount: number; totalPaid: number; totalGross: number };
+  // Credit-Modell: verfügbares Store-Guthaben des Kunden (Σ amount − used_amount über OPEN-Credits).
+  getAvailableCredit: (customerId: string) => number;
   // Live-Cashflow-Berechnung (User-Vorgabe):
   //  Revenue     = Σ payments.amount − Σ sales_returns.refund_paid_amount   (was reinkam minus was raus ging)
   //  Profit      = Σ payment·margin/gross − Σ refund·margin/gross           (anteilig zum Cash-Anteil)
@@ -253,6 +255,25 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       };
     } catch {
       return { outstanding: 0, invoiceCount: 0, totalPaid: 0, totalGross: 0 };
+    }
+  },
+
+  // Credit-Modell — verfügbares Store-Guthaben: Σ (amount − used_amount) über alle
+  // OPEN-customer_credits des Kunden. Spiegel zu SupplierDetail.creditBalance, aber
+  // sauberer (nutzt die used_amount-Spalte direkt statt aus Payment-Rows abzuleiten).
+  // Liefert die einlösbare Summe für UI-Anzeige UND Backend-Cap in applyCreditToInvoice.
+  getAvailableCredit: (customerId) => {
+    try {
+      const branchId = currentBranchId();
+      const rows = query(
+        `SELECT COALESCE(SUM(amount - used_amount), 0) AS avail
+           FROM customer_credits
+          WHERE branch_id = ? AND customer_id = ? AND status = 'OPEN'`,
+        [branchId, customerId]
+      );
+      return Math.max(0, Number(rows[0]?.avail || 0));
+    } catch {
+      return 0;
     }
   },
 

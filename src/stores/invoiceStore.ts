@@ -41,6 +41,10 @@ interface InvoiceStore {
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   rewriteInvoiceLines: (id: string, lines: { productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[]) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand) => void;
+  // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
+  // Konsumiert OPEN-customer_credits FIFO (used_amount↑) und bucht via recordPayment('credit')
+  // DR CUSTOMER_CREDIT / CR AR. Gibt den tatsächlich verrechneten Betrag zurück.
+  applyCreditToInvoice: (invoiceId: string, amount: number, note?: string) => number;
   setSpecialMark: (invoiceId: string, special: boolean) => void;
   // Plan §Edit: einzelne Payments später ändern oder löschen.
   updatePayment: (paymentId: string, invoiceId: string, data: { amount?: number; method?: string; notes?: string; receivedAt?: string }) => void;
@@ -817,6 +821,62 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     }
 
     get().loadInvoices();
+  },
+
+  // Credit-Modell Slice 3 — Einlösung von Store-Guthaben gegen eine Invoice.
+  // Spiegel zum Supplier-'credit'-Muster, aber mit echtem used_amount-Tracking
+  // (das die Slice-2-deleteReturn-Teardown-Logik korrekt hält). Ablauf:
+  //   1. Cap = min(amount, Invoice-Rest (gross−paid), verfügbares Guthaben).
+  //   2. FIFO OPEN-customer_credits konsumieren (used_amount↑, status→USED bei Voll-Verbrauch).
+  //   3. recordPayment(method='credit') bucht via cashAccountFor('credit')→CUSTOMER_CREDIT
+  //      automatisch DR CUSTOMER_CREDIT / CR AR — kein Geldfluss, reiner Liability/AR-Abbau.
+  // Domain (used_amount) und Ledger (CUSTOMER_CREDIT-Saldo) bleiben dadurch spiegelgleich.
+  applyCreditToInvoice: (invoiceId, amount, note) => {
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+    const db = getDatabase();
+    const inv = get().getInvoice(invoiceId);
+    if (!inv) return 0;
+    if (inv.status === 'CANCELLED') return 0;
+    const customerId = inv.customerId;
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+
+    // Cap auf den noch offenen Invoice-Rest — verhindert Tip/Über-Zahlung mit Guthaben.
+    const remainingOnInvoice = Math.max(0, inv.grossAmount - inv.paidAmount);
+    let toApply = Math.min(amount, remainingOnInvoice);
+    if (toApply <= 0.005) return 0;
+
+    // FIFO über OPEN-Credits (älteste zuerst). used_amount erhöhen; bei Voll-Verbrauch USED.
+    const credits = query(
+      `SELECT id, amount, used_amount FROM customer_credits
+        WHERE branch_id = ? AND customer_id = ? AND status = 'OPEN'
+        ORDER BY created_at ASC`,
+      [branchId, customerId]
+    );
+    let remaining = toApply;
+    let consumed = 0;
+    for (const c of credits) {
+      if (remaining <= 0.005) break;
+      const total = Number(c.amount || 0);
+      const used = Number(c.used_amount || 0);
+      const avail = total - used;
+      if (avail <= 0.005) continue;
+      const take = Math.min(avail, remaining);
+      const newUsed = used + take;
+      const newStatus = newUsed >= total - 0.005 ? 'USED' : 'OPEN';
+      db.run(`UPDATE customer_credits SET used_amount = ?, status = ? WHERE id = ?`,
+        [newUsed, newStatus, c.id as string]);
+      trackUpdate('customer_credits', c.id as string, { usedAmount: newUsed, status: newStatus });
+      remaining -= take;
+      consumed += take;
+    }
+    if (consumed <= 0.005) return 0;
+    saveDatabase();
+
+    // Verrechneten Betrag als Invoice-Payment method='credit' verbuchen — recordPayment
+    // erledigt Payment-Insert, Status-Konvertierung (→FINAL) und den Ledger-Post.
+    get().recordPayment(invoiceId, consumed, 'credit', note || 'Store-Guthaben verrechnet');
+    return consumed;
   },
 
   setSpecialMark: (invoiceId, special) => {
