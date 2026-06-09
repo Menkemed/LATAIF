@@ -1120,7 +1120,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       // schlaegt er fehl, bricht der ganze Storno ab (Error bubbelt), BEVOR die Order
       // auf 'cancelled' gesetzt wird. Sonst waere die Order storniert, aber die
       // Anzahlung haette keinen Domain-Credit zum Einloesen (Geld-Phantom). Insert vor
-      // dem (fuer 'credit' wirkungslosen) Post — Reihenfolge-Konvention ZIEL.md §3a.
+      // dem Post — Reihenfolge-Konvention ZIEL.md §3a. Credit-Modell: der Post bucht
+      // jetzt DR CUSTOMER_DEPOSITS / CR CUSTOMER_CREDIT (Anzahlung→Store-Guthaben),
+      // sodass Domain-Row und Ledger-Saldo spiegelgleich + einloesbar sind.
       if (choice === 'credit') {
         const creditId = uuid();
         let branchId: string;

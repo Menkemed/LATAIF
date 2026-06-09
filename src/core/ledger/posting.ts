@@ -98,9 +98,9 @@ export type SourceModule =
   // IN_STOCK). Eigener sourceModule, gekeyt auf returnId — bewusst NICHT unter
   // CREDIT_NOTE, weil repostCreditNoteFromCnId CN-Eintraege reverst+neu-postet.
   | 'SALES_RETURN_COGS'
-  // v0.7.0 — Order-Cancel Geld-Handling (Refund / Forfeit). 'credit' macht
-  // keine Ledger-Buchung — die Liability bleibt als CUSTOMER_DEPOSITS und wird
-  // beim Apply auf eine Folge-Order/Invoice aufgeloest.
+  // v0.7.0 — Order-Cancel Geld-Handling (Refund / Forfeit / Credit). 'credit'
+  // reklassifiziert die Anzahlung DR CUSTOMER_DEPOSITS / CR CUSTOMER_CREDIT
+  // (Credit-Modell) → einloesbar ueber denselben CUSTOMER_CREDIT-Pfad wie Return-Guthaben.
   | 'ORDER_CANCEL'
   // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
   // gekeyt auf `opening:<branchId>`.
@@ -1338,8 +1338,32 @@ export interface OrderCancellationChoice {
 export function postOrderCancellationChoice(c: OrderCancellationChoice): PostingResult | null {
   const amount = ROUND(c.totalPaid);
   if (amount <= 0) return null;
-  if (c.choice === 'credit') return null; // kein Ledger-Effekt
   const now = c.occurredAt || new Date().toISOString();
+
+  // Credit-Modell — 'credit' reklassifiziert die gehaltene Anzahlung von einer
+  // order-spezifischen Verbindlichkeit (CUSTOMER_DEPOSITS) in allgemeines Store-
+  // Guthaben (CUSTOMER_CREDIT). Beide CREDIT-natur (Liability) → reine Umklassifizierung,
+  // KEIN P&L-, KEIN Cash/Bank-Effekt. Damit ist der order_cancel-Credit ueber denselben
+  // CUSTOMER_CREDIT-Pfad einloesbar (applyCreditToInvoice: DR CUSTOMER_CREDIT / CR AR)
+  // wie der Sales-Return-Credit — sonst zoege die Einloesung CUSTOMER_CREDIT negativ und
+  // liesse CUSTOMER_DEPOSITS als Phantom stehen.
+  if (c.choice === 'credit') {
+    return postEntries(
+      [
+        {
+          account: 'CUSTOMER_DEPOSITS', direction: 'DEBIT', amount,
+          counterpartyType: 'CUSTOMER', counterpartyId: c.customerId,
+          metadata: { orderId: c.orderId, kind: 'order_cancel_to_credit' },
+        },
+        {
+          account: 'CUSTOMER_CREDIT', direction: 'CREDIT', amount,
+          counterpartyType: 'CUSTOMER', counterpartyId: c.customerId,
+          metadata: { orderId: c.orderId, kind: 'order_cancel_to_credit' },
+        },
+      ],
+      { occurredAt: now, sourceModule: 'ORDER_CANCEL', sourceId: `credit:${c.orderId}` }
+    );
+  }
 
   if (c.choice === 'refund') {
     const method = c.refundMethod || 'cash';
