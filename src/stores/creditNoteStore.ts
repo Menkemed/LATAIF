@@ -187,6 +187,21 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
 
   deleteCreditNote: (id) => {
     const db = getDatabase();
+
+    // Credit-Modell Slice 3.5 — Guard GANZ OBEN: ein CN darf NICHT geloescht werden, wenn
+    // das daraus entstandene Store-Guthaben bereits (teil-)eingeloest wurde (used_amount>0).
+    // deleteCreditNote (eigenstaendig via CreditNoteDetail) baut die customer_credits-Row
+    // gar nicht ab → ohne Guard verschwaende der CN-Ledger-Reverse das schon genutzte
+    // Guthaben. Blocken statt teil-reversen (gleiche Regel wie deleteReturn).
+    const usedCredit = query(
+      `SELECT id FROM customer_credits
+        WHERE source_type = 'sales_return' AND source_id = ? AND used_amount > 0.005 LIMIT 1`,
+      [id]
+    );
+    if (usedCredit.length > 0) {
+      throw new Error('Cannot delete this return because its customer credit has already been used.');
+    }
+
     // H-02 — Ledger-Storno VOR dem Löschen, sonst bleiben REVENUE/AR/VAT/Cash-
     // Buchungen der Credit Note verwaist (SSOT-Korruption, per UI nicht reparierbar).
     // hasLedgerEntries() ist false für Alt-CNs ohne Ledger → die löschen normal weiter.

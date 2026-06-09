@@ -760,6 +760,24 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     const db = getDatabase();
     const r = get().getReturn(id);
     if (!r) return;
+
+    // Credit-Modell Slice 3.5 — Guard GANZ OBEN (vor jeder Mutation → Atomarität):
+    // Ist das aus diesem Return entstandene Store-Guthaben bereits (teil-)eingeloest
+    // (used_amount>0), darf der Return NICHT geloescht werden. Sonst floss bereits Wert
+    // auf eine andere Rechnung (mit 'credit' bezahlt) → nicht sauber rueckabwickelbar, und
+    // der volle CN-Ledger-Reverse wuerde eine CUSTOMER_CREDIT-Divergenz erzeugen. Blocken
+    // statt teil-reversen (Hausregel wie verbrauchte supplier_credits / paid_out-Consignment).
+    const usedCredit = query(
+      `SELECT cc.id FROM customer_credits cc
+         JOIN credit_notes cn ON cn.id = cc.source_id
+        WHERE cn.sales_return_id = ? AND cc.source_type = 'sales_return'
+          AND cc.used_amount > 0.005 LIMIT 1`,
+      [id]
+    );
+    if (usedCredit.length > 0) {
+      throw new Error('Cannot delete this return because its customer credit has already been used.');
+    }
+
     const now = new Date().toISOString();
 
     // Disposition revertieren (außer wenn schon rejected — dann war's bereits revertiert).
