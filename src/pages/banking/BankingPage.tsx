@@ -9,6 +9,8 @@ import { Bhd } from '@/components/ui/Bhd';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { useBankingStore, transferFlow, transferDirectionFor, type BankTransactionType, type BankAccount } from '@/stores/bankingStore';
+import { balanceOf } from '@/core/ledger/queries';
+import { currentBranchId } from '@/core/db/helpers';
 
 
 const TYPE_LABELS: Record<BankTransactionType, string> = {
@@ -68,15 +70,22 @@ export function BankingPage() {
     catch (err) { console.error('[BankingPage] getTransactions failed:', err); return []; }
   }, [getTransactions, transfers]);
 
+  // M-12 Phase 2 — Salden aus dem Ledger-SSOT (balanceOf) statt Transaktions-Summe,
+  // konsistent mit Dashboard + Analytics. Opening lebt im Ledger (Backfill-Button);
+  // Karten-Geld liegt auf CARD_CLEARING (brutto−Gebühr) und wird in die Bank-Liquidität
+  // eingerechnet (Parität). allTxs bleibt der Bewegungs-Log (Liste + Filter) und dient
+  // hier nur als Recompute-Trigger, wenn sich Transaktionen ändern.
   const balances = useMemo(() => {
-    let cash = 0, bank = 0, benefit = 0;
-    for (const t of allTxs) {
-      const sign = t.flow === 'in' ? 1 : -1;
-      if (t.account === 'cash') cash += sign * t.amount;
-      else if (t.account === 'benefit') benefit += sign * t.amount;
-      else bank += sign * t.amount;
+    try {
+      const branchId = currentBranchId();
+      return {
+        cash: balanceOf('CASH', { branchId }),
+        bank: balanceOf('BANK', { branchId }) + balanceOf('CARD_CLEARING', { branchId }),
+        benefit: balanceOf('BENEFIT', { branchId }),
+      };
+    } catch {
+      return { cash: 0, bank: 0, benefit: 0 };
     }
-    return { cash, bank, benefit };
   }, [allTxs]);
   const filteredTxs = useMemo(() => {
     return allTxs.filter(t => {
