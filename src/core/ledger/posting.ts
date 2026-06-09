@@ -2092,18 +2092,20 @@ export function postScrapTradeReversed(tradeId: string): PostingResult {
 // Stichtag = fixe fruehe ISO (vor allen realen Transaktionen), damit Perioden-
 // Cashflow das Opening NICHT als In-Perioden-Flow zaehlt; all-time balanceOf
 // enthaelt es korrekt.
-// Idempotent via hasLedgerEntries('OPENING_BALANCE', `opening:<branchId>`) → postet
-// genau einmal. Gibt true zurueck wenn gepostet, false wenn uebersprungen (schon
-// vorhanden / kein Opening gesetzt).
-// ⚠️ Aendert sich das Opening spaeter in den Settings, muss reverse+repost erfolgen
-//    (Phase 2 / eigenes Feature) — der Guard postet bewusst nur einmal.
+// Sync-Semantik (reverse+repost-on-change): gleicht den aktiven Opening-Netto-Stand
+// im Ledger gegen settings.finance.opening_* ab. Bei Gleichheit no-op (idempotent →
+// Mehrfach-Klick/backfillAll erzeugen keinen Churn). Bei Abweichung wird die aktive
+// (unreversed) Opening-Transaktion via reverseTransaction zurueckgedreht und das neue
+// Opening frisch gepostet. So zieht ein spaeterer Opening-Edit korrekt nach (statt des
+// alten Einmal-Guards). Gibt true zurueck wenn etwas geaendert wurde, false bei no-op.
+// Reversal + Repost sitzen beide auf OPENING_BALANCE_DATE → kein Perioden-Flow-Rauschen.
 const OPENING_BALANCE_DATE = '2000-01-01T00:00:00.000Z';
 
 export function postOpeningBalances(branchId?: string, userId?: string): boolean {
   const bId = branchId ?? currentBranchId();
   const sourceId = `opening:${bId}`;
-  if (hasLedgerEntries('OPENING_BALANCE', sourceId)) return false;
 
+  // Soll aus settings
   const rows = query(
     `SELECT key, value FROM settings
        WHERE branch_id = ? AND key IN
@@ -2118,7 +2120,43 @@ export function postOpeningBalances(branchId?: string, userId?: string): boolean
     else if (r.key === 'finance.opening_benefit') benefit = v;
   }
   const total = ROUND(cash + bank + benefit);
-  if (total <= 0) return false; // kein Opening gesetzt → nichts zu buchen
+
+  // Ist: aktueller Netto-Opening-Stand im Ledger (Original − Reversal pro Konto).
+  // Da reversierte Paare sich aufheben, ist das genau das aktuell wirksame Opening.
+  const netRows = query(
+    `SELECT account, COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) AS net
+       FROM ledger_entries
+      WHERE branch_id = ? AND source_module = 'OPENING_BALANCE' AND source_id = ?
+        AND account IN ('CASH','BANK','BENEFIT')
+      GROUP BY account`,
+    [bId, sourceId]
+  );
+  let aCash = 0, aBank = 0, aBenefit = 0;
+  for (const r of netRows) {
+    const n = ROUND(Number(r.net) || 0);
+    if (r.account === 'CASH') aCash = n;
+    else if (r.account === 'BANK') aBank = n;
+    else if (r.account === 'BENEFIT') aBenefit = n;
+  }
+  const eps = 0.0005;
+  if (Math.abs(aCash - cash) < eps && Math.abs(aBank - bank) < eps && Math.abs(aBenefit - benefit) < eps) {
+    return false; // unveraendert → idempotenter no-op
+  }
+
+  // Abweichung → aktive (unreversed) Opening-Transaktion(en) reversen. NOT EXISTS
+  // findet Original-Zeilen ohne zugehoerige Reversal → handhabt wiederholte Edit-Zyklen.
+  const activeTx = query(
+    `SELECT DISTINCT le.transaction_id AS tx
+       FROM ledger_entries le
+      WHERE le.branch_id = ? AND le.source_module = 'OPENING_BALANCE' AND le.source_id = ?
+        AND le.reverses_entry_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM ledger_entries r WHERE r.reverses_entry_id = le.id)`,
+    [bId, sourceId]
+  );
+  for (const t of activeTx) reverseTransaction(t.tx as string, OPENING_BALANCE_DATE);
+
+  // Neu posten (nur wenn neues Opening > 0; sonst wurde es bewusst auf 0 gesetzt).
+  if (total <= 0) return activeTx.length > 0;
 
   const entries: LedgerEntryInput[] = [];
   if (cash > 0)    entries.push({ account: 'CASH',    direction: 'DEBIT', amount: cash,    metadata: { kind: 'opening_balance' } });
