@@ -26,7 +26,7 @@ import type {
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { postExpense, hasLedgerEntries } from '@/core/ledger/posting';
+import { postExpense, postGoldConversionCredit, hasLedgerEntries } from '@/core/ledger/posting';
 import { KARAT_PURITY as PURITY_LOOKUP } from '@/core/gold/purity';
 
 function safePost(label: string, fn: () => void): void {
@@ -637,6 +637,13 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       );
       trackInsert('customer_credits', creditId2, {
         customerId: c.customerId, amount: agreedBhd, sourceGoldCreditId: creditId,
+      });
+      // Credit-Modell Slice 4b — Ledger-Post NUR wenn der Domain-Insert gelang:
+      // DR GOLD_CREDIT_CLEARING / CR CUSTOMER_CREDIT (Bruecke Buch B → Buch A, kein P&L).
+      // Idempotent via hasLedgerEntries; gekeyt auf die customer_credits-Row-id.
+      safePost(`postGoldConversionCredit(${creditId2})`, () => {
+        if (hasLedgerEntries('GOLD_CONVERSION', creditId2)) return;
+        postGoldConversionCredit(creditId2, c.customerId, agreedBhd, now);
       });
     } catch (err) {
       console.warn('[gold] customer_credits insert failed — table may not exist:', err);

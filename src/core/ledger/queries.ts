@@ -39,6 +39,9 @@ const NATURAL_DEBIT: Set<LedgerAccount> = new Set([
   'SUPPLIER_CREDIT',
   // Loan-Receivable: wir haben Geld verliehen (MONEY_GIVEN). Asset, DEBIT-natur.
   'LOAN_RECEIVABLE',
+  // Gold-Credit-Clearing: Bruecke Buch B (Gold-Gewicht) → Buch A (BHD). Asset/DEBIT-natur.
+  // DR beim Konvertieren eines Gold-Credits in BHD-Store-Guthaben (Gegenseite CR CUSTOMER_CREDIT).
+  'GOLD_CREDIT_CLEARING',
 ]);
 
 function naturalSign(account: LedgerAccount): 1 | -1 {

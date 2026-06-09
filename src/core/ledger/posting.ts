@@ -50,6 +50,12 @@ export type LedgerAccount =
   // Customer-Deposits: Anzahlung vom Kunden vor Rechnungserstellung. Verbindlichkeit
   // (CREDIT-natur) — wir schulden Ware. Wird beim Convert-to-Invoice gegen AR verrechnet.
   | 'CUSTOMER_DEPOSITS'
+  // Gold-Credit-Clearing: Bruecke Buch B (Gold-Gewicht) → Buch A (BHD). Wird beim
+  // Konvertieren eines customer_gold_credit in BHD-Store-Guthaben mit DEBIT bebucht
+  // (Gegenseite CR CUSTOMER_CREDIT). Asset/DEBIT-natur, KEIN P&L/INVENTORY. Haelt den
+  // BHD-Wert des in Buch B (out→external) ausgebuchten Gold-Obligos auditierbar; spaetere
+  // Aufloesung wenn das Gold tatsaechlich monetarisiert wird. „Gold bleibt Gold, Geld bleibt Geld."
+  | 'GOLD_CREDIT_CLEARING'
   // Loans-Receivable: wir haben Geld verliehen (we_lend / MONEY_GIVEN). Asset, DEBIT-natur.
   | 'LOAN_RECEIVABLE'
   // Loans-Payable: wir haben Geld geliehen (we_borrow / MONEY_RECEIVED). Liability, CREDIT-natur.
@@ -104,7 +110,11 @@ export type SourceModule =
   | 'ORDER_CANCEL'
   // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
   // gekeyt auf `opening:<branchId>`.
-  | 'OPENING_BALANCE';
+  | 'OPENING_BALANCE'
+  // Credit-Modell — Konvertierung eines customer_gold_credit (Buch B, Gewicht) in
+  // BHD-Store-Guthaben: DR GOLD_CREDIT_CLEARING / CR CUSTOMER_CREDIT. Gekeyt auf die
+  // customer_credits-Row-id. Kein Reverse-Pfad (Gold-Conversion ist FULFILLED-terminal).
+  | 'GOLD_CONVERSION';
 
 export type CounterpartyType =
   | 'CUSTOMER'
@@ -1400,6 +1410,41 @@ export function postOrderCancellationChoice(c: OrderCancellationChoice): Posting
       },
     ],
     { occurredAt: now, sourceModule: 'ORDER_CANCEL', sourceId: `forfeit:${c.orderId}` }
+  );
+}
+
+// ── Gold-Conversion → Store-Guthaben ──────────────────────────
+//
+// Konvertiert ein customer_gold_credit (Buch B, Gewicht) in BHD-Store-Guthaben.
+// Das Gold-Obligo wird in Buch B (recordGoldMovement out→external) ausgebucht;
+// hier entsteht die BHD-Gegenbuchung in Buch A:
+//
+//   DEBIT  GOLD_CREDIT_CLEARING  by amountBhd   (Bruecke Buch B → Buch A)
+//   CREDIT CUSTOMER_CREDIT       by amountBhd   (wir schulden Store-Guthaben)
+//
+// KEIN P&L, KEIN INVENTORY, KEIN Cash/Bank. sourceId = customer_credits-Row-id.
+export function postGoldConversionCredit(
+  creditId: string,
+  customerId: string,
+  amountBhd: number,
+  occurredAt?: string
+): PostingResult | null {
+  const amount = ROUND(amountBhd);
+  if (amount <= 0) return null;
+  return postEntries(
+    [
+      {
+        account: 'GOLD_CREDIT_CLEARING', direction: 'DEBIT', amount,
+        counterpartyType: 'CUSTOMER', counterpartyId: customerId,
+        metadata: { creditId, kind: 'gold_conversion' },
+      },
+      {
+        account: 'CUSTOMER_CREDIT', direction: 'CREDIT', amount,
+        counterpartyType: 'CUSTOMER', counterpartyId: customerId,
+        metadata: { creditId, kind: 'gold_conversion' },
+      },
+    ],
+    { occurredAt: occurredAt || new Date().toISOString(), sourceModule: 'GOLD_CONVERSION', sourceId: creditId }
   );
 }
 
