@@ -42,6 +42,11 @@ export type LedgerAccount =
   | 'REFUNDS'
   | 'CARD_FEES'
   | 'SUPPLIER_CREDIT'
+  // Customer-Credit: allgemeines Store-Guthaben das WIR dem Kunden schulden (aus
+  // Sales-Return 'credit', Order-Storno, Gold-Conversion, spaeter Opening-Credit).
+  // CREDIT-natur (Liability) — Spiegel zum Asset SUPPLIER_CREDIT. NICHT verwechseln
+  // mit CUSTOMER_DEPOSITS (Anzahlung auf eine konkrete Order/Ware).
+  | 'CUSTOMER_CREDIT'
   // Customer-Deposits: Anzahlung vom Kunden vor Rechnungserstellung. Verbindlichkeit
   // (CREDIT-natur) — wir schulden Ware. Wird beim Convert-to-Invoice gegen AR verrechnet.
   | 'CUSTOMER_DEPOSITS'
@@ -330,7 +335,10 @@ function lookupInvoiceTaxScheme(invoiceId: string): string | undefined {
   return rows[0]?.tax_scheme_snapshot as string | undefined;
 }
 
-function cashAccountFor(method: PaymentMethod): LedgerAccount {
+// method-Typ lokal um 'credit' geweitet (NICHT der geteilte PaymentMethod-Typ —
+// das wuerde in ~12 Dateien rippeln). 'credit' = Einloesung von Store-Guthaben:
+// das spaetere applyCreditToInvoice bucht damit DR CUSTOMER_CREDIT / CR AR.
+function cashAccountFor(method: PaymentMethod | 'credit'): LedgerAccount {
   switch (method) {
     case 'cash':          return 'CASH';
     case 'bank_transfer': return 'BANK';
@@ -338,6 +346,7 @@ function cashAccountFor(method: PaymentMethod): LedgerAccount {
     // Benefit: BenefitPay App-Transfer, eigenes Konto separat von Bank.
     // Banking-Page zeigt Cash/Bank/Benefit als drei getrennte Balance-Cards.
     case 'benefit':       return 'BENEFIT';
+    case 'credit':        return 'CUSTOMER_CREDIT';
     default:              return 'BANK';
   }
 }
@@ -668,6 +677,9 @@ export function postCreditNote(cn: CreditNote): PostingResult {
       cn.refundMethod === 'cash' ? 'CASH' :
       cn.refundMethod === 'card' ? 'CARD_CLEARING' :
       cn.refundMethod === 'benefit' ? 'BENEFIT' :
+      // Store-Guthaben: kein Geldabfluss, sondern Liability die wir dem Kunden schulden.
+      // (Aktiviert erst, wenn Slice 2 den createCreditNote-Throw entfernt.)
+      cn.refundMethod === 'credit' ? 'CUSTOMER_CREDIT' :
       'BANK';
     entries.push({
       account: refundAcc,
