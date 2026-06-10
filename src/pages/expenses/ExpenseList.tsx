@@ -17,6 +17,7 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 // passiert.
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import type { Expense, ExpenseCategory, RecurringExpenseTemplate } from '@/core/models/types';
+import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { matchesDeep } from '@/core/utils/deep-search';
 
 function fmt(v: number): string {
@@ -154,6 +155,14 @@ export function ExpenseList() {
 
   const totals = getTotalsByCategory();
   const grandTotal = Object.values(totals).reduce((s, v) => s + v, 0);
+  // v0.8.1 — kapitalisierte Kosten (Inventory: fließen in Lagerwert→COGS, types.ts
+  // CAPITALIZED_EXPENSE_CATEGORIES) getrennt ausweisen: die Karten zeigen bewusst nur
+  // operative Kategorien (kein Doppelzählen mit der Verkaufsmarge) — ohne den Split
+  // widersprachen sich Header-Total (inkl. Inventory) und Karten-Summen (alle 0).
+  const capitalizedTotal = Object.entries(totals)
+    .filter(([cat]) => isCapitalizedExpenseCategory(cat))
+    .reduce((s, [, v]) => s + v, 0);
+  const operatingTotal = grandTotal - capitalizedTotal;
   const totalPaid = expenses.filter(e => e.status !== 'CANCELLED').reduce((s, e) => s + (e.paidAmount || 0), 0);
   const totalUnpaid = expenses.filter(e => e.status !== 'CANCELLED')
     .reduce((s, e) => s + Math.max(0, e.amount - (e.paidAmount || 0)), 0);
@@ -224,7 +233,9 @@ export function ExpenseList() {
   return (
     <PageLayout
       title="Expenses"
-      subtitle={`${expenses.length} records · ${fmt(grandTotal)} total · ${fmt(totalPaid)} paid · ${fmt(totalUnpaid)} open`}
+      subtitle={capitalizedTotal > 0.005
+        ? `${expenses.length} records · ${fmt(operatingTotal)} operating · ${fmt(capitalizedTotal)} capitalized (→ stock/COGS) · ${fmt(totalPaid)} paid · ${fmt(totalUnpaid)} open`
+        : `${expenses.length} records · ${fmt(grandTotal)} total · ${fmt(totalPaid)} paid · ${fmt(totalUnpaid)} open`}
       showSearch onSearch={setSearch} searchPlaceholder="Search description, number, reference..."
       actions={
         <div className="flex gap-2 items-center">
@@ -247,13 +258,27 @@ export function ExpenseList() {
                   background: categoryFilter === c.value ? 'rgba(15,15,16,0.06)' : 'transparent',
                 }}>{c.label}</button>
             ))}
+            {/* v0.8.1 — Inventory (kapitalisiert) filterbar machen, sobald vorhanden:
+                die Rows erschienen sonst nur unter „All" ohne erkennbare Kategorie. */}
+            {(totals.Inventory || 0) > 0 && (
+              <button onClick={() => setCategoryFilter('Inventory')}
+                className="cursor-pointer transition-all"
+                style={{
+                  padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                  border: `1px solid ${categoryFilter === 'Inventory' ? '#0F0F10' : 'transparent'}`,
+                  color: categoryFilter === 'Inventory' ? '#0F0F10' : '#6B7280',
+                  background: categoryFilter === 'Inventory' ? 'rgba(15,15,16,0.06)' : 'transparent',
+                }}>Inventory</button>
+            )}
           </div>
           <Button variant="primary" onClick={() => setShowNew(true)}>New Expense</Button>
         </div>
       }
     >
-      {/* Category summary */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 12, marginBottom: 24 }}>
+      {/* Category summary — operative Kategorien; Inventory (kapitalisiert) als
+          eigene, abgesetzte Karte nur wenn vorhanden (fließt in Lagerwert→COGS,
+          zählt bewusst NICHT zu den Betriebskosten = kein Doppelzählen). */}
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${CATEGORIES.length + ((totals.Inventory || 0) > 0 ? 1 : 0)}, 1fr)`, gap: 12, marginBottom: 24 }}>
         {CATEGORIES.map(c => (
           <div key={c.value} style={{
             padding: '12px 14px', background: '#FFFFFF', border: '1px solid #E5E9EE', borderRadius: 12,
@@ -265,6 +290,17 @@ export function ExpenseList() {
             <span style={{ fontSize: 10, color: '#6B7280' }}>BHD</span>
           </div>
         ))}
+        {(totals.Inventory || 0) > 0 && (
+          <div data-testid="inventory-capitalized-card" style={{
+            padding: '12px 14px', background: 'rgba(61,127,255,0.04)', border: '1px dashed #3D7FFF', borderRadius: 12,
+          }}>
+            <span className="text-overline" style={{ color: '#3D7FFF' }}>Inventory</span>
+            <div className="font-display" style={{ fontSize: 18, color: '#0F0F10', marginTop: 4 }}>
+              <Bhd v={totals.Inventory || 0}/>
+            </div>
+            <span style={{ fontSize: 10, color: '#3D7FFF' }}>BHD · capitalized → stock/COGS</span>
+          </div>
+        )}
       </div>
 
       {/* Recurring Templates Section */}
@@ -397,9 +433,12 @@ export function ExpenseList() {
               onClick={() => { setEditId(e.id); setEditForm({ ...e }); }}
               onMouseEnter={ev => (ev.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
               onMouseLeave={ev => (ev.currentTarget.style.background = 'transparent')}>
-                <span className="font-mono flex items-center gap-1" style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {/* v0.8.1 — ellipsis greift nicht auf Flex-Containern: Text in inneren
+                    span, sonst wird die Nummer hart abgeschnitten (EXP-2026-0000…) und
+                    verschiedene Nummern sehen identisch aus. Tooltip zeigt die volle. */}
+                <span className="font-mono flex items-center gap-1" style={{ fontSize: 12, color: '#0F0F10', minWidth: 0 }} title={e.expenseNumber}>
                   {e.recurringTemplateId && <Repeat size={10} style={{ color: '#715DE3', flexShrink: 0 }} />}
-                  {e.expenseNumber}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.expenseNumber}</span>
                 </span>
                 <span style={{ fontSize: 12, color: '#4B5563' }}>{e.expenseDate}</span>
                 <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{CATEGORIES.find(c => c.value === e.category)?.label || e.category}</span>
