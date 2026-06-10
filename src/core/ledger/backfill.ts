@@ -33,6 +33,8 @@ import {
   postAgentTransferSold,
   postConsignmentPayout,
   postOpeningBalances,
+  postOrderCancellationChoice,
+  postGoldConversionCredit,
   hasLedgerEntries,
   hasReversalFor,
   reverseSource,
@@ -966,6 +968,53 @@ export function backfillOpeningBalances(branchId: string): BackfillResult {
   return res;
 }
 
+// ── Customer-Credit-Modell — Alt-Credits ledgerisieren ───────
+// customer_credits-Rows aus der Zeit VOR den Slices 4a/4b (order_cancel /
+// gold_conversion) haben Domain-Guthaben ohne CR CUSTOMER_CREDIT im Ledger —
+// Einloesung (applyCreditToInvoice: DR CUSTOMER_CREDIT) zoege das Konto negativ.
+// Backfill spiegelt exakt die Live-Postings:
+//   order_cancel:    DR CUSTOMER_DEPOSITS / CR CUSTOMER_CREDIT (= Slice 4a;
+//                    raeumt zugleich die beim Alt-Cancel stehengebliebene Anzahlung)
+//   gold_conversion: DR GOLD_CREDIT_CLEARING / CR CUSTOMER_CREDIT (= Slice 4b)
+// sales_return-Credits existieren erst SEIT dem Modell (Slice 2 legt Row+Ledger
+// zusammen an) — kein Alt-Bestand moeglich, daher hier nicht behandelt.
+// Voller Original-amount, NICHT amount−used_amount: eventuelle Einloesungs-DRs
+// stehen schon im Ledger (CR amount − DR used == Domain amount − used_amount).
+export function backfillCustomerCredits(branchId: string): BackfillResult {
+  const res = emptyResult('customer_credits');
+  const rows = query(
+    `SELECT id, customer_id, amount, source_type, source_id, created_at
+     FROM customer_credits
+     WHERE branch_id = ? AND source_type IN ('order_cancel', 'gold_conversion')`,
+    [branchId]
+  );
+  res.total = rows.length;
+  for (const r of rows) {
+    const creditId = r.id as string;
+    const customerId = r.customer_id as string;
+    const amount = Number(r.amount || 0);
+    const createdAt = (r.created_at as string) || new Date().toISOString();
+    if (amount <= 0) { res.skipped++; continue; }
+    if (r.source_type === 'gold_conversion') {
+      // Live-Posting (goldStore) keyt auf die customer_credits-Row-id.
+      if (hasLedgerEntries('GOLD_CONVERSION', creditId)) { res.skipped++; continue; }
+      safeStep(res, `gold-credit ${creditId.slice(0, 8)}`, () => {
+        postGoldConversionCredit(creditId, customerId, amount, createdAt);
+      });
+    } else {
+      // order_cancel: source_id = orderId; Live-Posting keyt auf `credit:<orderId>`.
+      const orderId = r.source_id as string;
+      if (hasLedgerEntries('ORDER_CANCEL', `credit:${orderId}`)) { res.skipped++; continue; }
+      safeStep(res, `order-credit ${creditId.slice(0, 8)}`, () => {
+        postOrderCancellationChoice({
+          orderId, customerId, totalPaid: amount, choice: 'credit', occurredAt: createdAt,
+        });
+      });
+    }
+  }
+  return res;
+}
+
 export function backfillAll(branchId: string): BackfillResult[] {
   return [
     backfillOpeningBalances(branchId),
@@ -979,6 +1028,8 @@ export function backfillAll(branchId: string): BackfillResult[] {
     backfillExpensePayments(branchId),
     backfillBankTransfers(branchId),
     backfillOrderPayments(branchId),
+    // NACH Order-Payments: DR CUSTOMER_DEPOSITS braucht die Deposit-CRs zuerst.
+    backfillCustomerCredits(branchId),
     backfillDebts(branchId),
     backfillDebtPayments(branchId),
     backfillPartnerTransactions(branchId),

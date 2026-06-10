@@ -20,6 +20,7 @@ import {
   backfillExpensePayments,
   backfillBankTransfers,
   backfillOrderPayments,
+  backfillCustomerCredits,
   backfillDebts,
   backfillDebtPayments,
   backfillPartnerTransactions,
@@ -174,6 +175,7 @@ export function BackfillPage() {
           <Button onClick={withBranch(backfillExpensePayments)} disabled={running}>Expense-Payments</Button>
           <Button onClick={withBranch(backfillBankTransfers)} disabled={running}>Bank-Transfers</Button>
           <Button onClick={withBranch(backfillOrderPayments)} disabled={running}>Order-Payments</Button>
+          <Button onClick={withBranch(backfillCustomerCredits)} disabled={running}>Customer-Credits</Button>
           <Button onClick={withBranch(backfillDebts)} disabled={running}>Debts</Button>
           <Button onClick={withBranch(backfillDebtPayments)} disabled={running}>Debt-Payments</Button>
           <Button onClick={withBranch(backfillPartnerTransactions)} disabled={running}>Partner-Tx</Button>
