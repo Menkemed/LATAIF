@@ -73,6 +73,9 @@ const navGroups: NavGroup[] = [
       { to: '/analytics', label: 'Analytics', icon: BarChart3, tone: 'blue' },
       { to: '/business-reports', label: 'Business Reports', icon: BarChart3, tone: 'cyan' },
       { to: '/reconciliation', label: 'Reconciliation', icon: BarChart3, tone: 'orange' },
+      // Backfill-Werkzeuge (Opening/Customer-Credits/…) — Route existierte schon,
+      // war aber ohne Menüeintrag in der installierten App (keine Adresszeile) unerreichbar.
+      { to: '/ledger-backfill', label: 'Ledger Backfill', icon: BarChart3, tone: 'pink' },
     ],
   },
   { label: 'AI', items: [{ to: '/ai', label: 'AI', icon: Sparkles, tone: 'purple' }] },

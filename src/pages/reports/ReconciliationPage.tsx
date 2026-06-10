@@ -371,6 +371,9 @@ export function ReconciliationPage() {
   const mismatches = data.rows.filter(r => status(r) === 'mismatch').length;
 
   return (
+    // app-content = der scrollende Container des App-Layouts (Shell ist overflow:hidden) —
+    // ohne ihn ist die Seite unterhalb des Viewports abgeschnitten und nicht scrollbar.
+    <div className="app-content">
     <div style={{ padding: 24, maxWidth: 1280, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
         <h1 style={{ fontSize: 28, fontWeight: 600 }}>Reconciliation</h1>
@@ -584,6 +587,7 @@ export function ReconciliationPage() {
           </div>
         </Card>
       )}
+    </div>
     </div>
   );
 }

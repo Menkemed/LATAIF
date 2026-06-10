@@ -154,6 +154,9 @@ export function BackfillPage() {
   );
 
   return (
+    // app-content = der scrollende Container des App-Layouts (Shell ist overflow:hidden) —
+    // ohne ihn ist die Seite unterhalb des Viewports abgeschnitten und nicht scrollbar.
+    <div className="app-content">
     <div style={{ padding: 24, maxWidth: 1200, margin: '0 auto' }}>
       <h1 style={{ fontSize: 28, fontWeight: 600, marginBottom: 8 }}>Ledger Backfill</h1>
       <p style={{ color: '#6B7280', fontSize: 13, marginBottom: 24 }}>
@@ -297,6 +300,7 @@ export function BackfillPage() {
           </div>
         </Card>
       )}
+    </div>
     </div>
   );
 }
