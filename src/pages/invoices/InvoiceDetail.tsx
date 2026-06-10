@@ -409,7 +409,11 @@ export function InvoiceDetail() {
         lines: included,
       });
       // Plan §Returns: Refund optional sofort durchführen oder offen lassen.
-      if (returnRefundNow) {
+      // UI-Slice 2: bei 'credit' IMMER sofort — Guthaben entsteht bei approve (CN);
+      // ein offener REQUESTED-Credit-Return könnte später per Cash ausgezahlt werden,
+      // ohne dass die customer_credits-Row abgebaut wird (Divergenz). Nach refundReturn
+      // steht refund_status=REFUNDED → recordRefundPayment-Guard blockt den Cash-Pfad.
+      if (returnRefundNow || returnRefundMethod === 'credit') {
         refundSalesReturn(ret.id);
       }
       // Invoice-Store reloaden damit paid_amount/Status nach Refund frisch sind.
@@ -1814,10 +1818,12 @@ export function InvoiceDetail() {
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND METHOD</span>
               <div className="flex gap-2" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                {/* L-01 — 'credit' (Store-Guthaben / Credit Note) entfernt bis sauber modelliert. */}
-                {(['cash', 'bank', 'card', 'benefit', 'other'] as const).map(m => {
+                {/* Customer-Credit UI-Slice 2 — 'credit' wieder aktiv (L-01 via Credit-Modell behoben):
+                    createReturn→approveReturn→createCreditNote legt customer_credits-Row + CR CUSTOMER_CREDIT an.
+                    Refund-Timing wird bei 'credit' auf sofort erzwungen (siehe handleCreateReturn). */}
+                {(['cash', 'bank', 'card', 'benefit', 'credit', 'other'] as const).map(m => {
                   const active = returnRefundMethod === m;
-                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : 'Other';
+                  const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : m === 'credit' ? 'Store Credit' : 'Other';
                   return (
                     <button key={m} onClick={() => setReturnRefundMethod(m)} className="cursor-pointer rounded"
                       style={{ padding: '7px 14px', fontSize: 12,
@@ -1872,6 +1878,13 @@ export function InvoiceDetail() {
           <StaffSelect value={returnStaffId} onChange={setReturnStaffId} helper="Who handled this return (optional)." />
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND TIMING</span>
+            {returnRefundMethod === 'credit' ? (
+              // UI-Slice 2: Store Credit entsteht sofort mit der Credit Note — kein
+              // offener Refund möglich (handleCreateReturn erzwingt refundNow).
+              <p data-testid="credit-timing-hint" style={{ fontSize: 12, color: '#6B7280', margin: 0, padding: '7px 0' }}>
+                Store-Guthaben wird sofort gutgeschrieben — kein offener Refund.
+              </p>
+            ) : (
             <div className="flex gap-2">
               {[
                 { id: true, label: 'Refund jetzt zahlen' },
@@ -1886,6 +1899,7 @@ export function InvoiceDetail() {
                   }}>{o.label}</button>
               ))}
             </div>
+            )}
           </div>
 
           {(() => {
