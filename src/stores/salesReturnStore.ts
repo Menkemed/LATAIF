@@ -626,6 +626,28 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       if (!r) return;
     }
 
+    // Credit-Modell-Härtung — Methoden-Riegel (Altdaten/programmatische Aufrufe; die UI
+    // erreicht diesen Mismatch nicht). Wahrheit = Domain-Row: existiert für diesen Return
+    // ein Store-Guthaben (customer_credits via CN), darf NUR method='credit' durch —
+    // jede Cash-Methode würde zusätzlich auszahlen, während die einlösbare Credit-Row
+    // stehen bliebe (Doppel-Auszahlung + Domain≠Ledger nach Repost). Umgekehrt darf
+    // 'credit' ohne Domain-Row nicht durch: der Repost buchte CR CUSTOMER_CREDIT, aber
+    // die einlösbare Row entsteht nur in createCreditNote (Phantom-Guthaben, L-01).
+    // Sauberer Weg bei gewünschtem Cash: Return löschen (baut Credit-Row ab) + neu anlegen.
+    const ccRows = query(
+      `SELECT cc.id FROM customer_credits cc
+         JOIN credit_notes cn ON cn.id = cc.source_id AND cc.source_type = 'sales_return'
+        WHERE cn.sales_return_id = ? LIMIT 1`,
+      [returnId]
+    );
+    const hasStoreCredit = ccRows.length > 0;
+    if (hasStoreCredit && method !== 'credit') {
+      throw new Error('This return was settled as store credit — a cash payout would pay the customer twice. Delete the return and re-create it with a cash method if needed.');
+    }
+    if (!hasStoreCredit && method === 'credit') {
+      throw new Error("Store credit can only be granted when the return is created with refund method 'Store Credit'.");
+    }
+
     const remaining = Math.max(0, r.totalAmount - (r.refundPaidAmount || 0));
     if (remaining <= 0.005) { console.warn('[Return] nothing left to refund'); return; }
 
