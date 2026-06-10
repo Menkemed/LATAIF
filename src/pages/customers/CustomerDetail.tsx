@@ -120,7 +120,7 @@ export function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/clients');
-  const { customers, loadCustomers, updateCustomer, deleteCustomer, getCustomerStats } = useCustomerStore();
+  const { customers, loadCustomers, updateCustomer, deleteCustomer, getCustomerStats, getAvailableCredit } = useCustomerStore();
   const { loadReturns: loadSalesReturns, getCustomerRefundPayable } = useSalesReturnStore();
   const { products, loadProducts } = useProductStore();
   const { debts, loadDebts } = useDebtStore();
@@ -267,6 +267,8 @@ export function CustomerDetail() {
   const initials = `${(customer.firstName || '').charAt(0)}${(customer.lastName || '').charAt(0)}`.toUpperCase() || '?';
   const stats = id ? getCustomerStats(id) : { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0, openTransferCount: 0 };
   const refundPayable = id ? getCustomerRefundPayable(id) : 0;
+  // Customer-Credit Punkt 7 — offenes Store-Guthaben (Spiegel SupplierDetail.creditBalance).
+  const storeCredit = id ? getAvailableCredit(id) : 0;
   const marginPct = stats.revenue > 0 ? (stats.profit / stats.revenue) * 100 : 0;
   const lastOrderInvoice = customerInvoices[0];
 
@@ -607,10 +609,10 @@ export function CustomerDetail() {
 
         {!editing && (
           <>
-            {/* RECEIVABLE ROW — 3 (or 4 with refund) cards */}
+            {/* RECEIVABLE ROW — 3 Basis-Cards + konditional Refund-Payable/Store-Credit */}
             <div style={{
               display: 'grid',
-              gridTemplateColumns: refundPayable > 0 ? 'repeat(4, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))',
+              gridTemplateColumns: `repeat(${3 + (refundPayable > 0 ? 1 : 0) + (storeCredit > 0.005 ? 1 : 0)}, minmax(0, 1fr))`,
               gap: 16, marginTop: 24,
             }}>
               <KpiCard label="Open Receivables" value={stats.invoiceOutstanding}
@@ -635,6 +637,14 @@ export function CustomerDetail() {
                   hint="We owe customer"
                   icon={<Wallet size={18} style={{ color: '#DC2626' }} />} iconBg="rgba(220,38,38,0.10)"
                   valueColor="#DC2626" />
+              )}
+              {/* Customer-Credit Punkt 7 — Guthaben sichtbar auch ohne offene Rechnung.
+                  Einlösbar im Invoice-Payment-Modal („Guthaben verrechnen"). */}
+              {storeCredit > 0.005 && (
+                <KpiCard label="Store Credit" value={storeCredit}
+                  hint="Redeemable on invoices"
+                  icon={<Wallet size={18} style={{ color: '#AA956E' }} />} iconBg="rgba(170,149,110,0.10)"
+                  valueColor="#AA956E" />
               )}
             </div>
 

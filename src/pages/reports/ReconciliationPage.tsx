@@ -155,6 +155,34 @@ function domainCustomerDeposits(branchId: string): number {
   return Number(rows[0]?.t || 0);
 }
 
+function domainCustomerCredit(branchId: string): number {
+  // Ledger-Mechanik (Customer-Credit-Modell):
+  //   + CR(CUSTOMER_CREDIT) bei Erzeugung (Return-CN / Order-Storno / Gold-Conversion) über amount
+  //   - DR(CUSTOMER_CREDIT) bei Einlösung (Invoice-Payment method='credit') über den Verbrauch
+  // Domain-Spiegel = Σ (amount − used_amount) über ALLE Rows (USED trägt ~0 bei, exakt wie Ledger).
+  // Domain > Ledger ⇒ Alt-Credits aus der Zeit VOR der Ledgerisierung (Backfill-Bedarf).
+  const rows = query(
+    `SELECT COALESCE(SUM(amount - used_amount), 0) AS t
+     FROM customer_credits
+     WHERE branch_id = ?`,
+    [branchId]
+  );
+  return Number(rows[0]?.t || 0);
+}
+
+function domainGoldCreditClearing(branchId: string): number {
+  // Brücke Buch B (Gold) → Buch A (BHD): DR GOLD_CREDIT_CLEARING pro Gold-Conversion.
+  // Terminal — wird nie zurückgebucht (auch Einlösung lässt das Clearing stehen).
+  // Domain-Spiegel = Σ amount der gold_conversion-Credits.
+  const rows = query(
+    `SELECT COALESCE(SUM(amount), 0) AS t
+     FROM customer_credits
+     WHERE branch_id = ? AND source_type = 'gold_conversion'`,
+    [branchId]
+  );
+  return Number(rows[0]?.t || 0);
+}
+
 function domainLoanReceivable(branchId: string): number {
   const rows = query(
     `SELECT d.id, d.direction, d.amount, COALESCE((SELECT SUM(amount) FROM debt_payments WHERE debt_id = d.id), 0) AS paid
@@ -233,6 +261,9 @@ const SOURCE_TABLE_MAP: Record<string, string> = {
   PARTNER_TX: 'partner_transactions',
   TAX_PAYMENT: 'tax_payments',
   BANK_TRANSFER: 'bank_transfers',
+  // Customer-Credit: sourceId = customer_credits-Row-id (Slice 4b).
+  // ORDER_CANCEL fehlt bewusst — sourceId hat dort Präfixe ('credit:<orderId>'), kein 1:1-Row-Match.
+  GOLD_CONVERSION: 'customer_credits',
 };
 
 function loadOrphans(branchId: string): Orphan[] {
@@ -313,6 +344,10 @@ export function ReconciliationPage() {
         note: 'Domain = Σ (line.line_total − line.vat_amount) − Σ CN.net (line-level wie Ledger).' },
       { label: 'Customer Deposits',      account: 'CUSTOMER_DEPOSITS',   ledger: balanceOf('CUSTOMER_DEPOSITS'),   domain: domainCustomerDeposits(branchId),
         note: 'Domain = noch nicht in Invoice umgewandelte Order-Anzahlungen.' },
+      { label: 'Customer Credit',        account: 'CUSTOMER_CREDIT',     ledger: balanceOf('CUSTOMER_CREDIT'),     domain: domainCustomerCredit(branchId),
+        note: 'Domain = Σ (amount − used_amount) aller customer_credits. Domain > Ledger ⇒ Alt-Credits vor Ledgerisierung (Backfill).' },
+      { label: 'Gold-Credit Clearing',   account: 'GOLD_CREDIT_CLEARING', ledger: balanceOf('GOLD_CREDIT_CLEARING'), domain: domainGoldCreditClearing(branchId),
+        note: 'Domain = Σ amount der gold_conversion-Credits (terminal, wird nie zurückgebucht).' },
       { label: 'Loan Receivable',        account: 'LOAN_RECEIVABLE',     ledger: balanceOf('LOAN_RECEIVABLE'),     domain: domainLoanReceivable(branchId),
         note: 'Domain = Σ verliehen − Σ zurückerhalten (we_lend / MONEY_GIVEN).' },
       { label: 'Loan Payable',           account: 'LOAN_PAYABLE',        ledger: balanceOf('LOAN_PAYABLE'),        domain: domainLoanPayable(branchId),
