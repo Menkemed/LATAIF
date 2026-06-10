@@ -58,8 +58,8 @@ export function InvoiceDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
-  const { invoices, loadInvoices, updateInvoice, rewriteInvoiceLines, recordPayment, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
-  const { customers, loadCustomers } = useCustomerStore();
+  const { invoices, loadInvoices, updateInvoice, rewriteInvoiceLines, recordPayment, applyCreditToInvoice, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
+  const { customers, loadCustomers, getAvailableCredit } = useCustomerStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { repairs, loadRepairs, updateStatus: updateRepairStatus } = useRepairStore();
@@ -197,6 +197,9 @@ export function InvoiceDetail() {
   const creditedTotal = (creditNotes || []).filter(cn => cn.invoiceId === invoice.id).reduce((s, cn) => s + (cn.totalAmount || 0), 0);
   const effectiveGross = Math.max(0, invoice.grossAmount - creditedTotal);
   const remaining = Math.max(0, effectiveGross - invoice.paidAmount);
+  // Customer-Credit UI-Slice 1 — offenes Store-Guthaben des Kunden (Σ amount-used_amount,
+  // OPEN). Plain const wie `remaining`: jeder Render liest frisch → nach Verrechnung aktuell.
+  const availableCredit = invoice.customerId ? getAvailableCredit(invoice.customerId) : 0;
   const isDraft = invoice.status === 'DRAFT';
   const isCancelled = invoice.status === 'CANCELLED';
   const isPaid = invoice.status === 'FINAL';
@@ -443,6 +446,25 @@ export function InvoiceDetail() {
     setPaymentOpen(false);
     setPaymentAmount('');
     setPaymentMethod('bank_transfer');
+  }
+
+  // Customer-Credit UI-Slice 1 — Store-Guthaben auf die Rechnung verrechnen.
+  // FIFO-Verbrauch + Cap auf den Rest passieren im Store (applyCreditToInvoice);
+  // der posted intern recordPayment(method='credit') → DR CUSTOMER_CREDIT / CR AR.
+  function handleApplyCredit() {
+    if (!id || !invoice) return;
+    const toApply = Math.min(remaining, availableCredit);
+    if (toApply <= 0.005) return;
+    try {
+      applyCreditToInvoice(id, toApply);
+      setPaymentOpen(false);
+      setPaymentAmount('');
+      setPaymentMethod('bank_transfer');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[ApplyCredit] failed:', e);
+      alert(`Guthaben konnte nicht verrechnet werden:\n\n${msg}`);
+    }
   }
 
   // Customer-facing PDF — no margin VAT visible
@@ -1487,6 +1509,19 @@ export function InvoiceDetail() {
               </div>
             )}
           </div>
+          {/* Customer-Credit UI-Slice 1 — Store-Guthaben verrechnen. Bewusst KEIN
+              PAYMENT_METHODS-Eintrag (PaymentMethod-Typ bleibt unberührt); eigener
+              Pfad über applyCreditToInvoice (FIFO + Cap auf Rest im Store). */}
+          {availableCredit > 0.005 && remaining > 0.005 && (
+            <div data-testid="store-credit-block" style={{ marginTop: 16, padding: '12px 14px', background: '#F7F5EE', borderRadius: 8 }}>
+              <div style={{ fontSize: 12, color: '#4B5563', marginBottom: 10 }}>
+                Store-Guthaben verfügbar: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={availableCredit}/> BHD</span>
+              </div>
+              <Button variant="secondary" fullWidth onClick={handleApplyCredit}>
+                Guthaben verrechnen (<Bhd v={Math.min(remaining, availableCredit)}/> BHD)
+              </Button>
+            </div>
+          )}
         </div>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setPaymentOpen(false)}>Cancel</Button>
