@@ -96,6 +96,51 @@ function persistDbSync(data: Uint8Array): void {
   }
 }
 
+// ── Generische String-'null'-Heilung ──────────────────────────
+// Sync-Bug (applyUpsert bis v0.8.0): JSON-null wurde beim Apply als TEXT 'null'
+// geschrieben (typeof null === 'object' → JSON.stringify(null)) — über Jahre in
+// beliebige Spalten gesynct (products-Preise, order_lines.product_id,
+// ledger_entries.reverses_entry_id, …). Der Text 'null' ist truthy und bricht
+// jede IS-NULL-Logik — v.a. die Ledger-Guards: hasLedgerEntries sah keine
+// Originale (Backfill duplizierte bei jedem Klick), reverseSource fand nichts
+// (Stornos als No-op). 'null' als echter Nutzwert ist in keiner Fachspalte
+// legitim → flächig auf SQL-NULL. Ausgenommen changelog/audit_log (JSON-
+// Payload-Tabellen — 'null' kann dort gültiges JSON sein, keine Logik liest
+// sie mit IS NULL). Nur nullbare Nicht-PK-Spalten (NOT NULL würde werfen).
+// Läuft bei jedem Start (idempotent, in-memory schnell) — fängt auch Strings,
+// die Alt-Clients während der Update-Übergangsphase erneut reinsyncen.
+// Root-Cause-Fix: sync-service.applyUpsert bindet null jetzt als SQL-NULL.
+function healSyncStringNulls(database: Database): void {
+  try {
+    const tablesRes = database.exec(
+      `SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+          AND name NOT IN ('changelog', 'audit_log')`
+    );
+    if (tablesRes.length === 0) return;
+    let healed = 0;
+    for (const row of tablesRes[0].values) {
+      const table = String(row[0]);
+      let cols;
+      try { cols = database.exec(`PRAGMA table_info("${table}")`); } catch { continue; }
+      if (cols.length === 0) continue;
+      // PRAGMA table_info-Spalten: cid, name, type, notnull, dflt_value, pk
+      for (const c of cols[0].values) {
+        const name = String(c[1]);
+        if (Number(c[3]) || Number(c[5])) continue; // notnull oder pk
+        try {
+          database.run(`UPDATE "${table}" SET "${name}" = NULL WHERE "${name}" = 'null'`);
+          const ch = database.exec('SELECT changes() AS n');
+          healed += Number(ch[0]?.values?.[0]?.[0] || 0);
+        } catch { /* Spalte defensiv überspringen */ }
+      }
+    }
+    if (healed > 0) console.log(`[DB] String-'null'-Heilung: ${healed} Werte → SQL-NULL`);
+  } catch (err) {
+    console.warn('[DB] healSyncStringNulls failed:', err);
+  }
+}
+
 function runMigrations(database: Database): void {
   // Each migration wrapped: ignore "duplicate column" errors on re-run.
   const migrations: string[] = [
@@ -1587,6 +1632,10 @@ function runMigrations(database: Database): void {
       }
     }
   }
+
+  // Generische Daten-Heilung VOR den fachlichen Daten-Migrationen — die sollen
+  // schon mit echten NULLs arbeiten.
+  healSyncStringNulls(database);
 
   // Plan §Returns §History (Round 4) — Daten-Migration:
   // Restoriert historischen invoice.paid_amount für Invoices die durch alte Refund-Logik

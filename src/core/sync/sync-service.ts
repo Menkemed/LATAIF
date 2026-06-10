@@ -283,6 +283,11 @@ function applyUpsert(db: any, table: string, id: string, data: Record<string, un
   const setClause = keys.map(k => `${k} = ?`).join(', ');
   const values = keys.map(k => {
     const v = data[k];
+    // typeof null === 'object' → JSON.stringify(null) ergäbe den TEXT 'null' in der
+    // DB. Der bricht jede IS-NULL-Logik — v.a. ledger_entries.reverses_entry_id:
+    // hasLedgerEntries/Reversals sehen keine Originale mehr (Backfill dupliziert,
+    // Stornos werden No-ops). null/undefined müssen als echtes SQL-NULL binden.
+    if (v === null || v === undefined) return null;
     return typeof v === 'object' ? JSON.stringify(v) : v;
   });
 
