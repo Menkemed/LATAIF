@@ -503,8 +503,12 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     // Plan 2026-05: Cancel funktioniert für sold UND returned (= post-sale-return
     // wurde schon ausgelöst, aber die Auto-Purchase + Loss-Expense aus dem
     // recordSale-Flow hängen noch). Dann cleant Cancel-Sale die Reste auf.
-    if (con.status !== 'sold' && con.status !== 'returned') {
-      throw new Error(`Consignment ${con.consignmentNumber} is "${con.status}" — only sold/returned consignments can be cancelled.`);
+    // paid_out (Legacy-Payout via markPaidOut/recordPartialPayout) ist nur der
+    // Extremfall Teil-Payout=100% — Schritt 3b reverst die Payout-Postings, der
+    // Reset unten leert die Payout-Felder. deleteConsignment blockt paid_out
+    // weiterhin (L-05); DIES ist der saubere Teardown-Weg.
+    if (con.status !== 'sold' && con.status !== 'returned' && con.status !== 'paid_out') {
+      throw new Error(`Consignment ${con.consignmentNumber} is "${con.status}" — only sold/returned/paid_out consignments can be cancelled.`);
     }
 
     const db = getDatabase();
@@ -591,15 +595,18 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
 
     // 3b. M-22 — Consignor-Payout(s) reversen. Bei Teil-Payout bleibt der Status
     // 'sold' (recordPartialPayout), also ist cancelSale erreichbar OBWOHL schon Geld
-    // an den Consignor floss. Ohne Reverse blieben Pseudo-Aufwand + Cash-Abgang
-    // haengen. Guarded + idempotent (findet die synthetischen source_ids ueber metadata).
-    try {
-      reverseConsignmentPayouts(id, now);
-    } catch (e) {
-      console.warn('[cancelSale] payout reversal failed:', e);
-    }
+    // an den Consignor floss; bei paid_out ist der Payout der Regelfall. Ohne Reverse
+    // blieben Pseudo-Aufwand + Cash-Abgang haengen. Guarded + idempotent (findet die
+    // synthetischen source_ids ueber metadata). Bewusst KEIN Fehler-Swallow: schlaegt
+    // der Reverse fehl, bricht der Cancel VOR dem Reset ab (sonst stuende das
+    // Consignment auf 'active' mit Phantom-Payout-Postings = stiller Geldfehler).
+    // Schritte 0-3 sind idempotent geguardet — ein erneuter Versuch raeumt nach.
+    reverseConsignmentPayouts(id, now);
 
-    // 4. Consignment zurück auf 'active', Sale-Felder leeren.
+    // 4. Consignment zurück auf 'active', Sale-Felder leeren. Auch die Payout-
+    // Metadaten (method/date/reference) nullen — sonst blieben sie nach einem
+    // paid_out/Teil-Payout-Cancel als stale Daten stehen und erschienen beim
+    // naechsten Payout-Zyklus in der Payout-Details-Card.
     db.run(
       `UPDATE consignments SET
          status = 'active',
@@ -610,17 +617,27 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
          payout_amount = NULL,
          payout_paid_amount = 0,
          payout_status = 'pending',
+         payout_method = NULL,
+         payout_date = NULL,
+         payout_reference = NULL,
          sale_method = NULL,
          updated_at = ?
        WHERE id = ?`,
       [now, id]
     );
 
-    // 5. Produkt zurück auf consignment-stock.
+    // 5. Produkt zurück auf consignment-stock. quantity defensiv auf 1, wenn ≤0:
+    // der Legacy-Pfad (markSold ohne Invoice) dekrementierte die Stueckzahl und hat
+    // keinen Lot-Restore — ohne Heilung stuende das Produkt auf 'consignment' mit
+    // quantity=0. trackUpdate fehlte hier bisher komplett (Produkt-Reset erreichte
+    // den Sync-Changelog nie — zweites Geraet behielt 'sold').
     db.run(
-      `UPDATE products SET stock_status = 'consignment', source_type = 'CONSIGNMENT', updated_at = ? WHERE id = ?`,
+      `UPDATE products SET stock_status = 'consignment', source_type = 'CONSIGNMENT',
+         quantity = CASE WHEN quantity <= 0 THEN 1 ELSE quantity END, updated_at = ?
+       WHERE id = ?`,
       [now, con.productId]
     );
+    trackUpdate('products', con.productId, { stockStatus: 'consignment', sourceType: 'CONSIGNMENT', cancelledSale: true });
 
     saveDatabase();
     trackUpdate('consignments', id, { status: 'active', cancelledSale: true });

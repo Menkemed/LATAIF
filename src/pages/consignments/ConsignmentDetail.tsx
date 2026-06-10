@@ -393,7 +393,13 @@ export function ConsignmentDetail() {
                 <Button variant="ghost" onClick={() => setCancelSaleModal(true)}>Cancel Sale (cleanup)</Button>
               )}
               {consignment.status === 'paid_out' && (
-                <Button variant="ghost" onClick={() => setPostSaleReturnModal(true)}>Post-Sale Return</Button>
+                <>
+                  <Button variant="ghost" onClick={() => setPostSaleReturnModal(true)}>Post-Sale Return</Button>
+                  {/* paid_out-Teardown: bewusst OHNE invoiceId-Bedingung — die real
+                      existierende paid_out-Population stammt aus dem Legacy-Pfad
+                      (markPaidOut ohne Invoice); der Store-Flow deckt beide Fälle. */}
+                  <Button variant="ghost" onClick={() => setCancelSaleModal(true)}>Cancel Sale</Button>
+                </>
               )}
               <Button variant="ghost" onClick={openEditModal}>
                 <Edit3 size={14} /> Edit
@@ -916,11 +922,20 @@ export function ConsignmentDetail() {
           {linkedInvoice && (
             <li>Buyer Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort(linkedInvoice)}</span> → <strong>CANCELLED</strong> (AR cleared)</li>
           )}
+          {linkedInvoice && (linkedInvoice.paidAmount || 0) > 0.005 && (
+            <li style={{ color: '#B45309' }}>Buyer already paid <strong><Bhd v={linkedInvoice.paidAmount}/> BHD</strong> — this is <strong>NOT auto-refunded</strong> (refund or delete the payment separately)</li>
+          )}
           {linkedPurchase && (
-            <li>Consignor Purchase <span className="font-mono" style={{ color: '#3D7FFF' }}>{linkedPurchase.purchaseNumber}</span> → <strong>CANCELLED</strong> (AP cleared)</li>
+            <li>Consignor Purchase <span className="font-mono" style={{ color: '#3D7FFF' }}>{linkedPurchase.purchaseNumber}</span> → <strong>CANCELLED</strong>{(linkedPurchase.paidAmount || 0) > 0.005 ? '' : ' (AP cleared)'}</li>
+          )}
+          {linkedPurchase && (linkedPurchase.paidAmount || 0) > 0.005 && (
+            <li style={{ color: '#B45309' }}>Payments of <strong><Bhd v={linkedPurchase.paidAmount}/> BHD</strong> on the consignor purchase stay booked → open receivable against the consignor</li>
           )}
           {linkedLossExpense && (
             <li>Consignor-Loss-Expense <span className="font-mono" style={{ color: '#DC2626' }}>{linkedLossExpense.expenseNumber}</span> → <strong>CANCELLED</strong></li>
+          )}
+          {(consignment.payoutPaidAmount || 0) > 0.005 && (
+            <li style={{ color: '#B45309' }}>Consignor payout of <strong><Bhd v={consignment.payoutPaidAmount || 0}/> BHD</strong>{consignment.payoutMethod ? ` (paid via ${consignment.payoutMethod})` : ''} → <strong>reversed in the books</strong></li>
           )}
           <li>Consignment <strong>{consignment.consignmentNumber}</strong> → status back to <strong>active</strong>, sale data cleared</li>
           <li>Product <strong>{productLabel}</strong> → stock_status back to <strong>consignment</strong></li>
@@ -932,6 +947,10 @@ export function ConsignmentDetail() {
         }}>
           Use this when the sale was a mistake (wrong buyer, wrong price, buyer = consignor).
           For a normal post-sale return where the customer brings the item back, use <strong>Post-Sale Return</strong> instead.
+          {(consignment.payoutPaidAmount || 0) > 0.005 && (
+            <> The payout reversal is a <strong>booking only</strong> — cash/bank will show the money as returned,
+            so make sure you actually collect <Bhd v={consignment.payoutPaidAmount || 0}/> BHD back from the consignor.</>
+          )}
         </div>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setCancelSaleModal(false)}>Keep Sale</Button>
