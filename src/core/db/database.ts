@@ -251,12 +251,6 @@ function runMigrations(database: Database): void {
     `ALTER TABLE products ADD COLUMN quantity INTEGER DEFAULT 1`,
     // Quantity pro Invoice-Line — nur relevant wenn Produkt mehrere Stück hat.
     `ALTER TABLE invoice_lines ADD COLUMN quantity INTEGER DEFAULT 1`,
-    // Refund-Tracking: getrennt zwischen "geschuldete Rückzahlung" (refund_amount) und "tatsächlich gezahlt" (refund_paid_amount).
-    // Ein Return kann offen sein (Ware retour, Geld noch nicht zurück).
-    `ALTER TABLE sales_returns ADD COLUMN refund_paid_amount REAL DEFAULT 0`,
-    `ALTER TABLE sales_returns ADD COLUMN refund_paid_date TEXT`,
-    `ALTER TABLE sales_returns ADD COLUMN refund_status TEXT DEFAULT 'NOT_REFUNDED'`,
-    `ALTER TABLE sales_returns ADD COLUMN reason TEXT`,
     // Orders nutzen jetzt Collection-Kategorien + Attribute (single source of truth).
     `ALTER TABLE orders ADD COLUMN category_id TEXT`,
     `ALTER TABLE orders ADD COLUMN attributes TEXT DEFAULT '{}'`,
@@ -284,12 +278,6 @@ function runMigrations(database: Database): void {
     // Plan §Agent §Convert: Verlinkung Agent → Customer für Convert-to-Invoice.
     // Optional. Wird beim ersten Convert befüllt und danach wiederverwendet.
     `ALTER TABLE agents ADD COLUMN customer_id TEXT REFERENCES customers(id)`,
-    // Plan §Purchase §Tax: Input-VAT per Purchase-Line, damit sie gegen
-    // Output-VAT in der Steuer-Abrechnung verrechnet werden kann.
-    // Default tax_scheme=NULL ⇒ kein VAT (Backward-Compat für Altbestände).
-    `ALTER TABLE purchase_lines ADD COLUMN tax_scheme TEXT`,
-    `ALTER TABLE purchase_lines ADD COLUMN vat_rate REAL DEFAULT 0`,
-    `ALTER TABLE purchase_lines ADD COLUMN vat_amount REAL DEFAULT 0`,
     // Plan §Repair §Item-Details: kategorie-basierte Item-Erfassung. Felder
     // ergänzen statt ersetzen, damit Legacy-Repairs ohne Kategorie weiter funktionieren.
     `ALTER TABLE repairs ADD COLUMN item_category_id TEXT`,
@@ -674,6 +662,14 @@ function runMigrations(database: Database): void {
       line_total REAL NOT NULL DEFAULT 0,
       position INTEGER NOT NULL DEFAULT 0
     )`,
+    // Plan §Purchase §Tax: Input-VAT per Purchase-Line, damit sie gegen
+    // Output-VAT in der Steuer-Abrechnung verrechnet werden kann.
+    // Default tax_scheme=NULL ⇒ kein VAT (Backward-Compat für Altbestände).
+    // MUSS NACH dem CREATE stehen: auf frischen DBs scheiterte das ALTER sonst
+    // mit "no such table" und die Tabelle entstand OHNE die VAT-Spalten.
+    `ALTER TABLE purchase_lines ADD COLUMN tax_scheme TEXT`,
+    `ALTER TABLE purchase_lines ADD COLUMN vat_rate REAL DEFAULT 0`,
+    `ALTER TABLE purchase_lines ADD COLUMN vat_amount REAL DEFAULT 0`,
 
     `CREATE TABLE IF NOT EXISTS purchase_payments (
       id TEXT PRIMARY KEY,
@@ -767,6 +763,15 @@ function runMigrations(database: Database): void {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_sales_returns_invoice ON sales_returns(invoice_id)`,
     `CREATE INDEX IF NOT EXISTS idx_sales_returns_branch ON sales_returns(branch_id)`,
+    // Refund-Tracking: getrennt zwischen "geschuldete Rückzahlung" (refund_amount)
+    // und "tatsächlich gezahlt" (refund_paid_amount). Ein Return kann offen sein
+    // (Ware retour, Geld noch nicht zurück).
+    // MUSS NACH dem CREATE stehen: auf frischen DBs scheiterte das ALTER sonst
+    // mit "no such table" und die Tabelle entstand OHNE die Refund-Spalten.
+    `ALTER TABLE sales_returns ADD COLUMN refund_paid_amount REAL DEFAULT 0`,
+    `ALTER TABLE sales_returns ADD COLUMN refund_paid_date TEXT`,
+    `ALTER TABLE sales_returns ADD COLUMN refund_status TEXT DEFAULT 'NOT_REFUNDED'`,
+    `ALTER TABLE sales_returns ADD COLUMN reason TEXT`,
 
     // Credit Notes (Storno-Rechnungen) — eigenständige Steuerurkunde, 1:1 zu Sales Return
     // Industry standard (SAP/DATEV/Xero/QuickBooks): jeder Return erzeugt automatisch eine Credit Note
