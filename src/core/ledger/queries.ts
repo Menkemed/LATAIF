@@ -150,6 +150,12 @@ export function cashflow(
 }
 
 // ── Revenue-Snapshot für eine Periode ─────────────────────────
+//
+// M-01: Das ist die LEDGER-Sicht (Realisierung bei Issue, ALLE Quellen:
+// Invoice, Repair, Metal, Agent-Sold, Scrap-Spread) — Debug/Recon-Zwecke
+// (LedgerDebugPage). Fuer Reports und Kunden-Umsatz NICHT verwenden:
+// die eine Report-Regel ist computeSalesMetrics (FINAL-only, Refunds
+// anteilig) in core/reports/sales-metrics.ts.
 
 export interface RevenueSnapshot {
   netRevenue: number;

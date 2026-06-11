@@ -3,6 +3,12 @@
 //   1. Standard Rated Sales at 10% (Line 1 of the VAT Return)
 //   2. Profit Margin Scheme Sales (Line 1 of the VAT Return)
 //   3. Zero-Rated Domestic Sales (Line 4 of the VAT Return)
+//
+// M-01 ABGRENZUNG: Drei bewusst verschiedene Revenue-Regeln im System —
+//   Steuer (hier):  Periode = Tag der Vollzahlung (invoiceFinalizationDate), nur FINAL.
+//   Reports/Kunden: computeSalesMetrics — FINAL-only auf issuedAt, Refunds anteilig.
+//   Ledger:         Realisierung bei ISSUE (Accrual, siehe posting.ts postInvoiceIssued).
+// Abweichungen zwischen den dreien sind gewollt, kein Bug.
 
 import * as XLSX from 'xlsx';
 import type { Invoice, Customer, Product } from '@/core/models/types';

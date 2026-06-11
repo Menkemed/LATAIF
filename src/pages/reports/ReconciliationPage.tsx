@@ -127,6 +127,16 @@ function domainRevenue(branchId: string): number {
   // Wir summieren also line-level, NICHT invoice.net_amount — das Header-Feld
   // kann durch akkumulierte Rundungen abweichen (Σ line_total - Σ vat_amount
   // ≠ Header-net wenn Rundung pro Line gerundet wurde).
+  //
+  // M-01: Verglichen wird gegen den INVOICE/CREDIT_NOTE-Anteil des Ledger-REVENUE
+  // (sourceModule-Filter) — die uebrigen Quellen (Repair/Metal/Agent/Scrap) haben
+  // kein Invoice-Pendant und stehen als Info-Zeile unter der Tabelle.
+  // Drei LEGITIME Rest-Differenzen koennen bleiben (kein Posting-Bug):
+  //  1. Line-Edit gebuchter Invoices: rewriteInvoiceLines repostet das Ledger
+  //     nicht (bekanntes Backlog-Item) → Ledger zeigt den Stand bei Issue.
+  //  2. M-04 Cancel-nach-CN: cancelInvoice reversiert die Invoice-Buchung,
+  //     die CN-Buchung der vorherigen Returns bleibt — Domain zaehlt die CN noch.
+  //  3. Legacy-MARGIN-CNs (vor v0.7.x) buchten CN-VAT anders als heute.
   const invRows = query(
     `SELECT COALESCE(SUM(il.line_total - il.vat_amount), 0) AS t
      FROM invoice_lines il
@@ -340,8 +350,13 @@ export function ReconciliationPage() {
         note: 'Domain = Σ invoice (gross − paid) − Σ CN.receivableCancelAmount.' },
       { label: 'Accounts Payable',       account: 'ACCOUNTS_PAYABLE',    ledger: balanceOf('ACCOUNTS_PAYABLE'),    domain: domainAP(branchId),
         note: 'Domain = Σ aktive (Purchase+Expense) − Σ alle Payments (auch zu cancelled).' },
-      { label: 'Revenue (net)',          account: 'REVENUE',             ledger: balanceOf('REVENUE'),             domain: domainRevenue(branchId),
-        note: 'Domain = Σ (line.line_total − line.vat_amount) − Σ CN.net (line-level wie Ledger).' },
+      // M-01: nur der INVOICE/CN-Anteil ist mit dem Invoice-Domain-Aggregat
+      // vergleichbar — balanceOf traegt das Vorzeichen (CN-Anteil kommt negativ).
+      // Restliche REVENUE-Quellen (Repair/Metal/Agent/Scrap) → Info-Zeile unten.
+      { label: 'Revenue (net, invoices)', account: 'REVENUE',
+        ledger: balanceOf('REVENUE', { sourceModule: 'INVOICE' }) + balanceOf('REVENUE', { sourceModule: 'CREDIT_NOTE' }),
+        domain: domainRevenue(branchId),
+        note: 'Nur source_module INVOICE+CREDIT_NOTE. Domain = Σ (line.line_total − line.vat_amount) − Σ CN.net (line-level wie Ledger).' },
       { label: 'Customer Deposits',      account: 'CUSTOMER_DEPOSITS',   ledger: balanceOf('CUSTOMER_DEPOSITS'),   domain: domainCustomerDeposits(branchId),
         note: 'Domain = noch nicht in Invoice umgewandelte Order-Anzahlungen.' },
       { label: 'Customer Credit',        account: 'CUSTOMER_CREDIT',     ledger: balanceOf('CUSTOMER_CREDIT'),     domain: domainCustomerCredit(branchId),
@@ -356,12 +371,18 @@ export function ReconciliationPage() {
         note: 'Domain = Σ Investments − Σ Withdrawals − Σ Profit-Distributions.' },
     ];
 
+    // M-01: Residual = REVENUE-Anteile ohne Invoice-Pendant (REPAIR_PAYMENT,
+    // METAL_PAYMENT, AGENT_TRANSFER_SOLD, SCRAP_TRADE, Legacy AGENT_SETTLEMENT).
+    // Bewusst KEINE Vergleichszeile (kein Domain-Gegenstueck) — nur Info.
+    const revenueRow = rows.find(r => r.account === 'REVENUE');
+    const revenueOther = balanceOf('REVENUE') - (revenueRow?.ledger ?? 0);
+
     const branchImbalance = ledgerImbalance(branchId);
     const broken: ImbalancedTx[] = findImbalancedTransactions(branchId);
     const sources = loadSourceCounts(branchId);
     const orphans = loadOrphans(branchId);
 
-    return { rows, branchImbalance, broken, sources, orphans, branchId };
+    return { rows, revenueOther, branchImbalance, broken, sources, orphans, branchId };
   }, [refreshTick]);
 
   useEffect(() => {
@@ -456,6 +477,14 @@ export function ReconciliationPage() {
               })}
             </tbody>
           </table>
+        </div>
+        {/* M-01: Info-Zeile AUSSERHALB der Vergleichs-Rows (kein Domain-Pendant,
+            keine ✓/✗-Logik, kein account-Key-Konflikt mit der REVENUE-Zeile). */}
+        <div style={{ padding: '10px 16px', borderTop: '1px solid #E5E9EE', fontSize: 12, color: '#6B7280', display: 'flex', justifyContent: 'space-between' }}>
+          <span>
+            Other revenue (ledger) {'—'} Repair / Metal / Agent-Sold / Scrap-Spread, ohne Invoice-Pendant; bewusst nicht Teil des Vergleichs:
+          </span>
+          <span style={{ fontFamily: 'monospace' }}><Bhd v={data.revenueOther}/> BHD</span>
         </div>
       </Card>
 

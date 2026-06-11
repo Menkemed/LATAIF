@@ -367,6 +367,15 @@ function cashAccountFor(method: PaymentMethod | 'credit'): LedgerAccount {
 //   DEBIT  AR              by lineTotal
 //   CREDIT REVENUE         by (lineTotal - vatAmount)
 //   CREDIT VAT/MARGIN_VAT  by vatAmount   (übersprungen wenn 0)
+//
+// M-01 GRUNDSATZENTSCHEID (User, 2026-06-10): Das Ledger realisiert Revenue
+// BEI ISSUE (Accrual — Forderung entsteht, Umsatz gebucht). Die Reports und
+// alle Kunden-Anzeigen realisieren bewusst ANDERS: erst bei FINAL (voll
+// bezahlt), via computeSalesMetrics (core/reports/sales-metrics.ts). Diese
+// Differenz ist GEWOLLT und KEIN Bug — ein Umbau des Ledgers auf FINAL waere
+// eine eigene Deferred-Revenue-Grundsatzentscheidung. Die Reconciliation
+// vergleicht deshalb nur den source_module-INVOICE/CN-Anteil; Steuer-Export
+// (nbr-export) nutzt eine dritte Regel: Periode = Tag der Vollzahlung.
 
 export function postInvoiceIssued(invoice: Invoice): PostingResult {
   if (!invoice.lines || invoice.lines.length === 0) {

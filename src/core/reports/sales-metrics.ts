@@ -17,6 +17,11 @@
 // ABGESCHAFFT (nie sync-getrackt, Full-Row-LWW → Multi-Device-Drift, loechrige
 // Inkremente). Kunden-Umsatz wird IMMER hieraus abgeleitet — Datenbeschaffung
 // dafuer: loadSalesData() in sales-metrics-loader.ts.
+// ABGRENZUNG: Das zentrale Ledger realisiert Revenue BEI ISSUE (Accrual,
+// bewusster Entscheid — siehe postInvoiceIssued in core/ledger/posting.ts) und
+// enthaelt auch Nicht-Invoice-Quellen (Repair/Metal/Agent/Scrap). Ledger- und
+// Report-Revenue duerfen deshalb abweichen; vergleichbar ist nur der
+// source_module-INVOICE/CN-Anteil (ReconciliationPage).
 //
 // Reine Funktion: der Aufrufer reicht die bereits geladenen Invoices/Returns rein
 // (loest die SQL-vs-JS-Huerde — die LOGIK ist zentral, die Datenbeschaffung bleibt
