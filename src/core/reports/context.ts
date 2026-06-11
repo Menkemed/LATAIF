@@ -7,6 +7,7 @@
 import { query } from '@/core/db/helpers';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { computeSalesMetrics, type SalesMetrics } from '@/core/reports/sales-metrics';
+import { loadSalesData } from '@/core/reports/sales-metrics-loader';
 import { canonicalLoanDirection } from '@/core/models/types';
 
 // ── Period helpers ──────────────────────────────────────────
@@ -161,55 +162,14 @@ export interface BuildOpts {
 }
 
 // M-13 — laedt FINAL-Rechnungen + Lines + Returns einer Periode als Minimal-Objekte
-// und delegiert an den zentralen SSOT computeSalesMetrics. context.ts ist headless
-// (reines SQL), daher der lokale Datenabruf hier; die Umsatzregel (FINAL-only, Refunds
+// und delegiert an den zentralen SSOT computeSalesMetrics. Seit M-01 lebt die
+// Datenbeschaffung im geteilten loadSalesData (sales-metrics-loader.ts) — dieselbe
+// Quelle wie getCustomerStats/Kunden-Anzeigen; die Umsatzregel (FINAL-only, Refunds
 // anteilig ab, VAT nur VAT_10) lebt EINMAL in sales-metrics.ts.
 // endISO ist exklusiv (< endISO); computeSalesMetrics ist inklusiv (<= to) -> wir
 // uebergeben endISO-1ms als inklusive Obergrenze (auch fuer das Refund-Datum korrekt).
 function loadSalesMetrics(branchId: string, startISO: string, endISO: string): SalesMetrics {
-  const invRows = query(
-    `SELECT id, status, gross_amount, net_amount, margin_snapshot, purchase_price_snapshot, issued_at, created_at
-       FROM invoices
-      WHERE branch_id = ? AND status = 'FINAL'
-        AND COALESCE(issued_at, created_at) >= ? AND COALESCE(issued_at, created_at) < ?`,
-    [branchId, startISO, endISO]
-  );
-  const lineRows = query(
-    `SELECT il.invoice_id, il.tax_scheme, il.vat_amount
-       FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id
-      WHERE i.branch_id = ? AND i.status = 'FINAL'
-        AND COALESCE(i.issued_at, i.created_at) >= ? AND COALESCE(i.issued_at, i.created_at) < ?`,
-    [branchId, startISO, endISO]
-  );
-  const linesByInv = new Map<string, { taxScheme: string; vatAmount: number }[]>();
-  for (const lr of lineRows) {
-    const iid = String(lr.invoice_id);
-    const arr = linesByInv.get(iid) || [];
-    arr.push({ taxScheme: String(lr.tax_scheme || ''), vatAmount: Number(lr.vat_amount) || 0 });
-    linesByInv.set(iid, arr);
-  }
-  const invoices = invRows.map(r => ({
-    id: String(r.id),
-    status: String(r.status),
-    grossAmount: Number(r.gross_amount) || 0,
-    netAmount: Number(r.net_amount) || 0,
-    marginSnapshot: Number(r.margin_snapshot) || 0,
-    purchasePriceSnapshot: Number(r.purchase_price_snapshot) || 0,
-    issuedAt: (r.issued_at as string) || undefined,
-    createdAt: (r.created_at as string) || undefined,
-    lines: linesByInv.get(String(r.id)) || [],
-  }));
-  const retRows = query(
-    `SELECT invoice_id, refund_paid_amount, refund_paid_date, return_date
-       FROM sales_returns WHERE branch_id = ?`,
-    [branchId]
-  );
-  const salesReturns = retRows.map(r => ({
-    invoiceId: String(r.invoice_id),
-    refundPaidAmount: Number(r.refund_paid_amount) || 0,
-    refundPaidDate: (r.refund_paid_date as string) || undefined,
-    returnDate: (r.return_date as string) || undefined,
-  }));
+  const { invoices, salesReturns } = loadSalesData({ branchId, startISO, endISO });
   const toInclusive = new Date(new Date(endISO).getTime() - 1).toISOString();
   return computeSalesMetrics(invoices, salesReturns, { from: startISO, to: toInclusive });
 }

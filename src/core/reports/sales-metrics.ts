@@ -1,14 +1,22 @@
 // SSOT fuer Verkaufs-Kennzahlen ALLER Reports (Dashboard, Sales-Report,
-// Executive Summary, Analytics, KPI-Cards). Eine einzige Realisierungsregel,
+// Executive Summary, Analytics, KPI-Cards) UND — seit M-01 — fuer den
+// per-Kunde-Umsatz (LTV: CustomerDetail/CustomerList/Top Clients/Analytics,
+// via computeSalesMetricsByCustomer). Eine einzige Realisierungsregel,
 // damit die Zahlen nie wieder auseinanderlaufen.
 //
 // REGEL:
-//  - nur FINAL-Rechnungen (voll bezahlt) in der Periode (auf issuedAt ?? createdAt)
+//  - nur FINAL-Rechnungen (voll bezahlt) in der Periode (auf issuedAt ?? createdAt);
+//    period weglassen = echtes All-Time (kein Datumsfilter — auch fuer Refunds)
 //  - Rueckerstattungen (cash auf FINAL-Invoices, Refund-Datum in Periode) werden
 //    ANTEILIG (paid / gross) von ALLEN Kennzahlen abgezogen — einheitlich, auch Cost
 //  - kundensichtbare VAT NUR aus VAT_10-Lines (Margin-VAT ist intern; siehe M-11)
 //  - Scrap/Altgold ist NICHT enthalten (separat ausweisen) — die Funktion nimmt
 //    bewusst keine Scrap-Daten entgegen
+//
+// M-01: customers.total_revenue/total_profit/purchase_count sind als Quelle
+// ABGESCHAFFT (nie sync-getrackt, Full-Row-LWW → Multi-Device-Drift, loechrige
+// Inkremente). Kunden-Umsatz wird IMMER hieraus abgeleitet — Datenbeschaffung
+// dafuer: loadSalesData() in sales-metrics-loader.ts.
 //
 // Reine Funktion: der Aufrufer reicht die bereits geladenen Invoices/Returns rein
 // (loest die SQL-vs-JS-Huerde — die LOGIK ist zentral, die Datenbeschaffung bleibt
@@ -70,12 +78,15 @@ function invoiceInPeriod(inv: SalesMetricsInvoice, period: SalesPeriod): boolean
   return when >= period.from && when <= period.to;
 }
 
+// period weglassen = All-Time: KEIN Datumsfilter auf Invoices UND Refunds.
+// Bewusst optionaler Parameter statt Sentinel-Datum ('9999-…'), damit
+// zukunftsdatierte Belege nicht anders behandelt werden als im Sales-Report.
 export function computeSalesMetrics(
   invoices: SalesMetricsInvoice[],
   salesReturns: SalesMetricsReturn[],
-  period: SalesPeriod,
+  period?: SalesPeriod,
 ): SalesMetrics {
-  const finalInvs = invoices.filter(i => i.status === 'FINAL' && invoiceInPeriod(i, period));
+  const finalInvs = invoices.filter(i => i.status === 'FINAL' && (!period || invoiceInPeriod(i, period)));
   const finalIds = new Set(finalInvs.map(i => i.id));
   const finalById = new Map(finalInvs.map(i => [i.id, i]));
 
@@ -89,15 +100,16 @@ export function computeSalesMetrics(
   }
 
   // Rueckerstattungen: cash tatsaechlich erstattet, nur auf FINAL-Invoices, nur wenn
-  // das Refund-Datum in der Periode liegt. Proportional ueber gross verteilt.
-  const fromDay = period.from.slice(0, 10);
-  const toDay = period.to.slice(0, 10);
+  // das Refund-Datum in der Periode liegt (ohne period: immer). Proportional ueber
+  // gross verteilt.
+  const fromDay = period ? period.from.slice(0, 10) : '';
+  const toDay = period ? period.to.slice(0, 10) : '';
   for (const r of salesReturns) {
     if (!finalIds.has(r.invoiceId)) continue;
     const paid = r.refundPaidAmount || 0;
     if (paid <= 0) continue;
     const when = (r.refundPaidDate || r.returnDate || '').slice(0, 10);
-    if (when && (when < fromDay || when > toDay)) continue;
+    if (period && when && (when < fromDay || when > toDay)) continue;
     const inv = finalById.get(r.invoiceId)!;
     const g = inv.grossAmount || 0;
     gross -= paid;
@@ -111,4 +123,42 @@ export function computeSalesMetrics(
   }
 
   return { count: finalInvs.length, gross, net, vat, profit, cost };
+}
+
+// M-01 — per-Kunde-Partition derselben Regel: gruppiert die Invoices nach
+// customerId und rechnet pro Kunde EXAKT computeSalesMetrics. Returns folgen
+// ihrer Invoice (invoiceId → customerId) — ein Refund zaehlt nur beim Kunden,
+// dessen FINAL-Rechnung er referenziert (Orphan-Returns fallen wie im
+// Gesamt-Report durch den finalIds-Guard raus). Invoices ohne customerId
+// (Walk-in) tragen kein LTV und fehlen in der Map.
+// Mathematisch partitioniert das den Gesamt-Report: Summe aller Map-Werte
+// = computeSalesMetrics(alle Invoices mit Kunde).
+export function computeSalesMetricsByCustomer(
+  invoices: Array<SalesMetricsInvoice & { customerId?: string | null }>,
+  salesReturns: SalesMetricsReturn[],
+  period?: SalesPeriod,
+): Map<string, SalesMetrics> {
+  const invsByCustomer = new Map<string, SalesMetricsInvoice[]>();
+  const customerByInvoice = new Map<string, string>();
+  for (const inv of invoices) {
+    const cid = inv.customerId;
+    if (!cid) continue;
+    const arr = invsByCustomer.get(cid) || [];
+    arr.push(inv);
+    invsByCustomer.set(cid, arr);
+    customerByInvoice.set(inv.id, cid);
+  }
+  const retsByCustomer = new Map<string, SalesMetricsReturn[]>();
+  for (const r of salesReturns) {
+    const cid = customerByInvoice.get(r.invoiceId);
+    if (!cid) continue;
+    const arr = retsByCustomer.get(cid) || [];
+    arr.push(r);
+    retsByCustomer.set(cid, arr);
+  }
+  const out = new Map<string, SalesMetrics>();
+  for (const [cid, invs] of invsByCustomer) {
+    out.set(cid, computeSalesMetrics(invs, retsByCustomer.get(cid) || [], period));
+  }
+  return out;
 }

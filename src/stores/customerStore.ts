@@ -6,6 +6,8 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { customerBalance } from '@/core/ledger/queries';
+import { computeSalesMetrics } from '@/core/reports/sales-metrics';
+import { loadSalesData } from '@/core/reports/sales-metrics-loader';
 
 interface CustomerStore {
   customers: Customer[];
@@ -23,9 +25,9 @@ interface CustomerStore {
   getOutstanding: (customerId: string) => { outstanding: number; invoiceCount: number; totalPaid: number; totalGross: number };
   // Credit-Modell: verfügbares Store-Guthaben des Kunden (Σ amount − used_amount über OPEN-Credits).
   getAvailableCredit: (customerId: string) => number;
-  // Live-Cashflow-Berechnung (User-Vorgabe):
-  //  Revenue     = Σ payments.amount − Σ sales_returns.refund_paid_amount   (was reinkam minus was raus ging)
-  //  Profit      = Σ payment·margin/gross − Σ refund·margin/gross           (anteilig zum Cash-Anteil)
+  // M-01 — Kunden-Umsatz RECHNUNGSBASIERT aus der einen SSOT (User-Entscheid 2026-06-10):
+  //  Revenue     = Σ gross der FINAL-Invoices − anteilige Cash-Refunds  (= computeSalesMetrics, All-Time)
+  //  Profit      = Σ marginSnapshot − anteiliger Refund-Profit          (dieselbe Regel wie Sales-Report)
   //  Outstanding = Σ (gross − paid) PARTIAL/DRAFT Invoices + offene we_lend Loans
   //                + offene Approval-Sold-Transfers (counterparty CUSTOMER im Ledger)
   getCustomerStats: (customerId: string) => {
@@ -277,40 +279,16 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
     }
   },
 
-  // Live-Cashflow:
-  //  Revenue = Σ Customer-Zahlungen − Σ tatsächlich geleistete Refund-Zahlungen.
-  //  Profit  = anteilig: pro Zahlung margin/gross-Quote, ebenso pro Refund-Zahlung abgezogen.
+  // M-01 — Revenue/Profit kommen aus der EINEN Umsatz-Wahrheit computeSalesMetrics
+  // (rechnungsbasiert: Σ gross der FINAL-Invoices − anteilige Refunds, All-Time ohne
+  // period). Vorher zahlungsbasiert (Σ payments − Σ refund_paid) → Tips/Überzahlungen
+  // zählten ins LTV und die Zahl wich vom Sales-Report ab. FINAL-only bleibt
+  // (User-Vorgabe 2026-04-29): PARTIAL/DRAFT/CANCELLED tragen NICHT bei.
   //  Outstanding = (gross − paid) der offenen Invoices + offene we_lend-Loans.
-  // User-Vorgabe (2026-04-29): Revenue/Profit zählen NUR bei status='FINAL' (voll bezahlt).
-  // PARTIAL/DRAFT/CANCELLED-Invoices tragen NICHT bei — Teilzahlung wird in der UI separat
-  // als „Paid"/„Remaining" angezeigt, aber erst bei voller Settle-ung wird Umsatz realisiert.
   getCustomerStats: (customerId) => {
     try {
-      // Cash-Inflow: nur Zahlungen auf FINAL-Invoices zählen als Revenue.
-      const inflowRow = query(
-        `SELECT COALESCE(SUM(p.amount), 0) AS paid_in,
-                COALESCE(SUM(p.amount * (i.margin_snapshot / NULLIF(i.gross_amount, 0))), 0) AS profit_in
-         FROM payments p
-         JOIN invoices i ON i.id = p.invoice_id
-         WHERE i.customer_id = ? AND i.status = 'FINAL'`,
-        [customerId]
-      );
-
-      // Cash-Outflow: Refunds nur abziehen wenn die zugehörige Invoice FINAL war
-      // (sonst wurde sie nie als Revenue gezählt → Refund würde Revenue ins Negative drücken).
-      const outflowRow = query(
-        `SELECT COALESCE(SUM(r.refund_paid_amount), 0) AS paid_out,
-                COALESCE(SUM(r.refund_paid_amount * (i.margin_snapshot / NULLIF(i.gross_amount, 0))), 0) AS profit_out
-         FROM sales_returns r
-         JOIN invoices i ON i.id = r.invoice_id
-         WHERE r.customer_id = ? AND i.status = 'FINAL'`,
-        [customerId]
-      );
-
-      const paidIn   = Number(inflowRow[0]?.paid_in   || 0);
-      const profitIn = Number(inflowRow[0]?.profit_in || 0);
-      const paidOut  = Number(outflowRow[0]?.paid_out  || 0);
-      const profitOut= Number(outflowRow[0]?.profit_out || 0);
+      const { invoices, salesReturns } = loadSalesData({ customerId });
+      const m = computeSalesMetrics(invoices, salesReturns);
 
       // Outstanding aus Invoices — subtrahiert CN receivable_cancel für korrekte Netto-Schuld.
       // open_cnt zählt nur Invoices mit tatsächlich offenen Beträgen (nach CN-Abzug).
@@ -375,11 +353,11 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       const openTransferCount = Number(transferRow[0]?.cnt || 0);
 
       return {
-        // User-Spec: Revenue darf negativ werden wenn Refund > Zahlungen — Kunde hat
-        // mehr zurückbekommen als bezahlt (Goodwill-Refund / Storno mit Aufschlag).
-        // Vorher wurde mit Math.max(0,…) auf 0 geclampt, das hat den Refund unsichtbar gemacht.
-        revenue: paidIn - paidOut,
-        profit: profitIn - profitOut,
+        // User-Spec: Revenue darf negativ werden wenn Refunds > Rechnungssumme —
+        // Kunde hat mehr zurückbekommen als die Rechnung trug (Goodwill-Refund).
+        // KEIN Math.max(0,…)-Clamp, sonst wird der Refund unsichtbar (wie Sales-Report).
+        revenue: m.gross,
+        profit: m.profit,
         outstanding: invoiceOutstanding + loanOpen,
         invoiceOutstanding,
         loanOutstanding: loanOpen,
