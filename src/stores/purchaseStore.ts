@@ -90,7 +90,6 @@ interface PurchaseStore {
   createPurchase: (input: PurchaseInput) => Purchase;
   addPayment: (purchaseId: string, amount: number, method: 'cash' | 'bank' | 'benefit' | 'credit', reference?: string, note?: string) => void;
   cancelPurchase: (id: string) => void;
-  deletePurchase: (id: string) => void;
   // Returns
   createReturn: (input: {
     purchaseId: string;
@@ -348,7 +347,7 @@ function arriveLinkedOrderLines(
   for (const oid of affectedOrders) recomputeOrderStatusRaw(db, oid);
 }
 
-// Nach cancelPurchase/deletePurchase: verknuepfte ARRIVED-Zeilen zurueck auf
+// Nach cancelPurchase: verknuepfte ARRIVED-Zeilen zurueck auf
 // PENDING (nur nicht-invoicte) — die Order kann dann neu beschafft werden.
 function revertLinkedOrderLines(db: SqlDb, purchaseId: string): void {
   const linkRows = query(
@@ -724,39 +723,6 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       if (hasReversalFor('PURCHASE', id)) return;
       postPurchaseCancelled({ id } as Purchase);
     });
-  },
-
-  deletePurchase: (id) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    // Phase 7 Sync: betroffene Produkte VOR Cancel/Delete sammeln.
-    const affectedRows = query(
-      `SELECT DISTINCT product_id FROM stock_lots WHERE purchase_id = ?`,
-      [id]
-    );
-    const affectedProductIds = affectedRows.map(r => r.product_id as string);
-    // Lots cleanen — Schema hat ON DELETE SET NULL, sonst bleiben orphaned Lots
-    // mit purchase_id=NULL stehen und tauchen weiter als verkaufbar auf.
-    // Bereits verkaufte Lots (invoice_lines.lot_id gesetzt) duerfen nicht weg —
-    // soft-cancel statt hart loeschen, damit Cost-Snapshot-Audit erhalten bleibt.
-    db.run(`UPDATE stock_lots SET status = 'CANCELLED', purchase_id = NULL, purchase_line_id = NULL WHERE purchase_id = ?`, [id]);
-    // Back-to-Back: verknuepfte ARRIVED-Order-Zeilen zurueck auf PENDING — VOR
-    // dem DELETE, da die Link-Zeilen in purchase_lines mit-cascaded werden.
-    revertLinkedOrderLines(db, id);
-    db.run(`DELETE FROM purchases WHERE id = ?`, [id]);
-    for (const pid of affectedProductIds) {
-      syncProductQuantity(pid);
-      // F-PRC-01 — Phantom-Status vermeiden (siehe cancelPurchase).
-      if (getAvailableStock(pid) === 0) {
-        db.run(
-          `UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`,
-          [now, pid]
-        );
-      }
-    }
-    saveDatabase();
-    trackDelete('purchases', id);
-    get().loadPurchases();
   },
 
   // ── Purchase Returns (Plan §Purchase Returns) ──
