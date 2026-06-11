@@ -2487,25 +2487,28 @@ async function seedFreshDatabase(database: Database): Promise<void> {
   pStmt.free();
 
   // ── Demo customers ──
+  // M-01: keine Fake-LTV-Werte (total_revenue/total_profit/purchase_count) mehr —
+  // Kunden-Umsatz wird aus den Invoices abgeleitet; erfundene Zahlen wuerden den
+  // SSOT-Anzeigen sichtbar widersprechen. Spalten bleiben auf DEFAULT 0.
   const customers = [
-    { id:'c-1', fn:'Ahmed', ln:'Al-Khalifa', co:'Al-Khalifa Holdings', ph:'+973 3912 4455', wa:'+973 3912 4455', vip:2, prefs:['Rolex','Patek Philippe','Audemars Piguet'], bmin:30000, bmax:350000, stage:'active', rev:842000, profit:186400, cnt:12 },
-    { id:'c-2', fn:'Fatima', ln:'Hassan', ph:'+973 3855 2200', vip:1, prefs:['Rolex','Cartier','Chanel'], bmin:10000, bmax:80000, stage:'active', rev:245000, profit:48200, cnt:6 },
-    { id:'c-3', fn:'Mohammed', ln:'Al-Habsi', co:'Gulf Luxury Group', ph:'+973 3401 8800', vip:3, prefs:['Patek Philippe','Richard Mille','Hermes'], bmin:100000, bmax:1000000, stage:'active', rev:1520000, profit:340000, cnt:18 },
-    { id:'c-4', fn:'Sara', ln:'Al-Dosari', ph:'+973 3600 1122', vip:1, prefs:['Chanel','Hermes','Cartier','Van Cleef & Arpels'], bmin:5000, bmax:60000, stage:'qualified', rev:78000, profit:18500, cnt:4 },
-    { id:'c-5', fn:'Khalid', ln:'Bin Rashid', co:'Rashid Investments', ph:'+973 3777 9900', vip:2, prefs:['Audemars Piguet','Rolex','Richard Mille'], bmin:40000, bmax:200000, stage:'lead', rev:0, profit:0, cnt:0 },
-    { id:'c-6', fn:'Noura', ln:'Al-Mannai', ph:'+973 3200 5500', vip:1, prefs:['Hermes','Louis Vuitton','Chanel'], bmin:8000, bmax:70000, stage:'active', rev:134000, profit:32000, cnt:8 },
+    { id:'c-1', fn:'Ahmed', ln:'Al-Khalifa', co:'Al-Khalifa Holdings', ph:'+973 3912 4455', wa:'+973 3912 4455', vip:2, prefs:['Rolex','Patek Philippe','Audemars Piguet'], bmin:30000, bmax:350000, stage:'active' },
+    { id:'c-2', fn:'Fatima', ln:'Hassan', ph:'+973 3855 2200', vip:1, prefs:['Rolex','Cartier','Chanel'], bmin:10000, bmax:80000, stage:'active' },
+    { id:'c-3', fn:'Mohammed', ln:'Al-Habsi', co:'Gulf Luxury Group', ph:'+973 3401 8800', vip:3, prefs:['Patek Philippe','Richard Mille','Hermes'], bmin:100000, bmax:1000000, stage:'active' },
+    { id:'c-4', fn:'Sara', ln:'Al-Dosari', ph:'+973 3600 1122', vip:1, prefs:['Chanel','Hermes','Cartier','Van Cleef & Arpels'], bmin:5000, bmax:60000, stage:'qualified' },
+    { id:'c-5', fn:'Khalid', ln:'Bin Rashid', co:'Rashid Investments', ph:'+973 3777 9900', vip:2, prefs:['Audemars Piguet','Rolex','Richard Mille'], bmin:40000, bmax:200000, stage:'lead' },
+    { id:'c-6', fn:'Noura', ln:'Al-Mannai', ph:'+973 3200 5500', vip:1, prefs:['Hermes','Louis Vuitton','Chanel'], bmin:8000, bmax:70000, stage:'active' },
   ];
 
   const cStmt = database.prepare(
     `INSERT INTO customers (id, branch_id, first_name, last_name, company, phone, whatsapp, country, language,
-      budget_min, budget_max, vip_level, preferences, customer_type, sales_stage, total_revenue, total_profit, purchase_count, created_at, updated_at, created_by)
-     VALUES (?, 'branch-main', ?, ?, ?, ?, ?, 'BH', 'en', ?, ?, ?, ?, 'collector', ?, ?, ?, ?, ?, ?, 'user-owner')`
+      budget_min, budget_max, vip_level, preferences, customer_type, sales_stage, created_at, updated_at, created_by)
+     VALUES (?, 'branch-main', ?, ?, ?, ?, ?, 'BH', 'en', ?, ?, ?, ?, 'collector', ?, ?, ?, 'user-owner')`
   );
   for (const c of customers) {
     cStmt.run([
       c.id, c.fn, c.ln, c.co || null, c.ph, c.wa || null,
       c.bmin, c.bmax, c.vip, JSON.stringify(c.prefs), c.stage,
-      c.rev, c.profit, c.cnt, now, now,
+      now, now,
     ]);
   }
   cStmt.free();

@@ -163,14 +163,16 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
     const fields: string[] = [];
     const values: unknown[] = [];
 
+    // M-01: totalRevenue/totalProfit/purchaseCount sind hier bewusst NICHT mehr
+    // schreibbar — CustomerDetail-Edit schrieb sonst die stalen Form-Werte zurueck
+    // (Stale-Overwrite). Kunden-Umsatz lebt ausschliesslich in computeSalesMetrics.
     const fieldMap: Record<string, string> = {
       firstName: 'first_name', lastName: 'last_name', company: 'company',
       phone: 'phone', whatsapp: 'whatsapp', email: 'email',
       country: 'country', language: 'language', budgetMin: 'budget_min',
       budgetMax: 'budget_max', vipLevel: 'vip_level', customerType: 'customer_type',
       salesStage: 'sales_stage', notes: 'notes', lastContactAt: 'last_contact_at',
-      lastPurchaseAt: 'last_purchase_at', totalRevenue: 'total_revenue',
-      totalProfit: 'total_profit', purchaseCount: 'purchase_count',
+      lastPurchaseAt: 'last_purchase_at',
       vatAccountNumber: 'vat_account_number',
       personalId: 'personal_id',
     };

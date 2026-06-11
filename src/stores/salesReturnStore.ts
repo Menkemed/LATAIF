@@ -498,20 +498,9 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       );
     }
 
-    // Plan 2026-05: Umsatz/Profit korrigieren — Customer-LTV reduzieren.
-    // Profit-Anteil proportional zur retournierten Quote der Original-Invoice.
-    const invRow = query('SELECT margin_snapshot, gross_amount FROM invoices WHERE id = ?', [r.invoiceId])[0];
-    const invGross = (invRow?.gross_amount as number) || 0;
-    const invMargin = (invRow?.margin_snapshot as number) || 0;
-    const profitDelta = invGross > 0 ? invMargin * (r.totalAmount / invGross) : 0;
-    db.run(
-      `UPDATE customers SET
-         total_revenue = MAX(0, total_revenue - ?),
-         total_profit = total_profit - ?,
-         updated_at = ?
-       WHERE id = ?`,
-      [r.totalAmount, profitDelta, now, r.customerId]
-    );
+    // M-01: Customer-LTV wird hier NICHT mehr reduziert — die stalen
+    // customers.total_*-Spalten sind als Quelle abgeschafft; Refund-Abzuege
+    // rechnet computeSalesMetrics aus refund_paid_amount selbst (anteilig).
 
     // Nach CN-Erstellung: wenn effektives Invoice-Outstanding (gross - paid - Σ CN.cancel) = 0,
     // Invoice auf RETURNED setzen (Forderung vollständig durch Return abgedeckt).
@@ -816,21 +805,9 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
         [vatToRestore, now, r.invoiceId]
       );
     }
-    // Customer-LTV restaurieren — analog zur Reduktion in approveReturn.
-    if (wasApproved) {
-      const invRow = query('SELECT margin_snapshot, gross_amount FROM invoices WHERE id = ?', [r.invoiceId])[0];
-      const invGross = (invRow?.gross_amount as number) || 0;
-      const invMargin = (invRow?.margin_snapshot as number) || 0;
-      const profitDelta = invGross > 0 ? invMargin * (r.totalAmount / invGross) : 0;
-      db.run(
-        `UPDATE customers SET
-           total_revenue = total_revenue + ?,
-           total_profit = total_profit + ?,
-           updated_at = ?
-         WHERE id = ?`,
-        [r.totalAmount, profitDelta, now, r.customerId]
-      );
-    }
+    // M-01: kein Customer-LTV-Restore mehr — approveReturn reduziert nichts mehr
+    // (stale total_*-Spalten abgeschafft); der Return verschwindet mit dem Delete
+    // aus den sales_returns und damit automatisch aus computeSalesMetrics.
 
     // ── Ledger-Reversierung (v0.7.26) ───────────────────────────────────────
     // deleteReturn revertiert Lager/VAT/LTV — das LEDGER muss analog zurueck, sonst

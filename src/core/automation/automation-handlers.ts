@@ -312,25 +312,23 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
     }
   }
 
-  // Update customer KPIs
+  // Update customer KPIs — M-01: total_revenue/total_profit/purchase_count werden
+  // NICHT mehr inkrementiert (stale Spalten, nie sync-getrackt; Kunden-Umsatz kommt
+  // jetzt IMMER aus computeSalesMetrics ueber die Invoices). last_purchase_at/
+  // last_contact_at bleiben — sie haben eigene Leser (Active-Clients, Inactive-VIPs).
   const customerId = invoice.customer_id as string;
-  const grossAmount = (invoice.gross_amount as number) || 0;
-  const margin = (invoice.margin_snapshot as number) || 0;
 
   db.run(
     `UPDATE customers SET
-      total_revenue = total_revenue + ?,
-      total_profit = total_profit + ?,
-      purchase_count = purchase_count + 1,
       last_purchase_at = ?,
       last_contact_at = ?,
       updated_at = ?
     WHERE id = ?`,
-    [grossAmount, margin, now, now, now, customerId]
+    [now, now, now, customerId]
   );
 
   // Auto-upgrade sales stage if needed
-  const custRows = query(`SELECT sales_stage, purchase_count FROM customers WHERE id = ?`, [customerId]);
+  const custRows = query(`SELECT sales_stage FROM customers WHERE id = ?`, [customerId]);
   if (custRows.length > 0 && custRows[0].sales_stage !== 'active') {
     db.run(`UPDATE customers SET sales_stage = 'active', updated_at = ? WHERE id = ?`, [now, customerId]);
   }

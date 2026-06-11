@@ -184,8 +184,13 @@ export interface Customer {
   salesStage: SalesStage;
   lastContactAt?: string;
   lastPurchaseAt?: string;
+  /** @deprecated M-01: stale Spalte, wird nicht mehr geschrieben — Kunden-Umsatz
+   *  IMMER aus computeSalesMetrics(ByCustomer) ableiten. Feld bleibt nur fuer
+   *  Schema-/Sync-Kompatibilitaet. */
   totalRevenue: number;
+  /** @deprecated M-01: siehe totalRevenue. */
   totalProfit: number;
+  /** @deprecated M-01: siehe totalRevenue — FINAL-Anzahl kommt aus SalesMetrics.count. */
   purchaseCount: number;
   vatAccountNumber?: string;
   personalId?: string;
