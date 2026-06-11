@@ -8,7 +8,7 @@ import { query } from '@/core/db/helpers';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { computeSalesMetrics, type SalesMetrics } from '@/core/reports/sales-metrics';
 import { loadSalesData } from '@/core/reports/sales-metrics-loader';
-import { canonicalLoanDirection } from '@/core/models/types';
+import { balanceOf } from '@/core/ledger/queries';
 
 // ── Period helpers ──────────────────────────────────────────
 
@@ -409,25 +409,15 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     [branchId]
   );
 
-  // ── Debts ── M-14: kanonische Direction/Status statt harter Legacy-Strings
-  // ('we_lend'/'we_borrow'/'open'). Sonst fielen kanonische MONEY_GIVEN/MONEY_RECEIVED
-  // UND teil-rueckgezahlte (PARTIALLY_REPAID) Kredite raus. Deckt sich mit
-  // ReconciliationPage (domainLoanReceivable/Payable) + Dashboard: nur CANCELLED
-  // ausschliessen, outstanding = amount - paid (REPAID traegt damit 0).
-  const debtRows = query(
-    `SELECT d.direction, d.amount,
-            COALESCE((SELECT SUM(amount) FROM debt_payments WHERE debt_id = d.id), 0) AS paid
-       FROM debts d
-      WHERE d.branch_id = ? AND UPPER(COALESCE(d.status, 'OPEN')) != 'CANCELLED'`,
-    [branchId]
-  );
-  let debtsOwedToUs = 0, debtsWeOwe = 0;
-  for (const r of debtRows) {
-    const outstanding = Math.max(0, (Number(r.amount) || 0) - (Number(r.paid) || 0));
-    if (outstanding <= 0) continue;
-    if (canonicalLoanDirection(r.direction as string) === 'MONEY_GIVEN') debtsOwedToUs += outstanding;
-    else debtsWeOwe += outstanding;
-  }
+  // ── Debts ── M-24: Loan-Salden direkt aus dem Ledger-SSOT (balanceOf) statt
+  // Domain-Aggregat ueber debts/debt_payments (vorher M-14-Logik). LOAN_RECEIVABLE/
+  // LOAN_PAYABLE spiegeln amount − paid der offenen Loans (postLoanCreated/
+  // postLoanPayment; Cancel reverst seit M-24 auch die Repayments — debtStore).
+  // max(0,·)-Clamp wie vorher: die Domain clampte pro Loan; ein global negativer
+  // Saldo waere ein Daten-Artefakt (Overpayment) → Reconciliation, nicht Report.
+  // ⚠️ Wert korrekt erst nach einmaligem /ledger-backfill (M-12-Caveat).
+  const debtsOwedToUs = Math.max(0, balanceOf('LOAN_RECEIVABLE', { branchId }));
+  const debtsWeOwe = Math.max(0, balanceOf('LOAN_PAYABLE', { branchId }));
 
   // ── Previous period (optional) ─────────────────────────
   let previousPeriod: ReportContext['previousPeriod'];

@@ -245,12 +245,26 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
     get().loadDebts();
 
     // ZIEL.md §3a — Loan-Storno bei Status='CANCELLED' (oder Legacy 'cancelled').
-    // Bestehende Repayments bleiben gebucht (echtes Geld). Reconciliation surface
-    // Diskrepanzen, falls cancelled trotz schon erfolgter Rückzahlungen.
+    // M-24: Cancel = "Eintrag war ein Irrtum" → auch die Repayments werden
+    // reversiert (symmetrisch zu deleteDebt). Der fruehere Entscheid "Repayments
+    // bleiben gebucht (echtes Geld)" stammt aus der Zeit VOR M-12: seit die
+    // Cash-Anzeigen balanceOf lesen, wuerde ein halber Storno ein negatives
+    // LOAN_RECEIVABLE-Artefakt UND falsche Kassen-Salden hinterlassen.
+    // Forderungsverzicht ("Rest erlassen") ist KEIN Cancel — Loan offen lassen
+    // oder als REPAID abschliessen.
     if (data.status !== undefined) {
       const newStatus = String(data.status).toUpperCase();
       const oldStatus = String(before?.status || '').toUpperCase();
       if (newStatus === 'CANCELLED' && oldStatus !== 'CANCELLED' && before) {
+        const payRows = query('SELECT id FROM debt_payments WHERE debt_id = ?', [id]);
+        for (const r of payRows) {
+          const dpId = r.id as string;
+          safePost(`postLoanPaymentReversed(${dpId}) [cancel-debt]`, () => {
+            if (!hasLedgerEntries('LOAN_PAYMENT', dpId)) return;
+            if (hasReversalFor('LOAN_PAYMENT', dpId)) return;
+            postLoanPaymentReversed(dpId);
+          });
+        }
         safePost(`postLoanCancelled(${id})`, () => {
           if (!hasLedgerEntries('LOAN', id)) return;
           if (hasReversalFor('LOAN', id)) return;

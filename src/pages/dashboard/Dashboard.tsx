@@ -438,27 +438,31 @@ export function Dashboard() {
     ).length,
     [salesReturns]
   );
-  // Private Cash-Darlehen aus der `debts`-Tabelle — KEIN Bezug zu Handel-Forderungen
-  // (Invoices/Repairs/Consignments → das ist customerReceivables). Hier nur Bargeld-Loans.
+  // Private Cash-Darlehen — KEIN Bezug zu Handel-Forderungen (Invoices/Repairs/
+  // Consignments → das ist customerReceivables). Hier nur Bargeld-Loans.
+  // M-24 — die SALDEN kommen aus dem Ledger-SSOT (balanceOf LOAN_RECEIVABLE/
+  // LOAN_PAYABLE = amount − paid offener Loans; gleiche Quelle wie Exec-Summary).
+  // max(0,·) wie vorher (Domain clampte pro Loan). Die COUNTS bleiben aus der
+  // debts-Liste — das Ledger zaehlt keine offenen Loans. Deps wie accountBalances.
+  // ⚠️ Salden korrekt erst nach einmaligem /ledger-backfill (M-12-Caveat).
+  const loanBalances = useMemo(() => {
+    try {
+      const branchId = currentBranchId();
+      return {
+        given: Math.max(0, balanceOf('LOAN_RECEIVABLE', { branchId })),
+        taken: Math.max(0, balanceOf('LOAN_PAYABLE', { branchId })),
+      };
+    } catch {
+      return { given: 0, taken: 0 };
+    }
+  }, [debts]);
+  const loansGiven = loanBalances.given;
+  const loansTaken = loanBalances.taken;
   // Robust gegen Legacy-Direction ('we_lend'/'we_borrow') und Legacy-Status ('open'/'settled').
   const openLoanFilter = (d: typeof debts[number]) => {
     const s = canonicalLoanStatus(d.status, d.amount, d.paidAmount);
     return s === 'OPEN' || s === 'PARTIALLY_REPAID';
   };
-  const loansGiven = useMemo(() =>
-    debts
-      .filter(d => isLoanGiven(d.direction))
-      .filter(openLoanFilter)
-      .reduce((s, d) => s + Math.max(0, (d.amount || 0) - (d.paidAmount || 0)), 0),
-    [debts]
-  );
-  const loansTaken = useMemo(() =>
-    debts
-      .filter(d => !isLoanGiven(d.direction))
-      .filter(openLoanFilter)
-      .reduce((s, d) => s + Math.max(0, (d.amount || 0) - (d.paidAmount || 0)), 0),
-    [debts]
-  );
   const loansGivenCount = useMemo(() =>
     debts.filter(d => isLoanGiven(d.direction) && openLoanFilter(d)).length,
     [debts]
