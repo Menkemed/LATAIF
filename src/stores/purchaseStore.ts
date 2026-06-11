@@ -701,9 +701,24 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     trackStatusChange('purchases', id, p.status, 'CANCELLED');
     get().loadPurchases();
 
-    // ZIEL.md §3a — Ledger-Storno bei Purchase-Cancel (spiegelt INVENTORY/VAT_INPUT/AP).
-    // Bestehende Payments bleiben gebucht — sie waren echtes Geld raus, wurden gezahlt.
-    // Falls Lieferant refundiert, ist das eine separate Transaktion.
+    // ZIEL.md §3a + B2 — Ledger-Storno bei Purchase-Cancel = vollstaendiger Rueckbau
+    // (full-unwind, User-Entscheid 2026-06-11). Erst JEDE geleistete Zahlung reversen
+    // (DR Cash/Bank/Benefit zurueck / CR AP), dann das PURCHASE-Bein selbst (spiegelt
+    // INVENTORY/VAT_INPUT/AP). Ohne den Payment-Reverse bliebe bei (teil)bezahlter
+    // Purchase das PURCHASE_PAYMENT-Bein stehen -> AP negativ + Cash/Bank/Benefit phantom
+    // (analog deleteExpense / expense-cancel B1). Eine echte Lieferanten-Forderung bei
+    // refundiertem Geld waere ein eigenes Feature (bewusst NICHT hier). Die purchase_payments
+    // bleiben am CANCELLED-Record (Historie); backfillPurchasePayments ist via
+    // hasLedgerEntries idempotent. Guards = kein Doppel-Reverse.
+    const pays = query('SELECT id FROM purchase_payments WHERE purchase_id = ?', [id]);
+    for (const pp of pays) {
+      const payId = pp.id as string;
+      safePost(`reversePurchasePayment(${payId}) [cancel]`, () => {
+        if (!hasLedgerEntries('PURCHASE_PAYMENT', payId)) return;
+        if (hasReversalFor('PURCHASE_PAYMENT', payId)) return;
+        reverseSource('PURCHASE_PAYMENT', payId, now);
+      });
+    }
     safePost(`postPurchaseCancelled(${id})`, () => {
       if (!hasLedgerEntries('PURCHASE', id)) return;
       if (hasReversalFor('PURCHASE', id)) return;
