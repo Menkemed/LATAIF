@@ -180,6 +180,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   deleteAgent: (id) => {
+    // N1 — Referenz-Guard (wie deleteCustomer/deleteEmployee): einen Agent mit
+    // Transfer-Historie NICHT hart loeschen, sonst bleiben agent_transfers + ihre
+    // AGENT-Ledger-Eintraege (AGENT_TRANSFER_SOLD/SETTLEMENT) als Waisen.
+    // Stattdessen deaktivieren (active=0).
+    const tfCount = Number(query('SELECT COUNT(*) AS c FROM agent_transfers WHERE agent_id = ?', [id])[0]?.c || 0);
+    if (tfCount > 0) {
+      throw new Error(`Cannot delete agent — ${tfCount} transfer${tfCount === 1 ? '' : 's'} reference this agent. Mark as inactive instead.`);
+    }
     const db = getDatabase();
     db.run(`DELETE FROM agents WHERE id = ?`, [id]);
     saveDatabase();

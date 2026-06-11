@@ -144,6 +144,14 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
   },
 
   deletePartner: (id) => {
+    // N1 — Referenz-Guard (wie deleteCustomer/deleteEmployee): einen Partner mit
+    // Buchungshistorie NICHT hart loeschen, sonst bleiben partner_transactions +
+    // ihre PARTNER_EQUITY-Ledger-Eintraege als Waisen (counterparty zeigt auf
+    // geloeschten Partner). Stattdessen deaktivieren (active=0).
+    const txCount = Number(query('SELECT COUNT(*) AS c FROM partner_transactions WHERE partner_id = ?', [id])[0]?.c || 0);
+    if (txCount > 0) {
+      throw new Error(`Cannot delete partner — ${txCount} transaction${txCount === 1 ? '' : 's'} reference this partner. Mark as inactive instead.`);
+    }
     const db = getDatabase();
     db.run('DELETE FROM partners WHERE id = ?', [id]);
     saveDatabase();

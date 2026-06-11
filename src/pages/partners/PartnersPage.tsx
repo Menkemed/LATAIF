@@ -266,8 +266,12 @@ export function PartnersPage() {
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="danger" onClick={() => {
               if (editPartner && window.confirm(`Delete partner "${editPartner.name}"?`)) {
-                deletePartner(editPartner.id);
-                setEditPartner(null);
+                try {
+                  deletePartner(editPartner.id);
+                  setEditPartner(null);
+                } catch (e) {
+                  alert(e instanceof Error ? e.message : String(e));
+                }
               }
             }}>Delete</Button>
             <div className="flex gap-2">
