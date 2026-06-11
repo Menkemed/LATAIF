@@ -23,9 +23,9 @@ import { GaugeChart } from '@/components/charts/GaugeChart';
 import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
 import { query, currentBranchId } from '@/core/db/helpers';
-import { balanceOf } from '@/core/ledger/queries';
+import { balanceOf, totalReceivables } from '@/core/ledger/queries';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
-import { receivablesSummary, type ReceivableSource } from '@/core/finance/receivables';
+import { receivablesBreakdown } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
 import { computeSalesMetrics, computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
 
@@ -186,10 +186,22 @@ export function Dashboard() {
   const marginPct = useMemo(() => totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0, [totalRevenue, totalProfit]);
 
   // Payables & Receivables (Plan §Dashboard §E)
-  const supplierPayables = useMemo(
-    () => suppliers.reduce((s, sup) => s + (sup.outstandingBalance || 0), 0),
-    [suppliers]
-  );
+  // M-24 — SUPPLIER PAYABLES aus dem Ledger-SSOT, bewusst SUPPLIER-gefiltert
+  // (counterpartyType): die Karte bleibt semantisch "wir schulden Lieferanten"
+  // und deckt sich mit der /suppliers-Sicht (Purchases + Supplier-Expenses).
+  // Volles balanceOf('AP') waere ein Hybrid zwischen dieser Karte und TOTAL
+  // PAYABLES (Expense-Schulden OHNE Lieferant stecken dort). Lieferanten-
+  // GUTHABEN (SUPPLIER_CREDIT, eigenes Asset-Konto) mindert AP nicht — wie
+  // heute in der Domain-Anzeige (SupplierDetail zeigt es separat).
+  // ⚠️ Wert korrekt erst nach einmaligem /ledger-backfill (M-12-Caveat).
+  const supplierPayables = useMemo(() => {
+    try {
+      const branchId = currentBranchId();
+      return Math.max(0, balanceOf('ACCOUNTS_PAYABLE', { branchId, counterpartyType: 'SUPPLIER' }));
+    } catch {
+      return 0;
+    }
+  }, [purchases, allExpenses, suppliers]);
   const partnerCapital = useMemo(
     () => partners.reduce((s, p) => s + (p.balance || 0), 0),
     [partners]
@@ -247,29 +259,44 @@ export function Dashboard() {
     return totalProfit * (totalShare / 100);
   }, [partners, totalProfit]);
 
-  // ZIEL.md §3a — Receivables-Breakdown: Total + Anzahl Kunden + Source-Mix
-  // (Invoice / Consignment / Approval / Repair). Quelle ist receivablesSummary()
-  // (core/finance/receivables.ts) — Domain-Sum statt reinem Ledger-AR, damit auch
-  // Repairs (leben ausserhalb des Ledgers) erfasst sind. useMemo-Deps an Invoices/
-  // Returns; Repair-Aenderungen triggern via repairs-Store-Reload, der die DB
-  // aktualisiert — beim naechsten Render wird neu gerechnet.
-  const arSummary = useMemo(
-    () => receivablesSummary(),
-    [invoices, salesReturns]
-  );
-  const customerReceivables = arSummary.total;
-  const arSourceLabel = useMemo(() => {
-    const labels: Record<ReceivableSource, string> = { INVOICE: 'Invoices', CONSIGNMENT: 'Consignment', APPROVAL: 'Approval', REPAIR: 'Repairs' };
-    if (arSummary.sources.length === 0) return '';
-    if (arSummary.sources.length === 1) return labels[arSummary.sources[0]];
-    return arSummary.sources.map(s => labels[s]).join(', ');
-  }, [arSummary]);
+  // M-24 — RECEIVABLES aus dem Ledger-SSOT: totalReceivables() = max(0,
+  // balanceOf('ACCOUNTS_RECEIVABLE')) — Invoices@Issue + Approval-Sold − Payments
+  // − CN-Cancel; gleiche Quelle wie CustomerDetail (customerBalance). Offene
+  // REPAIRS leben NICHT im Ledger (postRepairPayment bucht erst bei Zahlung) und
+  // werden als SEPARATE Info-Position ausgewiesen statt eingemischt — kehrt den
+  // frueheren ZIEL.md-§3a-Entscheid ("Domain-Sum, damit Repairs erfasst sind")
+  // nach dem M-24-User-Entscheid um (Ledger-Definition gewinnt + Info-Position).
+  // Dokumentierte Abweichungen zur alten Domain-Summe: DRAFT-Invoices behalten
+  // ihre AR im Ledger (Domain schloss sie aus); Tip-Ueberzahlungen druecken
+  // per-Kunde-AR ins Minus und netten global (kein TIPS-Konto — Backlog).
+  // ⚠️ Wert korrekt erst nach einmaligem /ledger-backfill (M-12-Caveat).
+  const customerReceivables = useMemo(() => {
+    try {
+      return totalReceivables(currentBranchId());
+    } catch {
+      return 0;
+    }
+  }, [invoices, purchases, allExpenses, salesReturns]);
+  // Repairs-Info: offener Werkstatt-Forderungs-Anteil aus dem Domain-Breakdown
+  // (REPAIR-Zeilen) — beschreibend neben der Ledger-Zahl, nie addiert.
+  const repairsOpen = useMemo(() => {
+    try {
+      return receivablesBreakdown()
+        .filter(r => r.source === 'REPAIR')
+        .reduce((s, r) => s + r.open, 0);
+    } catch {
+      return 0;
+    }
+  }, [invoices, salesReturns]);
 
   // Alerts (Plan §Dashboard §7)
+  // M-24: Alert zeigt EXAKT dieselbe Ledger-Zahl wie die RECEIVABLES-Karte
+  // (+ Repairs als getrennter Zusatz) — zwei verschiedene "outstanding"-Zahlen
+  // nebeneinander waeren Support-Futter.
   const alerts: Array<{ key: string; level: 'urgent' | 'warn' | 'info'; text: string }> = [];
-  if (customerReceivables > 0) {
-    const fromTxt = arSourceLabel ? ` from ${arSummary.clientCount} client${arSummary.clientCount === 1 ? '' : 's'} (${arSourceLabel})` : '';
-    alerts.push({ key: 'open-inv', level: 'warn', text: `${fmt(customerReceivables)} BHD outstanding${fromTxt}` });
+  if (customerReceivables > 0 || repairsOpen > 0) {
+    const repairTxt = repairsOpen > 0 ? ` · plus ${fmt(repairsOpen)} BHD open repairs` : '';
+    alerts.push({ key: 'open-inv', level: 'warn', text: `${fmt(customerReceivables)} BHD outstanding${repairTxt}` });
   }
   if (supplierPayables > 0) {
     alerts.push({ key: 'sup-debt', level: 'warn', text: `${fmt(supplierPayables)} BHD owed to suppliers` });
@@ -279,8 +306,6 @@ export function Dashboard() {
   if (accountBalances.cash + accountBalances.bank + accountBalances.benefit < 1000) {
     alerts.push({ key: 'low-cash', level: 'urgent', text: 'Total liquidity below 1,000 BHD' });
   }
-
-  const openPurchases = purchases.filter(p => p.status === 'UNPAID' || p.status === 'PARTIALLY_PAID').length;
 
   // Sales Overview Gauge — Auto-Target:
   //   override (settings.finance.monthly_target) → Custom target
@@ -695,12 +720,12 @@ export function Dashboard() {
             <KPICard label="BENEFIT" value={fmt(accountBalances.benefit)} unit="BHD" icon={<Smartphone size={16} />} accent="orange" onClick={() => navigate('/banking')} />
             <KPICard label="RECEIVABLES"
               value={fmt(customerReceivables)}
-              unit={arSummary.clientCount === 0
-                ? 'BHD'
-                : `BHD · ${arSummary.clientCount} client${arSummary.clientCount === 1 ? '' : 's'}${arSourceLabel ? ` (${arSourceLabel})` : ''}`}
+              unit={repairsOpen > 0
+                ? `BHD · invoices & approvals · +${fmt(repairsOpen)} repairs`
+                : 'BHD · invoices & approvals'}
               icon={<FileText size={16} />} accent="orange"
               onClick={() => navigate('/receivables')} />
-            <KPICard label="SUPPLIER PAYABLES" value={fmt(supplierPayables)} unit={`BHD · ${openPurchases} open`} icon={<ShoppingCart size={16} />} accent="orange" onClick={() => navigate('/purchases?filter=UNPAID')} />
+            <KPICard label="SUPPLIER PAYABLES" value={fmt(supplierPayables)} unit="BHD · purchases & supplier expenses" icon={<ShoppingCart size={16} />} accent="orange" onClick={() => navigate('/suppliers')} />
           </div>
         </DashSection>
 

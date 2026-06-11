@@ -171,12 +171,13 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       const creditBalance = Math.max(0, earned - used);
 
       // outstandingBalance = totalPurchases − totalPaid (Domain-Wahrheit), damit
-      // die KPI-Karte mit der sichtbaren Tabelle uebereinstimmt — auch fuer
-      // historische Repair-Expenses, die vor dem Ledger-Post-Fix angelegt
-      // wurden und deshalb keinen ledger_entries-Eintrag haben.
-      // supplierBalance(id) (Ledger-basiert) wird bewusst NICHT mehr genutzt,
-      // weil unvollstaendiges Ledger zu unter-zaehlten Salden fuehrt — die
-      // Reconciliation-Page macht den Ledger-vs-Domain-Vergleich separat.
+      // die per-Supplier-KPI mit der sichtbaren Detail-Tabelle uebereinstimmt
+      // (itemisierte Sicht → Domain, M-24-Scope-Entscheid). Das DASHBOARD-Aggregat
+      // "SUPPLIER PAYABLES" liest seit M-24 dagegen das Ledger
+      // (balanceOf('ACCOUNTS_PAYABLE', {counterpartyType:'SUPPLIER'})) — beide
+      // koennen bei Alt-Daten-Luecken abweichen (z.B. historische Repair-Expenses
+      // ohne Ledger-Post, Legacy-Expenses mit paid_amount ohne payment-Rows);
+      // die Reconciliation-Page macht den Ledger-vs-Domain-Vergleich sichtbar.
       const outstandingBalance = totalPurchases - totalPaid;
 
       return {
