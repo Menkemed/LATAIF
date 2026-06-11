@@ -35,17 +35,22 @@ export function CustomerList() {
   // deren AR-Balance in die Dashboard-Summe einfliesst.
   const filterMode = searchParams.get('filter') || '';
 
+  // M-01 — Stats EINMAL pro Kunde berechnen (Batch-Map): Filter und Zeilen-Render
+  // lesen aus derselben Map statt getCustomerStats doppelt pro Kunde aufzurufen.
+  const statsById = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof getCustomerStats>>();
+    for (const c of customers) m.set(c.id, getCustomerStats(c.id));
+    return m;
+  }, [customers, getCustomerStats]);
+
   const filtered = useMemo(() => {
     let r = customers;
     if (searchQuery) r = r.filter(c => matchesDeep(c, searchQuery));
     if (filterMode === 'outstanding') {
-      r = r.filter(c => {
-        const s = getCustomerStats(c.id);
-        return (s.invoiceOutstanding || 0) > 0.005;
-      });
+      r = r.filter(c => (statsById.get(c.id)?.invoiceOutstanding || 0) > 0.005);
     }
     return r;
-  }, [customers, searchQuery, filterMode, getCustomerStats]);
+  }, [customers, searchQuery, filterMode, statsById]);
 
   function clearFilter() {
     const next = new URLSearchParams(searchParams);
@@ -122,7 +127,7 @@ export function CustomerList() {
       )}
 
       {filtered.map(c => {
-        const stats = getCustomerStats(c.id);
+        const stats = statsById.get(c.id) ?? getCustomerStats(c.id);
         return (
           <div
             key={c.id}

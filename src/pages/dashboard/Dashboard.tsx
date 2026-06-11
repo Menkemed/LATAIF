@@ -27,7 +27,7 @@ import { balanceOf } from '@/core/ledger/queries';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { receivablesSummary, type ReceivableSource } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
-import { computeSalesMetrics } from '@/core/reports/sales-metrics';
+import { computeSalesMetrics, computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
 
 function getGreeting(): string {
   const h = new Date().getHours();
@@ -123,7 +123,24 @@ export function Dashboard() {
   const stockByCat = useMemo(() => getStockByCategory(), [products, categories, getStockByCategory]);
 
   const featured = useMemo(() => products.filter(p => p.stockStatus === 'in_stock').slice(0, 4), [products]);
-  const topClients = useMemo(() => [...customers].sort((a, b) => b.totalRevenue - a.totalRevenue).slice(0, 5), [customers]);
+  // M-01 — Top Clients aus der EINEN Umsatz-Wahrheit (rechnungsbasiert, all-time,
+  // = computeSalesMetrics-Regel) statt aus stale customers.totalRevenue (nie
+  // sync-getrackt, loechrige Inkremente). sys-Sentinels sind im Store schon gefiltert.
+  const customerMetrics = useMemo(
+    () => computeSalesMetricsByCustomer(invoices, salesReturns),
+    [invoices, salesReturns]
+  );
+  const topClients = useMemo(
+    () => customers
+      .map(c => {
+        const m = customerMetrics.get(c.id);
+        return { ...c, revenue: m?.gross || 0, finalCount: m?.count || 0 };
+      })
+      .filter(c => c.revenue > 0)
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 5),
+    [customers, customerMetrics]
+  );
 
   // Plan §Sales §3: Revenue und Profit NUR aus FINAL invoices. Plan §Dashboard §4: Zeitraumfilter.
   const finalInvoices = useMemo(() => invoices.filter(i => {
@@ -377,12 +394,13 @@ export function Dashboard() {
   }, [invoices, products, categories]);
 
   // Top Clients als TopProductItem-Format (für gleiche List-Component)
+  // M-01: revenue/finalCount aus der SSOT (rechnungsbasiert) statt customers.total_*.
   const topClientsList = useMemo<TopProductItem[]>(() =>
     topClients.slice(0, 5).map(c => ({
       id: c.id,
       name: `${c.firstName} ${c.lastName}`,
-      subtitle: c.company || `${c.purchaseCount || 0} purchases`,
-      price: c.totalRevenue || 0,
+      subtitle: c.company || `${c.finalCount} purchases`,
+      price: c.revenue,
     })),
     [topClients]
   );
@@ -942,11 +960,11 @@ export function Dashboard() {
                       <span style={{ fontSize: 14, color: '#0F0F10' }}>{c.firstName} {c.lastName}</span>
                       <VIPBadge level={c.vipLevel} />
                     </div>
-                    <span style={{ fontSize: 11, color: '#6B7280' }}>{c.purchaseCount} purchases</span>
+                    <span style={{ fontSize: 11, color: '#6B7280' }}>{c.finalCount} purchases</span>
                   </div>
                 </div>
                 <div className="text-right">
-                  <div className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(c.totalRevenue)}</div>
+                  <div className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{fmt(c.revenue)}</div>
                   <div style={{ fontSize: 11, color: '#6B7280' }}>BHD</div>
                 </div>
               </div>

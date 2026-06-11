@@ -12,6 +12,8 @@ import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { balanceOf } from '@/core/ledger/queries';
+import { computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
+import { loadSalesData } from '@/core/reports/sales-metrics-loader';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { exportCsv } from '@/core/utils/export-file';
@@ -972,12 +974,17 @@ export function AnalyticsPage() {
 
   // ── CLIENT DATA ──
 
+  // M-01 — Revenue/Profit/Counts pro Kunde aus der EINEN SSOT (loadSalesData →
+  // computeSalesMetricsByCustomer, rechnungsbasiert all-time) statt aus stale
+  // customers.total_*/purchase_count. sys-Sentinels (z.B. sys-own-shop-*) sind
+  // KEINE Clients und fliegen ueberall raus — vorher konnte "Own Shop" als
+  // Top-Client erscheinen.
   const clients = useMemo(() => {
     if (!branchId) return null;
 
     // Total clients
     const total = qry(
-      `SELECT COUNT(*) as cnt FROM customers WHERE branch_id = ?`,
+      `SELECT COUNT(*) as cnt FROM customers WHERE branch_id = ? AND id NOT LIKE 'sys-%'`,
       [branchId]
     );
     const totalClients = num(total[0] || {}, 'cnt');
@@ -985,7 +992,7 @@ export function AnalyticsPage() {
     // Active (purchased in last 180 days)
     const active = qry(
       `SELECT COUNT(*) as cnt FROM customers
-       WHERE branch_id = ? AND last_purchase_at IS NOT NULL
+       WHERE branch_id = ? AND id NOT LIKE 'sys-%' AND last_purchase_at IS NOT NULL
        AND last_purchase_at >= date('now','-180 days')`,
       [branchId]
     );
@@ -994,51 +1001,46 @@ export function AnalyticsPage() {
     // Dormant
     const dormant = qry(
       `SELECT COUNT(*) as cnt FROM customers
-       WHERE branch_id = ? AND sales_stage = 'dormant'`,
+       WHERE branch_id = ? AND id NOT LIKE 'sys-%' AND sales_stage = 'dormant'`,
       [branchId]
     );
     const dormantClients = num(dormant[0] || {}, 'cnt');
 
-    // Top 5 by revenue
-    const topByRev = qry(
-      `SELECT first_name, last_name, total_revenue, purchase_count
-       FROM customers WHERE branch_id = ? AND total_revenue > 0
-       ORDER BY total_revenue DESC LIMIT 5`,
+    // Per-Kunde-Metriken (SSOT). Namens-Map zugleich null-Guard: Invoices auf
+    // geloeschte oder sys-Kunden tragen nicht zu den Client-Karten bei.
+    const { invoices, salesReturns } = loadSalesData({ branchId });
+    const byCustomer = computeSalesMetricsByCustomer(invoices, salesReturns);
+    const nameRows = qry(
+      `SELECT id, first_name, last_name FROM customers
+       WHERE branch_id = ? AND id NOT LIKE 'sys-%'`,
       [branchId]
     );
+    const names = new Map(nameRows.map(r => [
+      String(r.id),
+      `${(r.first_name as string) || ''} ${(r.last_name as string) || ''}`.trim(),
+    ]));
+    const perClient = [...byCustomer.entries()]
+      .filter(([id]) => names.has(id))
+      .map(([id, m]) => ({ id, name: names.get(id)!, gross: m.gross, profit: m.profit, count: m.count }));
 
-    // Top 5 by profit
-    const topByProfit = qry(
-      `SELECT first_name, last_name, total_profit, purchase_count
-       FROM customers WHERE branch_id = ? AND total_profit > 0
-       ORDER BY total_profit DESC LIMIT 5`,
-      [branchId]
-    );
+    // Top 5 by revenue / by profit
+    const topByRev = perClient.filter(p => p.gross > 0)
+      .sort((a, b) => b.gross - a.gross).slice(0, 5);
+    const topByProfit = perClient.filter(p => p.profit > 0)
+      .sort((a, b) => b.profit - a.profit).slice(0, 5);
 
     // Average client value
-    const totalRevenue = qry(
-      `SELECT COALESCE(SUM(total_revenue),0) as rev FROM customers WHERE branch_id = ?`,
-      [branchId]
-    );
-    const avgClientValue = safeDiv(num(totalRevenue[0] || {}, 'rev'), totalClients);
+    const avgClientValue = safeDiv(perClient.reduce((s, p) => s + p.gross, 0), totalClients);
 
-    // Repeat purchase rate
-    const buyingClients = qry(
-      `SELECT COUNT(*) as cnt FROM customers WHERE branch_id = ? AND purchase_count > 0`,
-      [branchId]
-    );
-    const repeatClients = qry(
-      `SELECT COUNT(*) as cnt FROM customers WHERE branch_id = ? AND purchase_count > 1`,
-      [branchId]
-    );
-    const buyingCount = num(buyingClients[0] || {}, 'cnt');
-    const repeatCount = num(repeatClients[0] || {}, 'cnt');
+    // Repeat purchase rate (count = FINAL-Rechnungen, gleiche Regel wie Revenue)
+    const buyingCount = perClient.filter(p => p.count >= 1).length;
+    const repeatCount = perClient.filter(p => p.count >= 2).length;
     const repeatRate = safeDiv(repeatCount, buyingCount) * 100;
 
     // VIP distribution
     const vipDist = qry(
       `SELECT vip_level, COUNT(*) as cnt
-       FROM customers WHERE branch_id = ?
+       FROM customers WHERE branch_id = ? AND id NOT LIKE 'sys-%'
        GROUP BY vip_level ORDER BY vip_level`,
       [branchId]
     );
@@ -1048,7 +1050,7 @@ export function AnalyticsPage() {
       topByRev, topByProfit, avgClientValue,
       repeatRate, buyingCount, repeatCount, vipDist,
     };
-  }, [branchId]);
+  }, [branchId, refreshTick]);
 
   // ── RENDER ──
 
@@ -1786,11 +1788,11 @@ export function AnalyticsPage() {
                 )}
                 {clients.topByRev.map((c, i) => (
                   <RankedItem
-                    key={i}
+                    key={c.id}
                     rank={i + 1}
-                    label={`${c.first_name as string} ${c.last_name as string}`}
-                    value={`${fmt(num(c, 'total_revenue'))} BHD`}
-                    sub={`${num(c, 'purchase_count')} purchases`}
+                    label={c.name}
+                    value={`${fmt(c.gross)} BHD`}
+                    sub={`${c.count} purchases`}
                   />
                 ))}
               </Card>
@@ -1802,11 +1804,11 @@ export function AnalyticsPage() {
                 )}
                 {clients.topByProfit.map((c, i) => (
                   <RankedItem
-                    key={i}
+                    key={c.id}
                     rank={i + 1}
-                    label={`${c.first_name as string} ${c.last_name as string}`}
-                    value={`${fmt(num(c, 'total_profit'))} BHD`}
-                    sub={`${num(c, 'purchase_count')} purchases`}
+                    label={c.name}
+                    value={`${fmt(c.profit)} BHD`}
+                    sub={`${c.count} purchases`}
                     color="#7EAA6E"
                   />
                 ))}
