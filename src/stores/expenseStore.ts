@@ -222,9 +222,25 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     trackUpdate('expenses', id, data);
     get().loadExpenses();
 
-    // ZIEL.md §3a — Ledger-Storno bei Expense-Cancel.
-    // Reverst nur EXPENSES_OPERATING/AP. Bereits geleistete Cash-Zahlungen bleiben gebucht.
+    // ZIEL.md §3a + B1 — Ledger-Storno bei Expense-Cancel. Erst JEDE geleistete
+    // Zahlung reversen (DR Cash/Bank/Benefit zurueck / CR AP), dann die Expense
+    // selbst (DR AP / CR EXPENSES). Ohne den Payment-Reverse bliebe bei einer
+    // (teil)bezahlten Expense das EXPENSE_PAYMENT-Bein stehen → AP negativ +
+    // Cash/Bank/Benefit phantom-reduziert. deleteExpense macht es bereits so; der
+    // Cancel-Pfad zog vorher nur das EXPENSE-Bein. Die expense_payments-Rows bleiben
+    // am CANCELLED-Record (Zahlungshistorie) — backfillExpensePayments ist via
+    // hasLedgerEntries idempotent und reposted nichts. Guards = kein Doppel-Reverse.
     if (data.status === 'CANCELLED' && before && before.status !== 'CANCELLED') {
+      const now = new Date().toISOString();
+      const pays = query('SELECT id FROM expense_payments WHERE expense_id = ?', [id]);
+      for (const p of pays) {
+        const payId = p.id as string;
+        safePost(`reverseExpensePayment(${payId}) [cancel]`, () => {
+          if (!hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
+          if (hasReversalFor('EXPENSE_PAYMENT', payId)) return;
+          reverseSource('EXPENSE_PAYMENT', payId, now);
+        });
+      }
       safePost(`postExpenseCancelled(${id})`, () => {
         if (!hasLedgerEntries('EXPENSE', id)) return;
         if (hasReversalFor('EXPENSE', id)) return;
