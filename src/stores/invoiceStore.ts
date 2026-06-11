@@ -532,6 +532,20 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           if (hasReversalFor('INVOICE', id)) return;        // bereits storniert
           postInvoiceCancelled({ id } as Invoice);
         });
+        // L2 — full-unwind: bei direktem Status-Cancel OHNE Refund-Return (z.B.
+        // consignmentStore.cancelSale mit bereits bezahlter Buyer-Invoice) auch die
+        // Zahlungs-Beine reversen, sonst bliebe CASH/BANK/BENEFIT phantom + AR negativ.
+        // reversedByReturn=true (UI-handleCancelInvoice macht VORHER Sales-Return+refund)
+        // ueberspringt diesen ganzen Block → KEIN Doppel-Refund. Unbezahlt = leere
+        // Schleife (No-Op). Analog deleteInvoice; Guards = idempotent.
+        const cancelPayIds = query('SELECT id FROM payments WHERE invoice_id = ?', [id]).map(r => r.id as string);
+        for (const pid of cancelPayIds) {
+          safePost(`postInvoicePaymentReversed(${pid}) [invoice-cancel]`, () => {
+            if (!hasLedgerEntries('PAYMENT', pid)) return;
+            if (hasReversalFor('PAYMENT', pid)) return;
+            postInvoicePaymentReversed(pid);
+          });
+        }
       }
 
       // Auto-Expenses (Card-Fees etc.) ebenfalls reverten — sonst Doppelbuchung im Ledger.
