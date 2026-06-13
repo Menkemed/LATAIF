@@ -58,36 +58,45 @@ function toStr(v: unknown): string | null {
   try { return JSON.stringify(v); } catch { return String(v); }
 }
 
-// Write a single audit record. Safe against missing branch/user session.
-export function logAudit(input: LogAuditInput): void {
-  try {
-    const db = getDatabase();
-    let branchId: string | null = null;
-    let userId: string | null = null;
-    try { branchId = currentBranchId(); } catch { /* not logged in yet */ }
-    try { userId = currentUserId(); } catch { /* not logged in yet */ }
+// Schreibt EINEN audit_log-Eintrag. Wirft bei Fehler (Roh-Variante).
+function writeAuditRow(input: LogAuditInput): void {
+  const db = getDatabase();
+  let branchId: string | null = null;
+  let userId: string | null = null;
+  try { branchId = currentBranchId(); } catch { /* not logged in yet */ }
+  try { userId = currentUserId(); } catch { /* not logged in yet */ }
 
-    db.run(
-      `INSERT INTO audit_log (id, branch_id, module, entity_type, entity_id, action_type,
-        field_name, old_value, new_value, changed_by, changed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        uuid(),
-        branchId,
-        input.module,
-        input.entityType,
-        input.entityId,
-        input.action,
-        input.field || null,
-        toStr(input.oldValue),
-        toStr(input.newValue),
-        userId,
-        new Date().toISOString(),
-      ]
-    );
-  } catch (err) {
-    console.warn('[audit] failed to log:', err);
-  }
+  db.run(
+    `INSERT INTO audit_log (id, branch_id, module, entity_type, entity_id, action_type,
+      field_name, old_value, new_value, changed_by, changed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      uuid(),
+      branchId,
+      input.module,
+      input.entityType,
+      input.entityId,
+      input.action,
+      input.field || null,
+      toStr(input.oldValue),
+      toStr(input.newValue),
+      userId,
+      new Date().toISOString(),
+    ]
+  );
+}
+
+// Write a single audit record. Safe against missing branch/user session.
+// Schluckt Schreibfehler (Standard-Pfad — Audit darf den Aufrufer nicht kippen).
+export function logAudit(input: LogAuditInput): void {
+  try { writeAuditRow(input); }
+  catch (err) { console.warn('[audit] failed to log:', err); }
+}
+
+// Variante fuer ATOMARE Vorgaenge: wirft bei Schreibfehler, damit der umgebende
+// SQL-Transaktions-Block (z. B. cancelReturn) per ROLLBACK vollstaendig scheitert.
+export function logAuditOrThrow(input: LogAuditInput): void {
+  writeAuditRow(input);
 }
 
 // For UPDATE: write one row per changed field (Plan §6).

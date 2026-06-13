@@ -86,7 +86,8 @@ export function InvoiceDetail() {
 
   // Sales Return state
   const { returns: salesReturns, loadReturns: loadSalesReturns, createReturn: createSalesReturn, refundReturn: refundSalesReturn,
-    getInvoiceReturnSummary, recordRefundPayment, getReturnedQtyForLine, getInvoiceCardInfo } = useSalesReturnStore();
+    getInvoiceReturnSummary, recordRefundPayment, getReturnedQtyForLine, getInvoiceCardInfo,
+    cancelReturn, getReturnCancelability } = useSalesReturnStore();
   const { creditNotes, loadCreditNotes } = useCreditNoteStore();
   const [showReturn, setShowReturn] = useState(false);
   const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number }>>({});
@@ -103,6 +104,10 @@ export function InvoiceDetail() {
   const [refundPayMethod, setRefundPayMethod] = useState<'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other'>('bank');
   // Slice 5 — bei cash/bank-Refund einer karten-gezahlten Invoice: Gebuehr abziehen (Kunde traegt)?
   const [refundDeductFee, setRefundDeductFee] = useState(false);
+
+  // Cancel-Return-Modal (Owner-only Storno; behaelt Return als REJECTED, reverst alle Wirkungen)
+  const [cancelReturnModal, setCancelReturnModal] = useState<{ returnId: string; returnNumber: string; needsStockWarning: boolean } | null>(null);
+  const [cancelReturnReason, setCancelReturnReason] = useState('');
 
   // Payment modal
   const [paymentOpen, setPaymentOpen] = useState(false);
@@ -1285,6 +1290,27 @@ export function InvoiceDetail() {
                             </button>
                           </div>
                         )}
+                        {/* Owner-only: einheitlicher Cancel-Pfad (Storno → REJECTED, alle Wirkungen reversiert) */}
+                        {perm.isOwner && (() => {
+                          const cb = getReturnCancelability(r.id);
+                          return (
+                            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed #E5E9EE' }}>
+                              {cb.canCancel ? (
+                                <button onClick={() => {
+                                  setCancelReturnModal({ returnId: r.id, returnNumber: r.returnNumber, needsStockWarning: cb.needsStockWarning });
+                                  setCancelReturnReason('');
+                                }}
+                                  className="cursor-pointer" style={{ padding: '4px 10px', fontSize: 11, border: '1px solid #DC2626', color: '#DC2626', borderRadius: 4, background: 'none' }}>
+                                  Cancel Return
+                                </button>
+                              ) : (
+                                <span style={{ fontSize: 11, color: '#9CA3AF' }} title={cb.blockReason || undefined}>
+                                  Cannot cancel: {cb.blockReason}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
                     );
                   })}
@@ -1755,6 +1781,46 @@ export function InvoiceDetail() {
                 setRefundPayAmount('');
                 setRefundDeductFee(false);
               }}>Record Payment</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Cancel Return Modal (Owner-only Storno → REJECTED, alle Wirkungen reversiert) */}
+      <Modal open={!!cancelReturnModal} onClose={() => setCancelReturnModal(null)} title="Cancel Return" width={460}>
+        {cancelReturnModal && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{ fontSize: 13, color: '#4B5563' }}>
+              Cancel return <b>{cancelReturnModal.returnNumber}</b>? This reverses its inventory, COGS, VAT,
+              credit note and customer-credit effects. The return is kept as <b>REJECTED</b> (history preserved)
+              and the invoice becomes editable again.
+            </div>
+            {cancelReturnModal.needsStockWarning && (
+              <div style={{ padding: 10, background: 'rgba(217,119,6,0.08)', border: '1px solid rgba(217,119,6,0.3)', borderRadius: 8, fontSize: 12, color: '#92400E' }}>
+                {'⚠'} This return used a <b>Keep-as-own / Return-to-owner</b> disposition. The stock reversal is
+                best-effort; please verify inventory and consignment status manually afterwards.
+              </div>
+            )}
+            <Input required label="REASON" value={cancelReturnReason}
+              onChange={e => setCancelReturnReason(e.target.value)}
+              placeholder="Why is this return being cancelled?" />
+            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
+              <Button variant="ghost" onClick={() => setCancelReturnModal(null)}>Keep Return</Button>
+              <Button variant="primary"
+                disabled={!cancelReturnReason.trim()}
+                onClick={() => {
+                  if (!cancelReturnReason.trim()) return;
+                  try {
+                    cancelReturn(cancelReturnModal.returnId, cancelReturnReason.trim());
+                    setCancelReturnModal(null);
+                    setCancelReturnReason('');
+                  } catch (e) {
+                    alert(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                style={{ background: '#DC2626' }}>
+                Cancel Return
+              </Button>
             </div>
           </div>
         )}

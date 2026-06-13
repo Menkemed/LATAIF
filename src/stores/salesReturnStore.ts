@@ -10,15 +10,21 @@
 //    CN cashRefund/receivableCancel-Split wird live nachgezogen, refund_status
 //    transitioned. Auto-approve, falls noch REQUESTED, damit CN garantiert existiert.
 //  - refundReturn: Convenience-Wrapper (approve + recordRefundPayment in einem).
-//  - rejectReturn: revertiert Disposition (best-effort), nur erlaubt vor Approval.
-//  - deleteReturn: revertiert Disposition + VAT + löscht CN.
+//  - cancelReturn: einheitlicher Storno (UI: Owner-only). Reverst Disposition/COGS/CN/VAT/
+//    Customer-Credit/Card-Fee in EINER SQL-Transaktion und behaelt die Row als REJECTED
+//    (Historie + Lines bleiben). Blockt bei ausgezahltem Refund oder verbrauchtem Credit.
+//    Idempotent (schon REJECTED → No-op). Ersetzt die alten reject/delete-Pfade.
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { SalesReturn, SalesReturnLine, SalesReturnStatus, RefundStatus, ProductDisposition } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackStatusChange, trackRefund, trackDelete } from '@/core/sync/track';
+import { trackInsert, trackUpdate, trackStatusChange, trackRefund } from '@/core/sync/track';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { trackChange } from '@/core/sync/sync-service';
+import { useAuthStore } from '@/stores/authStore';
+import { canonicalRole } from '@/core/models/types';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import {
   postCreditNote,
@@ -26,6 +32,9 @@ import {
   reverseSource,
   hasLedgerEntries,
   hasReversalFor,
+  beginLedgerTransaction,
+  commitLedgerTransaction,
+  rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { restoreLot, syncProductQuantity } from '@/core/lots/lot-queries';
 import type { CreditNote } from '@/core/models/types';
@@ -278,13 +287,15 @@ interface SalesReturnStore {
     }>;
   }) => SalesReturn;
   approveReturn: (id: string) => void;
-  rejectReturn: (id: string) => void;
   refundReturn: (id: string, partialAmount?: number) => void;
   // deductCardFee (Slice 5): bei method cash/bank zieht es die anteilige Original-
   // Karten-Gebuehr vom Refund ab (Kunde traegt sie). Bei method 'card' wird die Gebuehr
   // immer anteilig erstattet (Flag irrelevant).
   recordRefundPayment: (returnId: string, amount: number, method: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other', date?: string, deductCardFee?: boolean) => void;
-  deleteReturn: (id: string) => void;
+  // Einheitlicher Storno (Owner-only via UI). Atomar, behaelt die Row als REJECTED.
+  cancelReturn: (id: string, reason: string) => void;
+  // Vorab-Pruefung fuer die UI: ob/warum ein Return (nicht) stornierbar ist + Lager-Warnflag.
+  getReturnCancelability: (id: string) => { canCancel: boolean; blockReason: string | null; needsStockWarning: boolean };
   getInvoiceReturnSummary: (invoiceId: string, invoiceGross: number, invoicePaid?: number) => {
     returns: SalesReturn[];
     totalReturned: number;
@@ -532,32 +543,6 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     get().loadReturns();
   },
 
-  // ── Reject ───────────────────────────────────────────────
-  // Nur erlaubt vor Approval (keine CN ausgestellt). Disposition wird best-effort revertiert.
-  rejectReturn: (id) => {
-    const r = get().getReturn(id);
-    if (!r) return;
-    if (r.status === 'APPROVED' || r.status === 'REFUNDED' || r.status === 'CLOSED') {
-      console.warn('[Return] cannot reject after approval — use deleteReturn instead');
-      throw new Error('Cannot reject a return that has been approved. Use delete instead.');
-    }
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    // Disposition revertieren (Ware war beim Anlegen schon umgebucht).
-    revertDisposition(db, r.lines, r.productDisposition || 'IN_STOCK', now);
-    // Slice 2 — COGS-Umkehr der Return spiegeln (greift nur wenn IN_STOCK gepostet
-    // wurde; guarded + idempotent).
-    try {
-      if (hasLedgerEntries('SALES_RETURN_COGS', id) && !hasReversalFor('SALES_RETURN_COGS', id)) {
-        reverseSource('SALES_RETURN_COGS', id, now);
-      }
-    } catch (err) { console.error('[ledger] SALES_RETURN_COGS reverse failed:', err); }
-    db.run(`UPDATE sales_returns SET status = 'REJECTED' WHERE id = ?`, [id]);
-    saveDatabase();
-    trackStatusChange('sales_returns', id, r.status, 'REJECTED');
-    get().loadReturns();
-  },
-
   // ── Refund (convenience wrapper) ─────────────────────────
   // Plan 2026-05: Ruft approveReturn (idempotent) + recordRefundPayment(cap) auf.
   // KEIN eigener CN-Code mehr.
@@ -765,19 +750,31 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     get().loadReturns();
   },
 
-  // ── Delete ───────────────────────────────────────────────
-  // Vollständiges Rollback: Disposition revert, VAT zurück, CN löschen.
-  deleteReturn: (id) => {
-    const db = getDatabase();
+  // ── Cancel (einheitlicher Storno) ────────────────────────
+  // Reverst Disposition/COGS/CN/VAT/Customer-Credit/Card-Fee in EINER SQL-Transaktion und
+  // setzt den Return auf REJECTED (Row + Lines bleiben → Historie, keine verwaisten FKs,
+  // Invoice via editInvoice-Guard-B wieder editierbar, Returned-Qty wieder 0/korrekt).
+  // Blockt bei ausgezahltem Refund oder bereits verbrauchtem Customer-Credit. Idempotent.
+  cancelReturn: (id, reason) => {
+    // Owner-only — store-seitig HART erzwungen (die UI versteckt den Button zusaetzlich via perm.isOwner).
+    let actorRole: string | undefined;
+    try { actorRole = useAuthStore.getState().role(); } catch { actorRole = undefined; }
+    if (canonicalRole(actorRole) !== 'ADMIN') {
+      throw new Error('Only the owner can cancel a return.');
+    }
     const r = get().getReturn(id);
     if (!r) return;
-
-    // Credit-Modell Slice 3.5 — Guard GANZ OBEN (vor jeder Mutation → Atomarität):
-    // Ist das aus diesem Return entstandene Store-Guthaben bereits (teil-)eingeloest
-    // (used_amount>0), darf der Return NICHT geloescht werden. Sonst floss bereits Wert
-    // auf eine andere Rechnung (mit 'credit' bezahlt) → nicht sauber rueckabwickelbar, und
-    // der volle CN-Ledger-Reverse wuerde eine CUSTOMER_CREDIT-Divergenz erzeugen. Blocken
-    // statt teil-reversen (Hausregel wie verbrauchte supplier_credits / paid_out-Consignment).
+    if (r.status === 'REJECTED') return; // idempotenter No-op (schon storniert)
+    if (!reason || !reason.trim()) {
+      throw new Error('A reason is required to cancel a return.');
+    }
+    // Block 1 — bereits ausgezahlter Cash/Bank/Card-Refund: echtes Geld ist raus; ein
+    // Ledger-Reverse wuerde es nur buchhalterisch zurueckholen. Hart blocken.
+    if ((r.refundPaidAmount || 0) > 0.005) {
+      throw new Error(`Cannot cancel: a refund of ${(r.refundPaidAmount || 0).toFixed(3)} BHD has already been paid out. Reclaim the payout first.`);
+    }
+    // Block 2 — aus diesem Return entstandenes Store-Guthaben bereits (teil-)verbraucht:
+    // Wert floss schon auf eine andere Rechnung → nicht sicher rueckabwickelbar.
     const usedCredit = query(
       `SELECT cc.id FROM customer_credits cc
          JOIN credit_notes cn ON cn.id = cc.source_id
@@ -786,79 +783,71 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       [id]
     );
     if (usedCredit.length > 0) {
-      throw new Error('Cannot delete this return because its customer credit has already been used.');
+      throw new Error('Cannot cancel this return because its customer credit has already been used.');
     }
 
+    const db = getDatabase();
     const now = new Date().toISOString();
-
-    // Disposition revertieren (außer wenn schon rejected — dann war's bereits revertiert).
-    if (r.status !== 'REJECTED') {
-      revertDisposition(db, r.lines, r.productDisposition || 'IN_STOCK', now);
-    }
-
-    // VAT restoren (wenn Approve passierte — vat_corrected wurde abgezogen).
     const wasApproved = r.status === 'APPROVED' || r.status === 'REFUNDED' || r.status === 'CLOSED';
-    const vatToRestore = wasApproved ? Number(r.vatCorrected || 0) : 0;
-    if (vatToRestore > 0) {
-      db.run(
-        `UPDATE invoices SET vat_amount = vat_amount + ?, updated_at = ? WHERE id = ?`,
-        [vatToRestore, now, r.invoiceId]
-      );
-    }
-    // M-01: kein Customer-LTV-Restore mehr — approveReturn reduziert nichts mehr
-    // (stale total_*-Spalten abgeschafft); der Return verschwindet mit dem Delete
-    // aus den sales_returns und damit automatisch aus computeSalesMetrics.
+    const oldSnapshot = {
+      status: r.status,
+      refundStatus: r.refundStatus,
+      totalAmount: r.totalAmount,
+      refundPaidAmount: r.refundPaidAmount || 0,
+      vatCorrected: r.vatCorrected || 0,
+      disposition: r.productDisposition || 'IN_STOCK',
+    };
+    const deletedCnIds: string[] = [];
+    const deletedCcIds: string[] = [];
+    let feeRestored = 0;
+    let feeExpenseId: string | null = null;
 
-    // ── Ledger-Reversierung (v0.7.26) ───────────────────────────────────────
-    // deleteReturn revertiert Lager/VAT/LTV — das LEDGER muss analog zurueck, sonst
-    // bleiben Cash-Refund + CN-Buchungen als verwaiste Eintraege stehen (Saldo falsch).
-    // Slice 2 — Waren-Seite (COGS-Umkehr) der Return spiegeln. Bei bereits-rejected
-    // Returns ist sie schon reversiert → hasReversalFor-Guard macht es idempotent.
+    // ── ALLES in EINER gemeinsamen SQL-Transaktion → all-or-nothing ──────────
+    beginLedgerTransaction();
     try {
+      // 1. Inventory/Disposition zurueck (best-effort bei KEEP_AS_OWN/RETURN_TO_OWNER).
+      revertDisposition(db, r.lines, r.productDisposition || 'IN_STOCK', now);
+
+      // 2. VAT auf der Invoice wiederherstellen (nur wenn Approve sie reduziert hatte).
+      if (wasApproved && Number(r.vatCorrected || 0) > 0) {
+        db.run(
+          `UPDATE invoices SET vat_amount = vat_amount + ?, updated_at = ? WHERE id = ?`,
+          [Number(r.vatCorrected || 0), now, r.invoiceId]
+        );
+      }
+
+      // 3. COGS-Umkehr der Return spiegeln (greift nur bei IN_STOCK; guarded + idempotent).
       if (hasLedgerEntries('SALES_RETURN_COGS', id) && !hasReversalFor('SALES_RETURN_COGS', id)) {
         reverseSource('SALES_RETURN_COGS', id, now);
       }
-    } catch (err) { console.error('[ledger] deleteReturn SALES_RETURN_COGS reverse failed:', err); }
-    const cnRows = query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [id]);
-    for (const cn of cnRows) {
-      const cnId = cn.id as string;
-      // CN-Cash/Revenue/AR zurueckdrehen (nur die aktive, nicht-reversierte Buchung).
-      try {
+
+      // 4. Pro Credit Note: Ledger zurueck (Revenue/AR/Cash/VAT/CUSTOMER_CREDIT),
+      //    unverbrauchtes Store-Guthaben abbauen, CN-Row entfernen.
+      const cnRows = query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [id]);
+      for (const cn of cnRows) {
+        const cnId = cn.id as string;
         if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
           reverseSource('CREDIT_NOTE', cnId, now);
         }
-      } catch (err) { console.error(`[ledger] deleteReturn CN reverse failed:`, err); }
-      // L-01-Echtfix — das aus diesem CN entstandene Store-Guthaben symmetrisch abbauen
-      // (Ledger CR CUSTOMER_CREDIT wurde oben reversiert). NUR wenn unverbraucht
-      // (used_amount=0); teil-eingeloestes Guthaben (erst mit Slice 3 möglich) bleibt
-      // stehen, damit kein bereits genutztes Guthaben verschwindet.
-      try {
+        // Block 2 oben garantiert used_amount=0 → sauber loeschbar.
         const ccRows = query(
-          `SELECT id, used_amount FROM customer_credits WHERE source_type = 'sales_return' AND source_id = ?`,
+          `SELECT id FROM customer_credits WHERE source_type = 'sales_return' AND source_id = ?`,
           [cnId]
         );
         for (const cc of ccRows) {
-          if (Number(cc.used_amount || 0) <= 0.005) {
-            db.run(`DELETE FROM customer_credits WHERE id = ?`, [cc.id as string]);
-            trackDelete('customer_credits', cc.id as string);
-          } else {
-            console.warn(`[Return] customer_credit ${(cc.id as string).slice(0,8)} teil-eingeloest — bleibt bestehen`);
-          }
+          db.run(`DELETE FROM customer_credits WHERE id = ?`, [cc.id as string]);
+          deletedCcIds.push(cc.id as string);
         }
-      } catch (err) { console.error('[Return] deleteReturn customer_credit teardown failed:', err); }
-      trackDelete('credit_notes', cnId);
-    }
+        deletedCnIds.push(cnId);
+      }
+      db.run(`DELETE FROM credit_notes WHERE sales_return_id = ?`, [id]);
 
-    // Slice 5 — Karten-Gebuehr-Erstattungen dieses Returns reversieren (Ledger + Tabelle).
-    // Die REFUND-Eintraege (sourceId `cardfee-refund:<returnId>:<uuid>`) zurueckdrehen und
-    // die decrementierte CardFee-Expense der Invoice wieder auffuellen.
-    try {
+      // 5. Karten-Gebuehr-Erstattungen dieses Returns reversieren (Ledger + Expense auffuellen).
       const feeSrcs = query(
         `SELECT DISTINCT source_id FROM ledger_entries
            WHERE source_module = 'REFUND' AND source_id LIKE ?`,
         [`cardfee-refund:${id}:%`]
       );
-      let feeRestored = 0;
       for (const fs of feeSrcs) {
         const sid = fs.source_id as string;
         if (!hasLedgerEntries('REFUND', sid) || hasReversalFor('REFUND', sid)) continue;
@@ -879,21 +868,74 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
           [r.invoiceId]
         );
         if (feeRows.length) {
-          const fid = feeRows[0].id as string;
+          feeExpenseId = feeRows[0].id as string;
           const newAmt = Math.round(((Number(feeRows[0].amount) || 0) + feeRestored) * 1000) / 1000;
-          db.run(`UPDATE expenses SET amount = ?, paid_amount = ?, status = 'PAID' WHERE id = ?`, [newAmt, newAmt, fid]);
-          trackUpdate('expenses', fid, { cardFeeRestored: feeRestored, reason: 'return-deleted' });
+          db.run(`UPDATE expenses SET amount = ?, paid_amount = ?, status = 'PAID' WHERE id = ?`, [newAmt, newAmt, feeExpenseId]);
         }
       }
-    } catch (err) { console.error('[ledger] deleteReturn card-fee reverse failed:', err); }
 
-    db.run(`DELETE FROM credit_notes WHERE sales_return_id = ?`, [id]);
-    db.run(`DELETE FROM sales_return_lines WHERE return_id = ?`, [id]);
-    db.run(`DELETE FROM sales_returns WHERE id = ?`, [id]);
-    saveDatabase();
-    trackDelete('sales_returns', id);
+      // 6. Return auf REJECTED — Row + Lines bleiben erhalten (Historie, keine Orphans).
+      db.run(`UPDATE sales_returns SET status = 'REJECTED' WHERE id = ?`, [id]);
+
+      // 7. Audit ATOMAR in derselben Transaktion: logAuditOrThrow WIRFT bei Fehler →
+      //    der catch unten macht ROLLBACK, sodass weder Mutation noch Audit-Eintrag zurueckbleibt.
+      //    Kein saveDatabase hier — commitLedgerTransaction persistiert alles gemeinsam.
+      logAuditOrThrow({
+        module: 'Sales',
+        entityType: 'sales_returns',
+        entityId: id,
+        action: 'STATUS_CHANGE',
+        field: 'cancel',
+        oldValue: { ...oldSnapshot, invoiceId: r.invoiceId, returnNumber: r.returnNumber },
+        newValue: { status: 'REJECTED', reason: reason.trim(), invoiceId: r.invoiceId, reversedCreditNotes: deletedCnIds.length, removedCustomerCredits: deletedCcIds.length, cardFeeRestored: feeRestored },
+      });
+
+      commitLedgerTransaction();
+    } catch (err) {
+      rollbackLedgerTransaction();
+      get().loadReturns();
+      try { useCreditNoteStore.getState().loadCreditNotes(); } catch { /* */ }
+      throw err;
+    }
+
+    // ── Nach erfolgreichem Commit: NUR Sync-Tracking (trackChange → sync_changelog +
+    //    saveDatabase). Bewusst NICHT in der Transaktion — saveDatabase wuerde sonst einen
+    //    uncommitteten Zwischenstand leaken. Das Audit ist bereits ATOMAR im COMMIT (s. o.).
+    //    trackChange ist ein No-op, wenn kein LAN-Sync konfiguriert ist. ────────────────
+    try {
+      trackChange('sales_returns', id, 'update', { status: 'REJECTED', cancelReason: reason.trim() });
+      for (const cnId of deletedCnIds) trackChange('credit_notes', cnId, 'delete', {});
+      for (const ccId of deletedCcIds) trackChange('customer_credits', ccId, 'delete', {});
+      if (feeExpenseId && feeRestored > 0.0005) trackChange('expenses', feeExpenseId, 'update', { cardFeeRestored: feeRestored });
+    } catch (e) {
+      console.warn('[Return] cancel sync tracking failed (non-fatal):', e);
+    }
+
     get().loadReturns();
     try { useCreditNoteStore.getState().loadCreditNotes(); } catch { /* */ }
+  },
+
+  // Vorab-Pruefung fuer die UI: ob/warum ein Return (nicht) stornierbar ist + Lager-Warnflag.
+  getReturnCancelability: (id) => {
+    const r = get().getReturn(id);
+    if (!r) return { canCancel: false, blockReason: 'Return not found.', needsStockWarning: false };
+    if (r.status === 'REJECTED') return { canCancel: false, blockReason: 'Return is already cancelled.', needsStockWarning: false };
+    if ((r.refundPaidAmount || 0) > 0.005) {
+      return { canCancel: false, blockReason: `A refund of ${(r.refundPaidAmount || 0).toFixed(3)} BHD has already been paid out — reclaim it first.`, needsStockWarning: false };
+    }
+    const usedCredit = query(
+      `SELECT cc.id FROM customer_credits cc
+         JOIN credit_notes cn ON cn.id = cc.source_id
+        WHERE cn.sales_return_id = ? AND cc.source_type = 'sales_return'
+          AND cc.used_amount > 0.005 LIMIT 1`,
+      [id]
+    );
+    if (usedCredit.length > 0) {
+      return { canCancel: false, blockReason: 'The store credit from this return has already been used.', needsStockWarning: false };
+    }
+    const disp = r.productDisposition || 'IN_STOCK';
+    const needsStockWarning = disp === 'KEEP_AS_OWN' || disp === 'RETURN_TO_OWNER';
+    return { canCancel: true, blockReason: null, needsStockWarning };
   },
 
   // ── Aggregations (unverändert — Reports lesen hier) ─────
