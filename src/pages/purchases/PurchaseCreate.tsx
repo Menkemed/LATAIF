@@ -200,7 +200,9 @@ export function PurchaseCreate() {
   }
 
   const supplier = useMemo(() => suppliers.find(s => s.id === supplierId), [suppliers, supplierId]);
-  const supplierOptions = useMemo(() => suppliers.map(s => ({
+  // Nur aktive Supplier zur Auswahl (konsistent mit Repair/Order/Scrap-Pickern):
+  // ein deaktivierter Supplier soll nicht fuer einen NEUEN Einkauf waehlbar sein.
+  const supplierOptions = useMemo(() => suppliers.filter(s => s.active).map(s => ({
     id: s.id,
     label: s.name,
     subtitle: s.phone || s.email,
