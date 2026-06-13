@@ -16,6 +16,62 @@ function safePost(label: string, fn: () => void): void {
   }
 }
 
+// ── SSOT: alle Tabellen/Spalten, die einen Supplier referenzieren ──
+// Hat EINE davon einen Treffer, gilt der Supplier als "verknuepft" und darf NICHT
+// hart geloescht werden: das Frontend (sql.js) erzwingt keine Foreign Keys, ein
+// DELETE wuerde sonst diese 13 Referenzstellen ueber 12 Tabellen verwaisen lassen
+// (inkl. offener supplier_credits/gold_payables). Stattdessen deaktivieren
+// (active=0 via updateSupplier). Mehrere Spalten/Tabellen teilen sich ein Label
+// (repairs+repair_lines → "repair", orders+order_lines → "order") und werden im
+// Count aggregiert. Neue Supplier-FK-Tabelle → hier eintragen.
+const SUPPLIER_LINK_TABLES: { table: string; column: string; label: string }[] = [
+  { table: 'purchases',                   column: 'supplier_id',           label: 'purchase' },
+  { table: 'purchase_returns',            column: 'supplier_id',           label: 'purchase return' },
+  { table: 'supplier_credits',            column: 'supplier_id',           label: 'supplier credit' },
+  { table: 'gold_payables',               column: 'supplier_id',           label: 'gold payable' },
+  { table: 'expenses',                    column: 'supplier_id',           label: 'expense' },
+  { table: 'recurring_expense_templates', column: 'supplier_id',           label: 'recurring expense' },
+  { table: 'repairs',                     column: 'workshop_supplier_id',  label: 'repair' },
+  { table: 'repair_lines',                column: 'supplier_id',           label: 'repair' },
+  { table: 'scrap_trades',                column: 'buyer_supplier_id',     label: 'scrap trade' },
+  { table: 'precious_metals',             column: 'supplier_id',           label: 'metal record' },
+  { table: 'orders',                      column: 'goldsmith_supplier_id', label: 'order' },
+  { table: 'order_lines',                 column: 'supplier_id',           label: 'order' },
+  { table: 'order_lines',                 column: 'ordered_supplier_id',   label: 'order' },
+];
+
+/**
+ * Zaehlt fuer einen Supplier alle Referenzen ueber SUPPLIER_LINK_TABLES und
+ * aggregiert nach Label (nur Treffer mit count > 0). Leeres Array = nirgends
+ * referenziert = hart loeschbar. Wirft bei Query-Fehlern bewusst durch (statt
+ * "leer" zurueckzugeben), damit ein Schema-Problem nie zu faelschlichem Loeschen
+ * verknuepfter Geschaeftsdaten fuehrt.
+ */
+function querySupplierLinks(id: string): { label: string; count: number }[] {
+  const cols = SUPPLIER_LINK_TABLES
+    .map((t, i) => `(SELECT COUNT(*) FROM ${t.table} WHERE ${t.column} = ?) AS c${i}`)
+    .join(', ');
+  const rows = query(`SELECT ${cols}`, SUPPLIER_LINK_TABLES.map(() => id));
+  const rec = rows[0] as Record<string, unknown> | undefined;
+  const links: { label: string; count: number }[] = [];
+  if (!rec) return links;
+  SUPPLIER_LINK_TABLES.forEach((t, idx) => {
+    const n = Number(rec[`c${idx}`] || 0);
+    if (n <= 0) return;
+    const existing = links.find(l => l.label === t.label);
+    if (existing) existing.count += n;
+    else links.push({ label: t.label, count: n });
+  });
+  return links;
+}
+
+/** "2 purchases and 1 expense" — pluralisiert (+s) und verbindet mit Komma/„and". */
+function formatSupplierLinks(links: { label: string; count: number }[]): string {
+  const parts = links.map(l => `${l.count} ${l.label}${l.count === 1 ? '' : 's'}`);
+  if (parts.length <= 1) return parts.join('');
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+}
+
 interface SupplierCredit {
   id: string;
   supplierId: string;
@@ -123,6 +179,14 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   },
 
   deleteSupplier: (id) => {
+    // Guard (Product/N1-Muster): ein Supplier mit IRGENDEINER Verknuepfung darf
+    // nicht hart geloescht werden — sonst verwaisen verknuepfte Geschaeftsdaten
+    // (Frontend erzwingt keine FKs). Bei Treffern wirft die Meldung; die UI
+    // faengt sie und zeigt einen Alert. Stattdessen deaktivieren (active=0).
+    const links = querySupplierLinks(id);
+    if (links.length > 0) {
+      throw new Error(`Cannot delete supplier — referenced by ${formatSupplierLinks(links)}. Mark as inactive instead.`);
+    }
     const db = getDatabase();
     db.run('DELETE FROM suppliers WHERE id = ?', [id]);
     saveDatabase();

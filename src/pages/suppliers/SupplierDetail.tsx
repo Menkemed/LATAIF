@@ -255,8 +255,16 @@ export function SupplierDetail() {
 
   function handleDelete() {
     if (!id) return;
-    deleteSupplier(id);
-    navigate('/suppliers');
+    try {
+      deleteSupplier(id);
+      setConfirmDelete(false);
+      navigate('/suppliers');
+    } catch (e) {
+      // Supplier ist verknuepft (Guard) → Meldung zeigen, NICHT navigieren,
+      // Daten bleiben unveraendert. Stattdessen deaktivieren empfohlen.
+      setConfirmDelete(false);
+      alert(e instanceof Error ? e.message : String(e));
+    }
   }
 
   return (
@@ -664,7 +672,7 @@ export function SupplierDetail() {
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Supplier" width={400}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
-          Delete supplier <strong style={{ color: '#0F0F10' }}>{supplier.name}</strong>? Purchases remain but supplier link is lost.
+          Delete supplier <strong style={{ color: '#0F0F10' }}>{supplier.name}</strong>? This only works if the supplier has no linked records (purchases, expenses, payables, etc.) — otherwise mark it as inactive instead.
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
