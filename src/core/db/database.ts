@@ -595,6 +595,24 @@ function runMigrations(database: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_audit_module ON audit_log(module)`,
     `CREATE INDEX IF NOT EXISTS idx_audit_changed_at ON audit_log(changed_at)`,
 
+    // Invoice-Edit-Revisionen (Line-Edit gebuchter Rechnungen). Jeder editInvoice-
+    // Vorgang schreibt EINE Zeile mit Pflicht-Grund + vollem Vorher/Nachher-Snapshot
+    // (Header + Zeilen + paid/status als JSON). revision laeuft je Invoice 1,2,3,…
+    // Unveraenderbar (kein Update/Delete); ergaenzt das feld-weise audit_log um den
+    // kompletten Belegzustand vor/nach dem Edit.
+    `CREATE TABLE IF NOT EXISTS invoice_edits (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT,
+      invoice_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      old_snapshot TEXT NOT NULL,
+      new_snapshot TEXT NOT NULL,
+      edited_by TEXT,
+      edited_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_invoice_edits_invoice ON invoice_edits(invoice_id)`,
+
     // Phase 0.B: Tax-Scheme-Rename auf VAT_10 / ZERO / MARGIN (Plan §Tax §3)
     `UPDATE products SET tax_scheme = 'VAT_10' WHERE tax_scheme = 'standard'`,
     `UPDATE products SET tax_scheme = 'MARGIN' WHERE tax_scheme = 'margin'`,

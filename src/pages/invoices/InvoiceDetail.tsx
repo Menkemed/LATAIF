@@ -58,7 +58,7 @@ export function InvoiceDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
-  const { invoices, loadInvoices, updateInvoice, rewriteInvoiceLines, recordPayment, applyCreditToInvoice, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
+  const { invoices, loadInvoices, updateInvoice, editInvoice, recordPayment, applyCreditToInvoice, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
   const { customers, loadCustomers, getAvailableCredit } = useCustomerStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -77,6 +77,7 @@ export function InvoiceDetail() {
   const [lineDraft, setLineDraft] = useState<Array<{ id?: string; productId: string; description: string; quantity: number; unitPrice: number; purchasePrice: number; vatRate: number; vatAmount: number; lineTotal: number; taxScheme: string }>>([]);
   const [productPickerIdx, setProductPickerIdx] = useState<number | null>(null);
   const [productPickerQuery, setProductPickerQuery] = useState('');
+  const [lineEditReason, setLineEditReason] = useState('');  // Pflicht-Grund fuer den Line-Edit (Audit)
 
   // Payments-Manage Modal
   const [paymentsModal, setPaymentsModal] = useState(false);
@@ -234,6 +235,7 @@ export function InvoiceDetail() {
       lineTotal: l.lineTotal,
       taxScheme: l.taxScheme,
     })));
+    setLineEditReason('');
     setLinesModal(true);
   }
 
@@ -290,8 +292,11 @@ export function InvoiceDetail() {
   }
 
   function saveLines() {
-    if (!id || lineDraft.length === 0) return;
-    rewriteInvoiceLines(id, lineDraft.map(l => ({
+    if (!id || !invoice || lineDraft.length === 0) return;
+    // Pflicht-Aenderungsgrund (Audit). editInvoice wirft sonst — hier vorab pruefen.
+    const reason = lineEditReason.trim();
+    if (!reason) { alert('Please enter a reason for this edit.'); return; }
+    const payload = lineDraft.map(l => ({
       productId: l.productId,
       quantity: Math.max(1, Number(l.quantity) || 1),
       unitPrice: Number(l.unitPrice) || 0,
@@ -301,8 +306,16 @@ export function InvoiceDetail() {
       vatAmount: Number(l.vatAmount) || 0,
       lineTotal: Number(l.lineTotal) || 0,
       description: l.description || undefined,
-    })));
-    setLinesModal(false);
+    }));
+    // Ein atomarer Vorgang im Store (reverse+repost+status+audit). Reduktion unter
+    // den bereits gezahlten Betrag wird dort blockiert (klare Fehlermeldung).
+    try {
+      editInvoice(id, { lines: payload, reason });
+      setLinesModal(false);
+      setLineEditReason('');
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    }
   }
 
   function handleCancelInvoice() {
@@ -1396,6 +1409,13 @@ export function InvoiceDetail() {
           <div className="flex items-center" style={{ marginTop: 4 }}>
             <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Line</Button>
           </div>
+          <div>
+            <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>EDIT REASON *</span>
+            <input value={lineEditReason}
+              onChange={e => setLineEditReason(e.target.value)}
+              placeholder="Why is this invoice being edited? (required — saved to the audit log)"
+              style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }} />
+          </div>
           <div className="flex justify-between items-center" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <span style={{ fontSize: 12, color: '#6B7280' }}>
               Net: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={lineDraft.reduce((s, l) => s + (Number(l.unitPrice) || 0) * Math.max(1, Number(l.quantity) || 1), 0)}/></span>
@@ -1404,7 +1424,7 @@ export function InvoiceDetail() {
             </span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={() => setLinesModal(false)}>Cancel</Button>
-              <Button variant="primary" onClick={saveLines} disabled={lineDraft.length === 0}>Save Lines</Button>
+              <Button variant="primary" onClick={saveLines} disabled={lineDraft.length === 0 || !lineEditReason.trim()}>Save Lines</Button>
             </div>
           </div>
         </div>

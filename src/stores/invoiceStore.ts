@@ -16,9 +16,15 @@ import {
   postInvoicePaymentReversed,
   postInvoiceCancelled,
   postExpenseCancelled,
+  reverseSource,
+  beginLedgerTransaction,
+  commitLedgerTransaction,
+  rollbackLedgerTransaction,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+import { logAudit } from '@/core/audit/audit-log';
+import { useProductStore } from '@/stores/productStore';
 import type { Expense } from '@/core/models/types';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
@@ -39,7 +45,19 @@ interface InvoiceStore {
   createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>, staffId?: string, specialMark?: boolean) => Invoice;
   createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
-  rewriteInvoiceLines: (id: string, lines: { productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[]) => void;
+  // Atomarer Gesamt-Edit einer gebuchten Rechnung (Header + Zeilen + Inventory +
+  // Ledger-Reverse+Repost + optionale Delta-Zahlung + Status) in EINER SQL-Transaktion
+  // mit Pflicht-Aenderungsgrund (Audit). Reduktion unter den bereits gezahlten Betrag
+  // wird (vorerst) blockiert — Ueberzahlung→Store-Guthaben kommt als eigener Slice.
+  editInvoice: (id: string, input: {
+    lines: { productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[];
+    customerId?: string;
+    notes?: string;
+    issuedAt?: string;
+    staffId?: string;
+    deltaPayment?: { amount: number; method: PaymentMethod; cardBrand?: CardBrand };
+    reason: string;
+  }) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand) => void;
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
   // Konsumiert OPEN-customer_credits FIFO (used_amount↑) und bucht via recordPayment('credit')
@@ -581,12 +599,42 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     get().loadInvoices();
   },
 
-  rewriteInvoiceLines: (id, lines) => {
+  editInvoice: (id, input) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    const { lines, customerId, notes, issuedAt, staffId, deltaPayment, reason } = input;
 
-    // Vorab-Berechnung um zu prüfen ob neuer Brutto die bereits geleisteten Zahlungen
-    // unterläuft — sonst entstünde paid > gross und negative outstanding.
+    const inv0 = get().getInvoice(id);
+    if (!inv0) throw new Error(`editInvoice: invoice ${id} not found`);
+    if (inv0.status === 'CANCELLED') throw new Error('Cannot edit a cancelled invoice.');
+    if (!lines || lines.length === 0) throw new Error('Invoice must have at least one line.');
+
+    // Pflicht-Aenderungsgrund (Audit, Punkt 3) — kein stiller Edit.
+    const reasonTrim = (reason || '').trim();
+    if (!reasonTrim) throw new Error('An edit reason is required.');
+
+    // ── Guard B (Regel 2) — aktive Returns / Credit Notes blockieren den Line-Edit.
+    // editInvoice vergibt neue invoice_lines-IDs (DELETE+INSERT); bestehende
+    // sales_return_lines.invoice_line_id und der per source_line_id verankerte
+    // Original-COGS wuerden sonst verwaisen (Doppel-Return-Schutz + COGS-Reversal
+    // kaputt). Daher hart blocken: CN ueber CreditNotes-Detail loeschbar, Return
+    // ueber den Return-Storno — DANN ist der Line-Edit wieder frei.
+    const activeReturns = Number(query(
+      `SELECT COUNT(*) AS c FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED'`, [id]
+    )[0]?.c || 0);
+    const activeCreditNotes = Number(query(
+      `SELECT COUNT(*) AS c FROM credit_notes WHERE invoice_id = ?`, [id]
+    )[0]?.c || 0);
+    if (activeReturns > 0 || activeCreditNotes > 0) {
+      const parts: string[] = [];
+      if (activeReturns > 0) parts.push(`${activeReturns} return${activeReturns > 1 ? 's' : ''}`);
+      if (activeCreditNotes > 0) parts.push(`${activeCreditNotes} credit note${activeCreditNotes > 1 ? 's' : ''}`);
+      throw new Error(
+        `Cannot edit invoice lines — ${parts.join(' and ')} linked to this invoice. Delete the linked credit note / return first, then edit.`
+      );
+    }
+
+    // Vorab-Berechnung des neuen Brutto (vor jeder Mutation).
     let preNet = 0, preVat = 0;
     for (const l of lines) {
       const qty = Math.max(1, l.quantity || 1);
@@ -594,114 +642,241 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       preVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
     }
     const newGross = preNet + preVat;
-    const inv0 = get().getInvoice(id);
-    if (inv0 && inv0.paidAmount > newGross + 0.005) {
+    const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
+
+    // ── Punkt 1: paid_amount IST per Invariante SUM(payments) — updatePayment/
+    // deletePayment rechnen es daraus neu, ReconciliationPage.domainAR summiert
+    // payments direkt. Daher darf der Edit den bereits gezahlten Betrag NICHT
+    // unterschreiten (sonst muesste paid_amount still gesenkt werden = Invariante
+    // gebrochen, Guthaben doppelt). Reduktion-unter-paid wird vorerst BLOCKIERT;
+    // die saubere Ueberzahlung→Store-Guthaben-Umbuchung kommt als eigener Slice.
+    const projectedPaid = inv0.paidAmount + deltaAmount;
+    if (newGross < projectedPaid - 0.005) {
       throw new Error(
-        `Cannot reduce invoice gross to ${newGross.toFixed(3)} BHD — already paid ${inv0.paidAmount.toFixed(3)} BHD. Refund the excess first.`
+        `Cannot reduce the invoice total to ${newGross.toFixed(3)} BHD below the amount already paid ` +
+        `(${projectedPaid.toFixed(3)} BHD). Refund or adjust the payment first — ` +
+        `overpayment-to-store-credit is not yet available.`
       );
     }
 
-    // Phase 3 — alte Lots restoren bevor wir DELETE machen, sonst geht der
-    // Bestand verloren. Pro alter invoice_line mit lot_id: qty zurueckgeben.
-    // Phase 7 Sync: betroffene Produkt-IDs sammeln (alte UND neue), am Ende einmal sync.
-    const rewriteProductsToSync = new Set<string>();
-    {
-      const oldLines = db.exec(
-        `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
-        [id]
-      );
-      if (oldLines.length > 0) {
-        for (const row of oldLines[0].values) {
-          const [lotId, productId, qty] = row as [string | null, string | null, number];
-          if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
-          if (productId) rewriteProductsToSync.add(productId);
-        }
+    // Vorher-Snapshot fuer das Audit (Header + Zeilen + paid/status).
+    const oldSnapshot = JSON.stringify({
+      customerId: inv0.customerId, status: inv0.status,
+      netAmount: inv0.netAmount, vatAmount: inv0.vatAmount, grossAmount: inv0.grossAmount,
+      paidAmount: inv0.paidAmount, taxScheme: inv0.taxSchemeSnapshot,
+      issuedAt: inv0.issuedAt, notes: inv0.notes || null,
+      lines: (inv0.lines || []).map(l => ({
+        productId: l.productId, qty: l.quantity, unitPrice: l.unitPrice,
+        vat: l.vatAmount, lineTotal: l.lineTotal, taxScheme: l.taxScheme,
+      })),
+    });
+
+    // Ledger-Relevanz VOR dem Reverse festhalten (DRAFT ohne Ledger nicht posten).
+    const hadInvoiceLedger = hasLedgerEntries('INVOICE', id);
+
+    // ── Punkt 2: EINE echte SQL-Transaktion. reverse + header + lines + lots +
+    // repost + delta-payment + status + audit laufen als Einheit. Bei Fehler ROLLBACK
+    // → kein persistierter Zwischenstand (saveDatabase erst beim COMMIT). Store-State
+    // wird erst NACH COMMIT bzw. im Fehlerfall nach ROLLBACK re-synchronisiert.
+    const productsToSync = new Set<string>();
+    beginLedgerTransaction();
+    try {
+      // 1. (Regel 1) Bestehende INVOICE-Buchung reversen (AR/REVENUE/VAT/COGS/INVENTORY).
+      //    Multi-cycle-safe; PAYMENT-Beine (eigener sourceModule) bleiben unangetastet.
+      if (hadInvoiceLedger) {
+        reverseSource('INVOICE', id, now);
       }
-    }
 
-    db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
+      // 2. Header (optional) — Kunde/Notiz/Datum/Mitarbeiter im selben Vorgang.
+      const hSets: string[] = [];
+      const hVals: unknown[] = [];
+      if (customerId !== undefined) { hSets.push('customer_id = ?'); hVals.push(customerId); }
+      if (notes !== undefined) { hSets.push('notes = ?'); hVals.push(notes || null); }
+      if (issuedAt !== undefined) { hSets.push('issued_at = ?'); hVals.push(issuedAt); }
+      if (staffId !== undefined) { hSets.push('staff_id = ?'); hVals.push(staffId || null); }
+      if (hSets.length > 0) {
+        hVals.push(now, id);
+        db.run(`UPDATE invoices SET ${hSets.join(', ')}, updated_at = ? WHERE id = ?`, hVals);
+      }
+      const effCustomerId = customerId !== undefined ? customerId : inv0.customerId;
 
-    // Phase 4 — Auto-FIFO Lot-Pick spiegelt createDirectInvoice. Caller (InvoiceCreate
-    // im Edit-Mode) liefert lotId; falls nicht, FIFO-Lot picken + lot.unit_cost als Cost.
-    type ResolvedRewriteLine = typeof lines[number] & { _resolvedLotId: string | null; _resolvedCost: number };
-    const resolvedLines: ResolvedRewriteLine[] = lines.map(l => {
-      let lotId = l.lotId || null;
-      let cost = l.purchasePrice;
-      if (!lotId && l.productId) {
-        const r = db.exec(
-          `SELECT id, unit_cost FROM stock_lots
-            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
-            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
-          [l.productId]
+      // 3. Domain: alte Lots restoren (Bestand zurueck), dann Lines loeschen.
+      {
+        const oldLines = db.exec(
+          `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
+          [id]
         );
-        const row = r[0]?.values?.[0];
-        if (row) {
-          lotId = row[0] as string;
-          cost = Number(row[1]) || cost;
+        if (oldLines.length > 0) {
+          for (const row of oldLines[0].values) {
+            const [lotId, productId, qty] = row as [string | null, string | null, number];
+            if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
+            if (productId) productsToSync.add(productId);
+          }
         }
       }
-      return { ...l, _resolvedLotId: lotId, _resolvedCost: cost };
-    });
+      db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
 
-    let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
-    const stmt = db.prepare(
-      `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
-        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    resolvedLines.forEach((l, i) => {
-      const qty = Math.max(1, l.quantity || 1);
-      stmt.run([uuid(), id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
-      netAmount += l.unitPrice * qty;
-      totalVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
-      totalPurchase += l._resolvedCost * qty;
-      // v0.7.1 — siehe createDirectInvoice: lineTotal direkt aufsummieren statt
-      // net+vat zu rechnen (MARGIN hat lineTotal=net, vatAmount=internalVat).
-      grossAmount += l.lineTotal;
-    });
-    stmt.free();
+      // 4. Neue Lines — Auto-FIFO Lot-Pick wie createDirectInvoice. WICHTIG: Line-ID
+      //    EINMAL erzeugen (_id) und fuer DB-INSERT UND Repost-Objekt nutzen → COGS-
+      //    source_line_id == invoice_lines.id (ein spaeterer Return findet den Cost).
+      type ResolvedRewriteLine = typeof lines[number] & { _id: string; _resolvedLotId: string | null; _resolvedCost: number };
+      const resolvedLines: ResolvedRewriteLine[] = lines.map(l => {
+        let lotId = l.lotId || null;
+        let cost = l.purchasePrice;
+        if (!lotId && l.productId) {
+          const r = db.exec(
+            `SELECT id, unit_cost FROM stock_lots
+              WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+              ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+            [l.productId]
+          );
+          const row = r[0]?.values?.[0];
+          if (row) {
+            lotId = row[0] as string;
+            cost = Number(row[1]) || cost;
+          }
+        }
+        return { ...l, _id: uuid(), _resolvedLotId: lotId, _resolvedCost: cost };
+      });
 
-    // Neue Lots konsumieren.
-    resolvedLines.forEach(l => {
-      if (l._resolvedLotId) {
+      let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
+      const stmt = db.prepare(
+        `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
+          vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      resolvedLines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
-        consumeLot(l._resolvedLotId, qty);
+        stmt.run([l._id, id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
+        netAmount += l.unitPrice * qty;
+        totalVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
+        totalPurchase += l._resolvedCost * qty;
+        // v0.7.1 — siehe createDirectInvoice: lineTotal direkt aufsummieren statt
+        // net+vat zu rechnen (MARGIN hat lineTotal=net, vatAmount=internalVat).
+        grossAmount += l.lineTotal;
+      });
+      stmt.free();
+
+      // Neue Lots konsumieren.
+      resolvedLines.forEach(l => {
+        if (l._resolvedLotId) {
+          const qty = Math.max(1, l.quantity || 1);
+          consumeLot(l._resolvedLotId, qty);
+        }
+        if (l.productId) productsToSync.add(l.productId);
+      });
+
+      const margin = netAmount - totalPurchase;
+      const schemes = new Set(lines.map(l => l.taxScheme));
+      const taxScheme = schemes.size === 1 ? [...schemes][0] : 'mixed';
+
+      // 5. invoices-Totale aktualisieren — VOR dem Repost.
+      db.run(
+        `UPDATE invoices SET net_amount = ?, vat_amount = ?, gross_amount = ?,
+          purchase_price_snapshot = ?, sale_price_snapshot = ?, margin_snapshot = ?,
+          tax_scheme_snapshot = ?, updated_at = ? WHERE id = ?`,
+        [netAmount, totalVat, grossAmount, totalPurchase, netAmount, margin, taxScheme, now, id]
+      );
+
+      // 6. (Regel 1) Repost INVOICE — frische AR/REVENUE/VAT/COGS/INVENTORY. fresh.lines
+      //    tragen die ECHTEN invoice_lines-IDs (_id). Kein safePost: ein Repost-Fehler
+      //    MUSS den Gesamt-Rollback ausloesen. Nur posten, wenn die Rechnung ledger-
+      //    relevant ist (war im Ledger oder ist nicht-DRAFT) — eine reine DRAFT bleibt
+      //    ungebucht.
+      if (hadInvoiceLedger || inv0.status !== 'DRAFT') {
+        const fresh: Invoice = {
+          id, invoiceNumber: inv0.invoiceNumber, customerId: effCustomerId,
+          status: inv0.status, currency: inv0.currency || 'BHD',
+          netAmount, vatRateSnapshot: lines[0]?.vatRate || 10, vatAmount: totalVat,
+          grossAmount, taxSchemeSnapshot: taxScheme as InvoiceTaxScheme,
+          purchasePriceSnapshot: totalPurchase, salePriceSnapshot: netAmount, marginSnapshot: margin,
+          paidAmount: inv0.paidAmount, issuedAt: issuedAt ?? inv0.issuedAt, notes: notes ?? inv0.notes,
+          lines: resolvedLines.map((l, i) => ({
+            id: l._id, invoiceId: id, productId: l.productId,
+            quantity: Math.max(1, l.quantity || 1),
+            unitPrice: l.unitPrice, purchasePriceSnapshot: l._resolvedCost,
+            vatRate: l.vatRate, taxScheme: l.taxScheme as TaxScheme,
+            vatAmount: l.vatAmount, lineTotal: l.lineTotal, position: i + 1,
+          })),
+          createdAt: inv0.createdAt, createdBy: inv0.createdBy,
+        };
+        postInvoiceIssued(fresh);
       }
-      if (l.productId) rewriteProductsToSync.add(l.productId);
-    });
-    // Phase 7 Sync: products.quantity nach alter Restore + neuer Konsumption final nachziehen.
-    // Plan §Sales §Partial-Payment-Reservation: nach Rewrite zuerst entreservieren
-    // (Produkte die jetzt wieder qty>0 haben) und dann reservieren (Produkte die
-    // durch neue Lines auf 0 fallen). Reihenfolge wichtig: erst unreserve, dann reserve.
-    for (const pid of rewriteProductsToSync) syncProductQuantity(pid);
-    const invForRewrite = get().getInvoice(id);
-    const isStillUnpaid = !invForRewrite || invForRewrite.status !== 'FINAL';
-    for (const pid of rewriteProductsToSync) {
-      unreserveProductIfRestored(pid);
-      if (isStillUnpaid) reserveProductIfDepleted(pid);
+
+      // 7. Optionale Delta-Zahlung — innerhalb der Transaktion. recordPayment macht
+      //    Payment-Insert + Ledger (DR CASH/CR AR, ambient) + ggf. Card-Fee + Nummer-
+      //    Finalisierung. (newGross >= projectedPaid ist oben sichergestellt.)
+      if (deltaAmount > 0 && deltaPayment) {
+        get().recordPayment(id, deltaAmount, deltaPayment.method, undefined, undefined,
+          deltaPayment.method === 'card' ? deltaPayment.cardBrand : undefined);
+      }
+
+      // 8. Status / paid / tip SSOT-konform aus SUM(payments) (== paid_amount-Invariante).
+      //    Korrigiert FINAL→PARTIAL bei Erhoehung; bestaetigt FINAL nach Delta-Zahlung.
+      const paidRow = query(`SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?`, [id])[0];
+      const newPaid = Number(paidRow?.paid || 0);
+      const tip = Math.max(0, newPaid - grossAmount);
+      const newStatus: InvoiceStatus = newPaid >= grossAmount - 0.005 ? 'FINAL'
+        : newPaid > 0.005 ? 'PARTIAL'
+        : (inv0.status === 'DRAFT' ? 'DRAFT' : 'PARTIAL');
+      db.run(
+        `UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
+        [newPaid, tip, newStatus, now, id]
+      );
+      if (newStatus !== inv0.status) trackStatusChange('invoices', id, inv0.status, newStatus);
+
+      // 9. Produkt-Reservierung nachziehen (nach finalem Status): erst sync, dann
+      //    unreserve, dann reserve (nur solange nicht FINAL).
+      for (const pid of productsToSync) syncProductQuantity(pid);
+      const isStillUnpaid = newStatus !== 'FINAL';
+      for (const pid of productsToSync) {
+        unreserveProductIfRestored(pid);
+        if (isStillUnpaid) reserveProductIfDepleted(pid);
+      }
+
+      // 10. Audit (Punkt 3): invoice_edits-Revision mit vollem Vorher/Nachher-Snapshot
+      //     + audit_log-Eintrag (im History-Drawer sichtbar).
+      const newSnapshot = JSON.stringify({
+        customerId: effCustomerId, status: newStatus,
+        netAmount, vatAmount: totalVat, grossAmount, paidAmount: newPaid, taxScheme,
+        issuedAt: issuedAt ?? inv0.issuedAt, notes: notes ?? inv0.notes ?? null,
+        lines: resolvedLines.map(l => ({
+          productId: l.productId, qty: Math.max(1, l.quantity || 1), unitPrice: l.unitPrice,
+          vat: l.vatAmount, lineTotal: l.lineTotal, taxScheme: l.taxScheme,
+        })),
+      });
+      let branchId: string; try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+      let userId: string; try { userId = currentUserId(); } catch { userId = 'user-owner'; }
+      const revRow = query(`SELECT COALESCE(MAX(revision), 0) AS r FROM invoice_edits WHERE invoice_id = ?`, [id])[0];
+      const revision = Number(revRow?.r || 0) + 1;
+      const editId = uuid();
+      db.run(
+        `INSERT INTO invoice_edits (id, branch_id, invoice_id, revision, reason, old_snapshot, new_snapshot, edited_by, edited_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [editId, branchId, id, revision, reasonTrim, oldSnapshot, newSnapshot, userId, now]
+      );
+      trackInsert('invoice_edits', editId, { invoiceId: id, revision });
+      logAudit({
+        module: 'Sales', entityType: 'invoices', entityId: id, action: 'UPDATE',
+        field: `line edit (rev ${revision})`,
+        oldValue: `${inv0.grossAmount.toFixed(3)} BHD · ${inv0.status} · ${reasonTrim}`,
+        newValue: `${grossAmount.toFixed(3)} BHD · ${newStatus}`,
+      });
+
+      commitLedgerTransaction();
+    } catch (e) {
+      // Punkt 2 / Regel 5: vollstaendiger Rollback. Stores danach auf den
+      // zurueckgerollten DB-Stand zurueckziehen (innere Funktionen wie recordPayment
+      // koennten Store-State vorzeitig aktualisiert haben).
+      rollbackLedgerTransaction();
+      get().loadInvoices();
+      try { useProductStore.getState().loadProducts(); } catch { /* noop */ }
+      throw e;
     }
 
-    const margin = netAmount - totalPurchase;
-    const schemes = new Set(lines.map(l => l.taxScheme));
-    const taxScheme = schemes.size === 1 ? [...schemes][0] : 'mixed';
-
-    db.run(
-      `UPDATE invoices SET net_amount = ?, vat_amount = ?, gross_amount = ?,
-        purchase_price_snapshot = ?, sale_price_snapshot = ?, margin_snapshot = ?,
-        tax_scheme_snapshot = ?, updated_at = ? WHERE id = ?`,
-      [netAmount, totalVat, grossAmount, totalPurchase, netAmount, margin, taxScheme, now, id]
-    );
-
-    // Recompute tip if newly paid >= gross
-    const inv = get().getInvoice(id);
-    if (inv) {
-      const tip = Math.max(0, inv.paidAmount - grossAmount);
-      db.run(`UPDATE invoices SET tip_amount = ? WHERE id = ?`, [tip, id]);
-    }
-
-    saveDatabase();
-    trackUpdate('invoices', id, { linesReplaced: true, netAmount, grossAmount });
+    // Erfolg: Store-State NACH COMMIT synchronisieren (Invoice + Produkte/Reservierung).
     get().loadInvoices();
+    try { useProductStore.getState().loadProducts(); } catch { /* noop */ }
   },
 
   recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal, cardBrand) => {

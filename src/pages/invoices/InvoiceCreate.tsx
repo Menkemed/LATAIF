@@ -59,7 +59,7 @@ export function InvoiceCreate() {
   const [searchParams] = useSearchParams();
   const { id: editId } = useParams<{ id: string }>();
   const isEditMode = !!editId;
-  const { invoices, loadInvoices, createDirectInvoice, recordPayment, updateInvoice, rewriteInvoiceLines, getInvoicePayments } = useInvoiceStore();
+  const { invoices, loadInvoices, createDirectInvoice, recordPayment, editInvoice: editInvoiceFn, getInvoicePayments } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   // v0.6.9 — Soft-Reservation: Map product_id → { qty, orderNumbers[] } fuer den Picker-Hinweis.
@@ -86,6 +86,7 @@ export function InvoiceCreate() {
   const [paidAmount, setPaidAmount] = useState<number>(0);
   const [notes, setNotes] = useState('');
   const [staffId, setStaffId] = useState<string>('');
+  const [editReason, setEditReason] = useState('');  // Pflicht-Grund im Edit-Modus (Audit)
   const [error, setError] = useState('');
   const [hydrated, setHydrated] = useState(!isEditMode);
   // 2026-05-16 — Number-Type-Dialog: erscheint wenn die Rechnung als FINAL gespeichert wird.
@@ -273,14 +274,31 @@ export function InvoiceCreate() {
     });
 
     if (isEditMode && editInvoice) {
-      // Edit-Modus: Customer/Notes/Datum updaten, Lines neu schreiben (recomputed totals),
-      // Delta-Payment buchen falls paidAmount erhöht wurde.
+      // Edit-Modus: ALLES (Header + Zeilen + Inventory + Ledger-Reverse+Repost +
+      // optionale Delta-Zahlung + Status + Audit) atomar in editInvoice — eine
+      // einzige SQL-Transaktion im Store, nicht mehr UI-orchestriert.
       const issuedIso = `${issuedDate}T00:00:00.000Z`;
-      updateInvoice(editInvoice.id, { customerId, notes: notes || undefined, issuedAt: issuedIso, staffId: staffId || undefined });
-      rewriteInvoiceLines(editInvoice.id, payload);
+      const reason = editReason.trim();
+      if (!reason) { setError('Please enter a reason for this edit.'); return; }
+      // Delta-Zahlung nur bei Erhoehung des bezahlten Betrags (Reduktion ignoriert —
+      // negatives Payment gibt es im Modell nicht). Reduktion unter paid blockiert der Store.
       const delta = paidAmount - originalPaid;
-      if (delta > 0.001) {
-        recordPayment(editInvoice.id, delta, paymentMethod, undefined, specialMark, paymentMethod === 'card' ? cardBrand : undefined);
+      const deltaPayment = delta > 0.001
+        ? { amount: delta, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined }
+        : undefined;
+      try {
+        editInvoiceFn(editInvoice.id, {
+          lines: payload,
+          customerId,
+          notes: notes || undefined,
+          issuedAt: issuedIso,
+          staffId: staffId || undefined,
+          deltaPayment,
+          reason,
+        });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return;
       }
       if (thenPrint) {
         navigate(`/invoices/${editInvoice.id}?print=1`);
@@ -668,7 +686,16 @@ export function InvoiceCreate() {
             </div>
             {isEditMode && (
               <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 6, fontSize: 12, color: '#7A6B4F' }}>
-                Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page.
+                Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page. Reducing the total below the paid amount is blocked.
+              </div>
+            )}
+            {isEditMode && (
+              <div style={{ marginTop: 12 }}>
+                <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>EDIT REASON *</span>
+                <input value={editReason}
+                  onChange={e => setEditReason(e.target.value)}
+                  placeholder="Why is this invoice being edited? (required — saved to the audit log)"
+                  style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }} />
               </div>
             )}
             <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>

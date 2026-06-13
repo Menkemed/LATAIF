@@ -193,6 +193,51 @@ function trackLedgerEntries(entryIds: string[]): void {
   }
 }
 
+// ── Ambient-Transaktion (Multi-Step-Atomicity) ────────────────
+//
+// Normalerweise umschliesst jede Posting-Funktion (postEntries / reverseSource /
+// reverseByTransaction) ihre INSERTs mit einem eigenen BEGIN/COMMIT + saveDatabase.
+// Fuer einen zusammengesetzten Vorgang, der mehrere Buchungen + Domain-Mutationen
+// als EINE Einheit braucht (z.B. editInvoice: reverse + lines + repost + payment),
+// oeffnet der Aufrufer hier EINE umschliessende SQLite-Transaktion. Solange sie
+// aktiv ist (depth > 0), unterdruecken die Posting-Funktionen ihren eigenen
+// BEGIN/COMMIT/saveDatabase — alles laeuft in der aeusseren Transaktion und wird
+// bei einem Fehler per ROLLBACK atomar verworfen (kein persistierter Zwischenstand,
+// da saveDatabase erst beim aeusseren commit laeuft).
+//
+// sql.js erlaubt KEINE verschachtelten BEGINs → der depth-Zaehler stellt sicher,
+// dass nur die aeusserste Klammer BEGIN/COMMIT/ROLLBACK ausfuehrt.
+let ledgerTxDepth = 0;
+
+export function inLedgerTransaction(): boolean {
+  return ledgerTxDepth > 0;
+}
+
+export function beginLedgerTransaction(): void {
+  if (ledgerTxDepth === 0) {
+    getDatabase().run('BEGIN');
+  }
+  ledgerTxDepth++;
+}
+
+export function commitLedgerTransaction(): void {
+  if (ledgerTxDepth === 0) {
+    throw new Error('commitLedgerTransaction: no active ledger transaction');
+  }
+  ledgerTxDepth--;
+  if (ledgerTxDepth === 0) {
+    getDatabase().run('COMMIT');
+    saveDatabase();
+  }
+}
+
+export function rollbackLedgerTransaction(): void {
+  if (ledgerTxDepth === 0) return;
+  ledgerTxDepth = 0;
+  try { getDatabase().run('ROLLBACK'); }
+  catch (err) { console.error('[ledger] rollbackLedgerTransaction failed:', err); }
+}
+
 export function postEntries(
   entries: LedgerEntryInput[],
   ctx: PostContext
@@ -227,7 +272,9 @@ export function postEntries(
   const nos = reserveEntryNos(branchId, entries.length);
 
   const db = getDatabase();
-  db.run('BEGIN');
+  // Eigener BEGIN/COMMIT/saveDatabase nur ausserhalb einer Ambient-Transaktion.
+  const ambient = inLedgerTransaction();
+  if (!ambient) db.run('BEGIN');
   try {
     const entryIds: string[] = [];
     for (let i = 0; i < entries.length; i++) {
@@ -269,14 +316,18 @@ export function postEntries(
         ]
       );
     }
-    db.run('COMMIT');
-    // Persist nach jeder erfolgreichen Buchung — sonst gehen Posts beim Browser-Reload verloren,
-    // weil sql.js in-memory ist und localStorage nur via saveDatabase() aktualisiert wird.
-    saveDatabase();
+    if (!ambient) {
+      db.run('COMMIT');
+      // Persist nach jeder erfolgreichen Buchung — sonst gehen Posts beim Browser-Reload verloren,
+      // weil sql.js in-memory ist und localStorage nur via saveDatabase() aktualisiert wird.
+      // In einer Ambient-Transaktion uebernimmt commitLedgerTransaction() das Persistieren.
+      saveDatabase();
+    }
     trackLedgerEntries(entryIds);
     return { transactionId, entryIds };
   } catch (err) {
-    db.run('ROLLBACK');
+    // In einer Ambient-Transaktion macht der aeussere rollbackLedgerTransaction() den ROLLBACK.
+    if (!ambient) db.run('ROLLBACK');
     throw err;
   }
 }
@@ -774,7 +825,8 @@ export function reverseSource(
   const nos = reserveEntryNos(branchId, rows.length);
   const currency = (rows[0][curIdx] as string) ?? 'BHD';
 
-  db.run('BEGIN');
+  const ambient = inLedgerTransaction();
+  if (!ambient) db.run('BEGIN');
   try {
     const entryIds: string[] = [];
     for (let i = 0; i < rows.length; i++) {
@@ -817,12 +869,14 @@ export function reverseSource(
         ]
       );
     }
-    db.run('COMMIT');
-    saveDatabase();
+    if (!ambient) {
+      db.run('COMMIT');
+      saveDatabase();
+    }
     trackLedgerEntries(entryIds);
     return { transactionId, entryIds };
   } catch (err) {
-    db.run('ROLLBACK');
+    if (!ambient) db.run('ROLLBACK');
     throw err;
   }
 }
@@ -900,7 +954,8 @@ export function reverseTransaction(transactionId: string, occurredAt: string): P
   const nos = reserveEntryNos(branchId, rows.length);
   const currency = (rows[0][curIdx] as string) ?? 'BHD';
 
-  db.run('BEGIN');
+  const ambient = inLedgerTransaction();
+  if (!ambient) db.run('BEGIN');
   try {
     const entryIds: string[] = [];
     for (let i = 0; i < rows.length; i++) {
@@ -943,12 +998,14 @@ export function reverseTransaction(transactionId: string, occurredAt: string): P
         ]
       );
     }
-    db.run('COMMIT');
-    saveDatabase();
+    if (!ambient) {
+      db.run('COMMIT');
+      saveDatabase();
+    }
     trackLedgerEntries(entryIds);
     return { transactionId: newTxId, entryIds };
   } catch (err) {
-    db.run('ROLLBACK');
+    if (!ambient) db.run('ROLLBACK');
     throw err;
   }
 }
