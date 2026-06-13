@@ -267,6 +267,13 @@ export function SupplierDetail() {
     }
   }
 
+  function handleToggleActive() {
+    if (!id || !supplier) return;
+    // Deaktivieren/Reaktivieren — aendert NUR das active-Flag, keine Historie,
+    // Ledger-Daten oder offenen Verbindlichkeiten. Verknuepfte Records bleiben.
+    updateSupplier(id, { active: !supplier.active });
+  }
+
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
       <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
@@ -303,7 +310,12 @@ export function SupplierDetail() {
             {editing ? (
               <Input required label="" value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} />
             ) : (
-              <h1 className="font-display" style={{ fontSize: 28, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>{supplier.name}</h1>
+              <div className="flex items-center gap-3" style={{ marginTop: 4 }}>
+                <h1 className="font-display" style={{ fontSize: 28, color: '#0F0F10', lineHeight: 1.2 }}>{supplier.name}</h1>
+                {!supplier.active && (
+                  <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 999, color: '#6B7280', background: 'rgba(107,114,128,0.10)' }}>Inactive</span>
+                )}
+              </div>
             )}
             <div style={{ marginTop: 20 }}>
               {editing ? (
@@ -662,7 +674,10 @@ export function SupplierDetail() {
 
         {/* Danger zone */}
         {editing && (
-          <div style={{ marginTop: 24 }}>
+          <div style={{ marginTop: 24, display: 'flex', gap: 12 }}>
+            <Button variant="secondary" onClick={handleToggleActive}>
+              {supplier.active ? 'Deactivate Supplier' : 'Reactivate Supplier'}
+            </Button>
             <Button variant="danger" onClick={() => setConfirmDelete(true)}>
               <Trash2 size={14} /> Delete Supplier
             </Button>

@@ -26,15 +26,25 @@ export function SupplierList() {
   const navigate = useNavigate();
   const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
   const [search, setSearch] = useState('');
+  const [showInactive, setShowInactive] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState<Partial<Supplier>>({});
 
   useEffect(() => { loadSuppliers(); }, [loadSuppliers]);
 
+  // Default nur aktive; "Show inactive" blendet inaktive ein. Die Suche
+  // durchsucht nur die aktuell eingeblendete Menge.
+  const visible = useMemo(
+    () => (showInactive ? suppliers : suppliers.filter(s => s.active)),
+    [suppliers, showInactive],
+  );
   const filtered = useMemo(() => {
-    if (!search) return suppliers;
-    return suppliers.filter(s => matchesDeep(s, search));
-  }, [suppliers, search]);
+    if (!search) return visible;
+    return visible.filter(s => matchesDeep(s, search));
+  }, [visible, search]);
+
+  const activeCount = useMemo(() => suppliers.filter(s => s.active).length, [suppliers]);
+  const inactiveCount = suppliers.length - activeCount;
 
   function handleCreate() {
     if (!form.name) return;
@@ -58,9 +68,18 @@ export function SupplierList() {
   return (
     <PageLayout
       title="Suppliers"
-      subtitle={`${suppliers.length} suppliers · ${fmt(totalOutstanding)} BHD outstanding · ${fmt(totalCredit)} BHD credit`}
+      subtitle={`${activeCount} active${inactiveCount > 0 ? ` · ${inactiveCount} inactive` : ''} · ${fmt(totalOutstanding)} BHD outstanding · ${fmt(totalCredit)} BHD credit`}
       showSearch onSearch={setSearch} searchPlaceholder="Search supplier by name or phone..."
-      actions={<Button variant="primary" onClick={() => setShowNew(true)}>New Supplier</Button>}
+      actions={
+        <>
+          {inactiveCount > 0 && (
+            <Button variant="ghost" onClick={() => setShowInactive(v => !v)}>
+              {showInactive ? 'Hide inactive' : `Show inactive (${inactiveCount})`}
+            </Button>
+          )}
+          <Button variant="primary" onClick={() => setShowNew(true)}>New Supplier</Button>
+        </>
+      }
     >
       {filtered.length === 0 ? (
         <div style={{ padding: '80px 0', textAlign: 'center' }}>
