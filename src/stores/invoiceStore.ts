@@ -179,7 +179,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     let sumNet = 0, sumVat = 0, sumGross = 0;
     const vatRate = (offer.vat_rate as number) || 10;
 
-    type OverrideLine = { productId: string; description: string | null; purchasePrice: number; unitPrice: number; vatRate: number; taxScheme: string; vatAmount: number; lineTotal: number; position: number };
+    // COGS-Anker-Fix (wie createDirectInvoice): _id einmal pro Line erzeugen und
+    // fuer INSERT UND postInvoiceIssued nutzen -> source_line_id == invoice_lines.id.
+    type OverrideLine = { _id: string; productId: string; description: string | null; purchasePrice: number; unitPrice: number; vatRate: number; taxScheme: string; vatAmount: number; lineTotal: number; position: number };
     const lines: OverrideLine[] = [];
 
     for (const l of offerLineRows) {
@@ -202,7 +204,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       totalSale += net;
       sumNet += net; sumVat += vatAmt; sumGross += gross;
       lines.push({
-        productId: l.product_id as string, description: null,
+        _id: uuid(), productId: l.product_id as string, description: null,
         purchasePrice: pp, unitPrice: net, vatRate, taxScheme: scheme, vatAmount: vatAmt, lineTotal: gross,
         position: (l.position as number) || 0,
       });
@@ -248,7 +250,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     );
     for (const l of lines) {
       const lotId = lotsByProduct[l.productId] || null;
-      lineStmt.run([uuid(), id, l.productId, l.unitPrice, l.purchasePrice, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, l.position, lotId]);
+      lineStmt.run([l._id, id, l.productId, l.unitPrice, l.purchasePrice, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, l.position, lotId]);
     }
     lineStmt.free();
 
@@ -291,7 +293,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         purchasePriceSnapshot: totalPurchase, salePriceSnapshot: totalSale, marginSnapshot: margin,
         paidAmount: 0, issuedAt: now, dueAt: dueDate,
         lines: lines.map((l, i) => ({
-          id: uuid(), invoiceId: id, productId: l.productId,
+          id: l._id, invoiceId: id, productId: l.productId,
           quantity: 1,
           unitPrice: l.unitPrice, purchasePriceSnapshot: l.purchasePrice,
           vatRate: l.vatRate, taxScheme: l.taxScheme as TaxScheme,
@@ -338,7 +340,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     //   - Lot.qty_remaining wird konsumiert
     // Wenn kein Lot existiert (z.B. Consignment-Produkt bevor Auto-Purchase laeuft, oder
     // Repair-Service-Produkt) bleibt der vom Caller mitgegebene purchasePrice unveraendert.
-    type ResolvedLine = typeof lines[number] & { _resolvedLotId: string | null; _resolvedCost: number };
+    // COGS-Anker-Fix: die endgueltige invoice_line.id EINMAL erzeugen (_id) und fuer
+    // DB-INSERT UND das postInvoiceIssued-Objekt nutzen -> ledger source_line_id ==
+    // invoice_lines.id (ein spaeterer Return findet via getInvoiceLineCogs den Cost).
+    // Gleiches Muster wie editInvoice; kein zweiter uuid() pro Line mehr.
+    type ResolvedLine = typeof lines[number] & { _id: string; _resolvedLotId: string | null; _resolvedCost: number };
     const resolvedLines: ResolvedLine[] = lines.map(l => {
       let lotId = l.lotId || null;
       let cost = l.purchasePrice;
@@ -355,7 +361,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           cost = Number(row[1]) || cost;
         }
       }
-      return { ...l, _resolvedLotId: lotId, _resolvedCost: cost };
+      return { ...l, _id: uuid(), _resolvedLotId: lotId, _resolvedCost: cost };
     });
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
@@ -393,7 +399,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     );
     resolvedLines.forEach((l, i) => {
       const qty = Math.max(1, l.quantity || 1);
-      lineStmt.run([uuid(), id, l.productId, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
+      lineStmt.run([l._id, id, l.productId, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
     });
     lineStmt.free();
 
@@ -431,7 +437,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         purchasePriceSnapshot: totalPurchase, salePriceSnapshot: netAmount, marginSnapshot: margin,
         paidAmount: 0, issuedAt, notes,
         lines: resolvedLines.map((l, i) => ({
-          id: uuid(), invoiceId: id, productId: l.productId,
+          id: l._id, invoiceId: id, productId: l.productId,
           quantity: Math.max(1, l.quantity || 1),
           unitPrice: l.unitPrice, purchasePriceSnapshot: l._resolvedCost,
           vatRate: l.vatRate, taxScheme: l.taxScheme as TaxScheme,
