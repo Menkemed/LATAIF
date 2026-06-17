@@ -18,6 +18,14 @@ import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
+import {
+  isTransactionActive,
+  enterTransaction,
+  leaveNestedTransaction,
+  consumePendingSave,
+  markSavePending,
+  resetTransactionContext,
+} from '@/core/db/transaction-context';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
 import { canonicalLoanDirection } from '@/core/models/types';
 
@@ -207,33 +215,61 @@ function trackLedgerEntries(entryIds: string[]): void {
 //
 // sql.js erlaubt KEINE verschachtelten BEGINs → der depth-Zaehler stellt sicher,
 // dass nur die aeusserste Klammer BEGIN/COMMIT/ROLLBACK ausfuehrt.
-let ledgerTxDepth = 0;
+// Die Ambient-Transaktions-Mechanik (txDepth/pendingSave) liegt jetzt im
+// unabhängigen transaction-context — gemeinsamer Zustand mit database.saveDatabase(),
+// das den Export während einer offenen Tx zentral aufschiebt. Diese vier Funktionen
+// bleiben kompatible Wrapper; bestehende Caller (cancelReturn, editInvoice) bleiben unverändert.
 
 export function inLedgerTransaction(): boolean {
-  return ledgerTxDepth > 0;
+  return isTransactionActive();
 }
 
 export function beginLedgerTransaction(): void {
-  if (ledgerTxDepth === 0) {
-    getDatabase().run('BEGIN');
+  const outermost = enterTransaction();
+  if (outermost) {
+    try {
+      getDatabase().run('BEGIN');
+    } catch (err) {
+      // BEGIN fehlgeschlagen → Kontext sofort freigeben, sonst bliebe txDepth hängen.
+      resetTransactionContext();
+      throw err;
+    }
+    // Jede Ledger-Transaktion mutiert Daten → nach dem COMMIT ist genau EIN Save fällig.
+    // Wichtig bei deaktiviertem Sync: dort löst kein trackChange→saveDatabase aus, ein
+    // committeter Vorgang bliebe sonst unpersistiert → Datenverlust beim Neustart.
+    markSavePending();
   }
-  ledgerTxDepth++;
 }
 
 export function commitLedgerTransaction(): void {
-  if (ledgerTxDepth === 0) {
-    throw new Error('commitLedgerTransaction: no active ledger transaction');
-  }
-  ledgerTxDepth--;
-  if (ledgerTxDepth === 0) {
-    getDatabase().run('COMMIT');
-    saveDatabase();
+  // Senkt die Tiefe; nur die äußerste Ebene committet wirklich. Wirft bei depth 0.
+  const outermost = leaveNestedTransaction();
+  if (!outermost) return;
+
+  // Äußerstes COMMIT. Schlägt es fehl, ist die Transaktion ungültig → der Fehler
+  // propagiert in den catch des Callers (→ rollbackLedgerTransaction); nichts wird persistiert.
+  getDatabase().run('COMMIT');
+
+  // Ab hier ist der COMMIT ENDGÜLTIG. Ein anschließender Save-Fehler ist NICHT mehr
+  // rückrollbar — daher hier bewusst NICHT mehr werfen (sonst falscher "Rollback"-Status).
+  if (consumePendingSave()) {
+    // txDepth ist jetzt 0 → saveDatabase() exportiert echt (genau einmal, außerhalb der Tx).
+    // Bei Persist-Fehler bleibt die DB via drainSaves dirty und wird beim nächsten Save/Flush
+    // erneut versucht; der Promise-Reject wird hier geschluckt (Daten sind bereits committed).
+    saveDatabase().catch(err =>
+      console.error('[ledger] post-commit save failed; committed data stays dirty for retry:', err)
+    );
   }
 }
 
 export function rollbackLedgerTransaction(): void {
-  if (ledgerTxDepth === 0) return;
-  ledgerTxDepth = 0;
+  // Kein aktiver Zustand (z.B. COMMIT war bereits durch) → Kontext dennoch sicher leeren.
+  if (!isTransactionActive()) {
+    resetTransactionContext();
+    return;
+  }
+  // txDepth → 0 und pendingSave verwerfen (kein Phantom-Save/-Sync für zurückgerollte Daten).
+  resetTransactionContext();
   try { getDatabase().run('ROLLBACK'); }
   catch (err) { console.error('[ledger] rollbackLedgerTransaction failed:', err); }
 }

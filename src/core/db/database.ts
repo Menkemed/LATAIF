@@ -8,6 +8,7 @@ import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { v4 as uuid } from 'uuid';
 import { DEFAULT_CATEGORIES } from '../models/default-categories';
 import SCHEMA from './schema.sql?raw';
+import { isTransactionActive, markSavePending } from './transaction-context';
 
 let db: Database | null = null;
 const STORAGE_KEY = 'lataif_db_v2';
@@ -2664,12 +2665,14 @@ async function drainSaves(): Promise<void> {
   try {
     while (dirty && db) {
       dirty = false;
-      const data = db.export();
       try {
+        const data = db.export();
         await persistDb(data);
       } catch (err) {
-        console.error('[DB] persistDb failed, will retry on next save:', err);
-        dirty = true; // naechster saveDatabase()-Caller probiert es nochmal
+        // Sowohl export() als auch persistDb können scheitern → DB bleibt dirty,
+        // damit der nächste saveDatabase()/flushDatabase() es erneut versucht.
+        console.error('[DB] save failed, will retry on next save:', err);
+        dirty = true;
         break;
       }
     }
@@ -2680,6 +2683,14 @@ async function drainSaves(): Promise<void> {
 
 export function saveDatabase(): Promise<void> {
   if (!db) return Promise.resolve();
+  // Ambient-Transaktion aktiv → NIEMALS db.export() ausführen: das beendet in sql.js
+  // die offene SQL-Transaktion und macht den späteren COMMIT unmöglich. Stattdessen den
+  // Save aufschieben — commitLedgerTransaction persistiert nach dem äußeren COMMIT genau
+  // einmal (consumePendingSave). Bei ROLLBACK wird der pending Save verworfen.
+  if (isTransactionActive()) {
+    markSavePending();
+    return Promise.resolve();
+  }
   dirty = true;
   if (saveInFlight) return saveInFlight;
   saveInFlight = drainSaves();
