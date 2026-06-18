@@ -7,7 +7,7 @@ import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNu
 import { eventBus } from '@/core/events/event-bus';
 import { formatRepairLineNumber } from '@/core/repairs/line-numbering';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { trackLotRow } from '@/core/lots/lot-queries';
+import { trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import {
   postRepairPayment,
@@ -647,6 +647,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // If linked to a product, update its status
     if (data.productId) {
       db.run(`UPDATE products SET stock_status = 'in_repair', updated_at = ? WHERE id = ?`, [now, data.productId]);
+      trackProductRow(data.productId);   // LAN-Sync Phase 1b
     }
 
     // Plan repair-multi-supplier: wenn das Form einen workshop_supplier_id +
@@ -839,6 +840,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
               `UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
               [now, repair.productId]
             );
+            trackProductRow(repair.productId);   // LAN-Sync Phase 1b
           }
           // KEIN break hier — Expense-Block unten gilt auch für OWN wenn Supplier verlinkt.
         } else {
@@ -957,6 +959,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         updates.picked_up_at = now;
         if (repair.productId) {
           db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, repair.productId]);
+          trackProductRow(repair.productId);   // LAN-Sync Phase 1b
         }
         break;
       }
@@ -968,6 +971,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         updates.completed_at = now;
         if (repair.productId) {
           db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, repair.productId]);
+          trackProductRow(repair.productId);   // LAN-Sync Phase 1b
         }
         break;
       }

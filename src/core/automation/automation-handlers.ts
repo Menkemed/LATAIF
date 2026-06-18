@@ -7,6 +7,7 @@ import { v4 as uuid } from 'uuid';
 import { eventBus } from '../events/event-bus';
 import { getDatabase, saveDatabase } from '../db/database';
 import { query, currentBranchId, currentUserId } from '../db/helpers';
+import { trackProductRow } from '../lots/lot-queries';
 import type { DomainEvent, TaskType, TaskPriority } from '../models/types';
 
 function getBranchId(): string {
@@ -245,6 +246,7 @@ eventBus.on('offer.created', (event: DomainEvent) => {
       `UPDATE products SET stock_status = 'offered', last_offer_price = (SELECT unit_price FROM offer_lines WHERE offer_id = ? AND product_id = ?), updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`,
       [event.entityId, line.product_id, now, line.product_id]
     );
+    trackProductRow(line.product_id as string);   // LAN-Sync Phase 1b
   }
   if (offerLines.length > 0) saveDatabase();
 });
@@ -264,6 +266,7 @@ function revertOfferedProducts(offerId: string): void {
       `UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ? AND stock_status = 'offered'`,
       [now, line.product_id]
     );
+    trackProductRow(line.product_id as string);   // LAN-Sync Phase 1b
   }
   if (lines.length > 0) saveDatabase();
 }
@@ -300,6 +303,7 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
            last_sale_price = ?, updated_at = ? WHERE id = ?`,
         [line.unit_price, now, pid]
       );
+      trackProductRow(pid as string);   // LAN-Sync Phase 1b
     } else {
       // Legacy-Produkte ohne Lots: altes quantity-aware Verhalten unveraendert.
       db.run(
@@ -309,6 +313,7 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
            last_sale_price = ?, updated_at = ? WHERE id = ?`,
         [line.unit_price, now, pid]
       );
+      trackProductRow(pid as string);   // LAN-Sync Phase 1b
     }
   }
 

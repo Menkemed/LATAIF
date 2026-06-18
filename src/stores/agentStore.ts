@@ -5,6 +5,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackProductRow } from '@/core/lots/lot-queries';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { vatEngine } from '@/core/tax/vat-engine';
@@ -209,6 +210,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (data.productId) {
       // Plan §Product §5: source_type = AGENT während Transfer
       db.run(`UPDATE products SET stock_status = 'with_agent', source_type = 'AGENT', updated_at = ? WHERE id = ?`, [now, data.productId]);
+      trackProductRow(data.productId);   // LAN-Sync Phase 1b
     }
 
     db.run(
@@ -305,6 +307,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
          stock_status = CASE WHEN COALESCE(quantity,1) > 1 THEN stock_status ELSE 'sold' END,
          last_sale_price = ?, updated_at = ? WHERE id = ?`,
       [actualPrice, now, transfer.productId]);
+    trackProductRow(transfer.productId);   // LAN-Sync Phase 1b
     saveDatabase();
 
     // ZIEL.md §3a — Sold-Forderung ans zentrale Ledger.
@@ -335,6 +338,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const db = getDatabase();
     // Plan §Product §5: zurück zu OWN wenn Ware vom Agent zurückkommt
     db.run(`UPDATE products SET stock_status = 'in_stock', source_type = 'OWN', updated_at = ? WHERE id = ?`, [now, transfer.productId]);
+    trackProductRow(transfer.productId);   // LAN-Sync Phase 1b
     saveDatabase();
 
     // ZIEL.md §3a — falls der Transfer schon im Ledger als sold gepostet war,
@@ -441,6 +445,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (transfer && transfer.status === 'transferred') {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
         [now, transfer.productId]);
+      trackProductRow(transfer.productId);   // LAN-Sync Phase 1b
     }
 
     // ZIEL.md §3a — Ledger-Buchungen aufräumen, sonst bleibt die AR-Forderung

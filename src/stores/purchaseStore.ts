@@ -15,7 +15,7 @@ import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
-import { consumeLot, restoreLot, getAvailableStock, syncProductQuantity, trackLotRow } from '@/core/lots/lot-queries';
+import { consumeLot, restoreLot, getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
@@ -276,6 +276,7 @@ function reverseConfirmedPurchaseReturn(
     syncProductQuantity(pid);
     if (getAvailableStock(pid) > 0) {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, pid]);
+      trackProductRow(pid);   // LAN-Sync Phase 1b
     }
   }
 
@@ -456,8 +457,12 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       sourceOrderLineId: string | null;
     }> = [];
     let total = 0;
+    // Bestehende (nicht in diesem Purchase neu angelegte) Produkte — fuer die
+    // Canonical-Receive-Statusregel weiter unten (neue Produkte setzt createProduct schon).
+    const existingProductIds = new Set<string>();
     input.lines.forEach((ln, idx) => {
       let productId = ln.productId;
+      if (ln.productId) existingProductIds.add(ln.productId);
       if (!productId) {
         if (ln.newProduct) {
           // Plan §Purchase §New-Item: Neues Produkt mit voller Collection-Spec
@@ -580,6 +585,27 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // LAN-Sync Phase 1a: neue Lots als Full-Row (kanonische id) an Geraet B tracken.
     for (const lid of createdLotIds) trackLotRow(lid, 'insert');
 
+    // Canonical Purchase-Receive auch fuer BESTEHENDE Produkte: frische OWN-Ware macht
+    // das Produkt wieder verfuegbar. Fuer NEU angelegte Produkte erledigt das bereits
+    // createProduct (stock_status='in_stock'); fuer bestehende griff bisher NICHTS — ein
+    // 'sold'/'returned'/'consumed'-Produkt blieb trotz neuem aktiven Lot unverfuegbar.
+    // Reihenfolge: Lot erzeugt → syncProductQuantity (oben) → finaler Status/source_type → Snapshot.
+    // GUARD (kein Blind-Overwrite, kein neuer Normalizer): Lifecycle-Stati, die noch
+    // laufenden FREMDEN Workflows gehoeren, werden NICHT angefasst — with_agent (Agent-Out),
+    // in_repair (Repair-Out), consignment/consignment_reserved (Konsignations-Ware, nicht
+    // unsere), reserved (offene Teilzahlungs-Reservierung). Ein Purchase in diese Zustaende
+    // fuer DENSELBEN Product-Datensatz ist eine fachliche Fehlbedienung — der Produkt-Picker
+    // laesst sie zwar zu (kein Status-Filter), ein unterstuetzter Workflow ist es aber nicht.
+    const PURCHASE_PROTECTED_STATUS = new Set(['with_agent', 'in_repair', 'consignment', 'consignment_reserved', 'reserved']);
+    for (const pid of existingProductIds) {
+      if (getAvailableStock(pid) <= 0) continue;        // kein aktiver Lot → nichts zu tun
+      const curRows = query(`SELECT stock_status FROM products WHERE id = ?`, [pid]);
+      const curStatus = String(curRows[0]?.stock_status || '');
+      if (curStatus === 'in_stock' || PURCHASE_PROTECTED_STATUS.has(curStatus)) continue;
+      db.run(`UPDATE products SET stock_status = 'in_stock', source_type = 'OWN', updated_at = ? WHERE id = ?`, [now, pid]);
+      trackProductRow(pid);   // LAN-Sync Phase 1b: finaler autoritativer Product-Full-Row
+    }
+
     // Initial payment (if any)
     let initialPaymentId: string | null = null;
     if (input.initialPayment && input.initialPayment.amount > 0) {
@@ -701,6 +727,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
           `UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`,
           [now, pid]
         );
+        trackProductRow(pid);   // LAN-Sync Phase 1b
       }
     }
     // Back-to-Back: verknuepfte ARRIVED-Order-Zeilen zurueck auf PENDING.
@@ -833,6 +860,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       // (quantity bleibt durch syncProductQuantity's Legacy-Schutz stehen).
       if (getAvailableStock(pid) === 0) {
         db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, pid]);
+        trackProductRow(pid);   // LAN-Sync Phase 1b
       }
     }
 

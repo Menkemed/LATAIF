@@ -18,6 +18,14 @@ export function trackLotRow(lotId: string, operation: 'insert' | 'update' | 'del
   trackChange('stock_lots', lotId, operation, {});
 }
 
+// LAN-Sync (Phase 1b): bestandsrelevante products-Mutation (quantity/stock_status/…)
+// als Full-Row-Snapshot an Geraet B. Sync-only — KEIN Audit (nicht trackUpdate),
+// KEIN eigenes saveDatabase. trackChange liest die volle Zeile via SELECT * und erbt
+// den Transaktionskontext des Callers (editInvoice/cancelReturn → atomar, Rollback verwirft).
+export function trackProductRow(productId: string, operation: 'insert' | 'update' | 'delete' = 'update'): void {
+  trackChange('products', productId, operation, {});
+}
+
 export interface StockLot {
   id: string;
   branchId: string;
@@ -162,19 +170,27 @@ export function getAvailableStock(productId: string): number {
 // urspruengliches quantity-Feld.
 export function syncProductQuantity(productId: string): void {
   const db = getDatabase();
+  // Zwei Zaehlungen aus DERSELBEN bestehenden Aktiv-Regel — KEINE neue Statusregel:
+  //   - active_qty : Σ qty_remaining der fachlich AKTIVEN Lots
+  //                  (status != 'CANCELLED' AND qty_remaining > 0) — identisch zu
+  //                  getActiveLots / getAvailableStock / reserveProductIfDepleted.
+  //   - total_lots : existiert ueberhaupt eine Lot-HISTORIE (irgendeine stock_lots-Zeile)?
+  // So wird ein lot-basiertes, gerade ausverkauftes Produkt (Historie da, active_qty 0
+  // → quantity MUSS 0 werden) von einem echten Legacy-/Non-Lot-Produkt unterschieden
+  // (keine Historie → manuelle quantity unangetastet lassen). Vorher prüfte der
+  // Early-Return faelschlich auf 0 AKTIVE Lots → quantity blieb nach Ausverkauf stehen.
   const rows = query(
-    `SELECT COALESCE(SUM(qty_remaining), 0) AS qty,
-            COUNT(*) AS lots
+    `SELECT COALESCE(SUM(CASE WHEN status != 'CANCELLED' AND qty_remaining > 0 THEN qty_remaining ELSE 0 END), 0) AS active_qty,
+            COUNT(*) AS total_lots
        FROM stock_lots
-      WHERE product_id = ?
-        AND status != 'CANCELLED'
-        AND qty_remaining > 0`,
+      WHERE product_id = ?`,
     [productId]
   );
-  const lotCount = Number(rows[0]?.lots) || 0;
-  if (lotCount === 0) return;  // keine Lots → product.quantity unangetastet lassen
-  const qty = Number(rows[0]?.qty) || 0;
-  db.run(`UPDATE products SET quantity = ? WHERE id = ?`, [qty, productId]);
+  const totalLots = Number(rows[0]?.total_lots) || 0;
+  if (totalLots === 0) return;  // keine Lot-Historie → Legacy/Non-Lot, quantity unangetastet
+  const qty = Number(rows[0]?.active_qty) || 0;
+  db.run(`UPDATE products SET quantity = ? WHERE id = ?`, [qty, productId]);  // auch 0 wird ausdruecklich persistiert
+  trackProductRow(productId);   // LAN-Sync Phase 1b
 }
 
 // 2026-05-16 — Partial-Payment Reservation:
@@ -219,6 +235,7 @@ export function reserveProductIfDepleted(productId: string): void {
   if (!nextStatus) return;
   db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`,
     [nextStatus, new Date().toISOString(), productId]);
+  trackProductRow(productId);   // LAN-Sync Phase 1b
 }
 
 // Umkehrung: wird ein Sale storniert oder Lines neu geschrieben und gibt
@@ -245,6 +262,7 @@ export function unreserveProductIfRestored(productId: string): void {
   if (!nextStatus) return;
   db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`,
     [nextStatus, new Date().toISOString(), productId]);
+  trackProductRow(productId);   // LAN-Sync Phase 1b
 }
 
 // Bulk-Variante fuer Migration / Recompute-All.

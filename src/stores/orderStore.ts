@@ -6,6 +6,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackProductRow } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand } from '@/core/finance/card-fees';
@@ -388,6 +389,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
             // der Wareneingang (Purchase) ein stock_lot anlegt. createProduct
             // erzwingt min. 1, daher hier explizit zuruecksetzen.
             db.run(`UPDATE products SET quantity = 0 WHERE id = ?`, [created.id]);
+            trackProductRow(created.id);   // LAN-Sync Phase 1b
             return created.id;
           } catch (err) {
             console.error('[order] createProduct (new order line) failed:', err);
@@ -851,6 +853,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         });
         // New-Produkt ohne Bestand — quantity 0 bis zum Wareneingang (Purchase).
         db.run(`UPDATE products SET quantity = 0 WHERE id = ?`, [created.id]);
+        trackProductRow(created.id);   // LAN-Sync Phase 1b
         productId = created.id;
       } catch (err) {
         console.error('[order] createProduct (updateOrderLine) failed:', err);

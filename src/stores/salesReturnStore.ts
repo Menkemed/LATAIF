@@ -36,7 +36,7 @@ import {
   commitLedgerTransaction,
   rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
-import { restoreLot, syncProductQuantity, trackLotRow } from '@/core/lots/lot-queries';
+import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import type { CreditNote } from '@/core/models/types';
 import { refundCardFeePortion } from '@/core/finance/card-fee-booking';
 import { computeCardFee, normalizeCardBrand } from '@/core/finance/card-fees';
@@ -162,6 +162,7 @@ function applyDisposition(
         : 'in_stock';
       db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [newStatus, now, line.productId]);
     }
+    trackProductRow(line.productId);   // LAN-Sync Phase 1b: finaler Product-Snapshot je Line
   }
 }
 
@@ -230,6 +231,7 @@ function revertDisposition(
       console.warn(`[Return] cannot fully revert ${disposition} disposition for product ${line.productId} — manual cleanup may be needed`);
       db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
     }
+    trackProductRow(line.productId);   // LAN-Sync Phase 1b: finaler Product-Snapshot je Line
   }
 }
 

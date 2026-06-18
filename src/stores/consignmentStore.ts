@@ -5,7 +5,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { trackLotRow } from '@/core/lots/lot-queries';
+import { trackLotRow, trackProductRow, syncProductQuantity } from '@/core/lots/lot-queries';
 import { postConsignmentPayout, postCreditNote, hasLedgerEntries, hasReversalFor, reverseSource, reverseConsignmentPayouts } from '@/core/ledger/posting';
 import type { CreditNote } from '@/core/models/types';
 import { useSupplierStore } from './supplierStore';
@@ -183,6 +183,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     if (data.productId) {
       // Plan §Commission §4: source_type = CONSIGNMENT beim Intake
       db.run(`UPDATE products SET stock_status = 'consignment', source_type = 'CONSIGNMENT', updated_at = ? WHERE id = ?`, [now, data.productId]);
+      trackProductRow(data.productId);   // LAN-Sync Phase 1b
 
       // 2026-05-16 — Erwarteten Cost beim Intake setzen, damit die Product-Detail-
       // Seite nicht "Cost: 0 BHD" zeigt solange noch kein Auto-Purchase existiert.
@@ -306,6 +307,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
          stock_status = CASE WHEN COALESCE(quantity,1) > 1 THEN stock_status ELSE 'sold' END,
          updated_at = ? WHERE id = ?`,
       [new Date().toISOString(), con.productId]);
+    trackProductRow(con.productId);   // LAN-Sync Phase 1b
     saveDatabase();
     eventBus.emit('consignment.sold', 'consignment', id, { salePrice, commission, payout });
   },
@@ -721,6 +723,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     // Produkt verlässt System (stock_status = returned).
     db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`,
       [new Date().toISOString(), con.productId]);
+    trackProductRow(con.productId);   // LAN-Sync Phase 1b
     // Status-String bleibt lowercase 'returned' für Backward-Compat zu UI-Filtern.
     get().updateConsignment(id, { status: 'returned', payoutStatus: 'returned' });
     saveDatabase();
@@ -814,6 +817,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     // Produkt-Disposition
     if (disposition === 'RETURN_TO_OWNER') {
       db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, con.productId]);
+      trackProductRow(con.productId);   // LAN-Sync Phase 1b
       get().updateConsignment(id, { status: 'returned' });
       // v0.7.11 — Consignor-Purchase cancellen: wir haben die Ware an den
       // Consignor zurueckgegeben, also schulden wir ihm nichts mehr. Vorher
@@ -862,12 +866,13 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       // Verkaeufung falsch (z.B. Cost-Basis 1500 statt 1250 → 250 Profit gehen
       // als 0 Margin durch die Kasse, MARGIN_VAT geht verloren).
       const costBasis = con.payoutAmount ?? con.salePrice ?? 0;
-      db.run(
-        `UPDATE products SET stock_status = 'in_stock', source_type = 'OWN',
-         purchase_price = ?, updated_at = ? WHERE id = ?`,
-        [costBasis, now, con.productId]
-      );
-      // Phase 5 — neuer Stock-Lot an consignor_payout-Preis als Acquisition-
+      // Reihenfolge-Fix (Bug: quantity blieb 0 trotz aktivem Lot). Erst den Lot
+      // erzeugen, dann quantity aus aktiven Lots ableiten, dann finalen Status
+      // setzen, dann den LETZTEN autoritativen Snapshot tracken — so enthaelt der
+      // letzte products-Full-Row alle finalen Werte (quantity, stock_status,
+      // source_type, updated_at).
+      //
+      // (1) Phase 5 — neuer Stock-Lot an consignor_payout-Preis als Acquisition-
       // Cost. Originaler Lot der Sale-Konsumption bleibt EXHAUSTED.
       if (costBasis > 0) {
         const teardownLotId = uuid();   // LAN-Sync Phase 1a
@@ -880,6 +885,20 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
         );
         trackLotRow(teardownLotId, 'insert');
       }
+      // (2) products.quantity aus den jetzt aktiven Lots ableiten (→ 1). Vorher
+      // fehlte dieser Aufruf → quantity blieb 0 obwohl die aktive Lot-Summe 1 ist.
+      // No-op (Legacy-Schutz, early-return) falls kein Lot erzeugt wurde (costBasis 0).
+      syncProductQuantity(con.productId);
+      // (3) finaler Status + source_type + cost-basis — zuletzt gesetzt, damit kein
+      // anderer Helfer ihn ueberschreibt (syncProductQuantity ruehrt nur quantity an).
+      db.run(
+        `UPDATE products SET stock_status = 'in_stock', source_type = 'OWN',
+         purchase_price = ?, updated_at = ? WHERE id = ?`,
+        [costBasis, now, con.productId]
+      );
+      // (4) letzter autoritativer Full-Row-Snapshot (quantity, stock_status,
+      // source_type, updated_at) — LAN-Sync Phase 1b.
+      trackProductRow(con.productId);
       get().updateConsignment(id, { status: 'returned' });
     }
 
@@ -952,6 +971,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     if (con && con.status === 'active') {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
         [now, con.productId]);
+      trackProductRow(con.productId);   // LAN-Sync Phase 1b
     }
     // M-22 — Edge-Fall: 'con' ist nicht mehr im Store (null), aber im Ledger haengen
     // noch Payouts. Nach dem L-05-Guard gelangen nur noch active (= ohne Payouts) oder

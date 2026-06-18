@@ -16,7 +16,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postExpensePayment, reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
-import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow } from '@/core/lots/lot-queries';
+import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -196,6 +196,7 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
       };
       inStmt.run([uuid(), id, p.id, JSON.stringify(snapshot), p.purchasePrice]);
       db.run(`UPDATE products SET stock_status = 'consumed', updated_at = ? WHERE id = ?`, [now, p.id]);
+      trackProductRow(p.id);   // LAN-Sync Phase 1b — deckt Legacy-Input ab (syncProductQuantity persistiert nur bei vorhandener Lot-Historie); fuer Lot-Inputs harmloser Zwischen-Snapshot, von syncProductQuantity unten ueberschrieben
       // H-04 — Input-Lots leeren, sonst bleiben sie ACTIVE (qty_remaining>0) und
       // erscheinen als Phantom-Bestand (ueber Lot-Pfad verkaufbar) + ueberzaehlen
       // den Bestandswert (Input-Wert steckt zusaetzlich im Output). consumeLot treibt
@@ -372,6 +373,7 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
     for (const inp of rec.inputs) {
       if (!inp.productId) continue;
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, inp.productId]);
+      trackProductRow(inp.productId);   // LAN-Sync Phase 1b
       const lots = query(
         `SELECT id, qty_total, qty_remaining FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED'`,
         [inp.productId]
