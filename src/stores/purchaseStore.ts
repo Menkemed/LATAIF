@@ -15,6 +15,7 @@ import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen
 import { consumeLot, restoreLot, getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
@@ -625,6 +626,9 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
     saveDatabase();
     trackInsert('purchases', id, { purchaseNumber, supplierId: input.supplierId, total });
+    // LAN-Sync (Bug-3a): purchase_lines NACH dem Header tracken (FK-Reihenfolge). lineRecords
+    // tragen bereits stabile l.id → 1:1 identisch auf A und B; sync-only, kein Audit.
+    for (const l of lineRecords) trackChange('purchase_lines', l.id, 'insert', {});
     get().loadPurchases();
 
     // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
@@ -789,13 +793,19 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       `INSERT INTO purchase_return_lines (id, return_id, purchase_line_id, product_id, quantity, unit_price, line_total)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
+    // LAN-Sync (Bug-5): inline uuid() in kanonische Variable umstellen → Line-IDs trackbar.
+    const prLineIds: string[] = [];
     for (const l of input.lines) {
-      stmt.run([uuid(), id, l.purchaseLineId, l.productId || null, l.quantity, l.unitPrice, l.quantity * l.unitPrice]);
+      const prLineId = uuid();
+      prLineIds.push(prLineId);
+      stmt.run([prLineId, id, l.purchaseLineId, l.productId || null, l.quantity, l.unitPrice, l.quantity * l.unitPrice]);
     }
     stmt.free();
 
     saveDatabase();
     trackInsert('purchase_returns', id, { returnNumber, purchaseId: input.purchaseId, total });
+    // LAN-Sync (Bug-5): purchase_return_lines NACH dem Header tracken (FK-Reihenfolge), sync-only.
+    for (const prLineId of prLineIds) trackChange('purchase_return_lines', prLineId, 'insert', {});
     get().loadReturns();
     return get().getReturn(id)!;
   },

@@ -6,6 +6,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — purchase_lines FK-Entkopplung
 import { trackProductRow } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -780,9 +781,12 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     }
     // Back-to-Back: eine evtl. verknuepfte Purchase-Zeile entkoppeln (defensiv —
     // sql.js erzwingt FK ON DELETE SET NULL evtl. nicht).
+    // LAN-Sync (Bug-3): betroffene purchase_lines VOR dem Nullen erfassen, danach als update tracken.
+    const plUnlinkedIds = query(`SELECT id FROM purchase_lines WHERE source_order_line_id = ?`, [lineId]).map(r => r.id as string);
     db.run(`UPDATE purchase_lines SET source_order_line_id = NULL WHERE source_order_line_id = ?`, [lineId]);
     db.run(`DELETE FROM order_lines WHERE id = ?`, [lineId]);
     trackDelete('order_lines', lineId);
+    for (const plId of plUnlinkedIds) trackChange('purchase_lines', plId, 'update', {});
     saveDatabase();
     get().recomputeOrderStatus(orderId);
     get().loadOrders();
@@ -1306,6 +1310,11 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     }
     // Back-to-Back: Purchase-Verknuepfungen entkoppeln, bevor die order_lines
     // hart geloescht werden (sql.js erzwingt FK ON DELETE SET NULL evtl. nicht).
+    // LAN-Sync (Bug-3): betroffene purchase_lines VOR dem Nullen erfassen, danach als update tracken.
+    const plUnlinkedIds = query(
+      `SELECT id FROM purchase_lines WHERE source_order_line_id IN (SELECT id FROM order_lines WHERE order_id = ?)`,
+      [id]
+    ).map(r => r.id as string);
     db.run(
       `UPDATE purchase_lines SET source_order_line_id = NULL
         WHERE source_order_line_id IN (SELECT id FROM order_lines WHERE order_id = ?)`,
@@ -1316,6 +1325,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     db.run(`DELETE FROM orders WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('orders', id);
+    for (const plId of plUnlinkedIds) trackChange('purchase_lines', plId, 'update', {});
     get().loadOrders();
   },
 }));

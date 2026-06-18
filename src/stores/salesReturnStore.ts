@@ -442,8 +442,12 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       `INSERT INTO sales_return_lines (id, return_id, invoice_line_id, product_id, quantity, unit_price, vat_amount, line_total)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     );
+    // LAN-Sync (Bug-3b): inline uuid() in kanonische Variable umstellen → Line-IDs trackbar.
+    const srLineIds: string[] = [];
     for (const l of input.lines) {
-      stmt.run([uuid(), id, l.invoiceLineId, l.productId || null, l.quantity, l.unitPrice, l.vatAmount, l.quantity * l.unitPrice]);
+      const srLineId = uuid();
+      srLineIds.push(srLineId);
+      stmt.run([srLineId, id, l.invoiceLineId, l.productId || null, l.quantity, l.unitPrice, l.vatAmount, l.quantity * l.unitPrice]);
     }
     stmt.free();
 
@@ -466,6 +470,8 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
 
     saveDatabase();
     trackInsert('sales_returns', id, { returnNumber, invoiceId: input.invoiceId, total });
+    // LAN-Sync (Bug-3b): sales_return_lines NACH dem Header tracken (FK-Reihenfolge), sync-only.
+    for (const srLineId of srLineIds) trackChange('sales_return_lines', srLineId, 'insert', {});
     get().loadReturns();
     return get().getReturn(id)!;
   },

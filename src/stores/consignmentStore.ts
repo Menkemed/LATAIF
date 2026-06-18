@@ -5,6 +5,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen + Invoice-Spiegel
 import { trackLotRow, trackProductRow, syncProductQuantity } from '@/core/lots/lot-queries';
 import { postConsignmentPayout, postCreditNote, hasLedgerEntries, hasReversalFor, reverseSource, reverseConsignmentPayouts } from '@/core/ledger/posting';
 import type { CreditNote } from '@/core/models/types';
@@ -183,7 +184,6 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     if (data.productId) {
       // Plan §Commission §4: source_type = CONSIGNMENT beim Intake
       db.run(`UPDATE products SET stock_status = 'consignment', source_type = 'CONSIGNMENT', updated_at = ? WHERE id = ?`, [now, data.productId]);
-      trackProductRow(data.productId);   // LAN-Sync Phase 1b
 
       // 2026-05-16 — Erwarteten Cost beim Intake setzen, damit die Product-Detail-
       // Seite nicht "Cost: 0 BHD" zeigt solange noch kein Auto-Purchase existiert.
@@ -207,6 +207,11 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
           [expectedCost, data.productId]
         );
       }
+      // LAN-Sync (Bug-1-Fix): EIN finaler Product-Full-Row-Snapshot NACH allen Intake-
+      // Mutationen (stock_status, source_type, purchase_price/Expected-Cost). Zuvor lief
+      // trackProductRow VOR dem purchase_price-Update → der Expected-Cost-Platzhalter
+      // wurde nie nach Geraet B repliziert (solange kein weiteres Product-Event folgte).
+      trackProductRow(data.productId);
     }
 
     db.run(
@@ -541,11 +546,20 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
           // sales_return + lines + CN-row entfernen (dem User-Geist nach: nie passiert).
           const srRow = query(`SELECT sales_return_id FROM credit_notes WHERE id = ?`, [cnId])[0];
           const srId = srRow?.sales_return_id as string | undefined;
+          // LAN-Sync (Bug-6): betroffene IDs VOR dem Hard-Delete erfassen, danach als
+          // delete tracken — sonst behaelt Geraet B Return-/Credit-Artefakte (Orphans).
+          const srLineDelIds = srId
+            ? query(`SELECT id FROM sales_return_lines WHERE return_id = ?`, [srId]).map(r => r.id as string)
+            : [];
           db.run(`DELETE FROM credit_notes WHERE id = ?`, [cnId]);
           if (srId) {
             db.run(`DELETE FROM sales_return_lines WHERE return_id = ?`, [srId]);
             db.run(`DELETE FROM sales_returns WHERE id = ?`, [srId]);
           }
+          // Reihenfolge fuer konvergenten Full-Replay: erst Lines, dann Header, dann CN.
+          for (const lid of srLineDelIds) trackChange('sales_return_lines', lid, 'delete', {});
+          if (srId) trackChange('sales_returns', srId, 'delete', {});
+          trackChange('credit_notes', cnId, 'delete', {});
         }
       } catch (e) {
         console.warn('[cancelSale] post-sale-return cleanup failed:', e);
@@ -805,11 +819,16 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
        `Consignment post-sale return (${con.consignmentNumber})`, now, userId]
     );
 
+    // LAN-Sync (Bug-3b): stabile kanonische Line-IDs fangen (zuvor inline uuid() →
+    // nicht trackbar). Tracking folgt NACH dem sales_returns-Header-trackInsert (unten).
+    const srLineIds: string[] = [];
     for (const l of lineRows) {
+      const srLineId = uuid();
+      srLineIds.push(srLineId);
       db.run(
         `INSERT INTO sales_return_lines (id, return_id, invoice_line_id, product_id, quantity, unit_price, vat_amount, line_total)
          VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
-        [uuid(), returnId, l.id as string, con.productId, (l.unit_price as number) || 0,
+        [srLineId, returnId, l.id as string, con.productId, (l.unit_price as number) || 0,
          (l.vat_amount as number) || 0, (l.unit_price as number) || 0]
       );
     }
@@ -931,6 +950,11 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
 
     saveDatabase();
     trackInsert('sales_returns', returnId, { returnNumber, invoiceId: con.invoiceId, consignmentId: id, disposition });
+    // LAN-Sync (Bug-2): EIN Invoice-Full-Row-Snapshot NACH der VAT-Korrektur (vat_amount +
+    // updated_at; ZERO_VAT → nur updated_at, VAT_10 → auch vat_amount). Kein invoice_edits/Audit.
+    trackChange('invoices', con.invoiceId, 'update', {});
+    // LAN-Sync (Bug-3b): sales_return_lines NACH dem sales_returns-Header tracken (FK-Reihenfolge).
+    for (const srLineId of srLineIds) trackChange('sales_return_lines', srLineId, 'insert', {});
 
     const cn: CreditNote = {
       id: cnId,
