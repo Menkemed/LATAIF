@@ -6,6 +6,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
@@ -279,6 +280,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     saveDatabase();
     trackInsert('invoices', id, { invoiceNumber, customerId: offer.customer_id as string });
+    // Sync (Scope A): jede persistierte invoice_line mit ihrer kanonischen _id
+    // uebertragen. trackChange snapshottet die volle Zeile via SELECT * (inkl.
+    // lot_id/position/Preise/VAT) → Geraet B baut identische Lines. Erst HIER, nach
+    // erfolgreichem Domain-Insert + saveDatabase: warf ein vorheriges INSERT, wird
+    // nichts getrackt → kein verwaister Line-Sync-Eintrag bei fehlgeschlagenem Create.
+    for (const l of lines) trackChange('invoice_lines', l._id, 'insert', {});
     eventBus.emit('invoice.created', 'invoice', id, { offerId, total: offer.total });
     eventBus.emit('invoice.issued', 'invoice', id, {});
 
@@ -425,6 +432,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     saveDatabase();
     trackInsert('invoices', id, { invoiceNumber, customerId });
+    // Sync (Scope A): siehe createInvoiceFromOffer — Lines erst nach erfolgreichem
+    // Domain-Insert mit kanonischer _id uebertragen (Full-Row-Snapshot via SELECT *).
+    for (const l of resolvedLines) trackChange('invoice_lines', l._id, 'insert', {});
     eventBus.emit('invoice.created', 'invoice', id, { customerId, grossAmount });
 
     // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
@@ -720,7 +730,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           }
         }
       }
+      // Sync (Scope A): alte Line-IDs VOR dem DELETE erfassen — Geraet B muss exakt
+      // dieselben Zeilen entfernen. trackChange('delete') braucht nur die id (keinen
+      // Row-Snapshot), daher genuegt das Tracking direkt nach dem SQL-DELETE. Beides
+      // innerhalb der offenen Tx → atomar; Rollback verwirft die Changelog-Zeilen.
+      const oldLineIds = query(`SELECT id FROM invoice_lines WHERE invoice_id = ?`, [id]).map(r => r.id as string);
       db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
+      for (const oldId of oldLineIds) trackChange('invoice_lines', oldId, 'delete', {});
 
       // 4. Neue Lines — Auto-FIFO Lot-Pick wie createDirectInvoice. WICHTIG: Line-ID
       //    EINMAL erzeugen (_id) und fuer DB-INSERT UND Repost-Objekt nutzen → COGS-
@@ -762,6 +778,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         grossAmount += l.lineTotal;
       });
       stmt.free();
+
+      // Sync (Scope A): jede neue Line mit ihrer kanonischen _id uebertragen
+      // (Full-Row-Snapshot via SELECT *, inkl. lot_id/position/Preise/VAT). Die Lines
+      // sind hier bereits eingefuegt; trackChange liest sie in derselben offenen Tx.
+      // Repost-Ledger (postInvoiceIssued, COGS.source_line_id == _id) folgt danach →
+      // auf B existieren die Lines vor den referenzierenden Ledger-Entries.
+      resolvedLines.forEach(l => trackChange('invoice_lines', l._id, 'insert', {}));
 
       // Neue Lots konsumieren.
       resolvedLines.forEach(l => {
@@ -830,6 +853,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         [newPaid, tip, newStatus, now, id]
       );
       if (newStatus !== inv0.status) trackStatusChange('invoices', id, inv0.status, newStatus);
+      // Sync (Scope A): GENAU EIN Full-Row-Snapshot der invoices-Zeile, NACHDEM
+      // Header, Totale, Status, paid_amount und tip_amount final sind. trackChange
+      // (nicht trackUpdate) → kein Audit-Doppel; invoice_edits + Audit-History bleiben
+      // unveraendert. Innerhalb der Tx → atomar mit Lines + Ledger; Rollback verwirft.
+      trackChange('invoices', id, 'update', {});
 
       // 9. Produkt-Reservierung nachziehen (nach finalem Status): erst sync, dann
       //    unreserve, dann reserve (nur solange nicht FINAL).
