@@ -7,6 +7,16 @@
 
 import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
+import { trackChange } from '@/core/sync/sync-service';
+
+// LAN-Sync (Phase 1a): jede stock_lots-Mutation als Full-Row-Snapshot an Geraet B.
+// Sync-only — KEIN Audit, KEIN eigenes saveDatabase. trackChange liest die volle Zeile
+// selbst via SELECT * (bei delete nur die id) und ist ein No-op ohne LAN-Sync. Erbt den
+// Transaktionskontext des Callers: in editInvoice/cancelReturn laeuft der INSERT in
+// sync_changelog in derselben offenen SQL-Tx → atomar, Rollback verwirft die Zeile.
+export function trackLotRow(lotId: string, operation: 'insert' | 'update' | 'delete'): void {
+  trackChange('stock_lots', lotId, operation, {});
+}
 
 export interface StockLot {
   id: string;
@@ -112,6 +122,7 @@ export function consumeLot(lotId: string, qty: number): boolean {
     `UPDATE stock_lots SET qty_remaining = ?, status = ? WHERE id = ?`,
     [newRem, newStatus, lotId]
   );
+  trackLotRow(lotId, 'update');   // LAN-Sync Phase 1a
   return true;
 }
 
@@ -126,6 +137,7 @@ export function restoreLot(lotId: string, qty: number): boolean {
     `UPDATE stock_lots SET qty_remaining = ?, status = 'ACTIVE' WHERE id = ?`,
     [newRem, lotId]
   );
+  trackLotRow(lotId, 'update');   // LAN-Sync Phase 1a
   return true;
 }
 

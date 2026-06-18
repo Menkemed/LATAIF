@@ -36,7 +36,7 @@ import {
   commitLedgerTransaction,
   rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
-import { restoreLot, syncProductQuantity } from '@/core/lots/lot-queries';
+import { restoreLot, syncProductQuantity, trackLotRow } from '@/core/lots/lot-queries';
 import type { CreditNote } from '@/core/models/types';
 import { refundCardFeePortion } from '@/core/finance/card-fee-booking';
 import { computeCardFee, normalizeCardBrand } from '@/core/finance/card-fees';
@@ -128,13 +128,15 @@ function applyDisposition(
       // Den alten (verkauften) Lot lassen wir EXHAUSTED — wirtschaftlich korrekt:
       // Die Ware war verkauft, jetzt haben wir sie zum unitPrice "zurueckgekauft".
       if (line.unitPrice && line.unitPrice > 0) {
+        const keepLotId = uuid();   // LAN-Sync Phase 1a
         db.run(
           `INSERT INTO stock_lots
              (id, branch_id, product_id, purchase_id, purchase_line_id,
               unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
            VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, 'ACTIVE', ?, ?)`,
-          [uuid(), branchId, line.productId, line.unitPrice, qty, qty, now.split('T')[0], now]
+          [keepLotId, branchId, line.productId, line.unitPrice, qty, qty, now.split('T')[0], now]
         );
+        trackLotRow(keepLotId, 'insert');
       }
       // Phase 7 Sync: products.quantity aus den jetzt korrekten Lots.
       syncProductQuantity(line.productId);
@@ -194,6 +196,7 @@ function revertDisposition(
               WHERE id = ?`,
             [qty, qty, lotId]
           );
+          trackLotRow(lotId, 'update');   // LAN-Sync Phase 1a (laeuft in cancelReturn-Tx → atomar)
         }
       }
       // Phase 7 Sync — products.quantity aus Lots ableiten (ersetzt manuelles Decrement).
@@ -205,17 +208,19 @@ function revertDisposition(
       // Match: branchId implizit via product_id, purchase_id/line_id NULL, plus
       // Restbestand > 0 (sonst wuerden wir bereits konsumierte Spuren ausloeschen).
       // Wir cancellen den juengsten passenden Lot.
-      db.run(
-        `UPDATE stock_lots
-            SET status = 'CANCELLED'
-          WHERE id IN (
-            SELECT id FROM stock_lots
-              WHERE product_id = ? AND purchase_id IS NULL AND status = 'ACTIVE'
-                AND qty_remaining = qty_total
-              ORDER BY created_at DESC, id DESC LIMIT 1
-          )`,
+      // LAN-Sync Phase 1a: den zu cancelnden Lot zuerst aufloesen (identische Auswahl
+      // wie zuvor die Subquery), per id cancellen und den finalen Snapshot tracken.
+      const keepCancelId = query(
+        `SELECT id FROM stock_lots
+            WHERE product_id = ? AND purchase_id IS NULL AND status = 'ACTIVE'
+              AND qty_remaining = qty_total
+            ORDER BY created_at DESC, id DESC LIMIT 1`,
         [line.productId]
-      );
+      )[0]?.id as string | undefined;
+      if (keepCancelId) {
+        db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE id = ?`, [keepCancelId]);
+        trackLotRow(keepCancelId, 'update');
+      }
       console.warn(`[Return] reverted KEEP_AS_OWN for product ${line.productId} — purchase_price/source_type still need manual cleanup`);
       db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
       // Phase 7 Sync — products.quantity aus den verbleibenden Lots.

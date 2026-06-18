@@ -7,6 +7,7 @@ import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNu
 import { eventBus } from '@/core/events/event-bus';
 import { formatRepairLineNumber } from '@/core/repairs/line-numbering';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackLotRow } from '@/core/lots/lot-queries';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import {
   postRepairPayment,
@@ -830,6 +831,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
                   `UPDATE stock_lots SET unit_cost = unit_cost + ? WHERE id = ?`,
                   [perPiece, lotId]
                 );
+                trackLotRow(lotId, 'update');   // LAN-Sync Phase 1a
               }
             }
             // Own-Item: kein Pickup-Schritt — Produkt geht direkt zurück in Bestand.

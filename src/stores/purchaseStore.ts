@@ -15,7 +15,7 @@ import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
-import { consumeLot, restoreLot, getAvailableStock, syncProductQuantity } from '@/core/lots/lot-queries';
+import { consumeLot, restoreLot, getAvailableStock, syncProductQuantity, trackLotRow } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
@@ -562,18 +562,23 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`
     );
     const affectedProductIds = new Set<string>();
+    const createdLotIds: string[] = [];   // LAN-Sync Phase 1a
     for (const l of lineRecords) {
       if (!l.productId || l.qty <= 0) continue;
       // unit_cost = GROSS pro Stueck (Cash-Out an Supplier). Identische Basis wie
       // products.purchase_price heute, damit Phase 4 (Cost-Snapshot aus Lot) das
       // bestehende Margin-Verhalten 1:1 abloest, nur eben pro-Lot statt global.
-      lotStmt.run([uuid(), branchId, l.productId, id, l.id,
+      const lotId = uuid();
+      lotStmt.run([lotId, branchId, l.productId, id, l.id,
         l.unitPrice, l.qty, l.qty, purchaseDate, now]);
+      createdLotIds.push(lotId);
       affectedProductIds.add(l.productId);
     }
     lotStmt.free();
     // Phase 7 Sync: products.quantity = Σ lot.qty_remaining
     for (const pid of affectedProductIds) syncProductQuantity(pid);
+    // LAN-Sync Phase 1a: neue Lots als Full-Row (kanonische id) an Geraet B tracken.
+    for (const lid of createdLotIds) trackLotRow(lid, 'insert');
 
     // Initial payment (if any)
     let initialPaymentId: string | null = null;
@@ -681,7 +686,11 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // Sales-Picker filtern status='CANCELLED' raus (Phase 3). Bereits verkaufte
     // Pieces (invoice_lines.lot_id) bleiben verknuepft — der historische
     // Cost-Snapshot ist Eigentum der Invoice, nicht des Lots.
+    // LAN-Sync Phase 1a: betroffene Lot-IDs erfassen, soft-cancellen, dann je Lot
+    // den finalen Full-Row-Snapshot (status='CANCELLED') an Geraet B tracken.
+    const cancelledLotIds = query(`SELECT id FROM stock_lots WHERE purchase_id = ?`, [id]).map(r => r.id as string);
     db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE purchase_id = ?`, [id]);
+    for (const lid of cancelledLotIds) trackLotRow(lid, 'update');
     for (const pid of affectedProductIds) {
       syncProductQuantity(pid);
       // F-PRC-01 — sonst bleibt stock_status='in_stock' bei 0 Lots stehen (Phantom:

@@ -5,6 +5,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackLotRow } from '@/core/lots/lot-queries';
 import { postConsignmentPayout, postCreditNote, hasLedgerEntries, hasReversalFor, reverseSource, reverseConsignmentPayouts } from '@/core/ledger/posting';
 import type { CreditNote } from '@/core/models/types';
 import { useSupplierStore } from './supplierStore';
@@ -869,13 +870,15 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       // Phase 5 — neuer Stock-Lot an consignor_payout-Preis als Acquisition-
       // Cost. Originaler Lot der Sale-Konsumption bleibt EXHAUSTED.
       if (costBasis > 0) {
+        const teardownLotId = uuid();   // LAN-Sync Phase 1a
         db.run(
           `INSERT INTO stock_lots
              (id, branch_id, product_id, purchase_id, purchase_line_id,
               unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
            VALUES (?, ?, ?, NULL, NULL, ?, 1, 1, 'ACTIVE', ?, ?)`,
-          [uuid(), branchId, con.productId, costBasis, now.split('T')[0], now]
+          [teardownLotId, branchId, con.productId, costBasis, now.split('T')[0], now]
         );
+        trackLotRow(teardownLotId, 'insert');
       }
       get().updateConsignment(id, { status: 'returned' });
     }

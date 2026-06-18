@@ -16,7 +16,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postExpensePayment, reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
-import { getActiveLots, consumeLot, restoreLot, syncProductQuantity } from '@/core/lots/lot-queries';
+import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow } from '@/core/lots/lot-queries';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -244,12 +244,14 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
       // F-PRD-03 — Output bekommt ein Stock-Lot (Cost-Provenance + Lot-Bestandswert
       // bleibt erhalten: Input-Lots geleert ⇄ Output-Lot zum gleichen Wert). unit_cost
       // = Output-Wert, purchase_id NULL (kein Einkauf), qty 1.
+      const outputLotId = uuid();   // LAN-Sync Phase 1a
       db.run(
         `INSERT INTO stock_lots (id, branch_id, product_id, purchase_id, purchase_line_id,
            unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
          VALUES (?, ?, ?, NULL, NULL, ?, 1, 1, 'ACTIVE', ?, ?)`,
-        [uuid(), branchId, pId, Number(o.value) || 0, prodDate, now]
+        [outputLotId, branchId, pId, Number(o.value) || 0, prodDate, now]
       );
+      trackLotRow(outputLotId, 'insert');
       syncProductQuantity(pId);
     }
     outStmt.free();
@@ -385,7 +387,11 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
     // 2. Outputs entfernen: Produkt + dessen Production-Lot (purchase_id NULL) loeschen.
     for (const o of rec.outputs) {
       if (!o.productId) continue;
+      // LAN-Sync Phase 1a: Production-Output-Lots (purchase_id IS NULL) vor dem DELETE
+      // erfassen und als delete an Geraet B tracken (kein zurueckgelassener Lot auf B).
+      const delLotIds = query(`SELECT id FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL`, [o.productId]).map(r => r.id as string);
       db.run(`DELETE FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL`, [o.productId]);
+      for (const lid of delLotIds) trackLotRow(lid, 'delete');
       db.run(`DELETE FROM products WHERE id = ?`, [o.productId]);
       trackDelete('products', o.productId);
     }
