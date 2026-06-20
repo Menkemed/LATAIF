@@ -338,6 +338,10 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
   if (custRows.length > 0 && custRows[0].sales_stage !== 'active') {
     db.run(`UPDATE customers SET sales_stage = 'active', updated_at = ? WHERE id = ?`, [now, customerId]);
   }
+  // LAN-Sync: Kunden-KPIs (last_purchase_at/last_contact_at/sales_stage) als Full-Row-
+  // Snapshot syncen — Handler läuft auf B nicht. EIN trackChange nach beiden UPDATEs
+  // genügt (Full-Row enthält finalen sales_stage). Post-write.
+  trackChange('customers', customerId, 'update', {});
 
   saveDatabase();
 
@@ -348,6 +352,10 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
   );
   for (const row of openReminders) {
     db.run(`UPDATE tasks SET status = 'completed', completed_at = ? WHERE id = ?`, [now, row.id]);
+    // LAN-Sync: erledigte payment_reminder-Task als Full-Row-Snapshot syncen. Post-write.
+    // (automation-handlers.insertTask trackt die Erstellung nicht → die Task taucht auf B
+    // erst hier auf; vollständige Erstellungs-Sync = eigener insertTask-Slice.)
+    trackChange('tasks', row.id as string, 'update', {});
   }
   if (openReminders.length > 0) saveDatabase();
 
