@@ -1009,9 +1009,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const db = getDatabase();
     const repair = get().getRepair(id);
     // Restore product status if needed
+    let restoredProductId: string | null = null;
     if (repair?.productId && repair.status !== 'picked_up') {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
         [new Date().toISOString(), repair.productId]);
+      restoredProductId = repair.productId;
     }
     // Auto-erzeugte Repair-Cost-Expenses VOR dem Cancel einsammeln, damit wir sie
     // anschliessend gezielt im Ledger reverten koennen.
@@ -1046,6 +1048,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     saveDatabase();
     trackDelete('repairs', id);
     for (const lid of repairLineIds) trackChange('repair_lines', lid, 'delete', {});
+    // LAN-Sync: das beim Restore freigegebene Produkt (stock_status='in_stock') als Full-Row-
+    // Snapshot an Gerät B — sonst bleibt es dort auf 'in_repair' hängen. Reine Status-Änderung
+    // (keine quantity-/Lot-/Ledger-Mutation; unbedingter in_stock-Restore unverändert). Post-write.
+    if (restoredProductId) trackProductRow(restoredProductId);
+    // LAN-Sync: die stornierten Repair-Expenses (status='CANCELLED') als Full-Row-Snapshot an
+    // Gerät B — sonst bleibt die Workshop-Verbindlichkeit dort offen (Supplier-Saldo zu hoch).
+    // IDs aus linkedExpenses (vor dem Bulk-UPDATE erfasst). Reine Status-Sync; das Ledger-
+    // Reverse (postExpenseCancelled, Schleife unten) bleibt unverändert. Post-write.
+    for (const er of linkedExpenses) trackChange('expenses', er.id as string, 'update', {});
 
     if (payLedgerId) {
       safePost(`reverseRepairPayment(${payLedgerId}) [repair-delete]`, () => {

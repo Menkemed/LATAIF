@@ -41,6 +41,11 @@ function insertTask(opts: {
   );
 
   saveDatabase();
+  // LAN-Sync: auto-generierte Task als Full-Row-Snapshot an Gerät B — der erzeugende
+  // Event-Handler läuft auf B nicht (Full-Row-Replay erzeugt kein Domain-Event), sonst
+  // erscheint die Task dort nie. Sync-only (kein Audit — wie alle übrigen automation-
+  // Side-Effects); trackChange liest die volle Zeile via SELECT * und persistiert selbst.
+  trackChange('tasks', id, 'insert', {});
 }
 
 function addDays(days: number): string {
@@ -162,6 +167,9 @@ eventBus.on('repair.picked_up', (event: DomainEvent) => {
     db.run(`UPDATE tasks SET status = 'completed', completed_at = ? WHERE id = ?`, [now, row.id]);
   }
   if (open.length > 0) saveDatabase();
+  // LAN-Sync: auto-geschlossene Repair-Tasks als Full-Row-Snapshot syncen — Handler läuft
+  // auf B nicht. IDs stammen aus dem open-Select oben (vor dem UPDATE erfasst). Post-write.
+  for (const row of open) trackChange('tasks', row.id as string, 'update', {});
 });
 
 // ── repair.created ──
@@ -353,8 +361,8 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
   for (const row of openReminders) {
     db.run(`UPDATE tasks SET status = 'completed', completed_at = ? WHERE id = ?`, [now, row.id]);
     // LAN-Sync: erledigte payment_reminder-Task als Full-Row-Snapshot syncen. Post-write.
-    // (automation-handlers.insertTask trackt die Erstellung nicht → die Task taucht auf B
-    // erst hier auf; vollständige Erstellungs-Sync = eigener insertTask-Slice.)
+    // (insertTask trackt seit diesem Slice bereits die Erstellung → hier kommt nur die
+    // update-Zeile dazu; applyUpsert auf B konvergiert insert→update idempotent.)
     trackChange('tasks', row.id as string, 'update', {});
   }
   if (openReminders.length > 0) saveDatabase();
