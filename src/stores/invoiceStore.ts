@@ -10,7 +10,7 @@ import { trackChange } from '@/core/sync/sync-service';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
-import { bookCardFee } from '@/core/finance/card-fee-booking';
+import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
   postInvoiceIssued,
   postInvoicePayment,
@@ -1238,36 +1238,175 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   },
 
   // Plan §Edit: bestehende Payment ändern. Recalc paid_amount + Status der Invoice.
+  //
+  // Slice 1 (Zahlungsmodell-Bundle) — Ledger-konsistent: Aenderung von Betrag,
+  // Methode ODER Empfangsdatum reversiert BEIDE Legs (Geld + Auto-Card-Fee) und
+  // bucht sie mit den neuen Werten in EINER SQL-Transaktion neu (gleiche paymentId
+  // → Multi-Cycle-Idempotenz via hasReversalFor; created_at unveraendert → das
+  // bankingStore-Card-Fee-Netting ueber created_at bleibt intakt). Reine
+  // notes-Aenderungen laufen den Leichtgewicht-Pfad ohne Ledger-Churn.
   updatePayment: (paymentId, invoiceId, data) => {
     const db = getDatabase();
     const now = new Date().toISOString();
-    const fields: string[] = [];
-    const values: unknown[] = [];
-    if (data.amount !== undefined) { fields.push('amount = ?'); values.push(data.amount); }
-    if (data.method !== undefined) { fields.push('method = ?'); values.push(data.method); }
-    if (data.notes !== undefined) { fields.push('notes = ?'); values.push(data.notes); }
-    if (data.receivedAt !== undefined) { fields.push('received_at = ?'); values.push(data.receivedAt); }
-    if (fields.length === 0) return;
-    values.push(paymentId);
-    db.run(`UPDATE payments SET ${fields.join(', ')} WHERE id = ?`, values);
 
-    // Recalc paid_amount + status
-    const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?`, [invoiceId]);
-    const newPaid = Number(sumRow[0]?.paid || 0);
-    const inv = get().getInvoice(invoiceId);
-    if (inv) {
-      const tip = Math.max(0, newPaid - inv.grossAmount);
-      const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
-        : newPaid > 0 ? 'PARTIAL'
-        : (inv.status === 'CANCELLED' ? 'CANCELLED' : 'DRAFT');
-      db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
-        [newPaid, tip, newStatus, now, invoiceId]);
-      if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
-      // LAN-Sync (Gruppe 3): paid_amount/status/tip nach Recompute waren ungetrackt → B stale.
-      trackChange('invoices', invoiceId, 'update', {});
+    // Volle Alt-Row lesen: `data` traegt nur die von der UI geaenderten Felder
+    // (pro-Feld-onBlur), card_brand + created_at fehlen dort grundsaetzlich,
+    // werden aber fuer Repost (Betrag/Methode) und Card-Fee-Netting gebraucht.
+    const oldRows = query(
+      `SELECT amount, method, card_brand, notes, received_at, created_at FROM payments WHERE id = ?`,
+      [paymentId]
+    );
+    if (oldRows.length === 0) return; // Payment existiert nicht (mehr).
+    const old = oldRows[0];
+    const oldAmount = Number(old.amount) || 0;
+    const oldMethod = String(old.method);
+    const oldCardBrand = (old.card_brand as string | null) ?? null;
+    const oldNotes = (old.notes as string | null) ?? null;
+    const oldReceivedAt = String(old.received_at);
+    const oldCreatedAt = String(old.created_at);
+
+    const newAmount = data.amount !== undefined ? data.amount : oldAmount;
+    const newMethod = data.method !== undefined ? String(data.method) : oldMethod;
+    const newNotes = data.notes !== undefined ? (data.notes ?? null) : oldNotes;
+    const newReceivedAt = data.receivedAt !== undefined ? String(data.receivedAt) : oldReceivedAt;
+
+    // 'credit' (Store-Guthaben-Einloesung) hier nicht editierbar — ein generischer
+    // Repost wuerde CUSTOMER_CREDIT ohne used_amount-Buchhaltung bewegen. Kommt im
+    // dedizierten Credit-Slice.
+    if (newMethod === 'credit' || oldMethod === 'credit') {
+      throw new Error('Credit-Zahlungen koennen hier nicht bearbeitet werden.');
     }
-    saveDatabase();
-    trackUpdate('payments', paymentId, data);
+    if (newMethod === 'card' && newAmount <= 0) {
+      // Karten-Repost braucht amount > 0 (postInvoicePayment wirft sonst).
+      throw new Error('Eine Karten-Zahlung muss groesser als 0 sein.');
+    }
+
+    const amountChanged = data.amount !== undefined && newAmount !== oldAmount;
+    const methodChanged = data.method !== undefined && newMethod !== oldMethod;
+    const receivedAtChanged = data.receivedAt !== undefined && newReceivedAt !== oldReceivedAt;
+    // Geld-Leg-Ledger haengt an Betrag/Methode (Konto+Hoehe) UND received_at
+    // (occurred_at-Datierung) → alle drei loesen Reverse+Repost aus.
+    const moneyLegChanged = amountChanged || methodChanged || receivedAtChanged;
+    // Card-Fee haengt NUR an Betrag/Methode (nicht am Datum) — eine reine
+    // received_at-Korrektur laesst die Fee unveraendert (created_at bleibt gleich).
+    const cardFeeChanged = amountChanged || methodChanged;
+
+    // ── Leichtgewicht-Pfad: nichts am Geld-Leg → nur Notiz persistieren. ──
+    if (!moneyLegChanged) {
+      if (data.notes !== undefined) {
+        db.run(`UPDATE payments SET notes = ? WHERE id = ?`, [newNotes, paymentId]);
+        saveDatabase();
+        trackUpdate('payments', paymentId, { notes: newNotes });
+        get().loadInvoices();
+      }
+      return;
+    }
+
+    // card_brand bei 'card' setzen (alten Brand erhalten, sonst 'normal' — die
+    // Edit-UI hat keinen Brand-Selektor; die Amex-Unschaerfe bei cash→card ist
+    // bewusst dokumentiert und gehoert in einen spaeteren UI-Slice).
+    const newCardBrandValue: CardBrand | null =
+      newMethod === 'card' ? normalizeCardBrand(oldMethod === 'card' ? oldCardBrand : null) : null;
+
+    const branchId = currentBranchId();
+    const userId = currentUserId();
+    const inv = get().getInvoice(invoiceId);
+    const customerId = inv?.customerId;
+
+    // D3-Guard: zwei Karten-Fees mit IDENTISCHEM created_at koennte das
+    // bankingStore-Netting (keyt auf created_at, nicht payment_id) nicht
+    // disambiguieren. In diesem seltenen Kollisionsfall NICHT raten → Card-Fee-
+    // Schritt ueberspringen + warnen (Geld-Leg keyt auf paymentId, bleibt korrekt).
+    // Echte Loesung (Fee per payment_id) = spaeteres Bundle.
+    const feeCountRow = query(
+      `SELECT COUNT(*) AS n FROM expenses
+       WHERE category = 'CardFees' AND related_module = 'invoice' AND related_entity_id = ?
+         AND status != 'CANCELLED' AND created_at = ?`,
+      [invoiceId, oldCreatedAt]
+    );
+    const feeCollision = Number(feeCountRow[0]?.n || 0) > 1;
+    const touchCardFee = cardFeeChanged && !feeCollision;
+    if (cardFeeChanged && feeCollision) {
+      console.warn(`[updatePayment] card-fee created_at collision on invoice ${invoiceId} — skipping card-fee re-book for payment ${paymentId}`);
+    }
+
+    beginLedgerTransaction();
+    try {
+      // STEP A — Card-Fee reversieren, wenn sie sich aendert. Unbedingtes Reverse-
+      // vor-Rebook macht die Pro-Feld-UI-Sequenz self-healing: erst jede aktive Fee
+      // auf oldCreatedAt stornieren, dann (nur bei finaler Karte) neu buchen.
+      // reverseCardFees ist idempotent (no-op ohne aktive Fee).
+      if (touchCardFee) {
+        reverseCardFees('invoice', invoiceId, oldCreatedAt);
+      }
+
+      // STEP B — Geld-Leg der alten Zahlung reversieren (geguardet, Multi-Cycle-safe).
+      if (hasLedgerEntries('PAYMENT', paymentId) && !hasReversalFor('PAYMENT', paymentId)) {
+        postInvoicePaymentReversed(paymentId, now);
+      }
+
+      // STEP C — payments-Row auf die neuen Werte setzen (inkl. card_brand).
+      db.run(
+        `UPDATE payments SET amount = ?, method = ?, card_brand = ?, notes = ?, received_at = ? WHERE id = ?`,
+        [newAmount, newMethod, newCardBrandValue, newNotes, newReceivedAt, paymentId]
+      );
+
+      // Invoice paid_amount/tip/status nach dem Recompute neu setzen (unveraendert
+      // zur alten Logik — nur jetzt INNERHALB der Transaktion).
+      const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?`, [invoiceId]);
+      const newPaid = Number(sumRow[0]?.paid || 0);
+      if (inv) {
+        const tip = Math.max(0, newPaid - inv.grossAmount);
+        const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
+          : newPaid > 0 ? 'PARTIAL'
+          : (inv.status === 'CANCELLED' ? 'CANCELLED' : 'DRAFT');
+        db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
+          [newPaid, tip, newStatus, now, invoiceId]);
+        if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
+        // LAN-Sync (Gruppe 3): paid_amount/status/tip nach Recompute → EIN Full-Row-Snapshot.
+        trackChange('invoices', invoiceId, 'update', {});
+      }
+
+      // STEP D — Geld-Leg mit den NEUEN Werten neu buchen (gleiche paymentId →
+      // Multi-Cycle-Idempotenz greift). occurred_at = newReceivedAt.
+      if (newAmount > 0) {
+        if (!customerId) throw new Error('updatePayment: customerId fehlt — Repost nicht moeglich.');
+        postInvoicePayment(
+          {
+            id: paymentId,
+            invoiceId,
+            amount: newAmount,
+            method: newMethod as PaymentMethod,
+            receivedAt: newReceivedAt,
+            notes: newNotes ?? undefined,
+            createdAt: oldCreatedAt,
+          },
+          customerId
+        );
+      }
+
+      // STEP E — Card-Fee neu buchen, wenn die FINALE Methode 'card' ist.
+      // created_at = oldCreatedAt → bankingStore-Netting bleibt intakt.
+      if (touchCardFee && newMethod === 'card' && newAmount > 0) {
+        const label = inv
+          ? formatInvoiceDisplay({ invoiceNumber: inv.invoiceNumber, status: inv.status, specialMark: !!inv.specialMark })
+          : invoiceId.slice(0, 8);
+        bookCardFee({
+          branchId, userId, amount: newAmount, brand: newCardBrandValue ?? 'normal',
+          relatedModule: 'invoice', relatedEntityId: invoiceId,
+          label, createdAt: oldCreatedAt,
+        });
+      }
+
+      saveDatabase();                    // deferred bis zum aeusseren COMMIT
+      trackUpdate('payments', paymentId, data);
+      commitLedgerTransaction();
+    } catch (e) {
+      rollbackLedgerTransaction();
+      get().loadInvoices();
+      throw e;
+    }
+
     get().loadInvoices();
   },
 
@@ -1275,6 +1414,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   deletePayment: (paymentId, invoiceId) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // Slice 1 (Symmetrie zu updatePayment): method + created_at VOR dem DELETE
+    // erfassen, um danach die Auto-Card-Fee dieser Zahlung mit-zu-reversieren.
+    const delRows = query(`SELECT method, created_at FROM payments WHERE id = ?`, [paymentId]);
+    const delMethod = delRows.length ? String(delRows[0].method) : '';
+    const delCreatedAt = delRows.length ? String(delRows[0].created_at) : '';
     db.run(`DELETE FROM payments WHERE id = ?`, [paymentId]);
 
     const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?`, [invoiceId]);
@@ -1301,6 +1445,25 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (hasReversalFor('PAYMENT', paymentId)) return;
       postInvoicePaymentReversed(paymentId);
     });
+
+    // Slice 1 — die Auto-Card-Fee dieser Zahlung mit-stornieren, sonst bleibt eine
+    // verwaiste CardFees-Expense (DR EXPENSES / CR CARD_CLEARING) stehen. Bei
+    // created_at-Kollision (mehrere Karten-Fees gleichen Zeitstempels) bewusst NICHT
+    // raten → ueberspringen + warnen (Geld-Leg keyt auf paymentId, bleibt korrekt).
+    if (delMethod === 'card' && delCreatedAt) {
+      const feeCountRow = query(
+        `SELECT COUNT(*) AS n FROM expenses
+         WHERE category = 'CardFees' AND related_module = 'invoice' AND related_entity_id = ?
+           AND status != 'CANCELLED' AND created_at = ?`,
+        [invoiceId, delCreatedAt]
+      );
+      const n = Number(feeCountRow[0]?.n || 0);
+      if (n === 1) {
+        reverseCardFees('invoice', invoiceId, delCreatedAt);
+      } else if (n > 1) {
+        console.warn(`[deletePayment] card-fee created_at collision on invoice ${invoiceId} — skipping card-fee reversal for deleted payment ${paymentId}`);
+      }
+    }
 
     get().loadInvoices();
   },
