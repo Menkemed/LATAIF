@@ -1521,6 +1521,23 @@ function runMigrations(database: Database): void {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_customer_credits_customer ON customer_credits(customer_id, status)`,
 
+    // Zahlungsmodell-Bundle Slice 2 — Einlöse-Verknüpfung: applyCreditToInvoice
+    // konsumiert FIFO mehrere customer_credits-Rows in EINE 'credit'-Zahlung; ohne
+    // Rück-Link könnte ein Reverse (deleteInvoice/cancel/deletePayment) nicht wissen,
+    // welche Credits in welcher Höhe zurückzusetzen sind. Eine Row pro konsumiertem
+    // Credit (payment_id + credit_id + exakter Anteil) macht den used_amount-Reverse
+    // per-Row exakt und übersteht Interleaving. Rein additiv, sync-getrackt.
+    `CREATE TABLE IF NOT EXISTS credit_applications (
+      id              TEXT PRIMARY KEY,
+      branch_id       TEXT NOT NULL,
+      payment_id      TEXT NOT NULL,
+      credit_id       TEXT NOT NULL,
+      amount          REAL NOT NULL,
+      created_at      TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_credit_applications_payment ON credit_applications(payment_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_credit_applications_credit ON credit_applications(credit_id)`,
+
     // Backfill: existierende Single-Supplier-Repairs in eine repair_lines-Zeile
     // migrieren. NOT EXISTS-Guard macht den Schritt idempotent.
     `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, cost_amount, expense_id, status, created_at, updated_at)

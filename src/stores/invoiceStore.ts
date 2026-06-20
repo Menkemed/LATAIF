@@ -21,6 +21,7 @@ import {
   beginLedgerTransaction,
   commitLedgerTransaction,
   rollbackLedgerTransaction,
+  inLedgerTransaction,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
@@ -36,6 +37,38 @@ function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
     console.error(`[ledger] ${label} failed:`, err);
   }
+}
+
+// Slice 2 (Zahlungsmodell-Bundle) — Gegenstueck zu applyCreditToInvoice: beim Reverse
+// eines 'credit'-Payments das verbrauchte Store-Guthaben EXAKT zurueckgeben. Liest die
+// credit_applications-Link-Rows (payment_id), reduziert used_amount je konsumiertem
+// customer_credits-Row um den genauen Anteil (status USED->OPEN, sobald used < amount),
+// loescht die Link-Rows und synct beides. No-op, wenn keine Link-Rows existieren
+// (Nicht-credit-Payment, bereits restauriert, oder Legacy-credit vor der
+// credit_applications-Migration) → idempotent + kein Regress. Wird in den
+// (nicht-transaktionalen) Reverse-Pfaden deleteInvoice/updateInvoice-cancel/deletePayment
+// aufgerufen; persistiert + synct selbst (eigenes saveDatabase).
+function restoreCreditForPayment(paymentId: string): void {
+  const db = getDatabase();
+  const apps = query(`SELECT id, credit_id, amount FROM credit_applications WHERE payment_id = ?`, [paymentId]);
+  if (apps.length === 0) return;
+  for (const a of apps) {
+    const creditId = a.credit_id as string;
+    const take = Number(a.amount) || 0;
+    // Credit-Row koennte fehlen, wenn die GRANT-Seite (cancelReturn/deleteCreditNote) sie
+    // inzwischen geloescht hat — dann nichts zu restaurieren (Guthaben existiert nicht mehr).
+    const cr = query(`SELECT amount, used_amount FROM customer_credits WHERE id = ?`, [creditId])[0];
+    if (cr) {
+      const total = Number(cr.amount) || 0;
+      const newUsed = Math.max(0, (Number(cr.used_amount) || 0) - take);
+      const newStatus = newUsed >= total - 0.005 ? 'USED' : 'OPEN';
+      db.run(`UPDATE customer_credits SET used_amount = ?, status = ? WHERE id = ?`, [newUsed, newStatus, creditId]);
+      trackChange('customer_credits', creditId, 'update', {});
+    }
+    db.run(`DELETE FROM credit_applications WHERE id = ?`, [a.id as string]);
+    trackChange('credit_applications', a.id as string, 'delete', {});
+  }
+  saveDatabase();
 }
 
 interface InvoiceStore {
@@ -59,7 +92,7 @@ interface InvoiceStore {
     deltaPayment?: { amount: number; method: PaymentMethod; cardBrand?: CardBrand };
     reason: string;
   }) => void;
-  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand) => void;
+  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand, paymentIdOverride?: string) => string;
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
   // Konsumiert OPEN-customer_credits FIFO (used_amount↑) und bucht via recordPayment('credit')
   // DR CUSTOMER_CREDIT / CR AR. Gibt den tatsächlich verrechneten Betrag zurück.
@@ -580,6 +613,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
             postInvoicePaymentReversed(pid);
           });
         }
+        // Slice 2 — verbrauchtes Store-Guthaben jeder 'credit'-Zahlung zurueckgeben
+        // (used_amount-=Anteil, status→OPEN, Link-Rows weg). Bewusst NUR im
+        // !reversedByReturn-Zweig: bei reversedByReturn=true behandelt der Return-/CN-Pfad
+        // das Guthaben separat (sonst Doppel-Reverse). payments-Rows bleiben hier bestehen.
+        for (const pid of cancelPayIds) restoreCreditForPayment(pid);
       }
 
       // Auto-Expenses (Card-Fees etc.) ebenfalls reverten — sonst Doppelbuchung im Ledger.
@@ -913,7 +951,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     try { useProductStore.getState().loadProducts(); } catch { /* noop */ }
   },
 
-  recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal, cardBrand) => {
+  recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal, cardBrand, paymentIdOverride) => {
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Payment amount must be a positive number.');
     }
@@ -922,7 +960,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Expense verwendet. bankingStore matcht die Fee ueber created_at = payment.created_at
     // um die Bank-Zeile netto zu zeigen — dieser geteilte Timestamp ist load-bearing.
     const now = new Date().toISOString();
-    const paymentId = uuid();
+    // Slice 2 — atomare Caller (applyCreditToInvoice) geben die paymentId vor, damit sie
+    // VOR dem Aufruf die credit_applications-Link-Rows darauf keyen koennen.
+    const paymentId = paymentIdOverride || uuid();
     let branchId: string, userId: string;
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
@@ -1032,7 +1072,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // ZIEL.md §3a — Ledger-Posting für Customer-Zahlung.
     const invForLedger = get().getInvoice(invoiceId);
     if (invForLedger) {
-      safePost(`postInvoicePayment(${paymentId})`, () => {
+      const doPost = () => {
         if (hasLedgerEntries('PAYMENT', paymentId)) return;
         postInvoicePayment(
           {
@@ -1046,10 +1086,17 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           },
           invForLedger.customerId
         );
-      });
+      };
+      // Slice 2 — innerhalb einer Ambient-Ledger-Tx (editInvoice / applyCreditToInvoice)
+      // MUSS ein Post-Fehler propagieren, damit der aeussere try/catch zurueckrollt (echte
+      // Atomaritaet — sonst committet die Tx trotz fehlender DR/CR-Beine). Standalone bleibt
+      // safePost tolerant: ein Ledger-Bug soll den Verkaufsfluss nicht blockieren.
+      if (inLedgerTransaction()) doPost();
+      else safePost(`postInvoicePayment(${paymentId})`, doPost);
     }
 
     get().loadInvoices();
+    return paymentId;
   },
 
   // Credit-Modell Slice 3 — Einlösung von Store-Guthaben gegen eine Invoice.
@@ -1069,19 +1116,22 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const customerId = inv.customerId;
     let branchId: string;
     try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    const now = new Date().toISOString();
 
     // Cap auf den noch offenen Invoice-Rest — verhindert Tip/Über-Zahlung mit Guthaben.
     const remainingOnInvoice = Math.max(0, inv.grossAmount - inv.paidAmount);
-    let toApply = Math.min(amount, remainingOnInvoice);
+    const toApply = Math.min(amount, remainingOnInvoice);
     if (toApply <= 0.005) return 0;
 
-    // FIFO über OPEN-Credits (älteste zuerst). used_amount erhöhen; bei Voll-Verbrauch USED.
+    // FIFO über OPEN-Credits (älteste zuerst) — erst NUR planen (read-only), welche Rows
+    // in welcher Höhe konsumiert werden; geschrieben wird ausschliesslich in der Tx unten.
     const credits = query(
       `SELECT id, amount, used_amount FROM customer_credits
         WHERE branch_id = ? AND customer_id = ? AND status = 'OPEN'
         ORDER BY created_at ASC`,
       [branchId, customerId]
     );
+    const applied: Array<{ creditId: string; take: number; newUsed: number; newStatus: string }> = [];
     let remaining = toApply;
     let consumed = 0;
     for (const c of credits) {
@@ -1093,18 +1143,40 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const take = Math.min(avail, remaining);
       const newUsed = used + take;
       const newStatus = newUsed >= total - 0.005 ? 'USED' : 'OPEN';
-      db.run(`UPDATE customer_credits SET used_amount = ?, status = ? WHERE id = ?`,
-        [newUsed, newStatus, c.id as string]);
-      trackUpdate('customer_credits', c.id as string, { usedAmount: newUsed, status: newStatus });
+      applied.push({ creditId: c.id as string, take, newUsed, newStatus });
       remaining -= take;
       consumed += take;
     }
     if (consumed <= 0.005) return 0;
-    saveDatabase();
 
-    // Verrechneten Betrag als Invoice-Payment method='credit' verbuchen — recordPayment
-    // erledigt Payment-Insert, Status-Konvertierung (→FINAL) und den Ledger-Post.
-    get().recordPayment(invoiceId, consumed, 'credit', note || 'Store-Guthaben verrechnet');
+    // Slice 2 — ATOMAR: Credit-Konsum (used_amount↑) + credit_applications-Link-Rows +
+    // Payment-Insert + Ledger-Leg (DR CUSTOMER_CREDIT / CR AR) in EINER Transaktion.
+    // recordPayment laeuft jetzt tx-aware: sein Ledger-Post WIRFT (statt safePost-Schluck),
+    // sodass ein Fehler hier den vollstaendigen Rollback ausloest — kein halb-verbrauchtes
+    // Guthaben ohne Gegenbuchung mehr. paymentId fix vorgegeben, damit die Link-Rows darauf
+    // keyen. Alle trackUpdate/trackInsert laufen IN der Tx (atomar; Rollback → 0 Changelog).
+    const paymentId = uuid();
+    beginLedgerTransaction();
+    try {
+      for (const a of applied) {
+        db.run(`UPDATE customer_credits SET used_amount = ?, status = ? WHERE id = ?`,
+          [a.newUsed, a.newStatus, a.creditId]);
+        trackUpdate('customer_credits', a.creditId, { usedAmount: a.newUsed, status: a.newStatus });
+        const appId = uuid();
+        db.run(`INSERT INTO credit_applications (id, branch_id, payment_id, credit_id, amount, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)`,
+          [appId, branchId, paymentId, a.creditId, a.take, now]);
+        trackInsert('credit_applications', appId, { paymentId, creditId: a.creditId, amount: a.take });
+      }
+      // Verrechneten Betrag als Invoice-Payment method='credit' verbuchen (feste paymentId).
+      get().recordPayment(invoiceId, consumed, 'credit', note || 'Store-Guthaben verrechnet', undefined, undefined, paymentId);
+      commitLedgerTransaction();
+    } catch (e) {
+      rollbackLedgerTransaction();
+      get().loadInvoices();
+      throw e;
+    }
+    get().loadInvoices();
     return consumed;
   },
 
@@ -1216,6 +1288,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         postInvoicePaymentReversed(pid);
       });
     }
+
+    // Slice 2 — verbrauchtes Store-Guthaben jeder 'credit'-Zahlung zurueckgeben
+    // (used_amount-=Anteil, status→OPEN, Link-Rows weg). No-op fuer Nicht-credit-
+    // Zahlungen; credit_applications keyt auf payment_id und ueberlebt den
+    // payments-DELETE oben (kein FK-Cascade).
+    for (const pid of linkedPaymentIds) restoreCreditForPayment(pid);
 
     get().loadInvoices();
   },
@@ -1445,6 +1523,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (hasReversalFor('PAYMENT', paymentId)) return;
       postInvoicePaymentReversed(paymentId);
     });
+
+    // Slice 2 — war es eine 'credit'-Zahlung, das verbrauchte Store-Guthaben zurueckgeben
+    // (used_amount-=Anteil, status→OPEN, Link-Rows weg). Schliesst die Asymmetrie zu
+    // updatePayment (das credit-Edits blockt): deletePayment behandelt credit jetzt korrekt
+    // statt das Guthaben still zu verlieren.
+    if (delMethod === 'credit') restoreCreditForPayment(paymentId);
 
     // Slice 1 — die Auto-Card-Fee dieser Zahlung mit-stornieren, sonst bleibt eine
     // verwaiste CardFees-Expense (DR EXPENSES / CR CARD_CLEARING) stehen. Bei
