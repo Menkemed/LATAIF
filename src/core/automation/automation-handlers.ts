@@ -8,6 +8,7 @@ import { eventBus } from '../events/event-bus';
 import { getDatabase, saveDatabase } from '../db/database';
 import { query, currentBranchId, currentUserId } from '../db/helpers';
 import { trackProductRow } from '../lots/lot-queries';
+import { trackChange } from '../sync/sync-service';   // sync-only (kein Audit) — Auto-Completion-Side-Effects (Orders/Repairs)
 import type { DomainEvent, TaskType, TaskPriority } from '../models/types';
 
 function getBranchId(): string {
@@ -361,6 +362,11 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
          actual_delivery = COALESCE(actual_delivery, ?), updated_at = ? WHERE id = ?`,
       [now.split('T')[0], now, row.id]
     );
+    // LAN-Sync: Auf Gerät B feuert dieser invoice.paid-Handler nicht (Full-Row-Replay
+    // erzeugt kein Domain-Event). Den fertigen Order-Endzustand daher als Full-Row-
+    // Snapshot mitschicken. Idempotent (WHERE-Guard oben). Post-write: Crash-Fenster
+    // zwischen UPDATE und trackChange bleibt (wie bei allen bestehenden trackInsert).
+    trackChange('orders', row.id as string, 'update', {});
   }
   if (linkedOrders.length > 0) saveDatabase();
 
@@ -376,6 +382,9 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
          customer_payment_date = ?, updated_at = ? WHERE id = ?`,
       [charge, now.split('T')[0], now, row.id]
     );
+    // LAN-Sync: wie Orders — fertigen Repair-PAID-Zustand als Full-Row-Snapshot syncen,
+    // da der Handler auf B nicht läuft. Idempotent (WHERE-Guard != 'PAID'). Post-write.
+    trackChange('repairs', row.id as string, 'update', {});
   }
   if (linkedRepairs.length > 0) saveDatabase();
 });

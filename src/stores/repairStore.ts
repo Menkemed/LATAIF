@@ -7,6 +7,7 @@ import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNu
 import { eventBus } from '@/core/events/event-bus';
 import { formatRepairLineNumber } from '@/core/repairs/line-numbering';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — deleteRepair-Cascade (Gold-Buckets + repair_lines)
 import { trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import {
@@ -1035,9 +1036,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     );
     const payLedgerId = (payRow[0]?.customer_payment_ledger_id as string | null) || null;
 
+    // repair_lines VOR dem Repair-Delete erfassen + explizit löschen — sonst verwaisen
+    // sie auf Gerät B (sql.js erzwingt FK ON DELETE CASCADE nicht). Je Line als delete
+    // syncen. Post-write: Crash-Fenster wie bei allen bestehenden trackDelete.
+    const repairLineIds = query(`SELECT id FROM repair_lines WHERE repair_id = ?`, [id]).map(r => r.id as string);
+    db.run(`DELETE FROM repair_lines WHERE repair_id = ?`, [id]);
+
     db.run(`DELETE FROM repairs WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('repairs', id);
+    for (const lid of repairLineIds) trackChange('repair_lines', lid, 'delete', {});
 
     if (payLedgerId) {
       safePost(`reverseRepairPayment(${payLedgerId}) [repair-delete]`, () => {
@@ -1079,6 +1087,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // werden gecancelled (kein Ledger-Effekt — Gold ist nicht im BHD-Ledger).
     // FULFILLED Eintraege bleiben unangetastet (sind bereits abgeschlossen).
     const nowDel = new Date().toISOString();
+    // IDs der betroffenen OPEN-Buckets VOR dem Bulk-UPDATE erfassen (Bulk-WHERE ist nicht
+    // trackbar) → nach dem CANCELLED-UPDATE je Row als Full-Row-Snapshot syncen, sonst
+    // bleiben die Buckets auf Gerät B als Phantom-OPEN stehen. Kein Ledger-Effekt (Gold
+    // ist nicht im BHD-Ledger). Post-write: Crash-Fenster wie bestehende Sync-Sites.
+    const cancelledPayableIds = query(
+      `SELECT id FROM gold_payables WHERE source_repair_id = ? AND status = 'OPEN'`, [id]
+    ).map(r => r.id as string);
+    const cancelledCreditIds = query(
+      `SELECT id FROM customer_gold_credits WHERE source_repair_id = ? AND status = 'OPEN'`, [id]
+    ).map(r => r.id as string);
     db.run(
       `UPDATE gold_payables SET status = 'CANCELLED', notes = COALESCE(notes, '') || ' · Repair deleted',
          updated_at = ? WHERE source_repair_id = ? AND status = 'OPEN'`,
@@ -1090,6 +1108,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       [nowDel, id]
     );
     saveDatabase();
+    for (const gid of cancelledPayableIds) trackChange('gold_payables', gid, 'update', {});
+    for (const cid of cancelledCreditIds) trackChange('customer_gold_credits', cid, 'update', {});
 
     get().loadRepairs();
     get().loadRepairLines();

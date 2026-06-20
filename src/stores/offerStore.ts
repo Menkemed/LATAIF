@@ -6,6 +6,7 @@ import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/
 import { eventBus } from '@/core/events/event-bus';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — offer_lines + offers-Totals
 
 interface OfferStore {
   offers: Offer[];
@@ -138,6 +139,9 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
 
     saveDatabase();
     trackInsert('offers', id, { offerNumber, customerId, total });
+    // LAN-Sync: jede offer_line als insert syncen (Full-Row-Snapshot). Header zuerst
+    // (trackInsert oben), dann Lines (Parent-vor-Child). Post-write.
+    for (const l of offerLines) trackChange('offer_lines', l.id, 'insert', {});
     eventBus.emit('offer.created', 'offer', id, { customerId, total });
     get().loadOffers();
 
@@ -195,6 +199,7 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
     values.push(lineId);
     db.run(`UPDATE offer_lines SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
+    trackChange('offer_lines', lineId, 'update', {});   // LAN-Sync: geänderte Line syncen (offers-Header folgt via recalc)
     // Recalculate offer totals
     get().recalcOfferTotals(offerId);
     get().loadOffers();
@@ -212,6 +217,7 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
       [lineId, offerId, line.productId, line.unitPrice, vatRate, line.taxScheme, calc.grossAmount, pos]
     );
     saveDatabase();
+    trackChange('offer_lines', lineId, 'insert', {});   // LAN-Sync: neue Line syncen (offers-Header folgt via recalc)
     get().recalcOfferTotals(offerId);
     get().loadOffers();
   },
@@ -220,16 +226,21 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
     const db = getDatabase();
     db.run(`DELETE FROM offer_lines WHERE id = ?`, [lineId]);
     saveDatabase();
+    trackChange('offer_lines', lineId, 'delete', {});   // LAN-Sync: entfernte Line syncen (offers-Header folgt via recalc)
     get().recalcOfferTotals(offerId);
     get().loadOffers();
   },
 
   deleteOffer: (id) => {
     const db = getDatabase();
+    // offer_line-IDs VOR dem Delete erfassen → je Line als delete syncen, sonst
+    // verwaisen sie auf Gerät B (FK ON DELETE CASCADE wird in sql.js nicht erzwungen).
+    const lineIds = query(`SELECT id FROM offer_lines WHERE offer_id = ?`, [id]).map(r => r.id as string);
     db.run(`DELETE FROM offer_lines WHERE offer_id = ?`, [id]);
     db.run(`DELETE FROM offers WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('offers', id);
+    for (const lid of lineIds) trackChange('offer_lines', lid, 'delete', {});
     get().loadOffers();
   },
 
@@ -247,5 +258,8 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
     db.run(`UPDATE offers SET subtotal = ?, vat_amount = ?, total = ?, updated_at = ? WHERE id = ?`,
       [subtotal, totalVat, total, now, offerId]);
     saveDatabase();
+    // LAN-Sync: genau EIN offers-Full-Row-Snapshot nach dem finalen Header-Update.
+    // Nur die 3 Line-Mutationen rufen recalc → kein Doppel-Snapshot mit create/updateOffer.
+    trackChange('offers', offerId, 'update', {});
   },
 }));
