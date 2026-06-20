@@ -6,6 +6,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackStatusChange } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Header-Statuswechsel
 
 function today(): string {
   return new Date().toISOString().split('T')[0];
@@ -63,6 +64,7 @@ export function runDailySweep(): void {
       const oid = row.id as string;
       db.run(`UPDATE offers SET status = 'expired', updated_at = ? WHERE id = ?`, [now, oid]);
       trackStatusChange('offers', oid, 'sent/viewed/draft', 'expired');
+      trackChange('offers', oid, 'update', {});   // LAN-Sync (Gruppe 1): Expiry-Status syncen (audit-only zuvor)
       eventBus.emit('offer.expired', 'offer', oid, { auto: true });
       changed++;
     }
@@ -77,6 +79,7 @@ export function runDailySweep(): void {
       const cid = row.id as string;
       db.run(`UPDATE consignments SET status = 'expired', updated_at = ? WHERE id = ?`, [now, cid]);
       trackStatusChange('consignments', cid, 'active', 'expired');
+      trackChange('consignments', cid, 'update', {});   // LAN-Sync (Gruppe 1): Expiry-Status syncen (audit-only zuvor)
       createAutoTask({
         branchId,
         title: 'Consignment abgelaufen',

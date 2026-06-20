@@ -539,15 +539,23 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     //  - 'completed' → alle non-cancelled Lines → DELIVERED
     //  - 'cancelled' → alle Lines → CANCELLED
     //  - 'notified' / 'pending' → nur Order-Status (kein Line-Cascade)
+    // LAN-Sync (Gruppe 2): betroffene order_lines VOR dem Bulk-Status-Update erfassen,
+    // danach je Row als update tracken — Bulk-WHERE order_id=? ist sonst nicht trackbar → B blieb stale.
+    let cascadedLineIds: string[] = [];
     if (status === 'arrived') {
+      cascadedLineIds = query(`SELECT id FROM order_lines WHERE order_id = ? AND status IN ('PENDING', 'ORDERED')`, [id]).map(r => r.id as string);
       db.run(`UPDATE order_lines SET status = 'ARRIVED' WHERE order_id = ? AND status IN ('PENDING', 'ORDERED')`, [id]);
     } else if (status === 'completed') {
+      cascadedLineIds = query(`SELECT id FROM order_lines WHERE order_id = ? AND status != 'CANCELLED'`, [id]).map(r => r.id as string);
       db.run(`UPDATE order_lines SET status = 'DELIVERED' WHERE order_id = ? AND status != 'CANCELLED'`, [id]);
     } else if (status === 'cancelled') {
+      cascadedLineIds = query(`SELECT id FROM order_lines WHERE order_id = ?`, [id]).map(r => r.id as string);
       db.run(`UPDATE order_lines SET status = 'CANCELLED' WHERE order_id = ?`, [id]);
     }
 
     get().updateOrder(id, updates);
+    // Lines nach dem orders-Header (updateOrder hat ihn getrackt) → FK-Reihenfolge.
+    for (const lid of cascadedLineIds) trackChange('order_lines', lid, 'update', {});
 
     // v0.2.1/v0.3.0 — Bei status='arrived'/'completed' werden die jetzt
     // ARRIVED-Lines mit supplier_id als A/P-Expense gebucht. commitOrderLineExpenses
@@ -1199,6 +1207,11 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     db.run(`UPDATE order_lines SET status = 'CANCELLED' WHERE order_id = ?`, [id]);
     db.run(`UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?`, [now, id]);
     trackUpdate('orders', id, { status: 'cancelled', cancelChoice: choice });
+    // LAN-Sync (Gruppe 2): alle order_lines nach dem finalen CANCELLED-Update tracken — der
+    // Full-Row-Snapshot deckt status=CANCELLED + ordered_supplier_id=NULL (Bulk oben) gemeinsam ab.
+    for (const lid of query(`SELECT id FROM order_lines WHERE order_id = ?`, [id]).map(r => r.id as string)) {
+      trackChange('order_lines', lid, 'update', {});
+    }
 
     // 5b. L-07 — ein per Convert-Vorbereitung erzeugtes 'reserved' Custom-Produkt
     //     (order.product_id, OrderDetail.handleConvert) wieder freigeben, sonst haengt
@@ -1320,12 +1333,16 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         WHERE source_order_line_id IN (SELECT id FROM order_lines WHERE order_id = ?)`,
       [id]
     );
+    // LAN-Sync (Gruppe 2): betroffene purchases VOR dem source_order_id-Nullen erfassen, danach je
+    // Purchase-Header als update tracken (sonst stale Order-Ref auf B; asymmetrisch zur purchase_lines daneben).
+    const purUnlinkedIds = query(`SELECT id FROM purchases WHERE source_order_id = ?`, [id]).map(r => r.id as string);
     db.run(`UPDATE purchases SET source_order_id = NULL WHERE source_order_id = ?`, [id]);
     db.run(`DELETE FROM order_lines WHERE order_id = ?`, [id]);
     db.run(`DELETE FROM orders WHERE id = ?`, [id]);
     saveDatabase();
     trackDelete('orders', id);
     for (const plId of plUnlinkedIds) trackChange('purchase_lines', plId, 'update', {});
+    for (const pId of purUnlinkedIds) trackChange('purchases', pId, 'update', {});
     get().loadOrders();
   },
 }));

@@ -987,10 +987,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (prevStatus !== newStatus) {
         trackStatusChange('invoices', invoiceId, prevStatus, newStatus);
         if (wasFullyPaid) {
-          // Konvertierung loggen (Plan §12)
-          trackUpdate('invoices', invoiceId, { convertedToFinal: newInvoiceNumber, previousNumber: inv.invoiceNumber });
+          // Konvertierung loggen (Plan §12) — reines Audit; der LAN-Sync laeuft unten ueber
+          // den EINEN finalen trackChange (kein zweiter Invoice-Snapshot → keine Doppel-Emitter).
+          logAudit({ module: 'Sales', entityType: 'invoices', entityId: invoiceId, action: 'UPDATE',
+            field: 'invoice_number', oldValue: inv.invoiceNumber, newValue: newInvoiceNumber });
         }
       }
+      // LAN-Sync (Gruppe 3): recordPayment war nur bei Voll-Zahlung gesynct → Teilzahlung / gleicher
+      // Status liess paid_amount/status/invoice_number auf B stale. EIN autoritativer Invoice-Full-Row-
+      // Snapshot nach dem finalen UPDATE (paid_amount/tip/status/invoice_number/special_mark).
+      trackChange('invoices', invoiceId, 'update', {});
 
       if (wasFullyPaid) {
         // L-03: invoice.paid NUR beim echten Uebergang -> FINAL emittieren. Sonst
@@ -1257,6 +1263,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
         [newPaid, tip, newStatus, now, invoiceId]);
       if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
+      // LAN-Sync (Gruppe 3): paid_amount/status/tip nach Recompute waren ungetrackt → B stale.
+      trackChange('invoices', invoiceId, 'update', {});
     }
     saveDatabase();
     trackUpdate('payments', paymentId, data);
@@ -1280,6 +1288,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
         [newPaid, tip, newStatus, now, invoiceId]);
       if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
+      // LAN-Sync (Gruppe 3): paid_amount/status/tip nach Recompute waren ungetrackt → B stale.
+      trackChange('invoices', invoiceId, 'update', {});
     }
     saveDatabase();
     trackDelete('payments', paymentId);

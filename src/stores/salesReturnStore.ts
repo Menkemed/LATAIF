@@ -515,11 +515,15 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
 
     // VAT-Korrektur auf Invoice — CN ist die Steuerurkunde, die VAT-Pflicht reversiert.
     // Voll, nicht proportional zu Cash (Receivable-Cancel reversiert ebenfalls VAT).
+    // LAN-Sync (Gruppe 1): ob die Invoice-Header-Row angefasst wurde (VAT-Korrektur und/oder
+    // RETURNED) → genau EIN finaler Invoice-Snapshot am Ende, statt mehrerer Zwischen-Emits.
+    let invoiceTouched = false;
     if ((r.vatCorrected || 0) > 0) {
       db.run(
         `UPDATE invoices SET vat_amount = MAX(0, vat_amount - ?), updated_at = ? WHERE id = ?`,
         [r.vatCorrected || 0, now, r.invoiceId]
       );
+      invoiceTouched = true;
     }
 
     // M-01: Customer-LTV wird hier NICHT mehr reduziert — die stalen
@@ -544,6 +548,7 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
             `UPDATE invoices SET status = 'RETURNED', updated_at = ? WHERE id = ? AND status IN ('PARTIAL', 'DRAFT')`,
             [now, r.invoiceId]
           );
+          invoiceTouched = true;
         }
       }
     } catch (e) {
@@ -553,6 +558,9 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     db.run(`UPDATE sales_returns SET status = 'APPROVED' WHERE id = ?`, [id]);
     saveDatabase();
     trackStatusChange('sales_returns', id, r.status, 'APPROVED');
+    // LAN-Sync (Gruppe 1): sales_returns-Status-Snapshot + ggf. Invoice (VAT/RETURNED) — audit-only zuvor.
+    trackChange('sales_returns', id, 'update', {});
+    if (invoiceTouched) trackChange('invoices', r.invoiceId, 'update', {});
     get().loadReturns();
   },
 
@@ -591,6 +599,7 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     db.run(`UPDATE sales_returns SET status = 'REFUNDED' WHERE id = ?`, [id]);
     saveDatabase();
     trackStatusChange('sales_returns', id, r2.status, 'REFUNDED');
+    trackChange('sales_returns', id, 'update', {});   // LAN-Sync (Gruppe 1): Status-Snapshot (audit-only zuvor)
     get().loadReturns();
   },
 
@@ -751,6 +760,9 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
             `UPDATE invoices SET status = 'RETURNED', updated_at = ? WHERE id = ?`,
             [now, r.invoiceId]
           );
+          // LAN-Sync (Gruppe 1): Invoice→RETURNED war ungetrackt (sales_returns synct via
+          // trackUpdate oben, die Invoice nicht). Snapshot nach dem finalen Status-UPDATE.
+          trackChange('invoices', r.invoiceId, 'update', {});
         }
       }
     } catch (e) {

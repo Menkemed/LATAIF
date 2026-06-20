@@ -292,6 +292,8 @@ function reverseConfirmedPurchaseReturn(
       `UPDATE purchases SET total_amount = ?, paid_amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
       [restoredTotal, restoredPaid, restoredRemaining, restoredStatus, now, purchase.id]
     );
+    // LAN-Sync (Gruppe 1): der Return-Cancel restauriert den Parent-Purchase-Header — war ungetrackt.
+    trackChange('purchases', purchase.id, 'update', {});
   }
 
   // 6. Ungenutzten Supplier-Credit dieser Return entfernen.
@@ -684,6 +686,11 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     saveDatabase();
     trackPayment('purchases', purchaseId, amount, method);
     if (newStatus !== p.status) trackStatusChange('purchases', purchaseId, p.status, newStatus);
+    // LAN-Sync (Gruppe 3): paid_amount/remaining/status waren nur audit-getrackt (trackPayment/
+    // trackStatusChange) → B blieb stale; purchase_payments-Insert war ungetrackt. EIN Header-
+    // Snapshot nach dem Recompute + die Payment-Row mit stabiler id (purchases existiert auf B).
+    trackChange('purchases', purchaseId, 'update', {});
+    trackChange('purchase_payments', paymentId, 'insert', {});
     get().loadPurchases();
 
     // ZIEL.md §3a — Ledger-Posting für Supplier-Zahlung.
@@ -738,6 +745,9 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     if (p.sourceOrderId) revertLinkedOrderLines(db, id);
     saveDatabase();
     trackStatusChange('purchases', id, p.status, 'CANCELLED');
+    // LAN-Sync (Gruppe 1): Statuswechsel CANCELLED ist trackStatusChange = audit-only →
+    // Geraet B blieb auf altem Status. EIN Full-Row-Snapshot nach dem finalen Status-UPDATE.
+    trackChange('purchases', id, 'update', {});
     get().loadPurchases();
 
     // ZIEL.md §3a + B2 — Ledger-Storno bei Purchase-Cancel = vollstaendiger Rueckbau
@@ -838,6 +848,9 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       `UPDATE purchases SET total_amount = ?, paid_amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
       [newTotal, newPaid, remainingPayable, newStatus, now, purchase.id]
     );
+    // LAN-Sync (Gruppe 1): der Return-Confirm reduziert den Parent-Purchase-Header
+    // (total_amount/paid/remaining/status) — war ungetrackt → B blieb auf dem alten Stand.
+    trackChange('purchases', purchase.id, 'update', {});
 
     // H-07 — Rueckgabe an den Lieferanten: die Ware verlaesst unseren Bestand.
     // Korrekt ueber die Stock-Lots reduzieren (NICHT stock_status='sold' setzen —
@@ -907,6 +920,8 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
     saveDatabase();
     trackStatusChange('purchase_returns', id, 'DRAFT', finalStatus);
+    // LAN-Sync (Gruppe 1): Full-Row-Snapshot nach dem finalen Status-UPDATE (audit-only zuvor).
+    trackChange('purchase_returns', id, 'update', {});
 
     // Ledger: Net-Effekt der Return-Buchung — INVENTORY runter, A/P runter (Anteil
     // ohne Refund) und Cash/Bank/SUPPLIER_CREDIT rauf (Refund-Anteil). Idempotent
@@ -997,6 +1012,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     db.run(`UPDATE purchase_returns SET status = 'COMPLETED' WHERE id = ?`, [id]);
     saveDatabase();
     trackStatusChange('purchase_returns', id, 'CONFIRMED', 'COMPLETED');
+    trackChange('purchase_returns', id, 'update', {});   // LAN-Sync (Gruppe 1)
     get().loadReturns();
   },
 
@@ -1016,6 +1032,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     db.run(`UPDATE purchase_returns SET status = 'CANCELLED' WHERE id = ?`, [id]);
     saveDatabase();
     trackStatusChange('purchase_returns', id, prevStatus, 'CANCELLED');
+    trackChange('purchase_returns', id, 'update', {});   // LAN-Sync (Gruppe 1)
     get().loadPurchases();
     get().loadReturns();
   },

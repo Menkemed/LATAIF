@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackDelete, trackPayment } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — orders-Summary + converted-Flag
 import { useOrderStore } from '@/stores/orderStore';
 import {
   postOrderPayment,
@@ -128,6 +129,9 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     saveDatabase();
     trackInsert('order_payments', id, { orderId: p.orderId, amount: p.amount, method: p.method });
     trackPayment('orders', p.orderId, p.amount, p.method || 'cash');
+    // LAN-Sync (Gruppe 3): orders-Summary (deposit/remaining/fully_paid) war nur audit-getrackt
+    // (trackPayment) → B stale. Header-Snapshot nach dem reconcile-Recompute.
+    trackChange('orders', p.orderId, 'update', {});
     get().loadPayments(p.orderId);
     useOrderStore.getState().loadOrders(); // Order-Summary in UI refreshen
 
@@ -163,6 +167,8 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     reconcileOrderFromPayments(orderId);
     saveDatabase();
     trackDelete('order_payments', id);
+    // LAN-Sync (Gruppe 3): orders-Summary nach dem reconcile-Recompute syncen (war ungetrackt).
+    trackChange('orders', orderId, 'update', {});
     get().loadPayments(orderId);
     useOrderStore.getState().loadOrders();
 
@@ -199,6 +205,9 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     reverseCardFees('order', orderId);
     db.run(`UPDATE order_payments SET converted_to_invoice = 1 WHERE order_id = ?`, [orderId]);
     saveDatabase();
+    // LAN-Sync (Gruppe 3): converted-Flag je betroffener order_payments-Row tracken (IDs aus `rows`
+    // oben, vor der Mutation erfasst) — Bulk-WHERE order_id=? ist sonst nicht trackbar.
+    for (const r of rows) trackChange('order_payments', r.id as string, 'update', {});
   },
 
   totalPaid: (orderId) => {
