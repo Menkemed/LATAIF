@@ -63,10 +63,24 @@ function domainAR(branchId: string): number {
      WHERE branch_id = ? AND status != 'CANCELLED'`,
     [branchId]
   );
-  const pay = query(
+  // Slice 3 — Ueberzahlung: der Teil einer Zahlung ueber dem Invoice-gross geht im Ledger
+  // auf CUSTOMER_CREDIT, NICHT auf AR. Daher die je-Invoice gezahlte Summe auf gross CAPPEN
+  // (sonst subtrahiert domainAR den vollen Betrag → permanenter, wachsender AR-Mismatch in
+  // Hoehe der Gesamt-Ueberzahlung). MIN(., .) = SQLite-Skalar-min innerhalb von SUM.
+  const activePay = query(
+    `SELECT COALESCE(SUM(MIN(pp.paid, i.gross_amount)), 0) AS t
+     FROM invoices i
+     JOIN (SELECT invoice_id, SUM(amount) AS paid FROM payments GROUP BY invoice_id) pp
+       ON pp.invoice_id = i.id
+     WHERE i.branch_id = ? AND i.status != 'CANCELLED'`,
+    [branchId]
+  );
+  // Zahlungen zu CANCELLED Invoices voll subtrahieren (Geld floss real, Beine wurden beim
+  // Cancel reversiert) — Verhalten unveraendert ggue. vorher.
+  const cancelledPay = query(
     `SELECT COALESCE(SUM(p.amount), 0) AS t
      FROM payments p JOIN invoices i ON i.id = p.invoice_id
-     WHERE i.branch_id = ?`,
+     WHERE i.branch_id = ? AND i.status = 'CANCELLED'`,
     [branchId]
   );
   const cn = query(
@@ -75,7 +89,7 @@ function domainAR(branchId: string): number {
      WHERE branch_id = ?`,
     [branchId]
   );
-  return Number(inv[0]?.t || 0) - Number(pay[0]?.t || 0) - Number(cn[0]?.t || 0);
+  return Number(inv[0]?.t || 0) - Number(activePay[0]?.t || 0) - Number(cancelledPay[0]?.t || 0) - Number(cn[0]?.t || 0);
 }
 
 function domainAP(branchId: string): number {

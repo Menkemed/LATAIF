@@ -24,6 +24,7 @@ import {
   inLedgerTransaction,
   hasLedgerEntries,
   hasReversalFor,
+  computePaymentSplit,
 } from '@/core/ledger/posting';
 import { logAudit } from '@/core/audit/audit-log';
 import { useProductStore } from '@/stores/productStore';
@@ -67,6 +68,33 @@ function restoreCreditForPayment(paymentId: string): void {
     }
     db.run(`DELETE FROM credit_applications WHERE id = ?`, [a.id as string]);
     trackChange('credit_applications', a.id as string, 'delete', {});
+  }
+  saveDatabase();
+}
+
+// Slice 3 — GRANT-seitiger Guard/Teardown fuer Ueberzahlungs-Guthaben (source_type
+// 'overpayment', source_id = paymentId). Anders als restoreCreditForPayment (das KONSUMIERTES
+// Guthaben zurueckgibt) raeumt das hier das beim Ueberzahlen ERZEUGTE customer_credits ab.
+// assert: VOR jedem destruktiven Write aufrufen (wie deleteCreditNote-Guard) — wurde das
+// Ueberzahlungs-Guthaben schon (teil-)eingeloest, darf die Zahlung nicht reversiert werden.
+function assertOverpaymentCreditUnused(paymentId: string): void {
+  const used = query(
+    `SELECT 1 FROM customer_credits WHERE source_type = 'overpayment' AND source_id = ? AND used_amount > 0.005 LIMIT 1`,
+    [paymentId]
+  );
+  if (used.length > 0) {
+    throw new Error('Cannot reverse this payment because the store credit from its overpayment has already been used.');
+  }
+}
+// clawback: NACH dem Ledger-Reverse aufrufen (reverseSource('PAYMENT') dreht das
+// CR-CUSTOMER_CREDIT-Bein automatisch zurueck; hier nur die DOMAIN-Row loeschen + syncen).
+function clawbackOverpaymentCredit(paymentId: string): void {
+  const db = getDatabase();
+  const rows = query(`SELECT id FROM customer_credits WHERE source_type = 'overpayment' AND source_id = ?`, [paymentId]);
+  if (rows.length === 0) return;
+  for (const r of rows) {
+    db.run(`DELETE FROM customer_credits WHERE id = ?`, [r.id as string]);
+    trackChange('customer_credits', r.id as string, 'delete', {});
   }
   saveDatabase();
 }
@@ -606,6 +634,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         // ueberspringt diesen ganzen Block → KEIN Doppel-Refund. Unbezahlt = leere
         // Schleife (No-Op). Analog deleteInvoice; Guards = idempotent.
         const cancelPayIds = query('SELECT id FROM payments WHERE invoice_id = ?', [id]).map(r => r.id as string);
+        // Slice 3 — VOR dem Reverse pruefen: ist das Ueberzahlungs-Guthaben einer dieser
+        // Zahlungen bereits (teil-)eingeloest, darf nicht storniert werden (zerstoertes Guthaben).
+        for (const pid of cancelPayIds) assertOverpaymentCreditUnused(pid);
         for (const pid of cancelPayIds) {
           safePost(`postInvoicePaymentReversed(${pid}) [invoice-cancel]`, () => {
             if (!hasLedgerEntries('PAYMENT', pid)) return;
@@ -618,6 +649,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         // !reversedByReturn-Zweig: bei reversedByReturn=true behandelt der Return-/CN-Pfad
         // das Guthaben separat (sonst Doppel-Reverse). payments-Rows bleiben hier bestehen.
         for (const pid of cancelPayIds) restoreCreditForPayment(pid);
+        // Slice 3 — beim Ueberzahlen ERZEUGTES Guthaben dieser Zahlungen abraeumen (Ledger-
+        // CR-Bein via reverseSource('PAYMENT') oben schon gedreht; hier nur die Domain-Row).
+        for (const pid of cancelPayIds) clawbackOverpaymentCredit(pid);
       }
 
       // Auto-Expenses (Card-Fees etc.) ebenfalls reverten — sonst Doppelbuchung im Ledger.
@@ -967,6 +1001,21 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
+    // Slice 3 — Ueberzahlungs-Split: openRemainder = offener Invoice-Rest VOR dieser Zahlung;
+    // der Teil darueber wird Store-Guthaben (CR CUSTOMER_CREDIT + customer_credits-Row) statt
+    // negativem AR / tip. overpayExcess via SSOT-Helper, damit die Domain-Row exakt dem
+    // Ledger-Bein entspricht (Rounding). method='credit' (Guthaben-Einloesung) splittet nie.
+    const inv0 = get().getInvoice(invoiceId);
+    const openRemainder = inv0 ? Math.max(0, inv0.grossAmount - inv0.paidAmount) : amount;
+    const overpayExcess = computePaymentSplit(amount, openRemainder, method as PaymentMethod).creditCredit;
+    // Atomaritaet: erzeugt die Ueberzahlung ein Guthaben, MUESSEN payment + customer_credits +
+    // Ledger-Beine zusammen committen/rollen (sonst Guthaben-Row ohne Gegenbuchung — der
+    // safePost-Standalone-Pfad wuerde das sonst still durchwinken). Laeuft schon eine aeussere
+    // Tx (applyCreditToInvoice / editInvoice), reicht die — kein zweites BEGIN.
+    const ownTx = overpayExcess > 0.005 && !inLedgerTransaction();
+    if (ownTx) beginLedgerTransaction();
+    try {
+
     // v0.7.26 — Karten-Brand nur bei 'card' merken; steuert die Gebuehren-Rate.
     const cardBrandValue: CardBrand | null = method === 'card' ? normalizeCardBrand(cardBrand) : null;
     db.run(
@@ -984,7 +1033,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const inv = get().getInvoice(invoiceId);
     if (inv) {
       const newPaid = inv.paidAmount + amount;
-      const tip = Math.max(0, newPaid - inv.grossAmount);
+      // Slice 3 — der Ueberschuss (overpayExcess) wird unten als customer_credits gebucht,
+      // NICHT mehr als tip. tip_amount wird daher 0 geschrieben (Scope A: tip retired).
+      const tip = 0;
       // Float-Tolerance: BHD hat 3 Dezimalen → unter 0.005 BHD = ein Halb-Fil = effektiv null.
       const wasFullyPaid = newPaid >= inv.grossAmount - 0.005;
       const prevStatus = inv.status;
@@ -1065,6 +1116,19 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       });
     }
 
+    // Slice 3 — Ueberschuss als redeembares Store-Guthaben (source_type='overpayment',
+    // source_id=paymentId → deletePayment/deleteInvoice/cancel raeumen es per paymentId ab).
+    // Der CR-CUSTOMER_CREDIT-Ledger-Gegenpart entsteht im postInvoicePayment-Split unten.
+    if (overpayExcess > 0.005 && inv0) {
+      const overCreditId = uuid();
+      db.run(
+        `INSERT INTO customer_credits (id, branch_id, customer_id, source_type, source_id, amount, used_amount, status, note, created_at, created_by)
+         VALUES (?, ?, ?, 'overpayment', ?, ?, 0, 'OPEN', ?, ?, ?)`,
+        [overCreditId, branchId, inv0.customerId, paymentId, overpayExcess, `Ueberzahlung ${inv0.invoiceNumber}`, now, userId]
+      );
+      trackInsert('customer_credits', overCreditId, { customerId: inv0.customerId, amount: overpayExcess, sourcePaymentId: paymentId });
+    }
+
     saveDatabase();
     trackInsert('payments', paymentId, { invoiceId, amount, method });
     trackPayment('invoices', invoiceId, amount, method);
@@ -1084,15 +1148,26 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
             notes,
             createdAt: now,
           },
-          invForLedger.customerId
+          invForLedger.customerId,
+          openRemainder
         );
       };
       // Slice 2 — innerhalb einer Ambient-Ledger-Tx (editInvoice / applyCreditToInvoice)
       // MUSS ein Post-Fehler propagieren, damit der aeussere try/catch zurueckrollt (echte
       // Atomaritaet — sonst committet die Tx trotz fehlender DR/CR-Beine). Standalone bleibt
-      // safePost tolerant: ein Ledger-Bug soll den Verkaufsfluss nicht blockieren.
+      // safePost tolerant: ein Ledger-Bug soll den Verkaufsfluss nicht blockieren. Slice 3:
+      // bei Ueberzahlung haben wir oben ownTx geoeffnet → inLedgerTransaction() ist true →
+      // doPost() wirft → der untenstehende catch rollt payment+credit+Beine atomar zurueck.
       if (inLedgerTransaction()) doPost();
       else safePost(`postInvoicePayment(${paymentId})`, doPost);
+    }
+
+    if (ownTx) commitLedgerTransaction();
+    } catch (e) {
+      // Slice 3 — nur der ownTx-Ueberzahlungspfad rollt hier zurueck; sonst reicht der Fehler
+      // unveraendert durch (Nicht-Ueberzahlung lief wie bisher ohne eigene Tx).
+      if (ownTx) { rollbackLedgerTransaction(); get().loadInvoices(); }
+      throw e;
     }
 
     get().loadInvoices();
@@ -1212,6 +1287,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const linkedPaymentIds = query(
       `SELECT id FROM payments WHERE invoice_id = ?`, [id]
     ).map(r => r.id as string);
+    // Slice 3 — BLOCK VOR jedem destruktiven Write: ist das Ueberzahlungs-Guthaben einer
+    // dieser Zahlungen schon (teil-)eingeloest, darf die Invoice nicht geloescht werden.
+    for (const pid of linkedPaymentIds) assertOverpaymentCreditUnused(pid);
     // Phase 3 — Stock-Lots restoren bevor invoice_lines weg sind.
     // Phase 7 Sync: betroffene Produkte sammeln, am Ende sync.
     const deleteProductsToSync = new Set<string>();
@@ -1294,6 +1372,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Zahlungen; credit_applications keyt auf payment_id und ueberlebt den
     // payments-DELETE oben (kein FK-Cascade).
     for (const pid of linkedPaymentIds) restoreCreditForPayment(pid);
+    // Slice 3 — beim Ueberzahlen ERZEUGTES Guthaben dieser Zahlungen abraeumen (Ledger-
+    // CR-Bein via reverseSource('PAYMENT') oben schon gedreht; hier nur die Domain-Row).
+    for (const pid of linkedPaymentIds) clawbackOverpaymentCredit(pid);
 
     get().loadInvoices();
   },
@@ -1368,6 +1449,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Card-Fee haengt NUR an Betrag/Methode (nicht am Datum) — eine reine
     // received_at-Korrektur laesst die Fee unveraendert (created_at bleibt gleich).
     const cardFeeChanged = amountChanged || methodChanged;
+
+    // Slice 3 — eine Zahlung in/weiter-in eine Ueberzahlung zu editieren wird (vorerst)
+    // blockiert: updatePayment reverst+reposted OHNE Ueberzahlungs-Split → triebe AR negativ
+    // und legte kein customer_credits an. Stattdessen Zahlung loeschen + neu erfassen
+    // (recordPayment splittet die Ueberzahlung korrekt in Store-Guthaben). Reine notes-Edits
+    // (kein moneyLegChanged) laufen oben durch.
+    if (moneyLegChanged) {
+      const invForOverpay = get().getInvoice(invoiceId);
+      if (invForOverpay && (invForOverpay.paidAmount - oldAmount + newAmount) > invForOverpay.grossAmount + 0.005) {
+        throw new Error('Editing a payment into an overpayment is not supported. Delete the payment and record a new one (the overpayment becomes store credit).');
+      }
+    }
 
     // ── Leichtgewicht-Pfad: nichts am Geld-Leg → nur Notiz persistieren. ──
     if (!moneyLegChanged) {
@@ -1497,13 +1590,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const delRows = query(`SELECT method, created_at FROM payments WHERE id = ?`, [paymentId]);
     const delMethod = delRows.length ? String(delRows[0].method) : '';
     const delCreatedAt = delRows.length ? String(delRows[0].created_at) : '';
+    // Slice 3 — BLOCK VOR dem DELETE: ist das Ueberzahlungs-Guthaben dieser Zahlung schon
+    // (teil-)eingeloest, darf sie nicht reversiert werden (sonst zerstoertes Guthaben).
+    assertOverpaymentCreditUnused(paymentId);
     db.run(`DELETE FROM payments WHERE id = ?`, [paymentId]);
 
     const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?`, [invoiceId]);
     const newPaid = Number(sumRow[0]?.paid || 0);
     const inv = get().getInvoice(invoiceId);
     if (inv) {
-      const tip = Math.max(0, newPaid - inv.grossAmount);
+      const tip = 0; // Slice 3 — Ueberschuss ist Store-Guthaben, kein tip (Scope A)
       const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
         : newPaid > 0 ? 'PARTIAL'
         : (inv.status === 'CANCELLED' ? 'CANCELLED' : 'DRAFT');
@@ -1523,6 +1619,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (hasReversalFor('PAYMENT', paymentId)) return;
       postInvoicePaymentReversed(paymentId);
     });
+
+    // Slice 3 — beim Ueberzahlen ERZEUGTES Guthaben dieser Zahlung abraeumen (Ledger-CR-Bein
+    // via reverseSource('PAYMENT') oben schon gedreht; hier nur die Domain-Row).
+    clawbackOverpaymentCredit(paymentId);
 
     // Slice 2 — war es eine 'credit'-Zahlung, das verbrauchte Store-Guthaben zurueckgeben
     // (used_amount-=Anteil, status→OPEN, Link-Rows weg). Schliesst die Asymmetrie zu

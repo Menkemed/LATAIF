@@ -651,40 +651,74 @@ export function postSalesReturnCogs(
 //   DEBIT  CASH/BANK/CARD_CLEARING  by amount
 //   CREDIT ACCOUNTS_RECEIVABLE      by amount
 
+// Slice 3 — Ueberzahlungs-Split: der Teil einer Zahlung UEBER dem offenen Invoice-Rest
+// (openRemainder = gross - bereits-bezahlt) gehoert NICHT auf ACCOUNTS_RECEIVABLE (das
+// triebe AR negativ = Phantom-Forderung), sondern auf CUSTOMER_CREDIT (redeembare
+// Verbindlichkeit). Rounding-SICHER: creditCredit per Subtraktion, sodass
+// arCredit + creditCredit === ROUND(amount) (sonst postEntries-Imbalance). EINE Quelle —
+// recordPayment leitet die customer_credits-Row-Hoehe aus demselben Helper ab, damit
+// Domain-Row und Ledger-Bein nie um einen Fil divergieren. openRemainder === undefined
+// (Alt-Aufrufer / kein Split gewuenscht) ODER method 'credit' (Guthaben-Einloesung cappt
+// in applyCreditToInvoice bereits, ein Split waere self-referential DR/CR CUSTOMER_CREDIT)
+// → arCredit = voller Betrag, creditCredit 0 (unveraendertes 2-Bein-Verhalten).
+export function computePaymentSplit(
+  amount: number,
+  openRemainder: number | undefined,
+  method: PaymentMethod | 'credit'
+): { arCredit: number; creditCredit: number } {
+  const amt = ROUND(amount);
+  if (openRemainder === undefined || method === 'credit') return { arCredit: amt, creditCredit: 0 };
+  const arCredit = Math.min(amt, Math.max(0, ROUND(openRemainder)));
+  return { arCredit, creditCredit: ROUND(amt - arCredit) };
+}
+
 export function postInvoicePayment(
   payment: Payment,
-  customerId: string
+  customerId: string,
+  openRemainder?: number
 ): PostingResult {
   const amount = ROUND(payment.amount);
   if (amount <= 0) {
     throw new Error(`postInvoicePayment: amount must be > 0 (got ${payment.amount})`);
   }
   const cashAcc = cashAccountFor(payment.method);
-  return postEntries(
-    [
-      {
-        account: cashAcc,
-        direction: 'DEBIT',
-        amount,
-        counterpartyType: 'CUSTOMER',
-        counterpartyId: customerId,
-        metadata: { invoiceId: payment.invoiceId, method: payment.method },
-      },
-      {
-        account: 'ACCOUNTS_RECEIVABLE',
-        direction: 'CREDIT',
-        amount,
-        counterpartyType: 'CUSTOMER',
-        counterpartyId: customerId,
-        metadata: { invoiceId: payment.invoiceId, method: payment.method },
-      },
-    ],
+  const { arCredit, creditCredit } = computePaymentSplit(amount, openRemainder, payment.method);
+  const meta = { invoiceId: payment.invoiceId, method: payment.method };
+  const entries: LedgerEntryInput[] = [
     {
-      occurredAt: payment.receivedAt,
-      sourceModule: 'PAYMENT',
-      sourceId: payment.id,
-    }
-  );
+      account: cashAcc,
+      direction: 'DEBIT',
+      amount,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: customerId,
+      metadata: meta,
+    },
+  ];
+  if (arCredit > 0) {
+    entries.push({
+      account: 'ACCOUNTS_RECEIVABLE',
+      direction: 'CREDIT',
+      amount: arCredit,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: customerId,
+      metadata: meta,
+    });
+  }
+  if (creditCredit > 0) {
+    entries.push({
+      account: 'CUSTOMER_CREDIT',
+      direction: 'CREDIT',
+      amount: creditCredit,
+      counterpartyType: 'CUSTOMER',
+      counterpartyId: customerId,
+      metadata: { ...meta, overpayment: true },
+    });
+  }
+  return postEntries(entries, {
+    occurredAt: payment.receivedAt,
+    sourceModule: 'PAYMENT',
+    sourceId: payment.id,
+  });
 }
 
 // Reverse einer Invoice-Customer-Zahlung — bei deletePayment oder deleteInvoice.
