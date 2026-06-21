@@ -721,6 +721,48 @@ export function postInvoicePayment(
   });
 }
 
+// Slice 3b — Ueberzahlungs-Reklassifikation bei editInvoice. Wird eine gebuchte Rechnung
+// unter den bereits gezahlten Betrag reduziert (oder per Delta ueberzahlt), liegt nach
+// reverse+repost ein Ueberschuss auf ACCOUNTS_RECEIVABLE (negativ = Phantom-Forderung).
+// Dieser Helfer bucht ihn um auf CUSTOMER_CREDIT (redeembare Verbindlichkeit) — reine
+// Reklassifikation, KEIN Geldfluss (anders als postInvoicePayment, das ein Cash-Konto
+// belastet). sourceModule='INVOICE' (gleiche Quelle wie postInvoiceIssued) → das naechste
+// reverseSource('INVOICE', id) am Edit-/Cancel-/Delete-Start dreht dieses Bein automatisch
+// mit zurueck (kein eigener Reverse-Pfad noetig).
+export function postInvoiceOverpaymentCredit(
+  invoiceId: string,
+  customerId: string,
+  amount: number,
+  occurredAt: string
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postInvoiceOverpaymentCredit: amount must be > 0 (got ${amount})`);
+  }
+  const meta = { invoiceId, overpayment: true };
+  return postEntries(
+    [
+      {
+        account: 'ACCOUNTS_RECEIVABLE',
+        direction: 'DEBIT',
+        amount: amt,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: meta,
+      },
+      {
+        account: 'CUSTOMER_CREDIT',
+        direction: 'CREDIT',
+        amount: amt,
+        counterpartyType: 'CUSTOMER',
+        counterpartyId: customerId,
+        metadata: meta,
+      },
+    ],
+    { occurredAt, sourceModule: 'INVOICE', sourceId: invoiceId }
+  );
+}
+
 // Reverse einer Invoice-Customer-Zahlung — bei deletePayment oder deleteInvoice.
 // Spiegelt das etablierte postXReversed-Muster (Order/Loan/Repair/Metal/Agent/Partner).
 // Ohne das blieb die PAYMENT-Bewegung (DR CASH/BANK/BENEFIT / CR AR) im Ledger stehen,
