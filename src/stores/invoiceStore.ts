@@ -84,7 +84,7 @@ function restoreCreditForPayment(paymentId: string): void {
 //   'invoice_edit' → source_id = invoiceId  (editInvoice-Reduktion unter Bezahltes, Slice 3b)
 // assert: VOR jedem destruktiven/reversierenden Write — wurde das Guthaben schon
 // (teil-)eingeloest, darf der Vorgang nicht laufen (sonst zerstoertes Guthaben).
-function assertGrantedCreditUnused(sourceType: string, sourceId: string, msg: string): void {
+export function assertGrantedCreditUnused(sourceType: string, sourceId: string, msg: string): void {
   const used = query(
     `SELECT 1 FROM customer_credits WHERE source_type = ? AND source_id = ? AND used_amount > 0.005 LIMIT 1`,
     [sourceType, sourceId]
@@ -94,7 +94,7 @@ function assertGrantedCreditUnused(sourceType: string, sourceId: string, msg: st
 // clawback: NACH dem Ledger-Reverse aufrufen (reverseSource dreht das CR-CUSTOMER_CREDIT-
 // Bein automatisch zurueck; hier nur die DOMAIN-Row loeschen + syncen). In einer offenen
 // Ambient-Tx deferiert saveDatabase bis zum COMMIT.
-function clawbackGrantedCredit(sourceType: string, sourceId: string): void {
+export function clawbackGrantedCredit(sourceType: string, sourceId: string): void {
   const db = getDatabase();
   const rows = query(`SELECT id FROM customer_credits WHERE source_type = ? AND source_id = ?`, [sourceType, sourceId]);
   if (rows.length === 0) return;

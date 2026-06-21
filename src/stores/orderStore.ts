@@ -20,6 +20,10 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+// Slice 4a — gemeinsamer Order-Ueberzahlungs-Teardown (assert-unused → reverse ORDER_OVERPAY
+// → clawback). Runtime-Funktionsimport; der orderPaymentStore↔orderStore-Zyklus ist sicher
+// (beide Bindings werden nur in Actions zur Laufzeit aufgerufen, nicht bei Modul-Init).
+import { teardownOrderOverpayCredit } from '@/stores/orderPaymentStore';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -1112,6 +1116,13 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     const linkedProductId = (oRows[0].product_id as string | null) || null;  // L-07
     if (currentStatus === 'cancelled') throw new Error('Order ist bereits storniert.');
 
+    // Slice 4a — VOR der Geld-Buchung die Ueberzahlungs-Gutschrift abbauen: BLOCK falls schon
+    // eingeloest; sonst Reklass-Bein (ORDER_OVERPAY) reversen + Domain-Row weg. Zwingend vor dem
+    // 'credit'-Zweig unten, der DR CUSTOMER_DEPOSITS ueber den VOLLEN totalPaid bucht — sonst
+    // schreibt er die schon zu CUSTOMER_CREDIT umgebuchten Ueberschuss-Fil ein zweites Mal gut.
+    teardownOrderOverpayCredit(id,
+      'Cannot cancel this order because the store credit from its overpayment has already been used. Reverse that credit usage first.');
+
     // 0a. Invoiced-Block: keine Line darf invoice_id != NULL haben
     const invoicedRows = query(
       `SELECT COUNT(*) AS n FROM order_lines WHERE order_id = ? AND invoice_id IS NOT NULL`,
@@ -1280,6 +1291,11 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
 
   deleteOrder: (id) => {
     const db = getDatabase();
+    // Slice 4a — VOR dem Order-Payment-Reverse die Ueberzahlungs-Gutschrift abbauen: BLOCK falls
+    // schon eingeloest; sonst Reklass-Bein (ORDER_OVERPAY) reversen + Domain-Row weg (kein Orphan-
+    // CUSTOMER_CREDIT nach dem Order-Loeschen).
+    teardownOrderOverpayCredit(id,
+      'Cannot delete this order because the store credit from its overpayment has already been used. Reverse that credit usage first.');
     // ZIEL.md §3a — Vor dem CASCADE-Delete der order_payments deren Ledger-Buchungen reversen,
     // sonst hängt Customer-Deposits-Liability ohne Quelle in der Luft.
     const payRows = query('SELECT id FROM order_payments WHERE order_id = ?', [id]);

@@ -168,12 +168,17 @@ function domainRevenue(branchId: string): number {
 }
 
 function domainCustomerDeposits(branchId: string): number {
-  // Offene Order-Anzahlungen, die noch NICHT in Invoice umgewandelt wurden.
+  // Offene Order-Anzahlungen, die noch NICHT in Invoice umgewandelt wurden — pro Order auf
+  // agreed_price GEDECKELT (Slice 4a): der Ueberschuss ueber agreedPrice wird per ORDER_OVERPAY
+  // nach CUSTOMER_CREDIT reklassiert (lebt in domainCustomerCredit), liegt also nicht mehr auf
+  // CUSTOMER_DEPOSITS. Symmetrisch zum domainAR-Cap (3a). MIN(paid,agreed) je Order, dann SUM.
   const rows = query(
-    `SELECT COALESCE(SUM(op.amount), 0) AS t
-     FROM order_payments op JOIN orders o ON o.id = op.order_id
-     WHERE o.branch_id = ? AND COALESCE(op.converted_to_invoice, 0) = 0
-       AND o.status != 'cancelled'`,
+    `SELECT COALESCE(SUM(MIN(pp.paid, o.agreed_price)), 0) AS t
+     FROM orders o
+     JOIN (SELECT order_id, SUM(amount) AS paid FROM order_payments
+            WHERE COALESCE(converted_to_invoice, 0) = 0 GROUP BY order_id) pp
+       ON pp.order_id = o.id
+     WHERE o.branch_id = ? AND o.status != 'cancelled'`,
     [branchId]
   );
   return Number(rows[0]?.t || 0);

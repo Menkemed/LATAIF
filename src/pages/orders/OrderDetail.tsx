@@ -503,12 +503,25 @@ export function OrderDetail() {
       budget -= take;
     }
 
-    // Ueberschuss → neuer Deposit-Eintrag fuer die naechste Teil-Invoice.
+    // Slice 4a — Ueberschuss aufteilen: der echte Ueberzahlungs-Anteil (Pool ueber den
+    // agreedPrice der Order) wandert als GENAU EINE Invoice-Zahlung auf die Invoice → der
+    // 3a-Overpay-Split bucht daraus EINE einloesbare 'overpayment'-Kundengutschrift. Der Rest
+    // (Deposit bis agreedPrice, noch nicht invoiced) bleibt als Order-Deposit fuer die naechste
+    // Teil-Invoice. Der order_overpayment-Credit der Order wurde oben in markConvertedToInvoice
+    // bereits reverse+clawback abgebaut → keine Doppel-Gutschrift, genau eine fuer den Ueberschuss.
     const remainder = pool - cap;
-    if (remainder > 0.005) {
+    const agreedRow = query(`SELECT agreed_price FROM orders WHERE id = ?`, [orderId]);
+    const agreedPrice = agreedRow.length ? Number(agreedRow[0].agreed_price || 0) : 0;
+    const overpayPortion = Math.max(0, pool - Math.max(agreedPrice, invoiceTotal));
+    const depositPortion = Math.max(0, remainder - overpayPortion);
+    if (overpayPortion > 0.005) {
+      inv.recordPayment(invoiceId, overpayPortion, lastMethod,
+        `Overpayment carried over from order ${orderNumber}`, undefined, lastBrand);
+    }
+    if (depositPortion > 0.005) {
       useOrderPaymentStore.getState().addPayment({
         orderId,
-        amount: remainder,
+        amount: depositPortion,
         paidAt: new Date().toISOString().split('T')[0],
         method: lastMethod,
         cardBrand: lastBrand,

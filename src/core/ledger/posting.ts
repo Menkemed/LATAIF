@@ -116,6 +116,11 @@ export type SourceModule =
   // reklassifiziert die Anzahlung DR CUSTOMER_DEPOSITS / CR CUSTOMER_CREDIT
   // (Credit-Modell) → einloesbar ueber denselben CUSTOMER_CREDIT-Pfad wie Return-Guthaben.
   | 'ORDER_CANCEL'
+  // Slice 4a — Order-Ueberzahlung: zahlt der Kunde mehr als agreedPrice, wird der
+  // Ueberschuss DR CUSTOMER_DEPOSITS / CR CUSTOMER_CREDIT reklassiert (gekeyt auf orderId,
+  // reverse-and-repost-faehig via reconcileOrderOverpayCredit). Einloesbar ueber denselben
+  // CUSTOMER_CREDIT-Pfad wie ORDER_CANCEL/Return-Guthaben.
+  | 'ORDER_OVERPAY'
   // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
   // gekeyt auf `opening:<branchId>`.
   | 'OPENING_BALANCE'
@@ -1588,6 +1593,40 @@ export function postOrderCancellationChoice(c: OrderCancellationChoice): Posting
       },
     ],
     { occurredAt: now, sourceModule: 'ORDER_CANCEL', sourceId: `forfeit:${c.orderId}` }
+  );
+}
+
+// Slice 4a — Order-Ueberzahlung→Store-Guthaben. Zahlt der Kunde mehr als agreedPrice, liegt
+// der Ueberschuss zunaechst voll auf CUSTOMER_DEPOSITS (postOrderPayment ist 2-Bein, bleibt
+// unveraendert). Dieser Helfer reklassiert NUR den Ueberschuss DR CUSTOMER_DEPOSITS /
+// CR CUSTOMER_CREDIT — reine Umklassifizierung (beide CREDIT-natur/Liability), KEIN Cash-/
+// P&L-Effekt, einloesbar ueber denselben CUSTOMER_CREDIT-Pfad wie ORDER_CANCEL/Return-Guthaben.
+// sourceModule='ORDER_OVERPAY', sourceId=orderId → reverse-and-repost-faehig (clawback-then-
+// rebook in reconcileOrderOverpayCredit; reverseSource am Teardown). Spiegel zum
+// postInvoiceOverpaymentCredit (3b) + postOrderCancellationChoice('credit').
+export function postOrderOverpaymentCredit(
+  orderId: string,
+  customerId: string,
+  amount: number,
+  occurredAt: string
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postOrderOverpaymentCredit: amount must be > 0 (got ${amount})`);
+  }
+  const meta = { orderId, kind: 'order_overpayment' };
+  return postEntries(
+    [
+      {
+        account: 'CUSTOMER_DEPOSITS', direction: 'DEBIT', amount: amt,
+        counterpartyType: 'CUSTOMER', counterpartyId: customerId, metadata: meta,
+      },
+      {
+        account: 'CUSTOMER_CREDIT', direction: 'CREDIT', amount: amt,
+        counterpartyType: 'CUSTOMER', counterpartyId: customerId, metadata: meta,
+      },
+    ],
+    { occurredAt, sourceModule: 'ORDER_OVERPAY', sourceId: orderId }
   );
 }
 
