@@ -115,10 +115,16 @@ function domainAP(branchId: string): number {
      WHERE branch_id = ? AND status != 'CANCELLED' AND category != 'CardFees'`,
     [branchId]
   );
+  // Slice 4b — Purchase-Payments pro Purchase auf total_amount GEDECKELT (der Ueberschuss
+  // wird per PURCHASE_OVERPAY nach SUPPLIER_CREDIT reklassiert, lebt also nicht mehr auf AP) UND
+  // CANCELLED-Purchases AUSGESCHLOSSEN (cancelPurchase reverst Payment- + Overpay-Beine voll →
+  // Ledger-AP=0; ungecappt/ungefiltert subtrahierte die Domain sie weiter → negativer Drift).
+  // Symmetrisch zum domainAR-Cap.
   const purPayments = query(
-    `SELECT COALESCE(SUM(pp.amount), 0) AS t
-     FROM purchase_payments pp JOIN purchases pu ON pu.id = pp.purchase_id
-     WHERE pu.branch_id = ?`,
+    `SELECT COALESCE(SUM(MIN(pp.paid, pu.total_amount)), 0) AS t
+     FROM (SELECT purchase_id, SUM(amount) AS paid FROM purchase_payments GROUP BY purchase_id) pp
+     JOIN purchases pu ON pu.id = pp.purchase_id
+     WHERE pu.branch_id = ? AND pu.status != 'CANCELLED'`,
     [branchId]
   );
   const expPayments = query(
@@ -193,6 +199,19 @@ function domainCustomerCredit(branchId: string): number {
   const rows = query(
     `SELECT COALESCE(SUM(amount - used_amount), 0) AS t
      FROM customer_credits
+     WHERE branch_id = ?`,
+    [branchId]
+  );
+  return Number(rows[0]?.t || 0);
+}
+
+function domainSupplierCredit(branchId: string): number {
+  // Slice 4b — Lieferanten-Guthaben (Asset). Quellen: Purchase-Return refundMethod='credit'
+  // (source_return_id gesetzt) UND Purchase-Ueberzahlung (source_return_id IS NULL). Domain-
+  // Spiegel = Σ (amount − used_amount) ueber ALLE Rows; Ledger = balanceOf('SUPPLIER_CREDIT').
+  const rows = query(
+    `SELECT COALESCE(SUM(amount - used_amount), 0) AS t
+     FROM supplier_credits
      WHERE branch_id = ?`,
     [branchId]
   );
@@ -380,6 +399,8 @@ export function ReconciliationPage() {
         note: 'Domain = noch nicht in Invoice umgewandelte Order-Anzahlungen.' },
       { label: 'Customer Credit',        account: 'CUSTOMER_CREDIT',     ledger: balanceOf('CUSTOMER_CREDIT'),     domain: domainCustomerCredit(branchId),
         note: 'Domain = Σ (amount − used_amount) aller customer_credits. Domain > Ledger ⇒ Alt-Credits vor Ledgerisierung (Backfill).' },
+      { label: 'Supplier Credit',        account: 'SUPPLIER_CREDIT',     ledger: balanceOf('SUPPLIER_CREDIT'),     domain: domainSupplierCredit(branchId),
+        note: 'Domain = Σ (amount − used_amount) aller supplier_credits (Return-Credit + Purchase-Ueberzahlung). Domain > Ledger ⇒ Legacy-Ueberzahlungen vor Ledgerisierung (Backfill-Folge-Slice).' },
       { label: 'Gold-Credit Clearing',   account: 'GOLD_CREDIT_CLEARING', ledger: balanceOf('GOLD_CREDIT_CLEARING'), domain: domainGoldCreditClearing(branchId),
         note: 'Domain = Σ amount der gold_conversion-Credits (terminal, wird nie zurückgebucht).' },
       { label: 'Loan Receivable',        account: 'LOAN_RECEIVABLE',     ledger: balanceOf('LOAN_RECEIVABLE'),     domain: domainLoanReceivable(branchId),

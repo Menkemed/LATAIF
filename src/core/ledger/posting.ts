@@ -121,6 +121,11 @@ export type SourceModule =
   // reverse-and-repost-faehig via reconcileOrderOverpayCredit). Einloesbar ueber denselben
   // CUSTOMER_CREDIT-Pfad wie ORDER_CANCEL/Return-Guthaben.
   | 'ORDER_OVERPAY'
+  // Slice 4b — Purchase-Ueberzahlung: zahlt man dem Lieferanten mehr als total_amount, wird
+  // der Ueberschuss DR SUPPLIER_CREDIT / CR ACCOUNTS_PAYABLE reklassiert (Asset/DEBIT-natur,
+  // NICHT spiegelbildlich zur Customer-Seite). Gekeyt auf purchaseId, reverse-and-repost via
+  // reconcilePurchaseOverpayCredit. Einloesbar ueber den 'credit'-Payment-Pfad (DR AP / CR SUPPLIER_CREDIT).
+  | 'PURCHASE_OVERPAY'
   // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
   // gekeyt auf `opening:<branchId>`.
   | 'OPENING_BALANCE'
@@ -1627,6 +1632,42 @@ export function postOrderOverpaymentCredit(
       },
     ],
     { occurredAt, sourceModule: 'ORDER_OVERPAY', sourceId: orderId }
+  );
+}
+
+// Slice 4b — Purchase-Ueberzahlung→Lieferanten-Guthaben. Zahlt man mehr als total_amount, liegt
+// der Ueberschuss zunaechst als Phantom-Negativ-AP (postPurchasePayment ist 2-Bein DR AP / CR cash,
+// bleibt unveraendert). Dieser Helfer reklassiert NUR den Ueberschuss:
+//   DR SUPPLIER_CREDIT  (Asset/DEBIT-natur — hebt das einloesbare Guthaben)
+//   CR ACCOUNTS_PAYABLE (hebt das Phantom-Negativ-AP zurueck auf 0)
+// VORZEICHEN-WARNUNG: Das ist das GEGENTEIL der 4a-Customer-Form (DR DEPOSITS / CR CUSTOMER_CREDIT),
+// weil SUPPLIER_CREDIT ein Asset ist, CUSTOMER_CREDIT eine Liability. Exakt der Reverse der
+// Einloesung (purchaseCashAccountFor('credit')=SUPPLIER_CREDIT → DR AP / CR SUPPLIER_CREDIT).
+// sourceModule='PURCHASE_OVERPAY', sourceId=purchaseId → reverse-and-repost-faehig (clawback-then-
+// rebook in reconcilePurchaseOverpayCredit; reverseSource am cancelPurchase-Teardown).
+export function postPurchaseOverpaymentCredit(
+  purchaseId: string,
+  supplierId: string,
+  amount: number,
+  occurredAt: string
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postPurchaseOverpaymentCredit: amount must be > 0 (got ${amount})`);
+  }
+  const meta = { purchaseId, kind: 'purchase_overpayment' };
+  return postEntries(
+    [
+      {
+        account: 'SUPPLIER_CREDIT', direction: 'DEBIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta,
+      },
+      {
+        account: 'ACCOUNTS_PAYABLE', direction: 'CREDIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta,
+      },
+    ],
+    { occurredAt, sourceModule: 'PURCHASE_OVERPAY', sourceId: purchaseId }
   );
 }
 
