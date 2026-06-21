@@ -137,6 +137,26 @@ function teardownSupplierOverpayCredit(purchaseId: string, msg: string): void {
   clawbackSupplierOverpayCredit(purchaseId);
 }
 
+// F6 — beim Storno der EINLOESENDEN Purchase das auf einer Supplier-Gutschrift verbrauchte
+// used_amount zurueckgeben (Spiegel zum Customer-restoreCreditForPayment in invoiceStore). Der
+// Link ist 1:1 ueber purchase_payments.reference = supplier_credits.id (applyCreditToPurchase
+// loest genau EINEN Credit ein → keine Link-Tabelle noetig). Idempotenz liegt beim Caller: nur
+// fuer JETZT frisch reversierte Credit-Zahlungen aufrufen (Capture vor der Reverse-Schleife,
+// gefiltert auf !hasReversalFor). No-Op, wenn die Credit-Row inzwischen fehlt. Reine Domain-
+// Wiederherstellung passend zum bereits durch reverseSource gedrehten CR-SUPPLIER_CREDIT-Bein.
+function restoreSupplierCreditForPayment(creditId: string, amount: number): void {
+  if (!creditId || !(amount > 0.005)) return;
+  const db = getDatabase();
+  const cr = query(`SELECT amount, used_amount FROM supplier_credits WHERE id = ?`, [creditId])[0];
+  if (!cr) return;
+  const total = Number(cr.amount) || 0;
+  const newUsed = Math.max(0, (Number(cr.used_amount) || 0) - amount);
+  const newStatus = newUsed >= total - 0.005 ? 'USED' : 'OPEN';
+  db.run(`UPDATE supplier_credits SET used_amount = ?, status = ? WHERE id = ?`, [newUsed, newStatus, creditId]);
+  trackChange('supplier_credits', creditId, 'update', {});
+  saveDatabase();
+}
+
 interface PurchaseInput {
   supplierId: string;
   purchaseDate?: string;
@@ -880,6 +900,15 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     // refundiertem Geld waere ein eigenes Feature (bewusst NICHT hier). Die purchase_payments
     // bleiben am CANCELLED-Record (Historie); backfillPurchasePayments ist via
     // hasLedgerEntries idempotent. Guards = kein Doppel-Reverse.
+    // F6 — VOR den Reverses die Credit-Einloesungen erfassen, die JETZT frisch reversiert werden
+    // (Ledger vorhanden + noch nicht reversed). Ihr used_amount wird NACH den Reverses auf der
+    // Supplier-Gutschrift restauriert. Beim 2. Cancel ist die Liste leer (schon reversed →
+    // herausgefiltert) → kein Doppel-Restore.
+    const creditPaysToRestore = query(
+      `SELECT id, reference, amount FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND reference IS NOT NULL`,
+      [id]
+    ).filter(pp => hasLedgerEntries('PURCHASE_PAYMENT', pp.id as string) && !hasReversalFor('PURCHASE_PAYMENT', pp.id as string));
+
     const pays = query('SELECT id FROM purchase_payments WHERE purchase_id = ?', [id]);
     for (const pp of pays) {
       const payId = pp.id as string;
@@ -894,6 +923,13 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       if (hasReversalFor('PURCHASE', id)) return;
       postPurchaseCancelled({ id } as Purchase);
     });
+
+    // F6 — used_amount der verbrauchten Supplier-Gutschriften zurueckgeben (NACH den Ledger-
+    // Reverses, die das CR-SUPPLIER_CREDIT-Bein bereits zurueckgedreht haben → Domain folgt dem
+    // Ledger). Nur fuer die oben erfassten, frisch reversierten Credit-Zahlungen → idempotent.
+    for (const cp of creditPaysToRestore) {
+      restoreSupplierCreditForPayment(cp.reference as string, Number(cp.amount) || 0);
+    }
   },
 
   // ── Purchase Returns (Plan §Purchase Returns) ──
