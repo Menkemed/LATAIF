@@ -112,8 +112,8 @@ export function reconcileOrderOverpayCredit(orderId: string): void {
   }
   const orderRow = query(`SELECT customer_id FROM orders WHERE id = ?`, [orderId])[0];
   const customerId = orderRow?.customer_id as string | undefined;
-  let branchId = 'branch-main', userId = 'user-owner';
-  try { branchId = currentBranchId(); userId = currentUserId(); } catch { /* defaults */ }
+  let branchId = 'branch-main';
+  try { branchId = currentBranchId(); } catch { /* defaults */ }
 
   beginLedgerTransaction();
   try {

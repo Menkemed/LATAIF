@@ -749,14 +749,6 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     assertGrantedCreditUnused('invoice_edit', id,
       'Cannot edit this invoice because store credit from a previous edit overpayment has already been used. Reverse that credit usage first.');
 
-    // Vorab-Berechnung des neuen Brutto (vor jeder Mutation).
-    let preNet = 0, preVat = 0;
-    for (const l of lines) {
-      const qty = Math.max(1, l.quantity || 1);
-      preNet += l.unitPrice * qty;
-      preVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
-    }
-    const newGross = preNet + preVat;
     const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
 
     // ── Slice 3b: paid_amount IST per Invariante SUM(payments). Wird das Brutto unter den
