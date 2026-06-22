@@ -23,7 +23,7 @@ import {
 // Slice 4a — gemeinsamer Order-Ueberzahlungs-Teardown (assert-unused → reverse ORDER_OVERPAY
 // → clawback). Runtime-Funktionsimport; der orderPaymentStore↔orderStore-Zyklus ist sicher
 // (beide Bindings werden nur in Actions zur Laufzeit aufgerufen, nicht bei Modul-Init).
-import { teardownOrderOverpayCredit } from '@/stores/orderPaymentStore';
+import { teardownOrderOverpayCredit, reconcileOrderOverpayCredit } from '@/stores/orderPaymentStore';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -479,6 +479,15 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         branchId, userId, amount: initialPaid, brand: depositBrand,
         relatedModule: 'order', relatedEntityId: id, label: orderNumber, createdAt: now,
       });
+    }
+
+    // Slice 4a-Fix — Eine Initial-Anzahlung kann (wie eine spaetere Add-Payment) den Agreed
+    // Price ueberzahlen. Spiegelt orderPaymentStore.addPayment: NACH dem Producer-Post
+    // (CUSTOMER_DEPOSITS existiert) den Ueberschuss in Store-Guthaben reklassieren
+    // (clawback-then-rebook, idempotent). Ohne diesen Aufruf bliebe die Ueberzahlung als
+    // CUSTOMER_DEPOSITS stehen (Domain deckelt auf Agreed → Reconciliation-Mismatch, kein Credit).
+    if (initialPaid > 0 && data.customerId) {
+      reconcileOrderOverpayCredit(id);
     }
 
     return get().getOrder(id)!;

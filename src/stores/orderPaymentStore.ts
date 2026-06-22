@@ -96,7 +96,7 @@ function assertOrderOverpayMutable(orderId: string, prospectiveTotalPaid: number
 // wenn unveraendert. Reklass-Bein (ORDER_OVERPAY) + customer_credits-Row + Reverse atomar
 // in EINER beginLedgerTransaction (wirft → rollback). reverseSource ist multi-cycle-safe
 // (per-Leg), daher Reverse-and-Repost unter derselben sourceId zulaessig (wie editInvoice 3b).
-function reconcileOrderOverpayCredit(orderId: string): void {
+export function reconcileOrderOverpayCredit(orderId: string): void {
   const db = getDatabase();
   const now = new Date().toISOString();
   const agreed = orderAgreedPrice(orderId);
