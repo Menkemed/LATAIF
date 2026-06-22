@@ -422,6 +422,23 @@ export function hasReversalFor(sourceModule: SourceModule, sourceId: string): bo
   return !hasLedgerEntries(sourceModule, sourceId);
 }
 
+/**
+ * Backfill-Skip-Check: hat (source_module, source_id) JEMALS einen Ledger-Eintrag erzeugt —
+ * egal ob lebendes Original, reversiertes Original oder eine Reversal-Zeile? Im Gegensatz zu
+ * hasLedgerEntries (nur lebendes, unreversiertes Original) heisst TRUE hier "wurde bereits
+ * ledgerisiert" → der Backfill darf NICHT erneut posten. hasLedgerEntries ist fuer den Skip-Check
+ * falsch: bei stornierten/reversierten Records (z.B. cancelPurchase reverst Purchase + Payment)
+ * liefert es false → Backfill dupliziert die reversierten Buchungen (Reconciliation-Drift).
+ * Legacy-Records aus der Zeit VOR der Ledgerisierung haben 0 Eintraege → false → werden gebucht.
+ */
+export function hasAnyLedgerEntries(sourceModule: SourceModule, sourceId: string): boolean {
+  const rows = query(
+    `SELECT 1 FROM ledger_entries WHERE source_module = ? AND source_id = ? LIMIT 1`,
+    [sourceModule, sourceId]
+  );
+  return rows.length > 0;
+}
+
 // ── Domain-Mappings ───────────────────────────────────────────
 
 function vatAccountFor(scheme: string | undefined): LedgerAccount {

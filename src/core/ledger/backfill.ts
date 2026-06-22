@@ -36,6 +36,7 @@ import {
   postOrderCancellationChoice,
   postGoldConversionCredit,
   hasLedgerEntries,
+  hasAnyLedgerEntries,
   hasReversalFor,
   reverseSource,
   reverseTransaction,
@@ -278,7 +279,10 @@ export function backfillPurchases(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('PURCHASE', id)) { res.skipped++; continue; }
+    // Skip, sobald JE gebucht (auch reversiert/storniert) — sonst dupliziert der Backfill die
+    // bereits per cancelPurchase reversierten Buchungen (nicht idempotent). Nur Legacy-nie-
+    // gebuchte Purchases (0 Eintraege) werden gebucht; cancelled-Handling unten greift dann.
+    if (hasAnyLedgerEntries('PURCHASE', id)) { res.skipped++; continue; }
     const lineRows = query(
       `SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position`,
       [id]
@@ -334,7 +338,11 @@ export function backfillPurchasePayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('PURCHASE_PAYMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE gebucht (auch reversiert) — ein durch Storno/F6 reversiertes Credit-/
+    // Geld-Payment darf NICHT erneut gepostet werden (sonst DR AP / CR cash|SUPPLIER_CREDIT
+    // ohne Gegenreversal → AP/Supplier-Credit-Drift). hasLedgerEntries (nur lebendes Original)
+    // liefert bei reversierten false und re-postet sie — daher hasAnyLedgerEntries.
+    if (hasAnyLedgerEntries('PURCHASE_PAYMENT', id)) { res.skipped++; continue; }
     safeStep(res, `pay ${id.slice(0, 8)}`, () => {
       postPurchasePayment(
         {
