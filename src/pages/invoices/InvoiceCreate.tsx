@@ -228,7 +228,12 @@ export function InvoiceCreate() {
     const bad = lines.findIndex(l => !l.productId || l.quantity <= 0 || l.unitPrice < 0);
     if (bad !== -1) return `Line ${bad + 1}: pick a product, set qty > 0, price ≥ 0`;
     if (paidAmount < 0) return 'Paid amount cannot be negative';
-    if (paidAmount > total) return `Paid (${fmt(paidAmount)}) exceeds total (${fmt(total)})`;
+    // Überzahlung: Im EDIT-Modus erlaubt — editInvoice (S3b) verbucht den Überschuss
+    // (Reduktion des Totals unter den bereits bezahlten Betrag ODER Delta-Überzahlung)
+    // atomar als Customer Credit. Im CREATE-Modus (Direktverkauf) bleibt der Guard ein
+    // Tippfehler-Schutz; S3a-Überzahlung läuft bewusst über den Payment-Flow am
+    // Invoice-Detail (InvoiceDetail.handleRecordPayment hat dort keinen Guard).
+    if (!isEditMode && paidAmount > total) return `Paid (${fmt(paidAmount)}) exceeds total (${fmt(total)})`;
     return null;
   }
 
@@ -686,7 +691,12 @@ export function InvoiceCreate() {
             </div>
             {isEditMode && (
               <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 6, fontSize: 12, color: '#7A6B4F' }}>
-                Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page. Reducing the total below the paid amount is blocked.
+                Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page. If the new total is below the paid amount, the difference becomes customer credit.
+              </div>
+            )}
+            {isEditMode && paidAmount > total + 0.005 && (
+              <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(217,119,6,0.08)', border: '1px solid rgba(217,119,6,0.35)', borderRadius: 6, fontSize: 12, color: '#B45309' }}>
+                The paid amount exceeds the new total. The difference (<strong><Bhd v={paidAmount - total}/> BHD</strong>) will be converted into customer credit.
               </div>
             )}
             {isEditMode && (
