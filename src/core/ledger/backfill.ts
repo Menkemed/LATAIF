@@ -81,7 +81,10 @@ export function backfillInvoices(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('INVOICE', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — sonst churnt der Backfill bei
+    // stornierten Invoices jedes Mal ein neues issued+cancelled-Paar. hasLedgerEntries
+    // (nur lebendes Original) liefert bei reversierten false → Re-Post.
+    if (hasAnyLedgerEntries('INVOICE', id)) { res.skipped++; continue; }
 
     const lineRows = query(
       `SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY position`,
@@ -223,7 +226,10 @@ export function backfillInvoicePayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('PAYMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — cancelInvoice reverst das Payment-
+    // Ledger, BEHAELT aber die payments-Row. hasLedgerEntries (nur lebendes Original) liefert
+    // dann false → Backfill re-postet DR CASH / CR AR ohne Gegenreversal → AR/Cash-Drift.
+    if (hasAnyLedgerEntries('PAYMENT', id)) { res.skipped++; continue; }
     const customerId = r.customer_id as string;
     const payment: Payment = {
       id,
@@ -247,7 +253,9 @@ export function backfillCreditNotes(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('CREDIT_NOTE', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — eine via cancelReturn reversierte CN
+    // darf nicht erneut gepostet werden. hasLedgerEntries liefert bei reversierten false.
+    if (hasAnyLedgerEntries('CREDIT_NOTE', id)) { res.skipped++; continue; }
     const cn: CreditNote = {
       id,
       creditNoteNumber: r.credit_note_number as string,
@@ -369,7 +377,9 @@ export function backfillExpenses(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('EXPENSE', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — sonst churnt der Backfill bei
+    // stornierten Expenses jedes Mal ein neues expense+cancel-Paar.
+    if (hasAnyLedgerEntries('EXPENSE', id)) { res.skipped++; continue; }
     const expense: Expense = {
       id,
       expenseNumber: r.expense_number as string,
@@ -408,7 +418,10 @@ export function backfillExpensePayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('EXPENSE_PAYMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert). Reverse-Pfade loeschen heute zwar die
+    // expense_payments-Row (kein Re-Post moeglich) — semantisch ist der Skip aber "jemals
+    // ledgerisiert", daher hasAnyLedgerEntries (defensiv, falls je reverst-ohne-Loeschen).
+    if (hasAnyLedgerEntries('EXPENSE_PAYMENT', id)) { res.skipped++; continue; }
     safeStep(res, `exp-pay ${id.slice(0, 8)}`, () => {
       postExpensePayment(
         {
@@ -434,7 +447,8 @@ export function backfillBankTransfers(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('BANK_TRANSFER', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — ein reversierter Transfer darf nicht erneut gebucht werden.
+    if (hasAnyLedgerEntries('BANK_TRANSFER', id)) { res.skipped++; continue; }
     const transfer: BankTransfer = {
       id, branchId: r.branch_id as string,
       amount: Number(r.amount || 0),
@@ -462,7 +476,9 @@ export function backfillOrderPayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('ORDER_PAYMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — bei converted/cancelled Orders churnt
+    // sonst jedes Mal ein neues payment+reversal-Paar. hasLedgerEntries liefert bei reversierten false.
+    if (hasAnyLedgerEntries('ORDER_PAYMENT', id)) { res.skipped++; continue; }
     const customerId = r.customer_id as string;
     if (!customerId) { res.skipped++; continue; }
     const converted = Number(r.converted) === 1;
@@ -497,7 +513,9 @@ export function backfillDebts(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('LOAN', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — sonst churnt der Backfill bei
+    // stornierten Loans jedes Mal ein neues loan+cancel-Paar.
+    if (hasAnyLedgerEntries('LOAN', id)) { res.skipped++; continue; }
     const debt: Debt = {
       id,
       loanNumber: (r.loan_number as string | null) || undefined,
@@ -537,7 +555,8 @@ export function backfillDebtPayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('LOAN_PAYMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — Payment-Backfill ist "jemals ledgerisiert".
+    if (hasAnyLedgerEntries('LOAN_PAYMENT', id)) { res.skipped++; continue; }
     const dir = canonicalLoanDirection(r.direction as string);
     safeStep(res, `loan-pay ${id.slice(0, 8)}`, () => {
       postLoanPayment(
@@ -564,7 +583,8 @@ export function backfillPartnerTransactions(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('PARTNER_TX', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert).
+    if (hasAnyLedgerEntries('PARTNER_TX', id)) { res.skipped++; continue; }
     safeStep(res, `partner-tx ${id.slice(0, 8)}`, () => {
       postPartnerTransaction({
         id,
@@ -588,7 +608,8 @@ export function backfillTaxPayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('TAX_PAYMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert).
+    if (hasAnyLedgerEntries('TAX_PAYMENT', id)) { res.skipped++; continue; }
     safeStep(res, `tax ${id.slice(0, 8)}`, () => {
       postTaxPayment({
         id,
@@ -617,7 +638,8 @@ export function backfillMetalPayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('METAL_PAYMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert).
+    if (hasAnyLedgerEntries('METAL_PAYMENT', id)) { res.skipped++; continue; }
     safeStep(res, `metal-pay ${id.slice(0, 8)}`, () => {
       postMetalPayment({
         id,
@@ -646,7 +668,11 @@ export function backfillAgentSettlementPayments(branchId: string): BackfillResul
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('AGENT_SETTLEMENT', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert). Migrierte Settles haben old-reversed +
+    // new-live → beide Checks true → skip; reversierte-ohne-Re-Post werden hier korrekt
+    // uebersprungen (statt Drift). Migration (migrateLegacyAgentSettlements) re-postet inline
+    // und nutzt diesen Skip nicht → keine Interplay-Regression.
+    if (hasAnyLedgerEntries('AGENT_SETTLEMENT', id)) { res.skipped++; continue; }
     const method = (r.method as 'cash' | 'bank') || 'cash';
     const customerId = (r.customer_id as string) || '';
     if (!customerId) { res.skipped++; continue; }
@@ -910,7 +936,10 @@ export function backfillAgentTransferSold(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
-    if (hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert) — ein durch Convert/Returned reversierter
+    // Sold-Post darf nicht erneut die AR-Forderung aufbauen. Schuetzt zugleich den nachgelagerten
+    // migrateLegacyAgentSettlements:868-Guard (kein Re-Live-Posten eines reversierten Sold).
+    if (hasAnyLedgerEntries('AGENT_TRANSFER_SOLD', id)) { res.skipped++; continue; }
     const customerId = (r.customer_id as string) || '';
     if (!customerId) { res.skipped++; continue; }
     const amount = Number(r.settlement_amount ?? r.actual_sale_price ?? r.agent_price ?? 0);
@@ -942,7 +971,8 @@ export function backfillConsignmentPayouts(branchId: string): BackfillResult {
   for (const r of rows) {
     const consignmentId = r.id as string;
     const synthId = `cp-${consignmentId}`;
-    if (hasLedgerEntries('CONSIGNMENT_PAYOUT', synthId)) { res.skipped++; continue; }
+    // Skip, sobald JE ledgerisiert (auch reversiert).
+    if (hasAnyLedgerEntries('CONSIGNMENT_PAYOUT', synthId)) { res.skipped++; continue; }
     const amount = Number(r.payout_paid_amount || 0);
     if (amount <= 0) { res.skipped++; continue; }
     const method = String(r.payout_method || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank';
@@ -1005,14 +1035,16 @@ export function backfillCustomerCredits(branchId: string): BackfillResult {
     if (amount <= 0) { res.skipped++; continue; }
     if (r.source_type === 'gold_conversion') {
       // Live-Posting (goldStore) keyt auf die customer_credits-Row-id.
-      if (hasLedgerEntries('GOLD_CONVERSION', creditId)) { res.skipped++; continue; }
+      // Skip, sobald JE ledgerisiert (auch reversiert) — kein erneuter Grant nach Clawback.
+      if (hasAnyLedgerEntries('GOLD_CONVERSION', creditId)) { res.skipped++; continue; }
       safeStep(res, `gold-credit ${creditId.slice(0, 8)}`, () => {
         postGoldConversionCredit(creditId, customerId, amount, createdAt);
       });
     } else {
       // order_cancel: source_id = orderId; Live-Posting keyt auf `credit:<orderId>`.
       const orderId = r.source_id as string;
-      if (hasLedgerEntries('ORDER_CANCEL', `credit:${orderId}`)) { res.skipped++; continue; }
+      // Skip, sobald JE ledgerisiert (auch reversiert) — kein erneuter Grant nach Clawback.
+      if (hasAnyLedgerEntries('ORDER_CANCEL', `credit:${orderId}`)) { res.skipped++; continue; }
       safeStep(res, `order-credit ${creditId.slice(0, 8)}`, () => {
         postOrderCancellationChoice({
           orderId, customerId, totalPaid: amount, choice: 'credit', occurredAt: createdAt,
