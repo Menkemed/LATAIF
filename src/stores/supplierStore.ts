@@ -8,6 +8,7 @@ import type { Supplier, PurchasePayment } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only Header-Snapshot (purchases-Status nach Credit-Einloesung)
 import { postPurchasePayment, hasLedgerEntries } from '@/core/ledger/posting';
 
 function safePost(label: string, fn: () => void): void {
@@ -195,8 +196,9 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   },
 
   // Plan §Supplier §4: computed from purchases/payments.
-  // Plan §Purchase Returns §8: creditBalance = Summe aller Returns mit refund_method='credit'
-  // MINUS verbrauchte Credit-Payments auf Purchases.
+  // Slice 4b-Fix: creditBalance = Σ (amount − used_amount) aus supplier_credits (ALLE Quellen:
+  // Return-Credits refund_method='credit' UND Purchase-Ueberzahlung source_return_id IS NULL),
+  // konsistent mit domainSupplierCredit. Frueher nur purchase_returns → Overpay-Credits unsichtbar.
   // Plan §Repair §Workshop-as-Supplier: zusätzlich fließen Repair-Expenses
   // (category='RepairCosts', supplier_id=?) in die Bilanz ein, damit Workshop-
   // Forderungen sichtbar werden — gleicher Ledger, unterschiedliche Quellen.
@@ -222,17 +224,11 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       const totalPaid = purchasesPaid + expensesPaid;
 
       const credit = query(
-        `SELECT
-           COALESCE((SELECT SUM(refund_amount) FROM purchase_returns
-             WHERE supplier_id = ? AND refund_method = 'credit' AND status IN ('CONFIRMED','COMPLETED')), 0) AS earned,
-           COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
-             JOIN purchases pu ON pu.id = pp.purchase_id
-             WHERE pu.supplier_id = ? AND pp.method = 'credit'), 0) AS used`,
-        [id, id]
+        `SELECT COALESCE(SUM(amount - used_amount), 0) AS bal
+           FROM supplier_credits WHERE supplier_id = ?`,
+        [id]
       );
-      const earned = (credit[0]?.earned as number) || 0;
-      const used = (credit[0]?.used as number) || 0;
-      const creditBalance = Math.max(0, earned - used);
+      const creditBalance = Math.max(0, (credit[0]?.bal as number) || 0);
 
       // outstandingBalance = totalPurchases − totalPaid (Domain-Wahrheit), damit
       // die per-Supplier-KPI mit der sichtbaren Detail-Tabelle uebereinstimmt
@@ -301,7 +297,7 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       `UPDATE supplier_credits SET used_amount = ?, status = ? WHERE id = ?`,
       [newUsed, newStatus, creditId]
     );
-    // Als Purchase-Payment mit method='credit' verbuchen — existierender Status-Reconcile greift.
+    // Als Purchase-Payment mit method='credit' verbuchen.
     const payId = uuid();
     const paidAt = now.split('T')[0];
     db.run(
@@ -309,6 +305,25 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
        VALUES (?, ?, ?, 'credit', ?, ?, 'Applied from supplier credit', ?)`,
       [payId, purchaseId, apply, paidAt, creditId, now]
     );
+    // Slice 4b-Fix — Purchase-Status/Outstanding spiegeln die Credit-Einloesung, OHNE die Overpay-
+    // Basis paid_amount zu veraendern (die bleibt bewusst credit-frei; sonst zoege reconcile-
+    // PurchaseOverpayCredit eine Phantom-Ueberzahlung). settled = paid_amount + Σ credit-Payments →
+    // nur die Display-Felder status/remaining_amount werden nachgezogen.
+    const stRow = query(`SELECT total_amount, paid_amount FROM purchases WHERE id = ?`, [purchaseId])[0];
+    if (stRow) {
+      const totalAmt = (stRow.total_amount as number) || 0;
+      const paidAmt = (stRow.paid_amount as number) || 0;
+      const creditPaid = Number(query(
+        `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit'`,
+        [purchaseId]
+      )[0]?.t || 0);
+      const settled = paidAmt + creditPaid;
+      const newRemaining = Math.max(0, totalAmt - settled);
+      const purStatus = settled >= totalAmt - 0.005 ? 'PAID' : (settled > 0.005 ? 'PARTIALLY_PAID' : 'UNPAID');
+      db.run(`UPDATE purchases SET remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
+        [newRemaining, purStatus, now, purchaseId]);
+      trackChange('purchases', purchaseId, 'update', {});
+    }
     saveDatabase();
     trackUpdate('supplier_credits', creditId, { usedAmount: newUsed, status: newStatus });
     trackInsert('purchase_payments', payId, { purchaseId, amount: apply, method: 'credit' });

@@ -32,7 +32,7 @@ export function PurchaseDetail() {
   const goBack = useGoBack('/purchases');
   const { purchases, loadPurchases, addPayment, cancelPurchase, createReturn, confirmReturn, returns, loadReturns } = usePurchaseStore();
   const { employees, loadEmployees } = useEmployeeStore();
-  const { suppliers, loadSuppliers, getLedger } = useSupplierStore();
+  const { suppliers, loadSuppliers, getLedger, getOpenCredits, applyCreditToPurchase } = useSupplierStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
 
   const [showPayment, setShowPayment] = useState(false);
@@ -70,9 +70,28 @@ export function PurchaseDetail() {
   function handleAddPayment() {
     const amt = parseFloat(payAmount);
     if (!amt || amt <= 0 || !id) return;
-    // Plan §Purchase Returns §8: Credit darf max creditBalance verwenden.
-    if (payMethod === 'credit' && amt > supplierLedger.creditBalance + 0.001) return;
-    addPayment(id, amt, payMethod, payRef || undefined);
+    if (payMethod === 'credit') {
+      // Slice 4b-Fix — Credit-Einloesung ueber applyCreditToPurchase (FIFO ueber offene
+      // supplier_credits, aelteste zuerst), NICHT ueber addPayment: nur applyCreditToPurchase
+      // pflegt supplier_credits.used_amount + reference=creditId (F6) und bucht DR AP /
+      // CR SUPPLIER_CREDIT → Domain == Ledger (Reconciliation gruen). Deckt Return- UND
+      // Overpay-Credits (beide leben in supplier_credits).
+      if (amt > supplierLedger.creditBalance + 0.001) return;
+      const open = [...getOpenCredits(purchase!.supplierId)].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      let remaining = amt;
+      for (const c of open) {
+        if (remaining <= 0.005) break;
+        const avail = c.amount - c.usedAmount;
+        if (avail <= 0.005) continue;
+        const use = Math.min(remaining, avail);
+        applyCreditToPurchase(c.id, id, use);
+        remaining -= use;
+      }
+      loadPurchases();
+      loadSuppliers();
+    } else {
+      addPayment(id, amt, payMethod, payRef || undefined);
+    }
     setShowPayment(false);
     setPayAmount('');
     setPayRef('');
