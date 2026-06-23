@@ -20,6 +20,12 @@ function safePost(label: string, fn: () => void): void {
   }
 }
 
+// BHD hat 3 Dezimalstellen (Fils). Vergleiche/Rundungen laufen in Minor Units (Fils),
+// konsistent zur Projekt-Konvention (posting.ts ROUND, card-fee-booking.ts ROUND3).
+// KEINE BHD-Toleranzwerte wie 0.005 — die erlaubten sonst mehrere Fils Schlupf.
+const toFils = (n: number) => Math.round(n * 1000);
+const round3 = (n: number) => toFils(n) / 1000;
+
 // ── SSOT: alle Tabellen/Spalten, die einen Supplier referenzieren ──
 // Hat EINE davon einen Treffer, gilt der Supplier als "verknuepft" und darf NICHT
 // hart geloescht werden: das Frontend (sql.js) erzwingt keine Foreign Keys, ein
@@ -208,26 +214,61 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   // Plan §Repair §Workshop-as-Supplier: zusätzlich fließen Repair-Expenses
   // (category='RepairCosts', supplier_id=?) in die Bilanz ein, damit Workshop-
   // Forderungen sichtbar werden — gleicher Ledger, unterschiedliche Quellen.
+  //
+  // Outstanding-Fix (dieser Slice): pro AKTIVER Purchase ist der beglichene Betrag
+  //   settled = paid_amount (cash/bank/benefit) + Σ purchase_payments(method='credit')
+  // — eine Credit-Einloesung (applyCreditToPurchase) fasst paid_amount BEWUSST nicht an
+  // (Overpay-Modell), wird aber als purchase_payments-Row method='credit' gefuehrt. Frueher
+  // zaehlte getLedger nur paid_amount → eine voll per Credit beglichene Purchase zeigte
+  // "OUTSTANDING <total> · 0 open". Jetzt PER-POSTEN: outstanding = max(0, total − settled),
+  // Summe ueber alle Posten (eine Ueberzahlung/voll-Settlement einer Purchase darf die
+  // Outstanding einer anderen NICHT druecken). totalPaid = Σ total − Σ outstanding = der
+  // tatsaechlich beglichene Betrag (cash+bank+benefit+credit). Die paid_amount-SPALTE bleibt
+  // cash-only (Overpay-Reconciliation). Cancelled Posten + deren credit-payments sind via
+  // status != 'CANCELLED' ausgeschlossen. Reconciliation-Page rechnet AP eigenstaendig
+  // (Ledger-vs-Domain) und wird davon NICHT beruehrt; das DASHBOARD "SUPPLIER PAYABLES" liest
+  // seit M-24 balanceOf('ACCOUNTS_PAYABLE') — diese getLedger-Domain-Sicht deckt sich danach
+  // mit dem Ledger (bei sauberen Daten).
   getLedger: (id) => {
     try {
-      const p = query(
-        `SELECT COALESCE(SUM(total_amount),0) as t, COALESCE(SUM(paid_amount),0) as paid
-         FROM purchases WHERE supplier_id = ? AND status != 'CANCELLED'`,
+      const purchaseRows = query(
+        `SELECT p.total_amount AS total, p.paid_amount AS paid,
+                COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
+                          WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
+           FROM purchases p WHERE p.supplier_id = ? AND p.status != 'CANCELLED'`,
         [id]
       );
-      const purchasesTotal = (p[0]?.t as number) || 0;
-      const purchasesPaid = (p[0]?.paid as number) || 0;
+      let purchasesTotal = 0, purchasesOutstanding = 0;
+      for (const r of purchaseRows) {
+        const total = (r.total as number) || 0;
+        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
+        purchasesTotal += total;
+        purchasesOutstanding += Math.max(0, total - settled);
+      }
 
-      const e = query(
-        `SELECT COALESCE(SUM(amount),0) as t, COALESCE(SUM(paid_amount),0) as paid
-         FROM expenses WHERE supplier_id = ? AND status != 'CANCELLED'`,
+      // Expenses: kein Credit-Einloesungspfad (Credit loest nur gegen Purchases ein) →
+      // settled = paid_amount. (Falls kuenftig Expense-Credit-Redemption kommt, hier ergaenzen.)
+      const expenseRows = query(
+        `SELECT amount AS total, paid_amount AS paid
+           FROM expenses WHERE supplier_id = ? AND status != 'CANCELLED'`,
         [id]
       );
-      const expensesTotal = (e[0]?.t as number) || 0;
-      const expensesPaid = (e[0]?.paid as number) || 0;
+      let expensesTotal = 0, expensesOutstanding = 0;
+      for (const r of expenseRows) {
+        const total = (r.total as number) || 0;
+        const paid = (r.paid as number) || 0;
+        expensesTotal += total;
+        expensesOutstanding += Math.max(0, total - paid);
+      }
 
-      const totalPurchases = purchasesTotal + expensesTotal;
-      const totalPaid = purchasesPaid + expensesPaid;
+      // totalObligations = Σ aller Supplier-Verpflichtungen (Purchases + Workshop-Expenses).
+      // Das IST die Bedeutung des zurueckgegebenen Felds `totalPurchases` (bestehende Konvention,
+      // KPI "TOTAL PURCHASES" zeigt Purchases + Workshop). Identitaet damit explizit:
+      //   totalPaid = (purchasesTotal + expensesTotal) − outstandingBalance
+      // wobei outstandingBalance Purchases- UND Expense-Outstanding enthaelt.
+      const totalObligations = purchasesTotal + expensesTotal;
+      const outstandingBalance = purchasesOutstanding + expensesOutstanding;
+      const totalPaid = totalObligations - outstandingBalance;
 
       const credit = query(
         `SELECT COALESCE(SUM(amount - used_amount), 0) AS bal
@@ -236,21 +277,11 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       );
       const creditBalance = Math.max(0, (credit[0]?.bal as number) || 0);
 
-      // outstandingBalance = totalPurchases − totalPaid (Domain-Wahrheit), damit
-      // die per-Supplier-KPI mit der sichtbaren Detail-Tabelle uebereinstimmt
-      // (itemisierte Sicht → Domain, M-24-Scope-Entscheid). Das DASHBOARD-Aggregat
-      // "SUPPLIER PAYABLES" liest seit M-24 dagegen das Ledger
-      // (balanceOf('ACCOUNTS_PAYABLE', {counterpartyType:'SUPPLIER'})) — beide
-      // koennen bei Alt-Daten-Luecken abweichen (z.B. historische Repair-Expenses
-      // ohne Ledger-Post, Legacy-Expenses mit paid_amount ohne payment-Rows);
-      // die Reconciliation-Page macht den Ledger-vs-Domain-Vergleich sichtbar.
-      const outstandingBalance = totalPurchases - totalPaid;
-
       return {
-        totalPurchases,
-        totalPaid,
-        outstandingBalance,
-        creditBalance,
+        totalPurchases: round3(totalObligations),
+        totalPaid: round3(totalPaid),
+        outstandingBalance: round3(outstandingBalance),
+        creditBalance: round3(creditBalance),
       };
     } catch {
       return { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 };
@@ -296,6 +327,28 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     const available = total - used;
     const apply = Math.min(amount, available);
     if (apply <= 0) return;
+
+    // Credit-Ueberanwendung verhindern (kein stilles Cappen): der beantragte Betrag darf den
+    // echten offenen Rest der Purchase nicht uebersteigen. remaining = total_amount − paid_amount
+    // (cash/bank/benefit) − bereits gebuchte credit-payments. Bei Verstoss: harter Abbruch VOR
+    // jeder Mutation → kein used_amount-Update, keine purchase_payments-Row, kein Ledger-Post.
+    const guardRow = query(`SELECT total_amount, paid_amount FROM purchases WHERE id = ?`, [purchaseId])[0];
+    if (!guardRow) throw new Error('Purchase not found for credit application.');
+    const guardTotal = (guardRow.total_amount as number) || 0;
+    const guardPaid = (guardRow.paid_amount as number) || 0;
+    const guardCreditPaid = Number(query(
+      `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit'`,
+      [purchaseId]
+    )[0]?.t || 0);
+    const purchaseRemaining = guardTotal - guardPaid - guardCreditPaid;
+    // Vergleich in Fils (Minor Units), KEINE BHD-Toleranz: amount darf den offenen Rest nicht
+    // ueberschreiten — schon 0.001 BHD darueber wird blockiert. remaining 30.000/amount 30.000 ok,
+    // remaining 30.000/amount 30.001 → BLOCK. Abbruch VOR jeder Mutation.
+    if (toFils(amount) > toFils(purchaseRemaining)) {
+      throw new Error(
+        `Credit amount (${amount.toFixed(3)}) exceeds the purchase's open balance (${Math.max(0, purchaseRemaining).toFixed(3)}).`
+      );
+    }
 
     const newUsed = used + apply;
     const newStatus = newUsed >= total - 0.005 ? 'USED' : 'OPEN';

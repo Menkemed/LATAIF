@@ -76,7 +76,20 @@ export function PurchaseDetail() {
       // pflegt supplier_credits.used_amount + reference=creditId (F6) und bucht DR AP /
       // CR SUPPLIER_CREDIT → Domain == Ledger (Reconciliation gruen). Deckt Return- UND
       // Overpay-Credits (beide leben in supplier_credits).
-      if (amt > supplierLedger.creditBalance + 0.001) return;
+      // UI-Guard: Credit darf weder das verfuegbare Supplier-Guthaben noch den offenen
+      // Purchase-Rest uebersteigen — frueh + verstaendlich melden (der Store wirft sonst hart,
+      // siehe applyCreditToPurchase). remainingAmount = total − cash-paid − credit-paid.
+      // Vergleich in Fils (Minor Units), KEINE BHD-Toleranz — deckt sich mit dem Store-Guard.
+      const toFils = (n: number) => Math.round(n * 1000);
+      if (toFils(amt) > toFils(supplierLedger.creditBalance)) {
+        alert(`Not enough supplier credit. Available: ${fmt(supplierLedger.creditBalance)} BHD.`);
+        return;
+      }
+      const openBalance = purchase?.remainingAmount ?? 0;
+      if (toFils(amt) > toFils(openBalance)) {
+        alert(`Credit amount exceeds this purchase's open balance (${fmt(openBalance)} BHD). Enter at most that amount.`);
+        return;
+      }
       const open = [...getOpenCredits(purchase!.supplierId)].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       let remaining = amt;
       for (const c of open) {
