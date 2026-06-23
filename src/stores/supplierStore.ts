@@ -9,7 +9,10 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only Header-Snapshot (purchases-Status nach Credit-Einloesung)
-import { postPurchasePayment, hasLedgerEntries } from '@/core/ledger/posting';
+import {
+  postPurchasePayment, postStandaloneSupplierCredit, hasLedgerEntries, hasReversalFor, reverseSource,
+  beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
+} from '@/core/ledger/posting';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -98,6 +101,9 @@ interface SupplierStore {
   // Plan §8 #3 — explizite Credit-Records aus supplier_credits Tabelle
   getOpenCredits: (supplierId: string) => SupplierCredit[];
   applyCreditToPurchase: (creditId: string, purchaseId: string, amount: number) => void;
+  // Standalone Supplier-Prepayment/-Credit (nicht dokument-gebunden) — z.B. PaySupplierModal-Ueberschuss.
+  grantStandaloneCredit: (supplierId: string, amount: number, method: 'cash' | 'bank' | 'benefit', note?: string) => string;
+  deleteStandaloneSupplierCredit: (creditId: string) => void;
 }
 
 function rowToSupplier(row: Record<string, unknown>): Supplier {
@@ -349,5 +355,66 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
         postPurchasePayment(payment, supplierId);
       });
     }
+  },
+
+  // Standalone Supplier-Prepayment/-Credit: Geld an einen Lieferanten ueber dessen offene Posten
+  // hinaus. supplier_credits-Row mit source_return_id IS NULL AND source_purchase_id IS NULL
+  // (= standalone, disjunkt von Return- und Purchase-Overpay-Credits). Ledger DR SUPPLIER_CREDIT /
+  // CR cash atomar in EINER beginLedgerTransaction (Post wirft → rollback, Row faellt mit).
+  grantStandaloneCredit: (supplierId, amount, method, note) => {
+    const creditId = uuid();
+    if (!supplierId || !(amount > 0.005)) return creditId;
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    let branchId = 'branch-main', userId = 'user-owner';
+    try { branchId = currentBranchId(); userId = currentUserId(); } catch { /* defaults */ }
+    beginLedgerTransaction();
+    try {
+      db.run(
+        `INSERT INTO supplier_credits (id, branch_id, supplier_id, source_return_id, source_purchase_id,
+           amount, used_amount, status, note, created_at, created_by)
+         VALUES (?, ?, ?, NULL, NULL, ?, 0, 'OPEN', ?, ?, ?)`,
+        [creditId, branchId, supplierId, amount, note || 'Supplier prepayment', now, userId]
+      );
+      trackInsert('supplier_credits', creditId, { supplierId, amount });
+      postStandaloneSupplierCredit(creditId, supplierId, amount, method, now);
+      commitLedgerTransaction();
+    } catch (e) {
+      rollbackLedgerTransaction();
+      throw e;
+    }
+    get().loadSuppliers();
+    return creditId;
+  },
+
+  // Delete/Refund eines standalone Supplier-Credits. BLOCK bei (teil-)eingeloest (used>0) —
+  // Entscheidung wie S4b (kein Auto-Reversal benutzter Credits). Sonst Ledger reversen
+  // (CR SUPPLIER_CREDIT / DR cash = Geld zurueck) + Row weg + sync, atomar in EINER Tx.
+  // reverseSource ist multi-cycle-safe (per-Leg, hasReversalFor-geguardet). NUR fuer standalone
+  // Credits (Diskriminator beide Source-IDs NULL) — Return-/Purchase-Overpay-Credits unberuehrt.
+  deleteStandaloneSupplierCredit: (creditId) => {
+    const db = getDatabase();
+    const c = query(
+      `SELECT used_amount FROM supplier_credits
+        WHERE id = ? AND source_return_id IS NULL AND source_purchase_id IS NULL`,
+      [creditId]
+    )[0];
+    if (!c) return;
+    if ((Number(c.used_amount) || 0) > 0.005) {
+      throw new Error('Cannot delete this supplier credit because it has already been (partially) redeemed. Reverse the redemption first.');
+    }
+    beginLedgerTransaction();
+    try {
+      if (hasLedgerEntries('SUPPLIER_PREPAYMENT', creditId) && !hasReversalFor('SUPPLIER_PREPAYMENT', creditId)) {
+        reverseSource('SUPPLIER_PREPAYMENT', creditId, new Date().toISOString());
+      }
+      db.run(`DELETE FROM supplier_credits WHERE id = ?`, [creditId]);
+      trackDelete('supplier_credits', creditId);
+      commitLedgerTransaction();
+    } catch (e) {
+      rollbackLedgerTransaction();
+      throw e;
+    }
+    get().loadSuppliers();
   },
 }));

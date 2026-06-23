@@ -126,6 +126,11 @@ export type SourceModule =
   // NICHT spiegelbildlich zur Customer-Seite). Gekeyt auf purchaseId, reverse-and-repost via
   // reconcilePurchaseOverpayCredit. Einloesbar ueber den 'credit'-Payment-Pfad (DR AP / CR SUPPLIER_CREDIT).
   | 'PURCHASE_OVERPAY'
+  // Standalone Supplier-Prepayment/-Credit: Geld an einen Lieferanten ueber dessen offene Posten
+  // hinaus (z.B. PaySupplierModal-Ueberschuss bei nur offenen Expenses). DR SUPPLIER_CREDIT / CR cash.
+  // NICHT dokument-gebunden (supplier_credits source_purchase_id IS NULL AND source_return_id IS NULL).
+  // Gekeyt auf die supplier_credits-Row-id; Reverse via deleteStandaloneSupplierCredit (Refund).
+  | 'SUPPLIER_PREPAYMENT'
   // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
   // gekeyt auf `opening:<branchId>`.
   | 'OPENING_BALANCE'
@@ -1685,6 +1690,41 @@ export function postPurchaseOverpaymentCredit(
       },
     ],
     { occurredAt, sourceModule: 'PURCHASE_OVERPAY', sourceId: purchaseId }
+  );
+}
+
+// Standalone Supplier-Prepayment/-Credit (nicht dokument-gebunden). Im Gegensatz zu
+// postPurchaseOverpaymentCredit (CR AP) geht hier das Geld DIREKT raus:
+//   DR SUPPLIER_CREDIT   (Asset/DEBIT-natur — hebt das einloesbare Guthaben)
+//   CR CASH|BANK|BENEFIT (das Geld verlaesst die Kasse)
+// sourceModule='SUPPLIER_PREPAYMENT', sourceId=creditId (supplier_credits-Row). Einloesung gegen
+// Purchases ueber den bestehenden 'credit'-Payment-Pfad (DR AP / CR SUPPLIER_CREDIT); Reverse via
+// reverseSource('SUPPLIER_PREPAYMENT', creditId) = CR SUPPLIER_CREDIT / DR cash (Refund).
+export function postStandaloneSupplierCredit(
+  creditId: string,
+  supplierId: string,
+  amount: number,
+  method: ExpensePayment['method'],
+  occurredAt: string
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postStandaloneSupplierCredit: amount must be > 0 (got ${amount})`);
+  }
+  const cashAcc = expenseCashAccountFor(method);
+  const meta = { creditId, kind: 'supplier_prepayment' };
+  return postEntries(
+    [
+      {
+        account: 'SUPPLIER_CREDIT', direction: 'DEBIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta,
+      },
+      {
+        account: cashAcc, direction: 'CREDIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta,
+      },
+    ],
+    { occurredAt, sourceModule: 'SUPPLIER_PREPAYMENT', sourceId: creditId }
   );
 }
 

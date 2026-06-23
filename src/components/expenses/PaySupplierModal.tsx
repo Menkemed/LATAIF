@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/Button';
 import { Bhd } from '@/components/ui/Bhd';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
+import { useSupplierStore } from '@/stores/supplierStore';
 import { query } from '@/core/db/helpers';
 
 interface PaySupplierModalProps {
@@ -77,6 +78,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   const recordExpensePayment = useExpenseStore(s => s.recordExpensePayment);
   const purchases = usePurchaseStore(s => s.purchases);
   const addPurchasePayment = usePurchaseStore(s => s.addPayment);
+  const grantStandaloneCredit = useSupplierStore(s => s.grantStandaloneCredit);
 
   const [totalAmount, setTotalAmount] = useState<number>(0);
   const [method, setMethod] = useState<PayMethod>('bank');
@@ -211,17 +213,17 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
       alert(`Allocation sum (${fmt(allocatedSum)}) does not match total payment (${fmt(totalAmount)}).`);
       return;
     }
-    // Slice 4b — Ueberschuss (nicht allozierbar) wird auf ein offenes Purchase-Item gebucht →
-    // entsteht automatisch als Supplier-Credit (PURCHASE_OVERPAY). Nur wenn KEIN Purchase-Item
-    // offen ist (ausschliesslich Expenses), bleibt der Ueberschuss out-of-scope (standalone
-    // Supplier-Credit ohne Purchase) und wird nach Bestaetigung verworfen.
+    // Ueberschuss (nicht allozierbar): liegt ein offenes Purchase-Item vor, wird er darauf gebucht
+    // → reconcilePurchaseOverpayCredit reklassiert ihn zu SUPPLIER_CREDIT (PURCHASE_OVERPAY).
+    // Liegen NUR Expenses vor (kein Purchase), wird der Ueberschuss als standalone Supplier-Credit
+    // gutgeschrieben (DR SUPPLIER_CREDIT / CR cash) — kein Geld geht mehr verloren.
     const excess = totalAmount - allocatedSum;
     const overflowPurchase = openItems.find(i => i.sourceTable !== 'expense');
     if (excess > 0.005 && !overflowPurchase) {
       if (!window.confirm(
         `You're paying ${fmt(totalAmount)} but only ${fmt(allocatedSum)} can be allocated ` +
-        `(${fmt(excess)} excess). There is no open purchase to attach it to, so the excess will be ` +
-        `IGNORED (standalone supplier credit without a purchase is not supported). Continue?`
+        `(${fmt(excess)} excess). The excess will be credited to ${supplierName || 'this supplier'} ` +
+        `as redeemable supplier credit. Continue?`
       )) {
         return;
       }
@@ -237,10 +239,14 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
           addPurchasePayment(item.id, alloc, method);
         }
       }
-      // Slice 4b — den nicht-allozierbaren Rest als Ueberzahlung auf ein Purchase buchen →
-      // reconcilePurchaseOverpayCredit reklassiert ihn zu SUPPLIER_CREDIT.
-      if (excess > 0.005 && overflowPurchase) {
-        addPurchasePayment(overflowPurchase.id, excess, method);
+      // Ueberschuss verbuchen: bevorzugt auf ein offenes Purchase (PURCHASE_OVERPAY),
+      // sonst als standalone Supplier-Credit (DR SUPPLIER_CREDIT / CR cash).
+      if (excess > 0.005) {
+        if (overflowPurchase) {
+          addPurchasePayment(overflowPurchase.id, excess, method);
+        } else if (supplierId) {
+          grantStandaloneCredit(supplierId, excess, method, 'Supplier prepayment (PaySupplier overpayment)');
+        }
       }
       onClose();
     } catch (e) {
