@@ -1339,6 +1339,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const linkedPaymentIds = query(
       `SELECT id FROM payments WHERE invoice_id = ?`, [id]
     ).map(r => r.id as string);
+    // LAN-Sync (task_37973706) — Child-Row-IDs VOR den destruktiven Writes einsammeln.
+    // Der Sync-Replay cascaded NICHT (flaches DELETE … WHERE id, kein FK-Cascade), daher muss
+    // jede lokal geloeschte/geaenderte Row einzeln getrackt werden — sonst behalten andere
+    // Clients Orphans (invoice_lines/payments) bzw. Geist-Referenzen (order_lines/orders).
+    const linkedLineIds = query(
+      `SELECT id FROM invoice_lines WHERE invoice_id = ?`, [id]
+    ).map(r => r.id as string);
     // Slice 3 — BLOCK VOR jedem destruktiven Write: ist das Ueberzahlungs-Guthaben einer
     // dieser Zahlungen schon (teil-)eingeloest, darf die Invoice nicht geloescht werden.
     for (const pid of linkedPaymentIds) assertOverpaymentCreditUnused(pid);
@@ -1375,10 +1382,24 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // order_lines.invoice_id / orders.invoice_id als Geist-Referenz stehen und
     // die Order ist dauerhaft gesperrt (Zeilen-Delete/-Edit verlangt einen
     // Invoice-Storno, den es nicht mehr gibt).
+    const linkedOrderLineIds = query(
+      `SELECT id FROM order_lines WHERE invoice_id = ?`, [id]
+    ).map(r => r.id as string);
+    const linkedOrderIds = query(
+      `SELECT id FROM orders WHERE invoice_id = ?`, [id]
+    ).map(r => r.id as string);
     db.run(`UPDATE order_lines SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
     db.run(`UPDATE orders SET invoice_id = NULL WHERE invoice_id = ?`, [id]);
     db.run(`DELETE FROM invoices WHERE id = ?`, [id]);
     saveDatabase();
+    // LAN-Sync (task_37973706) — Child-Deletes + entkoppelte Order-Refs + stornierte
+    // Card-Fee-Expenses propagieren. Children-first vor dem Invoice-Delete; alle Ops sind
+    // idempotent (DELETE/UPDATE … WHERE id), die Reihenfolge ist fuer die Korrektheit unkritisch.
+    for (const lineId of linkedLineIds) trackDelete('invoice_lines', lineId);
+    for (const payId of linkedPaymentIds) trackDelete('payments', payId);
+    for (const olId of linkedOrderLineIds) trackChange('order_lines', olId, 'update', {});
+    for (const ordId of linkedOrderIds) trackChange('orders', ordId, 'update', {});
+    for (const er of linkedExpenses) trackChange('expenses', er.id as string, 'update', {});
     trackDelete('invoices', id);
 
     // Ledger: Invoice-Reverse + jeden zugehoerigen CardFee-Expense reverten,
