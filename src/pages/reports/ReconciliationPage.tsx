@@ -127,10 +127,16 @@ function domainAP(branchId: string): number {
      WHERE pu.branch_id = ? AND pu.status != 'CANCELLED'`,
     [branchId]
   );
+  // Slice A — CANCELLED-Expenses AUSGESCHLOSSEN, symmetrisch zum Purchase-Leg oben. Beim Cancel
+  // werden Expense- UND Payment-Beine voll reversiert (Ledger-AP-Anteil → 0) und die expense_payments-
+  // Rows bleiben als Historie am CANCELLED-Record stehen. Ohne den Status-Filter subtrahierte die
+  // Domain diese Payments weiter → Domain-AP < Ledger-AP nach Cancel (gilt fuer Cash UND Credit).
+  // WICHTIG: Filter auf EXPENSE-STATUS, NICHT auf Payment-Methode — Credit-Payments AKTIVER Expenses
+  // (status != 'CANCELLED') zaehlen weiterhin VOLL als AP-Settlement (sie reduzieren AP wie Cash).
   const expPayments = query(
     `SELECT COALESCE(SUM(ep.amount), 0) AS t
      FROM expense_payments ep JOIN expenses e ON e.id = ep.expense_id
-     WHERE e.branch_id = ?`,
+     WHERE e.branch_id = ? AND e.status != 'CANCELLED'`,
     [branchId]
   );
   return (

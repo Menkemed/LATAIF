@@ -980,10 +980,16 @@ function runMigrations(database: Database): void {
       amount REAL NOT NULL,
       method TEXT NOT NULL,
       paid_at TEXT NOT NULL,
+      reference TEXT,
       note TEXT,
       created_at TEXT NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_expense_pmt_expense ON expense_payments(expense_id)`,
+    // Slice A (Credit-gegen-Expense) — reference haelt bei method='credit' die supplier_credits.id,
+    // analog purchase_payments.reference. ALTER-vor-CREATE: Fresh-Install hat die Spalte schon aus
+    // dem CREATE oben (→ ALTER wirft "duplicate column", wird in runMigrations geschluckt = idempotent);
+    // bestehende DBs bekommen sie hier. NULL fuer alle Alt-Zeilen (cash/bank/benefit haben kein reference).
+    `ALTER TABLE expense_payments ADD COLUMN reference TEXT`,
     // Backfill: bestehende PAID-Expenses auf paid_amount = amount setzen,
     // damit sie nicht als „offen" in /payables erscheinen.
     `UPDATE expenses SET paid_amount = amount WHERE status = 'PAID' AND paid_amount = 0`,

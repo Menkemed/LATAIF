@@ -19,6 +19,7 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+import { expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 import type { Expense } from '@/core/models/types';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand } from '@/core/finance/card-fees';
@@ -219,6 +220,14 @@ function reconcileRepairSupplier(repairId: string, supplierId: string): void {
   const previousSupplierId = (expRow.supplier_id as string | null) || null;
   if (previousSupplierId === supplierId) return;
 
+  // Slice-A-Invariante: traegt die Expense eine aktive Credit-Einloesung (suppliergebunden),
+  // darf ihr Supplier NICHT umgehaengt werden — harter Block VOR jedem Write (kein Re-Home des
+  // Credit-Ledgers auf eine andere Supplier-Identitaet). In der Praxis nur NULL->B erreichbar
+  // (NULL-Supplier-Expense kann keinen Credit haben), aber defensiv korrekt.
+  if (expenseHasActiveCreditSettlement(expenseId)) {
+    throw new Error(SUPPLIER_CREDIT_LOCK_MESSAGE);
+  }
+
   // Description optional anreichern (nur wenn noch keine " · ..."-Sektion drin).
   let description = (expRow.description as string | null) || '';
   const sNameRow = query('SELECT name FROM suppliers WHERE id = ?', [supplierId]);
@@ -268,6 +277,14 @@ function reconcileRepairSupplier(repairId: string, supplierId: string): void {
     const payId = pRow.id as string;
     const payAmt = Number(pRow.amount || 0);
     if (payAmt <= 0) continue;
+    const payMethod = (pRow.method as string) || 'bank';
+    // Credit-Einloesungen werden NIE auf einen anderen Supplier umgehaengt: eine AKTIVE
+    // Credit-Einloesung wurde oben bereits per Block abgefangen; eine reversierte/inaktive
+    // Credit-Row darf nicht ueber den Cash-Poster neu gebucht werden (postExpensePayment
+    // wirft bei method='credit'). Cash/Bank/Benefit-Re-Home bleibt unveraendert.
+    if (payMethod === 'credit') continue;
+    const cashMethod: 'cash' | 'bank' | 'benefit' =
+      payMethod === 'cash' || payMethod === 'benefit' ? payMethod : 'bank';
     safePost(`reconcileRepairSupplier:payment(${payId})`, () => {
       if (hasLedgerEntries('EXPENSE_PAYMENT', payId) && !hasReversalFor('EXPENSE_PAYMENT', payId)) {
         reverseSource('EXPENSE_PAYMENT', payId, now);
@@ -277,7 +294,7 @@ function reconcileRepairSupplier(repairId: string, supplierId: string): void {
           id: payId,
           expenseId,
           amount: payAmt,
-          method: ((pRow.method as 'cash' | 'bank') || 'bank'),
+          method: cashMethod,
           paidAt: pRow.paid_at as string,
           createdAt: (pRow.created_at as string) || now,
           note: (pRow.note as string | null) || undefined,
@@ -686,6 +703,27 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const now = new Date().toISOString();
     // Snapshot fuer Late-Bind-Detection (Workshop-Supplier nachtraeglich gesetzt).
     const before = get().getRepair(id);
+
+    // Slice-A-Invariante: Workshop-Supplier-Wechsel blockieren, solange die verknuepfte
+    // (aktive) Repair-Expense eine aktive Credit-Einloesung traegt. Wirft VOR jedem Write →
+    // voller Rollback (Repair-Row + reconcile unberuehrt). Nur bei ECHTEM Wechsel pruefen
+    // (handleSave schickt workshopSupplierId unveraendert mit). NULL->B bleibt erlaubt, da
+    // eine NULL-Supplier-Expense keinen Credit tragen kann.
+    if (
+      data.workshopSupplierId !== undefined &&
+      (before?.workshopSupplierId || null) !== ((data.workshopSupplierId as string | null) || null)
+    ) {
+      const linkedExp = query(
+        `SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`,
+        [id],
+      );
+      for (const e of linkedExp) {
+        if (expenseHasActiveCreditSettlement(e.id as string)) {
+          throw new Error(SUPPLIER_CREDIT_LOCK_MESSAGE);
+        }
+      }
+    }
+
     const fields: string[] = [];
     const values: unknown[] = [];
 
@@ -1270,9 +1308,13 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         [line.expenseId]
       );
       const paid = (expRows[0]?.paid as number) || 0;
+      // Slice A: paid_amount ist cash-only — eine NUR per Supplier-Credit beglichene Line-Expense
+      // haette paid_amount=0 und wuerde den Cost/Supplier-Freeze sonst umgehen. Aktive
+      // Credit-Einloesung deshalb gleichwertig zu "Zahlung gebucht" behandeln.
+      const creditActive = expenseHasActiveCreditSettlement(line.expenseId);
       const wantsCriticalChange = data.costAmount !== undefined && data.costAmount !== line.costAmount
         || (data.supplierId !== undefined && data.supplierId !== line.supplierId);
-      if (paid > 0 && wantsCriticalChange) {
+      if ((paid > 0 || creditActive) && wantsCriticalChange) {
         throw new Error(
           'Cost/Supplier dieser Zeile kann nicht editiert werden — Zahlung bereits gebucht. ' +
           'Nutze "Cancel + Replace" stattdessen.'

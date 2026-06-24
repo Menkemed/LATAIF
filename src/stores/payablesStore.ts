@@ -197,14 +197,22 @@ export const usePayablesStore = create<PayablesStore>((set) => ({
         }, today, gracePeriodDays));
       }
 
-      // 5) Open Expenses — alles wo paid_amount < amount (Pay-Later + Partial Payment)
+      // 5) Open Expenses — Slice A Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen.
+      // Filter und outstanding rechnen gegen settled, sonst bliebe eine credit-beglichene Expense offen.
+      // credit_paid via gebuendelter Korrelations-Subquery (kein N+1). paidAmount = settled → build()
+      // berechnet outstanding = max(0, total − settled) korrekt.
       const expenseRows = query(
         `SELECT e.id, e.expense_number, e.category, e.amount, e.paid_amount,
                 e.expense_date, e.description, e.created_at, e.supplier_id, e.related_module,
-                s.name AS supplier_name
+                s.name AS supplier_name,
+                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
+                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
          FROM expenses e
          LEFT JOIN suppliers s ON s.id = e.supplier_id
-         WHERE e.status != 'CANCELLED' AND e.amount > COALESCE(e.paid_amount, 0) + 0.005`,
+         WHERE e.status != 'CANCELLED'
+           AND e.amount > COALESCE(e.paid_amount, 0)
+                          + COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
+                                      WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) + 0.005`,
         []
       );
       for (const r of expenseRows) {
@@ -212,6 +220,7 @@ export const usePayablesStore = create<PayablesStore>((set) => ({
         const desc = (r.description as string) || '';
         const supplierName = r.supplier_name as string | null;
         const supplierId = r.supplier_id as string | null;
+        const settled = Number(r.paid_amount || 0) + Number(r.credit_paid || 0);
         rows.push(build({
           type: 'expense',
           sourceTable: 'expenses',
@@ -222,7 +231,7 @@ export const usePayablesStore = create<PayablesStore>((set) => ({
           referenceNumber: (r.expense_number as string) || ((r.id as string) || '').slice(0, 8),
           issuedAt: (r.expense_date as string) || (r.created_at as string),
           totalAmount: Number(r.amount || 0),
-          paidAmount: Number(r.paid_amount || 0),
+          paidAmount: settled,
           navigateTo: '/expenses',
           detailLabel: supplierName ? `${cat} · ${desc || cat}` : `Expense · ${cat}`,
         }, today, gracePeriodDays));

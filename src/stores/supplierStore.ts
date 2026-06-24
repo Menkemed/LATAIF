@@ -10,7 +10,8 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only Header-Snapshot (purchases-Status nach Credit-Einloesung)
 import {
-  postPurchasePayment, postStandaloneSupplierCredit, hasLedgerEntries, hasReversalFor, reverseSource,
+  postPurchasePayment, postStandaloneSupplierCredit, postExpenseSupplierCreditPayment,
+  hasLedgerEntries, hasReversalFor, reverseSource,
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 
@@ -160,6 +161,13 @@ export interface SupplierCreditDisplay {
   refundable: boolean;
 }
 
+// Slice A — Ergebnis der atomaren Credit-gegen-Expense-Einloesung. Slice B zeigt daraus exakt,
+// welche Credits (FIFO) auf welche Expenses (FIFO) angewendet wurden.
+export interface SupplierCreditExpenseApplication {
+  applied: number;   // tatsaechlich angewendeter Gesamtbetrag (== requestedAmount bei Erfolg)
+  allocations: Array<{ expenseId: string; creditId: string; paymentId: string; amount: number }>;
+}
+
 interface SupplierStore {
   suppliers: Supplier[];
   loading: boolean;
@@ -174,6 +182,10 @@ interface SupplierStore {
   // SUPPLIER-CREDITS-Card: ALLE offenen Credits typisiert + (standalone) abgeleitete Methode + Refund-Eignung.
   getSupplierCreditsForDisplay: (supplierId: string) => SupplierCreditDisplay[];
   applyCreditToPurchase: (creditId: string, purchaseId: string, amount: number) => void;
+  // Slice A — Supplier-Credits gegen offene supplier-verknuepfte Expenses einloesen. Der Store
+  // berechnet den FIFO-Plan (Expenses + Credits, Datum dann ID) INNERHALB der Transaktion aus
+  // FRISCH geladenen Daten selbst — die UI gibt KEINEN Allokationsplan als finanzielle Autoritaet vor.
+  applySupplierCreditsToExpenses: (supplierId: string, requestedAmount: number, occurredAt?: string) => SupplierCreditExpenseApplication;
   // Standalone Supplier-Prepayment/-Credit (nicht dokument-gebunden) — z.B. PaySupplierModal-Ueberschuss.
   grantStandaloneCredit: (supplierId: string, amount: number, method: 'cash' | 'bank' | 'benefit', note?: string) => string;
   deleteStandaloneSupplierCredit: (creditId: string) => void;
@@ -313,19 +325,23 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
         purchasesOutstanding += Math.max(0, total - settled);
       }
 
-      // Expenses: kein Credit-Einloesungspfad (Credit loest nur gegen Purchases ein) →
-      // settled = paid_amount. (Falls kuenftig Expense-Credit-Redemption kommt, hier ergaenzen.)
+      // Slice A — Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen. paid_amount
+      // bleibt cash-only; die credit-Begleichung kommt aus expense_payments(method='credit'). Eine
+      // gebuendelte Korrelations-Subquery (kein N+1). Ohne den credit-Anteil bliebe eine credit-
+      // beglichene Expense faelschlich im OUTSTANDING.
       const expenseRows = query(
-        `SELECT amount AS total, paid_amount AS paid
-           FROM expenses WHERE supplier_id = ? AND status != 'CANCELLED'`,
+        `SELECT e.amount AS total, e.paid_amount AS paid,
+                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
+                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
+           FROM expenses e WHERE e.supplier_id = ? AND e.status != 'CANCELLED'`,
         [id]
       );
       let expensesTotal = 0, expensesOutstanding = 0;
       for (const r of expenseRows) {
         const total = (r.total as number) || 0;
-        const paid = (r.paid as number) || 0;
+        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
         expensesTotal += total;
-        expensesOutstanding += Math.max(0, total - paid);
+        expensesOutstanding += Math.max(0, total - settled);
       }
 
       // totalObligations = Σ aller Supplier-Verpflichtungen (Purchases + Workshop-Expenses).
@@ -510,6 +526,134 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
         postPurchasePayment(payment, supplierId);
       });
     }
+  },
+
+  // Slice A — Supplier-Credits gegen offene supplier-verknuepfte Expenses einloesen. AUTORITATIVER
+  // Writer: berechnet den FIFO-Plan selbst aus FRISCH (in-Tx) geladenen Daten — die UI gibt keinen
+  // Plan vor. ALLES in EINER aeusseren beginLedgerTransaction; jeder Fehler → kompletter Rollback +
+  // Throw. Kein safePost, kein await, kein Zwischen-Save, kein Teilcommit. paid_amount bleibt cash-
+  // only — die credit-Begleichung lebt in expense_payments(method='credit', reference=creditId) und
+  // im Ledger (DR AP / CR SUPPLIER_CREDIT via postExpenseSupplierCreditPayment).
+  applySupplierCreditsToExpenses: (supplierId, requestedAmount, occurredAt) => {
+    const result: SupplierCreditExpenseApplication = { applied: 0, allocations: [] };
+    if (!supplierId) throw new Error('applySupplierCreditsToExpenses: supplierId required.');
+    if (!(toFils(requestedAmount) > 0)) throw new Error('Requested amount must be greater than zero.');
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    let branchId = 'branch-main';
+    try { branchId = currentBranchId(); } catch { /* default */ }
+    const occurred = occurredAt || now;
+    const paidAt = occurred.includes('T') ? occurred.split('T')[0] : occurred;
+
+    beginLedgerTransaction();
+    try {
+      // ── 2-3. Frisch laden: offene supplier-verknuepfte Expenses dieser Branch (settled = cash+credit) ──
+      const expenseRows = query(
+        `SELECT e.id AS id, e.amount AS amount, e.paid_amount AS paid, e.status AS status, e.created_at AS created_at,
+                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
+                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
+           FROM expenses e
+          WHERE e.supplier_id = ? AND e.branch_id = ? AND e.status != 'CANCELLED'
+          ORDER BY e.created_at ASC, e.id ASC`,
+        [supplierId, branchId]
+      );
+      const openExpenses = expenseRows.map(r => {
+        const amountF = toFils(Number(r.amount) || 0);
+        const settledF = toFils(Number(r.paid) || 0) + toFils(Number(r.credit_paid) || 0);
+        return { id: r.id as string, amountF, settledF, remF: amountF - settledF };
+      }).filter(e => e.remF > 0);
+
+      // ── Frisch laden: offene Credits dieser Branch (available = amount − used_amount) ──
+      const creditRows = query(
+        `SELECT id, amount, used_amount FROM supplier_credits
+          WHERE supplier_id = ? AND branch_id = ? AND status = 'OPEN'
+          ORDER BY created_at ASC, id ASC`,
+        [supplierId, branchId]
+      );
+      const openCredits = creditRows.map(r => {
+        const totalF = toFils(Number(r.amount) || 0);
+        const usedF = toFils(Number(r.used_amount) || 0);
+        const availF = totalF - usedF;
+        if (availF < 0) throw new Error('Supplier credit has a negative available balance — data inconsistency.');
+        return { id: r.id as string, totalF, usedF, availF };
+      }).filter(c => c.availF > 0);
+
+      // ── 3. Validierung (Fils-genau, KEIN stilles Cappen) ──
+      const reqF = toFils(requestedAmount);
+      const openTotalF = openExpenses.reduce((s, e) => s + e.remF, 0);
+      const creditTotalF = openCredits.reduce((s, c) => s + c.availF, 0);
+      if (reqF > openTotalF) {
+        throw new Error(`Requested amount (${round3(requestedAmount).toFixed(3)}) exceeds the supplier's open expenses (${(openTotalF / 1000).toFixed(3)}).`);
+      }
+      if (reqF > creditTotalF) {
+        throw new Error(`Requested amount (${round3(requestedAmount).toFixed(3)}) exceeds available supplier credit (${(creditTotalF / 1000).toFixed(3)}).`);
+      }
+
+      // ── 4. FIFO-Plan: Expenses aeltester-zuerst, je Expense aus Credits aeltester-zuerst ──
+      const plan: Array<{ expenseId: string; creditId: string; amountF: number }> = [];
+      let need = reqF;
+      let ci = 0;
+      for (const exp of openExpenses) {
+        if (need <= 0) break;
+        let expRem = exp.remF;
+        while (expRem > 0 && need > 0) {
+          while (ci < openCredits.length && openCredits[ci].availF <= 0) ci++;
+          if (ci >= openCredits.length) break;   // defensiv — durch Validierung ausgeschlossen
+          const cr = openCredits[ci];
+          const takeF = Math.min(expRem, cr.availF, need);
+          if (takeF <= 0) break;
+          plan.push({ expenseId: exp.id, creditId: cr.id, amountF: takeF });
+          expRem -= takeF; cr.availF -= takeF; need -= takeF;
+        }
+      }
+      if (need > 0) throw new Error('Internal allocation error: could not fully distribute the requested amount.');
+
+      // ── 5+8. Pro Allokation: expense_payments-Row (method='credit', reference) + Ledger DIRECT ──
+      const creditAppliedF = new Map<string, number>();
+      const expenseAppliedF = new Map<string, number>();
+      for (const a of plan) {
+        const payId = uuid();
+        const amt = a.amountF / 1000;
+        db.run(
+          `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, reference, note, created_at)
+           VALUES (?, ?, ?, 'credit', ?, ?, 'Applied from supplier credit', ?)`,
+          [payId, a.expenseId, amt, paidAt, a.creditId, now]
+        );
+        trackInsert('expense_payments', payId, { expenseId: a.expenseId, amount: amt, method: 'credit', reference: a.creditId });
+        // Ledger DIREKT (kein safePost): wirft → propagiert → Rollback der gesamten Einloesung.
+        postExpenseSupplierCreditPayment(payId, a.expenseId, supplierId, amt, occurred);
+        creditAppliedF.set(a.creditId, (creditAppliedF.get(a.creditId) || 0) + a.amountF);
+        expenseAppliedF.set(a.expenseId, (expenseAppliedF.get(a.expenseId) || 0) + a.amountF);
+        result.allocations.push({ expenseId: a.expenseId, creditId: a.creditId, paymentId: payId, amount: amt });
+      }
+
+      // ── 6. supplier_credits.used_amount/status (aggregiert je Credit) ──
+      for (const [creditId, appliedF] of creditAppliedF) {
+        const cr = openCredits.find(c => c.id === creditId)!;
+        const newUsedF = cr.usedF + appliedF;
+        if (newUsedF > cr.totalF) throw new Error('Internal error: credit over-application detected.');
+        const newStatus = newUsedF >= cr.totalF ? 'USED' : 'OPEN';
+        db.run(`UPDATE supplier_credits SET used_amount = ?, status = ? WHERE id = ?`, [newUsedF / 1000, newStatus, creditId]);
+        trackUpdate('supplier_credits', creditId, { usedAmount: newUsedF / 1000, status: newStatus });
+      }
+
+      // ── 7. Expense-Status aus dem Settlement-SSOT (paid_amount UNVERAENDERT = cash-only) ──
+      for (const [expenseId, appliedF] of expenseAppliedF) {
+        const exp = openExpenses.find(e => e.id === expenseId)!;
+        const newSettledF = exp.settledF + appliedF;
+        const newStatus = newSettledF >= exp.amountF ? 'PAID' : 'PENDING';
+        db.run(`UPDATE expenses SET status = ? WHERE id = ? AND status != 'CANCELLED'`, [newStatus, expenseId]);
+        trackUpdate('expenses', expenseId, { status: newStatus });
+      }
+
+      result.applied = reqF / 1000;
+      commitLedgerTransaction();
+    } catch (e) {
+      rollbackLedgerTransaction();
+      throw e;
+    }
+    get().loadSuppliers();
+    return result;
   },
 
   // Standalone Supplier-Prepayment/-Credit: Geld an einen Lieferanten ueber dessen offene Posten

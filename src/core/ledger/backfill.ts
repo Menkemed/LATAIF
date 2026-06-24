@@ -418,6 +418,12 @@ export function backfillExpensePayments(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
+    // Slice A — Credit-Einloesungen NIE ueber den Cash-Poster backfillen: postExpensePayment kennt
+    // 'credit' nicht (faellt sonst auf BANK). Sie werden vom atomaren applySupplierCreditsToExpenses-
+    // Writer korrekt gebucht (DR AP / CR SUPPLIER_CREDIT) → hier ueberspringen. hasAnyLedgerEntries
+    // wuerde sie ohnehin als "jemals gebucht" skippen; dieser Guard ist explizit + robust gegen
+    // hypothetische Legacy-credit-Rows ohne Ledger.
+    if ((r.method as string) === 'credit') { res.skipped++; continue; }
     // Skip, sobald JE ledgerisiert (auch reversiert). Reverse-Pfade loeschen heute zwar die
     // expense_payments-Row (kein Re-Post moeglich) — semantisch ist der Skip aber "jemals
     // ledgerisiert", daher hasAnyLedgerEntries (defensiv, falls je reverst-ohne-Loeschen).

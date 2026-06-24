@@ -1449,7 +1449,12 @@ export interface ExpensePayment {
   id: UUID;
   expenseId: UUID;
   amount: number;
-  method: 'cash' | 'bank' | 'benefit';
+  // 'credit' = Supplier-Credit-Einloesung (Slice A): bucht DR AP / CR SUPPLIER_CREDIT, kein Cash.
+  // NUR ueber den atomaren applySupplierCreditsToExpenses-Writer; recordExpensePayment bleibt
+  // strikt cash/bank/benefit, postExpensePayment verweigert 'credit' (kein BANK-Default-Fallback).
+  method: 'cash' | 'bank' | 'benefit' | 'credit';
+  // Bei method='credit': supplier_credits.id der eingeloesten Gutschrift (Restore-Link bei Cancel/Delete).
+  reference?: string;
   paidAt: string;
   note?: string;
   createdAt: string;

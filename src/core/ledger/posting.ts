@@ -1372,6 +1372,12 @@ export function postExpensePayment(
   if (amount <= 0) {
     throw new Error(`postExpensePayment: amount must be > 0 (got ${payment.amount})`);
   }
+  // Slice A — harter Riegel: dieser Cash-Poster darf NIE eine Credit-Einloesung buchen. Ohne den
+  // Riegel faellt method='credit' durch expenseCashAccountFor.default → BANK → falsche Bank-Buchung,
+  // ohne SUPPLIER_CREDIT zu beruehren. Credit laeuft ausschliesslich ueber postExpenseSupplierCreditPayment.
+  if (payment.method === 'credit') {
+    throw new Error('postExpensePayment: method "credit" must use postExpenseSupplierCreditPayment (DR AP / CR SUPPLIER_CREDIT).');
+  }
   const cashAcc = expenseCashAccountFor(payment.method);
   const counterpartyType: CounterpartyType | undefined = supplierId ? 'SUPPLIER' : undefined;
   return postEntries(
@@ -1398,6 +1404,43 @@ export function postExpensePayment(
       sourceModule: 'EXPENSE_PAYMENT',
       sourceId: payment.id,
     }
+  );
+}
+
+// ── Expense Supplier-Credit Redemption (Slice A) ──────────────
+//
+//   DEBIT  ACCOUNTS_PAYABLE  by amount   (offene Lieferanten-Verbindlichkeit der Expense sinkt)
+//   CREDIT SUPPLIER_CREDIT   by amount   (einloesbares Guthaben sinkt — KEIN Cash/Bank/Benefit)
+//
+// Spiegelt postPurchasePayment(method='credit') (DR AP / CR SUPPLIER_CREDIT), aber als DEDIZIERTER
+// Poster, damit expenseCashAccountFor/postExpensePayment strikt cash/bank/benefit-only bleiben und
+// 'credit' nie durch den BANK-Default-Fallback rutschen kann. sourceModule='EXPENSE_PAYMENT',
+// sourceId=paymentId → reverseSource('EXPENSE_PAYMENT', paymentId) dreht es beim Cancel/Delete
+// methoden-agnostisch zurueck (Teardown identisch zur Cash-Zahlung).
+export function postExpenseSupplierCreditPayment(
+  paymentId: string,
+  expenseId: string,
+  supplierId: string,
+  amount: number,
+  occurredAt: string
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postExpenseSupplierCreditPayment: amount must be > 0 (got ${amount})`);
+  }
+  const meta = { expenseId, kind: 'expense_credit_redemption' };
+  return postEntries(
+    [
+      {
+        account: 'ACCOUNTS_PAYABLE', direction: 'DEBIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta,
+      },
+      {
+        account: 'SUPPLIER_CREDIT', direction: 'CREDIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta,
+      },
+    ],
+    { occurredAt, sourceModule: 'EXPENSE_PAYMENT', sourceId: paymentId }
   );
 }
 
@@ -1704,7 +1747,10 @@ export function postStandaloneSupplierCredit(
   creditId: string,
   supplierId: string,
   amount: number,
-  method: ExpensePayment['method'],
+  // Strikt cash/bank/benefit: ein standalone Credit wird mit echtem Geld gefundet. NICHT
+  // ExpensePayment['method'] (das seit Slice A 'credit' enthaelt) — sonst koennte 'credit' ueber
+  // expenseCashAccountFor.default still auf BANK gebucht werden. So faengt der Compiler jeden Misroute.
+  method: 'cash' | 'bank' | 'benefit',
   occurredAt: string
 ): PostingResult {
   const amt = ROUND(amount);

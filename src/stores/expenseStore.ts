@@ -15,7 +15,12 @@ import {
   reverseSource,
   hasLedgerEntries,
   hasReversalFor,
+  beginLedgerTransaction,
+  commitLedgerTransaction,
+  rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
+import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
+import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Buchungsfehler blockieren den operativen Domain-Insert NICHT; Reconciliation-View
@@ -71,7 +76,8 @@ function rowToExpensePayment(row: Record<string, unknown>): ExpensePayment {
     id: row.id as string,
     expenseId: row.expense_id as string,
     amount: (row.amount as number) || 0,
-    method: (row.method as 'cash' | 'bank' | 'benefit') || 'cash',
+    method: (row.method as 'cash' | 'bank' | 'benefit' | 'credit') || 'cash',
+    reference: (row.reference as string | null) || undefined,
     paidAt: row.paid_at as string,
     note: (row.note as string | null) || undefined,
     createdAt: row.created_at as string,
@@ -81,6 +87,9 @@ function rowToExpensePayment(row: Record<string, unknown>): ExpensePayment {
 function deriveStatus(amount: number, paid: number): 'PENDING' | 'PAID' {
   return paid >= amount - 0.005 ? 'PAID' : 'PENDING';
 }
+
+// BHD = 3 Dezimalstellen (Fils). Settlement-Vergleiche laufen in Minor Units, keine 0.005-Toleranz.
+const toFils = (n: number) => Math.round(n * 1000);
 
 export const useExpenseStore = create<ExpenseStore>((set, get) => ({
   expenses: [],
@@ -207,72 +216,111 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     }
     if (fields.length === 0) return;
     values.push(id);
-    db.run(`UPDATE expenses SET ${fields.join(', ')} WHERE id = ?`, values);
 
-    // Wenn amount geändert wurde, Status anhand neuer paid_amount neu ableiten.
+    // Slice-A-Invariante (Supplier-Credit suppliergebunden): Supplier-Wechsel A→B blockieren,
+    // solange die Expense eine aktive Credit-Einloesung traegt. Wirft VOR jedem Write → voller
+    // Rollback, kein Teilzustand. Greift NICHT im Cancel-Pfad (der reverst die Credit-Einloesung
+    // selbst + restored das Guthaben) und NICHT bei gleichbleibendem Supplier (A→A).
+    if (data.status !== 'CANCELLED' && data.supplierId !== undefined && before) {
+      const prevSup = before.supplierId || null;
+      const nextSup = (data.supplierId as string | null) || null;
+      if (prevSup !== nextSup && expenseHasActiveCreditSettlement(id)) {
+        throw new Error(SUPPLIER_CREDIT_LOCK_MESSAGE);
+      }
+    }
+
+    // Slice A — Cancel-Pfad VOLLSTAENDIG ATOMAR: Statuswechsel + Ledger-Reverse jeder Zahlung
+    // (DR Cash/Bank/Benefit zurueck / CR AP; bei credit: DR SUPPLIER_CREDIT zurueck / CR AP) +
+    // Expense-Reverse (postExpenseCancelled) + Credit-Restore laufen in EINER beginLedgerTransaction.
+    // Bei JEDEM Fehler rollt ALLES zurueck — inkl. des status='CANCELLED'-Writes — und der Vorgang
+    // bleibt erneut ausfuehrbar (Domain und Ledger konsistent; keine gestrandete Credit-Nutzung).
+    // Capture der Credit-Einloesungen VOR den Reverses (Ledger vorhanden + noch nicht reversed);
+    // 2. Cancel: before.status ist bereits CANCELLED → Block nicht betreten / Capture leer → kein
+    // Doppel-Restore. expense_payments-Rows bleiben am CANCELLED-Record (Zahlungshistorie).
+    if (data.status === 'CANCELLED' && before && before.status !== 'CANCELLED') {
+      const now = new Date().toISOString();
+      const creditPaysToRestore = query(
+        `SELECT id, reference, amount FROM expense_payments WHERE expense_id = ? AND method = 'credit' AND reference IS NOT NULL`,
+        [id]
+      ).filter(p => hasLedgerEntries('EXPENSE_PAYMENT', p.id as string) && !hasReversalFor('EXPENSE_PAYMENT', p.id as string));
+      const pays = query('SELECT id FROM expense_payments WHERE expense_id = ?', [id]);
+      beginLedgerTransaction();
+      try {
+        db.run(`UPDATE expenses SET ${fields.join(', ')} WHERE id = ?`, values);
+        for (const p of pays) {
+          const payId = p.id as string;
+          if (!hasLedgerEntries('EXPENSE_PAYMENT', payId)) continue;
+          if (hasReversalFor('EXPENSE_PAYMENT', payId)) continue;
+          reverseSource('EXPENSE_PAYMENT', payId, now);
+        }
+        if (hasLedgerEntries('EXPENSE', id) && !hasReversalFor('EXPENSE', id)) {
+          postExpenseCancelled(before);
+        }
+        for (const cp of creditPaysToRestore) {
+          restoreSupplierCreditUsage(cp.reference as string, Number(cp.amount) || 0);
+        }
+        trackUpdate('expenses', id, data);
+        commitLedgerTransaction();
+      } catch (e) {
+        rollbackLedgerTransaction();
+        throw e;
+      }
+      get().loadExpenses();
+      return;
+    }
+
+    // Generischer (Nicht-Cancel-)Update-Pfad — Verhalten unveraendert.
+    db.run(`UPDATE expenses SET ${fields.join(', ')} WHERE id = ?`, values);
+    // Wenn amount geändert wurde, Status neu ableiten — Settlement-SSOT (cash + credit).
     if (data.amount !== undefined) {
       const row = query('SELECT amount, paid_amount FROM expenses WHERE id = ?', [id])[0];
       if (row) {
-        const newStatus = deriveStatus(Number(row.amount || 0), Number(row.paid_amount || 0));
+        const newStatus = computeExpenseSettlement(
+          Number(row.amount || 0), Number(row.paid_amount || 0), creditPaidForExpense(id),
+        ).status;
         db.run('UPDATE expenses SET status = ? WHERE id = ? AND status != ?', [newStatus, id, 'CANCELLED']);
       }
     }
-
     saveDatabase();
     trackUpdate('expenses', id, data);
     get().loadExpenses();
-
-    // ZIEL.md §3a + B1 — Ledger-Storno bei Expense-Cancel. Erst JEDE geleistete
-    // Zahlung reversen (DR Cash/Bank/Benefit zurueck / CR AP), dann die Expense
-    // selbst (DR AP / CR EXPENSES). Ohne den Payment-Reverse bliebe bei einer
-    // (teil)bezahlten Expense das EXPENSE_PAYMENT-Bein stehen → AP negativ +
-    // Cash/Bank/Benefit phantom-reduziert. deleteExpense macht es bereits so; der
-    // Cancel-Pfad zog vorher nur das EXPENSE-Bein. Die expense_payments-Rows bleiben
-    // am CANCELLED-Record (Zahlungshistorie) — backfillExpensePayments ist via
-    // hasLedgerEntries idempotent und reposted nichts. Guards = kein Doppel-Reverse.
-    if (data.status === 'CANCELLED' && before && before.status !== 'CANCELLED') {
-      const now = new Date().toISOString();
-      const pays = query('SELECT id FROM expense_payments WHERE expense_id = ?', [id]);
-      for (const p of pays) {
-        const payId = p.id as string;
-        safePost(`reverseExpensePayment(${payId}) [cancel]`, () => {
-          if (!hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
-          if (hasReversalFor('EXPENSE_PAYMENT', payId)) return;
-          reverseSource('EXPENSE_PAYMENT', payId, now);
-        });
-      }
-      safePost(`postExpenseCancelled(${id})`, () => {
-        if (!hasLedgerEntries('EXPENSE', id)) return;
-        if (hasReversalFor('EXPENSE', id)) return;
-        postExpenseCancelled(before);
-      });
-    }
   },
 
   deleteExpense: (id) => {
     const db = getDatabase();
     const now = new Date().toISOString();
-    // M-03 — Ledger-Storno VOR dem Löschen. Erst jede Zahlung (DR AP / CR Cash),
-    // dann die Expense selbst (DR EXPENSES / CR AP). Sonst bleiben EXPENSES/AP/
-    // Cash dauerhaft verfälscht (Cancel-Pfad reverst korrekt — nur Delete fehlte).
+    // M-03 — Ledger-Storno VOR dem Löschen. Slice A: jetzt ATOMAR in EINER Ledger-Transaktion
+    // + Credit-Restore. Der Capture der einzuloesenden Credit-Zahlungen MUSS VOR dem (Cascade-)
+    // Delete passieren, sonst ist der reference-Link weg. Reverse → Restore → Delete → trackDelete
+    // im selben Commit; jeder Fehler → kompletter Rollback. 2. Delete (idempotent): Record weg →
+    // query leer → No-Op.
+    const creditPaysToRestore = query(
+      `SELECT id, reference, amount FROM expense_payments WHERE expense_id = ? AND method = 'credit' AND reference IS NOT NULL`,
+      [id]
+    ).filter(p => hasLedgerEntries('EXPENSE_PAYMENT', p.id as string) && !hasReversalFor('EXPENSE_PAYMENT', p.id as string));
     const pays = query('SELECT id FROM expense_payments WHERE expense_id = ?', [id]);
-    for (const p of pays) {
-      const payId = p.id as string;
-      safePost(`reverseExpensePayment(${payId})`, () => {
-        if (!hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
-        if (hasReversalFor('EXPENSE_PAYMENT', payId)) return;
+    beginLedgerTransaction();
+    try {
+      for (const p of pays) {
+        const payId = p.id as string;
+        if (!hasLedgerEntries('EXPENSE_PAYMENT', payId)) continue;
+        if (hasReversalFor('EXPENSE_PAYMENT', payId)) continue;
         reverseSource('EXPENSE_PAYMENT', payId, now);
-      });
+      }
+      if (hasLedgerEntries('EXPENSE', id) && !hasReversalFor('EXPENSE', id)) {
+        reverseSource('EXPENSE', id, now);
+      }
+      for (const cp of creditPaysToRestore) {
+        restoreSupplierCreditUsage(cp.reference as string, Number(cp.amount) || 0);
+      }
+      db.run('DELETE FROM expense_payments WHERE expense_id = ?', [id]);
+      db.run('DELETE FROM expenses WHERE id = ?', [id]);
+      trackDelete('expenses', id);
+      commitLedgerTransaction();
+    } catch (e) {
+      rollbackLedgerTransaction();
+      throw e;
     }
-    safePost(`reverseExpense(${id})`, () => {
-      if (!hasLedgerEntries('EXPENSE', id)) return;
-      if (hasReversalFor('EXPENSE', id)) return;
-      reverseSource('EXPENSE', id, now);
-    });
-    db.run('DELETE FROM expense_payments WHERE expense_id = ?', [id]);
-    db.run('DELETE FROM expenses WHERE id = ?', [id]);
-    saveDatabase();
-    trackDelete('expenses', id);
     get().loadExpenses();
   },
 
@@ -283,13 +331,17 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     const exp = get().getExpense(id);
     if (!exp) throw new Error('Expense not found');
     if (exp.status === 'CANCELLED') throw new Error('Cannot record payment on cancelled expense');
-    const remaining = Math.max(0, exp.amount - exp.paidAmount);
-    if (remaining <= 0.005) {
+    // Settlement-SSOT: remaining/Status beruecksichtigen bestehende Credit-Einloesungen
+    // (settled = cash paid_amount + Σ credit-payments). paid_amount selbst bleibt cash-only;
+    // dieser Cash-Pfad addiert applied NUR zu paid_amount, nie Credit. Fils-genau, keine 0.005-Toleranz.
+    const creditPaid = creditPaidForExpense(id);
+    const before = computeExpenseSettlement(exp.amount, exp.paidAmount, creditPaid, exp.status);
+    if (toFils(before.remaining) <= 0) {
       throw new Error('Expense is already fully paid');
     }
-    const applied = Math.min(amount, remaining);
+    const applied = Math.min(amount, before.remaining);
     const newPaid = exp.paidAmount + applied;
-    const newStatus = deriveStatus(exp.amount, newPaid);
+    const newStatus = computeExpenseSettlement(exp.amount, newPaid, creditPaid, exp.status).status;
     const now = new Date().toISOString();
     const payDate = date || now.split('T')[0];
 
