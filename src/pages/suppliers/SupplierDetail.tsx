@@ -16,7 +16,7 @@ import { SoftWarn } from '@/components/ui/SoftWarn';
 import { PhoneInput } from '@/components/ui/PhoneInput';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import { useSupplierStore } from '@/stores/supplierStore';
+import { useSupplierStore, type SupplierCreditDisplay } from '@/stores/supplierStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useGoldStore } from '@/stores/goldStore';
@@ -36,11 +36,18 @@ function fmtDate(iso?: string): string {
   return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
+// Klartext-Labels fuer die drei Credit-Quellen in der SUPPLIER-CREDITS-Card.
+const CREDIT_KIND_LABEL: Record<SupplierCreditDisplay['kind'], string> = {
+  standalone: 'Standalone',
+  purchase_overpay: 'Purchase Overpayment',
+  return: 'Purchase Return Credit',
+};
+
 export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/suppliers');
-  const { suppliers, loadSuppliers, updateSupplier, deleteSupplier, getLedger } = useSupplierStore();
+  const { suppliers, loadSuppliers, updateSupplier, deleteSupplier, getLedger, getSupplierCreditsForDisplay, deleteStandaloneSupplierCredit } = useSupplierStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   // v0.7.7 — Pay-direkt-am-Supplier. expenses + recordExpensePayment kommen
   // via Store; Modal lebt in src/components/expenses/PayExpenseModal.
@@ -69,6 +76,12 @@ export function SupplierDetail() {
   const [form, setForm] = useState<Partial<Supplier>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  // Refund-Slice: lokaler Refresh-Tick (loadSuppliers allein triggert weder die ledger-
+  // noch die Credit-Memo neu — beide haengen daher zusaetzlich an refreshKey). refundCredit =
+  // die im Confirm-Modal anstehende Credit-Zeile; refundBusy sperrt den Commit-Button (Re-Entry-Schutz).
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [refundCredit, setRefundCredit] = useState<SupplierCreditDisplay | null>(null);
+  const [refundBusy, setRefundBusy] = useState(false);
 
   useEffect(() => {
     loadSuppliers(); loadPurchases(); loadExpenses(); loadCustomers(); loadInvoices(); goldLoadAll();
@@ -143,7 +156,20 @@ export function SupplierDetail() {
   // (TOTAL PAID / OUTSTANDING) live aktualisiert. Vorher trigger nur Purchase-
   // Aenderungen einen Re-Calc, Workshop-Expense-Payments wurden in der KPI
   // ignoriert obwohl getLedger() sie summiert.
-  const ledger = useMemo(() => id ? getLedger(id) : { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 }, [id, getLedger, purchases, expenses]);
+  // refreshKey-Dep: nach einem Refund (deleteStandaloneSupplierCredit) faellt die CREDIT BALANCE
+  // sonst nicht neu — loadSuppliers() aktualisiert nur das suppliers-Array, nicht purchases/expenses.
+  const ledger = useMemo(() => id ? getLedger(id) : { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 }, [id, getLedger, purchases, expenses, refreshKey]);
+
+  // SUPPLIER-CREDITS-Card: alle offenen Credits typisiert. getSupplierCreditsForDisplay ist eine
+  // reine DB-Query (an kein reaktives Store-Array gebunden), daher EXPLIZITE Deps:
+  //   - refreshKey         → nach erfolgreichem Refund (+ PaySupplier-onClose, s.u.)
+  //   - purchases/expenses → eine Credit-erzeugende Mutation (Purchase-Überzahlung, PaySupplier-Bulk
+  //                          auf Purchase ODER auf supplier-verknüpfte Expense/Standalone) ändert
+  //                          eines dieser Arrays → die Card aktualisiert sofort, ohne Remount.
+  const supplierCredits = useMemo(
+    () => id ? getSupplierCreditsForDisplay(id) : [],
+    [id, getSupplierCreditsForDisplay, refreshKey, purchases, expenses]
+  );
 
   const supplierPurchases = useMemo(
     () => id ? purchases.filter(p => p.supplierId === id).sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate)) : [],
@@ -264,6 +290,24 @@ export function SupplierDetail() {
       // Daten bleiben unveraendert. Stattdessen deaktivieren empfohlen.
       setConfirmDelete(false);
       alert(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function handleRefundCredit() {
+    if (!refundCredit || refundBusy) return;
+    // Store ist autoritativ: deleteStandaloneSupplierCredit prueft used_amount/Asset-Leg FRISCH und
+    // wirft bei jedem Block/Race (kein stiller No-op). Daher KEIN optimistisches Entfernen — die Liste
+    // aktualisiert sich erst ueber refreshKey, NACHDEM der Store-Call zurueckkommt. Bei Erfolg = echte
+    // Rueckbuchung; bei Throw zeigen wir die Meldung und laden trotzdem neu (geracter Zustand sichtbar).
+    setRefundBusy(true);
+    try {
+      deleteStandaloneSupplierCredit(refundCredit.id);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefundBusy(false);
+      setRefundCredit(null);
+      setRefreshKey(k => k + 1);
     }
   }
 
@@ -672,6 +716,55 @@ export function SupplierDetail() {
           </Card>
         </div>
 
+        {/* Supplier Credits — alle offenen Credits typisiert. Refund nur fuer unbenutzte
+            standalone Credits mit eindeutigem Live-Asset-Leg; sonst Aktion {'—'}. */}
+        <div style={{ marginTop: 24 }}>
+          <Card>
+            <span className="text-overline" style={{ marginBottom: 12 }}>SUPPLIER CREDITS ({supplierCredits.length})</span>
+            {supplierCredits.length === 0 ? (
+              <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No open credits.</p>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 1fr 1fr 1fr 1fr 1fr', gap: 12, fontSize: 12, marginTop: 12 }}>
+                <span className="text-overline">DATE</span>
+                <span className="text-overline">TYPE</span>
+                <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
+                <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>USED</span>
+                <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AVAILABLE</span>
+                <span className="text-overline">METHOD</span>
+                <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
+                {supplierCredits.map(c => (
+                  <div key={c.id} style={{ display: 'contents' }}>
+                    <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(c.createdAt)}</span>
+                    <span style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{CREDIT_KIND_LABEL[c.kind]}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={c.amount}/></span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={c.usedAmount}/></span>
+                    <span className="font-mono" style={{ fontSize: 12, color: c.remaining > 0 ? '#AA956E' : '#6B7280', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={c.remaining}/></span>
+                    <span style={{ fontSize: 12, padding: '8px 0', borderTop: '1px solid #E5E9EE', color: c.kind === 'standalone' ? (c.method ? '#4B5563' : '#B45309') : '#9CA3AF' }}>
+                      {c.kind === 'standalone' ? (c.method ?? 'Unavailable') : '—'}
+                    </span>
+                    <span style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', textAlign: 'right' }}>
+                      {c.refundable ? (
+                        <button
+                          onClick={() => setRefundCredit(c)}
+                          style={{
+                            fontSize: 11, padding: '4px 12px', border: '1px solid #DC2626',
+                            borderRadius: 4, background: 'transparent', color: '#DC2626',
+                            cursor: 'pointer', fontWeight: 500,
+                          }}
+                          title="Refund this unused credit to the original Cash/Bank/Benefit account">
+                          Refund Credit
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: 11, color: '#9CA3AF' }}>{'—'}</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+
         {/* Danger zone */}
         {editing && (
           <div style={{ marginTop: 24, display: 'flex', gap: 12 }}>
@@ -693,6 +786,35 @@ export function SupplierDetail() {
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
           <Button variant="danger" onClick={handleDelete}>Delete</Button>
         </div>
+      </Modal>
+
+      <Modal open={!!refundCredit} onClose={() => { if (!refundBusy) setRefundCredit(null); }} title="Refund Supplier Credit" width={440}>
+        {refundCredit && (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px', marginBottom: 16, fontSize: 13 }}>
+              <span style={{ color: '#6B7280' }}>Supplier</span>
+              <span style={{ color: '#0F0F10', fontWeight: 500 }}>{supplier.name}</span>
+              <span style={{ color: '#6B7280' }}>Credit amount</span>
+              <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }}><Bhd v={refundCredit.amount}/> BHD</span>
+              <span style={{ color: '#6B7280' }}>Original method</span>
+              <span style={{ color: '#0F0F10', fontWeight: 500 }}>{refundCredit.method}</span>
+            </div>
+            <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 10, lineHeight: 1.5 }}>
+              The supplier is returning this amount to the original Cash/Bank/Benefit account.
+            </p>
+            <div style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.25)', marginBottom: 20 }}>
+              <p style={{ fontSize: 12, color: '#B91C1C', lineHeight: 1.5 }}>
+                Only completely unused standalone credits can be refunded.
+              </p>
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={() => setRefundCredit(null)} disabled={refundBusy}>Cancel</Button>
+              <Button variant="danger" onClick={handleRefundCredit} disabled={refundBusy}>
+                {refundBusy ? 'Refunding…' : 'Refund Credit'}
+              </Button>
+            </div>
+          </>
+        )}
       </Modal>
 
       <HistoryDrawer
@@ -725,7 +847,7 @@ export function SupplierDetail() {
       <PaySupplierModal
         supplierId={showPaySupplierModal ? supplier.id : null}
         supplierName={supplier.name}
-        onClose={() => setShowPaySupplierModal(false)}
+        onClose={() => { setShowPaySupplierModal(false); setRefreshKey(k => k + 1); }}
       />
     </div>
   );

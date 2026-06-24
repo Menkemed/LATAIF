@@ -26,6 +26,49 @@ function safePost(label: string, fn: () => void): void {
 const toFils = (n: number) => Math.round(n * 1000);
 const round3 = (n: number) => toFils(n) / 1000;
 
+// Option B (read-only) — VOLLSTAENDIGE Validierung der Original-Source-Gruppe eines STANDALONE
+// Credits, NICHT nur "ein Asset-Konto existiert". SSOT fuer Anzeige (refundable) UND Refund-Pfad.
+// Liefert die Methode (Cash/Bank/Benefit) NUR bei exakt gueltiger Ledger-Struktur fuer
+// source_module='SUPPLIER_PREPAYMENT', source_id=creditId:
+//   - genau ZWEI Original-Legs (reverses_entry_id IS NULL) — kein drittes, kein fehlendes
+//   - genau ein  DR SUPPLIER_CREDIT, Betrag == expectedAmount (Fils)
+//   - genau ein  CR CASH|BANK|BENEFIT, Betrag == expectedAmount (Fils) — kein doppeltes Asset-Leg
+//   - beide Legs in derselben transaction_id
+//   - fuer KEINES der beiden Legs existiert bereits ein Reversal (auch ein TEIL-reversierter
+//     Source ist damit nie wieder refundierbar) — zusaetzlich harter Riegel via hasReversalFor
+//     (letzter Zyklus geschlossen → sofort raus).
+// Jede Abweichung → null = "Unavailable": kein Refund-Button, Store wirft, keine Loeschung,
+// keine Ledger-Rueckbuchung. Reines Lesen, kein Schema-/Ledger-Logik-Change.
+function validateStandaloneCreditRefundSource(creditId: string, expectedAmount: number): 'Cash' | 'Bank' | 'Benefit' | null {
+  try {
+    // Letzter Zyklus bereits vollstaendig reversiert → nichts zu refunden.
+    if (hasReversalFor('SUPPLIER_PREPAYMENT', creditId)) return null;
+    const legs = query(
+      `SELECT e1.account AS account, e1.direction AS direction, e1.amount AS amount, e1.transaction_id AS txn,
+              (SELECT COUNT(*) FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id) AS rev_count
+         FROM ledger_entries e1
+        WHERE e1.source_module = 'SUPPLIER_PREPAYMENT' AND e1.source_id = ?
+          AND e1.reverses_entry_id IS NULL`,
+      [creditId]
+    );
+    if (legs.length !== 2) return null;                                   // genau zwei Original-Legs
+    if (legs.some(l => Number(l.rev_count) > 0)) return null;             // kein Leg (auch teil-) reversiert
+    const want = toFils(expectedAmount);
+    if (legs.some(l => toFils((l.amount as number) || 0) !== want)) return null;  // Betrag matcht Credit (Fils)
+    if (new Set(legs.map(l => String(l.txn))).size !== 1) return null;    // beide Legs, eine Transaktion
+    const drLeg = legs.find(l => l.account === 'SUPPLIER_CREDIT' && l.direction === 'DEBIT');
+    const crLegs = legs.filter(l => l.direction === 'CREDIT'
+      && (l.account === 'CASH' || l.account === 'BANK' || l.account === 'BENEFIT'));
+    if (!drLeg || crLegs.length !== 1) return null;                       // genau ein DR SC + genau ein CR Asset
+    switch (String(crLegs[0].account)) {
+      case 'CASH':    return 'Cash';
+      case 'BANK':    return 'Bank';
+      case 'BENEFIT': return 'Benefit';
+      default:        return null;
+    }
+  } catch { return null; }
+}
+
 // ── SSOT: alle Tabellen/Spalten, die einen Supplier referenzieren ──
 // Hat EINE davon einen Treffer, gilt der Supplier als "verknuepft" und darf NICHT
 // hart geloescht werden: das Frontend (sql.js) erzwingt keine Foreign Keys, ein
@@ -95,6 +138,28 @@ interface SupplierCredit {
   createdAt: string;
 }
 
+// Diskriminator der drei Credit-Quellen via NULL-Konvention (kein source_type-Feld):
+//   standalone       = source_return_id IS NULL AND source_purchase_id IS NULL
+//   purchase_overpay = source_purchase_id IS NOT NULL AND source_return_id IS NULL
+//   return           = source_return_id IS NOT NULL
+type SupplierCreditKind = 'standalone' | 'purchase_overpay' | 'return';
+
+// Zeile fuer die SUPPLIER-CREDITS-Card: zeigt ALLE offenen Credits typisiert. `method` wird
+// nur fuer standalone aus dem Ledger abgeleitet (Option B), sonst null. `refundable` = standalone
+// UND used_amount Fils-exakt 0 UND eindeutiges lebendes Asset-Leg (method != null).
+export interface SupplierCreditDisplay {
+  id: string;
+  supplierId: string;
+  amount: number;
+  usedAmount: number;
+  remaining: number;
+  status: 'OPEN' | 'USED' | 'EXPIRED';
+  createdAt: string;
+  kind: SupplierCreditKind;
+  method: 'Cash' | 'Bank' | 'Benefit' | null;
+  refundable: boolean;
+}
+
 interface SupplierStore {
   suppliers: Supplier[];
   loading: boolean;
@@ -106,6 +171,8 @@ interface SupplierStore {
   getLedger: (id: string) => { totalPurchases: number; totalPaid: number; outstandingBalance: number; creditBalance: number };
   // Plan §8 #3 — explizite Credit-Records aus supplier_credits Tabelle
   getOpenCredits: (supplierId: string) => SupplierCredit[];
+  // SUPPLIER-CREDITS-Card: ALLE offenen Credits typisiert + (standalone) abgeleitete Methode + Refund-Eignung.
+  getSupplierCreditsForDisplay: (supplierId: string) => SupplierCreditDisplay[];
   applyCreditToPurchase: (creditId: string, purchaseId: string, amount: number) => void;
   // Standalone Supplier-Prepayment/-Credit (nicht dokument-gebunden) — z.B. PaySupplierModal-Ueberschuss.
   grantStandaloneCredit: (supplierId: string, amount: number, method: 'cash' | 'bank' | 'benefit', note?: string) => string;
@@ -315,6 +382,41 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     } catch { return []; }
   },
 
+  // SUPPLIER-CREDITS-Card (dieser Slice): ALLE offenen Credits eines Suppliers mit Typ-
+  // Diskriminator (NULL-Konvention), Ursprungs-Methode (nur standalone, Option B aus dem Ledger)
+  // und Refund-Eignung. refundable = standalone UND used_amount Fils-exakt 0 UND eindeutiges
+  // lebendes Asset-Leg (method != null). Reines Lesen — keine Mutation, kein Schema-Change.
+  getSupplierCreditsForDisplay: (supplierId) => {
+    try {
+      const rows = query(
+        `SELECT id, supplier_id, source_return_id, source_purchase_id, amount, used_amount, status, created_at
+           FROM supplier_credits WHERE supplier_id = ? AND status = 'OPEN' ORDER BY created_at DESC`,
+        [supplierId]
+      );
+      return rows.map(r => {
+        const amount = (r.amount as number) || 0;
+        const used = (r.used_amount as number) || 0;
+        const kind: SupplierCreditKind = r.source_return_id
+          ? 'return'
+          : (r.source_purchase_id ? 'purchase_overpay' : 'standalone');
+        const method = kind === 'standalone' ? validateStandaloneCreditRefundSource(r.id as string, amount) : null;
+        const refundable = kind === 'standalone' && toFils(used) === 0 && method !== null;
+        return {
+          id: r.id as string,
+          supplierId: r.supplier_id as string,
+          amount,
+          usedAmount: used,
+          remaining: Math.max(0, amount - used),
+          status: (r.status as 'OPEN' | 'USED' | 'EXPIRED') || 'OPEN',
+          createdAt: r.created_at as string,
+          kind,
+          method,
+          refundable,
+        };
+      });
+    } catch { return []; }
+  },
+
   // Plan §8 #3 — Credit auf einen Purchase anwenden: used_amount erhöhen, Purchase als bezahlt verbuchen.
   applyCreditToPurchase: (creditId, purchaseId, amount) => {
     if (amount <= 0) return;
@@ -440,27 +542,53 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     return creditId;
   },
 
-  // Delete/Refund eines standalone Supplier-Credits. BLOCK bei (teil-)eingeloest (used>0) —
-  // Entscheidung wie S4b (kein Auto-Reversal benutzter Credits). Sonst Ledger reversen
-  // (CR SUPPLIER_CREDIT / DR cash = Geld zurueck) + Row weg + sync, atomar in EINER Tx.
-  // reverseSource ist multi-cycle-safe (per-Leg, hasReversalFor-geguardet). NUR fuer standalone
-  // Credits (Diskriminator beide Source-IDs NULL) — Return-/Purchase-Overpay-Credits unberuehrt.
+  // Refund eines STANDALONE Supplier-Credits = reales Geld zurueck auf das urspruengliche
+  // Cash/Bank/Benefit-Konto (CR SUPPLIER_CREDIT / DR cash via reverseSource) — NICHT nur Row-Delete.
+  // Gehaerteter, autoritativer Pfad; die UI darf sich NIE auf einen vorab geladenen used_amount
+  // verlassen. Alles wird hier FRISCH aus der DB geprueft:
+  //   1. Credit frisch laden  2. beide Source-IDs NULL (= standalone)  3. status='OPEN'
+  //   4. used_amount Fils-exakt 0 (schon 0.001 BLOCKT — keine 0.005-Toleranz mehr)
+  //   5. genau EIN lebendes, unreversiertes SUPPLIER_PREPAYMENT-Asset-Leg (Cash/Bank/Benefit)
+  //   6. erst dann atomar: Ledger reversen + Row loeschen + trackDelete + commit.
+  // Jeder verletzte Schritt WIRFT (kein stiller No-op) → die UI meldet nie faelschlich Erfolg,
+  // und bei Doppel-Refund/Race gibt es keine zweite Rueckbuchung. NUR fuer standalone Credits —
+  // Return-/Purchase-Overpay-Credits sind durch Schritt 2 ausgeschlossen.
   deleteStandaloneSupplierCredit: (creditId) => {
     const db = getDatabase();
-    const c = query(
-      `SELECT used_amount FROM supplier_credits
-        WHERE id = ? AND source_return_id IS NULL AND source_purchase_id IS NULL`,
-      [creditId]
-    )[0];
-    if (!c) return;
-    if ((Number(c.used_amount) || 0) > 0.005) {
-      throw new Error('Cannot delete this supplier credit because it has already been (partially) redeemed. Reverse the redemption first.');
-    }
+    // Read → Validate → Mutate laufen als EINE atomare Einheit INNERHALB der Transaktion:
+    // beginLedgerTransaction ZUERST, dann der frische SELECT, die Status-/Fils-Pruefung und die
+    // Zwei-Leg-Validierung — alle gegen denselben Snapshot, gegen den anschliessend committed wird.
+    // Jeder Fehler rollt die (bis dahin nur lesende) Transaktion zurueck und wirft verstaendlich;
+    // keine Loeschung/Rueckbuchung auf Basis veralteter Daten. Frontend-DB = sql.js (eine
+    // In-Memory-Verbindung), alles SYNCHRON → KEIN await/Race-Fenster zwischen Validierung und
+    // Commit; Cross-Client-Konkurrenz regelt der Sync-Layer (last-writer-wins), nicht SQLite-Locks.
     beginLedgerTransaction();
     try {
-      if (hasLedgerEntries('SUPPLIER_PREPAYMENT', creditId) && !hasReversalFor('SUPPLIER_PREPAYMENT', creditId)) {
-        reverseSource('SUPPLIER_PREPAYMENT', creditId, new Date().toISOString());
+      // 2. Credit frisch laden (nur standalone — beide Source-IDs NULL)
+      const c = query(
+        `SELECT amount, used_amount, status FROM supplier_credits
+          WHERE id = ? AND source_return_id IS NULL AND source_purchase_id IS NULL`,
+        [creditId]
+      )[0];
+      if (!c) {
+        throw new Error('Supplier credit not found or not a standalone credit — it may have already been refunded or redeemed.');
       }
+      // 3. Status + used_amount (Fils-exakt 0, schon 0.001 BLOCKT)
+      if (String(c.status) !== 'OPEN') {
+        throw new Error('This supplier credit is no longer open and cannot be refunded.');
+      }
+      if (toFils(Number(c.used_amount) || 0) !== 0) {
+        throw new Error('Cannot refund this supplier credit because it has already been (partially) redeemed. Reverse the redemption first.');
+      }
+      // 4. Vollstaendige Source-Gruppen-Validierung (genau DR SUPPLIER_CREDIT + CR Asset, Betrag ==
+      //    amount auf Fils, gleiche Transaktion, kein Leg reversiert). method != null garantiert die
+      //    exakte, lebende, unreversierte 2-Leg-Struktur → reverseSource flippt sie vollstaendig.
+      const method = validateStandaloneCreditRefundSource(creditId, (c.amount as number) || 0);
+      if (!method) {
+        throw new Error('Cannot refund: the original Cash/Bank/Benefit ledger entry for this credit is unavailable or invalid (missing, incomplete, amount-mismatched, or already reversed). A refund must book the money back to the original account.');
+      }
+      // 5. Reversal  6. Row loeschen  7. trackDelete  8. Commit
+      reverseSource('SUPPLIER_PREPAYMENT', creditId, new Date().toISOString());
       db.run(`DELETE FROM supplier_credits WHERE id = ?`, [creditId]);
       trackDelete('supplier_credits', creditId);
       commitLedgerTransaction();
