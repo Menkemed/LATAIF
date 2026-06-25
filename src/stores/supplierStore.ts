@@ -14,6 +14,9 @@ import {
   hasLedgerEntries, hasReversalFor, reverseSource,
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
+// Slice B — gemeinsamer reiner FIFO-Planer (kein DB/Mutation/Ledger). Der Writer ruft ihn IN
+// der Transaktion auf FRISCH geladenen Daten; dieselbe Funktion speist die UI-Vorschau.
+import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -560,12 +563,12 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       const openExpenses = expenseRows.map(r => {
         const amountF = toFils(Number(r.amount) || 0);
         const settledF = toFils(Number(r.paid) || 0) + toFils(Number(r.credit_paid) || 0);
-        return { id: r.id as string, amountF, settledF, remF: amountF - settledF };
+        return { id: r.id as string, createdAt: (r.created_at as string) || '', amountF, settledF, remF: amountF - settledF };
       }).filter(e => e.remF > 0);
 
       // ── Frisch laden: offene Credits dieser Branch (available = amount − used_amount) ──
       const creditRows = query(
-        `SELECT id, amount, used_amount FROM supplier_credits
+        `SELECT id, amount, used_amount, created_at FROM supplier_credits
           WHERE supplier_id = ? AND branch_id = ? AND status = 'OPEN'
           ORDER BY created_at ASC, id ASC`,
         [supplierId, branchId]
@@ -575,43 +578,20 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
         const usedF = toFils(Number(r.used_amount) || 0);
         const availF = totalF - usedF;
         if (availF < 0) throw new Error('Supplier credit has a negative available balance — data inconsistency.');
-        return { id: r.id as string, totalF, usedF, availF };
+        return { id: r.id as string, createdAt: (r.created_at as string) || '', totalF, usedF, availF };
       }).filter(c => c.availF > 0);
 
-      // ── 3. Validierung (Fils-genau, KEIN stilles Cappen) ──
+      // ── 3+4. Gemeinsamer reiner Planer: validiert Fils-genau (wirft → Rollback) und liefert den
+      // FIFO-Plan (Expenses aeltester-zuerst, je Expense aus Credits aeltester-zuerst). KEIN stilles
+      // Cappen. Identische Logik wie die UI-Vorschau — der Store bleibt aber die Autoritaet (frisch
+      // geladen, in-Tx). ──
       const reqF = toFils(requestedAmount);
-      const openTotalF = openExpenses.reduce((s, e) => s + e.remF, 0);
-      const creditTotalF = openCredits.reduce((s, c) => s + c.availF, 0);
-      if (reqF > openTotalF) {
-        throw new Error(`Requested amount (${round3(requestedAmount).toFixed(3)}) exceeds the supplier's open expenses (${(openTotalF / 1000).toFixed(3)}).`);
-      }
-      if (reqF > creditTotalF) {
-        throw new Error(`Requested amount (${round3(requestedAmount).toFixed(3)}) exceeds available supplier credit (${(creditTotalF / 1000).toFixed(3)}).`);
-      }
-
-      // ── 4. FIFO-Plan: Expenses aeltester-zuerst, je Expense aus Credits aeltester-zuerst ──
-      const plan: Array<{ expenseId: string; creditId: string; amountF: number }> = [];
-      let need = reqF;
-      let ci = 0;
-      for (const exp of openExpenses) {
-        if (need <= 0) break;
-        let expRem = exp.remF;
-        while (expRem > 0 && need > 0) {
-          while (ci < openCredits.length && openCredits[ci].availF <= 0) ci++;
-          if (ci >= openCredits.length) break;   // defensiv — durch Validierung ausgeschlossen
-          const cr = openCredits[ci];
-          const takeF = Math.min(expRem, cr.availF, need);
-          if (takeF <= 0) break;
-          plan.push({ expenseId: exp.id, creditId: cr.id, amountF: takeF });
-          expRem -= takeF; cr.availF -= takeF; need -= takeF;
-        }
-      }
-      if (need > 0) throw new Error('Internal allocation error: could not fully distribute the requested amount.');
+      const { allocations } = planSupplierCreditExpenseAllocations(openExpenses, openCredits, reqF);
 
       // ── 5+8. Pro Allokation: expense_payments-Row (method='credit', reference) + Ledger DIRECT ──
       const creditAppliedF = new Map<string, number>();
       const expenseAppliedF = new Map<string, number>();
-      for (const a of plan) {
+      for (const a of allocations) {
         const payId = uuid();
         const amt = a.amountF / 1000;
         db.run(

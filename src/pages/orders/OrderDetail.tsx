@@ -23,6 +23,7 @@ import { formatProductMultiLine } from '@/core/utils/product-format';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useExpenseStore } from '@/stores/expenseStore';
+import { computeExpenseSettlement, creditPaidByExpense } from '@/core/finance/expenseSettlement';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { query } from '@/core/db/helpers';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
@@ -130,6 +131,10 @@ export function OrderDetail() {
 
   const payments = useMemo(() => (id ? paymentsByOrder[id] || [] : []), [id, paymentsByOrder]);
   const totalPaid = useMemo(() => payments.reduce((s, p) => s + p.amount, 0), [payments]);
+
+  // Slice B — Credit-Einloesungen je Expense gebuendelt (EINE GROUP-BY-Query, kein N+1). Der A/P-Chip
+  // pro Kostenzeile rechnet settled = cash+credit, sonst zeigt eine credit-beglichene Zeile "Pay".
+  const expenseCreditPaid = useMemo(() => creditPaidByExpense(), [expenses]);
   // M-08 — angezeigter offener Saldo: konvertierte Order-Payments (Geld zur Invoice
   // gewandert) ausschliessen. totalPaid (roh) bleibt fuer Flow-Logik (Convert/Delete/Cancel).
   const totalPaidActive = useMemo(() => payments.filter(p => !p.convertedToInvoice).reduce((s, p) => s + p.amount, 0), [payments]);
@@ -1423,13 +1428,13 @@ export function OrderDetail() {
                               return <span style={{ color: '#D97706' }}>pending</span>;
                             }
                             const exp = expenses.find(e => e.id === l.expenseId);
-                            const status = exp?.status;
-                            const paid = exp?.paidAmount || 0;
-                            const total = exp?.amount || 0;
-                            if (status === 'PAID' || (total > 0 && paid >= total - 0.005)) {
+                            const settlement = exp
+                              ? computeExpenseSettlement(exp.amount, exp.paidAmount || 0, expenseCreditPaid.get(exp.id) || 0, exp.status)
+                              : null;
+                            if (settlement && settlement.status === 'PAID') {
                               return <span style={{ color: '#16A34A' }} title="Supplier expense fully paid">✓ Paid</span>;
                             }
-                            const isPartial = paid > 0.005;
+                            const isPartial = !!settlement && settlement.settled > 0;
                             return (
                               <button
                                 onClick={() => setPayExpenseId(l.expenseId!)}

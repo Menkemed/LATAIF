@@ -18,6 +18,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useExpenseStore } from '@/stores/expenseStore';
+import { computeExpenseSettlement, creditPaidForExpense } from '@/core/finance/expenseSettlement';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { useProductStore } from '@/stores/productStore';
@@ -164,7 +165,9 @@ export function RepairDetail() {
     if (fee <= 0) return false;
     const linked = expenses.find(e => e.relatedModule === 'repair' && e.relatedEntityId === id);
     if (!linked) return !!repair.internalPaidFrom;
-    return linked.status === 'PAID' || (linked.amount > 0 && linked.paidAmount >= linked.amount - 0.005);
+    // Settlement-SSOT: cash + credit. Eine credit-beglichene Workshop-Expense gilt als bezahlt.
+    const settlement = computeExpenseSettlement(linked.amount, linked.paidAmount || 0, creditPaidForExpense(linked.id), linked.status);
+    return settlement.status === 'PAID';
   }, [id, repair, expenses]);
 
   useEffect(() => {

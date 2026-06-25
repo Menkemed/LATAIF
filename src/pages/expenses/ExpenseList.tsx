@@ -19,6 +19,9 @@ import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import type { Expense, ExpenseCategory, RecurringExpenseTemplate } from '@/core/models/types';
 import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { matchesDeep } from '@/core/utils/deep-search';
+// Slice B — Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen. paid_amount bleibt
+// cash-only; ohne den credit-Anteil zeigte eine credit-beglichene Expense faelschlich "Unpaid".
+import { computeExpenseSettlement, creditPaidByExpense } from '@/core/finance/expenseSettlement';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -37,11 +40,11 @@ const CATEGORIES: { value: ExpenseCategory; label: string }[] = [
 type PayTiming = 'now' | 'later' | 'partial';
 type DisplayStatus = 'Paid' | 'Partially Paid' | 'Unpaid' | 'Cancelled';
 
-function deriveDisplayStatus(e: Expense): DisplayStatus {
-  if (e.status === 'CANCELLED') return 'Cancelled';
-  const paid = e.paidAmount || 0;
-  if (paid >= e.amount - 0.005) return 'Paid';
-  if (paid > 0.005) return 'Partially Paid';
+// Status aus der Settlement-SSOT (cash + credit), nicht aus paid_amount allein.
+function deriveDisplayStatus(s: ReturnType<typeof computeExpenseSettlement>): DisplayStatus {
+  if (s.status === 'CANCELLED') return 'Cancelled';
+  if (s.status === 'PAID') return 'Paid';
+  if (s.settled > 0) return 'Partially Paid';
   return 'Unpaid';
 }
 
@@ -153,6 +156,16 @@ export function ExpenseList() {
     return r;
   }, [expenses, search, categoryFilter]);
 
+  // Credit-Einloesungen je Expense gebuendelt (EINE GROUP-BY-Query, kein N+1) → Settlement je Expense.
+  const creditPaidMap = useMemo(() => creditPaidByExpense(), [expenses]);
+  const settlementByExpense = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof computeExpenseSettlement>>();
+    for (const e of expenses) {
+      m.set(e.id, computeExpenseSettlement(e.amount, e.paidAmount || 0, creditPaidMap.get(e.id) || 0, e.status));
+    }
+    return m;
+  }, [expenses, creditPaidMap]);
+
   const totals = getTotalsByCategory();
   const grandTotal = Object.values(totals).reduce((s, v) => s + v, 0);
   // v0.8.1 — kapitalisierte Kosten (Inventory: fließen in Lagerwert→COGS, types.ts
@@ -163,9 +176,12 @@ export function ExpenseList() {
     .filter(([cat]) => isCapitalizedExpenseCategory(cat))
     .reduce((s, [, v]) => s + v, 0);
   const operatingTotal = grandTotal - capitalizedTotal;
-  const totalPaid = expenses.filter(e => e.status !== 'CANCELLED').reduce((s, e) => s + (e.paidAmount || 0), 0);
+  // Settlement-SSOT: "paid" = cash+credit, "open" = Rest danach (sonst unter-meldet die Statistik
+  // den echten Zahlungsstatus, wenn Credits eingeloest wurden).
+  const totalPaid = expenses.filter(e => e.status !== 'CANCELLED')
+    .reduce((s, e) => s + (settlementByExpense.get(e.id)?.settled || 0), 0);
   const totalUnpaid = expenses.filter(e => e.status !== 'CANCELLED')
-    .reduce((s, e) => s + Math.max(0, e.amount - (e.paidAmount || 0)), 0);
+    .reduce((s, e) => s + (settlementByExpense.get(e.id)?.remaining || 0), 0);
 
   function handleCreate() {
     if (!form.amount || form.amount <= 0) return;
@@ -420,8 +436,10 @@ export function ExpenseList() {
             ))}
           </div>
           {filtered.map(e => {
-            const remaining = Math.max(0, e.amount - (e.paidAmount || 0));
-            const displayStatus = deriveDisplayStatus(e);
+            const settlement = settlementByExpense.get(e.id) || computeExpenseSettlement(e.amount, e.paidAmount || 0, 0, e.status);
+            const remaining = settlement.remaining;
+            const settled = settlement.settled;
+            const displayStatus = deriveDisplayStatus(settlement);
             const statusStyle = STATUS_STYLE[displayStatus];
             const canPay = displayStatus === 'Unpaid' || displayStatus === 'Partially Paid';
             return (
@@ -444,7 +462,7 @@ export function ExpenseList() {
                 <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{CATEGORIES.find(c => c.value === e.category)?.label || e.category}</span>
                 <span style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description || '—'}</span>
                 <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={e.amount}/></span>
-                <span className="font-mono" style={{ fontSize: 13, color: e.paidAmount > 0 ? '#16A34A' : '#9CA3AF' }}><Bhd v={e.paidAmount || 0}/></span>
+                <span className="font-mono" style={{ fontSize: 13, color: settled > 0 ? '#16A34A' : '#9CA3AF' }}><Bhd v={settled}/></span>
                 <span className="font-mono" style={{ fontSize: 13, color: remaining > 0.005 ? '#DC2626' : '#9CA3AF' }}>
                   {remaining > 0.005 ? fmt(remaining) : '—'}
                 </span>

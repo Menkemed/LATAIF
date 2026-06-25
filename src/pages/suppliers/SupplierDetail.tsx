@@ -25,6 +25,7 @@ import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { PaySupplierModal } from '@/components/expenses/PaySupplierModal';
 import type { GoldPayable } from '@/core/models/types';
 import { query } from '@/core/db/helpers';
+import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import type { Supplier } from '@/core/models/types';
 
 function fmt(v: number): string {
@@ -224,14 +225,17 @@ export function SupplierDetail() {
   // die OUTSTANDING-KPI sie laengst mitzaehlt (getLedger summiert ALLE expenses
   // des Suppliers, modul-unabhaengig). Jetzt deckt sich Liste wieder mit KPI.
   const workshopExpenses = useMemo(() => {
-    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; expenseDate: string; status: string; module: string; linkId?: string; sourceNumber?: string }>;
+    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; creditPaid: number; expenseDate: string; status: string; module: string; linkId?: string; sourceNumber?: string }>;
     try {
       // LEFT JOIN holt die echte Beleg-Nummer der Quelle (ORD-… / REP-…), damit
       // die SOURCE-Spalte ein ehrlicher Link ist: angezeigte Nummer == Ziel.
+      // Slice B — credit_paid gebuendelt (Korrelations-Subquery, kein N+1) → settled = cash+credit.
       const rows = query(
         `SELECT e.id, e.expense_number, e.description, e.amount, e.paid_amount, e.expense_date, e.status,
                 e.related_module, e.related_entity_id,
-                o.order_number AS order_number, r.repair_number AS repair_number
+                o.order_number AS order_number, r.repair_number AS repair_number,
+                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
+                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
            FROM expenses e
            LEFT JOIN orders  o ON o.id = e.related_entity_id AND e.related_module = 'order'
            LEFT JOIN repairs r ON r.id = e.related_entity_id AND e.related_module = 'repair'
@@ -245,6 +249,7 @@ export function SupplierDetail() {
         description: r.description as string,
         amount: (r.amount as number) || 0,
         paidAmount: (r.paid_amount as number) || 0,
+        creditPaid: Number(r.credit_paid) || 0,
         expenseDate: r.expense_date as string,
         status: r.status as string,
         module: (r.related_module as string) || 'repair',
@@ -252,9 +257,9 @@ export function SupplierDetail() {
         sourceNumber: (r.order_number as string) || (r.repair_number as string) || undefined,
       }));
     } catch { return []; }
-    // expenses-Array als Dep: nach recordExpensePayment aendert sich der Store,
-    // das useMemo re-queryt die DB und die Pay-Buttons aktualisieren live.
-  }, [id, purchases, expenses]);
+    // expenses-Array als Dep: nach recordExpensePayment aendert sich der Store, das useMemo re-queryt.
+    // refreshKey-Dep: nach Credit-Einloesung (PaySupplier-onClose) re-queryt die Card OHNE F5.
+  }, [id, purchases, expenses, refreshKey]);
 
   if (!supplier) {
     return (
@@ -528,12 +533,15 @@ export function SupplierDetail() {
                 <span className="text-overline">STATUS</span>
                 <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
                 {workshopExpenses.map(e => {
-                  const remaining = Math.max(0, e.amount - e.paidAmount);
+                  // Settlement-SSOT: settled = cash + credit; eine credit-beglichene Expense gilt als Paid.
+                  const settlement = computeExpenseSettlement(e.amount, e.paidAmount, e.creditPaid, e.status);
+                  const remaining = settlement.remaining;
+                  const settled = settlement.settled;
                   // Link nur wenn die Quelle noch existiert (JOIN lieferte eine Nummer).
                   const target = (e.linkId && e.sourceNumber)
                     ? (e.module === 'order' ? `/orders/${e.linkId}` : `/repairs/${e.linkId}`)
                     : null;
-                  const canPay = e.status !== 'PAID' && e.status !== 'CANCELLED' && remaining > 0;
+                  const canPay = settlement.status !== 'PAID' && e.status !== 'CANCELLED' && remaining > 0;
                   return (
                     <div key={e.id} style={{ display: 'contents' }}>
                       <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{e.expenseNumber}</span>
@@ -547,13 +555,13 @@ export function SupplierDetail() {
                       </span>
                       <span style={{ fontSize: 12, color: '#4B5563', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{fmtDate(e.expenseDate)}</span>
                       <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.amount}/></span>
-                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={e.paidAmount}/></span>
+                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A', textAlign: 'right', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}><Bhd v={settled}/></span>
                       <span style={{
                         fontSize: 11, padding: '8px 0', borderTop: '1px solid #E5E9EE',
-                        color: e.status === 'PAID' ? '#16A34A' : remaining > 0 ? '#DC2626' : '#6B7280',
+                        color: settlement.status === 'PAID' ? '#16A34A' : remaining > 0 ? '#DC2626' : '#6B7280',
                         fontWeight: remaining > 0 ? 600 : 400,
                       }}>
-                        {e.status === 'PAID' ? 'Paid' : remaining > 0 ? `${fmt(remaining)} pending` : e.status}
+                        {settlement.status === 'PAID' ? 'Paid' : remaining > 0 ? `${fmt(remaining)} pending` : e.status}
                       </span>
                       <span style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', textAlign: 'right' }}>
                         {canPay ? (

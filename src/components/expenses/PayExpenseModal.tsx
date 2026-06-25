@@ -5,12 +5,13 @@
 // Chip-Klick) und OrderDetail (A/P-Chip-Klick). Eine UI, eine SSOT-Action
 // (`recordExpensePayment`) — Cross-Store-Reload triggert die anderen Views
 // automatisch via expenseStore.recordExpensePayment.
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Bhd } from '@/components/ui/Bhd';
 import { useExpenseStore } from '@/stores/expenseStore';
+import { computeExpenseSettlement, creditPaidForExpense } from '@/core/finance/expenseSettlement';
 
 interface PayExpenseModalProps {
   expenseId: string | null;
@@ -29,7 +30,12 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   const [method, setMethod] = useState<PayMethod>('bank');
 
   const exp = expenseId ? expenses.find(e => e.id === expenseId) : null;
-  const remaining = exp ? Math.max(0, exp.amount - (exp.paidAmount || 0)) : 0;
+  // Settlement-SSOT: Rest = amount − (cash + credit). credit_paid einzeln (eine Expense → eine Query,
+  // kein N+1). Ohne den credit-Anteil koennte das Modal Cash auf eine bereits credit-beglichene
+  // Expense ueber-einziehen und zeigte einen falschen Restbetrag.
+  const creditPaid = useMemo(() => (expenseId ? creditPaidForExpense(expenseId) : 0), [expenseId, expenses]);
+  const settlement = exp ? computeExpenseSettlement(exp.amount, exp.paidAmount || 0, creditPaid, exp.status) : null;
+  const remaining = settlement ? settlement.remaining : 0;
 
   // Wenn das Modal mit einer neuen expenseId oeffnet, Form mit Restbetrag +
   // Default-Methode vorbelegen. effect statt useState-Init damit ein
@@ -77,9 +83,15 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
               <span className="font-mono"><Bhd v={exp.amount}/> BHD</span>
             </div>
             <div className="flex justify-between" style={{ marginTop: 4 }}>
-              <span>Already paid:</span>
+              <span>Already paid (cash):</span>
               <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={exp.paidAmount || 0}/> BHD</span>
             </div>
+            {creditPaid > 0 && (
+              <div className="flex justify-between" style={{ marginTop: 4 }}>
+                <span>Credit applied:</span>
+                <span className="font-mono" style={{ color: '#715DE3' }}><Bhd v={creditPaid}/> BHD</span>
+              </div>
+            )}
             <div className="flex justify-between" style={{ marginTop: 4 }}>
               <span>Remaining:</span>
               <span className="font-mono" style={{ color: '#DC2626' }}><Bhd v={remaining}/> BHD</span>
