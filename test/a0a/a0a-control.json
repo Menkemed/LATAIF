@@ -1,0 +1,183 @@
+{
+  "runName": "control",
+  "mode": "control",
+  "startingState": {
+    "contentIdenticalAB": true,
+    "domainHash": "a37362f1e66c2658",
+    "ledgerHash": "ea05846fa63116eb",
+    "bothChangelogsEmpty": true,
+    "bothCursorsZero": true,
+    "serverChangelogEmpty": true,
+    "separateProcesses": true,
+    "sharedSqlJsInstance": false,
+    "sharedDbFile": false,
+    "sharedAppDataDir": false
+  },
+  "sequence": {
+    "A_redeem_ok": true,
+    "B_view_after_pull": {
+      "supplier_credits": [
+        {
+          "amount": 100,
+          "used_amount": 100,
+          "status": "USED"
+        }
+      ],
+      "expense_payments": 1
+    },
+    "B_redeem_attempt_ok": false,
+    "B_redeem_error": "Requested amount (100.000) exceeds the supplier's open expenses (0.000)."
+  },
+  "syncCycles": [
+    {
+      "who": "A-control",
+      "pending": 0,
+      "cursor": "5"
+    },
+    {
+      "who": "B-control",
+      "pending": 0,
+      "cursor": "5"
+    },
+    {
+      "who": "A-control",
+      "pending": 0,
+      "cursor": "5"
+    },
+    {
+      "who": "B-control",
+      "pending": 0,
+      "cursor": "5"
+    }
+  ],
+  "serverChangelog": [
+    {
+      "id": 1,
+      "table": "expense_payments",
+      "action": "insert"
+    },
+    {
+      "id": 2,
+      "table": "ledger_entries",
+      "action": "insert"
+    },
+    {
+      "id": 3,
+      "table": "ledger_entries",
+      "action": "insert"
+    },
+    {
+      "id": 4,
+      "table": "supplier_credits",
+      "action": "update"
+    },
+    {
+      "id": 5,
+      "table": "expenses",
+      "action": "update"
+    }
+  ],
+  "finalSummary": {
+    "supplier_credits": [
+      {
+        "amount": 100,
+        "used_amount": 100,
+        "status": "USED"
+      }
+    ],
+    "expenses": [
+      {
+        "amount": 100,
+        "paid_amount": 0,
+        "status": "PAID"
+      }
+    ],
+    "expense_payments": {
+      "count": 1,
+      "shapes": [
+        {
+          "amount": 100,
+          "method": "credit",
+          "reference": "cred-a0a",
+          "count": 1
+        }
+      ]
+    },
+    "redemptionLedger": {
+      "transactions": 1,
+      "legs": [
+        {
+          "account": "ACCOUNTS_PAYABLE",
+          "direction": "DEBIT",
+          "amount": 100,
+          "count": 1
+        },
+        {
+          "account": "SUPPLIER_CREDIT",
+          "direction": "CREDIT",
+          "amount": 100,
+          "count": 1
+        }
+      ]
+    }
+  },
+  "recon": {
+    "globalImbalance": 0,
+    "supplierAP_ledger": 0,
+    "supplierCredit_ledger": 0,
+    "cpMismatches": 0,
+    "cpCreditErrors": 0
+  },
+  "controlHealthy": true,
+  "additionalDefect": false,
+  "invariants": [
+    {
+      "invariant": "Exactly one redemption succeeds (other blocked)",
+      "expectedBusiness": "one ok / one blocked",
+      "actual": "A.ok=true B.ok=false",
+      "violated": false
+    },
+    {
+      "invariant": "Credit used exactly once (used_amount == Σ credit payments)",
+      "expectedBusiness": "equal",
+      "actual": "used_amount=100, Σ=100",
+      "violated": false
+    },
+    {
+      "invariant": "Exactly one credit expense_payment row",
+      "expectedBusiness": 1,
+      "actual": 1,
+      "violated": false
+    },
+    {
+      "invariant": "Exactly one redemption ledger transaction",
+      "expectedBusiness": 1,
+      "actual": 1,
+      "violated": false
+    },
+    {
+      "invariant": "Expense not over-settled (Σ credit settled <= amount)",
+      "expectedBusiness": "<= 100",
+      "actual": 100,
+      "violated": false
+    },
+    {
+      "invariant": "Supplier-credit ledger balance >= 0",
+      "expectedBusiness": ">= 0",
+      "actual": 0,
+      "violated": false
+    },
+    {
+      "invariant": "Global ledger imbalance == 0",
+      "expectedBusiness": 0,
+      "actual": 0,
+      "violated": false
+    },
+    {
+      "invariant": "Counterparty reconciliation green",
+      "expectedBusiness": "0 mismatch / 0 error",
+      "actual": "mismatch=0, creditErrors=0",
+      "violated": false
+    }
+  ]
+}

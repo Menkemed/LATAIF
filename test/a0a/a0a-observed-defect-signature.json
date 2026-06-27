@@ -1,0 +1,50 @@
+{
+  "note": "Structural defect signature OBSERVED after the runs (read from the DB, then summarized). Descriptive only — it does NOT drive the writer, sync or fixture.",
+  "fixture": {
+    "tenant": "tenant-a0a",
+    "branch": "branch-a0a",
+    "supplier": "sup-a0a",
+    "expense": "exp-a0a",
+    "credit": "cred-a0a",
+    "user": "user-a0a",
+    "amount": 100
+  },
+  "race": [
+    {
+      "run": "run1",
+      "pushFirst": "A",
+      "bothRedeemed": true,
+      "violatedInvariants": [
+        "Exactly one redemption succeeds (other blocked)",
+        "Credit used exactly once (used_amount == Σ credit payments)",
+        "Exactly one credit expense_payment row",
+        "Exactly one redemption ledger transaction",
+        "Expense not over-settled (Σ credit settled <= amount)",
+        "Supplier-credit ledger balance >= 0",
+        "Counterparty reconciliation green"
+      ],
+      "globalGreenButCounterpartyRed": true
+    },
+    {
+      "run": "run2",
+      "pushFirst": "B",
+      "bothRedeemed": true,
+      "violatedInvariants": [
+        "Exactly one redemption succeeds (other blocked)",
+        "Credit used exactly once (used_amount == Σ credit payments)",
+        "Exactly one credit expense_payment row",
+        "Exactly one redemption ledger transaction",
+        "Expense not over-settled (Σ credit settled <= amount)",
+        "Supplier-credit ledger balance >= 0",
+        "Counterparty reconciliation green"
+      ],
+      "globalGreenButCounterpartyRed": true
+    }
+  ],
+  "control": {
+    "healthy": true,
+    "additionalDefect": false,
+    "B_second_redeem_ok": false,
+    "violatedInvariants": []
+  }
+}
