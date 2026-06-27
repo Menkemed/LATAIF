@@ -1,0 +1,719 @@
+{
+  "group": "canonical-json",
+  "profile": "LCJ-v4",
+  "protocolVersion": 4,
+  "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+  "maxI64": "9223372036854775807",
+  "u32Max": 4294967295,
+  "operationTypePattern": "^[A-Z][A-Z0-9_]{2,63}$",
+  "timestampPattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+  "i64KeyRule": "key ends with \"Fils\" or \"Revision\", or is serverSequence -> canonical i64 decimal STRING",
+  "u32KeyRule": "mutationCount and ordinal -> bounded JSON integer 0..4294967295",
+  "protocolVersionRule": "protocolVersion -> JSON integer, exactly 4 for v4",
+  "note": "LCJ-v4: 64-bit domain values are i64 decimal strings; protocolVersion/mutationCount/ordinal are bounded JSON integers; number rejection is field/schema based (no global ban).",
+  "canonicalCases": [
+    {
+      "name": "valid-simple-settlement",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 370,
+      "sha256": "114b4e3630e948a473d23613af5228aebfbcc4c5a5b0907422b08468317c8050"
+    },
+    {
+      "name": "member-order-independent",
+      "input": {
+        "allocations": [
+          {
+            "amountFils": "100000",
+            "expenseId": "exp-1",
+            "creditId": "cred-1"
+          }
+        ],
+        "requestedAmountFils": "100000",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "expectedSupplierSettlementRevision": "7",
+        "supplierId": "sup-1",
+        "branchId": "branch-a0b",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "protocolVersion": 4
+      },
+      "expect": "valid",
+      "sameHashAs": "valid-simple-settlement",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 370,
+      "sha256": "114b4e3630e948a473d23613af5228aebfbcc4c5a5b0907422b08468317c8050"
+    },
+    {
+      "name": "array-order-significant",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "60000"
+          },
+          {
+            "expenseId": "exp-2",
+            "creditId": "cred-1",
+            "amountFils": "40000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"60000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"},{\"amountFils\":\"40000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-2\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 432,
+      "sha256": "0dd7ef29b5b704f82b06b90fbac57ad15d7af452022cdbc976555d6e98378bf9"
+    },
+    {
+      "name": "array-order-significant-swapped",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-2",
+            "creditId": "cred-1",
+            "amountFils": "40000"
+          },
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "60000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "differentHashFrom": "array-order-significant",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"40000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-2\"},{\"amountFils\":\"60000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 432,
+      "sha256": "5b373887d6d3d0787a3c91e45e5ee5b296c92fc817bcf679496a1ad6b2a17e3f"
+    },
+    {
+      "name": "amount-changes-hash",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100001",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100001"
+          }
+        ]
+      },
+      "expect": "valid",
+      "differentHashFrom": "valid-simple-settlement",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100001\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100001\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 370,
+      "sha256": "41a95231240fb04a81d74fe7926251a4ab9ffb138227838cab52fdafc712b47c"
+    },
+    {
+      "name": "revision-changes-hash",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "8",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "differentHashFrom": "valid-simple-settlement",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"8\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 370,
+      "sha256": "76b071df387f0a66656fa02ba1631627367d3ea09cc0c97afc8673e507c54f1c"
+    },
+    {
+      "name": "branch-changes-hash",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-other",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "differentHashFrom": "valid-simple-settlement",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-other\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 372,
+      "sha256": "1572054023bda7e6e3fdf2f3263805d6b5d19455aebf52b64ebc92a875cb560f"
+    },
+    {
+      "name": "timestamp-changes-hash",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.001Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "differentHashFrom": "valid-simple-settlement",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.001Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 370,
+      "sha256": "5e2975e43e9ef9e09d46d04750aaa6c76be1fa4ae63cb1850f5dd55aa9bb13fc"
+    },
+    {
+      "name": "protocol-version-is-json-integer",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "note": "protocolVersion 4 serializes as bare integer in the hash",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 370,
+      "sha256": "114b4e3630e948a473d23613af5228aebfbcc4c5a5b0907422b08468317c8050"
+    },
+    {
+      "name": "nfc-input",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ],
+        "memo": "caf\u00e9"
+      },
+      "expect": "valid",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"memo\":\"caf\u00e9\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 385,
+      "sha256": "305bd60f9b058c00c246063e11c85406d7fb4459eeeb4260d992f7c2347796ee"
+    },
+    {
+      "name": "nfd-input-normalizes-equal",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ],
+        "memo": "cafe\u0301"
+      },
+      "expect": "valid",
+      "sameHashAs": "nfc-input",
+      "nfcEquivalence": "nfc-input",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"memo\":\"caf\u00e9\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 385,
+      "sha256": "305bd60f9b058c00c246063e11c85406d7fb4459eeeb4260d992f7c2347796ee"
+    },
+    {
+      "name": "explicit-null-memo",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ],
+        "memo": null
+      },
+      "expect": "valid",
+      "differentHashFrom": "absent-memo",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"memo\":null,\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 382,
+      "sha256": "ffbbac3582a04028ed901ff7e8d347eb98c87402c2a672bb3bc025f3b6e3bf3e"
+    },
+    {
+      "name": "absent-memo",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "valid",
+      "sameHashAs": "valid-simple-settlement",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 370,
+      "sha256": "114b4e3630e948a473d23613af5228aebfbcc4c5a5b0907422b08468317c8050"
+    },
+    {
+      "name": "max-i64-amount",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "9223372036854775807",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "9223372036854775807"
+          }
+        ]
+      },
+      "expect": "valid",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"9223372036854775807\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"9223372036854775807\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 396,
+      "sha256": "84e149040b13f5f10e01219fa30ff3a92c5706948ffb6d9695ec5856e02fa289"
+    },
+    {
+      "name": "string-escaping",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ],
+        "memo": "a\"b\\c\nd\te\u0001f"
+      },
+      "expect": "valid",
+      "canonical": "{\"allocations\":[{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\"}],\"branchId\":\"branch-a0b\",\"businessTimestamp\":\"2026-01-15T10:30:00.000Z\",\"expectedSupplierSettlementRevision\":\"7\",\"memo\":\"a\\\"b\\\\c\\nd\\te\\u0001f\",\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"protocolVersion\":4,\"requestedAmountFils\":\"100000\",\"supplierId\":\"sup-1\"}",
+      "utf8ByteLength": 400,
+      "sha256": "699b6a7d222529998266c8eb8bef6545f79a82c47489dd0273452a852fcaaabb"
+    },
+    {
+      "name": "reject-number-in-i64-field",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": 100000,
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "EXPECTED_I64_STRING"
+    },
+    {
+      "name": "reject-non-canonical-i64",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100.5",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "I64_NOT_CANONICAL"
+    },
+    {
+      "name": "reject-i64-leading-zero",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "00100",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "I64_LEADING_ZERO"
+    },
+    {
+      "name": "reject-i64-overflow",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "9223372036854775808",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "INT_OUT_OF_RANGE"
+    },
+    {
+      "name": "reject-stray-number-field",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ],
+        "supplierTier": 3
+      },
+      "expect": "JSON_NUMBER_NOT_ALLOWED"
+    }
+  ],
+  "schemaCases": [
+    {
+      "name": "valid-settlement-schema",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "valid"
+    },
+    {
+      "name": "reject-protocol-version-string",
+      "input": {
+        "protocolVersion": "4",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "EXPECTED_PROTOCOL_VERSION_INTEGER"
+    },
+    {
+      "name": "reject-protocol-version-float",
+      "input": {
+        "protocolVersion": 4.5,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "PROTOCOL_VERSION_NOT_INTEGER"
+    },
+    {
+      "name": "reject-protocol-version-3",
+      "input": {
+        "protocolVersion": 3,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "UNSUPPORTED_PROTOCOL_VERSION"
+    },
+    {
+      "name": "reject-protocol-version-5",
+      "input": {
+        "protocolVersion": 5,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "UNSUPPORTED_PROTOCOL_VERSION"
+    },
+    {
+      "name": "reject-operation-type-lowercase",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "apply_supplier_credit",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "INVALID_OPERATION_TYPE"
+    },
+    {
+      "name": "reject-operation-type-too-short",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "AB",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "INVALID_OPERATION_TYPE"
+    },
+    {
+      "name": "reject-operation-type-leading-digit",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "9APPLY",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "INVALID_OPERATION_TYPE"
+    },
+    {
+      "name": "reject-operation-id",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "not-a-uuid",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15T10:30:00.000Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "INVALID_OPERATION_ID"
+    },
+    {
+      "name": "reject-timestamp",
+      "input": {
+        "protocolVersion": 4,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "branchId": "branch-a0b",
+        "supplierId": "sup-1",
+        "expectedSupplierSettlementRevision": "7",
+        "businessTimestamp": "2026-01-15 10:30:00Z",
+        "requestedAmountFils": "100000",
+        "allocations": [
+          {
+            "expenseId": "exp-1",
+            "creditId": "cred-1",
+            "amountFils": "100000"
+          }
+        ]
+      },
+      "expect": "BAD_TIMESTAMP"
+    }
+  ]
+}

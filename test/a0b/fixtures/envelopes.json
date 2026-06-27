@@ -1,0 +1,893 @@
+{
+  "group": "envelopes",
+  "maxEnvelopeBytes": 1048576,
+  "maxEnvelopeBytesName": "MAX_ENVELOPE_BYTES_V4",
+  "u32Max": 4294967295,
+  "operationTypePattern": "^[A-Z][A-Z0-9_]{2,63}$",
+  "schema": {
+    "OperationEnvelope": [
+      "operationId:uuid",
+      "serverSequence:i64-string>=1",
+      "operationType:string",
+      "branchId:string",
+      "mutationCount:u32-integer",
+      "mutations:MaterializedMutation[]",
+      "result:object"
+    ],
+    "MaterializedMutation": [
+      "ordinal:u32-integer(0-based,dense,canonical-position)",
+      "table:string",
+      "op:insert|update",
+      "recordId:string",
+      "payload:object"
+    ],
+    "mutationOrder": "sort by UTF-8 bytes of canonical-json([table, recordId]); ordinal = position"
+  },
+  "u32Validity": [
+    {
+      "name": "zero",
+      "value": 0,
+      "expect": "valid"
+    },
+    {
+      "name": "one",
+      "value": 1,
+      "expect": "valid"
+    },
+    {
+      "name": "u32-max",
+      "value": 4294967295,
+      "expect": "valid"
+    },
+    {
+      "name": "string",
+      "value": "1",
+      "expect": "EXPECTED_U32_INTEGER"
+    },
+    {
+      "name": "negative",
+      "value": -1,
+      "expect": "U32_NEGATIVE"
+    },
+    {
+      "name": "float",
+      "value": 1.5,
+      "expect": "U32_NOT_INTEGER"
+    },
+    {
+      "name": "overflow",
+      "value": 4294967296,
+      "expect": "U32_OUT_OF_RANGE"
+    }
+  ],
+  "cases": [
+    {
+      "name": "valid-accepted-redemption",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 5,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "100000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "expenses",
+            "op": "update",
+            "recordId": "exp-1",
+            "payload": {
+              "paidAmountFils": "100000",
+              "status": "PAID"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "100000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 3,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "100000",
+              "direction": "CREDIT"
+            }
+          },
+          {
+            "ordinal": 4,
+            "table": "supplier_credits",
+            "op": "update",
+            "recordId": "sc-1",
+            "payload": {
+              "status": "USED",
+              "usedAmountFils": "100000"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "valid",
+      "canonical": "{\"branchId\":\"branch-a0b\",\"mutationCount\":5,\"mutations\":[{\"op\":\"insert\",\"ordinal\":0,\"payload\":{\"amountFils\":\"100000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\",\"method\":\"credit\"},\"recordId\":\"ep-1\",\"table\":\"expense_payments\"},{\"op\":\"update\",\"ordinal\":1,\"payload\":{\"paidAmountFils\":\"100000\",\"status\":\"PAID\"},\"recordId\":\"exp-1\",\"table\":\"expenses\"},{\"op\":\"insert\",\"ordinal\":2,\"payload\":{\"account\":\"ACCOUNTS_PAYABLE\",\"amountFils\":\"100000\",\"direction\":\"DEBIT\"},\"recordId\":\"le-1\",\"table\":\"ledger_entries\"},{\"op\":\"insert\",\"ordinal\":3,\"payload\":{\"account\":\"SUPPLIER_CREDIT\",\"amountFils\":\"100000\",\"direction\":\"CREDIT\"},\"recordId\":\"le-2\",\"table\":\"ledger_entries\"},{\"op\":\"update\",\"ordinal\":4,\"payload\":{\"status\":\"USED\",\"usedAmountFils\":\"100000\"},\"recordId\":\"sc-1\",\"table\":\"supplier_credits\"}],\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"result\":{\"status\":\"accepted\"},\"serverSequence\":\"5\"}",
+      "utf8ByteLength": 934,
+      "sha256": "f2ccc1ee33179a01526b4f7a1206120233d8da0fccd5e34a7ba07cf3bb40a347"
+    },
+    {
+      "name": "valid-two-ledger-legs",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 3,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "50000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "50000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "50000",
+              "direction": "CREDIT"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "valid",
+      "canonical": "{\"branchId\":\"branch-a0b\",\"mutationCount\":3,\"mutations\":[{\"op\":\"insert\",\"ordinal\":0,\"payload\":{\"amountFils\":\"50000\",\"creditId\":\"cred-1\",\"expenseId\":\"exp-1\",\"method\":\"credit\"},\"recordId\":\"ep-1\",\"table\":\"expense_payments\"},{\"op\":\"insert\",\"ordinal\":1,\"payload\":{\"account\":\"ACCOUNTS_PAYABLE\",\"amountFils\":\"50000\",\"direction\":\"DEBIT\"},\"recordId\":\"le-1\",\"table\":\"ledger_entries\"},{\"op\":\"insert\",\"ordinal\":2,\"payload\":{\"account\":\"SUPPLIER_CREDIT\",\"amountFils\":\"50000\",\"direction\":\"CREDIT\"},\"recordId\":\"le-2\",\"table\":\"ledger_entries\"}],\"operationId\":\"aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa\",\"operationType\":\"APPLY_SUPPLIER_CREDIT_TO_EXPENSES\",\"result\":{\"status\":\"accepted\"},\"serverSequence\":\"5\"}",
+      "utf8ByteLength": 684,
+      "sha256": "1fa0316bde11454ac87bc6bd003d36c3766740d10fab211def0d302c81a156e1"
+    },
+    {
+      "name": "reject-operation-type",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "apply_x",
+        "branchId": "branch-a0b",
+        "mutationCount": 5,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "100000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "expenses",
+            "op": "update",
+            "recordId": "exp-1",
+            "payload": {
+              "paidAmountFils": "100000",
+              "status": "PAID"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "100000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 3,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "100000",
+              "direction": "CREDIT"
+            }
+          },
+          {
+            "ordinal": 4,
+            "table": "supplier_credits",
+            "op": "update",
+            "recordId": "sc-1",
+            "payload": {
+              "status": "USED",
+              "usedAmountFils": "100000"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "INVALID_OPERATION_TYPE"
+    },
+    {
+      "name": "reject-operation-id",
+      "envelope": {
+        "operationId": "nope",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 5,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "100000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "expenses",
+            "op": "update",
+            "recordId": "exp-1",
+            "payload": {
+              "paidAmountFils": "100000",
+              "status": "PAID"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "100000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 3,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "100000",
+              "direction": "CREDIT"
+            }
+          },
+          {
+            "ordinal": 4,
+            "table": "supplier_credits",
+            "op": "update",
+            "recordId": "sc-1",
+            "payload": {
+              "status": "USED",
+              "usedAmountFils": "100000"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "INVALID_OPERATION_ID"
+    },
+    {
+      "name": "reject-sequence-not-string",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": 5,
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 5,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "100000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "expenses",
+            "op": "update",
+            "recordId": "exp-1",
+            "payload": {
+              "paidAmountFils": "100000",
+              "status": "PAID"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "100000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 3,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "100000",
+              "direction": "CREDIT"
+            }
+          },
+          {
+            "ordinal": 4,
+            "table": "supplier_credits",
+            "op": "update",
+            "recordId": "sc-1",
+            "payload": {
+              "status": "USED",
+              "usedAmountFils": "100000"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "EXPECTED_I64_STRING"
+    },
+    {
+      "name": "reject-sequence-zero",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "0",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 5,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "100000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "expenses",
+            "op": "update",
+            "recordId": "exp-1",
+            "payload": {
+              "paidAmountFils": "100000",
+              "status": "PAID"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "100000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 3,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "100000",
+              "direction": "CREDIT"
+            }
+          },
+          {
+            "ordinal": 4,
+            "table": "supplier_credits",
+            "op": "update",
+            "recordId": "sc-1",
+            "payload": {
+              "status": "USED",
+              "usedAmountFils": "100000"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "INVALID_SEQUENCE"
+    },
+    {
+      "name": "reject-mutation-count-string",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": "5",
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "50000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "50000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "50000",
+              "direction": "CREDIT"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "EXPECTED_U32_INTEGER"
+    },
+    {
+      "name": "reject-mutation-count-float",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 1.5,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "50000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "50000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "50000",
+              "direction": "CREDIT"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "U32_NOT_INTEGER"
+    },
+    {
+      "name": "reject-mutation-count-negative",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": -1,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "50000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "50000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "50000",
+              "direction": "CREDIT"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "U32_NEGATIVE"
+    },
+    {
+      "name": "reject-mutation-count-overflow",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 4294967296,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "50000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "50000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "50000",
+              "direction": "CREDIT"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "U32_OUT_OF_RANGE"
+    },
+    {
+      "name": "reject-mutation-count-mismatch",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 5,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": "50000",
+              "creditId": "cred-1",
+              "expenseId": "exp-1",
+              "method": "credit"
+            }
+          },
+          {
+            "ordinal": 1,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-1",
+            "payload": {
+              "account": "ACCOUNTS_PAYABLE",
+              "amountFils": "50000",
+              "direction": "DEBIT"
+            }
+          },
+          {
+            "ordinal": 2,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-2",
+            "payload": {
+              "account": "SUPPLIER_CREDIT",
+              "amountFils": "50000",
+              "direction": "CREDIT"
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "MUTATION_COUNT_MISMATCH"
+    },
+    {
+      "name": "reject-ordinal-string",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 1,
+        "mutations": [
+          {
+            "ordinal": "0",
+            "table": "a",
+            "op": "insert",
+            "recordId": "r1",
+            "payload": {}
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "EXPECTED_U32_INTEGER"
+    },
+    {
+      "name": "reject-duplicate-ordinal",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 2,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "a",
+            "op": "insert",
+            "recordId": "r1",
+            "payload": {}
+          },
+          {
+            "ordinal": 0,
+            "table": "b",
+            "op": "insert",
+            "recordId": "r2",
+            "payload": {}
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "DUPLICATE_ORDINAL"
+    },
+    {
+      "name": "reject-ordinal-gap",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 2,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "a",
+            "op": "insert",
+            "recordId": "r1",
+            "payload": {}
+          },
+          {
+            "ordinal": 2,
+            "table": "b",
+            "op": "insert",
+            "recordId": "r2",
+            "payload": {}
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "ORDINAL_NOT_DENSE"
+    },
+    {
+      "name": "reject-order-mismatch",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 2,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "ledger_entries",
+            "op": "insert",
+            "recordId": "le-9",
+            "payload": {}
+          },
+          {
+            "ordinal": 1,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {}
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "MUTATION_ORDER_MISMATCH"
+    },
+    {
+      "name": "reject-amount-not-string",
+      "envelope": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "serverSequence": "5",
+        "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+        "branchId": "branch-a0b",
+        "mutationCount": 1,
+        "mutations": [
+          {
+            "ordinal": 0,
+            "table": "expense_payments",
+            "op": "insert",
+            "recordId": "ep-1",
+            "payload": {
+              "amountFils": 50000
+            }
+          }
+        ],
+        "result": {
+          "status": "accepted"
+        }
+      },
+      "expect": "EXPECTED_I64_STRING"
+    }
+  ],
+  "sizeBoundary": {
+    "note": "verifier builds the fill so the canonical envelope is exactly maxEnvelopeBytes (valid) and maxEnvelopeBytes+1 (ENVELOPE_TOO_LARGE)",
+    "baseEnvelope": {
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "serverSequence": "5",
+      "operationType": "APPLY_SUPPLIER_CREDIT_TO_EXPENSES",
+      "branchId": "branch-a0b",
+      "mutationCount": 1,
+      "mutations": [
+        {
+          "ordinal": 0,
+          "table": "expense_payments",
+          "op": "insert",
+          "recordId": "ep-1",
+          "payload": {
+            "amountFils": "1",
+            "memo": ""
+          }
+        }
+      ],
+      "result": {
+        "status": "accepted"
+      }
+    },
+    "fillPath": [
+      "mutations",
+      0,
+      "payload",
+      "memo"
+    ],
+    "fillChar": "x",
+    "atLimitExpect": "valid",
+    "overLimitExpect": "ENVELOPE_TOO_LARGE"
+  }
+}

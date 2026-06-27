@@ -1,0 +1,290 @@
+{
+  "group": "cursor-sequences",
+  "rules": [
+    "serverSequence is globally monotonic",
+    "pull is for exactly one branch; cursor per (plane, tenantId, branchId)",
+    "gaps caused by other branches are allowed",
+    "serverSequence <= cursor is an idempotent skip; cursor never regresses",
+    "an apply error stops progress; later sequences are blocked, never skipped",
+    "delivered envelopes are sorted by serverSequence before apply"
+  ],
+  "scenarios": [
+    {
+      "name": "branch-a-gaps-allowed",
+      "branchKey": {
+        "plane": "finance",
+        "tenantId": "tenant-1",
+        "branchId": "branch-a"
+      },
+      "initialCursor": "0",
+      "deliveredOps": [
+        {
+          "serverSequence": "10",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "ok"
+        },
+        {
+          "serverSequence": "100",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "ok"
+        }
+      ],
+      "expected": {
+        "deliveredSortedSequences": [
+          "10",
+          "100"
+        ],
+        "appliedSequences": [
+          "10",
+          "100"
+        ],
+        "mutatedSequences": [
+          "10",
+          "100"
+        ],
+        "skippedSequences": [],
+        "blockedSequences": [],
+        "finalCursor": "100"
+      }
+    },
+    {
+      "name": "branch-b-independent",
+      "branchKey": {
+        "plane": "finance",
+        "tenantId": "tenant-1",
+        "branchId": "branch-b"
+      },
+      "initialCursor": "0",
+      "deliveredOps": [
+        {
+          "serverSequence": "20",
+          "branchId": "branch-b",
+          "mutates": true,
+          "applyOutcome": "ok"
+        },
+        {
+          "serverSequence": "40",
+          "branchId": "branch-b",
+          "mutates": true,
+          "applyOutcome": "ok"
+        }
+      ],
+      "expected": {
+        "deliveredSortedSequences": [
+          "20",
+          "40"
+        ],
+        "appliedSequences": [
+          "20",
+          "40"
+        ],
+        "mutatedSequences": [
+          "20",
+          "40"
+        ],
+        "skippedSequences": [],
+        "blockedSequences": [],
+        "finalCursor": "40"
+      }
+    },
+    {
+      "name": "redeliver-applied-skipped",
+      "branchKey": {
+        "plane": "finance",
+        "tenantId": "tenant-1",
+        "branchId": "branch-a"
+      },
+      "initialCursor": "100",
+      "deliveredOps": [
+        {
+          "serverSequence": "10",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "ok"
+        }
+      ],
+      "expected": {
+        "deliveredSortedSequences": [
+          "10"
+        ],
+        "appliedSequences": [],
+        "mutatedSequences": [],
+        "skippedSequences": [
+          "10"
+        ],
+        "blockedSequences": [],
+        "finalCursor": "100"
+      }
+    },
+    {
+      "name": "cursor-advance-without-mutation",
+      "branchKey": {
+        "plane": "finance",
+        "tenantId": "tenant-1",
+        "branchId": "branch-a"
+      },
+      "initialCursor": "0",
+      "deliveredOps": [
+        {
+          "serverSequence": "50",
+          "branchId": "branch-a",
+          "mutates": false,
+          "applyOutcome": "ok"
+        }
+      ],
+      "expected": {
+        "deliveredSortedSequences": [
+          "50"
+        ],
+        "appliedSequences": [
+          "50"
+        ],
+        "mutatedSequences": [],
+        "skippedSequences": [],
+        "blockedSequences": [],
+        "finalCursor": "50"
+      }
+    },
+    {
+      "name": "apply-error-blocks-later",
+      "branchKey": {
+        "plane": "finance",
+        "tenantId": "tenant-1",
+        "branchId": "branch-a"
+      },
+      "initialCursor": "0",
+      "deliveredOps": [
+        {
+          "serverSequence": "20",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "ok"
+        },
+        {
+          "serverSequence": "40",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "error"
+        },
+        {
+          "serverSequence": "60",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "ok"
+        }
+      ],
+      "expected": {
+        "deliveredSortedSequences": [
+          "20",
+          "40",
+          "60"
+        ],
+        "appliedSequences": [
+          "20"
+        ],
+        "mutatedSequences": [
+          "20"
+        ],
+        "skippedSequences": [],
+        "blockedSequences": [
+          "40",
+          "60"
+        ],
+        "finalCursor": "20"
+      }
+    },
+    {
+      "name": "out-of-order-delivery-sorted",
+      "branchKey": {
+        "plane": "finance",
+        "tenantId": "tenant-1",
+        "branchId": "branch-a"
+      },
+      "initialCursor": "0",
+      "deliveredOps": [
+        {
+          "serverSequence": "100",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "ok"
+        },
+        {
+          "serverSequence": "10",
+          "branchId": "branch-a",
+          "mutates": true,
+          "applyOutcome": "ok"
+        }
+      ],
+      "expected": {
+        "deliveredSortedSequences": [
+          "10",
+          "100"
+        ],
+        "appliedSequences": [
+          "10",
+          "100"
+        ],
+        "mutatedSequences": [
+          "10",
+          "100"
+        ],
+        "skippedSequences": [],
+        "blockedSequences": [],
+        "finalCursor": "100"
+      }
+    }
+  ],
+  "isolation": {
+    "note": "one global sequence space; each branch advances only on its own ops",
+    "globalOps": [
+      {
+        "serverSequence": "10",
+        "branchId": "branch-a",
+        "mutates": true,
+        "applyOutcome": "ok"
+      },
+      {
+        "serverSequence": "20",
+        "branchId": "branch-b",
+        "mutates": true,
+        "applyOutcome": "ok"
+      },
+      {
+        "serverSequence": "40",
+        "branchId": "branch-b",
+        "mutates": true,
+        "applyOutcome": "ok"
+      },
+      {
+        "serverSequence": "100",
+        "branchId": "branch-a",
+        "mutates": true,
+        "applyOutcome": "ok"
+      }
+    ],
+    "branchA": {
+      "branchId": "branch-a",
+      "initialCursor": "0",
+      "expected": {
+        "appliedSequences": [
+          "10",
+          "100"
+        ],
+        "finalCursor": "100"
+      }
+    },
+    "branchB": {
+      "branchId": "branch-b",
+      "initialCursor": "0",
+      "expected": {
+        "appliedSequences": [
+          "20",
+          "40"
+        ],
+        "finalCursor": "40"
+      }
+    }
+  }
+}

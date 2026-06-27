@@ -1,0 +1,16 @@
+[package]
+name = "a0b-verifier"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "A0b — independent Rust verifier for the Authoritative-Operation-Commit protocol fixtures (test-only, isolated crate)"
+
+[[bin]]
+name = "a0b-verifier"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v5"] }
+unicode-normalization = "0.1"

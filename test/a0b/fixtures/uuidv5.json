@@ -1,0 +1,294 @@
+{
+  "group": "uuidv5",
+  "namespace": {
+    "name": "NS_LATAIF_FIN_OPS",
+    "value": "9520db11-5c48-5d8f-a288-56f1876c0781",
+    "derivation": {
+      "method": "uuidv5",
+      "namespace": "6ba7b811-9dad-11d1-80b4-00c04fd430c8",
+      "namespaceName": "RFC4122 URL",
+      "nameString": "urn:lataif:fin-ops:protocol:v4"
+    },
+    "frozen": true
+  },
+  "rules": [
+    "child IDs are server-derived; client-proposed child IDs are invalid",
+    "ID/account/direction and any name component must not contain \"|\"",
+    "UUID fields must be canonical UUID strings",
+    "ordinals are bounded JSON integers from the finalized sort rules",
+    "a retry derives identical IDs"
+  ],
+  "knownAnswerVectors": {
+    "note": "external RFC/well-known vectors so each verifier proves SHA-256/UUIDv5 independently",
+    "uuid5": [
+      {
+        "name": "rfc-url-derive-namespace",
+        "namespace": "6ba7b811-9dad-11d1-80b4-00c04fd430c8",
+        "nameString": "urn:lataif:fin-ops:protocol:v4",
+        "expectedUuid": "9520db11-5c48-5d8f-a288-56f1876c0781"
+      },
+      {
+        "name": "well-known-dns-www-example-com",
+        "namespace": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        "nameString": "www.example.com",
+        "expectedUuid": "2ed6657d-e927-568b-95e1-2665a8aea6a2"
+      }
+    ],
+    "sha256": [
+      {
+        "input": "",
+        "hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "input": "abc",
+        "hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      }
+    ]
+  },
+  "childIdRules": {
+    "ledgerTransaction": "operationId + \"|ledger-tx\"",
+    "expensePayment": "operationId + \"|exp-pmt|\" + expenseId + \"|\" + creditId + \"|\" + ordinal",
+    "ledgerEntry": "operationId + \"|entry|\" + ordinal + \"|\" + direction + \"|\" + account"
+  },
+  "childIds": [
+    {
+      "name": "ledger-tx-basic",
+      "kind": "ledger-tx",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa|ledger-tx",
+      "expectedUuid": "430f4321-f9ec-59c4-8508-797c370eb150"
+    },
+    {
+      "name": "exp-pmt-one-expense-one-credit",
+      "kind": "exp-pmt",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "expenseId": "exp-1",
+      "creditId": "cred-1",
+      "ordinal": 0,
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa|exp-pmt|exp-1|cred-1|0",
+      "expectedUuid": "bd51b795-00f6-5577-9adb-c400dcbff289"
+    },
+    {
+      "name": "exp-pmt-multi-expense-b",
+      "kind": "exp-pmt",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "expenseId": "exp-2",
+      "creditId": "cred-1",
+      "ordinal": 1,
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa|exp-pmt|exp-2|cred-1|1",
+      "expectedUuid": "fb9ae8ee-fb0a-5095-84d0-5457edda042d"
+    },
+    {
+      "name": "exp-pmt-multi-credit-b",
+      "kind": "exp-pmt",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "expenseId": "exp-1",
+      "creditId": "cred-2",
+      "ordinal": 1,
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa|exp-pmt|exp-1|cred-2|1",
+      "expectedUuid": "9a1d57ab-f60a-5676-85a2-5bebdb5749d1"
+    },
+    {
+      "name": "ledger-entry-debit",
+      "kind": "ledger-entry",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "ordinal": 0,
+      "direction": "DEBIT",
+      "account": "ACCOUNTS_PAYABLE",
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa|entry|0|DEBIT|ACCOUNTS_PAYABLE",
+      "expectedUuid": "9a115fe0-a1a5-50c5-96d6-2d2c1c1477c3"
+    },
+    {
+      "name": "ledger-entry-same-account-credit",
+      "kind": "ledger-entry",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "ordinal": 1,
+      "direction": "CREDIT",
+      "account": "ACCOUNTS_PAYABLE",
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa|entry|1|CREDIT|ACCOUNTS_PAYABLE",
+      "expectedUuid": "4c600ce2-55f7-5c04-8ec1-98b470b5b7f3"
+    },
+    {
+      "name": "retry-identical-input",
+      "kind": "ledger-tx",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa|ledger-tx",
+      "expectedUuid": "430f4321-f9ec-59c4-8508-797c370eb150",
+      "sameUuidAs": "ledger-tx-basic"
+    },
+    {
+      "name": "minimal-change-different-uuid",
+      "kind": "ledger-tx",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaab",
+      "nameString": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaab|ledger-tx",
+      "expectedUuid": "b8754b21-1f70-52f2-8b04-d6200abe5209",
+      "differentUuidFrom": "ledger-tx-basic"
+    }
+  ],
+  "rejectChildIds": [
+    {
+      "name": "reject-pipe-in-component",
+      "kind": "exp-pmt",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "expenseId": "exp|1",
+      "creditId": "cred-1",
+      "ordinal": 0,
+      "expect": "CHILD_ID_COMPONENT_HAS_DELIMITER"
+    },
+    {
+      "name": "reject-pipe-in-account",
+      "kind": "ledger-entry",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "ordinal": 0,
+      "direction": "DEBIT",
+      "account": "A|B",
+      "expect": "CHILD_ID_COMPONENT_HAS_DELIMITER"
+    }
+  ],
+  "ordinalStability": {
+    "allocations": {
+      "sortRule": "sort by UTF-8 bytes of canonical-json([expenseId, creditId]); ordinal = index",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "unsortedInput": [
+        {
+          "expenseId": "exp-2",
+          "creditId": "cred-1"
+        },
+        {
+          "expenseId": "exp-1",
+          "creditId": "cred-1"
+        },
+        {
+          "expenseId": "exp-1",
+          "creditId": "cred-2"
+        }
+      ],
+      "expectedSorted": [
+        {
+          "expenseId": "exp-1",
+          "creditId": "cred-1",
+          "canonicalKey": "[\"exp-1\",\"cred-1\"]",
+          "ordinal": 0,
+          "expectedUuid": "bd51b795-00f6-5577-9adb-c400dcbff289"
+        },
+        {
+          "expenseId": "exp-1",
+          "creditId": "cred-2",
+          "canonicalKey": "[\"exp-1\",\"cred-2\"]",
+          "ordinal": 1,
+          "expectedUuid": "9a1d57ab-f60a-5676-85a2-5bebdb5749d1"
+        },
+        {
+          "expenseId": "exp-2",
+          "creditId": "cred-1",
+          "canonicalKey": "[\"exp-2\",\"cred-1\"]",
+          "ordinal": 2,
+          "expectedUuid": "3122da6d-0e57-57a3-8dca-4277422a2835"
+        }
+      ],
+      "duplicateRejectInput": [
+        {
+          "expenseId": "exp-1",
+          "creditId": "cred-1"
+        },
+        {
+          "expenseId": "exp-1",
+          "creditId": "cred-1"
+        }
+      ],
+      "duplicateExpect": "DUPLICATE_ALLOCATION_KEY"
+    },
+    "ledgerLegs": {
+      "sortRule": "sort by UTF-8 bytes of canonical-json([legRole, sourceId, account, direction, counterpartyType, counterpartyId, amountFils]); ordinal = index",
+      "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+      "unsortedInput": [
+        {
+          "legRole": "SUPPLIER_CREDIT_DRAW",
+          "sourceId": "s2",
+          "account": "SUPPLIER_CREDIT",
+          "direction": "CREDIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "100000"
+        },
+        {
+          "legRole": "AP_SETTLE",
+          "sourceId": "s1",
+          "account": "ACCOUNTS_PAYABLE",
+          "direction": "DEBIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "60000"
+        },
+        {
+          "legRole": "AP_SETTLE",
+          "sourceId": "s3",
+          "account": "ACCOUNTS_PAYABLE",
+          "direction": "DEBIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "40000"
+        }
+      ],
+      "expectedSorted": [
+        {
+          "legRole": "AP_SETTLE",
+          "sourceId": "s1",
+          "account": "ACCOUNTS_PAYABLE",
+          "direction": "DEBIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "60000",
+          "canonicalKey": "[\"AP_SETTLE\",\"s1\",\"ACCOUNTS_PAYABLE\",\"DEBIT\",\"SUPPLIER\",\"sup-1\",\"60000\"]",
+          "ordinal": 0,
+          "expectedUuid": "9a115fe0-a1a5-50c5-96d6-2d2c1c1477c3"
+        },
+        {
+          "legRole": "AP_SETTLE",
+          "sourceId": "s3",
+          "account": "ACCOUNTS_PAYABLE",
+          "direction": "DEBIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "40000",
+          "canonicalKey": "[\"AP_SETTLE\",\"s3\",\"ACCOUNTS_PAYABLE\",\"DEBIT\",\"SUPPLIER\",\"sup-1\",\"40000\"]",
+          "ordinal": 1,
+          "expectedUuid": "ddd6a25c-7224-57c3-bf4f-f7ec9b350545"
+        },
+        {
+          "legRole": "SUPPLIER_CREDIT_DRAW",
+          "sourceId": "s2",
+          "account": "SUPPLIER_CREDIT",
+          "direction": "CREDIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "100000",
+          "canonicalKey": "[\"SUPPLIER_CREDIT_DRAW\",\"s2\",\"SUPPLIER_CREDIT\",\"CREDIT\",\"SUPPLIER\",\"sup-1\",\"100000\"]",
+          "ordinal": 2,
+          "expectedUuid": "63bcaa7c-aa9c-590c-a383-4bc83a480bb4"
+        }
+      ],
+      "duplicateRejectInput": [
+        {
+          "legRole": "AP_SETTLE",
+          "sourceId": "s1",
+          "account": "ACCOUNTS_PAYABLE",
+          "direction": "DEBIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "60000"
+        },
+        {
+          "legRole": "AP_SETTLE",
+          "sourceId": "s1",
+          "account": "ACCOUNTS_PAYABLE",
+          "direction": "DEBIT",
+          "counterpartyType": "SUPPLIER",
+          "counterpartyId": "sup-1",
+          "amountFils": "60000"
+        }
+      ],
+      "duplicateExpect": "DUPLICATE_LEDGER_EFFECT_KEY"
+    }
+  }
+}

@@ -1,0 +1,145 @@
+{
+  "group": "operation-results",
+  "finalStatuses": [
+    "accepted",
+    "conflict",
+    "validation_rejected"
+  ],
+  "transientStatuses": [
+    "FINANCE_NOT_BOOTSTRAPPED",
+    "READ_ONLY",
+    "SERVICE_UNAVAILABLE",
+    "DB_LOCKED",
+    "RATE_LIMITED",
+    "INTERNAL_ERROR_BEFORE_COMMIT",
+    "UNKNOWN_COMMIT_STATUS"
+  ],
+  "classification": [
+    {
+      "status": "accepted",
+      "final": true
+    },
+    {
+      "status": "conflict",
+      "final": true
+    },
+    {
+      "status": "validation_rejected",
+      "final": true
+    },
+    {
+      "status": "FINANCE_NOT_BOOTSTRAPPED",
+      "final": false
+    },
+    {
+      "status": "READ_ONLY",
+      "final": false
+    },
+    {
+      "status": "SERVICE_UNAVAILABLE",
+      "final": false
+    },
+    {
+      "status": "DB_LOCKED",
+      "final": false
+    },
+    {
+      "status": "RATE_LIMITED",
+      "final": false
+    },
+    {
+      "status": "INTERNAL_ERROR_BEFORE_COMMIT",
+      "final": false
+    },
+    {
+      "status": "UNKNOWN_COMMIT_STATUS",
+      "final": false
+    }
+  ],
+  "retryRules": [
+    "final stored decision + same payload hash => REPLAY_STORED (identical result)",
+    "final stored decision + different payload hash => OPERATION_ID_REUSED",
+    "prior transient/unknown commit status => STATUS_QUERY before retry",
+    "no stored decision + same operationId+hash => RETRY_ALLOWED"
+  ],
+  "retryCases": [
+    {
+      "name": "replay-accepted",
+      "stored": {
+        "exists": true,
+        "status": "accepted",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "expectedAction": "REPLAY_STORED",
+      "expectedResultStatus": "accepted"
+    },
+    {
+      "name": "replay-conflict",
+      "stored": {
+        "exists": true,
+        "status": "conflict",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "expectedAction": "REPLAY_STORED",
+      "expectedResultStatus": "conflict"
+    },
+    {
+      "name": "replay-validation-rejected",
+      "stored": {
+        "exists": true,
+        "status": "validation_rejected",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "expectedAction": "REPLAY_STORED",
+      "expectedResultStatus": "validation_rejected"
+    },
+    {
+      "name": "operation-id-reuse",
+      "stored": {
+        "exists": true,
+        "status": "accepted",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "1dcb0ea8c6e918ead74f08603000abd242de543722b49ff7b0e843a8edc5a2a1"
+      },
+      "expectedAction": "OPERATION_ID_REUSED"
+    },
+    {
+      "name": "unknown-commit-status-query",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398",
+        "priorOutcome": "UNKNOWN_COMMIT_STATUS"
+      },
+      "expectedAction": "STATUS_QUERY"
+    },
+    {
+      "name": "no-decision-retry-allowed",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "expectedAction": "RETRY_ALLOWED"
+    }
+  ]
+}
