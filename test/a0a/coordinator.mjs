@@ -17,7 +17,7 @@
 //                  local state are causal — not the fixture or a baked assertion)
 //
 // Real components (unmodified production code):
-//   • Real Rust/Axum server  → ../server/target/release/lataif-server.exe (isolated DB)
+//   • Real Rust/Axum server  → server/target/release/lataif-server.exe (in-repo, isolated DB)
 //   • Real auth/sync API      → POST /api/auth/register, /api/sync/push, /api/sync/pull
 //   • Real client stack       → src/core/db/database.ts (sql.js) + helpers.ts
 //   • Real redemption writer   → src/stores/supplierStore.ts :: applySupplierCreditsToExpenses (540)
@@ -48,7 +48,7 @@ import { execSync } from 'node:child_process';
 
 const HARNESS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DESKTOP = path.resolve(HARNESS_DIR, '../..');
-const SERVER_EXE = path.resolve(DESKTOP, '../server/target/release/lataif-server.exe');
+const SERVER_EXE = path.resolve(DESKTOP, 'server/target/release/lataif-server.exe');
 const CLIENT = path.join(HARNESS_DIR, 'client.mjs');
 const PORT = 3001;                                  // server bind is hardcoded 0.0.0.0:3001
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -62,7 +62,7 @@ const DBGFD = fs.openSync(path.join(TMP, 'coord-debug.log'), 'w');
 const dbg = (...a) => fs.writeSync(DBGFD, '[coord] ' + a.map(x => typeof x==='string'?x:JSON.stringify(x)).join(' ') + '\n');
 const log = (...a) => { dbg(...a); console.log('[coord]', ...a); };
 
-if (!fs.existsSync(SERVER_EXE)) { console.error(`Server binary not found: ${SERVER_EXE}\nBuild it first: (cd ../server && cargo build --release)`); process.exit(2); }
+if (!fs.existsSync(SERVER_EXE)) { console.error(`Server binary not found: ${SERVER_EXE}\nBuild it first: (cd server && cargo build --release)`); process.exit(2); }
 
 function portFree(port) { return new Promise(res => { const s = net.createServer(); s.once('error', () => res(false)); s.once('listening', () => s.close(() => res(true))); s.listen(port, '127.0.0.1'); }); }
 

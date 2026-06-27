@@ -10,7 +10,7 @@ behaviour — it fixes nothing and changes no production code.
 ## What is real vs. harness
 
 Real (unmodified production code, exercised end-to-end):
-- Rust/Axum sync server (`../../../server`), its real SQLite, `/api/auth/register`,
+- Rust/Axum sync server (`../../server`, in-repo), its real SQLite, `/api/auth/register`,
   `/api/sync/push`, `/api/sync/pull`.
 - Client DB engine + schema + migrations (`src/core/db/database.ts`, sql.js).
 - Redemption writer `supplierStore.applySupplierCreditsToExpenses` + ledger
@@ -33,7 +33,7 @@ SQL (allowed); the concurrent business action runs only through the real writer.
 ## Prerequisites
 
 - `node` (tested v24) and installed `desktop/node_modules` (sql.js, vite, …).
-- The real server built: `cd ../../../server && cargo build --release`
+- The real server built: `cd ../../server && cargo build --release`
   (produces `server/target/release/lataif-server.exe`).
 - TCP port **3001** free (the server bind is hardcoded to `0.0.0.0:3001`).
 

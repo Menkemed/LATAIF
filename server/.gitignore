@@ -1,0 +1,11 @@
+/target/
+/lataif_server.db
+/lataif_server.db-wal
+/lataif_server.db-shm
+/*.db
+/*.db-wal
+/*.db-shm
+/.env
+/.env.*
+*.log
+*.exe
