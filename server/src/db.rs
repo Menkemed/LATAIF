@@ -1,6 +1,6 @@
-use rusqlite::{Connection, Result};
+use rusqlite::Connection;
 
-pub fn init_database() -> Result<Connection> {
+pub fn init_database() -> Result<Connection, Box<dyn std::error::Error + Send + Sync>> {
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "lataif_server.db".to_string());
     let conn = Connection::open(&db_path)?;
 
@@ -72,6 +72,13 @@ pub fn init_database() -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_sync_id ON sync_changelog(id);
         "
     )?;
+
+    // A1a: apply additive authoritative-operation migrations after the base
+    // schema. These create empty operation/ledger tables only; no production
+    // path writes to them and no existing table is altered. A hard failure
+    // (history divergence / checksum or name mismatch / schema drift) aborts
+    // startup; the typed `MigrationError` is preserved as the error source.
+    crate::migrations::run_migrations(&conn, crate::migrations::ALL_MIGRATIONS)?;
 
     tracing::info!("Database initialized at {}", db_path);
     Ok(conn)
