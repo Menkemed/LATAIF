@@ -212,16 +212,26 @@ fn walk_types(v: &Value) -> Option<String> {
 
 // ---------------- accessors ----------------
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
-    v.get(k).and_then(|x| x.as_str()).unwrap_or_else(|| panic!("missing str {}", k))
+    v.get(k)
+        .and_then(|x| x.as_str())
+        .unwrap_or_else(|| panic!("missing str {}", k))
 }
 fn u(v: &Value, k: &str) -> u64 {
-    v.get(k).and_then(|x| x.as_u64()).unwrap_or_else(|| panic!("missing u64 {}", k))
+    v.get(k)
+        .and_then(|x| x.as_u64())
+        .unwrap_or_else(|| panic!("missing u64 {}", k))
 }
 fn arr<'a>(v: &'a Value, k: &str) -> &'a Vec<Value> {
-    v.get(k).and_then(|x| x.as_array()).unwrap_or_else(|| panic!("missing arr {}", k))
+    v.get(k)
+        .and_then(|x| x.as_array())
+        .unwrap_or_else(|| panic!("missing arr {}", k))
 }
 fn strs(v: &Value) -> Vec<String> {
-    v.as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect()
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect()
 }
 
 const OP_TYPE_OK: fn(&str) -> bool = |t: &str| {
@@ -232,7 +242,9 @@ const OP_TYPE_OK: fn(&str) -> bool = |t: &str| {
     if !b[0].is_ascii_uppercase() {
         return false;
     }
-    b[1..].iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+    b[1..]
+        .iter()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
 };
 fn is_uuid(s: &str) -> bool {
     let b = s.as_bytes();
@@ -252,9 +264,25 @@ fn ts_ok(t: &str) -> bool {
     }
     let digit = |i: usize| b[i].is_ascii_digit();
     (0..4).all(digit)
-        && b[4] == b'-' && digit(5) && digit(6) && b[7] == b'-' && digit(8) && digit(9)
-        && b[10] == b'T' && digit(11) && digit(12) && b[13] == b':' && digit(14) && digit(15)
-        && b[16] == b':' && digit(17) && digit(18) && b[19] == b'.' && digit(20) && digit(21) && digit(22)
+        && b[4] == b'-'
+        && digit(5)
+        && digit(6)
+        && b[7] == b'-'
+        && digit(8)
+        && digit(9)
+        && b[10] == b'T'
+        && digit(11)
+        && digit(12)
+        && b[13] == b':'
+        && digit(14)
+        && digit(15)
+        && b[16] == b':'
+        && digit(17)
+        && digit(18)
+        && b[19] == b'.'
+        && digit(20)
+        && digit(21)
+        && digit(22)
         && b[23] == b'Z'
 }
 
@@ -265,13 +293,17 @@ struct Checker {
 }
 impl Checker {
     fn new() -> Self {
-        Checker { pass: 0, fails: Vec::new() }
+        Checker {
+            pass: 0,
+            fails: Vec::new(),
+        }
     }
     fn eq<A: PartialEq + std::fmt::Debug>(&mut self, a: A, b: A, label: &str) {
         if a == b {
             self.pass += 1;
         } else {
-            self.fails.push(format!("{}: got {:?} exp {:?}", label, a, b));
+            self.fails
+                .push(format!("{}: got {:?} exp {:?}", label, a, b));
         }
     }
     fn ok(&mut self, c: bool, label: &str) {
@@ -285,11 +317,17 @@ impl Checker {
 
 // ---------------- envelope validation ----------------
 fn validate_envelope(env: &Value, max: usize) -> Result<(String, usize, String), String> {
-    let otype = env.get("operationType").and_then(|x| x.as_str()).unwrap_or("");
+    let otype = env
+        .get("operationType")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
     if !OP_TYPE_OK(otype) {
         return Err("INVALID_OPERATION_TYPE".into());
     }
-    let oid = env.get("operationId").and_then(|x| x.as_str()).unwrap_or("");
+    let oid = env
+        .get("operationId")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
     if !is_uuid(oid) {
         return Err("INVALID_OPERATION_ID".into());
     }
@@ -303,7 +341,10 @@ fn validate_envelope(env: &Value, max: usize) -> Result<(String, usize, String),
     if env["mutationCount"].as_u64().unwrap() != muts.len() as u64 {
         return Err("MUTATION_COUNT_MISMATCH".into());
     }
-    let ords: Vec<u64> = muts.iter().map(|m| m["ordinal"].as_u64().unwrap()).collect();
+    let ords: Vec<u64> = muts
+        .iter()
+        .map(|m| m["ordinal"].as_u64().unwrap())
+        .collect();
     let mut uniq = ords.clone();
     uniq.sort();
     uniq.dedup();
@@ -320,7 +361,11 @@ fn validate_envelope(env: &Value, max: usize) -> Result<(String, usize, String),
     let mut keyed: Vec<(u64, String)> = muts
         .iter()
         .map(|m| {
-            let key = canon(&Value::Array(vec![m["table"].clone(), m["recordId"].clone()])).unwrap();
+            let key = canon(&Value::Array(vec![
+                m["table"].clone(),
+                m["recordId"].clone(),
+            ]))
+            .unwrap();
             (m["ordinal"].as_u64().unwrap(), key)
         })
         .collect();
@@ -362,19 +407,45 @@ fn run() -> Checker {
         match result {
             Ok(canonical) => {
                 k.eq(expect, "valid", &format!("cj:{} expect", name));
-                k.eq(canonical.as_str(), s(c, "canonical"), &format!("cj:{} canonical", name));
-                k.eq(canonical.as_bytes().len() as u64, u(c, "utf8ByteLength"), &format!("cj:{} byteLength", name));
-                k.eq(sha256hex(&canonical), s(c, "sha256").to_string(), &format!("cj:{} sha256", name));
+                k.eq(
+                    canonical.as_str(),
+                    s(c, "canonical"),
+                    &format!("cj:{} canonical", name),
+                );
+                k.eq(
+                    canonical.as_bytes().len() as u64,
+                    u(c, "utf8ByteLength"),
+                    &format!("cj:{} byteLength", name),
+                );
+                k.eq(
+                    sha256hex(&canonical),
+                    s(c, "sha256").to_string(),
+                    &format!("cj:{} sha256", name),
+                );
                 if let Some(o) = c.get("sameHashAs").and_then(|x| x.as_str()) {
-                    k.eq(s(c, "sha256"), s(find(o), "sha256"), &format!("cj:{} sameHashAs", name));
+                    k.eq(
+                        s(c, "sha256"),
+                        s(find(o), "sha256"),
+                        &format!("cj:{} sameHashAs", name),
+                    );
                 }
                 if let Some(o) = c.get("differentHashFrom").and_then(|x| x.as_str()) {
-                    k.ok(s(c, "sha256") != s(find(o), "sha256"), &format!("cj:{} differentHashFrom", name));
+                    k.ok(
+                        s(c, "sha256") != s(find(o), "sha256"),
+                        &format!("cj:{} differentHashFrom", name),
+                    );
                 }
                 if let Some(o) = c.get("nfcEquivalence").and_then(|x| x.as_str()) {
                     let other = find(o);
-                    k.ok(c["input"] != other["input"], &format!("cj:{} nfd!=nfc input", name));
-                    k.eq(canon(input).unwrap(), canon(&other["input"]).unwrap(), &format!("cj:{} canon(nfd)==canon(nfc)", name));
+                    k.ok(
+                        c["input"] != other["input"],
+                        &format!("cj:{} nfd!=nfc input", name),
+                    );
+                    k.eq(
+                        canon(input).unwrap(),
+                        canon(&other["input"]).unwrap(),
+                        &format!("cj:{} canon(nfd)==canon(nfc)", name),
+                    );
                 }
             }
             Err(code) => k.eq(code, expect.to_string(), &format!("cj:{} reject", name)),
@@ -384,33 +455,67 @@ fn run() -> Checker {
         let name = s(c, "name");
         let p = &c["input"];
         let r: Option<String> = (|| {
-            if !p.get("operationType").and_then(|x| x.as_str()).map(OP_TYPE_OK).unwrap_or(false) {
+            if !p
+                .get("operationType")
+                .and_then(|x| x.as_str())
+                .map(OP_TYPE_OK)
+                .unwrap_or(false)
+            {
                 return Some("INVALID_OPERATION_TYPE".into());
             }
-            if !p.get("operationId").and_then(|x| x.as_str()).map(is_uuid).unwrap_or(false) {
+            if !p
+                .get("operationId")
+                .and_then(|x| x.as_str())
+                .map(is_uuid)
+                .unwrap_or(false)
+            {
                 return Some("INVALID_OPERATION_ID".into());
             }
-            if !p.get("businessTimestamp").and_then(|x| x.as_str()).map(ts_ok).unwrap_or(false) {
+            if !p
+                .get("businessTimestamp")
+                .and_then(|x| x.as_str())
+                .map(ts_ok)
+                .unwrap_or(false)
+            {
                 return Some("BAD_TIMESTAMP".into());
             }
             walk_types(p)
         })();
         if s(c, "expect") == "valid" {
-            k.ok(r.is_none(), &format!("cj-schema:{} expected valid, got {:?}", name, r));
+            k.ok(
+                r.is_none(),
+                &format!("cj-schema:{} expected valid, got {:?}", name, r),
+            );
         } else {
-            k.eq(r.unwrap_or_default(), s(c, "expect").to_string(), &format!("cj-schema:{} reject", name));
+            k.eq(
+                r.unwrap_or_default(),
+                s(c, "expect").to_string(),
+                &format!("cj-schema:{} reject", name),
+            );
         }
     }
 
     // group 2: uuidv5
     let u5 = load("uuidv5.json");
-    k.eq(uuid5(URL_NS, s(&u5["namespace"]["derivation"], "nameString")), s(&u5["namespace"], "value").to_string(), "u5:namespace recompute");
+    k.eq(
+        uuid5(URL_NS, s(&u5["namespace"]["derivation"], "nameString")),
+        s(&u5["namespace"], "value").to_string(),
+        "u5:namespace recompute",
+    );
     k.eq(s(&u5["namespace"], "value"), NS, "u5:namespace frozen");
     for kv in u5["knownAnswerVectors"]["uuid5"].as_array().unwrap() {
-        k.eq(uuid5(s(kv, "namespace"), s(kv, "nameString")), s(kv, "expectedUuid").to_string(), &format!("u5:kav {}", s(kv, "name")));
+        k.eq(
+            uuid5(s(kv, "namespace"), s(kv, "nameString")),
+            s(kv, "expectedUuid").to_string(),
+            &format!("u5:kav {}", s(kv, "name")),
+        );
     }
     for kv in u5["knownAnswerVectors"]["sha256"].as_array().unwrap() {
-        k.eq(sha256hex(s(kv, "input")), s(kv, "hex").to_string(), &format!("u5:sha256 {:?}", s(kv, "input")));
+        k.eq(
+            sha256hex(s(kv, "input")),
+            s(kv, "hex").to_string(),
+            &format!("u5:sha256 {:?}", s(kv, "input")),
+        );
     }
     let children = arr(&u5, "childIds");
     let cfind = |name: &str| children.iter().find(|c| c["name"] == name).unwrap();
@@ -418,59 +523,149 @@ fn run() -> Checker {
     let child_name = |c: &Value| -> String {
         match s(c, "kind") {
             "ledger-tx" => format!("{}|ledger-tx", s(c, "operationId")),
-            "exp-pmt" => format!("{}|exp-pmt|{}|{}|{}", s(c, "operationId"), s(c, "expenseId"), s(c, "creditId"), ordn(c)),
-            "ledger-entry" => format!("{}|entry|{}|{}|{}", s(c, "operationId"), ordn(c), s(c, "direction"), s(c, "account")),
+            "exp-pmt" => format!(
+                "{}|exp-pmt|{}|{}|{}",
+                s(c, "operationId"),
+                s(c, "expenseId"),
+                s(c, "creditId"),
+                ordn(c)
+            ),
+            "ledger-entry" => format!(
+                "{}|entry|{}|{}|{}",
+                s(c, "operationId"),
+                ordn(c),
+                s(c, "direction"),
+                s(c, "account")
+            ),
             other => panic!("kind {}", other),
         }
     };
     let components = |c: &Value| -> Vec<String> {
         match s(c, "kind") {
             "ledger-tx" => vec![s(c, "operationId").into()],
-            "exp-pmt" => vec![s(c, "operationId").into(), s(c, "expenseId").into(), s(c, "creditId").into(), ordn(c).to_string()],
-            _ => vec![s(c, "operationId").into(), ordn(c).to_string(), s(c, "direction").into(), s(c, "account").into()],
+            "exp-pmt" => vec![
+                s(c, "operationId").into(),
+                s(c, "expenseId").into(),
+                s(c, "creditId").into(),
+                ordn(c).to_string(),
+            ],
+            _ => vec![
+                s(c, "operationId").into(),
+                ordn(c).to_string(),
+                s(c, "direction").into(),
+                s(c, "account").into(),
+            ],
         }
     };
     for c in children {
         let name = s(c, "name");
-        k.ok(components(c).iter().all(|x| !x.contains('|')), &format!("u5:{} pipe-free", name));
-        k.eq(child_name(c), s(c, "nameString").to_string(), &format!("u5:{} nameString", name));
-        k.eq(uuid5(NS, &child_name(c)), s(c, "expectedUuid").to_string(), &format!("u5:{} uuid", name));
+        k.ok(
+            components(c).iter().all(|x| !x.contains('|')),
+            &format!("u5:{} pipe-free", name),
+        );
+        k.eq(
+            child_name(c),
+            s(c, "nameString").to_string(),
+            &format!("u5:{} nameString", name),
+        );
+        k.eq(
+            uuid5(NS, &child_name(c)),
+            s(c, "expectedUuid").to_string(),
+            &format!("u5:{} uuid", name),
+        );
         if let Some(o) = c.get("sameUuidAs").and_then(|x| x.as_str()) {
-            k.eq(s(c, "expectedUuid"), s(cfind(o), "expectedUuid"), &format!("u5:{} sameUuidAs", name));
+            k.eq(
+                s(c, "expectedUuid"),
+                s(cfind(o), "expectedUuid"),
+                &format!("u5:{} sameUuidAs", name),
+            );
         }
         if let Some(o) = c.get("differentUuidFrom").and_then(|x| x.as_str()) {
-            k.ok(s(c, "expectedUuid") != s(cfind(o), "expectedUuid"), &format!("u5:{} differentUuidFrom", name));
+            k.ok(
+                s(c, "expectedUuid") != s(cfind(o), "expectedUuid"),
+                &format!("u5:{} differentUuidFrom", name),
+            );
         }
     }
     for c in arr(&u5, "rejectChildIds") {
         let has_pipe = components(c).iter().any(|x| x.contains('|'));
-        k.eq(if has_pipe { "CHILD_ID_COMPONENT_HAS_DELIMITER" } else { "ok" }, s(c, "expect"), &format!("u5:{} reject", s(c, "name")));
+        k.eq(
+            if has_pipe {
+                "CHILD_ID_COMPONENT_HAS_DELIMITER"
+            } else {
+                "ok"
+            },
+            s(c, "expect"),
+            &format!("u5:{} reject", s(c, "name")),
+        );
     }
     {
         let a = &u5["ordinalStability"]["allocations"];
         let opid = s(a, "operationId");
-        let key = |x: &Value| canon(&Value::Array(vec![x["expenseId"].clone(), x["creditId"].clone()])).unwrap();
+        let key = |x: &Value| {
+            canon(&Value::Array(vec![
+                x["expenseId"].clone(),
+                x["creditId"].clone(),
+            ]))
+            .unwrap()
+        };
         let mut sorted: Vec<Value> = a["unsortedInput"].as_array().unwrap().clone();
         sorted.sort_by(|x, y| key(x).cmp(&key(y)));
         for (i, item) in sorted.iter().enumerate() {
             let e = &a["expectedSorted"][i];
-            k.eq(key(item), s(e, "canonicalKey").to_string(), &format!("u5:alloc[{}] key", i));
-            k.eq(i as u64, e["ordinal"].as_u64().unwrap(), &format!("u5:alloc[{}] ordinal", i));
-            let n = format!("{}|exp-pmt|{}|{}|{}", opid, s(item, "expenseId"), s(item, "creditId"), i);
-            k.eq(uuid5(NS, &n), s(e, "expectedUuid").to_string(), &format!("u5:alloc[{}] uuid", i));
+            k.eq(
+                key(item),
+                s(e, "canonicalKey").to_string(),
+                &format!("u5:alloc[{}] key", i),
+            );
+            k.eq(
+                i as u64,
+                e["ordinal"].as_u64().unwrap(),
+                &format!("u5:alloc[{}] ordinal", i),
+            );
+            let n = format!(
+                "{}|exp-pmt|{}|{}|{}",
+                opid,
+                s(item, "expenseId"),
+                s(item, "creditId"),
+                i
+            );
+            k.eq(
+                uuid5(NS, &n),
+                s(e, "expectedUuid").to_string(),
+                &format!("u5:alloc[{}] uuid", i),
+            );
         }
-        let dk: Vec<String> = a["duplicateRejectInput"].as_array().unwrap().iter().map(|x| key(x)).collect();
+        let dk: Vec<String> = a["duplicateRejectInput"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| key(x))
+            .collect();
         let mut ddk = dk.clone();
         ddk.sort();
         ddk.dedup();
-        k.eq(if ddk.len() != dk.len() { "DUPLICATE_ALLOCATION_KEY" } else { "ok" }, s(a, "duplicateExpect"), "u5:alloc dedup");
+        k.eq(
+            if ddk.len() != dk.len() {
+                "DUPLICATE_ALLOCATION_KEY"
+            } else {
+                "ok"
+            },
+            s(a, "duplicateExpect"),
+            "u5:alloc dedup",
+        );
 
         let lg = &u5["ordinalStability"]["ledgerLegs"];
         let lopid = s(lg, "operationId");
         let lkey = |x: &Value| {
             canon(&Value::Array(vec![
-                x["legRole"].clone(), x["sourceId"].clone(), x["account"].clone(), x["direction"].clone(),
-                x["counterpartyType"].clone(), x["counterpartyId"].clone(), x["amountFils"].clone(),
+                x["legRole"].clone(),
+                x["sourceId"].clone(),
+                x["account"].clone(),
+                x["direction"].clone(),
+                x["counterpartyType"].clone(),
+                x["counterpartyId"].clone(),
+                x["amountFils"].clone(),
             ]))
             .unwrap()
         };
@@ -478,16 +673,47 @@ fn run() -> Checker {
         lsorted.sort_by(|x, y| lkey(x).cmp(&lkey(y)));
         for (i, item) in lsorted.iter().enumerate() {
             let e = &lg["expectedSorted"][i];
-            k.eq(lkey(item), s(e, "canonicalKey").to_string(), &format!("u5:leg[{}] key", i));
-            k.eq(i as u64, e["ordinal"].as_u64().unwrap(), &format!("u5:leg[{}] ordinal", i));
-            let n = format!("{}|entry|{}|{}|{}", lopid, i, s(item, "direction"), s(item, "account"));
-            k.eq(uuid5(NS, &n), s(e, "expectedUuid").to_string(), &format!("u5:leg[{}] uuid", i));
+            k.eq(
+                lkey(item),
+                s(e, "canonicalKey").to_string(),
+                &format!("u5:leg[{}] key", i),
+            );
+            k.eq(
+                i as u64,
+                e["ordinal"].as_u64().unwrap(),
+                &format!("u5:leg[{}] ordinal", i),
+            );
+            let n = format!(
+                "{}|entry|{}|{}|{}",
+                lopid,
+                i,
+                s(item, "direction"),
+                s(item, "account")
+            );
+            k.eq(
+                uuid5(NS, &n),
+                s(e, "expectedUuid").to_string(),
+                &format!("u5:leg[{}] uuid", i),
+            );
         }
-        let ldk: Vec<String> = lg["duplicateRejectInput"].as_array().unwrap().iter().map(|x| lkey(x)).collect();
+        let ldk: Vec<String> = lg["duplicateRejectInput"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| lkey(x))
+            .collect();
         let mut lddk = ldk.clone();
         lddk.sort();
         lddk.dedup();
-        k.eq(if lddk.len() != ldk.len() { "DUPLICATE_LEDGER_EFFECT_KEY" } else { "ok" }, s(lg, "duplicateExpect"), "u5:leg dedup");
+        k.eq(
+            if lddk.len() != ldk.len() {
+                "DUPLICATE_LEDGER_EFFECT_KEY"
+            } else {
+                "ok"
+            },
+            s(lg, "duplicateExpect"),
+            "u5:leg dedup",
+        );
     }
 
     // group 3: envelopes
@@ -495,18 +721,38 @@ fn run() -> Checker {
     let max = u(&ev, "maxEnvelopeBytes") as usize;
     for c in arr(&ev, "u32Validity") {
         let r = validate_u32(&c["value"]);
-        k.eq(r.unwrap_or_else(|| "valid".into()), s(c, "expect").to_string(), &format!("env:u32 {}", s(c, "name")));
+        k.eq(
+            r.unwrap_or_else(|| "valid".into()),
+            s(c, "expect").to_string(),
+            &format!("env:u32 {}", s(c, "name")),
+        );
     }
     for c in arr(&ev, "cases") {
         let name = s(c, "name");
         match validate_envelope(&c["envelope"], max) {
             Ok((canonical, len, h)) => {
                 k.eq(s(c, "expect"), "valid", &format!("env:{} expect", name));
-                k.eq(canonical.as_str(), s(c, "canonical"), &format!("env:{} canonical", name));
-                k.eq(len as u64, u(c, "utf8ByteLength"), &format!("env:{} byteLength", name));
-                k.eq(h, s(c, "sha256").to_string(), &format!("env:{} sha256", name));
+                k.eq(
+                    canonical.as_str(),
+                    s(c, "canonical"),
+                    &format!("env:{} canonical", name),
+                );
+                k.eq(
+                    len as u64,
+                    u(c, "utf8ByteLength"),
+                    &format!("env:{} byteLength", name),
+                );
+                k.eq(
+                    h,
+                    s(c, "sha256").to_string(),
+                    &format!("env:{} sha256", name),
+                );
             }
-            Err(code) => k.eq(code, s(c, "expect").to_string(), &format!("env:{} reject", name)),
+            Err(code) => k.eq(
+                code,
+                s(c, "expect").to_string(),
+                &format!("env:{} reject", name),
+            ),
         }
     }
     {
@@ -519,24 +765,51 @@ fn run() -> Checker {
         atl["mutations"][0]["payload"]["memo"] = Value::String("x".repeat(need));
         match validate_envelope(&atl, max) {
             Ok((_, len, _)) => k.eq(len, max, "env:boundary at-limit length"),
-            Err(e) => k.fails.push(format!("env:boundary at-limit unexpectedly rejected: {}", e)),
+            Err(e) => k.fails.push(format!(
+                "env:boundary at-limit unexpectedly rejected: {}",
+                e
+            )),
         }
         let mut over = sb["baseEnvelope"].clone();
         over["mutations"][0]["payload"]["memo"] = Value::String("x".repeat(need + 1));
         match validate_envelope(&over, max) {
-            Ok(_) => k.fails.push("env:boundary over-limit unexpectedly valid".into()),
-            Err(e) => k.eq(e, s(sb, "overLimitExpect").to_string(), "env:boundary over-limit reject"),
+            Ok(_) => k
+                .fails
+                .push("env:boundary over-limit unexpectedly valid".into()),
+            Err(e) => k.eq(
+                e,
+                s(sb, "overLimitExpect").to_string(),
+                "env:boundary over-limit reject",
+            ),
         }
     }
 
     // group 4: cursor-sequences
     let cs = load("cursor-sequences.json");
-    fn run_cursor(initial: &str, branch: &str, ops: &[Value]) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, String) {
+    fn run_cursor(
+        initial: &str,
+        branch: &str,
+        ops: &[Value],
+    ) -> (
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        String,
+    ) {
         let mut sorted: Vec<&Value> = ops.iter().collect();
-        sorted.sort_by_key(|o| o["serverSequence"].as_str().unwrap().parse::<i64>().unwrap());
+        sorted.sort_by_key(|o| {
+            o["serverSequence"]
+                .as_str()
+                .unwrap()
+                .parse::<i64>()
+                .unwrap()
+        });
         let mut cursor: i64 = initial.parse().unwrap();
         let mut blocked = false;
-        let (mut applied, mut mutated, mut skipped, mut blk, mut delivered) = (vec![], vec![], vec![], vec![], vec![]);
+        let (mut applied, mut mutated, mut skipped, mut blk, mut delivered) =
+            (vec![], vec![], vec![], vec![], vec![]);
         for o in &sorted {
             if o["branchId"].as_str().unwrap() != branch {
                 continue;
@@ -563,26 +836,69 @@ fn run() -> Checker {
             }
             cursor = sn;
         }
-        (delivered, applied, mutated, skipped, blk, cursor.to_string())
+        (
+            delivered,
+            applied,
+            mutated,
+            skipped,
+            blk,
+            cursor.to_string(),
+        )
     }
     for sc in arr(&cs, "scenarios") {
         let name = s(sc, "name");
-        let (d, ap, mu, sk, bl, fc) = run_cursor(s(sc, "initialCursor"), s(&sc["branchKey"], "branchId"), arr(sc, "deliveredOps"));
+        let (d, ap, mu, sk, bl, fc) = run_cursor(
+            s(sc, "initialCursor"),
+            s(&sc["branchKey"], "branchId"),
+            arr(sc, "deliveredOps"),
+        );
         let e = &sc["expected"];
-        k.eq(d, strs(&e["deliveredSortedSequences"]), &format!("cs:{} delivered", name));
-        k.eq(ap, strs(&e["appliedSequences"]), &format!("cs:{} applied", name));
-        k.eq(mu, strs(&e["mutatedSequences"]), &format!("cs:{} mutated", name));
-        k.eq(sk, strs(&e["skippedSequences"]), &format!("cs:{} skipped", name));
-        k.eq(bl, strs(&e["blockedSequences"]), &format!("cs:{} blocked", name));
-        k.eq(fc, s(e, "finalCursor").to_string(), &format!("cs:{} finalCursor", name));
+        k.eq(
+            d,
+            strs(&e["deliveredSortedSequences"]),
+            &format!("cs:{} delivered", name),
+        );
+        k.eq(
+            ap,
+            strs(&e["appliedSequences"]),
+            &format!("cs:{} applied", name),
+        );
+        k.eq(
+            mu,
+            strs(&e["mutatedSequences"]),
+            &format!("cs:{} mutated", name),
+        );
+        k.eq(
+            sk,
+            strs(&e["skippedSequences"]),
+            &format!("cs:{} skipped", name),
+        );
+        k.eq(
+            bl,
+            strs(&e["blockedSequences"]),
+            &format!("cs:{} blocked", name),
+        );
+        k.eq(
+            fc,
+            s(e, "finalCursor").to_string(),
+            &format!("cs:{} finalCursor", name),
+        );
     }
     let iso = &cs["isolation"];
     let global = iso["globalOps"].as_array().unwrap();
     for side in ["branchA", "branchB"] {
         let b = &iso[side];
         let (_, ap, _, _, _, fc) = run_cursor(s(b, "initialCursor"), s(b, "branchId"), global);
-        k.eq(ap, strs(&b["expected"]["appliedSequences"]), &format!("cs:iso {} applied", side));
-        k.eq(fc, s(&b["expected"], "finalCursor").to_string(), &format!("cs:iso {} finalCursor", side));
+        k.eq(
+            ap,
+            strs(&b["expected"]["appliedSequences"]),
+            &format!("cs:iso {} applied", side),
+        );
+        k.eq(
+            fc,
+            s(&b["expected"], "finalCursor").to_string(),
+            &format!("cs:iso {} finalCursor", side),
+        );
     }
 
     // group 5: operation-results
@@ -590,15 +906,24 @@ fn run() -> Checker {
     let finals: Vec<String> = strs(&orr["finalStatuses"]);
     let is_final = |st: &str| finals.iter().any(|f| f == st);
     for c in arr(&orr, "classification") {
-        k.eq(is_final(s(c, "status")), c["final"].as_bool().unwrap(), &format!("or:classify {}", s(c, "status")));
+        k.eq(
+            is_final(s(c, "status")),
+            c["final"].as_bool().unwrap(),
+            &format!("or:classify {}", s(c, "status")),
+        );
     }
     for c in arr(&orr, "retryCases") {
         let name = s(c, "name");
         let stored = &c["stored"];
         let incoming = &c["incoming"];
         let (action, rstatus): (&str, Option<&str>) = if stored["exists"].as_bool().unwrap() {
-            if incoming.get("hash").and_then(|x| x.as_str()) == stored.get("hash").and_then(|x| x.as_str()) {
-                ("REPLAY_STORED", stored.get("status").and_then(|x| x.as_str()))
+            if incoming.get("hash").and_then(|x| x.as_str())
+                == stored.get("hash").and_then(|x| x.as_str())
+            {
+                (
+                    "REPLAY_STORED",
+                    stored.get("status").and_then(|x| x.as_str()),
+                )
             } else {
                 ("OPERATION_ID_REUSED", None)
             }
@@ -609,7 +934,11 @@ fn run() -> Checker {
         } else {
             ("RETRY_ALLOWED", None)
         };
-        k.eq(action, s(c, "expectedAction"), &format!("or:retry {} action", name));
+        k.eq(
+            action,
+            s(c, "expectedAction"),
+            &format!("or:retry {} action", name),
+        );
         if let Some(es) = c.get("expectedResultStatus").and_then(|x| x.as_str()) {
             k.eq(rstatus, Some(es), &format!("or:retry {} status", name));
         }
@@ -620,7 +949,11 @@ fn run() -> Checker {
 
 fn main() {
     let k = run();
-    println!("A0b rust-verifier: {} assertions passed, {} failed", k.pass, k.fails.len());
+    println!(
+        "A0b rust-verifier: {} assertions passed, {} failed",
+        k.pass,
+        k.fails.len()
+    );
     if !k.fails.is_empty() {
         for f in &k.fails {
             eprintln!("  - {}", f);
@@ -635,9 +968,18 @@ mod tests {
 
     #[test]
     fn primitive_known_answers() {
-        assert_eq!(sha256hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-        assert_eq!(sha256hex("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-        assert_eq!(uuid5("6ba7b810-9dad-11d1-80b4-00c04fd430c8", "www.example.com"), "2ed6657d-e927-568b-95e1-2665a8aea6a2");
+        assert_eq!(
+            sha256hex(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            uuid5("6ba7b810-9dad-11d1-80b4-00c04fd430c8", "www.example.com"),
+            "2ed6657d-e927-568b-95e1-2665a8aea6a2"
+        );
         assert_eq!(uuid5(URL_NS, "urn:lataif:fin-ops:protocol:v4"), NS);
     }
 
@@ -658,6 +1000,9 @@ mod tests {
 
         // protocolVersion ("p…") sorts before requestedAmountFils ("r…").
         let c = serde_json::json!({ "requestedAmountFils": 100000, "protocolVersion": "4" });
-        assert_eq!(walk_types(&c), Some("EXPECTED_PROTOCOL_VERSION_INTEGER".to_string()));
+        assert_eq!(
+            walk_types(&c),
+            Some("EXPECTED_PROTOCOL_VERSION_INTEGER".to_string())
+        );
     }
 }
