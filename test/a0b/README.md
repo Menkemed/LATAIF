@@ -77,6 +77,9 @@ by editing expected values in only one verifier.
 - **NFC inside the hash boundary**: all string values are NFC-normalized before
   escaping and hashing (Node `normalize("NFC")`, Rust `unicode-normalization`), so
   NFD and NFC inputs produce identical canonical bytes and hashes.
+- **Deterministic validation order**: field/schema validation traverses object
+  members in ascending UTF-8 byte order of their names and arrays in index order;
+  the first error wins, independent of input insertion order.
 - Frozen namespace `NS_LATAIF_FIN_OPS = 9520db11-5c48-5d8f-a288-56f1876c0781`.
 - Pilot `operationType = APPLY_SUPPLIER_CREDIT_TO_EXPENSES`;
   `MAX_ENVELOPE_BYTES_V4 = 1048576` (1 MiB).

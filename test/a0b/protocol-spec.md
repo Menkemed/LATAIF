@@ -92,6 +92,24 @@ Node parses i64 strings with `BigInt`; Rust parses **strictly** to `i64`.
 
 No floats, negatives, strings, `NaN` or `Infinity` are accepted for these fields.
 
+### 2.3 Deterministic validation traversal order
+
+Field/schema validation (§2.1, §2.2) traverses a value in one fixed order, so the
+returned error code is independent of input insertion order:
+
+- **Object members** are validated in **ascending UTF-8 byte order of their member
+  names**. Member names are ASCII `^[A-Za-z0-9_]+$`, so this is the stable ASCII
+  byte order. For each member the **key is checked first**, then its value is
+  validated recursively.
+- **Arrays** are validated in **index order**.
+- The **first** error in this deterministic traversal is returned.
+- **Input insertion order is irrelevant**: an object and the same object with its
+  members in a different textual order yield the **same** error code.
+
+Both verifiers implement this identically — Node sorts the member names by UTF-8
+bytes before traversal; Rust traverses the byte-ordered `serde_json` map and sorts
+the names explicitly.
+
 ---
 
 ## 3. NFC inside the hash boundary
@@ -234,11 +252,16 @@ Retry semantics:
 |---|---|
 | final decision stored, **same** payload hash | `REPLAY_STORED` (return the identical stored result) |
 | final decision stored, **different** payload hash for same `operationId` | `OPERATION_ID_REUSED` |
-| no final decision, prior outcome transient / unknown commit status | `STATUS_QUERY` (query before retrying) |
+| no final decision, prior outcome a **safe transient** (any transient **except** `UNKNOWN_COMMIT_STATUS`) | `RETRY_ALLOWED` (retry with the same `operationId` + same payload hash) |
+| no final decision, prior outcome `UNKNOWN_COMMIT_STATUS` | `STATUS_QUERY` (query the commit status before retrying) |
 | no stored decision, same `operationId` + same hash | `RETRY_ALLOWED` |
 
-This is the byte-level basis for **at-most-once** acceptance with **idempotent
-retry**.
+A safe transient (`FINANCE_NOT_BOOTSTRAPPED`, `READ_ONLY`, `SERVICE_UNAVAILABLE`,
+`DB_LOCKED`, `RATE_LIMITED`, `INTERNAL_ERROR_BEFORE_COMMIT`) never reached the
+commit decision, so the same operation may simply be retried. Only
+`UNKNOWN_COMMIT_STATUS` is ambiguous about whether the commit happened and must be
+resolved by a status query first. This is the byte-level basis for **at-most-once**
+acceptance with **idempotent retry**.
 
 ---
 

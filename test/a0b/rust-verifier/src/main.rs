@@ -177,7 +177,14 @@ fn walk_types(v: &Value) -> Option<String> {
             None
         }
         Value::Object(m) => {
-            for (k, val) in m {
+            // Deterministic traversal: validate members in ascending UTF-8 byte
+            // order of their names (insertion-order independent). serde_json's
+            // map is already byte-ordered, but we sort explicitly so the rule
+            // does not depend on the map backing.
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            for k in keys {
+                let val = m.get(k).unwrap();
                 if is_i64_key(k) {
                     if let Some(r) = validate_i64(val) {
                         return Some(r);
@@ -595,7 +602,9 @@ fn run() -> Checker {
             } else {
                 ("OPERATION_ID_REUSED", None)
             }
-        } else if incoming.get("priorOutcome").and_then(|x| x.as_str()).map(|p| !is_final(p)).unwrap_or(false) {
+        } else if incoming.get("priorOutcome").and_then(|x| x.as_str())
+            == Some("UNKNOWN_COMMIT_STATUS")
+        {
             ("STATUS_QUERY", None)
         } else {
             ("RETRY_ALLOWED", None)
@@ -636,5 +645,19 @@ mod tests {
     fn full_parity() {
         let k = run();
         assert!(k.fails.is_empty(), "failures:\n{}", k.fails.join("\n"));
+    }
+
+    #[test]
+    fn deterministic_traversal_order() {
+        // Two invalid fields: the byte-smaller member name ("mutationCount" <
+        // "requestedAmountFils") wins regardless of input insertion order.
+        let a = serde_json::json!({ "mutationCount": "x", "requestedAmountFils": 100000 });
+        let b = serde_json::json!({ "requestedAmountFils": 100000, "mutationCount": "x" });
+        assert_eq!(walk_types(&a), Some("EXPECTED_U32_INTEGER".to_string()));
+        assert_eq!(walk_types(&a), walk_types(&b));
+
+        // protocolVersion ("p…") sorts before requestedAmountFils ("r…").
+        let c = serde_json::json!({ "requestedAmountFils": 100000, "protocolVersion": "4" });
+        assert_eq!(walk_types(&c), Some("EXPECTED_PROTOCOL_VERSION_INTEGER".to_string()));
     }
 }

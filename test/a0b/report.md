@@ -32,16 +32,16 @@ Generated from the fixtures only (no timestamps, paths, PIDs, versions); byte-st
 
 | group | cases |
 |---|---:|
-| canonical-json | 30 |
+| canonical-json | 45 |
 | uuidv5 | 22 |
 | envelopes | 25 |
 | cursor-sequences | 8 |
-| operation-results | 16 |
-| **total** | **101** |
+| operation-results | 22 |
+| **total** | **122** |
 
 ## Reject codes exercised
 
-`BAD_TIMESTAMP`, `CHILD_ID_COMPONENT_HAS_DELIMITER`, `DUPLICATE_ALLOCATION_KEY`, `DUPLICATE_LEDGER_EFFECT_KEY`, `DUPLICATE_ORDINAL`, `ENVELOPE_TOO_LARGE`, `EXPECTED_I64_STRING`, `EXPECTED_PROTOCOL_VERSION_INTEGER`, `EXPECTED_U32_INTEGER`, `I64_LEADING_ZERO`, `I64_NOT_CANONICAL`, `INT_OUT_OF_RANGE`, `INVALID_OPERATION_ID`, `INVALID_OPERATION_TYPE`, `INVALID_SEQUENCE`, `JSON_NUMBER_NOT_ALLOWED`, `MUTATION_COUNT_MISMATCH`, `MUTATION_ORDER_MISMATCH`, `ORDINAL_NOT_DENSE`, `PROTOCOL_VERSION_NOT_INTEGER`, `U32_NEGATIVE`, `U32_NOT_INTEGER`, `U32_OUT_OF_RANGE`, `UNSUPPORTED_PROTOCOL_VERSION`
+`BAD_TIMESTAMP`, `CHILD_ID_COMPONENT_HAS_DELIMITER`, `DUPLICATE_ALLOCATION_KEY`, `DUPLICATE_LEDGER_EFFECT_KEY`, `DUPLICATE_ORDINAL`, `ENVELOPE_TOO_LARGE`, `EXPECTED_I64_STRING`, `EXPECTED_PROTOCOL_VERSION_INTEGER`, `EXPECTED_U32_INTEGER`, `I64_LEADING_ZERO`, `I64_NOT_CANONICAL`, `INT_OUT_OF_RANGE`, `INVALID_OPERATION_ID`, `INVALID_OPERATION_TYPE`, `INVALID_SEQUENCE`, `JSON_NUMBER_NOT_ALLOWED`, `MUTATION_COUNT_MISMATCH`, `MUTATION_ORDER_MISMATCH`, `NON_ASCII_KEY`, `ORDINAL_NOT_DENSE`, `PROTOCOL_VERSION_NOT_INTEGER`, `U32_NEGATIVE`, `U32_NOT_INTEGER`, `U32_OUT_OF_RANGE`, `UNSUPPORTED_PROTOCOL_VERSION`
 
 ## Parity contract
 
@@ -49,4 +49,4 @@ Both verifiers independently compute and must agree on: NFC-normalized strings, 
 UTF-8 byte length, SHA-256, UUIDv5, ordinal sort order, envelope validation, cursor/sequence results, and
 result/retry classification. 64-bit domain values are i64 decimal strings (Node BigInt, Rust strict i64);
 protocolVersion/mutationCount/ordinal are bounded JSON integers (Rust u32).
-Node verification: PASS (231 assertions). Run the Rust verifier with `cargo run` in `rust-verifier/`.
+Node verification: PASS (261 assertions). Run the Rust verifier with `cargo run` in `rust-verifier/`.

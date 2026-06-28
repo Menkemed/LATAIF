@@ -502,6 +502,137 @@
         "supplierTier": 3
       },
       "expect": "JSON_NUMBER_NOT_ALLOWED"
+    },
+    {
+      "name": "multi-error-i64-and-u32",
+      "note": "two invalid fields; ascending byte-order traversal picks mutationCount (u32) before requestedAmountFils (i64)",
+      "input": {
+        "mutationCount": "x",
+        "requestedAmountFils": 100000
+      },
+      "expect": "EXPECTED_U32_INTEGER"
+    },
+    {
+      "name": "multi-error-i64-and-u32-reordered",
+      "note": "same two fields, reversed input order; identical expected code (insertion-order independent)",
+      "input": {
+        "requestedAmountFils": 100000,
+        "mutationCount": "x"
+      },
+      "expect": "EXPECTED_U32_INTEGER"
+    },
+    {
+      "name": "multi-error-protocol-version-and-i64",
+      "input": {
+        "protocolVersion": "4",
+        "requestedAmountFils": 100000
+      },
+      "expect": "EXPECTED_PROTOCOL_VERSION_INTEGER"
+    },
+    {
+      "name": "multi-error-protocol-version-and-i64-reordered",
+      "input": {
+        "requestedAmountFils": 100000,
+        "protocolVersion": "4"
+      },
+      "expect": "EXPECTED_PROTOCOL_VERSION_INTEGER"
+    },
+    {
+      "name": "multi-error-stray-number-and-u32",
+      "note": "ordinal (u32 key) sorts before supplierTier (stray number); U32_NEGATIVE wins",
+      "input": {
+        "ordinal": -1,
+        "supplierTier": 3
+      },
+      "expect": "U32_NEGATIVE"
+    },
+    {
+      "name": "multi-error-stray-number-and-u32-reordered",
+      "input": {
+        "supplierTier": 3,
+        "ordinal": -1
+      },
+      "expect": "U32_NEGATIVE"
+    },
+    {
+      "name": "multi-error-nested",
+      "note": "nested object with two errors; recursion still uses byte-order traversal",
+      "input": {
+        "wrapper": {
+          "mutationCount": "x",
+          "requestedAmountFils": 100000
+        }
+      },
+      "expect": "EXPECTED_U32_INTEGER"
+    },
+    {
+      "name": "multi-error-nested-reordered",
+      "input": {
+        "wrapper": {
+          "requestedAmountFils": 100000,
+          "mutationCount": "x"
+        }
+      },
+      "expect": "EXPECTED_U32_INTEGER"
+    },
+    {
+      "name": "key-allowed-abc",
+      "input": {
+        "abc": "1"
+      },
+      "expect": "valid",
+      "canonical": "{\"abc\":\"1\"}",
+      "utf8ByteLength": 11,
+      "sha256": "2be31b32316f5891712031f8b6a3cfc52d098f9f022617743ace136ad3a65aef"
+    },
+    {
+      "name": "key-allowed-alnum-underscore",
+      "input": {
+        "A1_b": "1"
+      },
+      "expect": "valid",
+      "canonical": "{\"A1_b\":\"1\"}",
+      "utf8ByteLength": 12,
+      "sha256": "642426b5f3ff2c31a54f81a44adc7c48de05c866b1cb7a4d21db66da82639c18"
+    },
+    {
+      "name": "key-allowed-leading-digit",
+      "note": "object keys allow a leading digit (unlike operationType)",
+      "input": {
+        "9abc": "1"
+      },
+      "expect": "valid",
+      "canonical": "{\"9abc\":\"1\"}",
+      "utf8ByteLength": 12,
+      "sha256": "6995c740c9c32e1d58810eabe0a0052892aafe7b628b33519f1903d77fdf0f3d"
+    },
+    {
+      "name": "key-empty-rejected",
+      "input": {
+        "": "1"
+      },
+      "expect": "NON_ASCII_KEY"
+    },
+    {
+      "name": "key-hyphen-rejected",
+      "input": {
+        "a-b": "1"
+      },
+      "expect": "NON_ASCII_KEY"
+    },
+    {
+      "name": "key-space-rejected",
+      "input": {
+        "a b": "1"
+      },
+      "expect": "NON_ASCII_KEY"
+    },
+    {
+      "name": "key-non-ascii-rejected",
+      "input": {
+        "mémo": "1"
+      },
+      "expect": "NON_ASCII_KEY"
     }
   ],
   "schemaCases": [

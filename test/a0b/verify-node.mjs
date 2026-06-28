@@ -97,7 +97,9 @@ const isU32Key = (k) => k === 'mutationCount' || k === 'ordinal';
 function walkTypes(v) {
   if (Array.isArray(v)) { for (const e of v) { const r = walkTypes(e); if (r) return r; } return null; }
   if (v && typeof v === 'object') {
-    for (const k of Object.keys(v)) {
+    // Deterministic traversal: validate members in ascending UTF-8 byte order
+    // of their names (insertion-order independent), not Object.keys order.
+    for (const k of Object.keys(v).sort(cmpBytes)) {
       const val = v[k];
       if (isI64Key(k)) { const r = validateI64String(val); if (r) return r; }
       else if (k === 'protocolVersion') { const r = validateProtocolVersion(val); if (r) return r; }
@@ -322,7 +324,7 @@ function retryDecision(stored, incoming) {
     if (incoming.hash === stored.hash) return { action: 'REPLAY_STORED', resultStatus: stored.status };
     return { action: 'OPERATION_ID_REUSED' };
   }
-  if (incoming.priorOutcome && !FINAL.has(incoming.priorOutcome)) return { action: 'STATUS_QUERY' };
+  if (incoming.priorOutcome === 'UNKNOWN_COMMIT_STATUS') return { action: 'STATUS_QUERY' };
   return { action: 'RETRY_ALLOWED' };
 }
 let orCases = 0;

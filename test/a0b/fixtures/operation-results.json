@@ -59,7 +59,8 @@
   "retryRules": [
     "final stored decision + same payload hash => REPLAY_STORED (identical result)",
     "final stored decision + different payload hash => OPERATION_ID_REUSED",
-    "prior transient/unknown commit status => STATUS_QUERY before retry",
+    "no stored decision + prior outcome a safe transient (any transient except UNKNOWN_COMMIT_STATUS) => RETRY_ALLOWED (same operationId + same hash)",
+    "no stored decision + prior outcome UNKNOWN_COMMIT_STATUS => STATUS_QUERY before retry",
     "no stored decision + same operationId+hash => RETRY_ALLOWED"
   ],
   "retryCases": [
@@ -138,6 +139,78 @@
       "incoming": {
         "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
         "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398"
+      },
+      "expectedAction": "RETRY_ALLOWED"
+    },
+    {
+      "name": "retry-after-finance-not-bootstrapped",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398",
+        "priorOutcome": "FINANCE_NOT_BOOTSTRAPPED"
+      },
+      "expectedAction": "RETRY_ALLOWED"
+    },
+    {
+      "name": "retry-after-read-only",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398",
+        "priorOutcome": "READ_ONLY"
+      },
+      "expectedAction": "RETRY_ALLOWED"
+    },
+    {
+      "name": "retry-after-service-unavailable",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398",
+        "priorOutcome": "SERVICE_UNAVAILABLE"
+      },
+      "expectedAction": "RETRY_ALLOWED"
+    },
+    {
+      "name": "retry-after-db-locked",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398",
+        "priorOutcome": "DB_LOCKED"
+      },
+      "expectedAction": "RETRY_ALLOWED"
+    },
+    {
+      "name": "retry-after-rate-limited",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398",
+        "priorOutcome": "RATE_LIMITED"
+      },
+      "expectedAction": "RETRY_ALLOWED"
+    },
+    {
+      "name": "retry-after-internal-error-before-commit",
+      "stored": {
+        "exists": false
+      },
+      "incoming": {
+        "operationId": "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa",
+        "hash": "47317b01099959fa40efebee37254415511f6f9fde3c93a74223e3730e515398",
+        "priorOutcome": "INTERNAL_ERROR_BEFORE_COMMIT"
       },
       "expectedAction": "RETRY_ALLOWED"
     }
