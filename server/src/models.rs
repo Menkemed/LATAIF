@@ -38,8 +38,8 @@ pub struct SyncChange {
     pub table_name: String,
     pub record_id: String,
     pub branch_id: String,
-    pub action: String,  // insert, update, delete
-    pub data: String,    // JSON
+    pub action: String, // insert, update, delete
+    pub data: String,   // JSON
     pub created_at: String,
 }
 
@@ -66,7 +66,7 @@ pub struct SyncPullResponse {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Claims {
-    pub sub: String,        // user_id
+    pub sub: String, // user_id
     pub tenant_id: String,
     pub branch_id: String,
     pub role: String,

@@ -3,15 +3,15 @@
 // REST API for multi-device synchronization
 // ═══════════════════════════════════════════════════════════
 
-mod db;
 mod auth;
-mod routes;
+mod db;
 mod models;
+mod routes;
 
 use axum::Router;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber;
 
 pub struct AppState {
@@ -28,7 +28,8 @@ async fn main() {
 
     let state = Arc::new(AppState {
         db: Mutex::new(conn),
-        jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "lataif_secret_2026_change_in_production".to_string()),
+        jwt_secret: std::env::var("JWT_SECRET")
+            .unwrap_or_else(|_| "lataif_secret_2026_change_in_production".to_string()),
     });
 
     // CORS — allow desktop + mobile apps

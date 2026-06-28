@@ -70,7 +70,7 @@ pub fn init_database() -> Result<Connection, Box<dyn std::error::Error + Send + 
 
         CREATE INDEX IF NOT EXISTS idx_sync_tenant_branch ON sync_changelog(tenant_id, branch_id);
         CREATE INDEX IF NOT EXISTS idx_sync_id ON sync_changelog(id);
-        "
+        ",
     )?;
 
     // A1a: apply additive authoritative-operation migrations after the base

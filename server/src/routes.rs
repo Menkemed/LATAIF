@@ -45,8 +45,13 @@ async fn login(
         .and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![req.email], |row| {
                 Ok((
-                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?,
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             })
         });
@@ -61,7 +66,13 @@ async fn login(
     let token = auth::create_token(&user_id, &tenant_id, &branch_id, &role, &state.jwt_secret)?;
 
     Ok(Json(LoginResponse {
-        token, user_id, tenant_id, branch_id, role, user_name, branch_name,
+        token,
+        user_id,
+        tenant_id,
+        branch_id,
+        role,
+        user_name,
+        branch_name,
     }))
 }
 
@@ -76,8 +87,8 @@ async fn register_tenant(
     let user_id = uuid::Uuid::new_v4().to_string();
     let slug = req.tenant_name.to_lowercase().replace(' ', "-");
 
-    let password_hash = bcrypt::hash(&req.password, 10)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let password_hash =
+        bcrypt::hash(&req.password, 10).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     db.execute(
         "INSERT INTO tenants (id, name, slug, plan, active, created_at, updated_at) VALUES (?1, ?2, ?3, 'starter', 1, ?4, ?4)",
@@ -102,8 +113,13 @@ async fn register_tenant(
     let token = auth::create_token(&user_id, &tenant_id, &branch_id, "owner", &state.jwt_secret)?;
 
     Ok(Json(LoginResponse {
-        token, user_id, tenant_id, branch_id,
-        role: "owner".to_string(), user_name: req.user_name, branch_name: req.branch_name,
+        token,
+        user_id,
+        tenant_id,
+        branch_id,
+        role: "owner".to_string(),
+        user_name: req.user_name,
+        branch_name: req.branch_name,
     }))
 }
 
@@ -177,5 +193,8 @@ async fn sync_pull(
 
     let last_sync_id = changes.last().map(|c| c.id).unwrap_or(since_id);
 
-    Ok(Json(SyncPullResponse { changes, last_sync_id }))
+    Ok(Json(SyncPullResponse {
+        changes,
+        last_sync_id,
+    }))
 }

@@ -1,8 +1,14 @@
+use crate::models::Claims;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use crate::models::Claims;
 
-pub fn create_token(user_id: &str, tenant_id: &str, branch_id: &str, role: &str, secret: &str) -> Result<String, StatusCode> {
+pub fn create_token(
+    user_id: &str,
+    tenant_id: &str,
+    branch_id: &str,
+    role: &str,
+    secret: &str,
+) -> Result<String, StatusCode> {
     let expiration = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::days(30))
         .unwrap()
