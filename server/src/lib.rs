@@ -6,4 +6,5 @@
 //! Axum binary — it accepts no operations, registers no routes, and touches
 //! neither database nor network.
 
+pub mod money;
 pub mod protocol;

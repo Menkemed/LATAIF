@@ -14,6 +14,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/sync/push", post(sync_push))
         .route("/sync/pull", get(sync_pull))
+        .route("/operations/pull", get(operations_pull))
         .route("/me", get(get_me))
         .route_layer(middleware::from_fn(auth::auth_middleware));
 
@@ -136,21 +137,65 @@ async fn sync_push(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(req): Json<SyncPushRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> (StatusCode, Json<serde_json::Value>) {
     let db = state.db.lock().await;
     let now = chrono::Utc::now().to_rfc3339();
-    let mut count = 0;
-
-    for change in &req.changes {
-        db.execute(
-            "INSERT INTO sync_changelog (tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![claims.tenant_id, claims.branch_id, change.table_name, change.record_id, change.action, change.data, claims.sub, now],
-        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        count += 1;
+    // B0: the whole batch is processed in one BEGIN IMMEDIATE transaction through
+    // the schema-oriented bridge (folds non-credit settlement on cut-over records,
+    // blocks protected mutations, relays the rest). All-or-nothing.
+    match crate::authoritative_sync::bridge::process_sync_batch(
+        &db,
+        &claims.tenant_id,
+        &claims.branch_id,
+        &claims.sub,
+        &req.changes,
+        &now,
+    ) {
+        Ok(n) => (StatusCode::OK, Json(serde_json::json!({ "synced": n }))),
+        Err(e) => {
+            let code = if matches!(e, crate::authoritative_sync::bridge::BatchError::Internal) {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::CONFLICT
+            };
+            // Only the stable B0 error code is exposed — never a raw SQL message.
+            (
+                code,
+                Json(serde_json::json!({ "error": e.code(), "rejected": true })),
+            )
+        }
     }
+}
 
-    Ok(Json(serde_json::json!({ "synced": count })))
+#[derive(Deserialize)]
+struct OpsPullParams {
+    since: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// B0 — operations pull (no submit). Tenant/branch come only from the claims.
+async fn operations_pull(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<OpsPullParams>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let db = state.db.lock().await;
+    match crate::authoritative_sync::pull_operations(
+        &db,
+        &claims.tenant_id,
+        &claims.branch_id,
+        params.since.unwrap_or(0),
+        params.limit.unwrap_or(100),
+    ) {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(crate::authoritative_sync::pull_result_json(&result)),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "B0_INTERNAL" })),
+        ),
+    }
 }
 
 #[derive(Deserialize)]

@@ -19,3 +19,7 @@ unicode-normalization = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+[dev-dependencies]
+# test-only: drive the real Axum routes via `oneshot` for the B0 auth/HTTP contract.
+tower = { version = "0.5", features = ["util"] }

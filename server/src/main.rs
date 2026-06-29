@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════
 
 mod auth;
+mod authoritative_sync;
 mod db;
 mod models;
 mod routes;
@@ -51,3 +52,6 @@ async fn main() {
 }
 
 mod migrations;
+
+#[cfg(test)]
+mod route_tests;
