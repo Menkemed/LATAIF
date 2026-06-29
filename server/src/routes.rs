@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     middleware,
     routing::{get, post},
@@ -14,7 +14,12 @@ pub fn api_routes() -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/sync/push", post(sync_push))
         .route("/sync/pull", get(sync_pull))
+        // B0 operations-pull (static `pull` segment) stays; B1 adds submit + status.
+        // axum/matchit gives the static `/operations/pull` priority over the
+        // `/operations/{operation_id}` param route (proven in route_tests).
+        .route("/operations", post(submit_operation))
         .route("/operations/pull", get(operations_pull))
+        .route("/operations/{operation_id}", get(get_operation))
         .route("/me", get(get_me))
         .route_layer(middleware::from_fn(auth::auth_middleware));
 
@@ -196,6 +201,51 @@ async fn operations_pull(
             Json(serde_json::json!({ "error": "B0_INTERNAL" })),
         ),
     }
+}
+
+/// B1 — submit `APPLY_SUPPLIER_CREDIT_TO_EXPENSES`. Tenant/branch/actor come only
+/// from the authenticated claims; the payload is canonicalised + hashed inside
+/// the handler. Returns the final or transient protocol decision (a transient
+/// outcome is retryable → 503; a final decision is delivered with 200).
+async fn submit_operation(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = state.db.lock().await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let operation_id = payload
+        .get("operationId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let payload_hash =
+        lataif_server::protocol::canonical::payload_hash_hex(&payload).unwrap_or_default();
+    let decision = crate::operations::submit(&conn, &claims, &payload, &now);
+    let code = if decision.is_transient() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    (
+        code,
+        Json(decision.to_response(&operation_id, &payload_hash)),
+    )
+}
+
+/// B1 — operation status (no re-execution). Tenant-isolated via the claims.
+async fn get_operation(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(operation_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().await;
+    Json(
+        crate::operations::get_status(&conn, &claims.tenant_id, &claims.branch_id, &operation_id)
+            .unwrap_or_else(
+                || serde_json::json!({ "operationId": operation_id, "status": "unknown" }),
+            ),
+    )
 }
 
 #[derive(Deserialize)]

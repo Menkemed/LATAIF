@@ -7,6 +7,7 @@ mod auth;
 mod authoritative_sync;
 mod db;
 mod models;
+mod operations;
 mod routes;
 
 use axum::Router;

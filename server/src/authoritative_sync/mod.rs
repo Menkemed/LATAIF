@@ -41,6 +41,47 @@ pub fn latest_snapshot(
     })
 }
 
+/// Sum of active `method='credit'` `expense_payments` for an expense, taken from
+/// the **newest, branch-isolated** snapshot per payment record in
+/// `sync_changelog` (deleted rows excluded). Money via [`lataif_server::money`]
+/// — never `f64 * 1000`. Used only at B1 cutover to reconstruct an expense's existing
+/// credit-settled total before the projection becomes authoritative.
+pub(crate) fn sum_active_credit_payments(
+    conn: &Connection,
+    tenant: &str,
+    branch: &str,
+    expense_id: &str,
+) -> rusqlite::Result<i64> {
+    let mut stmt = conn.prepare(
+        "SELECT c.data FROM sync_changelog c
+         WHERE c.tenant_id = ?1 AND c.branch_id = ?2 AND c.table_name = 'expense_payments'
+           AND c.id = (SELECT MAX(c2.id) FROM sync_changelog c2
+                       WHERE c2.tenant_id = c.tenant_id AND c2.branch_id = c.branch_id
+                         AND c2.table_name = c.table_name AND c2.record_id = c.record_id)
+           AND c.action <> 'delete'",
+    )?;
+    let rows = stmt.query_map(params![tenant, branch], |r| r.get::<_, String>(0))?;
+    let mut total: i64 = 0;
+    for data in rows {
+        let v: Value = match serde_json::from_str(&data?) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let matches_expense = v.get("expense_id").and_then(|x| x.as_str()) == Some(expense_id);
+        let is_credit = v.get("method").and_then(|x| x.as_str()) == Some("credit");
+        if matches_expense && is_credit {
+            if let Some(a) = v.get("amount") {
+                let fils = lataif_server::money::bhd_value_to_fils(a)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                total = total
+                    .checked_add(fils)
+                    .ok_or(rusqlite::Error::InvalidQuery)?;
+            }
+        }
+    }
+    Ok(total)
+}
+
 /// One authoritative operation envelope delivered by the pull.
 #[derive(Debug, Clone)]
 pub struct PulledOperation {

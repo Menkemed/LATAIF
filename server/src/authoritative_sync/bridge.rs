@@ -253,17 +253,17 @@ fn write_clean_snapshot(
 }
 
 /// A finalised expense settlement projection (all fields in fils).
-struct ExpenseProjection {
-    supplier_id: String,
-    amount_fils: i64,
-    non_credit_paid_fils: i64,
-    credit_paid_fils: i64,
-    settled_fils: i64,
-    open_fils: i64,
-    status: String,
+pub(crate) struct ExpenseProjection {
+    pub(crate) supplier_id: String,
+    pub(crate) amount_fils: i64,
+    pub(crate) non_credit_paid_fils: i64,
+    pub(crate) credit_paid_fils: i64,
+    pub(crate) settled_fils: i64,
+    pub(crate) open_fils: i64,
+    pub(crate) status: String,
 }
 
-fn build_expense_projection(
+pub(crate) fn build_expense_projection(
     supplier_id: &str,
     amount_fils: i64,
     non_credit_paid_fils: i64,
@@ -299,7 +299,7 @@ fn build_expense_projection(
     })
 }
 
-fn expense_projection_json(
+pub(crate) fn expense_projection_json(
     expense_id: &str,
     tenant: &str,
     branch: &str,
@@ -319,21 +319,78 @@ fn expense_projection_json(
     })
 }
 
+/// A finalised supplier-credit balance projection (all fields in fils). The
+/// canonical SUPPLIER_CREDIT_BALANCE shape the bridge reads (`supplierId`,
+/// `amountFils`, `usedAmountFils`) lives here so B1 writes it through one schema.
+pub(crate) struct CreditProjection {
+    pub(crate) supplier_id: String,
+    pub(crate) amount_fils: i64,
+    pub(crate) used_amount_fils: i64,
+    pub(crate) available_amount_fils: i64,
+    pub(crate) status: String,
+}
+
+pub(crate) fn build_credit_projection(
+    supplier_id: &str,
+    amount_fils: i64,
+    used_amount_fils: i64,
+) -> Result<CreditProjection, BatchError> {
+    if amount_fils < 0 || used_amount_fils < 0 {
+        return Err(BatchError::InvalidMoney("negative credit component".into()));
+    }
+    if used_amount_fils > amount_fils {
+        return Err(BatchError::SettlementOverpayment(format!(
+            "used {} > amount {}",
+            used_amount_fils, amount_fils
+        )));
+    }
+    Ok(CreditProjection {
+        supplier_id: supplier_id.to_string(),
+        amount_fils,
+        used_amount_fils,
+        available_amount_fils: amount_fils - used_amount_fils,
+        status: if used_amount_fils >= amount_fils {
+            "USED"
+        } else {
+            "OPEN"
+        }
+        .to_string(),
+    })
+}
+
+pub(crate) fn credit_projection_json(
+    credit_id: &str,
+    tenant: &str,
+    branch: &str,
+    p: &CreditProjection,
+) -> Value {
+    json!({
+        "creditId": credit_id,
+        "tenantId": tenant,
+        "branchId": branch,
+        "supplierId": p.supplier_id,
+        "amountFils": p.amount_fils,
+        "usedAmountFils": p.used_amount_fils,
+        "availableAmountFils": p.available_amount_fils,
+        "status": p.status,
+    })
+}
+
 /// Read fils from a prior projection field.
-fn proj_fils(p: &Value, key: &str) -> i64 {
+pub(crate) fn proj_fils(p: &Value, key: &str) -> i64 {
     p.get(key).and_then(|v| v.as_i64()).unwrap_or(0)
 }
 
-/// Bump (or create) an aggregate revision exactly once; returns the new value.
-fn bump_revision(
+/// Read an aggregate's current revision (`0` if it has never been materialised).
+/// Single source of truth for revision access (reused by the B1 operation CAS).
+pub(crate) fn read_revision(
     conn: &Connection,
     tenant: &str,
     branch: &str,
     agg_type: &str,
     agg_id: &str,
-    now: &str,
 ) -> Result<i64, BatchError> {
-    let current: i64 = conn
+    Ok(conn
         .query_row(
             "SELECT revision FROM aggregate_revisions
              WHERE tenant_id=?1 AND branch_id=?2 AND aggregate_type=?3 AND aggregate_id=?4",
@@ -342,7 +399,19 @@ fn bump_revision(
         )
         .optional()
         .map_err(|_| BatchError::Internal)?
-        .unwrap_or(0);
+        .unwrap_or(0))
+}
+
+/// Bump (or create) an aggregate revision exactly once; returns the new value.
+pub(crate) fn bump_revision(
+    conn: &Connection,
+    tenant: &str,
+    branch: &str,
+    agg_type: &str,
+    agg_id: &str,
+    now: &str,
+) -> Result<i64, BatchError> {
+    let current = read_revision(conn, tenant, branch, agg_type, agg_id)?;
     let next = current + 1;
     conn.execute(
         "INSERT INTO aggregate_revisions (tenant_id, branch_id, aggregate_type, aggregate_id, revision, updated_at)
@@ -356,7 +425,7 @@ fn bump_revision(
 }
 
 /// Upsert a canonical projection row.
-fn write_projection(
+pub(crate) fn write_projection(
     conn: &Connection,
     tenant: &str,
     branch: &str,
@@ -378,6 +447,31 @@ fn write_projection(
     Ok(())
 }
 
+/// Test-only pause hook: lets a concurrency test hold this batch's write lock
+/// (right after `BEGIN IMMEDIATE`) until the other writer is provably blocked.
+/// Compiled out of the production binary; no public flag/route/env switch.
+#[cfg(test)]
+pub(crate) mod test_pause {
+    use std::cell::RefCell;
+    type Hook = Box<dyn FnMut() + Send>;
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+    pub(crate) fn install(f: Hook) {
+        HOOK.with(|h| *h.borrow_mut() = Some(f));
+    }
+    pub(crate) fn clear() {
+        HOOK.with(|h| *h.borrow_mut() = None);
+    }
+    pub(crate) fn fire() {
+        let hook = HOOK.with(|h| h.borrow_mut().take());
+        if let Some(mut f) = hook {
+            f();
+            HOOK.with(|h| *h.borrow_mut() = Some(f));
+        }
+    }
+}
+
 /// Entry point: process the whole batch atomically.
 pub fn process_sync_batch(
     conn: &Connection,
@@ -389,6 +483,9 @@ pub fn process_sync_batch(
 ) -> Result<usize, BatchError> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|_| BatchError::Internal)?;
+    // The write lock is now held; a concurrency test may pause here.
+    #[cfg(test)]
+    test_pause::fire();
     match process_in_tx(conn, tenant, branch, actor, changes, now) {
         Ok(n) => {
             conn.execute_batch("COMMIT")
