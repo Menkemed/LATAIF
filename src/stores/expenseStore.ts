@@ -20,7 +20,7 @@ import {
   rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
-import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
+import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE, SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Buchungsfehler blockieren den operativen Domain-Insert NICHT; Reconciliation-View
@@ -226,6 +226,22 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
       const nextSup = (data.supplierId as string | null) || null;
       if (prevSup !== nextSup && expenseHasActiveCreditSettlement(id)) {
         throw new Error(SUPPLIER_CREDIT_LOCK_MESSAGE);
+      }
+    }
+
+    // D1 — Amount-Reduktion unter das bereits Beglichene (cash + credit) blockieren, solange
+    // eine aktive Credit-Einloesung besteht: sonst settled > amount (ueberbelegter Credit).
+    // Spiegelt die Server-Invariante (bridge.rs build_expense_projection → B0_SETTLEMENT_
+    // OVERPAYMENT). Wirft VOR jedem Write → voller Rollback, kein Teilzustand + kein
+    // fehlschlagender Legacy-Push. Greift NICHT im Cancel-Pfad (reverst die Einloesung selbst)
+    // und nur, wenn amount tatsaechlich uebergeben wird. Fils-genau, keine Toleranz.
+    if (data.status !== 'CANCELLED' && data.amount !== undefined && before) {
+      const nextAmountF = toFils(Number(data.amount) || 0);
+      if (expenseHasActiveCreditSettlement(id)) {
+        const settledF = toFils(before.paidAmount || 0) + toFils(creditPaidForExpense(id));
+        if (nextAmountF < settledF) {
+          throw new Error(SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE);
+        }
       }
     }
 

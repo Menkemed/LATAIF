@@ -30,6 +30,15 @@ const round3 = (n: number) => toFils(n) / 1000;
 export const SUPPLIER_CREDIT_LOCK_MESSAGE =
   'Cannot change supplier while supplier credit is applied. Reverse or cancel the credit settlement first.';
 
+// D1 — Amount-Untergrenze bei aktiver Credit-Einloesung: der Expense-Betrag darf nicht
+// unter das bereits Beglichene (cash + credit) sinken, sonst waere settled > amount und der
+// Supplier-Credit ist ueberbelegt (Credit an einer zu kleinen Expense gebunden → verlorener
+// Rest-Anspruch). Der Server (bridge.rs build_expense_projection) lehnt genau das als
+// B0_SETTLEMENT_OVERPAYMENT ab; lokal wird es hart geblockt, damit gar kein inkonsistenter
+// lokaler Zustand + fehlschlagender Push-Stau entsteht.
+export const SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE =
+  'Cannot reduce the expense amount below the settled supplier credit. Reverse or cancel the credit settlement first.';
+
 // True, wenn die Expense mind. eine method='credit'-Row mit lebenden Ledger-Eintraegen
 // und ohne Reversal besitzt (eine bereits reversierte/restored Credit-Row gilt als inaktiv).
 export function expenseHasActiveCreditSettlement(expenseId: string): boolean {

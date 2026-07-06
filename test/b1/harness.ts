@@ -290,6 +290,32 @@ async function seedServer(url: string, token: string, branchId: string, opts: { 
   assert(r.status === 200, `seed push 200 (got ${r.status})`);
 }
 
+// ── D1 helpers ──
+// Assert that a legacy sync-push mutation is rejected by the B0 bridge with a stable code.
+async function assertBlocked(url: string, token: string, changes: unknown[], code: string): Promise<void> {
+  const r = await syncPush(url, token, changes);
+  const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+  assert(r.status === 409, `expected 409 block (got ${r.status}) for ${code}`);
+  assert(body.error === code, `expected ${code} (got ${JSON.stringify(body)})`);
+}
+// Seed a server + drive one full-100 credit op to accepted → exp-1/cred-1 are now cut over
+// (server projections + revisions materialised). Returns the applied client A.
+async function seedAndCutover(
+  SQL: { Database: new () => SqlDb },
+  srv: Server,
+  token: string,
+  branchId: string,
+): Promise<ReturnType<typeof makeClient>> {
+  await seedServer(srv.url, token, branchId);
+  const A = makeClient(SQL, branchId);
+  const op = buildFullOp(A);
+  const r = await submitOp(srv.url, token, op.payload);
+  assert(r.status === 200 && r.body.status === 'accepted', `cutover accepted (got ${r.status}/${r.body.status})`);
+  await pullApply(srv.url, token, A);
+  assertClientEndState(A);
+  return A;
+}
+
 // ═══════════════════════════════════ scenarios ═══════════════════════════════════
 async function main(): Promise<void> {
   const SQL = (await initSqlJs()) as unknown as { Database: new () => SqlDb };
@@ -499,6 +525,242 @@ async function main(): Promise<void> {
       // nothing stored on the server
       const pull = await pullOps(srv.url, reg.token, 0, 200);
       assert((pull.operations as unknown[]).length === 0, 'no envelope created');
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // ═══════════ D1 — finance hardening: protected mutations, folds & idempotency ═══════════
+
+  // 1) credit-settled expense DELETE via legacy sync → blocked
+  await scenario('D1: credit-settled expense delete blocked (B0_PROTECTED_EXPENSE_CANCEL_DELETE)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1a${Date.now()}@x.com`);
+      await seedAndCutover(SQL, srv, reg.token, reg.branchId);
+      await assertBlocked(
+        srv.url,
+        reg.token,
+        [{ table_name: 'expenses', record_id: 'exp-1', action: 'delete', data: JSON.stringify({}) }],
+        'B0_PROTECTED_EXPENSE_CANCEL_DELETE',
+      );
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 2) credit-settled expense CANCEL via legacy sync → blocked
+  await scenario('D1: credit-settled expense cancel blocked (B0_PROTECTED_EXPENSE_CANCEL_DELETE)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1b${Date.now()}@x.com`);
+      await seedAndCutover(SQL, srv, reg.token, reg.branchId);
+      await assertBlocked(
+        srv.url,
+        reg.token,
+        [{ table_name: 'expenses', record_id: 'exp-1', action: 'update', data: JSON.stringify({ status: 'CANCELLED' }) }],
+        'B0_PROTECTED_EXPENSE_CANCEL_DELETE',
+      );
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 3) supplier change on a credit-settled expense → blocked
+  await scenario('D1: expense supplier change blocked (B0_SUPPLIER_CHANGE_LOCKED)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1c${Date.now()}@x.com`);
+      await seedAndCutover(SQL, srv, reg.token, reg.branchId);
+      await assertBlocked(
+        srv.url,
+        reg.token,
+        [{ table_name: 'expenses', record_id: 'exp-1', action: 'update', data: JSON.stringify({ supplier_id: 'sup-2' }) }],
+        'B0_SUPPLIER_CHANGE_LOCKED',
+      );
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 4) amount reduced below the settled credit → blocked (the server floor under the desktop guard)
+  await scenario('D1: expense amount below settled credit blocked (B0_SETTLEMENT_OVERPAYMENT)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1d${Date.now()}@x.com`);
+      await seedAndCutover(SQL, srv, reg.token, reg.branchId);
+      await assertBlocked(
+        srv.url,
+        reg.token,
+        [{ table_name: 'expenses', record_id: 'exp-1', action: 'update', data: JSON.stringify({ amount: 50 }) }],
+        'B0_SETTLEMENT_OVERPAYMENT',
+      );
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 5) used supplier credit DELETE via legacy sync → blocked
+  await scenario('D1: used supplier credit delete blocked (B0_PROTECTED_CREDIT_DELETE_REFUND)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1e${Date.now()}@x.com`);
+      await seedAndCutover(SQL, srv, reg.token, reg.branchId);
+      await assertBlocked(
+        srv.url,
+        reg.token,
+        [{ table_name: 'supplier_credits', record_id: 'cred-1', action: 'delete', data: JSON.stringify({}) }],
+        'B0_PROTECTED_CREDIT_DELETE_REFUND',
+      );
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 6) used supplier credit amount reduction via legacy sync → blocked
+  await scenario('D1: used supplier credit amount reduction blocked (B0_PROTECTED_CREDIT_PAYMENT)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1f${Date.now()}@x.com`);
+      await seedAndCutover(SQL, srv, reg.token, reg.branchId);
+      await assertBlocked(
+        srv.url,
+        reg.token,
+        [{ table_name: 'supplier_credits', record_id: 'cred-1', action: 'update', data: JSON.stringify({ amount: 50 }) }],
+        'B0_PROTECTED_CREDIT_PAYMENT',
+      );
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 7) a legacy credit-method payment on the protected case → blocked
+  await scenario('D1: legacy credit-payment mutation blocked (B0_PROTECTED_CREDIT_PAYMENT)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1g${Date.now()}@x.com`);
+      await seedAndCutover(SQL, srv, reg.token, reg.branchId);
+      await assertBlocked(
+        srv.url,
+        reg.token,
+        [{ table_name: 'expense_payments', record_id: 'legacy-credit-pay', action: 'insert', data: JSON.stringify({ id: 'legacy-credit-pay', expense_id: 'exp-1', amount: 10, method: 'credit', reference: 'cred-1' }) }],
+        'B0_PROTECTED_CREDIT_PAYMENT',
+      );
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 8) cash/bank/benefit payment on a partially-credit-settled (cut-over) expense still folds (200)
+  await scenario('D1: cash payment compatible after cutover (folded, not blocked)', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1h${Date.now()}@x.com`);
+      await seedServer(srv.url, reg.token, reg.branchId);
+      const A = makeClient(SQL, reg.branchId);
+      // partial credit apply: 60 of the 100 credit onto exp-1 → open remaining 40
+      const p = A.plan(60_000);
+      const grouped = proto.groupByCredit(p.allocations);
+      const payload = proto.buildPayload(A.db, {
+        operationId: randomUUID(),
+        branchId: reg.branchId,
+        creditId: 'cred-1',
+        nowIso: new Date().toISOString(),
+        allocations: grouped[0].allocations,
+      });
+      const rr = await submitOp(srv.url, reg.token, payload);
+      assert(rr.status === 200 && rr.body.status === 'accepted', `partial credit accepted (got ${rr.status}/${rr.body.status})`);
+      // a legacy cash payment of the remaining 40 must FOLD (not be blocked)
+      const r = await syncPush(srv.url, reg.token, [
+        { table_name: 'expense_payments', record_id: 'cash-pay-1', action: 'insert', data: JSON.stringify({ id: 'cash-pay-1', expense_id: 'exp-1', amount: 40, method: 'cash' }) },
+        { table_name: 'expenses', record_id: 'exp-1', action: 'update', data: JSON.stringify({ paid_amount: 40, status: 'PAID' }) },
+      ]);
+      assert(r.status === 200, `cash payment folds after cutover (got ${r.status})`);
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 9) operations-pull is idempotent across an app restart (cursor + applied-guard persist)
+  await scenario('D1: operations-pull idempotent across app restart', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1i${Date.now()}@x.com`);
+      await seedServer(srv.url, reg.token, reg.branchId);
+      const A = makeClient(SQL, reg.branchId);
+      const op = buildFullOp(A);
+      await submitOp(srv.url, reg.token, op.payload);
+      const B = makeClient(SQL, reg.branchId);
+      const n1 = await pullApply(srv.url, reg.token, B);
+      assert(n1 === 1, `B applied one (got ${n1})`);
+      // simulate an app restart: export B's DB bytes and reopen a fresh connection on them
+      const bytes = B.raw.export();
+      const SQLctor = SQL as unknown as { Database: new (data?: Uint8Array) => SqlDb };
+      const reopened = new SQLctor.Database(bytes);
+      const db2: proto.Db = {
+        run: (sql, params) => reopened.run(sql, (params as never[]) ?? []),
+        query: (sql, params) => {
+          const res = reopened.exec(sql, (params as never[]) ?? []);
+          if (res.length === 0) return [];
+          const { columns, values } = res[0];
+          return values.map((row: unknown[]) => {
+            const o: Record<string, unknown> = {};
+            columns.forEach((c: string, i: number) => (o[c] = row[i]));
+            return o;
+          });
+        },
+      };
+      // cursor persisted → re-pull from the reopened DB delivers nothing new
+      const since = proto.readOpCursor(db2);
+      const res = await pullOps(srv.url, reg.token, since, 200);
+      assert(((res.operations as unknown[]) || []).length === 0, 'no ops after restart (cursor survived)');
+      // and the applied-envelope idempotency record survived the restart
+      assert(db2.query('SELECT operation_id FROM b1_applied_envelopes').length === 1, 'applied-envelope record survived restart');
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 10) a losing conflict leaves the loser's local DB clean, then converges on refresh
+  await scenario('D1: conflict leaves loser local DB clean, refresh converges', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1j${Date.now()}@x.com`);
+      await seedServer(srv.url, reg.token, reg.branchId);
+      const A = makeClient(SQL, reg.branchId);
+      const B = makeClient(SQL, reg.branchId);
+      await submitOp(srv.url, reg.token, buildFullOp(A).payload); // A wins
+      const rB = await submitOp(srv.url, reg.token, buildFullOp(B).payload);
+      assert(rB.body.status === 'conflict', `B conflict (got ${rB.body.status})`);
+      // no local financial write happened on B before the authoritative accept
+      assert(B.db.query("SELECT id FROM expense_payments WHERE expense_id='exp-1'").length === 0, 'B no local payment after conflict');
+      assert(B.db.query('SELECT id FROM ledger_entries').length === 0, 'B no local ledger after conflict');
+      assert(proto.readRevision(B.db, proto.AGG_CREDIT, 'cred-1') === 0, 'B credit revision still 0 after conflict');
+      // refresh via pull → converges to the authoritative end state
+      await pullApply(srv.url, reg.token, B);
+      assertClientEndState(B);
+    } finally {
+      srv.kill();
+    }
+  });
+
+  // 11) a validation/economic rejection (CREDIT_OVERDRAWN) leaves no server or local writes
+  await scenario('D1: overdrawn rejection leaves no server/local writes', async () => {
+    const srv = await startServer();
+    try {
+      const reg = await register(srv.url, `d1k${Date.now()}@x.com`);
+      await seedServer(srv.url, reg.token, reg.branchId);
+      const A = makeClient(SQL, reg.branchId);
+      const op = buildFullOp(A);
+      // ask for 150 out of a 100 credit → overdrawn (same proven mutation shape as the reuse test)
+      const overdrawn = { ...op.payload, operationId: randomUUID(), allocations: [{ ...op.payload.allocations[0], amountFils: '150000' }] };
+      const r = await submitOp(srv.url, reg.token, overdrawn);
+      assert(r.body.status === 'conflict' || r.body.status === 'validation_rejected', `rejected (got ${r.body.status}/${r.body.errorCode})`);
+      // nothing stored on the server, nothing applied locally
+      const pull = await pullOps(srv.url, reg.token, 0, 200);
+      assert((pull.operations as unknown[]).length === 0, 'no envelope created');
+      assert(A.db.query("SELECT id FROM expense_payments WHERE method='credit'").length === 0, 'no local credit payment');
+      assert(proto.readRevision(A.db, proto.AGG_CREDIT, 'cred-1') === 0, 'no local credit revision');
     } finally {
       srv.kill();
     }
