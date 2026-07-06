@@ -23,6 +23,7 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import { query } from '@/core/db/helpers';
 import { creditPaidByExpense } from '@/core/finance/expenseSettlement';
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
+import { applySupplierCreditViaServer } from '@/core/operations/service';
 
 interface PaySupplierModalProps {
   supplierId: string | null;
@@ -88,8 +89,8 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   const purchases = usePurchaseStore(s => s.purchases);
   const addPurchasePayment = usePurchaseStore(s => s.addPayment);
   const grantStandaloneCredit = useSupplierStore(s => s.grantStandaloneCredit);
-  // Slice B — Credit-Methode: autoritativer Writer + frische Lesepfade fuer Snapshot/Vorschau.
-  const applyCreditsToExpenses = useSupplierStore(s => s.applySupplierCreditsToExpenses);
+  // C1 — Credit-Methode laeuft jetzt ueber applySupplierCreditViaServer (autoritativer
+  // Serverpfad); nur noch frische Lesepfade fuer Snapshot/Vorschau hier.
   const getOpenCredits = useSupplierStore(s => s.getOpenCredits);
   const loadSuppliers = useSupplierStore(s => s.loadSuppliers);
 
@@ -302,7 +303,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     setManualAlloc(prev => ({ ...prev, [key]: capped }));
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
     // Re-Entry-Riegel: busy (async UI-State) UND submittingRef (synchron, schuetzt denselben Tick).
     if (busy || submittingRef.current) return;
     if (!supplierId || totalAmount <= 0) return;
@@ -311,22 +312,30 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     // (autoritativ; FIFO im Store). Ruft NIE recordExpensePayment/addPurchasePayment/grantStandaloneCredit
     // und erzeugt nie Overflow-Credit. ──
     if (method === 'credit') {
+      // ── C1: autoritativer Serverpfad. KEIN lokaler Write vor der Serverentscheidung.
+      // Genau eine Operation je Credit (FIFO-Plan im Service); bei accepted wird das
+      // autoritative Envelope lokal (idempotent, ohne Re-Push) angewandt. ──
       submittingRef.current = true;
       setBusy(true);
       try {
-        // Skalar (Fils-aligniert) — KEIN Allokationsplan aus der UI. Store laedt frisch + rechnet selbst.
-        applyCreditsToExpenses(supplierId, fromFils(requestedFils));
-        loadExpenses();                          // globales expenses-Array → alle Settlement-Displays
+        const res = await applySupplierCreditViaServer(supplierId, fromFils(requestedFils));
+        loadExpenses();                          // Settlement-Displays neu laden
         loadSuppliers();                         // Supplier-KPIs/Liste
-        onClose();                               // Erfolg: Riegel bleibt gesetzt bis Re-Open; bumpt refreshKey
+        setRefreshTick(t => t + 1);              // Snapshot/Max/Vorschau neu rechnen
+        if (res.outcome === 'success') {
+          onClose();                             // Erfolg: schliessen (Riegel bleibt bis Re-Open)
+        } else {
+          // conflict / validation / bootstrap / offline / unknown / auth / server:
+          // Modal bleibt offen, klare Meldung, Retry erlaubt — KEIN automatischer Retry.
+          alert(res.message);
+          submittingRef.current = false;
+        }
       } catch (e) {
-        // Tx ist komplett zurueckgerollt. Modal bleibt offen, KEINE Erfolgsmeldung; aktuellen Stand
-        // neu laden + Snapshot/Max/Vorschau neu rechnen (Submit bleibt gesperrt falls Betrag zu hoch).
         alert(e instanceof Error ? e.message : String(e));
         loadExpenses();
         loadSuppliers();
         setRefreshTick(t => t + 1);
-        submittingRef.current = false;           // Fehler → Retry erlauben
+        submittingRef.current = false;
       } finally {
         setBusy(false);
       }

@@ -9,6 +9,7 @@ import { v4 as uuid } from 'uuid';
 import { DEFAULT_CATEGORIES } from '../models/default-categories';
 import SCHEMA from './schema.sql?raw';
 import { isTransactionActive, markSavePending } from './transaction-context';
+import { B1_MIGRATION_SQL } from '../operations/migration';
 
 let db: Database | null = null;
 const STORAGE_KEY = 'lataif_db_v2';
@@ -1670,6 +1671,10 @@ function runMigrations(database: Database): void {
     `ALTER TABLE payments ADD COLUMN card_brand TEXT`,
     // v0.7.26 — Karten-Brand auf Order-Zahlungen (Deposit + Folgezahlungen).
     `ALTER TABLE order_payments ADD COLUMN card_brand TEXT`,
+    // ── B1 (C1) — atomare Supplier-Credit-Operation auf dem Server: lokaler
+    // Operation-/Revisions-/Cursor-State (geteilte, getestete SQL). Rein additiv,
+    // idempotent (IF NOT EXISTS). Server-only-Tabellen bleiben am Server.
+    ...B1_MIGRATION_SQL,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

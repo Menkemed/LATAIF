@@ -313,7 +313,17 @@ export async function syncNow(): Promise<void> {
   try {
     const pushed = await pushChanges();
     const pulled = await pullChanges();
-    setStatus('synced', `Pushed ${pushed}, pulled ${pulled}`);
+    // C1: drain the authoritative operations-pull too, so a passive device
+    // converges on B1 operations (whose effects are NOT in sync_changelog).
+    // Dynamic import breaks the operations/sync static cycle.
+    let opsApplied = 0;
+    try {
+      const ops = await import('../operations/service');
+      opsApplied = await ops.pullAndApplyOperationsAuto();
+    } catch (e) {
+      console.warn('[Sync] ops-pull skipped:', e);
+    }
+    setStatus('synced', `Pushed ${pushed}, pulled ${pulled}, ops ${opsApplied}`);
   } catch (err) {
     console.warn('[Sync] Error:', err);
     setStatus('error', String(err));
