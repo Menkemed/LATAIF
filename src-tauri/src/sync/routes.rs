@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use super::{auth, models::*, AppState};
 
-pub fn api_routes() -> Router<Arc<AppState>> {
+pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/sync/push", post(sync_push))
         .route("/sync/pull", get(sync_pull))
         .route("/me", get(get_me))
         .route("/products/by-sku/{sku}", get(product_by_sku))
-        .route_layer(middleware::from_fn(auth::auth_middleware));
+        .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
     Router::new()
         .route("/auth/login", post(login))
@@ -46,8 +46,13 @@ async fn login(
         .and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![req.email], |row| {
                 Ok((
-                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?,
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             })
         });
@@ -62,7 +67,13 @@ async fn login(
     let token = auth::create_token(&user_id, &tenant_id, &branch_id, &role, &state.jwt_secret)?;
 
     Ok(Json(LoginResponse {
-        token, user_id, tenant_id, branch_id, role, user_name, branch_name,
+        token,
+        user_id,
+        tenant_id,
+        branch_id,
+        role,
+        user_name,
+        branch_name,
     }))
 }
 
@@ -77,8 +88,8 @@ async fn register_tenant(
     let user_id = uuid::Uuid::new_v4().to_string();
     let slug = req.tenant_name.to_lowercase().replace(' ', "-");
 
-    let password_hash = bcrypt::hash(&req.password, 10)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let password_hash =
+        bcrypt::hash(&req.password, 10).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     db.execute(
         "INSERT INTO tenants (id, name, slug, plan, active, created_at, updated_at) VALUES (?1, ?2, ?3, 'starter', 1, ?4, ?4)",
@@ -103,8 +114,13 @@ async fn register_tenant(
     let token = auth::create_token(&user_id, &tenant_id, &branch_id, "owner", &state.jwt_secret)?;
 
     Ok(Json(LoginResponse {
-        token, user_id, tenant_id, branch_id,
-        role: "owner".to_string(), user_name: req.user_name, branch_name: req.branch_name,
+        token,
+        user_id,
+        tenant_id,
+        branch_id,
+        role: "owner".to_string(),
+        user_name: req.user_name,
+        branch_name: req.branch_name,
     }))
 }
 
@@ -178,7 +194,10 @@ async fn sync_pull(
 
     let last_sync_id = changes.last().map(|c| c.id).unwrap_or(since_id);
 
-    Ok(Json(SyncPullResponse { changes, last_sync_id }))
+    Ok(Json(SyncPullResponse {
+        changes,
+        last_sync_id,
+    }))
 }
 
 // "Check Item": Produkt per SKU nachschlagen und volle Details (inkl. Foto) zurueckgeben.
@@ -220,7 +239,9 @@ async fn product_by_sku(
              ORDER BY id DESC LIMIT 1",
         )
         .and_then(|mut stmt| {
-            stmt.query_row(rusqlite::params![claims.tenant_id, record_id], |row| row.get(0))
+            stmt.query_row(rusqlite::params![claims.tenant_id, record_id], |row| {
+                row.get(0)
+            })
         });
     if latest_action.unwrap_or_default() == "delete" {
         return Err(StatusCode::NOT_FOUND);
@@ -242,7 +263,9 @@ async fn product_by_sku(
                  ORDER BY id DESC LIMIT 1",
             )
             .and_then(|mut stmt| {
-                stmt.query_row(rusqlite::params![claims.tenant_id, cat_id], |row| row.get(0))
+                stmt.query_row(rusqlite::params![claims.tenant_id, cat_id], |row| {
+                    row.get(0)
+                })
             });
         if let Ok(name) = cat_name {
             product["category_name"] = serde_json::Value::String(name);
@@ -260,7 +283,9 @@ fn col_num(r: &rusqlite::Row, idx: usize) -> Option<f64> {
     match r.get_ref(idx) {
         Ok(ValueRef::Real(f)) => Some(f),
         Ok(ValueRef::Integer(i)) => Some(i as f64),
-        Ok(ValueRef::Text(t)) => std::str::from_utf8(t).ok().and_then(|s| s.trim().parse::<f64>().ok()),
+        Ok(ValueRef::Text(t)) => std::str::from_utf8(t)
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok()),
         _ => None,
     }
 }
@@ -269,10 +294,7 @@ fn col_num(r: &rusqlite::Row, idx: usize) -> Option<f64> {
 // damit der laufende sql.js-Schreiber nicht blockiert wird. Liefert das Produkt-JSON in
 // genau der Form, die die Mobile-Seite (renderProduct) erwartet: images/attributes/
 // scope_of_delivery bleiben JSON-Strings, Preise als Zahl. None => Caller nutzt Fallback.
-fn product_from_frontend_db(
-    db_path: &std::path::Path,
-    sku: &str,
-) -> Option<serde_json::Value> {
+fn product_from_frontend_db(db_path: &std::path::Path, sku: &str) -> Option<serde_json::Value> {
     use rusqlite::OpenFlags;
     let conn = rusqlite::Connection::open_with_flags(
         db_path,

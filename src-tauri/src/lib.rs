@@ -1,6 +1,6 @@
-mod sync;
 #[cfg(windows)]
 mod printing;
+mod sync;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -22,9 +22,13 @@ async fn sync_server_stop(state: tauri::State<'_, AppHandleState>) -> Result<Str
 }
 
 #[tauri::command]
-async fn sync_server_status(state: tauri::State<'_, AppHandleState>) -> Result<serde_json::Value, String> {
+async fn sync_server_status(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<serde_json::Value, String> {
     let (running, port, self_token) = state.server.status().await;
-    let ip = local_ip_address::local_ip().map(|i| i.to_string()).unwrap_or_else(|_| "0.0.0.0".into());
+    let ip = local_ip_address::local_ip()
+        .map(|i| i.to_string())
+        .unwrap_or_else(|_| "0.0.0.0".into());
     Ok(serde_json::json!({
         "running": running,
         "port": port,

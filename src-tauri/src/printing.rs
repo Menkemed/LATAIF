@@ -17,13 +17,22 @@ struct DocInfo1W {
 
 #[link(name = "winspool")]
 extern "system" {
-    fn OpenPrinterW(p_printer_name: *const u16, ph_printer: *mut Handle, p_default: *mut core::ffi::c_void) -> Bool;
+    fn OpenPrinterW(
+        p_printer_name: *const u16,
+        ph_printer: *mut Handle,
+        p_default: *mut core::ffi::c_void,
+    ) -> Bool;
     fn ClosePrinter(h_printer: Handle) -> Bool;
     fn StartDocPrinterW(h_printer: Handle, level: Dword, p_doc_info: *mut DocInfo1W) -> Dword;
     fn EndDocPrinter(h_printer: Handle) -> Bool;
     fn StartPagePrinter(h_printer: Handle) -> Bool;
     fn EndPagePrinter(h_printer: Handle) -> Bool;
-    fn WritePrinter(h_printer: Handle, p_buf: *const core::ffi::c_void, cb_buf: Dword, pc_written: *mut Dword) -> Bool;
+    fn WritePrinter(
+        h_printer: Handle,
+        p_buf: *const core::ffi::c_void,
+        cb_buf: Dword,
+        pc_written: *mut Dword,
+    ) -> Bool;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -47,7 +56,10 @@ pub fn print_raw(printer: &str, data: &[u8]) -> Result<u32, String> {
     unsafe {
         let mut h: Handle = ptr::null_mut();
         if OpenPrinterW(printer_w.as_ptr(), &mut h, ptr::null_mut()) == 0 || h.is_null() {
-            return Err(format!("Drucker '{}' konnte nicht geöffnet werden (OpenPrinter).", printer));
+            return Err(format!(
+                "Drucker '{}' konnte nicht geöffnet werden (OpenPrinter).",
+                printer
+            ));
         }
 
         let mut di = DocInfo1W {

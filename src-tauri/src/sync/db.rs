@@ -67,7 +67,7 @@ pub fn init_database(db_path: &Path) -> Result<Connection> {
 
         CREATE INDEX IF NOT EXISTS idx_sync_tenant_branch ON sync_changelog(tenant_id, branch_id);
         CREATE INDEX IF NOT EXISTS idx_sync_id ON sync_changelog(id);
-        "
+        ",
     )?;
 
     // Seed default tenant + owner user if database is empty

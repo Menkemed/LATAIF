@@ -38,6 +38,7 @@ pub mod db;
 pub mod mobile_page;
 pub mod models;
 pub mod routes;
+pub mod secret;
 
 const MDNS_SERVICE: &str = "_lataif-sync._tcp.local.";
 // HTTPS-Port fuer die Mobile-Seite (Live-Kamera am Handy braucht secure context).
@@ -90,8 +91,11 @@ impl SyncServer {
 
         let conn = db::init_database(&self.db_path).map_err(|e| format!("DB init failed: {e}"))?;
 
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .unwrap_or_else(|_| "lataif_secret_2026_change_in_production".to_string());
+        // Fail-closed, persisted per-install secret — no silent hard-coded default.
+        // An explicit env override is honoured for tests/dev (see sync::secret); the
+        // known dev default is rejected unless LATAIF_ALLOW_DEV_JWT_SECRET=1.
+        let jwt_secret = secret::load_or_create_sync_secret(&self.db_path)
+            .map_err(|e| format!("Sync JWT secret init failed: {e}"))?;
 
         // Plan §LAN-Sync §Self-Token: JWT für die lokale Desktop-Instanz generieren.
         // Default-Claims passen zu single-tenant single-branch Deployments — wenn
@@ -103,7 +107,8 @@ impl SyncServer {
             "branch-main",
             "owner",
             &jwt_secret,
-        ).map_err(|_| "Self-token generation failed".to_string())?;
+        )
+        .map_err(|_| "Self-token generation failed".to_string())?;
         *self.self_token.lock().await = Some(self_token);
 
         // Frontend-DB liegt als lataif.db im selben Ordner wie die Sync-Server-DB.
@@ -119,11 +124,14 @@ impl SyncServer {
             frontend_db_path,
         });
 
-        let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
         // Body-Limit auf 50 MB hochsetzen — Handy-Fotos als base64 sind oft 5-15 MB.
         let body_limit = DefaultBodyLimit::max(50 * 1024 * 1024);
         let app = Router::new()
-            .nest("/api", routes::api_routes())
+            .nest("/api", routes::api_routes(state.clone()))
             .route("/mobile", axum::routing::get(serve_mobile_page))
             .route("/zxing-wasm.js", axum::routing::get(serve_zxing_wasm_js))
             .route("/zxing_reader.wasm", axum::routing::get(serve_zxing_wasm))
@@ -166,9 +174,12 @@ impl SyncServer {
                 Ok(certified) => {
                     let cert_der = certified.cert.der().to_vec();
                     let key_der = certified.key_pair.serialize_der();
-                    match axum_server::tls_rustls::RustlsConfig::from_der(vec![cert_der], key_der).await {
+                    match axum_server::tls_rustls::RustlsConfig::from_der(vec![cert_der], key_der)
+                        .await
+                    {
                         Ok(tls_config) => {
-                            let https_addr: std::net::SocketAddr = ([0, 0, 0, 0], HTTPS_PORT).into();
+                            let https_addr: std::net::SocketAddr =
+                                ([0, 0, 0, 0], HTTPS_PORT).into();
                             Some(tokio::spawn(async move {
                                 let _ = axum_server::bind_rustls(https_addr, tls_config)
                                     .serve(https_app.into_make_service())
@@ -264,11 +275,7 @@ pub async fn discover_lan_servers(timeout_secs: u64) -> Vec<String> {
 
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, async {
-            receiver.recv_async().await
-        })
-        .await
-        {
+        match tokio::time::timeout(remaining, async { receiver.recv_async().await }).await {
             Ok(Ok(event)) => {
                 if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
                     for ip in info.get_addresses() {
