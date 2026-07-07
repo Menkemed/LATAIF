@@ -25,6 +25,11 @@ import {
 // (beide Bindings werden nur in Actions zur Laufzeit aufgerufen, nicht bei Modul-Init).
 import { teardownOrderOverpayCredit, reconcileOrderOverpayCredit } from '@/stores/orderPaymentStore';
 
+// F1 — Order→Invoice-Idempotenz: Meldung, wenn eine Order-Line bereits in einer Rechnung
+// steckt (harter Guard analog H-03 bei Offer→Invoice).
+export const ORDER_LINE_ALREADY_INVOICED_MESSAGE =
+  'One or more of these order items are already on an invoice. Please refresh and try again.';
+
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -164,6 +169,8 @@ interface OrderStore {
   getBillableLines: (orderId: string) => OrderLine[];
   // v0.3.0 — verknuepft Lines mit der erzeugten Invoice (nach Convert)
   markOrderLinesInvoiced: (lineIds: string[], invoiceId: string) => void;
+  // F1 — harter Idempotenz-Guard: wirft, wenn eine Line bereits invoiced ist. Vor Convert.
+  assertOrderLinesBillable: (lineIds: string[]) => void;
 }
 
 function rowToOrder(row: Record<string, unknown>): Order {
@@ -720,11 +727,32 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     if (lineIds.length === 0) return;
     const db = getDatabase();
     for (const lid of lineIds) {
-      db.run(`UPDATE order_lines SET invoice_id = ? WHERE id = ?`, [invoiceId, lid]);
+      // F1 — idempotent: nur verknuepfen, wenn die Line noch KEINE Invoice traegt. So
+      // ueberschreibt ein zweiter (Race-/Doppelklick-)Convert die Verknuepfung einer
+      // bereits invoicten Line nicht auf eine andere Invoice. Pre-Check + WHERE-Guard.
+      const cur = query(`SELECT invoice_id FROM order_lines WHERE id = ?`, [lid])[0];
+      if (!cur || cur.invoice_id) continue;
+      db.run(`UPDATE order_lines SET invoice_id = ? WHERE id = ? AND invoice_id IS NULL`, [invoiceId, lid]);
       trackUpdate('order_lines', lid, { invoiceId });
     }
     saveDatabase();
     get().loadOrders();
+  },
+
+  // F1 — harter Idempotenz-Guard fuer Order→Invoice (analog H-03 bei Offer→Invoice, das
+  // die invoices-Tabelle direkt prueft). Wirft, wenn eine der Lines bereits eine Invoice
+  // traegt — FRISCH aus der DB gelesen, nicht aus dem Store-Cache. VOR createDirectInvoice
+  // aufrufen: der Convert-Handler ruft danach SYNCHRON createDirectInvoice +
+  // markOrderLinesInvoiced, daher sieht ein zweiter (Doppelklick-)Durchlauf die Lines
+  // bereits invoiced und wirft, BEVOR eine doppelte Invoice/Revenue/Ledger entsteht.
+  assertOrderLinesBillable: (lineIds) => {
+    if (lineIds.length === 0) throw new Error(ORDER_LINE_ALREADY_INVOICED_MESSAGE);
+    const placeholders = lineIds.map(() => '?').join(',');
+    const rows = query(
+      `SELECT invoice_id FROM order_lines WHERE id IN (${placeholders}) AND invoice_id IS NOT NULL`,
+      lineIds,
+    );
+    if (rows.length > 0) throw new Error(ORDER_LINE_ALREADY_INVOICED_MESSAGE);
   },
 
   // v0.5.0 — Custom-Order „cost-later": eine einzelne Line ans Order anhaengen.

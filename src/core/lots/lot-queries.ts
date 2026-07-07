@@ -8,6 +8,7 @@
 import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
+import { firstUnavailableLot, STOCK_UNAVAILABLE_MESSAGE, type LotSnapshot } from './lot-availability';
 
 // LAN-Sync (Phase 1a): jede stock_lots-Mutation als Full-Row-Snapshot an Geraet B.
 // Sync-only — KEIN Audit, KEIN eigenes saveDatabase. trackChange liest die volle Zeile
@@ -132,6 +133,20 @@ export function consumeLot(lotId: string, qty: number): boolean {
   );
   trackLotRow(lotId, 'update');   // LAN-Sync Phase 1a
   return true;
+}
+
+// F1 — Pre-Flight vor jeder Invoice-Buchung: wirft STOCK_UNAVAILABLE_MESSAGE, wenn
+// irgendein Lot die (pro Lot aggregierte) geforderte Menge nicht mehr deckt. REIN LESEND
+// → sicher VOR den Domain-Inserts aufzurufen, damit keine Invoice/Line/Revenue/COGS ohne
+// passenden Stock-Abzug entsteht (consumeLot gibt sonst nur `false` zurück, das der
+// Aufrufer ignorierte). Lines ohne Lot (Service/Consignment-vor-Auto-Purchase) werden
+// übersprungen. Verhindert Doppel-/Über-Verkauf desselben Lots bereits vor dem Commit.
+export function assertLotsConsumable(picks: { lotId: string | null; qty: number }[]): void {
+  const bad = firstUnavailableLot(picks, (lotId): LotSnapshot | null => {
+    const lot = getLot(lotId);
+    return lot ? { status: lot.status, qtyRemaining: lot.qtyRemaining } : null;
+  });
+  if (bad) throw new Error(STOCK_UNAVAILABLE_MESSAGE);
 }
 
 // Inverse von consumeLot — fuer Sales-Returns / Invoice-Cancel.

@@ -7,7 +7,7 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
-import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored } from '@/core/lots/lot-queries';
+import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -289,21 +289,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const finalSchemes = new Set(lines.map(l => l.taxScheme));
     const invoiceScheme: string = finalSchemes.size === 1 ? [...finalSchemes][0] : 'mixed';
 
-    db.run(
-      `INSERT INTO invoices (id, branch_id, invoice_number, offer_id, customer_id, status, currency,
-        net_amount, vat_rate_snapshot, vat_amount, gross_amount, tax_scheme_snapshot,
-        purchase_price_snapshot, sale_price_snapshot, margin_snapshot,
-        paid_amount, issued_at, due_at, notes, staff_id, special_mark, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, invoiceNumber, offerId, offer.customer_id,
-       sumNet, vatRate, sumVat, sumGross,
-       invoiceScheme, now, dueDate, offer.notes || null, staffId || null, specialMark ? 1 : 0, now, now, userId]
-    );
-
     // Phase 3 — Offer→Invoice hat keine Lot-Info (Offers sind ohne Bestand).
     // Auto-FIFO: aelteste ACTIVE Lot pro Produkt picken, Cost-Snapshot ueberschreiben
     // mit lot.unit_cost falls Lot existiert (genauer als der von Offer mitgegebene
-    // Snapshot von products.purchase_price).
+    // Snapshot von products.purchase_price). F1: VOR dem INSERT aufgeloest, damit die
+    // Lot-Verfuegbarkeit vor jedem Write geprueft werden kann.
     const lotsByProduct: Record<string, string | null> = {};
     {
       const productIds = [...new Set(lines.map(l => l.productId))];
@@ -318,6 +308,22 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         lotsByProduct[pid] = row ? (row[0] as string) : null;
       }
     }
+
+    // F1 — Lot-Verfuegbarkeit VOR dem INSERT pruefen (aggregiert pro Lot: mehrere
+    // Offer-Lines desselben Produkts ziehen denselben Auto-FIFO-Lot → der zweite consumeLot
+    // wuerde sonst still `false` liefern). Wirft bevor irgendetwas geschrieben wird.
+    assertLotsConsumable(lines.map(l => ({ lotId: lotsByProduct[l.productId] || null, qty: 1 })));
+
+    db.run(
+      `INSERT INTO invoices (id, branch_id, invoice_number, offer_id, customer_id, status, currency,
+        net_amount, vat_rate_snapshot, vat_amount, gross_amount, tax_scheme_snapshot,
+        purchase_price_snapshot, sale_price_snapshot, margin_snapshot,
+        paid_amount, issued_at, due_at, notes, staff_id, special_mark, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, branchId, invoiceNumber, offerId, offer.customer_id,
+       sumNet, vatRate, sumVat, sumGross,
+       invoiceScheme, now, dueDate, offer.notes || null, staffId || null, specialMark ? 1 : 0, now, now, userId]
+    );
 
     const lineStmt = db.prepare(
       `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
@@ -445,6 +451,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       }
       return { ...l, _id: uuid(), _resolvedLotId: lotId, _resolvedCost: cost };
     });
+
+    // F1 — Lot-Verfuegbarkeit VOR jedem Write pruefen (aggregiert pro Lot). Eine
+    // stockpflichtige Line darf nur gebucht werden, wenn ihr Lot noch konsumierbar ist;
+    // sonst wuerde Revenue/COGS ohne Stock-Abzug entstehen (consumeLot gibt sonst nur
+    // `false` zurueck, ignoriert). Wirft VOR dem Invoice/Line-Insert → dieser Pfad hat
+    // keine umschliessende Ledger-Tx, daher kein Rollback noetig / kein Teilzustand.
+    assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
     for (const l of resolvedLines) {
@@ -848,6 +861,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         }
         return { ...l, _id: uuid(), _resolvedLotId: lotId, _resolvedCost: cost };
       });
+
+      // F1 — Lot-Verfuegbarkeit VOR den neuen Line-Inserts pruefen (aggregiert pro Lot).
+      // Wirft innerhalb der offenen beginLedgerTransaction → voller Rollback (Reverse +
+      // alte/neue Lines verworfen). Kein Revenue/COGS-Repost ohne passenden Stock-Abzug.
+      assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
 
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
       const stmt = db.prepare(

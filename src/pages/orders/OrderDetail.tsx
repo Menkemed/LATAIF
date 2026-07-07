@@ -68,7 +68,7 @@ export function OrderDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
-    getBillableLines, markOrderLinesInvoiced, updateOrderLineStatus,
+    getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable, updateOrderLineStatus,
     addOrderLine, deleteOrderLine, updateOrderLinePrice, updateOrderLine,
     markOrderLineOrdered, cancelOrderWithMoney } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
@@ -690,6 +690,16 @@ export function OrderDetail() {
       });
     }
 
+    // F1 — harter Idempotenz-Guard VOR dem Invoice-Create: bricht ab, wenn eine der Lines
+    // (Doppelklick / zweiter Convert) bereits invoiced ist. assertOrderLinesBillable liest
+    // FRISCH aus der DB — ein zweiter synchroner Durchlauf sieht die vom ersten gesetzten
+    // invoice_ids und stoppt, bevor eine doppelte Invoice/Revenue/Ledger entsteht.
+    try {
+      assertOrderLinesBillable(billableLines.map(l => l.id));
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+      return;
+    }
     const invoice = createDirectInvoice(
       order.customerId,
       invoiceLineInputs,
