@@ -51,7 +51,7 @@ async function startServer(): Promise<Server> {
   const dir = mkdtempSync(join(tmpdir(), 'b1srv-'));
   const dbPath = join(dir, 'srv.db');
   const proc: ChildProcess = spawn(BIN, [], {
-    env: { ...process.env, BIND_ADDR: `127.0.0.1:${port}`, DATABASE_PATH: dbPath, JWT_SECRET: 'lataif_secret_2026_change_in_production' },
+    env: { ...process.env, BIND_ADDR: `127.0.0.1:${port}`, DATABASE_PATH: dbPath, LATAIF_JWT_SECRET: 'b1-harness-jwt-secret' },
     stdio: 'ignore',
   });
   const url = `http://127.0.0.1:${port}`;

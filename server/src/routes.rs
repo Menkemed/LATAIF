@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::{auth, models::*, AppState};
 
-pub fn api_routes() -> Router<Arc<AppState>> {
+pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
         .route("/sync/push", post(sync_push))
         .route("/sync/pull", get(sync_pull))
@@ -21,7 +21,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/operations/pull", get(operations_pull))
         .route("/operations/{operation_id}", get(get_operation))
         .route("/me", get(get_me))
-        .route_layer(middleware::from_fn(auth::auth_middleware));
+        .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
     Router::new()
         .route("/auth/login", post(login))

@@ -13,8 +13,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
-/// Matches the `auth_middleware` default secret (no JWT_SECRET env in tests).
-const SECRET: &str = "lataif_secret_2026_change_in_production";
+/// The route tests build `AppState` directly with this test secret and sign tokens
+/// with the same value; the middleware now reads it from `AppState` (not the env).
+const SECRET: &str = "route-tests-jwt-secret";
 const HASH64: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn seed_state() -> Arc<AppState> {
@@ -67,7 +68,7 @@ fn seed_state() -> Arc<AppState> {
 
 fn app(state: Arc<AppState>) -> Router {
     Router::new()
-        .nest("/api", routes::api_routes())
+        .nest("/api", routes::api_routes(state.clone()))
         .with_state(state)
 }
 

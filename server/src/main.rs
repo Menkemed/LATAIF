@@ -25,13 +25,22 @@ pub struct AppState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    // Fail closed: refuse to start unless a JWT secret is explicitly configured.
+    // Never fall back to a hard-coded development secret in a running server.
+    let jwt_secret = match auth::load_jwt_secret() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("FATAL: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // Initialize database
     let conn = db::init_database().expect("Failed to initialize database");
 
     let state = Arc::new(AppState {
         db: Mutex::new(conn),
-        jwt_secret: std::env::var("JWT_SECRET")
-            .unwrap_or_else(|_| "lataif_secret_2026_change_in_production".to_string()),
+        jwt_secret,
     });
 
     // CORS — allow desktop + mobile apps
@@ -41,7 +50,7 @@ async fn main() {
         .allow_headers(Any);
 
     let app = Router::new()
-        .nest("/api", routes::api_routes())
+        .nest("/api", routes::api_routes(state.clone()))
         .layer(cors)
         .with_state(state);
 
