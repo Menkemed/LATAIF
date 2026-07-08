@@ -10,10 +10,14 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import type { Product } from '@/core/models/types';
-import { getDatabase, saveDatabase, resetDatabase } from '@/core/db/database';
+import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { exportFile } from '@/core/utils/export-file';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { useProductStore } from '@/stores/productStore';
+import { runSafePurge, countPurge, PURGE_PLANS, runGuardedReset, isFactoryResetBlocked, FACTORY_RESET_BLOCKED_MESSAGE, type PurgeDb } from '@/core/settings/safe-purge';
+import { createPreDestructiveBackup } from '@/core/settings/pre-destructive-backup';
+import { trackDelete } from '@/core/sync/track';
+import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
 import { computeImageEmbedding, cosineSimilarity, pairwiseVisualMatch, isAiConfigured } from '@/core/ai/ai-service';
 import { useAuthStore } from '@/stores/authStore';
 import { usePermission } from '@/hooks/usePermission';
@@ -2802,7 +2806,38 @@ function DangerZoneTab() {
   const [confirmText, setConfirmText] = useState('');
   const [purgeTarget, setPurgeTarget] = useState<string | null>(null);
   const [purgeSuccess, setPurgeSuccess] = useState('');
+  const [purgeError, setPurgeError] = useState('');
+  const [purgeBusy, setPurgeBusy] = useState(false);
+  const [resetError, setResetError] = useState('');
+  const [resetBlocked, setResetBlocked] = useState(false);
   const [backupMsg, setBackupMsg] = useState('');
+
+  // D3b: Beim Öffnen des Factory-Reset-Modals prüfen, ob Sync/LAN konfiguriert ist.
+  // Ist es das, wird der Reset blockiert (lokaler Reset könnte Server-Daten resurrecten).
+  useEffect(() => {
+    if (!confirmOpen) return;
+    let cancelled = false;
+    (async () => {
+      const sync = await import('@/core/sync/sync-service');
+      const lan = await import('@/core/sync/auto-lan');
+      if (!cancelled) {
+        setResetBlocked(isFactoryResetBlocked({ syncConfigured: sync.isSyncConfigured(), lanMode: lan.getLanMode() }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [confirmOpen]);
+
+  // D3: Anzahl betroffener Datensätze für die Bestätigung (read-only, zählt nur).
+  const purgeCount = useMemo<number | null>(() => {
+    if (!purgeTarget) return null;
+    const steps = PURGE_PLANS[purgeTarget];
+    if (!steps) return null;
+    try {
+      return countPurge(getDatabase() as unknown as PurgeDb, steps, currentBranchId()).total;
+    } catch {
+      return null;
+    }
+  }, [purgeTarget]);
 
   async function handleBackup() {
     try {
@@ -2842,53 +2877,67 @@ function DangerZoneTab() {
   }
 
   async function handleReset() {
-    if (confirmText !== 'RESET') return;
-    await resetDatabase();
-    localStorage.removeItem('lataif_session');
-    window.location.reload();
+    if (confirmText !== 'RESET' || purgeBusy) return;
+    // D3b: Sync/LAN-Signale frisch lesen (Guard = defense-in-depth zusätzlich zur UI-Sperre).
+    const sync = await import('@/core/sync/sync-service');
+    const lan = await import('@/core/sync/auto-lan');
+    setPurgeBusy(true);
+    setResetError('');
+    try {
+      const result = await runGuardedReset({
+        syncConfigured: sync.isSyncConfigured(),
+        lanMode: lan.getLanMode(),
+        // Backup nur, wenn NICHT blockiert. Vorher flushen, damit es die neuesten Daten erfasst.
+        backup: async () => { await flushDatabase().catch(() => {}); return createPreDestructiveBackup('factory-reset'); },
+        reset: resetDatabase,
+        onBlocked: () => setResetBlocked(true), // Banner zeigt FACTORY_RESET_BLOCKED_MESSAGE
+      });
+      if (result.blocked) { setPurgeBusy(false); return; } // KEINE DB gelöscht, KEIN Backup
+      localStorage.removeItem('lataif_session');
+      window.location.reload();
+    } catch (err) {
+      setResetError(`Reset abgebrochen — es wurde nichts gelöscht. Grund: ${err instanceof Error ? err.message : String(err)}`);
+      setPurgeBusy(false);
+    }
   }
 
-  function handlePurge() {
-    if (!purgeTarget || confirmText !== 'DELETE') return;
-    const db = getDatabase();
+  // D3: Sicherer Purge — Auto-Backup ZUERST, dann atomarer, getrackter Purge.
+  // Für JEDEN gelöschten Record wird ein Sync-Delete-Change geschrieben (bestehendes
+  // trackDelete-Format), damit ein späterer Pull/Replay gelöschte Records NICHT wiederbelebt.
+  // Backup-Fehler ODER Purge-Fehler → alles rollt zurück, es wird nichts (halb) gelöscht.
+  async function handlePurge() {
+    if (!purgeTarget || confirmText !== 'DELETE' || purgeBusy) return;
+    const steps = PURGE_PLANS[purgeTarget];
+    if (!steps) return;
     const branchId = currentBranchId();
-    const tables: Record<string, string[]> = {
-      products: ['DELETE FROM offer_lines WHERE offer_id IN (SELECT id FROM offers WHERE branch_id = ?)', 'DELETE FROM invoice_lines WHERE invoice_id IN (SELECT id FROM invoices WHERE branch_id = ?)', 'DELETE FROM products WHERE branch_id = ?'],
-      customers: ['DELETE FROM customers WHERE branch_id = ?'],
-      offers: ['DELETE FROM offer_lines WHERE offer_id IN (SELECT id FROM offers WHERE branch_id = ?)', 'DELETE FROM offers WHERE branch_id = ?'],
-      invoices: ['DELETE FROM payments WHERE branch_id = ?', 'DELETE FROM invoice_lines WHERE invoice_id IN (SELECT id FROM invoices WHERE branch_id = ?)', 'DELETE FROM invoices WHERE branch_id = ?'],
-      repairs: ['DELETE FROM repairs WHERE branch_id = ?'],
-      consignments: ['DELETE FROM consignments WHERE branch_id = ?'],
-      agents: ['DELETE FROM agent_transfers WHERE branch_id = ?', 'DELETE FROM agents WHERE branch_id = ?'],
-      orders: ['DELETE FROM orders WHERE branch_id = ?'],
-      tasks: ['DELETE FROM tasks WHERE branch_id = ?'],
-      documents: ['DELETE FROM documents WHERE branch_id = ?'],
-      all_data: [
-        'DELETE FROM offer_lines WHERE offer_id IN (SELECT id FROM offers WHERE branch_id = ?)',
-        'DELETE FROM invoice_lines WHERE invoice_id IN (SELECT id FROM invoices WHERE branch_id = ?)',
-        'DELETE FROM payments WHERE branch_id = ?',
-        'DELETE FROM agent_transfers WHERE branch_id = ?',
-        'DELETE FROM offers WHERE branch_id = ?',
-        'DELETE FROM invoices WHERE branch_id = ?',
-        'DELETE FROM repairs WHERE branch_id = ?',
-        'DELETE FROM consignments WHERE branch_id = ?',
-        'DELETE FROM agents WHERE branch_id = ?',
-        'DELETE FROM orders WHERE branch_id = ?',
-        'DELETE FROM tasks WHERE branch_id = ?',
-        'DELETE FROM documents WHERE branch_id = ?',
-        'DELETE FROM products WHERE branch_id = ?',
-        'DELETE FROM customers WHERE branch_id = ?',
-      ],
-    };
-    const queries = tables[purgeTarget];
-    if (!queries) return;
-    for (const sql of queries) {
-      db.run(sql, [branchId]);
+    setPurgeBusy(true);
+    setPurgeError('');
+    try {
+      // Aktuellen Stand persistieren, damit das Backup die neuesten Daten erfasst.
+      await flushDatabase().catch(() => {});
+      const result = await runSafePurge(steps, branchId, {
+        db: getDatabase() as unknown as PurgeDb,
+        backup: () => createPreDestructiveBackup(`purge:${purgeTarget}`),
+        begin: beginLedgerTransaction,
+        commit: commitLedgerTransaction,
+        rollback: rollbackLedgerTransaction,
+        onDelete: trackDelete,
+      });
+      // Purge-Ergebnis dauerhaft schreiben + betroffene Ansichten aktualisieren.
+      await flushDatabase().catch(() => {});
+      useProductStore.getState().loadProducts();
+      setPurgeTarget(null);
+      setConfirmText('');
+      setPurgeSuccess(
+        `${result.total} Datensätze gelöscht (Sync-Delete-Changes geschrieben). Backup: ${result.backupLocation}`
+      );
+    } catch (err) {
+      setPurgeError(
+        `Abgebrochen — es wurde NICHTS gelöscht. Grund: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      setPurgeBusy(false);
     }
-    saveDatabase();
-    setPurgeTarget(null);
-    setConfirmText('');
-    setPurgeSuccess(`All ${purgeTarget.replace('_', ' ')} deleted.`);
   }
 
   const purgeOptions = [
@@ -2980,39 +3029,80 @@ function DangerZoneTab() {
       </div>
 
       {/* Purge confirmation */}
-      <Modal open={!!purgeTarget} onClose={() => setPurgeTarget(null)} title={`Delete ${purgeTarget?.replace('_', ' ')}`} width={420}>
+      <Modal open={!!purgeTarget} onClose={() => { if (!purgeBusy) { setPurgeTarget(null); setPurgeError(''); } }} title={`Delete ${purgeTarget?.replace('_', ' ')}`} width={440}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{ padding: '14px 16px', borderRadius: 8, background: 'rgba(170,110,110,0.06)', border: '1px solid rgba(220,38,38,0.2)' }}>
             <p style={{ fontSize: 13, color: '#AA6E6E', lineHeight: 1.5 }}>
-              This will permanently delete all {purgeTarget?.replace('_', ' ')} from this branch. This cannot be undone.
+              This permanently deletes{' '}
+              <b>{purgeCount != null ? `${purgeCount} record${purgeCount === 1 ? '' : 's'}` : `all ${purgeTarget?.replace('_', ' ')}`}</b>{' '}
+              from this branch.
             </p>
+            <ul style={{ fontSize: 12, color: '#8A5A5A', lineHeight: 1.6, margin: '8px 0 0', paddingLeft: 18 }}>
+              <li>A local backup is created automatically before anything is deleted.</li>
+              <li>Sync delete-changes are written, so deletions propagate and won{"'"}t come back after a sync.</li>
+              <li>This cannot be undone except by restoring the backup.</li>
+            </ul>
           </div>
+          {purgeError && (
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.35)' }}>
+              <p style={{ fontSize: 12, color: '#B91C1C', lineHeight: 1.5 }}>{purgeError}</p>
+            </div>
+          )}
           <p style={{ fontSize: 13, color: '#4B5563' }}>
             Type <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }}>DELETE</span> to confirm:
           </p>
           <Input value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder="Type DELETE" />
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setPurgeTarget(null)}>Cancel</Button>
-            <Button variant="danger" onClick={handlePurge} disabled={confirmText !== 'DELETE'}>Delete</Button>
+            <Button variant="ghost" onClick={() => { setPurgeTarget(null); setPurgeError(''); }} disabled={purgeBusy}>Cancel</Button>
+            <Button variant="danger" onClick={handlePurge} disabled={confirmText !== 'DELETE' || purgeBusy}>{purgeBusy ? 'Backing up & deleting…' : 'Delete'}</Button>
           </div>
         </div>
       </Modal>
 
       {/* Factory reset confirmation */}
-      <Modal open={confirmOpen} onClose={() => { setConfirmOpen(false); setConfirmText(''); }} title="Factory Reset" width={460}>
+      <Modal open={confirmOpen} onClose={() => { if (!purgeBusy) { setConfirmOpen(false); setConfirmText(''); setResetError(''); } }} title="Factory Reset" width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div style={{ padding: '14px 16px', borderRadius: 8, background: 'rgba(170,110,110,0.06)', border: '1px solid rgba(220,38,38,0.2)' }}>
-            <p style={{ fontSize: 13, color: '#AA6E6E', lineHeight: 1.5 }}>
-              This will permanently delete ALL data, users, and settings. The app will restart completely fresh.
-            </p>
-          </div>
-          <p style={{ fontSize: 13, color: '#4B5563' }}>
-            Type <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }}>RESET</span> to confirm:
-          </p>
-          <Input value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder="Type RESET" />
+          {resetBlocked ? (
+            <div style={{ padding: '14px 16px', borderRadius: 8, background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.35)' }}>
+              <p style={{ fontSize: 13, color: '#B91C1C', fontWeight: 600, lineHeight: 1.5, marginBottom: 8 }}>
+                {FACTORY_RESET_BLOCKED_MESSAGE}
+              </p>
+              <ul style={{ fontSize: 12, color: '#B04A4A', lineHeight: 1.6, margin: 0, paddingLeft: 18 }}>
+                <li>Factory Reset only deletes data locally.</li>
+                <li>The sync server can push the old data back afterwards.</li>
+                <li>For sync-tracked data, use Safe Purge (Delete Data) above instead.</li>
+                <li>A full server baseline/compaction is coming in D4.</li>
+              </ul>
+              <p style={{ fontSize: 12, color: '#8A5A5A', lineHeight: 1.6, margin: '8px 0 0' }}>
+                To reset anyway, first disconnect sync deliberately (Sync tab {'→'} Disconnect).
+              </p>
+            </div>
+          ) : (
+            <>
+              <div style={{ padding: '14px 16px', borderRadius: 8, background: 'rgba(170,110,110,0.06)', border: '1px solid rgba(220,38,38,0.2)' }}>
+                <p style={{ fontSize: 13, color: '#AA6E6E', lineHeight: 1.5 }}>
+                  This will permanently delete ALL data, users, and settings. The app will restart completely fresh.
+                </p>
+                <p style={{ fontSize: 12, color: '#8A5A5A', lineHeight: 1.6, margin: '8px 0 0' }}>
+                  A local backup is created automatically first. This cannot be undone except by restoring the backup.
+                </p>
+              </div>
+              {resetError && (
+                <div style={{ padding: '10px 14px', borderRadius: 8, background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.35)' }}>
+                  <p style={{ fontSize: 12, color: '#B91C1C', lineHeight: 1.5 }}>{resetError}</p>
+                </div>
+              )}
+              <p style={{ fontSize: 13, color: '#4B5563' }}>
+                Type <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }}>RESET</span> to confirm:
+              </p>
+              <Input value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder="Type RESET" />
+            </>
+          )}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => { setConfirmOpen(false); setConfirmText(''); }}>Cancel</Button>
-            <Button variant="danger" onClick={handleReset} disabled={confirmText !== 'RESET'}>Factory Reset</Button>
+            <Button variant="ghost" onClick={() => { setConfirmOpen(false); setConfirmText(''); setResetError(''); }} disabled={purgeBusy}>{resetBlocked ? 'Close' : 'Cancel'}</Button>
+            {!resetBlocked && (
+              <Button variant="danger" onClick={handleReset} disabled={confirmText !== 'RESET' || purgeBusy}>{purgeBusy ? 'Backing up & resetting…' : 'Factory Reset'}</Button>
+            )}
           </div>
         </div>
       </Modal>
