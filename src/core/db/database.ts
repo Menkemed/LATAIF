@@ -10,10 +10,28 @@ import { DEFAULT_CATEGORIES } from '../models/default-categories';
 import SCHEMA from './schema.sql?raw';
 import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
+import {
+  atomicWrite,
+  createSaveCoalescer,
+  StaleWriteError,
+  type DiskSig,
+  type FsLike,
+} from './atomic-persist';
 
 let db: Database | null = null;
 const STORAGE_KEY = 'lataif_db_v2';
 const DB_FILENAME = 'lataif.db';
+
+// D2: Signatur (size+mtime), wie wir den Disk-Stand der lataif.db zuletzt geladen/geschrieben
+// haben. null = keine Baseline (frischer Start / nach Reset). Schützt vor Stale-Overwrite:
+// weicht die Datei vor einem Save von dieser Signatur ab, wurde sie fremd verändert → Save wird
+// verweigert statt einen neueren Stand blind zu überschreiben. Wird bei Load und nach jedem
+// erfolgreichen atomaren Write aktualisiert.
+let lastKnownDiskSig: DiskSig | null = null;
+// Eindeutiger Temp-Namensteil pro App-Session (uuid ist bereits importiert; kein Date.now nötig).
+const TMP_SESSION_TAG = uuid().slice(0, 8);
+let tmpSeq = 0;
+let lastTmpPath: string | null = null;
 
 // ── Tauri detection ──
 function isTauri(): boolean {
@@ -22,6 +40,22 @@ function isTauri(): boolean {
 
 async function getTauriFs() {
   return await import('@tauri-apps/plugin-fs');
+}
+
+// D2: Tauri plugin-fs auf die minimale FsLike-Schnittstelle des atomic-persist-Kerns abbilden.
+// Expliziter Adapter statt Cast — robust gegen abweichende optionale Parameter der Plugin-API.
+async function getFsLike(): Promise<FsLike> {
+  const fs = await getTauriFs();
+  return {
+    writeFile: (p, d) => fs.writeFile(p, d),
+    stat: async (p) => {
+      const s = await fs.stat(p);
+      return { size: s.size, mtime: s.mtime };
+    },
+    rename: (a, b) => fs.rename(a, b),
+    remove: (p) => fs.remove(p),
+    mkdir: (p, o) => fs.mkdir(p, o),
+  };
 }
 
 async function getAppDataDir(): Promise<string> {
@@ -44,8 +78,17 @@ async function loadSavedDb(): Promise<Uint8Array | null> {
       const exists = await fs.exists(path);
       if (exists) {
         const data = await fs.readFile(path);
+        // D2: Baseline-Signatur der GERADE geladenen Datei merken — der Stale-Guard
+        // vergleicht spätere Saves gegen genau diesen Stand.
+        try {
+          const st = await fs.stat(path);
+          lastKnownDiskSig = { size: st.size, mtimeMs: st.mtime ? st.mtime.getTime() : null };
+        } catch {
+          lastKnownDiskSig = null; // nicht stat-bar → keine Baseline (Stale-Check fällt fail-open aus)
+        }
         return new Uint8Array(data);
       }
+      lastKnownDiskSig = null; // keine Datei → keine Baseline
     } catch (err) {
       console.warn('[DB] Tauri file load failed:', err);
     }
@@ -65,15 +108,22 @@ async function loadSavedDb(): Promise<Uint8Array | null> {
 // ── Save DB to file (Tauri) or localStorage (browser) ──
 async function persistDb(data: Uint8Array): Promise<void> {
   if (isTauri()) {
-    const fs = await getTauriFs();
+    const fs = await getFsLike();
     const dir = await getAppDataDir();
-    await fs.mkdir(dir, { recursive: true }).catch(() => {});
-    const path = await getDbFilePath();
-    await fs.writeFile(path, data);
+    const finalPath = await getDbFilePath();
+    // Best-effort: eine evtl. übriggebliebene Temp-Datei eines vorigen Versuchs entfernen.
+    if (lastTmpPath) await fs.remove(lastTmpPath).catch(() => {});
+    // Eindeutiger Temp-Pfad im selben Verzeichnis (gleiches Volume → rename ist atomar).
+    const tmpPath = `${finalPath}.tmp-${TMP_SESSION_TAG}-${tmpSeq++}`;
+    lastTmpPath = tmpPath;
+    // Atomarer Write (Temp → verify → rename) + Stale-Guard. Wirft bei Konflikt/Fehler,
+    // OHNE die finale Datei zu beschädigen. Rückgabe = neue Baseline-Signatur.
+    lastKnownDiskSig = await atomicWrite(fs, { dir, finalPath, tmpPath, data, baseline: lastKnownDiskSig });
+    lastTmpPath = null; // rename hat den Temp konsumiert
     return;
   }
 
-  // Browser-only fallback
+  // Browser-only fallback (localStorage.setItem ist synchron/atomar genug).
   localStorage.setItem(STORAGE_KEY, encodeForLocalStorage(data));
 }
 
@@ -2686,28 +2736,31 @@ async function seedFreshDatabase(database: Database): Promise<void> {
 // IMMER nur ein writeFile gleichzeitig. Setzt jemand "dirty" waehrend ein
 // Save laeuft, dreht die Schleife eine weitere Runde — am Ende ist garantiert
 // der allerletzte In-Memory-State auf der Platte.
-let saveInFlight: Promise<void> | null = null;
-let dirty = false;
-
-async function drainSaves(): Promise<void> {
-  try {
-    while (dirty && db) {
-      dirty = false;
-      try {
-        const data = db.export();
-        await persistDb(data);
-      } catch (err) {
-        // Sowohl export() als auch persistDb können scheitern → DB bleibt dirty,
-        // damit der nächste saveDatabase()/flushDatabase() es erneut versucht.
-        console.error('[DB] save failed, will retry on next save:', err);
-        dirty = true;
-        break;
-      }
+//
+// D2: Das Coalescing steckt jetzt im wiederverwendbaren, headless testbaren
+// createSaveCoalescer(). persistDb schreibt atomar (Temp→verify→rename) mit Stale-Guard.
+// Persist-Fehler werden NICHT mehr still verschluckt: onError loggt sie (nur Meldung, kein
+// Puffer), getLastSaveError() macht sie abfragbar, flushDatabase() wirft sie nach außen.
+const saver = createSaveCoalescer({
+  snapshot: () => getDatabase().export(),
+  persist: (data) => persistDb(data),
+  isReady: () => db !== null,
+  onError: (err) => {
+    if (err instanceof StaleWriteError) {
+      console.error(
+        '[DB] STALE-WRITE: neuerer/fremder Disk-Stand erkannt — Save verweigert, KEIN Overwrite.',
+        { baseline: err.baseline, current: err.current }
+      );
+    } else {
+      console.error(
+        '[DB] save failed, will retry on next save:',
+        err instanceof Error ? err.message : String(err)
+      );
     }
-  } finally {
-    saveInFlight = null;
-  }
-}
+  },
+  // Stale-Konflikt ist kein transienter Retry: nicht weiter drehen, nicht clobbern.
+  isFatal: (err) => err instanceof StaleWriteError,
+});
 
 export function saveDatabase(): Promise<void> {
   if (!db) return Promise.resolve();
@@ -2719,21 +2772,21 @@ export function saveDatabase(): Promise<void> {
     markSavePending();
     return Promise.resolve();
   }
-  dirty = true;
-  if (saveInFlight) return saveInFlight;
-  saveInFlight = drainSaves();
-  return saveInFlight;
+  // saveDatabase() rejectet bewusst NIE (241 Fire-and-Forget-Aufrufer würden sonst
+  // Unhandled-Rejections erzeugen) — Fehler laufen über onError/getLastSaveError/flushDatabase.
+  return saver.requestSave();
 }
 
-// Wartet bis alle pending writes durch sind. MUSS vor App-Quit awaited werden,
-// sonst killt der OS den Prozess waehrend ein writeFile noch laeuft.
+// D2: Letzter Persist-Fehler (Stale-Konflikt oder transient) für Diagnose/UI. null = alles ok.
+export function getLastSaveError(): unknown {
+  return saver.getLastError();
+}
+
+// Wartet bis alle pending writes durch sind. MUSS vor App-Quit awaited werden, sonst killt
+// der OS den Prozess waehrend ein writeFile noch laeuft. Wirft den letzten Persist-Fehler,
+// damit der Quit-Handler ihn beobachten/loggen kann (App.tsx fängt ihn im Promise.race).
 export async function flushDatabase(): Promise<void> {
-  // Mehrere Runden falls neue Mutations *waehrend* dem Drain kommen.
-  for (let i = 0; i < 10; i++) {
-    if (saveInFlight) await saveInFlight;
-    if (!dirty) return;
-    saveDatabase();
-  }
+  await saver.flush(10);
 }
 
 // Synchroner Flush fuer Browser beforeunload (localStorage.setItem blockiert).
@@ -2775,5 +2828,8 @@ export async function resetDatabase(): Promise<void> {
     } catch { /* */ }
   }
   localStorage.removeItem(STORAGE_KEY);
+  lastKnownDiskSig = null; // D2: Datei entfernt → Baseline verwerfen, sonst sähe der nächste
+  //                          (frische) Save die neu erzeugte Datei als „stale" an.
+  lastTmpPath = null;
   if (db) { db.close(); db = null; }
 }
