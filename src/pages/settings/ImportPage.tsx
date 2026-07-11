@@ -195,7 +195,9 @@ export function ImportPage() {
       plannedSalePrice: item.plannedSalePrice || undefined,
       minSalePrice: minSale,
       maxSalePrice: maxSale,
-      taxScheme: item.taxScheme ?? 'MARGIN', // für importierbare Zeilen garantiert gesetzt
+      // Importierbare Zeilen haben immer ein aufgelöstes Scheme (sonst invalid + ausgeschlossen);
+      // der null-Fall ist unerreichbar — kein hartes MARGIN-Literal mehr im Import-Pfad.
+      taxScheme: item.taxScheme ?? undefined,
       notes,
       attributes: attrs,
       images: [],
