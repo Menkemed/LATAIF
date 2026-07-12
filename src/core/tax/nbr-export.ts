@@ -165,7 +165,14 @@ function buildMonthSheet(
     const note = paymentNote(inv, pays);
 
     for (const line of stdLines) {
-      const net = round3(line.unitPrice);
+      // B4 — Net Line Amount = GROSS (lineTotal) − VAT (vatAmount). Beide Felder sind
+      // kanonisch als ZEILEN-GESAMT gespeichert (createDirectInvoice: grossAmount += lineTotal,
+      // totalVat += vatAmount — je OHNE *qty), unitPrice dagegen ist NETTO PRO STUECK
+      // (netAmount += unitPrice*qty). Vorher `net = unitPrice` → bei quantity>1 zu niedrig
+      // (VAT/Gross betrafen die ganze Zeile, Netto nur 1 Stueck). qty=1 unveraendert, da dann
+      // lineTotal = unitPrice + vatAmount. Bewusst der persistierte/editierbare lineTotal,
+      // nicht unitPrice*qty (robust gegen manuell gesetzte/gerundete Line-Totals).
+      const net = round3(line.lineTotal - line.vatAmount);
       const vat = round3(line.vatAmount);
       const gross = round3(line.lineTotal);
       rows.push(rowWithNote([
@@ -366,7 +373,7 @@ export function exportNbrVatReport(year: number, invoices: Invoice[], customers:
       for (const inv of b.invoices) {
         for (const line of inv.lines) {
           if (line.taxScheme === 'VAT_10') {
-            acc.standardNet += line.unitPrice;
+            acc.standardNet += (line.lineTotal - line.vatAmount);   // B4 — Zeilen-Netto = Gross − VAT (qty-korrekt), nicht unitPrice (pro Stueck)
             acc.standardVat += line.vatAmount;
           } else if (line.taxScheme === 'MARGIN') {
             acc.marginProfit += (line.lineTotal - line.purchasePriceSnapshot * Math.max(1, line.quantity || 1));
