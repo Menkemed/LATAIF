@@ -9,7 +9,8 @@
 //  - customerId: invoices.customer_id (per-Kunde-Sicht, z.B. getCustomerStats)
 //  - startISO/endISO: COALESCE(issued_at, created_at) >= start AND < end
 //    (endISO EXKLUSIV, wie ReportPeriod) — nur auf Invoices; Returns werden
-//    bewusst NICHT zeitgefiltert (Refund-Datums-Regel lebt in computeSalesMetrics).
+//    bewusst NICHT zeitgefiltert (Invoice-Period-Semantik: der Return folgt seiner
+//    Rechnung, B3-B — der finalIds-Guard in computeSalesMetrics entscheidet).
 // Ohne Zeitfenster = All-Time (computeSalesMetrics dann ohne period aufrufen).
 
 import { query } from '@/core/db/helpers';
@@ -70,20 +71,23 @@ export function loadSalesData(filter: SalesDataFilter): LoadedSalesData {
   }));
 
   // Returns ueber den Invoice-JOIN auf dieselbe Menge eingrenzen (branch/customer),
-  // aber OHNE Zeitfenster — der finalIds-Guard + die Refund-Datums-Regel in
-  // computeSalesMetrics entscheiden, was zaehlt (Bestandsverhalten aus context.ts).
+  // aber OHNE Zeitfenster — der finalIds-Guard + die Return-Status-Regel (B3) in
+  // computeSalesMetrics entscheiden, was zaehlt: ein wirksamer Return restated die
+  // Periode SEINER Rechnung (Invoice-Period-Semantik, B3-B; kein Return-Datumsfilter).
   const retConds: string[] = ['1=1'];
   const retParams: unknown[] = [];
   if (filter.branchId) { retConds.push('r.branch_id = ?'); retParams.push(filter.branchId); }
   if (filter.customerId) { retConds.push('i.customer_id = ?'); retParams.push(filter.customerId); }
   const retRows = query(
-    `SELECT r.invoice_id, r.refund_paid_amount, r.refund_paid_date, r.return_date
+    `SELECT r.invoice_id, r.status, r.total_amount, r.refund_paid_amount, r.refund_paid_date, r.return_date
        FROM sales_returns r JOIN invoices i ON i.id = r.invoice_id
       WHERE ${retConds.join(' AND ')}`,
     retParams
   );
   const salesReturns = retRows.map(r => ({
     invoiceId: String(r.invoice_id),
+    status: String(r.status || ''),
+    totalAmount: Number(r.total_amount) || 0,
     refundPaidAmount: Number(r.refund_paid_amount) || 0,
     refundPaidDate: (r.refund_paid_date as string) || undefined,
     returnDate: (r.return_date as string) || undefined,

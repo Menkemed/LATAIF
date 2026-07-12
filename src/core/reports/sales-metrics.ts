@@ -7,8 +7,14 @@
 // REGEL:
 //  - nur FINAL-Rechnungen (voll bezahlt) in der Periode (auf issuedAt ?? createdAt);
 //    period weglassen = echtes All-Time (kein Datumsfilter — auch fuer Refunds)
-//  - Rueckerstattungen (cash auf FINAL-Invoices, Refund-Datum in Periode) werden
-//    ANTEILIG (paid / gross) von ALLEN Kennzahlen abgezogen — einheitlich, auch Cost
+//  - wirksame Sales Returns (Credit Note existiert → status APPROVED/REFUNDED/CLOSED)
+//    reduzieren ANTEILIG (totalAmount / gross) ALLE Kennzahlen (einheitlich, auch Cost)
+//    der URSPRUNGS-RECHNUNG — UNABHAENGIG von Return-/Approval-/Refund-Datum. B3-Fix:
+//    vorher faelschlich an refund_paid_amount gekoppelt → Report zeigte Umsatz/Gewinn zu
+//    hoch, solange der Refund noch payable/unpaid war. B3-B: INVOICE-PERIOD-SEMANTIK — ein
+//    wirksamer Return RESTATED die Periode SEINER Rechnung (kein separater Event-Period-
+//    Abzug ueber Return-/Refund-Datum). REQUESTED (noch keine CN) und REJECTED (storniert
+//    via cancelReturn) zaehlen NICHT.
 //  - kundensichtbare VAT NUR aus VAT_10-Lines (Margin-VAT ist intern; siehe M-11)
 //  - Scrap/Altgold ist NICHT enthalten (separat ausweisen) — die Funktion nimmt
 //    bewusst keine Scrap-Daten entgegen
@@ -51,9 +57,11 @@ export interface SalesMetricsInvoice {
 
 export interface SalesMetricsReturn {
   invoiceId: string;
-  refundPaidAmount: number;
-  refundPaidDate?: string;
-  returnDate?: string;
+  status: string;                // SalesReturnStatus — nur wirksame (CN existiert) zaehlen
+  totalAmount: number;           // wirtschaftlich wirksamer Return-Betrag (= geschuldeter Refund / CN-Summe)
+  refundPaidAmount: number;      // Cash-Abwicklung — NICHT mehr fuer die Umsatz-/Gewinnminderung genutzt
+  refundPaidDate?: string;       // (nur noch informativ)
+  returnDate?: string;           // (informativ — Periode folgt der Rechnung, nicht dem Return-Datum; B3-B)
 }
 
 export interface SalesPeriod {
@@ -63,11 +71,11 @@ export interface SalesPeriod {
 
 export interface SalesMetrics {
   count: number;    // Anzahl FINAL-Rechnungen in der Periode
-  gross: number;    // Brutto-Umsatz (inkl. VAT) abzgl. Cash-Refunds
-  net: number;      // Netto-Umsatz abzgl. anteiligem Refund-Netto
-  vat: number;      // kundensichtbare VAT (nur VAT_10-Lines) abzgl. anteiligem Refund-VAT
-  profit: number;   // Marge (marginSnapshot) abzgl. anteiligem Refund-Profit
-  cost: number;     // Wareneinsatz (purchasePriceSnapshot) abzgl. anteiligem Refund-Cost
+  gross: number;    // Brutto-Umsatz (inkl. VAT) abzgl. wirksamer Returns (totalAmount)
+  net: number;      // Netto-Umsatz abzgl. anteiligem Return-Netto
+  vat: number;      // kundensichtbare VAT (nur VAT_10-Lines) abzgl. anteiligem Return-VAT
+  profit: number;   // Marge (marginSnapshot) abzgl. anteiligem Return-Profit
+  cost: number;     // Wareneinsatz (purchasePriceSnapshot) abzgl. anteiligem Return-Cost
 }
 
 // Kundensichtbare VAT einer Rechnung = nur VAT_10-Lines (Differenzbesteuerung/MARGIN
@@ -82,6 +90,13 @@ function invoiceInPeriod(inv: SalesMetricsInvoice, period: SalesPeriod): boolean
   if (!when) return true;   // ohne Datum: nicht ausschliessen (wie salesReport)
   return when >= period.from && when <= period.to;
 }
+
+// B3 — ein Sales Return ist wirtschaftlich wirksam (Umsatz/Gewinn-mindernd), sobald seine
+// Credit Note existiert: approveReturn erstellt die CN und setzt den Status auf APPROVED
+// (danach REFUNDED/CLOSED im Lifecycle). REQUESTED = angelegt, aber noch KEINE CN
+// (nur Disposition/COGS); REJECTED = via cancelReturn storniert (CN reversiert). Beide
+// duerfen den Report-Umsatz nicht mindern — sonst weicht der Report vom Ledger ab.
+const EFFECTIVE_RETURN_STATUSES = new Set(['APPROVED', 'REFUNDED', 'CLOSED']);
 
 // period weglassen = All-Time: KEIN Datumsfilter auf Invoices UND Refunds.
 // Bewusst optionaler Parameter statt Sentinel-Datum ('9999-…'), damit
@@ -104,22 +119,29 @@ export function computeSalesMetrics(
     cost += i.purchasePriceSnapshot || 0;
   }
 
-  // Rueckerstattungen: cash tatsaechlich erstattet, nur auf FINAL-Invoices, nur wenn
-  // das Refund-Datum in der Periode liegt (ohne period: immer). Proportional ueber
-  // gross verteilt.
-  const fromDay = period ? period.from.slice(0, 10) : '';
-  const toDay = period ? period.to.slice(0, 10) : '';
+  // B3 / B3-B — wirksame Returns (Credit Note existiert) mindern ALLE Kennzahlen anteilig,
+  // basierend auf dem GESCHULDETEN Return-Betrag (totalAmount = CN-Summe), NICHT auf der
+  // Refund-Auszahlung. Nur FINAL-Invoices, nur APPROVED/REFUNDED/CLOSED. Proportional ueber
+  // gross verteilt (kanonische Return-Berechnung wie bisher).
+  //
+  // INVOICE-PERIOD-SEMANTIK (B3-B, bewusster Entscheid): ein wirksamer Return RESTATED die
+  // Periode SEINER Rechnung — der finalIds-Guard koppelt ihn bereits an die (schon
+  // periodengefilterte) Rechnung, daher KEIN zusaetzlicher Datumsfilter ueber Return-/Refund-
+  // Datum. Das Refund-Zahlungsdatum beeinflusst die Umsatzrealisierung nicht; und ein Return-
+  // Datum in einer anderen Periode als die Rechnung wuerde den Return sonst aus JEDEM Monats-
+  // Report fallen lassen (die Rechnung liegt dann in keiner finalIds-Menge). Eine echte Event-/
+  // Accounting-Period-Auswertung nach credit_notes.issued_at braeuchte eine separate Architektur
+  // (die SSOT filtert Rechnungen bereits nach issuedAt) — offenes Design-Finding, siehe B3-B-Report.
   for (const r of salesReturns) {
     if (!finalIds.has(r.invoiceId)) continue;
-    const paid = r.refundPaidAmount || 0;
-    if (paid <= 0) continue;
-    const when = (r.refundPaidDate || r.returnDate || '').slice(0, 10);
-    if (period && when && (when < fromDay || when > toDay)) continue;
+    if (!EFFECTIVE_RETURN_STATUSES.has(r.status)) continue;
+    const amt = r.totalAmount || 0;
+    if (amt <= 0) continue;
     const inv = finalById.get(r.invoiceId)!;
     const g = inv.grossAmount || 0;
-    gross -= paid;
+    gross -= amt;
     if (g > 0) {
-      const ratio = paid / g;
+      const ratio = amt / g;
       net -= (inv.netAmount || 0) * ratio;
       vat -= vat10Of(inv) * ratio;
       profit -= (inv.marginSnapshot || 0) * ratio;
