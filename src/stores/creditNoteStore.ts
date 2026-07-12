@@ -11,6 +11,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackDelete } from '@/core/sync/track';
 import { postCreditNote, hasLedgerEntries, reverseSource } from '@/core/ledger/posting';
+import { planCreditNoteCreditTeardown } from '@/core/credit/overpayment-teardown';
 
 interface CreditNoteStore {
   creditNotes: CreditNote[];
@@ -188,17 +189,19 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
   deleteCreditNote: (id) => {
     const db = getDatabase();
 
-    // Credit-Modell Slice 3.5 — Guard GANZ OBEN: ein CN darf NICHT geloescht werden, wenn
+    // Credit-Modell Slice 3.5 / B2 — Guard GANZ OBEN: ein CN darf NICHT geloescht werden, wenn
     // das daraus entstandene Store-Guthaben bereits (teil-)eingeloest wurde (used_amount>0).
-    // deleteCreditNote (eigenstaendig via CreditNoteDetail) baut die customer_credits-Row
-    // gar nicht ab → ohne Guard verschwaende der CN-Ledger-Reverse das schon genutzte
-    // Guthaben. Blocken statt teil-reversen (gleiche Regel wie deleteReturn).
-    const usedCredit = query(
-      `SELECT id FROM customer_credits
-        WHERE source_type = 'sales_return' AND source_id = ? AND used_amount > 0.005 LIMIT 1`,
+    // B2-Fix: die UNBENUTZTEN customer_credits-Zeilen werden nach dem Ledger-Reverse mitgeloescht
+    // (vorher blieben sie als einloesbares Phantom-Guthaben stehen — B0-Fund). planCreditNoteCredit-
+    // Teardown blockt used, liefert sonst die zu loeschenden IDs (gleiche Regel wie deleteReturn).
+    const cnCredits = (query(
+      `SELECT id, amount, used_amount FROM customer_credits WHERE source_type = 'sales_return' AND source_id = ?`,
       [id]
-    );
-    if (usedCredit.length > 0) {
+    ) as { id: string; amount: number; used_amount: number }[]).map(r => ({
+      id: r.id, amount: Number(r.amount) || 0, usedAmount: Number(r.used_amount) || 0,
+    }));
+    const teardown = planCreditNoteCreditTeardown(cnCredits);
+    if (teardown.blocked) {
       throw new Error('Cannot delete this return because its customer credit has already been used.');
     }
 
@@ -209,6 +212,12 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     // sonst entstünden genau die Waisen, die wir verhindern wollen.
     if (hasLedgerEntries('CREDIT_NOTE', id)) {
       reverseSource('CREDIT_NOTE', id, new Date().toISOString());
+    }
+    // B2 — unbenutzte Store-Guthaben-Zeilen abbauen (Ledger-CR ist via reverseSource oben
+    // bereits gedreht). Ohne das bliebe ein einloesbares Phantom-Guthaben ohne Ledger-Deckung.
+    for (const creditId of teardown.deleteCreditIds) {
+      db.run('DELETE FROM customer_credits WHERE id = ?', [creditId]);
+      trackDelete('customer_credits', creditId);
     }
     db.run('DELETE FROM credit_notes WHERE id = ?', [id]);
     saveDatabase();

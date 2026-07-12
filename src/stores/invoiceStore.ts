@@ -28,6 +28,7 @@ import {
   computePaymentSplit,
 } from '@/core/ledger/posting';
 import { logAudit } from '@/core/audit/audit-log';
+import { planEditOverpayment } from '@/core/credit/overpayment-teardown';
 import { useProductStore } from '@/stores/productStore';
 import type { Expense } from '@/core/models/types';
 
@@ -762,6 +763,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     assertGrantedCreditUnused('invoice_edit', id,
       'Cannot edit this invoice because store credit from a previous edit overpayment has already been used. Reverse that credit usage first.');
 
+    // ── B2 — dieselbe Sperre fuer das beim Ueberzahlen ERZEUGTE 'overpayment'-Guthaben
+    // (recordPayment-Split, source_type='overpayment', source_id=paymentId). Ist es bereits
+    // (teil-)eingeloest, darf der Edit es nicht still veraendern → fail-fast VOR dem Reverse.
+    for (const p of query(`SELECT id FROM payments WHERE invoice_id = ?`, [id]) as { id: string }[]) {
+      assertOverpaymentCreditUnused(p.id);
+    }
+
     const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
 
     // ── Slice 3b: paid_amount IST per Invariante SUM(payments). Wird das Brutto unter den
@@ -1004,15 +1012,34 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       //      (das alte wurde oben per clawbackGrantedCredit entfernt → Re-Edit-idempotent).
       //      Innerhalb der offenen Tx → atomar; ein postEntries-Fehler loest den Rollback aus.
       //      Sofort via applyCreditToInvoice (Slice 2) einloesbar.
-      if (overpay > 0.005) {
-        postInvoiceOverpaymentCredit(id, effCustomerId, overpay, now);
+      // B2 — nur das DELTA ueber ein bereits bestehendes 'overpayment'-Guthaben nachbuchen.
+      // Das beim Ueberzahlen erzeugte Guthaben (recordPayment-Split, source_type='overpayment',
+      // PAYMENT-gebucht) wird von reverseSource('INVOICE') NICHT angefasst und bleibt bestehen.
+      // Wuerde Step 8b den vollen `overpay` buchen, entstuende doppeltes Guthaben + Phantom-AR
+      // (B0-Fund). planEditOverpayment liefert das reine Delta; used-Guthaben ist oben fail-fast
+      // geblockt, die Schrumpf-Kollision (Delta<0) blockt hier (Rollback-sicher in der offenen Tx).
+      const existingOverpay = (query(
+        `SELECT cc.id, cc.amount, cc.used_amount FROM customer_credits cc
+           JOIN payments p ON p.id = cc.source_id
+          WHERE cc.source_type = 'overpayment' AND p.invoice_id = ?`, [id]
+      ) as { id: string; amount: number; used_amount: number }[]).map(r => ({
+        id: r.id, amount: Number(r.amount) || 0, usedAmount: Number(r.used_amount) || 0,
+      }));
+      const overpayPlan = planEditOverpayment({ newPaid, newGross: grossAmount, existingOverpaymentCredits: existingOverpay });
+      if (overpayPlan.blocked) {
+        throw new Error(overpayPlan.reason === 'OVERPAYMENT_CREDIT_WOULD_SHRINK'
+          ? 'Cannot edit: this would shrink an existing overpayment store credit below its amount. Refund or apply that credit first, then edit.'
+          : 'Cannot edit: the overpayment store credit from a payment has already been used. Reverse that credit usage first.');
+      }
+      if (overpayPlan.additionalCredit > 0.005) {
+        postInvoiceOverpaymentCredit(id, effCustomerId, overpayPlan.additionalCredit, now);
         const overCreditId = uuid();
         db.run(
           `INSERT INTO customer_credits (id, branch_id, customer_id, source_type, source_id, amount, used_amount, status, note, created_at, created_by)
            VALUES (?, ?, ?, 'invoice_edit', ?, ?, 0, 'OPEN', ?, ?, ?)`,
-          [overCreditId, branchId, effCustomerId, id, overpay, `Ueberzahlung ${inv0.invoiceNumber}`, now, userId]
+          [overCreditId, branchId, effCustomerId, id, overpayPlan.additionalCredit, `Ueberzahlung ${inv0.invoiceNumber}`, now, userId]
         );
-        trackInsert('customer_credits', overCreditId, { customerId: effCustomerId, amount: overpay, sourceInvoiceId: id });
+        trackInsert('customer_credits', overCreditId, { customerId: effCustomerId, amount: overpayPlan.additionalCredit, sourceInvoiceId: id });
       }
 
       const revRow = query(`SELECT COALESCE(MAX(revision), 0) AS r FROM invoice_edits WHERE invoice_id = ?`, [id])[0];
