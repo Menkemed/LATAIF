@@ -21,6 +21,7 @@ import { vatEngine } from '@/core/tax/vat-engine';
 import { getLotsWithPurchaseNumbers, formatLotLabel, getStockAggregates, type StockLot } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
+import { checkEditReason, EDIT_REASON_REQUIRED_MESSAGE } from '@/core/invoices/edit-reason';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -283,8 +284,11 @@ export function InvoiceCreate() {
       // optionale Delta-Zahlung + Status + Audit) atomar in editInvoice — eine
       // einzige SQL-Transaktion im Store, nicht mehr UI-orchestriert.
       const issuedIso = `${issuedDate}T00:00:00.000Z`;
-      const reason = editReason.trim();
-      if (!reason) { setError('Please enter a reason for this edit.'); return; }
+      // E1: gleiche Regel wie bisher (getrimmter Grund Pflicht), Meldung aus der SSOT-Konstante,
+      // damit das Reason-Feld unten den Fehler exakt matchen und inline anzeigen kann.
+      const reasonCheck = checkEditReason(isEditMode, editReason);
+      if (!reasonCheck.ok) { setError(reasonCheck.message); return; }
+      const reason = reasonCheck.reason;
       // Delta-Zahlung nur bei Erhoehung des bezahlten Betrags (Reduktion ignoriert —
       // negatives Payment gibt es im Modell nicht). Reduktion unter paid blockiert der Store.
       const delta = paidAmount - originalPaid;
@@ -699,15 +703,6 @@ export function InvoiceCreate() {
                 The paid amount exceeds the new total. The difference (<strong><Bhd v={paidAmount - total}/> BHD</strong>) will be converted into customer credit.
               </div>
             )}
-            {isEditMode && (
-              <div style={{ marginTop: 12 }}>
-                <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>EDIT REASON *</span>
-                <input value={editReason}
-                  onChange={e => setEditReason(e.target.value)}
-                  placeholder="Why is this invoice being edited? (required — saved to the audit log)"
-                  style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }} />
-              </div>
-            )}
             <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                 <span className="text-overline">PAID</span>
@@ -782,6 +777,30 @@ export function InvoiceCreate() {
           </Card>
         </div>
 
+        {/* EDIT REASON — E1: Pflicht-Grund im Edit-Modus, prominent direkt vor Summary/Save.
+            Eigenes Feld, getrennt von NOTES; gleicher editReason-State wie die Save-Validierung.
+            Validierungsfehler wird INLINE am Feld gezeigt (roter Rand + Meldung darunter),
+            nicht isoliert unten unter der Summary. Nur im Edit-Modus gerendert → Create unberührt. */}
+        {isEditMode && (
+          <div style={{ marginTop: 16 }}>
+            <Card>
+              <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>REASON FOR EDIT *</span>
+              <textarea value={editReason}
+                onChange={e => { setEditReason(e.target.value); if (error === EDIT_REASON_REQUIRED_MESSAGE) setError(''); }}
+                rows={2}
+                placeholder="Explain why this invoice is being changed... (required — saved to the audit log)"
+                style={{
+                  width: '100%', padding: '10px 12px', fontSize: 13, resize: 'vertical',
+                  border: `1px solid ${error === EDIT_REASON_REQUIRED_MESSAGE ? '#DC2626' : '#D5D9DE'}`,
+                  borderRadius: 6, background: '#FFFFFF', color: '#0F0F10',
+                }} />
+              {error === EDIT_REASON_REQUIRED_MESSAGE && (
+                <div style={{ marginTop: 6, fontSize: 12, color: '#DC2626' }}>{EDIT_REASON_REQUIRED_MESSAGE}</div>
+              )}
+            </Card>
+          </div>
+        )}
+
         {/* 7. SUMMARY BOX — Premium Lila-Card im Dashboard-Spot-Look (Two-Tone-Glow) */}
         <div style={{
           position: 'relative', marginTop: 24, padding: '24px 28px', borderRadius: 20,
@@ -818,8 +837,9 @@ export function InvoiceCreate() {
           </div>
         </div>
 
-        {/* Error */}
-        {error && (
+        {/* Error — E1: der Edit-Reason-Fehler wird INLINE am Reason-Feld oben gezeigt, daher hier
+            unterdrückt (nicht isoliert unter der Summary doppeln). Alle anderen Fehler bleiben hier. */}
+        {error && error !== EDIT_REASON_REQUIRED_MESSAGE && (
           <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 8, fontSize: 12, color: '#DC2626' }}>
             {error}
           </div>
