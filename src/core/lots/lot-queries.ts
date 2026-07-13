@@ -9,6 +9,7 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
 import { firstUnavailableLot, STOCK_UNAVAILABLE_MESSAGE, type LotSnapshot } from './lot-availability';
+import { firstProductWithAgent, WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
 
 // LAN-Sync (Phase 1a): jede stock_lots-Mutation als Full-Row-Snapshot an Geraet B.
 // Sync-only — KEIN Audit, KEIN eigenes saveDatabase. trackChange liest die volle Zeile
@@ -147,6 +148,21 @@ export function assertLotsConsumable(picks: { lotId: string | null; qty: number 
     return lot ? { status: lot.status, qtyRemaining: lot.qtyRemaining } : null;
   });
   if (bad) throw new Error(STOCK_UNAVAILABLE_MESSAGE);
+}
+
+// B5 — With-Agent-Guard fuer den Invoice-Pfad. Liest stock_status FRISCH aus der DB (nicht
+// aus dem Store-Cache) — analog assertLotsConsumable / assertOrderLinesBillable — und wirft,
+// wenn eines der zu fakturierenden Produkte beim Agenten ist (with_agent). VOR den Domain-
+// Inserts aufrufen, damit keine Invoice/Line/Revenue/COGS fuer ein with_agent-Stueck entsteht.
+// Der Agent-Settlement-Pfad (agentStore) ist der EINZIGE legitime Weg, ein with_agent-Stueck
+// zu fakturieren, und umgeht diesen Guard bewusst (createDirectInvoice opts.allowWithAgent).
+export function assertProductsSellable(productIds: string[]): void {
+  const ids = [...new Set(productIds.filter(Boolean))];
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = query(`SELECT id, stock_status FROM products WHERE id IN (${placeholders})`, ids);
+  const bad = firstProductWithAgent(rows.map(r => ({ id: String(r.id), stockStatus: (r.stock_status as string) || null })));
+  if (bad) throw new Error(WITH_AGENT_INVOICE_BLOCKED_MESSAGE);
 }
 
 // Inverse von consumeLot — fuer Sales-Returns / Invoice-Cancel.

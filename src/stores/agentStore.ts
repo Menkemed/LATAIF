@@ -524,6 +524,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         lineTotal: calc.grossAmount,
       }],
       `Agent settlement · transfer ${transfer.transferNumber}`,
+      // B5 — Agent-Settlement IST der kanonische, legitime Verkauf des with_agent-Stuecks →
+      // den With-Agent-Guard in createDirectInvoice bewusst umgehen (opts.allowWithAgent).
+      undefined, undefined, undefined, undefined,
+      { allowWithAgent: true },
     );
 
     // Transfer ↔ Invoice koppeln + Customer-Verknüpfung am Agent merken.
@@ -642,6 +646,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       customerId,
       lines,
       `Combined agent settlement · transfers ${noteRefs}`,
+      // B5 — Bulk-Agent-Settlement: legitimer Verkauf der with_agent-Stuecke → Guard umgehen.
+      undefined, undefined, undefined, undefined,
+      { allowWithAgent: true },
     );
 
     // Pro Transfer: invoiceId koppeln + bestehende Settle-Payments in die

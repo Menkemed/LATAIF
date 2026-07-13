@@ -26,10 +26,12 @@ import { useExpenseStore } from '@/stores/expenseStore';
 import { computeExpenseSettlement, creditPaidByExpense } from '@/core/finance/expenseSettlement';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { query } from '@/core/db/helpers';
+import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
+import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
-import type { Order, OrderLine, OrderStatus, Product, TaxScheme, GoldPayable } from '@/core/models/types';
+import type { Order, OrderLine, OrderStatus, Product, TaxScheme, GoldPayable, Invoice } from '@/core/models/types';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -535,6 +537,39 @@ export function OrderDetail() {
     }
   }
 
+  // B5-B — zentrale ATOMARE Order→Invoice-Konvertierung (genutzt von modernem UND Legacy-Pfad).
+  // convertOrderLinesToInvoiceTx fuehrt assertBillable → createDirectInvoice → markOrderLinesInvoiced
+  // → updateOrder(invoiceId) in EINER Ledger-Transaktion aus; JEDER Fehler → voller Rollback (keine
+  // Invoice, keine Line-Markierung, keine Order-Aenderung) → eine Wiederholung erzeugt KEINE zweite
+  // Invoice, auch bei lot-losen Positionen (die der Lot-Guard nicht schuetzt). Keine Invoice-Logik
+  // dupliziert (createInvoice ruft das echte createDirectInvoice).
+  function convertOrderToInvoiceAtomic(
+    customerId: string,
+    billableLineIds: string[],
+    lines: Parameters<typeof createDirectInvoice>[1],
+    notes: string,
+    specialMark: boolean,
+  ): Invoice {
+    let created: Invoice | null = null;
+    convertOrderLinesToInvoiceTx({
+      begin: beginLedgerTransaction,
+      commit: commitLedgerTransaction,
+      rollback: rollbackLedgerTransaction,
+      assertBillable: () => assertOrderLinesBillable(billableLineIds),
+      createInvoice: () => {
+        const inv = createDirectInvoice(customerId, lines, notes, undefined, undefined, undefined, specialMark);
+        created = inv;
+        return inv;
+      },
+      linkLinesAndOrder: (invId) => {
+        markOrderLinesInvoiced(billableLineIds, invId);
+        if (id) updateOrder(id, { invoiceId: invId });
+      },
+      refresh: () => { loadOrders(); loadInvoices(); loadProducts(); },
+    });
+    return created!;
+  }
+
   async function handleCreateFinalInvoice() {
     if (!id || !order) return;
 
@@ -690,30 +725,26 @@ export function OrderDetail() {
       });
     }
 
-    // F1 — harter Idempotenz-Guard VOR dem Invoice-Create: bricht ab, wenn eine der Lines
-    // (Doppelklick / zweiter Convert) bereits invoiced ist. assertOrderLinesBillable liest
-    // FRISCH aus der DB — ein zweiter synchroner Durchlauf sieht die vom ersten gesetzten
-    // invoice_ids und stoppt, bevor eine doppelte Invoice/Revenue/Ledger entsteht.
+    // B5-B — atomare Konvertierung: assertBillable + createDirectInvoice + markOrderLinesInvoiced
+    // + updateOrder(invoiceId) laufen in EINER Ledger-Transaktion (convertOrderToInvoiceAtomic).
+    // Jeder Fehler → voller Rollback (keine Invoice, keine Line-Markierung) → eine Wiederholung
+    // erzeugt keine zweite Invoice. assertOrderLinesBillable liest FRISCH aus der DB.
+    let invoice: Invoice;
     try {
-      assertOrderLinesBillable(billableLines.map(l => l.id));
+      invoice = convertOrderToInvoiceAtomic(
+        order.customerId,
+        billableLines.map(l => l.id),
+        invoiceLineInputs,
+        `Invoice for order ${order.orderNumber}`,
+        specialMark,
+      );
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
       return;
     }
-    const invoice = createDirectInvoice(
-      order.customerId,
-      invoiceLineInputs,
-      `Invoice for order ${order.orderNumber}`,
-      undefined,
-      undefined,
-      undefined,
-      specialMark,
-    );
-    // v0.3.0 — invoicte Lines mit der Invoice verknuepfen (partial invoicing).
-    markOrderLinesInvoiced(billableLines.map(l => l.id), invoice.id);
-    // M-07 — Option 3: "Auftrag abschliessen" angehakt → die invoicten Positionen
-    // auf DELIVERED setzen. recomputeOrderStatus (in updateOrderLineStatus) rollt die
-    // Order auf 'completed', sobald ALLE kundenseitigen Lines DELIVERED sind; bei
+    // M-07 — Option 3: "Auftrag abschliessen" angehakt → die invoicten Positionen auf DELIVERED
+    // setzen (NACH der atomaren Konvertierung). recomputeOrderStatus (in updateOrderLineStatus)
+    // rollt die Order auf 'completed', sobald ALLE kundenseitigen Lines DELIVERED sind; bei
     // Teil-Convert bleibt sie 'arrived'. Default leer → unveraendertes Verhalten.
     if (markCompleteOnConvert) {
       for (const l of billableLines) {
@@ -721,7 +752,6 @@ export function OrderDetail() {
         catch (err) { console.warn('[order] mark-complete-on-convert failed:', err); }
       }
     }
-    updateOrder(id, { invoiceId: invoice.id });
     setPendingProduct(null);
     // v0.3.1 — Deposit-Pool auf die Invoice anrechnen, gedeckelt aufs Invoice-Total.
     // Ein Ueberschuss bleibt fuer die naechste Teil-Invoice stehen; ist der Pool
@@ -747,6 +777,7 @@ export function OrderDetail() {
     if (!id || !order || !prod) return;
     const grossAgreed = order.agreedPrice || totalPaid;
     if (grossAgreed <= 0) { alert('Agreed price required.'); return; }
+
     const taxScheme = (perLine[prod.id] || prod.taxScheme || 'MARGIN') as TaxScheme;
     const vatRate = taxScheme === 'ZERO' ? 0 : 10;
     const netInput = taxScheme === 'VAT_10'
@@ -755,24 +786,32 @@ export function OrderDetail() {
     const calc = vatEngine.calculateNet(netInput, prod.purchasePrice || 0, taxScheme, vatRate);
     // v0.7.1 — NBR: siehe analoge Stelle weiter oben.
     const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
-    const invoice = createDirectInvoice(
-      order.customerId,
-      [{
-        productId: prod.id,
-        unitPrice: calc.netAmount,
-        purchasePrice: prod.purchasePrice || 0,
-        taxScheme,
-        vatRate,
-        vatAmount: persistedVat,
-        lineTotal: calc.grossAmount,
-      }],
-      `Final invoice for order ${order.orderNumber}`,
-      undefined,
-      undefined,
-      undefined,
-      specialMark,
-    );
-    updateOrder(id, { invoiceId: invoice.id });
+    // B5-B — Legacy-Konvertierung ATOMAR (wie moderner Pfad): assertBillable + createDirectInvoice
+    // + markOrderLinesInvoiced + updateOrder(invoiceId) in EINER Ledger-Tx. Jeder Fehler → voller
+    // Rollback → keine zweite Invoice bei Wiederholung, auch fuer lot-lose Custom-Stuecke ('reserved',
+    // kein stock_lot; der Lot-Guard schuetzt sie nicht). getBillableLines liefert die billbaren Lines
+    // der Legacy-Order (Voll-Konvertierung ueber agreedPrice, keine Teil-Konvertierung).
+    let invoice: Invoice;
+    try {
+      invoice = convertOrderToInvoiceAtomic(
+        order.customerId,
+        getBillableLines(id).map(l => l.id),
+        [{
+          productId: prod.id,
+          unitPrice: calc.netAmount,
+          purchasePrice: prod.purchasePrice || 0,
+          taxScheme,
+          vatRate,
+          vatAmount: persistedVat,
+          lineTotal: calc.grossAmount,
+        }],
+        `Final invoice for order ${order.orderNumber}`,
+        specialMark,
+      );
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+      return;
+    }
     setPendingProduct(null);
     await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount);
     navigate(`/invoices/${invoice.id}`);

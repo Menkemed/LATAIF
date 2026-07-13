@@ -7,7 +7,7 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
-import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable } from '@/core/lots/lot-queries';
+import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -120,7 +120,7 @@ interface InvoiceStore {
   loadInvoices: () => void;
   getInvoice: (id: string) => Invoice | undefined;
   createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>, staffId?: string, specialMark?: boolean) => Invoice;
-  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean) => Invoice;
+  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean, opts?: { allowWithAgent?: boolean }) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   // Atomarer Gesamt-Edit einer gebuchten Rechnung (Header + Zeilen + Inventory +
   // Ledger-Reverse+Repost + optionale Delta-Zahlung + Status) in EINER SQL-Transaktion
@@ -313,6 +313,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // F1 — Lot-Verfuegbarkeit VOR dem INSERT pruefen (aggregiert pro Lot: mehrere
     // Offer-Lines desselben Produkts ziehen denselben Auto-FIFO-Lot → der zweite consumeLot
     // wuerde sonst still `false` liefern). Wirft bevor irgendetwas geschrieben wird.
+    // B5 — With-Agent-Guard: auch ueber einen (veralteten) Offer darf kein with_agent-Stueck
+    // fakturiert werden. Frisch aus der DB; kein Agent-opt-out auf dem Offer-Pfad.
+    assertProductsSellable(lines.map(l => l.productId));
     assertLotsConsumable(lines.map(l => ({ lotId: lotsByProduct[l.productId] || null, qty: 1 })));
 
     db.run(
@@ -398,7 +401,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     return get().getInvoice(id)!;
   },
 
-  createDirectInvoice: (customerId, lines, notes, issuedAtOverride, numbering, staffId, specialMark) => {
+  createDirectInvoice: (customerId, lines, notes, issuedAtOverride, numbering, staffId, specialMark, opts) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -458,6 +461,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // sonst wuerde Revenue/COGS ohne Stock-Abzug entstehen (consumeLot gibt sonst nur
     // `false` zurueck, ignoriert). Wirft VOR dem Invoice/Line-Insert → dieser Pfad hat
     // keine umschliessende Ledger-Tx, daher kein Rollback noetig / kein Teilzustand.
+    // B5 — With-Agent-Guard (harte Store-Grenze) VOR dem Lot-Check: kein Produkt, das beim
+    // Agenten ist, darf ueber den normalen Invoice-Pfad fakturiert werden. Der Agent-
+    // Settlement-Pfad (agentStore) setzt opts.allowWithAgent = legitimer Verkauf des Stuecks.
+    if (!opts?.allowWithAgent) {
+      assertProductsSellable(resolvedLines.map(l => l.productId));
+    }
     assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
@@ -873,6 +882,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // F1 — Lot-Verfuegbarkeit VOR den neuen Line-Inserts pruefen (aggregiert pro Lot).
       // Wirft innerhalb der offenen beginLedgerTransaction → voller Rollback (Reverse +
       // alte/neue Lines verworfen). Kein Revenue/COGS-Repost ohne passenden Stock-Abzug.
+      // B5 — With-Agent-Guard: eine neu hinzugefuegte Edit-Line darf kein with_agent-Stueck
+      // sein (der InvoiceDetail-Picker filtert stock_status nicht). Wirft in der Tx → Rollback.
+      assertProductsSellable(resolvedLines.map(l => l.productId));
       assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
 
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
