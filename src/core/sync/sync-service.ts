@@ -4,8 +4,10 @@
 // Works offline — queues changes and syncs when online
 // ═══════════════════════════════════════════════════════════
 
-import { getDatabase, saveDatabase } from '../db/database';
+import { getDatabase, saveDatabase, saveDatabaseDurably } from '../db/database';
 import { query } from '../db/helpers';
+import { isTransactionActive } from '../db/transaction-context';
+import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
 
 const SYNC_INTERVAL = 30_000; // 30 seconds
 const STORAGE_KEY_URL = 'lataif_sync_url';
@@ -157,27 +159,43 @@ async function pullChanges(): Promise<number> {
   // sie nach dem Reload gegen die DB scoren und ein Side-by-Side-Review
   // zum Mergen anbieten kann.
   const insertedProductIds: string[] = [];
-  for (const change of changes) {
-    try {
-      const data = JSON.parse(change.data);
-      if (change.action === 'insert' || change.action === 'update') {
-        applyUpsert(db, change.table_name, change.record_id, data);
-        if (change.action === 'insert' && change.table_name === 'products') {
-          insertedProductIds.push(change.record_id);
-        }
-      } else if (change.action === 'delete') {
-        db.run(`DELETE FROM ${change.table_name} WHERE id = ?`, [change.record_id]);
-      }
-    } catch (err) {
-      // v0.4.1 — NICHT das ganze change-Objekt loggen: change.data kann ein
-      // base64-Foto (~1 MB) enthalten — das wuerde die Konsole/den Speicher
-      // bei jedem fehlgeschlagenen Apply zumuellen. Nur Tabelle + Record-ID.
-      console.warn('[Sync] Failed to apply change:', change.table_name, change.record_id, err);
-    }
-  }
-
-  saveDatabase();
-  localStorage.setItem(STORAGE_KEY_LAST, String(last_sync_id));
+  // M2 / M2-A — Sicherheitsreihenfolge (durable-cursor.ts): apply batch ATOMAR → AWAIT durable
+  // save → erst DANN den Cursor vorruecken.
+  //   M2:   der Cursor rueckt nur nach bestaetigtem durablem Save vor (saveDatabaseDurably wirft
+  //         bei Persist-Fehler → kein Advance → Re-Pull).
+  //   M2-A: der Apply-Loop laeuft in EINER sql.js-Transaktion und BRICHT beim ersten Fehler AB
+  //         (kein per-Change-Schlucken mehr). ROLLBACK verwirft ALLE bereits angewandten Changes
+  //         des Batches → kein partieller, nicht-dauerhafter Memory-Stand bleibt sichtbar; ein
+  //         SyncApplyError (change id/table/record/op, KEIN Payload) wird geworfen → commitPulledBatch
+  //         erreicht weder durableSave noch setCursor → der Cursor (`lataif_sync_last_id`) bleibt alt
+  //         → der naechste Pull liefert den GESAMTEN Batch erneut (applyUpsert/DELETE idempotent).
+  //         So wird KEIN Change in der Mitte still uebersprungen.
+  await commitPulledBatch({
+    applyBatch: () => {
+      // Der Pull laeuft nie in einer Ambient-Ledger-Tx; liefe er es doch, wuerde unser ROLLBACK
+      // deren Zustand mit-verwerfen → dann lieber laut scheitern (kein Cursor-Advance) als still.
+      if (isTransactionActive()) throw new Error('[Sync] pull apply darf nicht in einer aktiven Transaktion laufen');
+      applyChangesAtomic(changes, {
+        begin: () => db.run('BEGIN'),
+        applyChange: (change) => {
+          // change.data kann ein base64-Foto (~1 MB) sein — NIE das ganze Objekt loggen.
+          const data = JSON.parse((change as unknown as { data: string }).data);
+          if (change.action === 'insert' || change.action === 'update') {
+            applyUpsert(db, change.table_name, change.record_id, data);
+            if (change.action === 'insert' && change.table_name === 'products') {
+              insertedProductIds.push(change.record_id);
+            }
+          } else if (change.action === 'delete') {
+            db.run(`DELETE FROM ${change.table_name} WHERE id = ?`, [change.record_id]);
+          }
+        },
+        commit: () => db.run('COMMIT'),
+        rollback: () => { db.run('ROLLBACK'); insertedProductIds.length = 0; },
+      });
+    },
+    durableSave: saveDatabaseDurably,
+    setCursor: () => localStorage.setItem(STORAGE_KEY_LAST, String(last_sync_id)),
+  });
 
   // Plan §LAN-Sync: nach dem Pull die betroffenen Stores neu laden — sonst
   // bleibt die UI auf dem alten Stand und neue Items vom Handy tauchen erst

@@ -2777,6 +2777,25 @@ export function saveDatabase(): Promise<void> {
   return saver.requestSave();
 }
 
+// M2 — Awaitbare DURABLE Save-Barriere fuer den Sync-Pull.
+// Resolved GENAU DANN, wenn der aktuelle In-Memory-Voll-Stand dauerhaft auf die aktive
+// DB-Datei geschrieben wurde; WIRFT bei jedem Persist-Fehler (Stale-Konflikt oder transient).
+// Im Gegensatz zu saveDatabase() (fire-and-forget, rejectet NIE) reicht sie den Fehler
+// weiter — damit pullChanges den Sync-Cursor NICHT vorrueckt, wenn der Write scheiterte
+// (M1-Root-Cause: Cursor-Advance vor bestaetigtem Disk-Write → permanenter Item-Verlust).
+export async function saveDatabaseDurably(): Promise<void> {
+  if (!db) return;
+  if (isTransactionActive()) {
+    // Durability laesst sich in einer offenen Ambient-Tx nicht synchron garantieren
+    // (db.export() wuerde die Tx beenden). Der Sync-Pull laeuft NIE in einer Tx; ein
+    // Aufruf hier waere ein Programmierfehler → laut scheitern statt still Verlust riskieren.
+    throw new Error('saveDatabaseDurably darf nicht innerhalb einer aktiven Transaktion aufgerufen werden');
+  }
+  await saver.requestSave();        // kick + drain: persistiert den aktuellen Voll-Stand
+  const err = saver.getLastError(); // Coalescer resolved auch bei Fehler → hier pruefen
+  if (err) throw err instanceof Error ? err : new Error(String(err));
+}
+
 // D2: Letzter Persist-Fehler (Stale-Konflikt oder transient) für Diagnose/UI. null = alles ok.
 export function getLastSaveError(): unknown {
   return saver.getLastError();
