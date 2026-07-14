@@ -62,15 +62,47 @@ import { UpdateBanner } from '@/components/shared/UpdateBanner';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync } from '@/core/db/database';
+import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
 
 let automationsRegistered = false;
 
+// M4-A — Overlay während des kontrollierten App-Close: erst "Daten werden gespeichert…",
+// bei Persistenzfehler eine sichtbare Fehlermeldung (App bleibt offen, erneuter Versuch möglich).
+function CloseOverlay({ status }: { status: CloseStatus | null }) {
+  if (!status) return null;
+  const isError = status.kind === 'error';
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 99999,
+      background: 'rgba(15,15,16,0.72)', backdropFilter: 'blur(2px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} role="status" aria-live="assertive">
+      <div style={{
+        background: '#1A1A1F', color: '#FFFFFF', border: '1px solid ' + (isError ? 'rgba(220,38,38,0.5)' : '#2A2A30'),
+        borderRadius: 12, padding: '22px 26px', minWidth: 320, maxWidth: 440,
+        boxShadow: '0 12px 40px rgba(0,0,0,0.5)', textAlign: 'center',
+      }}>
+        {isError ? (
+          <>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#DC2626', marginBottom: 8 }}>Speichern fehlgeschlagen</div>
+            <div style={{ fontSize: 12, color: '#B8B8C0', marginBottom: 6 }}>{status.message.slice(0, 200)}</div>
+            <div style={{ fontSize: 12, color: '#8E8E97' }}>Die App bleibt geöffnet. Bitte erneut schließen, um es noch einmal zu versuchen.</div>
+          </>
+        ) : (
+          <div style={{ fontSize: 14, color: '#FFFFFF' }}>Daten werden gespeichert. Bitte warten …</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [dbReady, setDbReady] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [closeStatus, setCloseStatus] = useState<CloseStatus | null>(null); // M4-A: App-Close-Overlay
   const { session, initialize } = useAuthStore();
 
   useEffect(() => {
@@ -112,48 +144,54 @@ export default function App() {
     if (isTauri) {
       let unlisten: (() => void) | null = null;
       let cancelled = false;
-      let closing = false;
+      // M4-A/M4-A1 — kontrollierter Close via prepareAndCloseApplication. Single-Flight (Regel C)
+      // einmal binden: mehrere X-Klicks teilen denselben Lauf. Reihenfolge: Status → UI-Turn →
+      // Sync pausieren → laufenden Sync abwarten → durabler Flush → Window-Close. Bei Sync-Warte-
+      // oder Persistenzfehler KEIN Close, KEIN Hard-Exit — App bleibt offen, Fehler sichtbar,
+      // Sync wird kontrolliert wieder freigegeben, Retry moeglich (Regeln A/B).
+      const runClose = createSingleFlight(async () => {
+        const winMod = await import('@tauri-apps/api/window');
+        const win = winMod.getCurrentWindow();
+        const sync = await import('@/core/sync/sync-service');
+        await prepareAndCloseApplication({
+          setStatus: (s) => setCloseStatus(s),
+          // Regel E: dem UI einen Event-Loop-Turn geben, damit das Save-Overlay erscheint, BEVOR
+          // der (potenziell blockierende) db.export()/Flush startet. Bewusst setTimeout(0) statt
+          // requestAnimationFrame: rAF feuert bei minimiertem/verstecktem Fenster (document.hidden)
+          // nicht — ein Close darf dann NICHT haengen. setTimeout(0) laeuft als Macrotask nach dem
+          // (auto-gebatchten) React-Commit → das Overlay ist gerendert.
+          yieldToRender: () => new Promise<void>((r) => setTimeout(r, 0)),
+          // Regel D: neue Sync-Laeufe (Timer UND manuell) pausieren — Lifecycle-Vertrag in
+          // sync-service; M2-Batch-/Durable-Save-/Cursor-Semantik bleibt unangetastet.
+          stopBackgroundWrites: () => sync.pauseAutoSync(),
+          // Auf einen BEREITS laufenden syncNow() warten, damit dessen DB-Writes im finalen Flush
+          // landen (er schliesst alle Writes + Store-Reloads vor der Promise-Aufloesung ab).
+          waitForPendingOperations: () => sync.waitForSyncIdle(),
+          // Persistenzbarriere: schliesst alle angeforderten Writes ab und WIRFT bei Fehler
+          // (kein Schlucken mehr wie im alten 1,5s-Best-Effort-Pfad).
+          flushPendingDatabaseWrites: () => flushDatabase(),
+          // Nur nach bestaetigter Persistenz. destroy() kann in Tauri v2 haengen → ein gebundener
+          // Hard-Exit NACH sicherem Flush ist unbedenklich (die Daten sind bereits auf der Platte).
+          closeWindow: async () => {
+            win.destroy().catch((err) => console.warn('[App] destroy failed:', err));
+            setTimeout(async () => {
+              try { const proc = await import('@tauri-apps/plugin-process'); await proc.exit(0); } catch { /* */ }
+            }, 2000);
+          },
+          // Bei Fehler: Pause aufheben + genau EIN Auto-Sync-Timer wieder starten; App bleibt offen.
+          resumeBackgroundWrites: () => sync.resumeAutoSync(),
+        });
+      });
       import('@tauri-apps/api/window').then(async (mod) => {
         if (cancelled) return;
         const win = mod.getCurrentWindow();
         unlisten = await win.onCloseRequested(async (event) => {
-          if (closing) return;
-          closing = true;
-          event.preventDefault();
-          // Hard-Deadline: nach 3s ist das Fenster IMMER weg, egal was passiert.
-          // setTimeout setzen BEVOR async-Work startet, sonst kann ein hängender
-          // flush/destroy auch den Hard-Exit blockieren — der ist im selben
-          // Event-Loop-Tick wie das setTimeout, nicht innerhalb des awaits.
-          const hardExitTimer = setTimeout(async () => {
-            console.warn('[App] close took too long — forcing exit via plugin-process');
-            try {
-              const proc = await import('@tauri-apps/plugin-process');
-              await proc.exit(0);
-            } catch (err) { console.error('[App] hard exit failed:', err); }
-          }, 3000);
+          event.preventDefault(); // wir kontrollieren den Close selbst
           try {
-            // Best-effort flush mit 1.5s-Cap.
-            try {
-              await Promise.race([
-                flushDatabase(),
-                new Promise<void>((_, reject) => setTimeout(() => reject(new Error('flush timeout')), 1500)),
-              ]);
-            } catch (err) { console.warn('[App] flush on close skipped:', err); }
-            // Fire-and-forget destroy — nicht awaiten, weil Tauri v2 in manchen
-            // States nie resolved. Wenn destroy funktioniert, ist das Fenster
-            // weg bevor der Hard-Exit feuert. Wenn nicht, fängt der setTimeout es.
-            win.destroy().catch(err => console.warn('[App] destroy failed:', err));
-          } finally {
-            clearTimeout(hardExitTimer);
-            // ABER: hard-exit-Sicherheitsnetz nochmal als finaler Fallback —
-            // falls destroy() weder resolved noch das Fenster zumacht. Nach
-            // weiteren 1.5s gibt's keine Ausreden mehr.
-            setTimeout(async () => {
-              try {
-                const proc = await import('@tauri-apps/plugin-process');
-                await proc.exit(0);
-              } catch { /* */ }
-            }, 1500);
+            await runClose();
+          } catch (err) {
+            // Fehler ist bereits als closeStatus 'error' sichtbar; App bleibt offen (kein Hard-Exit).
+            console.warn('[App] close aborted (persist failed):', err instanceof Error ? err.message : String(err));
           }
         });
       });
@@ -202,6 +240,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <div className="app-layout" style={{ background: '#F2F7FA' }}>
+        <CloseOverlay status={closeStatus} />
         <GlobalSearch />
         <UpdateBanner />
         <SyncDuplicateGuard />

@@ -16,6 +16,10 @@ const STORAGE_KEY_LAST = 'lataif_sync_last_id';
 
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let syncing = false;
+// M4-A1 — Close-Lifecycle: waehrend eines App-Close werden neue Sync-Laeufe pausiert und ein
+// bereits laufender Lauf wird als Promise festgehalten, damit der Close darauf warten kann.
+let syncPaused = false;
+let inFlightSync: Promise<void> | null = null;
 
 // ── Status ──
 
@@ -323,31 +327,39 @@ function applyUpsert(db: any, table: string, id: string, data: Record<string, un
 
 // ── Full sync cycle ──
 
-export async function syncNow(): Promise<void> {
-  if (syncing || !isSyncConfigured()) return;
+export function syncNow(): Promise<void> {
+  // M4-A1: waehrend eines App-Close (syncPaused) KEINEN neuen Lauf starten; ebenso kein
+  // paralleler Lauf (syncing-Single-Flight bleibt unveraendert). Rueckgabe ist der laufende
+  // Zyklus als Promise, damit waitForSyncIdle() darauf warten kann.
+  if (syncing || syncPaused || !isSyncConfigured()) return Promise.resolve();
   syncing = true;
   setStatus('syncing');
 
-  try {
-    const pushed = await pushChanges();
-    const pulled = await pullChanges();
-    // C1: drain the authoritative operations-pull too, so a passive device
-    // converges on B1 operations (whose effects are NOT in sync_changelog).
-    // Dynamic import breaks the operations/sync static cycle.
-    let opsApplied = 0;
+  const run = (async () => {
     try {
-      const ops = await import('../operations/service');
-      opsApplied = await ops.pullAndApplyOperationsAuto();
-    } catch (e) {
-      console.warn('[Sync] ops-pull skipped:', e);
+      const pushed = await pushChanges();
+      const pulled = await pullChanges();
+      // C1: drain the authoritative operations-pull too, so a passive device
+      // converges on B1 operations (whose effects are NOT in sync_changelog).
+      // Dynamic import breaks the operations/sync static cycle.
+      let opsApplied = 0;
+      try {
+        const ops = await import('../operations/service');
+        opsApplied = await ops.pullAndApplyOperationsAuto();
+      } catch (e) {
+        console.warn('[Sync] ops-pull skipped:', e);
+      }
+      setStatus('synced', `Pushed ${pushed}, pulled ${pulled}, ops ${opsApplied}`);
+    } catch (err) {
+      console.warn('[Sync] Error:', err);
+      setStatus('error', String(err));
+    } finally {
+      syncing = false;
+      inFlightSync = null;
     }
-    setStatus('synced', `Pushed ${pushed}, pulled ${pulled}, ops ${opsApplied}`);
-  } catch (err) {
-    console.warn('[Sync] Error:', err);
-    setStatus('error', String(err));
-  } finally {
-    syncing = false;
-  }
+  })();
+  inFlightSync = run;
+  return run;
 }
 
 // ── Auto-sync ──
@@ -368,6 +380,41 @@ export function stopAutoSync() {
     clearInterval(syncTimer);
     syncTimer = null;
   }
+}
+
+// ── M4-A1: Close-Lifecycle — laufenden Sync sauber abschliessen vor dem finalen Flush ──
+//
+// Der App-Close-Flow (App.tsx) braucht: neue Sync-Laeufe pausieren → einen bereits laufenden
+// syncNow() vollstaendig abwarten → finaler flushDatabase() → Window schliessen. stopAutoSync()
+// allein loescht nur den Timer; ein laufender syncNow() koennte danach noch schreiben.
+
+// Pausiert Auto-Sync: loescht den Timer UND blockt neue (Timer- wie manuelle) syncNow-Laeufe,
+// bis resumeAutoSync() gerufen wird. Ein BEREITS laufender syncNow() wird NICHT abgebrochen.
+export function pauseAutoSync(): void {
+  syncPaused = true;
+  if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+}
+
+// Wartet auf den vollstaendigen Abschluss eines bereits laufenden syncNow() (inkl. aller
+// DB-Writes + Store-Reloads — die passieren vor der Promise-Aufloesung). syncNow() behandelt
+// Fehler intern (setStatus('error')) und rejectet nicht; das try/catch ist rein defensiv, damit
+// ein unerwarteter Reject das Close-Warten nicht selbst zum Fehler macht.
+export async function waitForSyncIdle(): Promise<void> {
+  const p = inFlightSync;
+  if (p) { try { await p; } catch { /* syncNow behandelt Fehler intern */ } }
+}
+
+// Hebt die Pause auf und startet Auto-Sync wieder — GENAU EIN Timer (startAutoSync guardet gegen
+// Doppel-Timer via `if (syncTimer) return`). Fuer den Fall eines abgebrochenen Close.
+export function resumeAutoSync(): void {
+  syncPaused = false;
+  startAutoSync();
+}
+
+// Bequemer kombinierter Vertrag fuer den Close: neue Syncs pausieren + laufenden abwarten.
+export async function pauseAutoSyncAndWaitForIdle(): Promise<void> {
+  pauseAutoSync();
+  await waitForSyncIdle();
 }
 
 // ── Server login (connects desktop to server) ──
