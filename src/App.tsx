@@ -86,12 +86,12 @@ function CloseOverlay({ status }: { status: CloseStatus | null }) {
       }}>
         {isError ? (
           <>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#DC2626', marginBottom: 8 }}>Speichern fehlgeschlagen</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#DC2626', marginBottom: 8 }}>Save failed</div>
             <div style={{ fontSize: 12, color: '#B8B8C0', marginBottom: 6 }}>{status.message.slice(0, 200)}</div>
-            <div style={{ fontSize: 12, color: '#8E8E97' }}>Die App bleibt geöffnet. Bitte erneut schließen, um es noch einmal zu versuchen.</div>
+            <div style={{ fontSize: 12, color: '#8E8E97' }}>The app stays open. Please close again to retry.</div>
           </>
         ) : (
-          <div style={{ fontSize: 14, color: '#FFFFFF' }}>Daten werden gespeichert. Bitte warten …</div>
+          <div style={{ fontSize: 14, color: '#FFFFFF' }}>Saving data. Please wait …</div>
         )}
       </div>
     </div>
