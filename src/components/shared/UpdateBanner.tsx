@@ -1,12 +1,15 @@
 // Plan §Auto-Update — prüft beim App-Start (und bei manuellem Klick) ob ein neuer
 // LATAIF-Build verfügbar ist. Zeigt unauffälliges Banner; User entscheidet wann installieren.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Download, X, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { saveDatabaseDurably } from '@/core/db/database';
+import { prepareAndInstallUpdate, createSingleFlight } from '@/core/updater/update-orchestration';
 
 type UpdateState =
   | { kind: 'idle' }
   | { kind: 'checking' }
   | { kind: 'available'; version: string; notes?: string; date?: string }
+  | { kind: 'saving' }
   | { kind: 'downloading'; progress: number }
   | { kind: 'installing' }
   | { kind: 'error'; message: string }
@@ -19,6 +22,9 @@ function isTauri(): boolean {
 export function UpdateBanner() {
   const [state, setState] = useState<UpdateState>({ kind: 'idle' });
   const [dismissed, setDismissed] = useState(false);
+  const [starting, setStarting] = useState(false); // schnelle UI-Sperre gegen Doppelklick
+  // Single-Flight-Barriere aus dem produktiven Helper — einmal erzeugen (stabil ueber Renders).
+  const installRef = useRef<(() => Promise<void>) | null>(null);
 
   async function checkForUpdate(manual = false) {
     if (!isTauri()) {
@@ -51,34 +57,66 @@ export function UpdateBanner() {
     }
   }
 
+  // M3 — Ein Update-Durchlauf: erst DURABEL speichern, dann herunterladen+installieren, dann
+  // relaunchen (prepareAndInstallUpdate erzwingt genau diese Reihenfolge). Der durable Save
+  // laeuft VOR downloadAndInstall, weil der NSIS-Installer die laufende .exe ersetzt und
+  // relaunch() den Prozess beendet — pending In-Memory-Aenderungen (z.B. gerade gesyncte
+  // Uploads) waeren sonst fuer immer verloren.
+  async function installOnce() {
+    const { check } = await import('@tauri-apps/plugin-updater');
+    const update = await check();
+    if (!update) {
+      setState({ kind: 'up-to-date' });
+      setTimeout(() => setState({ kind: 'idle' }), 4000);
+      return;
+    }
+
+    let downloaded = 0;
+    let total = 0;
+    await prepareAndInstallUpdate({
+      // 1. Aktuellen DB-Stand durabel schreiben; wirft bei Persist-Fehler ODER aktiver
+      //    Ambient-Transaktion → kein Download, kein Relaunch, Stand bleibt sicher.
+      durableSave: saveDatabaseDurably,
+      // 2. Erst NACH bestaetigtem Save: herunterladen + installieren, Progress live anzeigen.
+      downloadAndInstall: () =>
+        update.downloadAndInstall((event) => {
+          if (event.event === 'Started') {
+            total = event.data.contentLength || 0;
+          } else if (event.event === 'Progress') {
+            downloaded += event.data.chunkLength;
+            const pct = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+            setState({ kind: 'downloading', progress: pct });
+          } else if (event.event === 'Finished') {
+            setState({ kind: 'installing' });
+          }
+        }),
+      // 3. Nur nach erfolgreicher Installation: App neustarten.
+      relaunch: async () => {
+        const { relaunch } = await import('@tauri-apps/plugin-process');
+        await relaunch();
+      },
+      onPhase: (phase) => {
+        if (phase.kind === 'saving') setState({ kind: 'saving' });
+        else if (phase.kind === 'downloading') setState({ kind: 'downloading', progress: 0 });
+        else if (phase.kind === 'relaunching') setState({ kind: 'installing' });
+      },
+    });
+  }
+
   async function installUpdate() {
     if (!isTauri()) return;
+    if (starting) return; // schnelle UI-Sperre gegen Doppelklick vor dem ersten State-Wechsel
+    setStarting(true);
+    // Single-Flight-Barriere (produktiver Helper) einmalig binden → zweiter Klick startet
+    // keine zweite Kette, sondern haengt sich an denselben laufenden Durchlauf.
+    if (!installRef.current) installRef.current = createSingleFlight(installOnce);
     try {
-      const { check } = await import('@tauri-apps/plugin-updater');
-      const update = await check();
-      if (!update) { setState({ kind: 'up-to-date' }); return; }
-
-      let downloaded = 0;
-      let total = 0;
-      setState({ kind: 'downloading', progress: 0 });
-      await update.downloadAndInstall((event) => {
-        if (event.event === 'Started') {
-          total = event.data.contentLength || 0;
-        } else if (event.event === 'Progress') {
-          downloaded += event.data.chunkLength;
-          const pct = total > 0 ? Math.round((downloaded / total) * 100) : 0;
-          setState({ kind: 'downloading', progress: pct });
-        } else if (event.event === 'Finished') {
-          setState({ kind: 'installing' });
-        }
-      });
-
-      // Nach erfolgreicher Installation: App neustarten
-      const { relaunch } = await import('@tauri-apps/plugin-process');
-      await relaunch();
+      await installRef.current();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setState({ kind: 'error', message: msg });
+    } finally {
+      setStarting(false);
     }
   }
 
@@ -102,6 +140,7 @@ export function UpdateBanner() {
   // Sichtbar nur wenn relevant + nicht dismissed
   const visible = !dismissed && (
     state.kind === 'available' ||
+    state.kind === 'saving' ||
     state.kind === 'downloading' ||
     state.kind === 'installing' ||
     state.kind === 'error' ||
@@ -129,10 +168,11 @@ export function UpdateBanner() {
             {state.notes ? state.notes.slice(0, 100) : 'Neue LATAIF-Version bereit zum Installieren.'}
           </div>
         </div>
-        <button onClick={installUpdate}
+        <button onClick={installUpdate} disabled={starting}
           className="cursor-pointer"
           style={{ padding: '8px 14px', background: '#C6A36D', color: '#1A1A1F',
             border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600,
+            opacity: starting ? 0.6 : 1, cursor: starting ? 'default' : 'pointer',
             display: 'flex', alignItems: 'center', gap: 6 }}>
           <Download size={12} /> Install
         </button>
@@ -142,6 +182,15 @@ export function UpdateBanner() {
           title="Remind later">
           <X size={14} />
         </button>
+      </div>
+    );
+  }
+
+  if (state.kind === 'saving') {
+    return (
+      <div style={styles} role="status">
+        <RefreshCw size={16} className="animate-spin" style={{ color: '#C6A36D' }} />
+        <div style={{ flex: 1, fontSize: 13 }}>Daten werden gesichert…</div>
       </div>
     );
   }
