@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "lataif"
-version = "0.8.20"
+version = "0.8.21"
 dependencies = [
  "axum",
  "axum-server",
