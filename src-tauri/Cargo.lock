@@ -2140,6 +2140,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]

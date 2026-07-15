@@ -61,18 +61,28 @@ import { GlobalSearch } from '@/components/shared/GlobalSearch';
 import { UpdateBanner } from '@/components/shared/UpdateBanner';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
-import { initDatabase, flushDatabase, flushDatabaseSync } from '@/core/db/database';
+import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
+import { prepareAndReloadApplication, createSingleFlight as createReloadSingleFlight, type ReloadStatus } from '@/core/lifecycle/reload-orchestration';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
 
 let automationsRegistered = false;
 
-// M4-A — Overlay während des kontrollierten App-Close: erst "Daten werden gespeichert…",
-// bei Persistenzfehler eine sichtbare Fehlermeldung (App bleibt offen, erneuter Versuch möglich).
-function CloseOverlay({ status }: { status: CloseStatus | null }) {
+// M5-B — Event-Name der nativen WebView2-Reload-Bruecke. MUSS exakt mit src-tauri/src/lib.rs
+// (NATIVE_RELOAD_EVENT) uebereinstimmen: die native Bruecke unterdrueckt F5/Ctrl+R und sendet
+// dieses Event, woraufhin wir hier den durablen Save-vor-Reload-Flow fahren.
+const NATIVE_RELOAD_EVENT = 'm5-native-reload-requested';
+
+// M4-A/M5 — Overlay für den kontrollierten App-Close ODER Reload: erst "Saving data…", bei
+// Persistenzfehler eine sichtbare Fehlermeldung (App bleibt offen). Der Retry-Hinweis ist
+// mode-spezifisch, damit ein Reload-Fehler nicht "close again" sagt.
+function CloseOverlay({ status, mode = 'close' }: { status: CloseStatus | null; mode?: 'close' | 'reload' }) {
   if (!status) return null;
   const isError = status.kind === 'error';
+  const retryHint = mode === 'reload'
+    ? 'The app stays open. Please try reloading again.'
+    : 'The app stays open. Please close again to retry.';
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 99999,
@@ -88,7 +98,7 @@ function CloseOverlay({ status }: { status: CloseStatus | null }) {
           <>
             <div style={{ fontSize: 14, fontWeight: 600, color: '#DC2626', marginBottom: 8 }}>Save failed</div>
             <div style={{ fontSize: 12, color: '#B8B8C0', marginBottom: 6 }}>{status.message.slice(0, 200)}</div>
-            <div style={{ fontSize: 12, color: '#8E8E97' }}>The app stays open. Please close again to retry.</div>
+            <div style={{ fontSize: 12, color: '#8E8E97' }}>{retryHint}</div>
           </>
         ) : (
           <div style={{ fontSize: 14, color: '#FFFFFF' }}>Saving data. Please wait …</div>
@@ -103,6 +113,7 @@ export default function App() {
   const [dbError, setDbError] = useState<string | null>(null);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [closeStatus, setCloseStatus] = useState<CloseStatus | null>(null); // M4-A: App-Close-Overlay
+  const [reloadStatus, setReloadStatus] = useState<ReloadStatus | null>(null); // M5: Reload-Overlay
   const { session, initialize } = useAuthStore();
 
   useEffect(() => {
@@ -209,6 +220,49 @@ export default function App() {
     };
   }, []);
 
+  // M5 / M5-B — Reload/Refresh-Persistenz. Ein nativer Reload (F5 / Ctrl+R) im Tauri-Webview wuerde
+  // pending In-Memory-Aenderungen (z.B. gerade gesyncte Uploads) verlieren: initDatabase() liest die
+  // DB-Datei neu von der Platte, und flushDatabaseSync() ist unter Tauri ein No-op (beforeunload kann
+  // keinen async Save abwarten). Ein reiner JS-keydown-Interceptor griff hier NICHT — WebView2 feuert
+  // den Reload-Accelerator nativ, bevor/statt der DOM-keydown das Frontend erreicht; preventDefault()
+  // bleibt wirkungslos (empirisch belegt, M5-A1). Deshalb M5-B: die native WebView2-Bruecke (src-tauri)
+  // unterdrueckt F5/Ctrl+R synchron auf COM-Ebene (AcceleratorKeyPressed → SetHandled(true)) und meldet
+  // den Reload-Wunsch als Tauri-Event. HIER hoeren wir genau dieses Event ab und fahren den durablen
+  // Save-vor-Reload-Flow. Nur unter Tauri (im Browser-Dev bleibt F5 der normale HMR-Reload). Der
+  // Listener wird frueh — vor Login/Onboarding/Loading — registriert, damit er auf allen Screens greift.
+  useEffect(() => {
+    const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    if (!isTauri) return;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    // Single-Flight (produktiver Helper) einmal binden: schnelle Doppel-F5 starten keine zweite Kette.
+    const runReload = createReloadSingleFlight(async () => {
+      const sync = await import('@/core/sync/sync-service');
+      await prepareAndReloadApplication({
+        setStatus: (s) => setReloadStatus(s),
+        // Regel E: ein Event-Loop-Turn, damit das Save-Overlay erscheint (setTimeout(0), nicht rAF
+        // — rAF feuert bei verstecktem Fenster nicht).
+        yieldToRender: () => new Promise<void>((r) => setTimeout(r, 0)),
+        pauseBackgroundWrites: () => sync.pauseAutoSync(),         // M4-A1: neue Sync-Laeufe pausieren
+        waitForPendingOperations: () => sync.waitForSyncIdle(),    // laufenden Sync abwarten
+        durableSave: saveDatabaseDurably,                          // M2: frischer db.export + persist, wirft bei Fehler/aktiver Tx
+        reloadApplication: () => window.location.reload(),         // nur nach bestaetigter Persistenz
+        resumeBackgroundWrites: () => sync.resumeAutoSync(),       // bei Fehler: Sync wieder freigeben
+      });
+    });
+    // Die native Bruecke sendet dieses Event, NACHDEM sie den nativen Reload unterdrueckt hat.
+    import('@tauri-apps/api/event').then(async (mod) => {
+      if (cancelled) return;
+      unlisten = await mod.listen(NATIVE_RELOAD_EVENT, () => {
+        runReload().catch((err) => {
+          // Fehler ist bereits als reloadStatus 'error' sichtbar; App bleibt offen (KEIN Reload).
+          console.warn('[App] reload aborted (persist failed):', err instanceof Error ? err.message : String(err));
+        });
+      });
+    });
+    return () => { cancelled = true; if (unlisten) unlisten(); };
+  }, []);
+
   // Recurring-Expense Generator: catch-up bei jedem Session-Wechsel / App-Start.
   // Laeuft erst nachdem session vorliegt (currentBranchId greift auf Session zu).
   useEffect(() => {
@@ -240,7 +294,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <div className="app-layout" style={{ background: '#F2F7FA' }}>
-        <CloseOverlay status={closeStatus} />
+        <CloseOverlay status={closeStatus ?? reloadStatus} mode={closeStatus ? 'close' : 'reload'} />
         <GlobalSearch />
         <UpdateBanner />
         <SyncDuplicateGuard />

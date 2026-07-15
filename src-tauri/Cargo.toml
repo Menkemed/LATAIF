@@ -41,3 +41,11 @@ local-ip-address = "0.6"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rcgen = "0.13"
 rustls = "0.23"
+
+# M5-B — native WebView2-Reload-Bruecke (F5/Ctrl+R). Nur Windows. Bewusst auf die von wry
+# bereits transitiv genutzten Versionen unifiziert (Cargo.lock pinnt webview2-com 0.38.2 /
+# windows 0.61.3), damit der ICoreWebView2Controller-Typ von PlatformWebview::controller()
+# exakt passt. Kein Versionsbump — dieselben Crates, nur zusaetzlich als Direct-Dependency.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
