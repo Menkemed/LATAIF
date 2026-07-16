@@ -2,6 +2,7 @@
 mod printing;
 mod sync;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -57,6 +58,199 @@ fn print_raw_zpl(printer: String, zpl: String) -> Result<u32, String> {
     {
         let _ = (printer, zpl);
         Err("Raw-Druck wird nur unter Windows unterstützt.".to_string())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M4-D — Native Close Finalization (nach durablem Frontend-Flush)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Ausgangslage (M4-C, empirisch belegt): der alte Close-Pfad rief im Webview `win.destroy()`
+// (in Tauri v2 mangels `core:window:allow-destroy` still abgelehnt) und beendete den Prozess
+// dann NUR ueber einen Webview-`setTimeout(2000) → proc.exit(0)`-Fallback. Wird der Webview
+// suspendiert/okkludiert (minimiert), laeuft dieser JS-Timer nicht mehr → der Prozess terminiert
+// nicht, Port 3001 bleibt belegt.
+//
+// Loesung: den finalen Prozess-Exit NICHT an einen Webview-Timer koppeln. Das Frontend ruft NACH
+// bestaetigter durabler Persistenz genau diesen Command; ab hier uebernimmt Rust nativ: den
+// eingebetteten Sync-Server idempotent stoppen (Port 3001 freigeben) und `AppHandle::exit(0)`.
+// Der Finalizer fuehrt bewusst KEINE DB-/Persistenzoperation aus (die liegt vollstaendig im
+// Frontend/M2/M4) und loggt keine Geschaeftsdaten.
+
+// Idempotenz-Guard: der Shutdown-Finalizer darf pro Prozess nur EINMAL wirken (schneller Doppel-X
+// bzw. doppelter invoke → kein zweiter Server-Stop, kein zweiter Exit).
+static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+
+mod shutdown {
+    use std::time::Duration;
+
+    /// Reiner, injizierbarer Finalisierungs-Ablauf — ohne Tauri und ohne echten Prozess-Exit,
+    /// damit Reihenfolge (Server-Stop VOR Exit), Idempotenz und Timeout-Verhalten unit-testbar sind.
+    ///
+    ///   proceed == false → Doppelaufruf: NICHTS tun (kein zweiter Stop, kein zweiter Exit).
+    ///   sonst            → Sync-Server stoppen (mit hartem Zeitdeckel) → danach exit_application() 1×.
+    ///
+    /// Der Zeitdeckel garantiert, dass ein haengender/fehlerhafter Server-Stop den nativen Exit
+    /// NIEMALS blockiert: der Frontend-Flush ist zu diesem Zeitpunkt bereits durabel bestaetigt, es
+    /// darf nichts mehr die Terminierung offenhalten. Ein Timeout ist KEIN Fehler.
+    /// Es gibt bewusst keinen DB-/Persistenz-Parameter — der Ablauf kann gar nichts speichern.
+    pub async fn finalize_shutdown_sequence<S, F>(
+        proceed: bool,
+        stop_timeout: Duration,
+        stop_server: S,
+        exit_application: F,
+    ) -> bool
+    where
+        S: std::future::Future<Output = ()>,
+        F: FnOnce(),
+    {
+        if !proceed {
+            return false;
+        }
+        // Server-Stop mit Deckel — bei Timeout ODER Erfolg geht es zum Exit (Ergebnis egal).
+        let _ = tokio::time::timeout(stop_timeout, stop_server).await;
+        exit_application();
+        true
+    }
+}
+
+// M4-D — Nativer Close-Finalizer. Das Frontend ruft diesen Command AUSSCHLIESSLICH nach einem
+// erfolgreich bestaetigten durablen DB-Flush (prepareAndCloseApplication). Terminierung liegt
+// damit nativ bei Rust statt an einem fragilen Webview-Timer.
+#[tauri::command]
+async fn finalize_application_shutdown(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<(), String> {
+    // Idempotenz gegen Doppel-X: nur der erste Aufruf wirkt (atomarer compare_exchange).
+    let proceed = SHUTDOWN_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok();
+    // Arc/Handle vor dem await klonen — kein State-Borrow ueber den await-Punkt.
+    let server = state.server.clone();
+    let app_handle = app.clone();
+    shutdown::finalize_shutdown_sequence(
+        proceed,
+        std::time::Duration::from_secs(3),
+        // Server-Stop ist idempotent (SyncServer::stop → Ok bei "nicht laufend"); Fehler/Timeout
+        // duerfen den Exit nicht blockieren → Ergebnis bewusst verworfen.
+        async move {
+            let _ = server.stop().await;
+        },
+        move || app_handle.exit(0),
+    )
+    .await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::shutdown::finalize_shutdown_sequence;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    // Hinweis "keine DB-Operation": der Helper hat gar keinen DB-/Persistenz-Parameter — er KANN
+    // strukturell nichts speichern. Diese Tests decken Reihenfolge, Idempotenz und Timeout ab.
+
+    #[tokio::test]
+    async fn stops_server_before_exit_when_running() {
+        // Gemeinsames Reihenfolge-Log → "stop" muss vor "exit" stehen.
+        let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let l1 = log.clone();
+        let l2 = log.clone();
+        let ran = finalize_shutdown_sequence(
+            true,
+            Duration::from_secs(1),
+            async move {
+                l1.lock().unwrap().push("stop");
+            },
+            move || l2.lock().unwrap().push("exit"),
+        )
+        .await;
+        assert!(ran, "Finalisierung soll ausgefuehrt werden");
+        assert_eq!(*log.lock().unwrap(), vec!["stop", "exit"]);
+    }
+
+    #[tokio::test]
+    async fn exits_even_when_server_not_running() {
+        // "Server nicht laufend" ist im echten Code ein Ok-Stop; hier tut der Stop-Future nichts.
+        let exited = Arc::new(AtomicUsize::new(0));
+        let e = exited.clone();
+        let ran = finalize_shutdown_sequence(
+            true,
+            Duration::from_secs(1),
+            async move { /* no-op: Server war nicht aktiv */ },
+            move || {
+                e.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert!(ran);
+        assert_eq!(exited.load(Ordering::SeqCst), 1, "Exit auch ohne laufenden Server");
+    }
+
+    #[tokio::test]
+    async fn double_call_does_nothing() {
+        // proceed == false (zweiter invoke / Doppel-X) → weder Stop noch Exit.
+        let stop = Arc::new(AtomicUsize::new(0));
+        let exit = Arc::new(AtomicUsize::new(0));
+        let s = stop.clone();
+        let e = exit.clone();
+        let ran = finalize_shutdown_sequence(
+            false,
+            Duration::from_secs(1),
+            async move {
+                s.fetch_add(1, Ordering::SeqCst);
+            },
+            move || {
+                e.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert!(!ran);
+        assert_eq!(stop.load(Ordering::SeqCst), 0, "kein zweiter Server-Stop");
+        assert_eq!(exit.load(Ordering::SeqCst), 0, "kein zweiter Exit");
+    }
+
+    #[tokio::test]
+    async fn hanging_stop_times_out_then_exits() {
+        // Haengender Server-Stop → Timeout greift → Exit passiert trotzdem, ohne lange zu warten.
+        let exit = Arc::new(AtomicUsize::new(0));
+        let e = exit.clone();
+        let start = Instant::now();
+        let ran = finalize_shutdown_sequence(
+            true,
+            Duration::from_millis(50),
+            std::future::pending::<()>(), // Stop, der NIE fertig wird
+            move || {
+                e.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert!(ran);
+        assert_eq!(exit.load(Ordering::SeqCst), 1, "Exit trotz haengendem Stop");
+        assert!(start.elapsed() >= Duration::from_millis(50), "Timeout muss abgelaufen sein");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "Exit darf nicht auf den haengenden Stop warten"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_called_exactly_once() {
+        let exit = Arc::new(AtomicUsize::new(0));
+        let e = exit.clone();
+        finalize_shutdown_sequence(
+            true,
+            Duration::from_secs(1),
+            async move {},
+            move || {
+                e.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await;
+        assert_eq!(exit.load(Ordering::SeqCst), 1, "Exit-Callback genau einmal");
     }
 }
 
@@ -305,7 +499,8 @@ pub fn run() {
             sync_server_stop,
             sync_server_status,
             discover_lan_servers,
-            print_raw_zpl
+            print_raw_zpl,
+            finalize_application_shutdown
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

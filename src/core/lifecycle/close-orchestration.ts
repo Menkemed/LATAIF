@@ -30,7 +30,7 @@
 // Entkoppelt von Tauri-Window/Sync/DB (Dependency-Injection), damit genau diese Reihenfolge
 // headless getestet werden kann. App.tsx injiziert stopAutoSync/startAutoSync (Aufruf, keine
 // Sync-Aenderung), flushDatabase (wartet auf angeforderte Writes + WIRFT bei Fehler) und
-// win.destroy().
+// closeWindow = den nativen Close-Finalizer (M4-D: invoke('finalize_application_shutdown')).
 
 export type CloseStatus =
   | { kind: 'saving' }
@@ -49,7 +49,9 @@ export interface CloseOrchestrationOps {
   /** Durable Persistenzbarriere: schliesst alle bereits angeforderten Writes ab und WIRFT bei
    *  Fehler (z.B. flushDatabase() — NICHT das fire-and-forget saveDatabase()). */
   flushPendingDatabaseWrites: () => Promise<void>;
-  /** Kontrollierter Window-Close (z.B. win.destroy()). NUR nach erfolgreichem Flush. */
+  /** M4-D: nativer Close-Finalizer (z.B. invoke('finalize_application_shutdown') → Rust stoppt den
+   *  Sync-Server und ruft AppHandle::exit(0)). NUR nach erfolgreichem Flush. Im Erfolgsfall beendet
+   *  Rust den Prozess (Promise loest nie auf); wirft nur, wenn der Finalizer VOR dem Exit fehlschlaegt. */
   closeWindow: () => Promise<void>;
   /** Optional: bei Fehler den (in Schritt D pausierten) Background-Betrieb wieder aufnehmen. */
   resumeBackgroundWrites?: () => void;
@@ -64,12 +66,16 @@ export async function prepareAndCloseApplication(ops: CloseOrchestrationOps): Pr
   try {
     if (ops.waitForPendingOperations) await ops.waitForPendingOperations();
     await ops.flushPendingDatabaseWrites();           // Persistenzbarriere; wirft bei Fehler
+    // M4-D: finaler Schritt = nativer Close-Finalizer (Rust: Sync-Server stoppen + nativer Prozess-Exit).
+    // NUR nach bestaetigter Persistenz. Im Erfolgsfall beendet Rust den Prozess → dieses Promise loest
+    // nie auf (normaler Exit-Pfad, kein Fehler). Schlaegt der Finalizer VOR dem Exit fehl, landet der
+    // Fehler ebenfalls im catch: App bleibt offen, Fehler sichtbar, Retry moeglich (Regel A/B).
+    await ops.closeWindow();
   } catch (err) {
     ops.setStatus({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
     ops.resumeBackgroundWrites?.();                   // Betrieb kontrolliert wieder aufnehmen
-    throw err;                                         // Regel A/B: KEIN closeWindow
+    throw err;                                         // Regel A/B: kein nativer Exit → App bleibt offen
   }
-  await ops.closeWindow();                             // nur nach bestaetigter Persistenz
 }
 
 // Single-Flight-Barriere (Regel C): waehrend ein Close-Flow laeuft, liefern weitere Aufrufe

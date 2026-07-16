@@ -161,8 +161,6 @@ export default function App() {
       // oder Persistenzfehler KEIN Close, KEIN Hard-Exit — App bleibt offen, Fehler sichtbar,
       // Sync wird kontrolliert wieder freigegeben, Retry moeglich (Regeln A/B).
       const runClose = createSingleFlight(async () => {
-        const winMod = await import('@tauri-apps/api/window');
-        const win = winMod.getCurrentWindow();
         const sync = await import('@/core/sync/sync-service');
         await prepareAndCloseApplication({
           setStatus: (s) => setCloseStatus(s),
@@ -181,13 +179,13 @@ export default function App() {
           // Persistenzbarriere: schliesst alle angeforderten Writes ab und WIRFT bei Fehler
           // (kein Schlucken mehr wie im alten 1,5s-Best-Effort-Pfad).
           flushPendingDatabaseWrites: () => flushDatabase(),
-          // Nur nach bestaetigter Persistenz. destroy() kann in Tauri v2 haengen → ein gebundener
-          // Hard-Exit NACH sicherem Flush ist unbedenklich (die Daten sind bereits auf der Platte).
+          // M4-D: finaler Abschluss vollstaendig nativ. Rust stoppt den Sync-Server und beendet den
+          // Prozess via AppHandle::exit(0) — KEIN win.destroy(), KEIN Webview-setTimeout(proc.exit).
+          // Im Erfolgsfall stirbt der Prozess → dieser invoke loest nie auf (normaler Exit-Pfad, KEIN
+          // Fehlerdialog). Nur ein Finalizer-Fehler VOR dem Exit wirft → Overlay 'error' + Retry.
           closeWindow: async () => {
-            win.destroy().catch((err) => console.warn('[App] destroy failed:', err));
-            setTimeout(async () => {
-              try { const proc = await import('@tauri-apps/plugin-process'); await proc.exit(0); } catch { /* */ }
-            }, 2000);
+            const core = await import('@tauri-apps/api/core');
+            await core.invoke('finalize_application_shutdown');
           },
           // Bei Fehler: Pause aufheben + genau EIN Auto-Sync-Timer wieder starten; App bleibt offen.
           resumeBackgroundWrites: () => sync.resumeAutoSync(),

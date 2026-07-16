@@ -342,8 +342,64 @@ function makeOps(over: Partial<Record<string, unknown>> = {}) {
     check(sync.timerActive && sync.startCount === 2, '15: doppeltes Resume erzeugt KEINEN zweiten Timer');
   }
 
+  // ═══ 16. M4-D: nativer Finalizer schlaegt VOR dem Exit fehl → error-Status, Resume, Retry frei ═══
+  {
+    // Der finale Schritt ist jetzt der native Close-Finalizer (invoke('finalize_application_shutdown')).
+    // Im Erfolgsfall beendet Rust den Prozess (Promise loest nie auf). Schlaegt der invoke aber VOR
+    // dem Exit fehl, gilt Regel A/B analog zum Flush-Fehler: sichtbarer Fehler, Background wieder
+    // aufnehmen, App bleibt offen, erneuter Close moeglich (kein stiller Hang, kein Hard-Exit).
+    let failNext = true;
+    const ops = makeOps({
+      closeWindow: async () => { ops0.counts.close++; ops0.log.push('close'); if (failNext) throw new Error('finalize failed (injected)'); },
+    });
+    const ops0 = ops as ReturnType<typeof makeOps>;
+    const guarded = createSingleFlight(() => prepareAndCloseApplication(ops as never));
+    let threw = false;
+    try { await guarded(); } catch { threw = true; }
+    check(threw, '16: Finalizer-Fehler propagiert');
+    check(ops0.counts.resume === 1, '16: Background nach Finalizer-Fehler genau einmal wieder aufgenommen');
+    const last = ops0.statuses[ops0.statuses.length - 1];
+    check(last != null && last.kind === 'error' && last.message.includes('finalize failed'), '16: sichtbarer Fehlerstatus bei Finalizer-Fehler');
+    failNext = false;                        // Ursache behoben
+    await guarded();                          // Guard nach Fehler frei → erneuter Close erreicht den Finalizer
+    check(ops0.counts.close === 2, '16: zweiter Close nach Behebung ruft den Finalizer erneut (Retry moeglich)');
+  }
+
+  // ═══ 17. M4-D: Erfolgsreihenfolge endet im nativen Finalizer (pause → wait-idle → flush → finalize) ═══
+  {
+    // Spiegelt das produktive App.tsx-Wiring: stopBackgroundWrites=pauseAutoSync,
+    // waitForPendingOperations=waitForSyncIdle, flush, closeWindow=invoke('finalize_application_shutdown').
+    const order: string[] = [];
+    let finalized = 0;
+    await prepareAndCloseApplication({
+      setStatus: () => {},
+      stopBackgroundWrites: () => { order.push('pause'); },
+      waitForPendingOperations: async () => { order.push('wait'); },
+      flushPendingDatabaseWrites: async () => { order.push('flush'); },
+      closeWindow: async () => { order.push('finalize'); finalized++; },
+    });
+    check(order.join(',') === 'pause,wait,flush,finalize', '17: Reihenfolge pause → wait-idle → flush → nativer Finalizer');
+    check(finalized === 1, '17: nativer Finalizer genau einmal (kein Doppel-Abschluss)');
+  }
+
+  // ═══ 18. M4-D: der alte fragile Abschluss ist aus dem produktiven Close-Wiring (App.tsx) entfernt ═══
+  {
+    // Beweist am echten Source: KEIN win.destroy(), KEIN proc.exit()/JS-Exit-Timer, kein plugin-process-
+    // Import mehr — stattdessen der native Finalizer-invoke. Kommentare werden entfernt, damit
+    // erklaerende "KEIN win.destroy()"-Hinweise nicht falsch-positiv matchen.
+    const { readFile } = await import('node:fs/promises');
+    const appSrc = await readFile(new URL('../../src/App.tsx', import.meta.url), 'utf8');
+    const codeOnly = appSrc
+      .replace(/\/\*[\s\S]*?\*\//g, '')          // Blockkommentare
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');       // Zeilenkommentare (":" -> URLs verschonen)
+    check(/invoke\(\s*['"]finalize_application_shutdown['"]\s*\)/.test(codeOnly), '18: Close-Pfad ruft den nativen Finalizer finalize_application_shutdown');
+    check(!/win\.destroy\s*\(/.test(codeOnly), '18: kein win.destroy() mehr im Close-Pfad');
+    check(!/proc\.exit\s*\(/.test(codeOnly), '18: kein proc.exit() / JS-Exit-Timer mehr');
+    check(!appSrc.includes('plugin-process'), '18: App.tsx importiert @tauri-apps/plugin-process nicht mehr (Exit-Pfad entfernt)');
+  }
+
   const total = pass + fail.length;
-  console.log(`\nM4-A window-close-persistence: ${pass}/${total} checks passed`);
+  console.log(`\nM4-A/M4-D window-close-persistence: ${pass}/${total} checks passed`);
   if (fail.length) { console.log('FAILURES:'); for (const f of fail) console.log('  X ' + f); process.exit(1); }
-  console.log('OK — Close nur nach bestaetigter Persistenz; Sync pausiert+abgewartet vor Flush; letzter Sync-Write im Flush; Flush-Fehler → kein Close/Hard-Exit + retrybar; Single-Flight; Resume ohne Doppel-Timer; UI vor Flush.');
+  console.log('OK — Close nur nach bestaetigter Persistenz; Sync pausiert+abgewartet vor Flush; letzter Sync-Write im Flush; Flush-Fehler → kein Close/Hard-Exit + retrybar; Single-Flight; Resume ohne Doppel-Timer; UI vor Flush; M4-D: finaler Schritt = nativer Finalizer (kein win.destroy/proc.exit), Finalizer-Fehler retrybar.');
 })();
