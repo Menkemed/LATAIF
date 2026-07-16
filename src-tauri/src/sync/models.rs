@@ -17,17 +17,6 @@ pub struct LoginResponse {
     pub branch_name: String,
 }
 
-#[derive(Deserialize)]
-pub struct RegisterTenantRequest {
-    pub tenant_name: String,
-    pub branch_name: String,
-    pub user_name: String,
-    pub email: String,
-    pub password: String,
-    pub country: String,
-    pub currency: String,
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SyncChange {
     pub id: i64,
