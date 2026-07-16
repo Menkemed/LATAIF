@@ -196,6 +196,26 @@ export function createSaveCoalescer(opts: CoalescerOpts): SaveCoalescer {
 
   async function drain(): Promise<void> {
     try {
+      // M6-B0 — EINMAL yielden, BEVOR der erste Snapshot gezogen wird.
+      //
+      // Die produktive Reihenfolge ist ueberall:
+      //     Business-Write  ->  saveDatabase()  ->  trackChange()
+      // (z.B. productStore.ts:529-531; 101 von 134 getrackten Call-Sites). saveDatabase()
+      // wird nicht awaited — drain() lief daher synchron bis zu seinem ersten await und
+      // zog snapshot() MITTEN im Mutations-Block: der erste durable Snapshot enthielt die
+      // Business-Zeile OHNE ihre Changelog-Zeile. Ein Crash vor dem zweiten Drain liess die
+      // lokale Aenderung bestehen, waehrend ihr Sync-Change dauerhaft fehlte -> stiller
+      // Sync-Propagation-Verlust (die Business-Zeile selbst ging NIE verloren).
+      //
+      // `await null` verschiebt den Snapshot in einen Microtask: der aufrufende synchrone
+      // Block laeuft garantiert zu Ende (Business-Write UND trackChange), erst danach wird
+      // exportiert. Belegt in M6-A5: es gibt NIRGENDS eine await-Grenze zwischen Write und
+      // trackChange (0 Treffer bei 607 Writes / 296 Tracks) — ein Microtask genuegt also.
+      //
+      // Durability wird dadurch NICHT schlechter: persist() war immer async, das Zeitfenster
+      // bis zum abgeschlossenen Disk-Write aendert sich um einen Microtask. Der erste durable
+      // Snapshot wird nur vollstaendig statt halb.
+      await null;
       while (dirty && ready()) {
         dirty = false;
 
