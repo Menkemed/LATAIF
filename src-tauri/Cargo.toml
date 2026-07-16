@@ -27,6 +27,13 @@ axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }
 rusqlite = { version = "0.35", features = ["bundled"] }
+
+# M6-B1 — Shared protocol core. Pulls ONLY the `lataif-server` LIBRARY target
+# (migrations runner / protocol / money); the standalone `main.rs` binary is not
+# a dependency target and is never linked into the desktop app. Deliberately the
+# same rusqlite 0.35 "bundled" as above, so cargo unifies both to ONE crate and
+# ONE bundled SQLite — verified via `cargo tree -d` (see M6-B1 report).
+lataif-server = { path = "../server" }
 jsonwebtoken = "9"
 bcrypt = "0.17"
 uuid = { version = "1", features = ["v4"] }

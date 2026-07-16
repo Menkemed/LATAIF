@@ -133,23 +133,61 @@ async fn get_me(Extension(claims): Extension<Claims>) -> Json<serde_json::Value>
     }))
 }
 
+// M6-B1 — Legacy push batch, now ATOMIC.
+//
+// Before: each change was INSERTed in autocommit inside a bare loop. A failure at
+// change N left changes 1..N-1 permanently committed, but the client sees only the
+// 5xx and re-pushes the WHOLE batch (`pushChanges` marks `synced=1` only on 2xx)
+// → the already-stored rows are inserted a second time. This closes exactly that
+// partial-commit/full-retry gap and NOTHING else.
+//
+// The legacy contract is deliberately unchanged: no CAS, no base_revision, no
+// field filtering, no per-change rejection, no protocol-version gate. Every change
+// that would have been accepted before is still accepted, and the response body is
+// byte-for-byte the same shape. This slice does NOT fix the stale-replay defect.
+pub fn apply_legacy_push_batch(
+    conn: &mut rusqlite::Connection,
+    tenant_id: &str,
+    branch_id: &str,
+    user_id: &str,
+    now: &str,
+    changes: &[SyncPushChange],
+) -> rusqlite::Result<usize> {
+    // IMMEDIATE: take the write lock up front instead of upgrading mid-batch.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    let mut count = 0usize;
+    for change in changes {
+        // `?` drops `tx` → rusqlite's Drop rolls back → zero rows survive a failure.
+        tx.execute(
+            "INSERT INTO sync_changelog (tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![tenant_id, branch_id, change.table_name, change.record_id, change.action, change.data, user_id, now],
+        )?;
+        count += 1;
+    }
+
+    tx.commit()?;
+    Ok(count)
+}
+
 async fn sync_push(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(req): Json<SyncPushRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
     let now = chrono::Utc::now().to_rfc3339();
-    let mut count = 0;
 
-    for change in &req.changes {
-        db.execute(
-            "INSERT INTO sync_changelog (tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![claims.tenant_id, claims.branch_id, change.table_name, change.record_id, change.action, change.data, claims.sub, now],
-        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        count += 1;
-    }
+    let count = apply_legacy_push_batch(
+        &mut db,
+        &claims.tenant_id,
+        &claims.branch_id,
+        &claims.sub,
+        &now,
+        &req.changes,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "synced": count })))
 }
@@ -287,6 +325,153 @@ fn col_num(r: &rusqlite::Row, idx: usize) -> Option<f64> {
             .ok()
             .and_then(|s| s.trim().parse::<f64>().ok()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod legacy_push_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sync_changelog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL,
+                branch_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL,
+                action TEXT NOT NULL, data TEXT NOT NULL, user_id TEXT, created_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn change(record_id: &str) -> SyncPushChange {
+        SyncPushChange {
+            table_name: "products".into(),
+            record_id: record_id.into(),
+            action: "update".into(),
+            data: format!("{{\"id\":\"{record_id}\"}}"),
+        }
+    }
+
+    fn rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM sync_changelog", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Controlled, deterministic DB failure for exactly one record id — stands in
+    /// for any mid-batch INSERT error (disk, constraint, corruption).
+    fn fail_on(conn: &Connection, record_id: &str) {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER boom BEFORE INSERT ON sync_changelog
+             WHEN NEW.record_id = '{record_id}'
+             BEGIN SELECT RAISE(ABORT, 'controlled test failure'); END;"
+        ))
+        .unwrap();
+    }
+
+    fn push(conn: &mut Connection, changes: &[SyncPushChange]) -> rusqlite::Result<usize> {
+        apply_legacy_push_batch(conn, "tenant-1", "branch-main", "self-desktop", "2026-07-16", changes)
+    }
+
+    // ── A: 3 valid changes → all 3 committed ────────────────────────────────
+    #[test]
+    fn a_all_valid_changes_commit() {
+        let mut conn = db();
+        let n = push(&mut conn, &[change("p1"), change("p2"), change("p3")]).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(rows(&conn), 3);
+    }
+
+    // ── B: change 2 fails → 0 committed (the actual M6-B1 fix) ──────────────
+    #[test]
+    fn b_failure_in_the_middle_commits_nothing() {
+        let mut conn = db();
+        fail_on(&conn, "p2");
+        let err = push(&mut conn, &[change("p1"), change("p2"), change("p3")]);
+        assert!(err.is_err(), "batch must fail");
+        assert_eq!(
+            rows(&conn),
+            0,
+            "no partial commit: change 1 must NOT survive a failure at change 2"
+        );
+    }
+
+    // ── C: retry after a failed batch → committed exactly once ─────────────
+    #[test]
+    fn c_retry_after_failure_commits_exactly_once() {
+        let mut conn = db();
+        fail_on(&conn, "p2");
+        assert!(push(&mut conn, &[change("p1"), change("p2"), change("p3")]).is_err());
+        assert_eq!(rows(&conn), 0);
+
+        // Client re-pushes the identical batch (it never marked synced=1).
+        // Failure cause removed → full batch lands, and p1 is NOT duplicated.
+        conn.execute_batch("DROP TRIGGER boom;").unwrap();
+        let n = push(&mut conn, &[change("p1"), change("p2"), change("p3")]).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(rows(&conn), 3, "exactly one full commit, no duplicate of change 1");
+        let p1: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_changelog WHERE record_id='p1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(p1, 1);
+    }
+
+    // ── D: stored content + row shape identical to the legacy semantics ─────
+    #[test]
+    fn d_successful_legacy_payload_is_stored_exactly_as_before() {
+        let mut conn = db();
+        push(&mut conn, &[change("p1")]).unwrap();
+        let (tenant, branch, table, record, action, data, user, created): (
+            String, String, String, String, String, String, String, String,
+        ) = conn
+            .query_row(
+                "SELECT tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at
+                 FROM sync_changelog WHERE id=1",
+                [],
+                |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (tenant.as_str(), branch.as_str(), table.as_str(), record.as_str()),
+            ("tenant-1", "branch-main", "products", "p1")
+        );
+        assert_eq!(action, "update");
+        assert_eq!(data, "{\"id\":\"p1\"}", "payload stored verbatim — no filtering");
+        assert_eq!(user, "self-desktop", "writer still taken from the JWT subject");
+        assert_eq!(created, "2026-07-16");
+    }
+
+    // ── Empty batch stays a no-op (unchanged legacy behaviour) ─────────────
+    #[test]
+    fn empty_batch_is_a_noop() {
+        let mut conn = db();
+        assert_eq!(push(&mut conn, &[]).unwrap(), 0);
+        assert_eq!(rows(&conn), 0);
+    }
+
+    // ── Inactivity: the legacy path must not touch the new protocol columns ─
+    #[test]
+    fn legacy_push_writes_no_protocol_fields() {
+        let mut conn = db();
+        conn.execute_batch(
+            "ALTER TABLE sync_changelog ADD COLUMN record_revision INTEGER;
+             ALTER TABLE sync_changelog ADD COLUMN operation_id TEXT;
+             ALTER TABLE sync_changelog ADD COLUMN protocol_version INTEGER;",
+        )
+        .unwrap();
+        push(&mut conn, &[change("p1")]).unwrap();
+        let (rev, op, pv): (Option<i64>, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT record_revision, operation_id, protocol_version FROM sync_changelog WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(rev.is_none() && op.is_none() && pv.is_none(), "legacy path stays legacy");
     }
 }
 

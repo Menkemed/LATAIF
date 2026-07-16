@@ -63,7 +63,10 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-mod migrations;
+// M6-B1: `migrations` now lives in the library surface (`lataif_server::migrations`)
+// so the embedded Tauri sync server reuses the same runner. The binary consumes it
+// from there — one implementation, no in-tree copy.
+use lataif_server::migrations;
 
 #[cfg(test)]
 mod route_tests;

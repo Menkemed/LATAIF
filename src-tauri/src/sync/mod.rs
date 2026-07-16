@@ -35,6 +35,8 @@ use tower_http::cors::{Any, CorsLayer};
 
 pub mod auth;
 pub mod db;
+/// M6-B1 — additive, inactive protocol migrations for the embedded server DB.
+pub mod migrations;
 pub mod mobile_page;
 pub mod models;
 pub mod routes;
