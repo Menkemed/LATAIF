@@ -1829,11 +1829,16 @@ function SyncTab() {
   const [serverStatus, setServerStatus] = useState<{ running: boolean; port: number; ip: string; url: string } | null>(null);
   const [discovered, setDiscovered] = useState<string[]>([]);
   const [discovering, setDiscovering] = useState(false);
+  // M6-B2A2: die serverseitig gehaltene Rolle. localStorage ist hier nur noch Anzeige.
+  const [primaryState, setPrimaryState] = useState<string>('');
 
   async function refreshServer() {
     const { getServerStatus } = await import('@/core/sync/sync-server');
     const s = await getServerStatus();
     setServerStatus(s);
+    const lan = await import('@/core/sync/auto-lan');
+    const st = await lan.getPrimaryStatus();
+    setPrimaryState(st?.state ?? '');
   }
 
   useEffect(() => {
@@ -1848,21 +1853,74 @@ function SyncTab() {
     refreshServer();
   }, []);
 
+  // M6-B2A/B2A1: Der Server startet nicht mehr "einfach so" — er startet, WEIL diese
+  // Installation ausdruecklich als Primary konfiguriert wurde, und das darf nur der Owner.
+  //
+  // Diese Seite ist KEINE Sicherheitsgrenze: sie sammelt die Credentials nur ein, Rust
+  // prueft sie gegen den bcrypt-Hash in der Server-DB. Ein `invoke` an dieser UI vorbei
+  // scheitert an derselben Pruefung. Die Rollenanzeige hier ist reine UX.
+  //
+  // Ausschalten setzt die Rolle auf `client` (nicht `unconfigured`): das Geraet soll
+  // weiter synchronisieren duerfen, nur nicht mehr selbst Host sein.
+  function explain(msg: string): string {
+    if (msg.includes('OWNER_AUTHORIZATION_REQUIRED')) return 'Not authorized: owner credentials required.';
+    if (msg.includes('INSTANCE_ID_MISMATCH')) return 'This server database belongs to a different installation. The role cannot be changed here.';
+    if (msg.includes('LEGACY_ADOPTION_NOT_CONFIRMED')) return 'Adoption was not confirmed.';
+    if (msg.includes('NO_LEGACY_ADOPTION_PENDING')) return 'No legacy server role is pending adoption on this device.';
+    return msg;
+  }
+
   async function handleToggleServer() {
     const { startSyncServer, stopSyncServer } = await import('@/core/sync/sync-server');
+    const lan = await import('@/core/sync/auto-lan');
+    const target: 'primary' | 'client' = serverStatus?.running ? 'client' : 'primary';
+
+    const email = window.prompt('Owner email (required to change the sync role):');
+    if (!email) return;
+    const password = window.prompt('Owner password:');
+    if (!password) return;
+
     try {
-      if (serverStatus?.running) {
-        await stopSyncServer();
-        (await import('@/core/sync/auto-lan')).setLanMode('off');
+      if (target === 'client') {
+        await stopSyncServer(email, password);
+        await lan.configurePrimaryMode('client', email, password);
+        lan.setLanMode('off');
         setLanModeUi('off');
       } else {
-        await startSyncServer();
-        (await import('@/core/sync/auto-lan')).setLanMode('server');
+        await lan.configurePrimaryMode('primary', email, password);   // erst die Rolle …
+        await startSyncServer();                                      // … dann der Start
+        lan.setLanMode('server');
         setLanModeUi('server');
       }
       await refreshServer();
     } catch (err) {
-      setResult(String(err));
+      setResult(explain(String(err)));
+    }
+  }
+
+  // M6-B2A2: Einmalige Bestaetigung einer erkannten Legacy-Serverrolle. Sichtbar nur,
+  // solange `primary_status.state === 'legacy_adoption_required'` — danach nie wieder.
+  async function handleAdoptLegacy() {
+    const lan = await import('@/core/sync/auto-lan');
+    const { startSyncServer } = await import('@/core/sync/sync-server');
+    if (!window.confirm(
+      'This device was a sync server before the update. Adopting it makes THIS installation the primary.\n\n' +
+      'Only do this if this is the real host. A copied server database must not be adopted here.'
+    )) return;
+    const email = window.prompt('Owner email (required to adopt the legacy server role):');
+    if (!email) return;
+    const password = window.prompt('Owner password:');
+    if (!password) return;
+    try {
+      await lan.adoptLegacyPrimary(email, password);
+      await startSyncServer();
+      lan.setLanMode('server');
+      setLanModeUi('server');
+      setPrimaryState('primary');
+      await refreshServer();
+      setResult('This device is now the sync primary.');
+    } catch (err) {
+      setResult(explain(String(err)));
     }
   }
 
@@ -1928,11 +1986,29 @@ function SyncTab() {
             <p style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.6, marginBottom: 12 }}>
               {serverStatus.running
                 ? `Other LATAIF installations in your network can sync to this machine. Share this URL with other devices: `
-                : `Start this machine as a sync server if you want other LATAIF installations in the same network (same Wi-Fi or LAN) to sync against it. First installation to start usually becomes the server.`}
+                : `Start this machine as a sync server if you want other LATAIF installations in the same network (same Wi-Fi or LAN) to sync against it. This is an explicit owner decision — no device ever becomes the server on its own.`}
               {serverStatus.running && (
                 <code style={{ color: '#0F0F10', background: '#F2F7FA', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>{serverStatus.url}</code>
               )}
             </p>
+            {/* M6-B2A2: einmalige Bestaetigung einer erkannten Legacy-Serverrolle. */}
+            {primaryState === 'legacy_adoption_required' && (
+              <div style={{ marginBottom: 12, padding: '10px 12px', background: '#FFF7ED', borderRadius: 6, border: '1px solid #FDBA74' }}>
+                <p style={{ fontSize: 12, color: '#9A3412', lineHeight: 1.6, marginBottom: 8 }}>
+                  This device was configured as a sync server before the update. Confirm once that
+                  <strong>{' '}this installation{' '}</strong>
+                  is the real host — a copied server database must not be adopted here.
+                </p>
+                <Button variant="primary" onClick={handleAdoptLegacy}>Adopt this device as sync primary</Button>
+              </div>
+            )}
+            {primaryState === 'read_only' && (
+              <div style={{ marginBottom: 12, padding: '10px 12px', background: '#FEF2F2', borderRadius: 6, border: '1px solid #FCA5A5' }}>
+                <p style={{ fontSize: 12, color: '#991B1B', lineHeight: 1.6 }}>
+                  This server database belongs to a different installation (read-only). Sync writes are refused.
+                </p>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <Button variant={serverStatus.running ? 'danger' : 'primary'} onClick={handleToggleServer}>
                 {serverStatus.running ? 'Stop Server' : 'Start as Server'}

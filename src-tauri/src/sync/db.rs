@@ -401,7 +401,11 @@ mod system_principal_tests {
         let applied: i64 = conn2
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(applied, 1, "exactly one migration recorded after two starts");
+        assert_eq!(
+            applied,
+            super::super::migrations::EMBEDDED_MIGRATIONS.len() as i64,
+            "each migration recorded exactly once after two starts"
+        );
         drop(conn2);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

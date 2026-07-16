@@ -30,10 +30,16 @@ export async function startSyncServer(): Promise<string> {
   return (await t.invoke('sync_server_start')) as string;
 }
 
-export async function stopSyncServer(): Promise<string> {
+/**
+ * M6-B2A2: Der manuelle Stop ist eine Owner-Aktion — sonst koennte jeder Renderer den
+ * Primary-Server der Filiale abschalten. Rust prueft die Credentials; der interne
+ * M4-Shutdown laeuft an diesem Command vorbei und braucht sie nicht.
+ * Die Rolle bleibt dabei unveraendert (`primary_host_config` wird nicht angefasst).
+ */
+export async function stopSyncServer(email: string, password: string): Promise<string> {
   const t = await tauri();
   if (!t) throw new Error('Sync server only available in desktop app');
-  return (await t.invoke('sync_server_stop')) as string;
+  return (await t.invoke('sync_server_stop', { email, password })) as string;
 }
 
 export async function getServerStatus(): Promise<ServerStatus | null> {

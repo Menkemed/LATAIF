@@ -20,7 +20,14 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
     Router::new()
         .route("/auth/login", post(login))
-        .route("/auth/register", post(register_tenant))
+        // M6-B2A1 — `/auth/register` ENTFERNT.
+        //
+        // Sie war oeffentlich und UNAUTHENTIFIZIERT und legte tenant + branch + user an —
+        // jeder im LAN konnte auf Port 3001 einen Tenant erzeugen. Ein Initial-Setup-Pfad
+        // ist sie nie gewesen: `init_database` seedet tenant-1/branch-main/user-owner auf
+        // jeder frischen DB, und im gesamten Repo gibt es **keinen einzigen Aufrufer**
+        // (weder Frontend noch mobile_page). Eine tote, weit offene Write-Route zu gaten
+        // waere schlechter, als sie zu entfernen: hier gibt es nichts zu erlauben.
         .route("/health", get(health))
         .merge(protected)
 }
@@ -77,52 +84,10 @@ async fn login(
     }))
 }
 
-async fn register_tenant(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<RegisterTenantRequest>,
-) -> Result<Json<LoginResponse>, StatusCode> {
-    let db = state.db.lock().await;
-    let now = chrono::Utc::now().to_rfc3339();
-    let tenant_id = uuid::Uuid::new_v4().to_string();
-    let branch_id = uuid::Uuid::new_v4().to_string();
-    let user_id = uuid::Uuid::new_v4().to_string();
-    let slug = req.tenant_name.to_lowercase().replace(' ', "-");
-
-    let password_hash =
-        bcrypt::hash(&req.password, 10).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    db.execute(
-        "INSERT INTO tenants (id, name, slug, plan, active, created_at, updated_at) VALUES (?1, ?2, ?3, 'starter', 1, ?4, ?4)",
-        rusqlite::params![tenant_id, req.tenant_name, slug, now],
-    ).map_err(|_| StatusCode::CONFLICT)?;
-
-    db.execute(
-        "INSERT INTO branches (id, tenant_id, name, country, currency, active, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
-        rusqlite::params![branch_id, tenant_id, req.branch_name, req.country, req.currency, now],
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    db.execute(
-        "INSERT INTO users (id, tenant_id, email, password_hash, name, active, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
-        rusqlite::params![user_id, tenant_id, req.email, password_hash, req.user_name, now],
-    ).map_err(|_| StatusCode::CONFLICT)?;
-
-    db.execute(
-        "INSERT INTO user_branches (user_id, branch_id, role, is_default, created_at) VALUES (?1, ?2, 'owner', 1, ?3)",
-        rusqlite::params![user_id, branch_id, now],
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let token = auth::create_token(&user_id, &tenant_id, &branch_id, "owner", &state.jwt_secret)?;
-
-    Ok(Json(LoginResponse {
-        token,
-        user_id,
-        tenant_id,
-        branch_id,
-        role: "owner".to_string(),
-        user_name: req.user_name,
-        branch_name: req.branch_name,
-    }))
-}
+// M6-B2A1: `register_tenant` samt Route entfernt — sie war eine unauthentifizierte,
+// aufruferlose Write-Flaeche, die tenants/branches/users anlegte und ein Owner-JWT
+// ausstellte. `init_database` seedet tenant-1/branch-main/user-owner ohnehin auf jeder
+// frischen DB; ein Initial-Setup ueber HTTP wurde nie gebraucht.
 
 async fn get_me(Extension(claims): Extension<Claims>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -176,6 +141,23 @@ async fn sync_push(
     Extension(claims): Extension<Claims>,
     Json(req): Json<SyncPushRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // M6-B2A — central write gate. The ONLY state that may accept sync writes is a
+    // primary whose recorded binding matches this installation. `should_serve()` already
+    // kept client/unconfigured from listening at all; this catches read_only (a copied or
+    // restored server DB) and is defence in depth for every future caller.
+    if !state.primary_state.may_write_sync() {
+        eprintln!(
+            "[sync] push refused: {} (state '{}')",
+            if state.primary_state == super::primary::State::ReadOnly {
+                super::primary::ERR_SERVER_READ_ONLY
+            } else {
+                super::primary::ERR_PRIMARY_NOT_CONFIGURED
+            },
+            state.primary_state.as_str()
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let mut db = state.db.lock().await;
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -451,6 +433,76 @@ mod legacy_push_tests {
         let mut conn = db();
         assert_eq!(push(&mut conn, &[]).unwrap(), 0);
         assert_eq!(rows(&conn), 0);
+    }
+
+    // ── W4: Write-Surface-Nachweis am QUELLTEXT ──────────────────────────────
+    //
+    // Der Anspruch ist nicht "sync_push hat ein Gate", sondern: es gibt KEINE zweite
+    // mutierende Flaeche, die daran vorbei schreibt. Deshalb wird die Routenmenge und die
+    // Menge der Schreibzugriffe geprueft, nicht nur ein Handler.
+    #[test]
+    fn w4_every_mutating_route_is_gated() {
+        let src = include_str!("routes.rs");
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prod = &code[..code.find("#[cfg(test)]").unwrap_or(code.len())];
+
+        // 1. Die unauthentifizierte Registerroute existiert nicht mehr.
+        assert!(!prod.contains("register_tenant"), "W1/W2/W3: /auth/register muss entfernt sein");
+
+        // 2. Welche Routen gibt es ueberhaupt?
+        let routes: Vec<&str> = prod
+            .match_indices(".route(\"")
+            .map(|(i, _)| {
+                let rest = &prod[i + 8..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect();
+        assert_eq!(
+            routes,
+            vec!["/sync/push", "/sync/pull", "/me", "/products/by-sku/{sku}", "/auth/login", "/health"],
+            "Routenmenge geaendert — Modusmatrix und Gate neu bewerten"
+        );
+
+        // 3. Jeder Schreibzugriff im Produktivcode geht in sync_changelog — also durch
+        //    apply_legacy_push_batch, und das erreicht man nur ueber das Gate.
+        let writers: Vec<&str> = ["INSERT INTO", "UPDATE ", "DELETE FROM"]
+            .iter()
+            .flat_map(|kw| prod.match_indices(kw).map(|(i, _)| &prod[i..(i + 40).min(prod.len())]))
+            .collect();
+        for w in &writers {
+            assert!(
+                w.contains("sync_changelog"),
+                "unerwartete Schreibflaeche im Produktivcode: {w:?} — muss durch das Gate"
+            );
+        }
+        assert!(!writers.is_empty(), "Sanity: der Scanner sieht ueberhaupt Schreibzugriffe");
+        assert!(prod.contains("may_write_sync()"), "sync_push muss das zentrale Gate aufrufen");
+    }
+
+    // ── W5: Lesepfade veraendern die DB nicht ────────────────────────────────
+    #[test]
+    fn w5_read_routes_do_not_write() {
+        let src = include_str!("routes.rs");
+        for handler in ["async fn sync_pull", "async fn get_me", "async fn product_by_sku", "async fn health"] {
+            let start = src.find(handler).unwrap_or_else(|| panic!("{handler} nicht gefunden"));
+            // Bis zur NAECHSTEN Top-Level-Funktion, nicht ueber ein festes Zeichenfenster —
+            // sonst laeuft der Scan in den Nachbarcode und misst das Falsche.
+            let rest = &src[start + handler.len()..];
+            let end = ["\nasync fn ", "\nfn ", "\npub fn ", "\npub async fn "]
+                .iter()
+                .filter_map(|m| rest.find(m))
+                .min()
+                .map(|i| start + handler.len() + i)
+                .unwrap_or(src.len());
+            let body = &src[start..end];
+            for kw in ["INSERT INTO", "UPDATE ", "DELETE FROM"] {
+                assert!(!body.contains(kw), "{handler} darf nicht schreiben (fand {kw})");
+            }
+        }
     }
 
     // ── Inactivity: the legacy path must not touch the new protocol columns ─

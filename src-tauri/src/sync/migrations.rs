@@ -41,7 +41,63 @@ use lataif_server::migrations::Migration;
 
 /// The embedded server's migrations, strictly ascending. Independent from the
 /// standalone server's `ALL_MIGRATIONS` — different deployment, different scope.
-pub const EMBEDDED_MIGRATIONS: &[Migration] = &[V0001_SYNC_PROTOCOL_FOUNDATION];
+pub const EMBEDDED_MIGRATIONS: &[Migration] =
+    &[V0001_SYNC_PROTOCOL_FOUNDATION, V0002_PRIMARY_HOST_CONFIG];
+
+/// M6-B2A — records WHICH installation this server DB belongs to and what role it was
+/// explicitly configured for. Deliberately NOT carrying `authority_epoch` or any
+/// certificate: the authority contract is M6-B2C, and a column here would imply a
+/// guarantee that does not exist yet (M6-A4: single-authority is not enforceable
+/// without a shared lease).
+///
+/// `up_sql == reference_sql` here (unlike v0001) — it only creates a new table, so the
+/// drift reference runs cleanly in an empty in-memory database.
+pub const V0002_PRIMARY_HOST_CONFIG: Migration = Migration {
+    version: 2,
+    name: "primary_host_config",
+    up_sql: V0002_SQL,
+    reference_sql: V0002_SQL,
+};
+
+const V0002_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS primary_host_config (
+    tenant_id          TEXT NOT NULL,
+    branch_id          TEXT NOT NULL,
+    primary_host_id    TEXT,
+    server_instance_id TEXT,
+    mode               TEXT NOT NULL,
+    configured_at      TEXT NOT NULL,
+    configured_by      TEXT,
+    state              TEXT NOT NULL,
+
+    -- M6-B2A2 — Audit des LEGACY-HINWEISES, der zu dieser Zeile fuehrte. Bewusst
+    -- getrennt von der Rolle: der Hinweis stammt aus kopierbaren Quellen (localStorage,
+    -- Changelog-Historie) und ist deshalb nie eine Autorisierung, nur eine Spur.
+    legacy_mode        TEXT,
+    legacy_setup_done  INTEGER,
+    legacy_has_served  INTEGER,
+    adopted_at         TEXT,
+    adopted_by         TEXT,
+
+    PRIMARY KEY (tenant_id, branch_id),
+
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+
+    CHECK (mode IN ('unconfigured', 'primary', 'client', 'legacy_pending')),
+    -- `state` spiegelt den zuletzt geschriebenen `mode`. Der EFFEKTIVE Zustand (inkl.
+    -- read_only bei Instance-Mismatch) wird nie gespeichert, sondern bei jedem Start aus
+    -- mode + Install-ID neu aufgeloest — eine gespeicherte Kopie waere sonst genau das,
+    -- was man mitkopieren kann.
+    CHECK (state IN ('unconfigured', 'primary', 'client', 'legacy_pending')),
+    -- A primary MUST be bound to a concrete installation. Without that binding a copied
+    -- DB could call itself primary purely on the strength of its own contents.
+    CHECK (mode <> 'primary' OR server_instance_id IS NOT NULL),
+    -- A pending legacy hint must NOT carry a binding — that is the whole point: it has
+    -- not been adopted yet.
+    CHECK (mode <> 'legacy_pending' OR server_instance_id IS NULL)
+);
+"#;
 
 pub const V0001_SYNC_PROTOCOL_FOUNDATION: Migration = Migration {
     version: 1,
@@ -261,10 +317,12 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1]);
+        assert_eq!(report.applied, vec![1, 2]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
+        // M6-B2A
+        assert!(table_exists(&conn, "primary_host_config"));
     }
 
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
@@ -274,7 +332,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1]);
+        assert_eq!(second.already_current, vec![1, 2]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

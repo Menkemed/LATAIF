@@ -17,8 +17,24 @@ async fn sync_server_start(state: tauri::State<'_, AppHandleState>) -> Result<St
     state.server.start().await
 }
 
+/// M6-B2A2 — der manuelle Stop ist eine Owner-Aktion.
+///
+/// Vorher konnte jeder Renderer den Primary-Server der Filiale abschalten. Der INTERNE
+/// Shutdown (M4-D `finalize_application_shutdown`) ruft `server.stop()` direkt in Rust und
+/// ist davon nicht betroffen — er braucht keine Credentials und aendert keine Rolle.
+///
+/// Der Stop veraendert `primary_host_config` NICHT: das Geraet bleibt primary und startet
+/// beim naechsten Mal wieder korrekt.
 #[tauri::command]
-async fn sync_server_stop(state: tauri::State<'_, AppHandleState>) -> Result<String, String> {
+async fn sync_server_stop(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<String, String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    drop(conn);
     state.server.stop().await
 }
 
@@ -44,6 +60,118 @@ async fn sync_server_status(
 #[tauri::command]
 async fn discover_lan_servers(timeout_secs: Option<u64>) -> Result<Vec<String>, String> {
     Ok(sync::discover_lan_servers(timeout_secs.unwrap_or(3)).await)
+}
+
+// ── M6-B2A — explicit static primary ────────────────────────────────────────
+//
+// The role now lives in the server DB, bound to this installation's id file — NOT in
+// localStorage, which the client can rewrite and which cannot survive as an authority
+// source. These commands are the only way the role ever changes; discovery cannot.
+
+/// Open the server DB (creating/migrating it if needed) purely to read or write the role.
+/// Kept separate from `SyncServer::start` so a client/unconfigured device can be asked
+/// about its state without anything binding a port.
+fn open_config_db(
+    server: &sync::SyncServer,
+) -> Result<(rusqlite::Connection, String), String> {
+    let conn = sync::db::init_database(&server.db_path).map_err(|e| format!("DB init failed: {e}"))?;
+    let id = sync::install_id::load_or_create(&server.db_path)
+        .map_err(|e| format!("Install id unavailable: {e}"))?;
+    Ok((conn, id))
+}
+
+#[tauri::command]
+async fn primary_status(state: tauri::State<'_, AppHandleState>) -> Result<serde_json::Value, String> {
+    let (conn, id) = open_config_db(&state.server)?;
+    let cfg = sync::primary::load_config(&conn, "tenant-1", "branch-main")
+        .map_err(|e| format!("Primary config unreadable: {e}"))?;
+    let resolved = sync::primary::resolve_state(cfg.as_ref(), &id);
+    Ok(serde_json::json!({
+        "state": resolved.as_str(),
+        "mode": cfg.as_ref().map(|c| c.mode.as_str()).unwrap_or("unconfigured"),
+        "configured": cfg.is_some(),
+        "mayWriteSync": resolved.may_write_sync(),
+        "shouldServe": resolved.should_serve(),
+        // Redacted on purpose: the full install id is a stable device identifier.
+        "installIdShort": sync::install_id::redact(&id),
+        "instanceMatches": cfg
+            .as_ref()
+            .and_then(|c| c.server_instance_id.as_deref())
+            .map(|b| b == id),
+    }))
+}
+
+/// Explicit, OWNER-AUTHORIZED action: set this installation's role. The only path that
+/// ever writes `mode='primary'`, and it always binds to this install's id.
+///
+/// M6-B2A1 — why credentials: a Tauri command arrives from the renderer, and there is no
+/// Rust-side session. A role or a `configured_by` passed in would be the caller vouching
+/// for itself; a JWT would not help either, since the self-token carries `role="owner"`
+/// and is handed to that same renderer. Only knowledge of the owner password — checked
+/// against the bcrypt hash in the SERVER DB — is a boundary the renderer cannot cross by
+/// itself. `configured_by` then comes from the verified lookup, never from the call.
+#[tauri::command]
+async fn primary_configure(
+    state: tauri::State<'_, AppHandleState>,
+    mode: String,
+    email: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    let m = sync::primary::Mode::parse(&mode).ok_or_else(|| format!("unknown mode '{mode}'"))?;
+    let (conn, id) = open_config_db(&state.server)?;
+
+    let owner = sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+
+    let applied = sync::primary::configure_as_owner(&conn, "tenant-1", "branch-main", m, &id, &owner)
+        .map_err(|code| code.to_string())?;
+
+    Ok(serde_json::json!({ "mode": applied.as_str(), "configuredBy": owner.user_id() }))
+}
+
+/// M6-B2A2 — der einzige Weg von einem Legacy-Hinweis zu `primary`.
+///
+/// Verlangt verifizierte Owner-Credentials UND die woertliche Bestaetigung. Der Grund:
+/// `lataif_lan_mode='server'` und die Changelog-Historie sind beide **kopierbar** — eine
+/// Vor-v0002-Server-DB traegt echte Historie und keine Bindung, also wuerde jede Kopie
+/// sich sonst an ihre neue Installation binden. Erst diese Erklaerung des Owners macht
+/// aus einer Spur eine Rolle.
+#[tauri::command]
+async fn primary_adopt_legacy(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    confirmation: String,
+) -> Result<serde_json::Value, String> {
+    let (conn, id) = open_config_db(&state.server)?;
+    let owner = sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let m = sync::primary::adopt_legacy_as_owner(
+        &conn,
+        "tenant-1",
+        "branch-main",
+        &id,
+        &owner,
+        &confirmation,
+    )
+    .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "mode": m.as_str(), "adoptedBy": owner.user_id() }))
+}
+
+/// One-time adoption of the legacy `lataif_lan_mode` / `lataif_lan_setup_done` values.
+/// Idempotent: once a row exists the legacy values are ignored forever, so a stale or
+/// cleared localStorage can never re-decide the role.
+#[tauri::command]
+async fn primary_migrate_legacy(
+    state: tauri::State<'_, AppHandleState>,
+    legacy_mode: Option<String>,
+    setup_done: bool,
+) -> Result<serde_json::Value, String> {
+    let (conn, id) = open_config_db(&state.server)?;
+    let legacy = sync::primary::LegacyLanConfig { mode: legacy_mode, setup_done };
+    let m = sync::primary::migrate_once(&conn, "tenant-1", "branch-main", &legacy, &id)
+        .map_err(|e| format!("Legacy migration failed: {e}"))?;
+    Ok(serde_json::json!({ "mode": m.as_str() }))
 }
 
 // Raw-Druck von ZPL an einen benannten Drucker (Zebra-Tags). Windows-only;
@@ -496,6 +624,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             sync_server_start,
+            primary_status,
+            primary_configure,
+            primary_adopt_legacy,
+            primary_migrate_legacy,
             sync_server_stop,
             sync_server_status,
             discover_lan_servers,

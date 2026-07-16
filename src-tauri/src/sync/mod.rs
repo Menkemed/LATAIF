@@ -35,10 +35,14 @@ use tower_http::cors::{Any, CorsLayer};
 
 pub mod auth;
 pub mod db;
+/// M6-B2A — stable per-install device identity (`sync_install_id.key`).
+pub mod install_id;
 /// M6-B1 — additive, inactive protocol migrations for the embedded server DB.
 pub mod migrations;
 pub mod mobile_page;
 pub mod models;
+/// M6-B2A — explicit static primary: role resolution, legacy migration, write gate.
+pub mod primary;
 pub mod routes;
 pub mod secret;
 
@@ -53,6 +57,11 @@ pub struct AppState {
     /// Lookup liest Produkte direkt aus deren `products`-Tabelle (read-only) — die ist die
     /// SSOT mit aktuellem, vollstaendigem Bild. Der Sync-Changelog verliert teils Bilder.
     pub frontend_db_path: std::path::PathBuf,
+    /// M6-B2A — the effective role this server was started with, resolved ONCE at start
+    /// from `primary_host_config` + the install-id file. The write gate reads it; it never
+    /// changes while the server runs (a role change goes through an explicit command,
+    /// which restarts the server).
+    pub primary_state: primary::State,
 }
 
 pub struct SyncServer {
@@ -93,6 +102,33 @@ impl SyncServer {
 
         let conn = db::init_database(&self.db_path).map_err(|e| format!("DB init failed: {e}"))?;
 
+        // M6-B2A — the role gate. A server only listens because this installation was
+        // EXPLICITLY configured as primary; a discovery timeout can no longer promote
+        // anyone. Resolved before anything binds a port.
+        let install_id = install_id::load_or_create(&self.db_path)
+            .map_err(|e| format!("Install id unavailable: {e}"))?;
+        let config = primary::load_config(&conn, "tenant-1", "branch-main")
+            .map_err(|e| format!("Primary config unreadable: {e}"))?;
+        let state = primary::resolve_state(config.as_ref(), &install_id);
+        if !state.should_serve() {
+            // client / unconfigured: no writing server, ever. Not an error the user must
+            // fix — it is the correct state for a non-host device.
+            return Err(format!(
+                "{}: this installation is '{}' and does not run a sync server",
+                primary::ERR_PRIMARY_NOT_CONFIGURED,
+                state.as_str()
+            ));
+        }
+        if state == primary::State::ReadOnly {
+            // The recorded binding belongs to a different installation — a copied or
+            // restored server DB. Serve reads, refuse sync writes, change nothing.
+            eprintln!(
+                "[sync] {} — server DB is bound to another installation; starting READ-ONLY (install {})",
+                primary::ERR_INSTANCE_ID_MISMATCH,
+                install_id::redact(&install_id)
+            );
+        }
+
         // Fail-closed, persisted per-install secret — no silent hard-coded default.
         // An explicit env override is honoured for tests/dev (see sync::secret); the
         // known dev default is rejected unless LATAIF_ALLOW_DEV_JWT_SECRET=1.
@@ -120,11 +156,13 @@ impl SyncServer {
             .map(|p| p.join("lataif.db"))
             .unwrap_or_else(|| std::path::PathBuf::from("lataif.db"));
 
-        let state = Arc::new(AppState {
+        let app_state = Arc::new(AppState {
             db: Mutex::new(conn),
             jwt_secret,
             frontend_db_path,
+            primary_state: state,
         });
+        let state = app_state;
 
         let cors = CorsLayer::new()
             .allow_origin(Any)
