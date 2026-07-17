@@ -80,9 +80,20 @@ pub fn redact(id: &str) -> String {
 
 /// Load the id, or create it exactly once.
 ///
-/// Race-free by construction: creation uses `create_new(true)`, i.e. an atomic
-/// O_EXCL/CREATE_NEW. If two processes start together, exactly one wins the create; the
-/// loser gets `AlreadyExists` and reads the winner's id. Neither can clobber the other.
+/// ## The race this avoids — and why `create_new` alone did not
+///
+/// The first version used `OpenOptions::create_new(true)` and called itself "race-free by
+/// construction". It is not. `create_new` is atomic and exclusive about the NAME, but it
+/// publishes that name *before* the content is written, so a concurrent starter that
+/// loses the create can read the file in the window before the winner's `write_all` and
+/// find it **empty**. `parse_install_id` then fails closed — no wrong id is ever handed
+/// out — but a legitimate second start dies with "install id unusable" for no reason.
+/// `i3_concurrent_creation_yields_one_id` caught it as a flake.
+///
+/// So the content is written under a unique temporary name first and only then published
+/// under the real one with an operation that fails if the name is taken (`hard_link`).
+/// The final name therefore never exists half-written: a concurrent starter sees either
+/// no file at all, or a complete one.
 pub fn load_or_create_in_dir(app_data_dir: &Path) -> Result<String, InstallIdError> {
     use std::io::Write;
 
@@ -96,18 +107,37 @@ pub fn load_or_create_in_dir(app_data_dir: &Path) -> Result<String, InstallIdErr
     }
 
     let fresh = uuid::Uuid::new_v4().hyphenated().to_string();
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut f) => {
-            f.write_all(fresh.as_bytes()).map_err(|e| InstallIdError::Io(e.to_string()))?;
-            f.sync_all().map_err(|e| InstallIdError::Io(e.to_string()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
-            Ok(fresh)
+    let tmp = app_data_dir.join(format!(
+        ".{INSTALL_ID_FILENAME}.{}.tmp",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+
+    // 1. Write the COMPLETE file under a name nobody else looks for.
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| InstallIdError::Io(e.to_string()))?;
+        f.write_all(fresh.as_bytes()).map_err(|e| InstallIdError::Io(e.to_string()))?;
+        f.sync_all().map_err(|e| InstallIdError::Io(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
         }
-        // Lost the create race — the winner's id is authoritative.
+    }
+
+    // 2. Publish it. `hard_link` fails if the destination exists — the create-new
+    //    semantics we need, but applied to a file that is already complete. (`rename`
+    //    would be wrong here: it silently OVERWRITES, which is exactly what an identity
+    //    file must never allow.)
+    let published = std::fs::hard_link(&tmp, &path);
+    let _ = std::fs::remove_file(&tmp);
+
+    match published {
+        Ok(()) => Ok(fresh),
+        // Lost the race — the winner's id is authoritative, and it is fully written.
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let contents =
                 std::fs::read_to_string(&path).map_err(|e| InstallIdError::Io(e.to_string()))?;
@@ -127,13 +157,42 @@ pub fn load_or_create(sync_db_path: &Path) -> Result<String, InstallIdError> {
 mod tests {
     use super::*;
 
-    fn tmp_dir() -> std::path::PathBuf {
+    /// A temp dir that cleans itself up on drop — including on panic.
+    ///
+    /// These directories hold real install-id key material, and cleanup written at the
+    /// END of a test body simply does not run when an assertion fails: `Drop` runs during
+    /// unwinding, a trailing statement does not. A red test would otherwise leave key
+    /// files in the system temp dir.
+    pub struct TempDir(std::path::PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl TempDir {
+        /// Threads need an owned path; a clone of the PathBuf never cleans up on its own,
+        /// only the guard does.
+        fn path_buf(&self) -> std::path::PathBuf {
+            self.0.clone()
+        }
+    }
+
+    fn tmp_dir() -> TempDir {
         let d = std::env::temp_dir().join(format!(
             "com.lataif.m6b2atest20260716-{}",
             uuid::Uuid::new_v4().as_simple()
         ));
         std::fs::create_dir_all(&d).unwrap();
-        d
+        TempDir(d)
     }
 
     // ── I1: fresh app data → exactly one new valid id ───────────────────────
@@ -144,10 +203,9 @@ mod tests {
         assert!(uuid::Uuid::parse_str(&id).is_ok(), "must be a valid UUID");
         assert!(!uuid::Uuid::parse_str(&id).unwrap().is_nil());
         assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 4, "UUIDv4 (CSPRNG)");
-        let files: Vec<_> = std::fs::read_dir(&d).unwrap().filter_map(|e| e.ok()).collect();
+        let files: Vec<_> = std::fs::read_dir(&*d).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(files.len(), 1, "exactly one file created");
         assert_eq!(files[0].file_name().to_str().unwrap(), INSTALL_ID_FILENAME);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     // ── I2: second start → identical id ─────────────────────────────────────
@@ -159,29 +217,36 @@ mod tests {
         let c = load_or_create_in_dir(&d).unwrap();
         assert_eq!(a, b);
         assert_eq!(b, c);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     // ── I3: concurrent first creation → exactly one valid file ──────────────
+    /// Threads are released from a barrier so they collide inside the create window on
+    /// purpose. Before the tmp+`hard_link` fix this failed intermittently with
+    /// `Invalid { reason: "file is empty" }` — the loser read the winner's file after
+    /// `create_new` had published the name but before `write_all` had filled it.
     #[test]
     fn i3_concurrent_creation_yields_one_id() {
         let d = tmp_dir();
         let mut handles = Vec::new();
-        for _ in 0..8 {
-            let dir = d.clone();
-            handles.push(std::thread::spawn(move || load_or_create_in_dir(&dir)));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        for _ in 0..16 {
+            let dir = d.path_buf();
+            let b = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                load_or_create_in_dir(&dir)
+            }));
         }
         let ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect();
         let first = &ids[0];
         assert!(ids.iter().all(|i| i == first), "all threads must agree on one id: {ids:?}");
-        let files: Vec<_> = std::fs::read_dir(&d).unwrap().filter_map(|e| e.ok()).collect();
+        let files: Vec<_> = std::fs::read_dir(&*d).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(files.len(), 1, "create_new(true) must leave exactly one file");
         // and the file really holds the agreed id
         assert_eq!(
             parse_install_id(&std::fs::read_to_string(d.join(INSTALL_ID_FILENAME)).unwrap()).unwrap(),
             *first
         );
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     // ── I4: empty file → fail-closed, NOT replaced ──────────────────────────
@@ -193,7 +258,6 @@ mod tests {
         let err = load_or_create_in_dir(&d).unwrap_err();
         assert!(matches!(err, InstallIdError::Invalid { .. }), "got {err:?}");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "   \n", "file must stay untouched");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     // ── I5: invalid UUID → fail-closed ──────────────────────────────────────
@@ -206,7 +270,6 @@ mod tests {
             let err = load_or_create_in_dir(&d).unwrap_err();
             assert!(matches!(err, InstallIdError::Invalid { .. }), "{bad} → {err:?}");
             assert_eq!(std::fs::read_to_string(&p).unwrap(), bad, "must not be overwritten");
-            let _ = std::fs::remove_dir_all(&d);
         }
     }
 
@@ -216,8 +279,6 @@ mod tests {
         let a = tmp_dir();
         let b = tmp_dir();
         assert_ne!(load_or_create_in_dir(&a).unwrap(), load_or_create_in_dir(&b).unwrap());
-        let _ = std::fs::remove_dir_all(&a);
-        let _ = std::fs::remove_dir_all(&b);
     }
 
     // ── I8: app update (binary changes, app data survives) → id survives ────
@@ -228,7 +289,6 @@ mod tests {
         // An update replaces the binary; the app data dir — and this file — stay put.
         let after = load_or_create_in_dir(&d).unwrap();
         assert_eq!(before, after);
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     // ── I9: the full id never appears in a log-safe rendering ───────────────
