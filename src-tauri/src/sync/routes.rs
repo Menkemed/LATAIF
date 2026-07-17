@@ -42,6 +42,24 @@ async fn login(
 ) -> Result<Json<LoginResponse>, StatusCode> {
     let db = state.db.lock().await;
 
+    // M6-B2A4 — no login at all until this server has a provisioned owner.
+    //
+    // Checked SERVER-WIDE and BEFORE any user lookup, deliberately: the answer is a
+    // property of the installation, not of an account, so it cannot be used to probe which
+    // e-mails exist (§4, no user enumeration). Everything below it keeps returning a flat
+    // 401.
+    //
+    // This is the LAN-facing half of the default-credential defect: `role` comes from
+    // `user_branches`, so the shipped `admin@lataif.com`/`admin` used to return an OWNER
+    // JWT here — and that JWT is what unlocks `/sync/push`.
+    if !super::credentials::owner_credentials_ready(&db) {
+        eprintln!(
+            "[sync] login refused: {} — this server has no provisioned owner yet",
+            super::primary::ERR_OWNER_PROVISIONING_REQUIRED
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let result: Result<(String, String, String, String, String, String, String), _> = db
         .prepare(
             "SELECT u.id, u.tenant_id, u.name, u.password_hash, ub.branch_id, ub.role, b.name
@@ -66,6 +84,12 @@ async fn login(
 
     let (user_id, tenant_id, user_name, password_hash, branch_id, role, branch_name) =
         result.map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    // M6-B2A4 — and per user: a provisioned SERVER does not make every account usable.
+    // Indistinguishable from a wrong password on purpose — from here on, one flat 401.
+    if !super::credentials::state_of(&db, &user_id).may_authenticate() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
     if !bcrypt::verify(&req.password, &password_hash).unwrap_or(false) {
         return Err(StatusCode::UNAUTHORIZED);

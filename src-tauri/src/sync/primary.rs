@@ -92,6 +92,10 @@ pub const ERR_PRIMARY_NOT_CONFIGURED: &str = "SYNC_PRIMARY_NOT_CONFIGURED";
 pub const ERR_INSTANCE_ID_MISMATCH: &str = "INSTANCE_ID_MISMATCH";
 pub const ERR_SERVER_READ_ONLY: &str = "SYNC_SERVER_READ_ONLY";
 pub const ERR_OWNER_REQUIRED: &str = "OWNER_AUTHORIZATION_REQUIRED";
+/// M6-B2A4 — distinct from `ERR_OWNER_REQUIRED` on purpose. "Wrong password" and "this
+/// server has no owner password yet" are different facts and need different remedies, and
+/// the latter reveals nothing about which accounts exist.
+pub const ERR_OWNER_PROVISIONING_REQUIRED: &str = "OWNER_PROVISIONING_REQUIRED";
 pub const ERR_TRANSITION_NOT_ALLOWED: &str = "PRIMARY_TRANSITION_NOT_ALLOWED";
 pub const ERR_ADOPTION_NOT_CONFIRMED: &str = "LEGACY_ADOPTION_NOT_CONFIRMED";
 pub const ERR_NO_LEGACY_ADOPTION_PENDING: &str = "NO_LEGACY_ADOPTION_PENDING";
@@ -148,6 +152,17 @@ pub fn authorize_owner(
         .map_err(|_| ERR_OWNER_REQUIRED)?;
 
     let (user_id, hash, role) = row.ok_or(ERR_OWNER_REQUIRED)?;
+
+    // M6-B2A4 — the credential must be one somebody deliberately provisioned.
+    //
+    // This is the check that gives every sentence above it meaning. Until B2A4, a fresh or
+    // lost server DB was silently re-seeded with `admin@lataif.com` / `admin`, so the
+    // bcrypt comparison below passed for a constant printed in the source — B2A1's
+    // "boundary the renderer cannot cross" was no boundary at all. `state_of` returns
+    // `Unprovisioned` for a user with no credential row, so absence fails closed too.
+    if !super::credentials::state_of(conn, &user_id).may_authenticate() {
+        return Err(ERR_OWNER_PROVISIONING_REQUIRED);
+    }
     if !bcrypt::verify(password, &hash).unwrap_or(false) {
         return Err(ERR_OWNER_REQUIRED);
     }
@@ -528,6 +543,18 @@ mod tests {
             "INSERT INTO user_branches VALUES ('user-owner','branch-main','owner',1,'n');
              INSERT INTO user_branches VALUES ('user-staff','branch-main','staff',0,'n');
              INSERT INTO user_branches VALUES ('user-old','branch-main','owner',0,'n');",
+        ).unwrap();
+        // M6-B2A4 — these users stand for a server whose owner ALREADY provisioned a real
+        // password. Without a credential row they would be `unprovisioned` and every B2A
+        // contract below would fail for the wrong reason (provisioning, not the rule under
+        // test). The B2A4-specific "no credential row ⇒ refused" behaviour is proven in
+        // `credentials.rs`, not smuggled in here.
+        conn.execute_batch(
+            "INSERT INTO server_credentials
+               (user_id, credential_state, password_changed_at, created_at, updated_at)
+             VALUES ('user-owner','active','n','n','n'),
+                    ('user-staff','active','n','n','n'),
+                    ('user-old','active','n','n','n');",
         ).unwrap();
     }
 

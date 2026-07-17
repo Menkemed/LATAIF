@@ -42,7 +42,59 @@ use lataif_server::migrations::Migration;
 /// The embedded server's migrations, strictly ascending. Independent from the
 /// standalone server's `ALL_MIGRATIONS` — different deployment, different scope.
 pub const EMBEDDED_MIGRATIONS: &[Migration] =
-    &[V0001_SYNC_PROTOCOL_FOUNDATION, V0002_PRIMARY_HOST_CONFIG];
+    &[V0001_SYNC_PROTOCOL_FOUNDATION, V0002_PRIMARY_HOST_CONFIG, V0003_SERVER_CREDENTIALS];
+
+/// M6-B2A4 — the credential state of every embedded-server login.
+///
+/// ## Why a table and not columns on `users`
+///
+/// §3 allows either. A separate table wins twice: adding columns to `users` would need
+/// `ALTER TABLE`, which cannot run in the drift reference's empty in-memory DB (the
+/// `up_sql != reference_sql` dance of v0001), and — more importantly — the ABSENCE of a
+/// row here is a meaningful, fail-closed answer. A login with no credential row is
+/// `unprovisioned`, so a user that predates this migration, or one inserted by a path we
+/// forgot, is refused rather than silently trusted.
+///
+/// ## What it fixes
+///
+/// `init_database` seeded `admin@lataif.com` / `admin` as owner of tenant-1/branch-main
+/// into every empty server DB, and nothing in the application could ever change it
+/// (`/auth/login` only reads, `/auth/register` was removed in B2A1, `users` is not a
+/// synced table). So the "owner authorization" of M6-B2A1/B2A2 — and `/auth/login`'s
+/// owner JWT, which unlocks `/sync/push` for anyone on the Wi-Fi — rested on a constant
+/// printed in the source. This table is where that stops being true.
+///
+/// `up_sql == reference_sql` (only CREATEs).
+pub const V0003_SERVER_CREDENTIALS: Migration = Migration {
+    version: 3,
+    name: "server_credentials",
+    up_sql: V0003_SQL,
+    reference_sql: V0003_SQL,
+};
+
+const V0003_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS server_credentials (
+    user_id             TEXT NOT NULL PRIMARY KEY,
+    credential_state    TEXT NOT NULL,
+    password_changed_at TEXT,
+    provisioned_at      TEXT,
+    provisioned_by      TEXT,
+    -- Audit only: WHY this row was classified as it was. Never an authorization input.
+    classified_reason   TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+
+    CHECK (credential_state IN ('unprovisioned', 'active', 'disabled', 'recovery_required')),
+    -- An active credential must record when its password was last set. A row claiming
+    -- 'active' with no such moment is a row nobody deliberately created.
+    CHECK (credential_state <> 'active' OR password_changed_at IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_server_credentials_state
+    ON server_credentials (credential_state);
+"#;
 
 /// M6-B2A — records WHICH installation this server DB belongs to and what role it was
 /// explicitly configured for. Deliberately NOT carrying `authority_epoch` or any
@@ -317,7 +369,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2]);
+        assert_eq!(report.applied, vec![1, 2, 3]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
@@ -332,7 +384,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2]);
+        assert_eq!(second.already_current, vec![1, 2, 3]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

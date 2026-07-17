@@ -92,7 +92,18 @@ pub fn init_database(db_path: &Path) -> Result<Connection> {
         let tenant_id = "tenant-1";
         let branch_id = "branch-main";
         let user_id = "user-owner";
-        let default_password = bcrypt::hash("admin", 10).unwrap_or_default();
+        // M6-B2A4 — the owner PLACEHOLDER is still created (the stable `user-owner` /
+        // `tenant-1` / `branch-main` ids are load-bearing across the whole embedded
+        // server), but it gets NO usable password. This used to be `bcrypt::hash("admin")`,
+        // which meant every LATAIF installation on earth shipped the same working owner
+        // login — and `/auth/login` hands out an OWNER JWT, so that constant unlocked
+        // `/sync/push` for anyone on the Wi-Fi.
+        //
+        // `"!"` is not a bcrypt hash: `bcrypt::verify` errors on it and every caller does
+        // `.unwrap_or(false)`, so no password can match. There is nothing to guess,
+        // because there is nothing there. `server_credentials` records the same fact
+        // explicitly as `unprovisioned`; the owner sets a real password once, locally.
+        let default_password = super::credentials::UNUSABLE_HASH.to_string();
 
         conn.execute(
             "INSERT INTO tenants (id, name, slug, plan, active, created_at, updated_at) VALUES (?1, 'My Business', 'mybiz', 'enterprise', 1, ?2, ?2)",
@@ -128,6 +139,15 @@ pub fn init_database(db_path: &Path) -> Result<Connection> {
     // it. Idempotent and independent of the seed block above (which only runs on
     // a virgin DB) so existing installs get it too.
     seed_system_principal(&conn)?;
+
+    // M6-B2A4 — classify every login exactly once, then leave it alone forever.
+    //
+    // Runs on EVERY start, not just a virgin DB: the whole point is to reach the installs
+    // that already carry the shipped `admin`/`admin` owner and devalue it. Idempotent and
+    // transactional — a user that already has a credential row is untouched, so a restart
+    // can never re-decide a provisioned password.
+    let mut conn = conn;
+    super::credentials::classify_existing(&mut conn)?;
 
     Ok(conn)
 }

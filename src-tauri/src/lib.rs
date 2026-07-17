@@ -174,6 +174,79 @@ async fn primary_migrate_legacy(
     Ok(serde_json::json!({ "mode": m.as_str() }))
 }
 
+// ── M6-B2A4 — server owner provisioning ─────────────────────────────────────
+//
+// Local Tauri commands only. There is deliberately NO HTTP route: before the first
+// provisioning this machine has no way to tell its owner from anyone else, so the only
+// boundary available is local control of the OS and the running app. That is a real
+// boundary — it is not a remotely authenticated one, and nothing here pretends it is.
+//
+// What this replaces: `init_database` used to seed `admin@lataif.com` / `admin` as owner
+// of tenant-1/branch-main into every empty server DB, and nothing could change it. That
+// constant satisfied `authorize_owner` (so B2A1/B2A2's owner gate was decoration) and
+// `/auth/login`, which returns an OWNER JWT and thereby unlocked `/sync/push` to anyone
+// on the same Wi-Fi.
+
+/// Read-only. Needs no credentials: whether this server still needs setup is not a secret,
+/// and the UI must be able to ask before it can sensibly prompt for anything.
+#[tauri::command]
+async fn server_owner_status(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<serde_json::Value, String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    let ready = sync::credentials::owner_credentials_ready(&conn);
+    Ok(serde_json::json!({
+        "provisioned": ready,
+        "provisioningRequired": !ready,
+        "minPasswordLength": sync::credentials::MIN_PASSWORD_LEN,
+        // The UI must send this verbatim; it is not free text.
+        "confirmationPhrase": sync::credentials::PROVISION_CONFIRMATION,
+    }))
+}
+
+/// §6 — first provisioning of the embedded server's owner password.
+///
+/// Takes no current password: there is none, by construction. `provisioned_by` is the
+/// fixed constant `local-bootstrap` and is never taken from the caller — at this moment no
+/// verified identity exists to name, and recording a renderer-supplied one would be
+/// writing a claim down as a fact.
+#[tauri::command]
+async fn server_owner_provision(
+    state: tauri::State<'_, AppHandleState>,
+    password: String,
+    password_confirmation: String,
+    confirmation: String,
+) -> Result<serde_json::Value, String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    let user_id =
+        sync::credentials::provision_owner(&conn, &password, &password_confirmation, &confirmation)
+            .map_err(|code| code.to_string())?;
+    // Deliberately no automatic primary claim and no automatic root-key import: setting a
+    // password says who the owner is, not what this machine's role should be.
+    Ok(serde_json::json!({ "provisioned": true, "userId": user_id }))
+}
+
+/// §8 — change the password of an already-provisioned owner. Requires the current one.
+#[tauri::command]
+async fn server_owner_change_password(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    current_password: String,
+    new_password: String,
+    new_password_confirmation: String,
+) -> Result<serde_json::Value, String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    let user_id = sync::credentials::change_owner_password(
+        &conn,
+        &email,
+        &current_password,
+        &new_password,
+        &new_password_confirmation,
+    )
+    .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "changed": true, "userId": user_id }))
+}
+
 // Raw-Druck von ZPL an einen benannten Drucker (Zebra-Tags). Windows-only;
 // auf anderen Plattformen ein sauberer Fehler statt Compile-Bruch.
 #[tauri::command]
@@ -628,6 +701,10 @@ pub fn run() {
             primary_configure,
             primary_adopt_legacy,
             primary_migrate_legacy,
+            // M6-B2A4 — local-only owner provisioning. No HTTP equivalent exists.
+            server_owner_status,
+            server_owner_provision,
+            server_owner_change_password,
             sync_server_stop,
             sync_server_status,
             discover_lan_servers,

@@ -1832,6 +1832,10 @@ function SyncTab() {
   // M6-B2A2: die serverseitig gehaltene Rolle. localStorage ist hier nur noch Anzeige.
   const [primaryState, setPrimaryState] = useState<string>('');
 
+  // M6-B2A4: hat dieser Server ueberhaupt schon ein Owner-Passwort? Bis dahin ist
+  // gar nichts moeglich — kein Login, kein Serverstart, keine Owner-Aktion.
+  const [ownerSetupRequired, setOwnerSetupRequired] = useState(false);
+
   async function refreshServer() {
     const { getServerStatus } = await import('@/core/sync/sync-server');
     const s = await getServerStatus();
@@ -1839,6 +1843,63 @@ function SyncTab() {
     const lan = await import('@/core/sync/auto-lan');
     const st = await lan.getPrimaryStatus();
     setPrimaryState(st?.state ?? '');
+    const { getServerOwnerStatus } = await import('@/core/sync/server-owner');
+    const owner = await getServerOwnerStatus();
+    setOwnerSetupRequired(owner?.provisioningRequired ?? false);
+  }
+
+  // M6-B2A4: Erst-Provisionierung des Server-Owner-Passworts.
+  //
+  // Bis v0.8.23 lieferte jede Installation `admin@lataif.com` / `admin` als
+  // funktionierenden Owner aus — dieselbe Konstante ueberall, unaenderbar. Sie erfuellte
+  // die Owner-Pruefung UND `/auth/login`, das ein Owner-JWT ausstellt und damit
+  // `/sync/push` fuer jeden im WLAN oeffnete. Jetzt gibt es gar kein Passwort mehr,
+  // bis der Owner hier eines setzt.
+  //
+  // Diese Seite ist KEINE Sicherheitsgrenze: sie sammelt nur ein. Rust prueft Phrase,
+  // Laenge und Bestaetigung und lehnt eine zweite Provisionierung ab.
+  async function handleProvisionOwner() {
+    const { provisionServerOwner, getServerOwnerStatus } = await import('@/core/sync/server-owner');
+    const status = await getServerOwnerStatus();
+    if (!status) return;
+
+    const password = window.prompt(
+      `Choose a password for this machine's sync server owner (min ${status.minPasswordLength} characters).\n\n` +
+      `This replaces the old shared default. Other devices will use it to sync to this machine.`
+    );
+    if (!password) return;
+    const confirm = window.prompt('Repeat the password:');
+    if (!confirm) return;
+    if (!window.confirm(
+      'Set this machine as the sync server owner?\n\n' +
+      'Keep this password safe — it is the only way to change the sync role later.'
+    )) return;
+
+    try {
+      await provisionServerOwner(password, confirm, status.confirmationPhrase);
+      await refreshServer();
+      setResult('Server owner password set. You can now start the LAN sync server.');
+    } catch (err) {
+      setResult(explain(String(err)));
+    }
+  }
+
+  async function handleChangeOwnerPassword() {
+    const { changeServerOwnerPassword } = await import('@/core/sync/server-owner');
+    const email = window.prompt('Owner email:');
+    if (!email) return;
+    const current = window.prompt('Current owner password:');
+    if (!current) return;
+    const next = window.prompt('New password (min 12 characters):');
+    if (!next) return;
+    const confirm = window.prompt('Repeat the new password:');
+    if (!confirm) return;
+    try {
+      await changeServerOwnerPassword(email, current, next, confirm);
+      setResult('Server owner password changed.');
+    } catch (err) {
+      setResult(explain(String(err)));
+    }
   }
 
   useEffect(() => {
@@ -1863,6 +1924,11 @@ function SyncTab() {
   // Ausschalten setzt die Rolle auf `client` (nicht `unconfigured`): das Geraet soll
   // weiter synchronisieren duerfen, nur nicht mehr selbst Host sein.
   function explain(msg: string): string {
+    if (msg.includes('OWNER_PROVISIONING_REQUIRED')) return 'This server has no owner password yet. Set one first (Server owner setup).';
+    if (msg.includes('OWNER_ALREADY_PROVISIONED')) return 'This server already has an owner password. Use "Change password" instead.';
+    if (msg.includes('PROVISION_PASSWORD_TOO_SHORT')) return 'Password too short (minimum 12 characters).';
+    if (msg.includes('PROVISION_PASSWORD_MISMATCH')) return 'The two passwords do not match.';
+    if (msg.includes('PROVISION_CONFIRMATION_REQUIRED')) return 'Setup was not confirmed.';
     if (msg.includes('OWNER_AUTHORIZATION_REQUIRED')) return 'Not authorized: owner credentials required.';
     if (msg.includes('INSTANCE_ID_MISMATCH')) return 'This server database belongs to a different installation. The role cannot be changed here.';
     if (msg.includes('LEGACY_ADOPTION_NOT_CONFIRMED')) return 'Adoption was not confirmed.';
@@ -1991,6 +2057,28 @@ function SyncTab() {
                 <code style={{ color: '#0F0F10', background: '#F2F7FA', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>{serverStatus.url}</code>
               )}
             </p>
+            {/* M6-B2A4: ohne Owner-Passwort geht gar nichts — zuerst anzeigen. */}
+            {ownerSetupRequired && (
+              <div style={{ marginBottom: 12, padding: '10px 12px', background: '#EFF6FF', borderRadius: 6, border: '1px solid #93C5FD' }}>
+                <p style={{ fontSize: 12, color: '#1E3A8A', lineHeight: 1.6, marginBottom: 8 }}>
+                  <strong>Server owner setup required.</strong>{' '}
+                  This machine has no sync server password yet. Earlier versions shipped a
+                  shared default; it has been disabled. Set your own password before starting
+                  the LAN server.
+                </p>
+                <Button variant="primary" onClick={handleProvisionOwner}>Set server owner password</Button>
+              </div>
+            )}
+            {!ownerSetupRequired && (
+              <div style={{ marginBottom: 12 }}>
+                <button
+                  onClick={handleChangeOwnerPassword}
+                  style={{ fontSize: 12, color: '#6B7280', textDecoration: 'underline', background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+                >
+                  Change server owner password
+                </button>
+              </div>
+            )}
             {/* M6-B2A2: einmalige Bestaetigung einer erkannten Legacy-Serverrolle. */}
             {primaryState === 'legacy_adoption_required' && (
               <div style={{ marginBottom: 12, padding: '10px 12px', background: '#FFF7ED', borderRadius: 6, border: '1px solid #FDBA74' }}>

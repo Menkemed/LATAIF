@@ -34,6 +34,8 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
 
 pub mod auth;
+/// M6-B2A4 — server owner provisioning; kills the shipped `admin`/`admin` default.
+pub mod credentials;
 pub mod db;
 /// M6-B2A — stable per-install device identity (`sync_install_id.key`).
 pub mod install_id;
@@ -119,6 +121,19 @@ impl SyncServer {
                 state.as_str()
             ));
         }
+        // M6-B2A4 — a server with no provisioned owner binds NO port at all.
+        //
+        // Not merely "login would fail": until an owner password exists, this machine has
+        // no way to tell its owner from anyone else on the network, so it has no business
+        // offering a sync surface. Checked before the port, like the role gate above.
+        // Local business in `lataif.db` is unaffected — this only withholds LAN sync.
+        if !credentials::owner_credentials_ready(&conn) {
+            return Err(format!(
+                "{}: set a server owner password in Settings → Sync before starting the LAN server",
+                primary::ERR_OWNER_PROVISIONING_REQUIRED
+            ));
+        }
+
         if state == primary::State::ReadOnly {
             // The recorded binding belongs to a different installation — a copied or
             // restored server DB. Serve reads, refuse sync writes, change nothing.
