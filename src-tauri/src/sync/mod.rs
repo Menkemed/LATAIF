@@ -34,6 +34,10 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
 
 pub mod auth;
+/// M6-B2C — authority certificates and host transfer. INACTIVE: no route consults them.
+pub mod authority;
+/// M6-B2C3 — `canonical_bytes_v1`: the only byte layout we sign or authenticate.
+pub mod canonical;
 /// M6-B2A4 — server owner provisioning; kills the shipped `admin`/`admin` default.
 pub mod credentials;
 pub mod db;
@@ -45,8 +49,24 @@ pub mod mobile_page;
 pub mod models;
 /// M6-B2A — explicit static primary: role resolution, legacy migration, write gate.
 pub mod primary;
+/// M6-B2B — encrypted tenant-root recovery bundle (Argon2id + AES-256-GCM). INACTIVE.
+pub mod recovery;
+/// M6-B2BC1 §1 — audit of the recovery entry path. Tests only; no production code.
+pub mod recovery_entry;
 pub mod routes;
 pub mod secret;
+/// M6-B2C4 — root custody and the two-phase authority transfer. INACTIVE.
+pub mod transfer;
+/// M6-B2C5 §4–§9 — the cross-host end-to-end proof. Tests only; no production code.
+///
+/// Separate from `transfer`'s own suite because it tests a different thing: not what the
+/// state machine decides, but what survives two real machines and real restarts. It uses
+/// files on disk where the other uses in-memory databases — which is the only way a
+/// "survives a crash" claim can mean anything.
+#[cfg(test)]
+mod transfer_e2e;
+/// M6-B2B — tenant trust root: private Ed25519 key file + public record. INACTIVE.
+pub mod trust_root;
 
 const MDNS_SERVICE: &str = "_lataif-sync._tcp.local.";
 // HTTPS-Port fuer die Mobile-Seite (Live-Kamera am Handy braucht secure context).

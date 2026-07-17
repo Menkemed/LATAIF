@@ -247,6 +247,506 @@ async fn server_owner_change_password(
     Ok(serde_json::json!({ "changed": true, "userId": user_id }))
 }
 
+// ── M6-B2B/B2C — tenant trust root, recovery bundle, authority certificates ──
+//
+// INACTIVE. These commands create and verify trust material; nothing consults it yet.
+// `/sync/push` is still gated solely by the B2A role (`may_write_sync()`), and it stays
+// that way until an explicit later slice activates the new contract. See
+// `authority::tests::a20_no_sync_write_gate_was_activated`.
+//
+// Why every mutating command re-checks the owner: a Tauri command arrives from the
+// renderer and there is no Rust-side session. The same reasoning as M6-B2A1 — only
+// knowledge of the owner password, verified against the bcrypt hash in the server DB, is
+// a boundary the renderer cannot cross by itself. `configured_by` / `issued_by` therefore
+// always come from `OwnerAuth`, never from the call.
+
+/// Everything a trust/authority command needs, resolved once, in Rust.
+struct TrustCtx {
+    conn: rusqlite::Connection,
+    install_id: String,
+    app_data_dir: std::path::PathBuf,
+    primary_state: sync::primary::State,
+}
+
+/// Resolve the context. The `primary_state` is re-derived here from
+/// `primary_host_config` + the install-id file — never taken from the caller.
+fn trust_ctx(server: &sync::SyncServer) -> Result<TrustCtx, String> {
+    let (conn, install_id) = open_config_db(server)?;
+    let app_data_dir = server
+        .db_path
+        .parent()
+        .ok_or_else(|| "Could not determine the app data directory".to_string())?
+        .to_path_buf();
+    let cfg = sync::primary::load_config(&conn, "tenant-1", "branch-main")
+        .map_err(|e| format!("Primary config unreadable: {e}"))?;
+    let primary_state = sync::primary::resolve_state(cfg.as_ref(), &install_id);
+    Ok(TrustCtx { conn, install_id, app_data_dir, primary_state })
+}
+
+/// Read-only. Deliberately needs no credentials: knowing *whether* a root exists is not
+/// a secret, and the owner must be able to see the state before being asked for a password.
+#[tauri::command]
+async fn trust_root_status(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let trust = sync::trust_root::resolve_trust_state(&c.conn, &c.app_data_dir, "tenant-1");
+    let rec = sync::trust_root::load_active_root(&c.conn, "tenant-1")
+        .map_err(|e| format!("Trust root unreadable: {e}"))?;
+    // M6-B2C4 §9 — custody is the other half of "may this machine sign?", and it is the
+    // half that is invisible from the filesystem. After a transfer commit the key file and
+    // the root record both still look perfectly healthy on the source; only this says it
+    // has stopped. Reporting it here is what makes "why can't I sign?" answerable without
+    // reading the DB by hand.
+    let custody = sync::transfer::custody_state(&c.conn, "tenant-1", &c.install_id)
+        .map_err(|e| format!("Custody unreadable: {e}"))?;
+    Ok(serde_json::json!({
+        "state": trust.as_str(),
+        // Both must hold. `trust.may_sign()` alone was the whole answer before B2C4 and is
+        // now only the local-key half of it.
+        "maySign": trust.may_sign() && custody.is_some_and(|s| s.may_sign()),
+        "trustMaySign": trust.may_sign(),
+        "custodyState": custody.map(|s| s.as_str()),
+        "custodyMaySign": custody.map(|s| s.may_sign()),
+        "configured": rec.is_some(),
+        "rootKeyIdShort": rec.as_ref().map(|r| sync::trust_root::redact(&r.root_key_id)),
+        // The fingerprint is public by design — it is what an owner compares by phone.
+        "fingerprint": rec.as_ref().map(|r| r.fingerprint.clone()),
+        "generation": rec.as_ref().map(|r| r.generation),
+        "primaryState": c.primary_state.as_str(),
+    }))
+}
+
+#[tauri::command]
+async fn trust_root_initialize(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let rec = sync::trust_root::initialize_root(
+        &c.conn,
+        &c.app_data_dir,
+        "tenant-1",
+        &c.install_id,
+        c.primary_state,
+        &owner,
+    )
+    .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "rootKeyIdShort": sync::trust_root::redact(&rec.root_key_id),
+        "fingerprint": rec.fingerprint,
+        "generation": rec.generation,
+        "createdBy": owner.user_id(),
+    }))
+}
+
+/// Export the encrypted recovery bundle.
+///
+/// Two passwords, on purpose: the owner's login password authorizes the *server* action,
+/// and a separate recovery passphrase encrypts the *file*. The bundle leaves the building,
+/// so it must not be unlockable by the same secret that unlocks the shop.
+///
+/// Returns the bundle as a string; writing it somewhere is the caller's decision, so this
+/// command never picks a path — least of all inside the app data dir, where it would sit
+/// next to the key it is supposed to be a backup of.
+#[tauri::command]
+async fn trust_root_export_recovery(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    recovery_password: String,
+    recovery_password_confirmation: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let _owner =
+        sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    sync::recovery::validate_recovery_password(&recovery_password, &recovery_password_confirmation)
+        .map_err(|code| code.to_string())?;
+
+    let rec = sync::trust_root::load_active_root(&c.conn, "tenant-1")
+        .map_err(|e| format!("Trust root unreadable: {e}"))?
+        .ok_or_else(|| sync::trust_root::ERR_ROOT_KEY_MISSING.to_string())?;
+    let key = sync::trust_root::load_key(&c.app_data_dir, &rec).map_err(|code| code.to_string())?;
+
+    // Carry the last authority we know as a HINT. Recovery must not read it as a promise —
+    // the lost primary may well have issued a higher epoch before it died (§14).
+    let last = sync::authority::load_active(&c.conn, "tenant-1", "branch-main")
+        .map_err(|e| format!("Authority unreadable: {e}"))?;
+    let hints = sync::recovery::AuthorityHints {
+        authority_id: last.as_ref().map(|a| a.authority_id.clone()),
+        authority_epoch: last.as_ref().map(|a| a.authority_epoch),
+        certificate_serial: last.as_ref().map(|a| a.certificate_serial.clone()),
+    };
+
+    let created_at: String = c
+        .conn
+        .query_row(
+            "SELECT created_at FROM tenant_trust_roots WHERE root_key_id = ?1",
+            rusqlite::params![rec.root_key_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+
+    let bundle =
+        sync::recovery::export_bundle(&key, &rec, &created_at, &recovery_password, &hints)
+            .map_err(|code| code.to_string())?;
+    let text = sync::recovery::serialize_bundle(&bundle).map_err(|code| code.to_string())?;
+
+    Ok(serde_json::json!({
+        "filename": sync::recovery::BUNDLE_FILENAME,
+        "bundle": text,
+        "fingerprint": rec.fingerprint,
+    }))
+}
+
+#[tauri::command]
+async fn trust_root_import_recovery(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    recovery_password: String,
+    bundle: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    if !c.primary_state.may_write_sync() {
+        return Err(sync::trust_root::ERR_ROOT_NOT_PRIMARY.to_string());
+    }
+    let imported = sync::recovery::import_bundle(&bundle, "tenant-1", &recovery_password)
+        .map_err(|code| code.to_string())?;
+    sync::trust_root::restore_root(
+        &c.conn,
+        &c.app_data_dir,
+        &imported.record,
+        imported.seed,
+        &c.install_id,
+        &owner,
+    )
+    .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "fingerprint": imported.record.fingerprint,
+        "generation": imported.record.generation,
+        // Hints only — the caller must treat these as "possibly stale" (§14).
+        "lastKnownAuthorityEpoch": imported.hints.authority_epoch,
+    }))
+}
+
+// ── M6-B2C commands ─────────────────────────────────────────────────────────
+
+/// Build an issuing context. Fails closed if the root cannot sign.
+fn issue_ready<'a>(
+    c: &'a TrustCtx,
+    rec: &'a sync::trust_root::TrustRootRecord,
+    key: &'a sync::trust_root::RootKey,
+    owner: &'a sync::primary::OwnerAuth,
+) -> sync::authority::IssueContext<'a> {
+    sync::authority::IssueContext {
+        conn: &c.conn,
+        tenant_id: "tenant-1",
+        branch_id: "branch-main",
+        install_id: &c.install_id,
+        primary_state: c.primary_state,
+        root: rec,
+        key,
+        owner,
+    }
+}
+
+/// One door to a signing root, so every command reports the same precise reason when
+/// there isn't one (missing → restore a bundle; lost → re-enrol; damaged → fix the file).
+fn load_signing_root(
+    c: &TrustCtx,
+) -> Result<(sync::trust_root::TrustRootRecord, sync::trust_root::RootKey), String> {
+    sync::trust_root::require_signing_root(&c.conn, &c.app_data_dir, "tenant-1")
+        .map_err(|code| code.to_string())
+}
+
+#[tauri::command]
+async fn authority_status(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let active = sync::authority::load_active(&c.conn, "tenant-1", "branch-main")
+        .map_err(|e| format!("Authority unreadable: {e}"))?;
+    let known = sync::authority::highest_known_epoch(&c.conn, "tenant-1", "branch-main")
+        .map_err(|e| format!("Authority unreadable: {e}"))?;
+    Ok(serde_json::json!({
+        "configured": active.is_some(),
+        "authorityEpoch": active.as_ref().map(|a| a.authority_epoch),
+        "status": active.as_ref().map(|a| a.status.as_str()),
+        "isThisInstallation": active
+            .as_ref()
+            .map(|a| a.server_instance_id == c.install_id),
+        // "highest epoch THIS database knows" — deliberately not called "the" highest.
+        "locallyKnownHighestEpoch": known,
+        // The flag that keeps everyone honest about what this slice does.
+        "enforcedForSyncWrites": false,
+    }))
+}
+
+#[tauri::command]
+async fn authority_initialize(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let (rec, key) = load_signing_root(&c)?;
+    let cert = sync::authority::initialize_authority(&issue_ready(&c, &rec, &key, &owner))
+        .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "authorityEpoch": cert.payload.authority_epoch,
+        "certificateSerial": cert.payload.certificate_serial,
+        "issuedBy": owner.user_id(),
+    }))
+}
+
+// ── M6-B2C4 §8 — the two-phase transfer, T1 … T7 ────────────────────────────
+//
+// The old `authority_issue_transfer` / `authority_import_transfer` pair is gone. It moved a
+// certificate and called that a transfer, while the private root key — the only thing that
+// can sign — stayed on the source. These seven commands move the key, under the owner's
+// passphrase, with one irreversible step in the middle.
+//
+// OWNER BOUNDARY, stated plainly: T1 (`issue`), T4 (`confirm`), T5 (`commit`) and the abort
+// run on the SOURCE and go through the hardened `authorize_owner`. T2 (`import`), T3
+// (`receipt`) and T7 (`activate`) run on the TARGET, which by definition may not have this
+// tenant's user table yet — a fresh machine has no owner to authenticate against. Their gate
+// is therefore local and different in kind: possession of the package plus its passphrase,
+// and the install-id binding in the AAD. Claiming they were owner-authenticated would be a
+// lie; this comment is where that is said out loud instead.
+
+/// T1 — the source issues the transfer package. Nothing changes hands yet.
+#[tauri::command]
+async fn authority_transfer_issue(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    target_install_id: String,
+    passphrase: String,
+    passphrase_confirmation: String,
+    confirmation: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let (rec, key) = load_signing_root(&c)?;
+    let req = sync::transfer::IssueRequest {
+        conn: &c.conn,
+        tenant_id: "tenant-1",
+        branch_id: "branch-main",
+        install_id: &c.install_id,
+        primary_state: c.primary_state,
+        root: &rec,
+        key: &key,
+        owner: &owner,
+    };
+    let (bundle, record) = sync::transfer::issue(
+        &req,
+        target_install_id.trim(),
+        &passphrase,
+        &passphrase_confirmation,
+        &confirmation,
+    )
+    .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "transferId": record.transfer_id,
+        "bundle": bundle.to_json().map_err(|c| c.to_string())?,
+        "filename": sync::transfer::TRANSFER_FILENAME,
+        "state": record.state.as_str(),
+    }))
+}
+
+/// T2 — the target imports the package. Local gate; see the boundary note above.
+#[tauri::command]
+async fn authority_transfer_import(
+    state: tauri::State<'_, AppHandleState>,
+    bundle: String,
+    passphrase: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let outcome =
+        sync::transfer::import(&c.conn, &c.app_data_dir, &bundle, &c.install_id, &passphrase)
+            .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "outcome": format!("{outcome:?}") }))
+}
+
+/// T3 — the target proves the import. Re-runnable after a crash.
+#[tauri::command]
+async fn authority_transfer_receipt(
+    state: tauri::State<'_, AppHandleState>,
+    transfer_id: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let receipt =
+        sync::transfer::create_receipt(&c.conn, &c.app_data_dir, transfer_id.trim(), &c.install_id)
+            .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "receipt": receipt.to_json().map_err(|c| c.to_string())?,
+        "confirmationLevel": receipt.confirmation_level,
+    }))
+}
+
+/// T4 — the source verifies the receipt.
+#[tauri::command]
+async fn authority_transfer_confirm(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    receipt: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let (rec, _key) = load_signing_root(&c)?;
+    sync::transfer::confirm_receipt(&c.conn, &c.app_data_dir, &receipt, &c.install_id, &rec)
+        .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "state": "target_confirmed",
+        "confirmationLevel": sync::transfer::CONFIRMATION_LEVEL,
+    }))
+}
+
+/// T5 — the source stops being the authority. Irreversible.
+#[tauri::command]
+async fn authority_transfer_commit(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    transfer_id: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    sync::transfer::commit(&c.conn, transfer_id.trim(), &c.install_id, &owner)
+        .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "state": "committed" }))
+}
+
+/// T6 — the source hands out the commit secret. Re-exportable after a crash.
+#[tauri::command]
+async fn authority_transfer_commit_token(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    transfer_id: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let token =
+        sync::transfer::export_commit_token(&c.conn, &c.app_data_dir, transfer_id.trim(), &c.install_id)
+            .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "token": token.to_json().map_err(|c| c.to_string())? }))
+}
+
+/// T7 — the target becomes the authority. Local gate; see the boundary note above.
+#[tauri::command]
+async fn authority_transfer_activate(
+    state: tauri::State<'_, AppHandleState>,
+    token: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let outcome = sync::transfer::activate(&c.conn, &c.app_data_dir, &token, &c.install_id)
+        .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "outcome": format!("{outcome:?}"),
+        // The transfer moves custody, never the B2A role. Saying so in the response keeps
+        // the caller from assuming the machine is now a primary.
+        "primaryRoleUnchanged": true,
+    }))
+}
+
+/// §10 — the source aborts. Only before the commit.
+#[tauri::command]
+async fn authority_transfer_abort(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    transfer_id: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let (rec, _key) = load_signing_root(&c)?;
+    let token = sync::transfer::abort(&c.conn, &c.app_data_dir, transfer_id.trim(), &c.install_id, &rec)
+        .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "token": token.to_json().map_err(|c| c.to_string())? }))
+}
+
+/// §10 — the target stands down.
+#[tauri::command]
+async fn authority_transfer_abort_import(
+    state: tauri::State<'_, AppHandleState>,
+    token: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    sync::transfer::import_abort(&c.conn, &c.app_data_dir, &token, &c.install_id)
+        .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "state": "aborted" }))
+}
+
+/// §14 — forced takeover when the old primary is gone for good.
+///
+/// The result is `recovery_pending` unless this database provably holds the full epoch
+/// history. That is the honest answer: we cannot know what a machine we cannot reach
+/// issued before it died, and inventing a safe-looking epoch jump would only hide it.
+#[tauri::command]
+async fn authority_prepare_recovery(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    confirmation: String,
+    hint_epoch: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let (rec, key) = load_signing_root(&c)?;
+    let (cert, status) = sync::authority::prepare_recovery(
+        &issue_ready(&c, &rec, &key, &owner),
+        hint_epoch,
+        &confirmation,
+    )
+    .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({
+        "authorityEpoch": cert.payload.authority_epoch,
+        "status": status.as_str(),
+        "isActive": status == sync::authority::CertStatus::Active,
+        "certificateSerial": cert.payload.certificate_serial,
+    }))
+}
+
+#[tauri::command]
+async fn authority_revoke(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    authority_id: String,
+    reason: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    sync::authority::revoke_authority(
+        &c.conn,
+        "tenant-1",
+        "branch-main",
+        &authority_id,
+        reason.as_deref(),
+        &owner,
+    )
+    .map_err(|code| code.to_string())?;
+    Ok(serde_json::json!({ "revoked": true, "revokedBy": owner.user_id() }))
+}
+
 // Raw-Druck von ZPL an einen benannten Drucker (Zebra-Tags). Windows-only;
 // auf anderen Plattformen ein sauberer Fehler statt Compile-Bruch.
 #[tauri::command]
@@ -705,6 +1205,24 @@ pub fn run() {
             server_owner_status,
             server_owner_provision,
             server_owner_change_password,
+            // M6-B2B/B2C — trust root + authority. INACTIVE: no route consults them.
+            trust_root_status,
+            trust_root_initialize,
+            trust_root_export_recovery,
+            trust_root_import_recovery,
+            authority_status,
+            authority_initialize,
+            authority_transfer_issue,
+            authority_transfer_import,
+            authority_transfer_receipt,
+            authority_transfer_confirm,
+            authority_transfer_commit,
+            authority_transfer_commit_token,
+            authority_transfer_activate,
+            authority_transfer_abort,
+            authority_transfer_abort_import,
+            authority_prepare_recovery,
+            authority_revoke,
             sync_server_stop,
             sync_server_status,
             discover_lan_servers,

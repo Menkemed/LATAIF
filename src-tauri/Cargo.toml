@@ -48,6 +48,17 @@ local-ip-address = "0.6"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rcgen = "0.13"
 rustls = "0.23"
+argon2 = "0.5"
+aes-gcm = "0.10"
+ed25519-dalek = "2"
+zeroize = "1"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+# M6-B2C4 — HMAC-SHA256 fuer den Target-Receipt, HKDF-SHA256 fuer die Versiegelung der
+# Source-Secrets. Beide bauen auf `digest 0.10`, das sha2 bereits mitbringt.
+hmac = "0.12"
+hkdf = "0.12"
 
 # M5-B — native WebView2-Reload-Bruecke (F5/Ctrl+R). Nur Windows. Bewusst auf die von wry
 # bereits transitiv genutzten Versionen unifiziert (Cargo.lock pinnt webview2-com 0.38.2 /
