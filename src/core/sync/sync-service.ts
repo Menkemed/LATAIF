@@ -8,11 +8,22 @@ import { getDatabase, saveDatabase, saveDatabaseDurably } from '../db/database';
 import { query } from '../db/helpers';
 import { isTransactionActive } from '../db/transaction-context';
 import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
+// M6-B2DE4 §5 — the apply path (denylist, identifier gates, applyUpsert, the DELETE branch and
+// the applySyncChange dispatcher) lives in the node-safe `apply-change.ts` so the behavioral gate
+// can drive the REAL functions against a real sql.js database. Same implementation, one home.
+import { applySyncChange, assertSyncIdentifier } from './apply-change';
+// Re-exported so existing import paths (`from '.../sync-service'`) keep working.
+export { isControlPlaneTable, isValidSyncIdentifier } from './apply-change';
 
 const SYNC_INTERVAL = 30_000; // 30 seconds
 const STORAGE_KEY_URL = 'lataif_sync_url';
 const STORAGE_KEY_TOKEN = 'lataif_sync_token';
 const STORAGE_KEY_LAST = 'lataif_sync_last_id';
+
+// M6-B2DE4 §5 — the control-plane denylist, the identifier charset/gates and applyUpsert moved to
+// the node-safe `apply-change.ts` (imported above) so the behavioral gate can drive the REAL
+// functions. `isControlPlaneTable` / `isValidSyncIdentifier` are re-exported above; the apply loop
+// below calls `applySyncChange`, and `trackChange` uses `assertSyncIdentifier` for its echo-SELECT.
 
 let syncTimer: ReturnType<typeof setInterval> | null = null;
 let syncing = false;
@@ -81,6 +92,10 @@ export function trackChange(tableName: string, recordId: string, action: 'insert
     // (applyUpsert nutzt dort nur die record_id).
     let syncData: Record<string, unknown> = data;
     if (action === 'insert' || action === 'update') {
+      // §3 — `tableName` is interpolated into the echo-SELECT below. It comes from local caller
+      // code (always a canonical literal), but gate it anyway so no path — not even this local
+      // one — turns a non-canonical name into SQL. record_id stays a bound parameter.
+      assertSyncIdentifier('table', tableName);
       try {
         const rows = query(`SELECT * FROM ${tableName} WHERE id = ?`, [recordId]);
         if (rows.length > 0) syncData = rows[0];
@@ -182,15 +197,16 @@ async function pullChanges(): Promise<number> {
       applyChangesAtomic(changes, {
         begin: () => db.run('BEGIN'),
         applyChange: (change) => {
-          // change.data kann ein base64-Foto (~1 MB) sein — NIE das ganze Objekt loggen.
-          const data = JSON.parse((change as unknown as { data: string }).data);
-          if (change.action === 'insert' || change.action === 'update') {
-            applyUpsert(db, change.table_name, change.record_id, data);
-            if (change.action === 'insert' && change.table_name === 'products') {
-              insertedProductIds.push(change.record_id);
-            }
-          } else if (change.action === 'delete') {
-            db.run(`DELETE FROM ${change.table_name} WHERE id = ?`, [change.record_id]);
+          // M6-B2DE4 §5 — the REAL apply dispatcher (control-plane denylist → SYNC_CONTROL_PLANE_
+          // TABLE_FORBIDDEN, canonical table name → SYNC_TABLE_NAME_INVALID, canonical column
+          // names → SYNC_COLUMN_NAME_INVALID, then applyUpsert / DELETE). It throws BEFORE any SQL
+          // string is built, so a poisoned change aborts the whole batch (applyChangesAtomic rolls
+          // back) and the cursor does NOT advance. record_id stays a bound parameter.
+          applySyncChange(db, change as unknown as import('./apply-change').ApplyChange);
+          // Only reached when the change applied cleanly: track inserted products for the
+          // duplicate-review event fired after the store reload.
+          if (change.action === 'insert' && change.table_name === 'products') {
+            insertedProductIds.push(change.record_id);
           }
         },
         commit: () => db.run('COMMIT'),
@@ -292,38 +308,8 @@ async function pullChanges(): Promise<number> {
   return changes.length;
 }
 
-function applyUpsert(db: any, table: string, id: string, data: Record<string, unknown>) {
-  // v0.4.1 — `id` aus den Spalten herausfiltern. Die /mobile-Capture-Seite
-  // schickt `id` MIT im data-Objekt. Ohne diesen Filter entsteht unten
-  // `INSERT INTO t (id, id, …)` (duplizierte Spalte) → der ganze Change
-  // scheitert und das vom Handy hochgeladene Repair/Produkt/Customer taucht
-  // nie auf. Die separate `id`-Variable bleibt der maßgebliche Schlüssel.
-  const keys = Object.keys(data).filter(k => k !== 'id');
-  if (keys.length === 0) return;
-
-  // Try update first
-  const setClause = keys.map(k => `${k} = ?`).join(', ');
-  const values = keys.map(k => {
-    const v = data[k];
-    // typeof null === 'object' → JSON.stringify(null) ergäbe den TEXT 'null' in der
-    // DB. Der bricht jede IS-NULL-Logik — v.a. ledger_entries.reverses_entry_id:
-    // hasLedgerEntries/Reversals sehen keine Originale mehr (Backfill dupliziert,
-    // Stornos werden No-ops). null/undefined müssen als echtes SQL-NULL binden.
-    if (v === null || v === undefined) return null;
-    return typeof v === 'object' ? JSON.stringify(v) : v;
-  });
-
-  const result = db.exec(`SELECT COUNT(*) FROM ${table} WHERE id = ?`, [id]);
-  const exists = result.length > 0 && result[0].values[0][0] > 0;
-
-  if (exists) {
-    db.run(`UPDATE ${table} SET ${setClause} WHERE id = ?`, [...values, id]);
-  } else {
-    const allKeys = ['id', ...keys];
-    const placeholders = allKeys.map(() => '?').join(', ');
-    db.run(`INSERT INTO ${table} (${allKeys.join(', ')}) VALUES (${placeholders})`, [id, ...values]);
-  }
-}
+// applyUpsert moved to `apply-change.ts` (M6-B2DE4 §5) — same conflict logic, one home, and now
+// importable by the behavioral gate against a real sql.js database.
 
 // ── Full sync cycle ──
 

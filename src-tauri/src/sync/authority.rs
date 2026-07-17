@@ -1433,25 +1433,39 @@ mod tests {
         let routes_src = include_str!("routes.rs");
         let prod = &routes_src[..routes_src.find("#[cfg(test)]").unwrap_or(routes_src.len())];
         assert!(prod.contains("may_write_sync()"), "the B2A gate is still there");
-        for forbidden in [
+
+        // M6-B2DE1 §12 — the old contract "routes.rs contains no device/cutover word at all"
+        // is now too broad and had to go: §10 REQUIRES the push/pull paths to observe legacy
+        // activity, which means calling `cutover::record_legacy_activity`. So the scan can no
+        // longer forbid the mere strings "cutover" or "device". What it forbids instead is the
+        // set of functions that would turn observation into a GATE — anything that verifies a
+        // certificate, checks custody, or resolves trust as a precondition for accepting a
+        // legacy write. Those never appear in a legacy sync path, and their absence is the real
+        // invariant. The behaviour itself (legacy still flows, activity still blocks readiness)
+        // is proved by the S* and L* tests, which §12 makes the primary evidence.
+        for forbidden_gate in [
             "verify_certificate",
-            "authority",
-            "trust_root",
-            "certificate",
-            "authority_epoch",
-            // M6-B2C4 — the transfer and custody machinery joins the list. §16 is explicit
-            // that /sync/push gets NO mandatory authority gate in this slice, and custody is
-            // exactly the kind of thing that looks tempting to check there.
-            "custody",
-            "transfer",
-            "root_custody",
             "require_custody",
+            "require_signing_authority",
+            "classify_claim",
+            "resolve_trust_state",
+            "resolve_state_with_registry",
         ] {
             assert!(
-                !prod.to_lowercase().contains(forbidden),
-                "routes.rs must not consult {forbidden} yet — B2C is inactive"
+                !prod.contains(forbidden_gate),
+                "routes.rs must not call {forbidden_gate} — a legacy sync path may observe, never gate"
             );
         }
+        // And the two things that ARE allowed now are allowed for a stated reason, not by
+        // accident: the control-plane denylist (isolation) and activity observation.
+        assert!(
+            prod.contains("sync_policy::is_forbidden"),
+            "the control-plane denylist must gate the legacy batch (§4)"
+        );
+        assert!(
+            prod.contains("record_legacy_activity"),
+            "legacy activity must be observed after a successful sync (§10)"
+        );
 
         // 2. The write gate is still purely a function of the B2A state.
         assert!(State::Primary.may_write_sync());

@@ -693,6 +693,413 @@ async fn authority_transfer_abort_import(
     Ok(serde_json::json!({ "state": "aborted" }))
 }
 
+// ── M6-B2DE — device identity, enrollment and cutover readiness ──────────────
+//
+// OWNER BOUNDARY, restated for this slice because it is not the same on both sides:
+//
+//   * The DEVICE side (`device_status`, `device_create_enrollment_request`,
+//     `device_import_enrollment_response`) runs on a machine that may have no owner at all —
+//     `users` is not a synced table, so a fresh client has no owner row for this tenant.
+//     Their gate is local: possession of the device key, and the install-id + public-key
+//     binding the certificate carries. Calling `authorize_owner` there would be theatre.
+//
+//   * The SERVER side (`device_approve_enrollment`, `device_revoke`, `device_retire`,
+//     `device_mark_compromised`, `device_begin_reenrollment`, and every inventory/cutover
+//     command) runs on the primary and goes through the hardened `authorize_owner`.
+//
+// No HTTP route is added by any of this. /sync/push and /sync/pull are untouched (§14).
+
+/// The device's own view of itself. Read-only; creates nothing.
+#[tauri::command]
+async fn device_status(state: tauri::State<'_, AppHandleState>) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    // The registry wins over the local files. A device whose owner revoked it an hour ago
+    // still has a perfectly healthy key and certificate on disk — asking only the disk would
+    // answer "Enrolled" forever, which is the one answer that must not be possible here.
+    let st = sync::device::resolve_state_with_registry(&c.conn, &c.app_data_dir);
+    let local_only = sync::device::resolve_state(&c.app_data_dir);
+    let cert = sync::device::load_certificate(&c.app_data_dir).ok();
+    Ok(serde_json::json!({
+        "state": st.as_str(),
+        "canProvePossession": st.can_prove_possession(),
+        // Surfaced separately so the difference is visible rather than resolved silently:
+        // when these disagree, the registry revoked a device that does not know it yet.
+        "localFileState": local_only.as_str(),
+        "deviceIdShort": sync::device::load_identity(&c.app_data_dir)
+            .ok()
+            .map(|k| sync::trust_root::redact(k.device_id())),
+        "certificateSerial": cert.as_ref().map(|x| x.payload.certificate_serial.clone()),
+        "deviceRole": cert.as_ref().map(|x| x.payload.device_role.clone()),
+        "capabilities": cert.as_ref().map(|x| x.payload.capabilities.clone()),
+        // §8 — whether a tenant root has been pinned out-of-band on this machine. Once true,
+        // a re-import that names a different root is refused; the UI can show the pin status
+        // so an owner knows the device is anchored, not merely holding a certificate.
+        "trustAnchorPinned": sync::device::trust_anchor_exists(&c.app_data_dir),
+        // §5 — whether the stored certificate still verifies against the PINNED anchor (same
+        // tenant/branch/root/generation, signature by the pinned root). False when unenrolled,
+        // or if a certificate and anchor ever disagreed — the honest signal the UI can show.
+        "certificateMatchesAnchor":
+            sync::device::verify_certificate_against_anchor(&c.app_data_dir).is_ok(),
+        // The transfer of a certificate never grants a role on the LAN. Saying so in the
+        // response keeps a caller from assuming enrollment changed anything about the host.
+        "primaryRoleUnchanged": true,
+    }))
+}
+
+/// §6 — the device creates its key (once) and a signed enrollment request.
+#[tauri::command]
+async fn device_create_enrollment_request(
+    state: tauri::State<'_, AppHandleState>,
+    requested_role: String,
+    requested_capabilities: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    // `load_or_create` never re-keys a damaged or certificate-bearing install: it fails.
+    let key = sync::device::load_or_create_identity(&c.app_data_dir).map_err(|e| e.to_string())?;
+    let req = sync::device::create_enrollment_request(
+        &key,
+        &c.install_id,
+        "tenant-1",
+        "branch-main",
+        requested_role.trim(),
+        &requested_capabilities,
+        1,
+        3,
+    )
+    .map_err(|e| e.to_string())?;
+    // §7 — persist the request locally the moment it is created. The import path checks the
+    // signed approval's request id + nonce against THIS stored request, so it must be on disk
+    // before the response ever comes back.
+    sync::device::store_enrollment_request(&c.app_data_dir, &req).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "request": req.to_json().map_err(|e| e.to_string())?,
+        "filename": "device-enrollment-request.lataif",
+        "requestId": req.request_id,
+        // What the file proves, spelled out where the caller sees it.
+        "proves": "possession of this device's private key",
+        "doesNotProve": "owner consent, tenant membership, or any capability",
+    }))
+}
+
+/// §7 — the owner approves a request and the authority signs a device certificate.
+#[tauri::command]
+async fn device_approve_enrollment(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    request: String,
+    granted_role: String,
+    granted_capabilities: Vec<String>,
+    device_label: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let req = sync::device::EnrollmentRequest::from_json(&request).map_err(|e| e.to_string())?;
+    let (rec, key) = load_signing_root(&c)?;
+    // §7 — an active authority AND an active custody are required. `require_signing_authority`
+    // is the M6-B2C4 gate; going around it would let a retired host mint device identities.
+    let current = sync::authority::require_signing_authority(
+        &c.conn, "tenant-1", "branch-main", &c.install_id, c.primary_state, &rec,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let grant = sync::device::EnrollmentGrant {
+        tenant_id: "tenant-1",
+        branch_id: "branch-main",
+        device_role: granted_role.trim(),
+        capabilities: &granted_capabilities,
+        protocol_min: 1,
+        protocol_max: 3,
+        device_label: device_label.as_deref(),
+    };
+    let (cert, resp) = sync::device::approve_enrollment(
+        &c.conn,
+        &req,
+        &grant,
+        &rec,
+        &key,
+        &current.authority_id,
+        current.authority_epoch,
+        // §7 — the root-signed authority certificate, verbatim, so the target can verify the
+        // whole chain from a root it does not yet trust.
+        &current.certificate,
+        &owner,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "response": resp.to_json().map_err(|e| e.to_string())?,
+        "filename": "device-enrollment-response.lataif",
+        "certificateSerial": cert.payload.certificate_serial,
+        "deviceId": cert.payload.device_id,
+        // §8 — the fingerprint the TARGET owner must confirm out-of-band before importing.
+        // Surfaced here so the primary's UI can show it (as text and a QR code) for a
+        // side-by-side check. It is NOT a secret — it is a value that must be compared, and
+        // comparing it is what anchors trust.
+        "tenantRootFingerprint": resp.tenant_root_fingerprint,
+        // The grant decides these, never the request.
+        "grantedRole": cert.payload.device_role,
+        "grantedCapabilities": cert.payload.capabilities,
+    }))
+}
+
+/// §8 — the device adopts its certificate, pinning the tenant root out-of-band.
+///
+/// `expected_root_fingerprint` is the 64 hex characters the owner confirmed through a separate
+/// channel (a QR code from the primary, a phone call). On a first import it is mandatory — the
+/// target has no prior knowledge of the root, so this human-confirmed value is the anchor. It
+/// is deliberately NOT read from the response file: a fingerprint taken from the same file that
+/// carries the chain would let the file vouch for itself, which is exactly what §8 forbids.
+///
+/// Local gate; the target may have no owner (see the boundary note above), so there is no
+/// `authorize_owner` here — possession of the device key, the install-id binding, and the
+/// out-of-band fingerprint are the trust.
+#[tauri::command]
+async fn device_import_enrollment_response(
+    state: tauri::State<'_, AppHandleState>,
+    response: String,
+    expected_root_fingerprint: Option<String>,
+    expected_request_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let outcome = sync::device::import_enrollment_response(
+        &c.app_data_dir,
+        &response,
+        &c.install_id,
+        expected_root_fingerprint.as_deref(),
+        expected_request_id.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "outcome": format!("{outcome:?}"),
+        "state": sync::device::resolve_state(&c.app_data_dir).as_str(),
+        // §8 — none of these happen here.
+        "primaryClaimed": false,
+        "serverStarted": false,
+        "lanModeChanged": false,
+    }))
+}
+
+/// §9 — the owner ends a device's life. One command, an explicit reason code.
+#[tauri::command]
+async fn device_revoke(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    device_id: String,
+    reason_code: String,
+    note: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    // The three flavours are separate values, not a boolean: "revoked" and "compromised"
+    // call for different responses from a human reading the log later.
+    let reason = match reason_code.as_str() {
+        "revoked" => sync::device::RevokeReason::Revoked,
+        "retired" => sync::device::RevokeReason::Retired,
+        "compromised" => sync::device::RevokeReason::Compromised,
+        _ => return Err("DEVICE_REVOKE_REASON_INVALID".to_string()),
+    };
+    sync::device::revoke_device(&c.conn, device_id.trim(), reason, note.as_deref(), &owner)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "deviceId": device_id, "reasonCode": reason_code, "irreversible": true }))
+}
+
+/// §9 — the owner asks a device to come back with a new keypair.
+#[tauri::command]
+async fn device_begin_reenrollment(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    device_id: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    sync::device::begin_reenrollment(&c.conn, device_id.trim(), &owner).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "deviceId": device_id,
+        "state": "reenrollment_required",
+        // There is no silent key rotation: the old certificate names a key nobody holds.
+        "oldCertificate": "superseded",
+    }))
+}
+
+// ── §10/§11 — the legacy inventory ──────────────────────────────────────────
+
+#[tauri::command]
+async fn inventory_add_item(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    owner_label: String,
+    device_description: Option<String>,
+    expected_user_or_location: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let id = sync::cutover::add_item(
+        &c.conn,
+        "tenant-1",
+        "branch-main",
+        &owner_label,
+        device_description.as_deref(),
+        expected_user_or_location.as_deref(),
+        &owner,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "inventoryItemId": id, "status": "expected" }))
+}
+
+/// §10 — link an item to a device. Explicit, by a human, always.
+#[tauri::command]
+async fn inventory_link_device(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    inventory_item_id: String,
+    device_id: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    sync::cutover::link_to_device(&c.conn, inventory_item_id.trim(), device_id.trim(), &owner)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "status": "enrolled", "linkedBy": "owner" }))
+}
+
+#[tauri::command]
+async fn inventory_resolve_item(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    inventory_item_id: String,
+    status: String,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let st = sync::cutover::ItemStatus::parse(&status).ok_or("INVENTORY_INVALID")?;
+    sync::cutover::resolve_item(&c.conn, inventory_item_id.trim(), st, &reason, &owner)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "status": st.as_str(), "resolved": st.is_resolved() }))
+}
+
+#[tauri::command]
+async fn inventory_list(state: tauri::State<'_, AppHandleState>) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let items = sync::cutover::list_items(&c.conn, "tenant-1", "branch-main")
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<serde_json::Value> = items
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "inventoryItemId": i.inventory_item_id,
+                "ownerLabel": i.owner_label,
+                "status": i.status.as_str(),
+                "resolved": i.status.is_resolved(),
+                "linkedDeviceId": i.linked_device_id,
+                "resolutionReason": i.resolution_reason,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "items": rows,
+        "unresolvedCount": items.iter().filter(|i| !i.status.is_resolved()).count(),
+    }))
+}
+
+/// §11 — the owner attests the inventory is complete.
+#[tauri::command]
+async fn inventory_attest(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    confirmation: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let att =
+        sync::cutover::attest_inventory(&c.conn, "tenant-1", "branch-main", &confirmation, &owner)
+            .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "attestationId": att.attestation_id,
+        "itemCount": att.item_count,
+        "resolvedCount": att.resolved_count,
+        "statementVersion": att.statement_version,
+        // §11 — the app MUST show this. It is returned with the result so a UI cannot render
+        // a success without the sentence that says what was actually claimed.
+        "statement": sync::cutover::STATEMENT_TEXT,
+        "isTechnicalProof": false,
+    }))
+}
+
+/// §12 — readiness. Read-only, and it never activates anything.
+#[tauri::command]
+async fn cutover_readiness(state: tauri::State<'_, AppHandleState>) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let r = sync::cutover::evaluate_readiness(
+        &c.conn, "tenant-1", "branch-main", &c.install_id, c.primary_state,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "state": r.state.as_str(),
+        "isReady": r.is_ready(),
+        "blockingReasons": r.blocking_reasons,
+        "hasAttestation": r.has_attestation,
+        "allItemsResolved": r.all_items_resolved,
+        "allEnrolledItemsHaveActiveCertificates": r.all_enrolled_items_have_active_certificates,
+        "hasActiveAuthority": r.has_active_authority,
+        "hasActiveRootCustody": r.has_active_root_custody,
+        "ownerProvisioned": r.owner_provisioned,
+        "staticPrimaryBindingValid": r.static_primary_binding_valid,
+        "legacyActivityAfterAttestation": r.legacy_activity_after_attestation,
+        // §12 — always false here. B3/B4 owns the v4 write path.
+        "protocolV4WritePathReady": r.protocol_v4_write_path_ready,
+        "readyMeansPreparedNotActivated": true,
+    }))
+}
+
+#[tauri::command]
+async fn cutover_mark_ready(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    let owner = sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let r = sync::cutover::mark_ready(
+        &c.conn, "tenant-1", "branch-main", &c.install_id, c.primary_state, &owner,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "state": r.state.as_str(), "isReady": r.is_ready() }))
+}
+
+/// §12 — the activation attempt, which always refuses in this slice.
+///
+/// It exists so the refusal is a tested contract instead of an absence. Legacy clients keep
+/// working; nothing here can stop them.
+#[tauri::command]
+async fn cutover_attempt_activation(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    let c = trust_ctx(&state.server)?;
+    sync::primary::authorize_owner(&c.conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    sync::cutover::attempt_activation(
+        &c.conn, "tenant-1", "branch-main", &c.install_id, c.primary_state,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "activated": false }))
+}
+
 /// §14 — forced takeover when the old primary is gone for good.
 ///
 /// The result is `recovery_pending` unless this database provably holds the full epoch
@@ -1223,6 +1630,20 @@ pub fn run() {
             authority_transfer_abort_import,
             authority_prepare_recovery,
             authority_revoke,
+            device_status,
+            device_create_enrollment_request,
+            device_approve_enrollment,
+            device_import_enrollment_response,
+            device_revoke,
+            device_begin_reenrollment,
+            inventory_add_item,
+            inventory_link_device,
+            inventory_resolve_item,
+            inventory_list,
+            inventory_attest,
+            cutover_readiness,
+            cutover_mark_ready,
+            cutover_attempt_activation,
             sync_server_stop,
             sync_server_status,
             discover_lan_servers,

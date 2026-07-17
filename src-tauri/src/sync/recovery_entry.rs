@@ -436,11 +436,27 @@ mod audit {
             "async fn authority_transfer_receipt",
             "async fn authority_transfer_activate",
             "async fn authority_transfer_abort_import",
+            // M6-B2DE — the device side has the same shape and the same reason: a machine
+            // that has only ever created a keypair has no owner row for this tenant, because
+            // `users` is not synced.
+            "async fn device_status",
+            "async fn device_create_enrollment_request",
+            "async fn device_import_enrollment_response",
         ] {
             let start = prod.find(cmd).unwrap_or_else(|| panic!("{cmd} not found"));
             let rest = &prod[start..];
             let end = rest[1..].find("\n#[tauri::command]").map(|i| i + 1).unwrap_or(rest.len());
-            let body = &rest[..end];
+            // EXECUTABLE lines only. The window between one command and the next contains
+            // prose, and that prose is where the boundary is explained — including the
+            // sentence "calling authorize_owner here would be theatre". A scan that could
+            // not tell a prohibition from a call would force us to delete the explanation to
+            // keep the test green, which is backwards. (M6-B2DE hit exactly this.)
+            let body: String = rest[..end]
+                .lines()
+                .map(|l| l.trim_start())
+                .filter(|l| !l.starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
             assert!(
                 !body.contains("authorize_owner"),
                 "{cmd} runs on a machine that may have no owner — calling authorize_owner \
@@ -459,6 +475,24 @@ mod audit {
         assert!(
             prod.contains("OWNER BOUNDARY"),
             "the source/target authorization split must be documented at the commands"
+        );
+        // The comment filter above must not have turned this test into a no-op: the
+        // owner-gated commands still have to trip it. If this stops failing, the filter ate
+        // the code as well as the prose.
+        let owner_gated = {
+            let start = prod.find("async fn authority_transfer_issue").unwrap();
+            let rest = &prod[start..];
+            let end = rest[1..].find("\n#[tauri::command]").map(|i| i + 1).unwrap_or(rest.len());
+            rest[..end]
+                .lines()
+                .map(|l| l.trim_start())
+                .filter(|l| !l.starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            owner_gated.contains("authorize_owner"),
+            "the filter must still see real calls, not just strip everything"
         );
     }
 

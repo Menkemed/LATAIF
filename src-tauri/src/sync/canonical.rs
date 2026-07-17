@@ -70,6 +70,26 @@ pub const DOMAIN_TRANSFER_ABORT: &[u8] = b"LATAIF-TRANSFER-ABORT-V1";
 pub const DOMAIN_TRANSFER_SEAL: &[u8] = b"LATAIF-TRANSFER-SEAL-V1";
 pub const DOMAIN_RECOVERY_BUNDLE_AAD: &[u8] = b"LATAIF-RECOVERY-BUNDLE-AAD-V1";
 
+// M6-B2DE — device identity.
+//
+// A device certificate and an authority certificate are both Ed25519 signatures made by the
+// same tenant root over a set of ids. Without their own separators, bytes shaped like one
+// could verify as the other — and an authority certificate is a far bigger claim than a
+// device certificate. Two separators, one for each direction of the enrollment.
+pub const DOMAIN_DEVICE_CERT: &[u8] = b"LATAIF-DEVICE-CERT-V1";
+/// Signed by the DEVICE's own key, not the root: this is the only place in the protocol
+/// where a key other than the tenant root signs anything, which is exactly why it may not
+/// share a domain with anything the root signs.
+pub const DOMAIN_DEVICE_ENROLLMENT_REQUEST: &[u8] = b"LATAIF-DEVICE-ENROLLMENT-REQUEST-V1";
+/// M6-B2DE2 §7 — the signed enrollment approval. Signed by the ACTIVE AUTHORITY, which in this
+/// design holds and uses the tenant root key (there is no separate authority signing key — see
+/// `authority::sign_payload`). It binds the entire grant — request id + nonce, device identity,
+/// role/capabilities/protocol, the issued device certificate's serial and hash, and the
+/// registry record hash — into ONE signed statement, so no security-relevant enrollment
+/// metadata travels unsigned. Its own separator keeps an approval's bytes from ever verifying
+/// as a device or authority certificate, and vice versa.
+pub const DOMAIN_DEVICE_ENROLLMENT_APPROVAL: &[u8] = b"LATAIF-DEVICE-ENROLLMENT-APPROVAL-V1";
+
 /// Encoder for `canonical_bytes_v1`.
 ///
 /// Deliberately not `Serialize`-driven: the whole point is that the layout is written out
@@ -334,9 +354,15 @@ mod tests {
         let commit = same_fields(DOMAIN_TRANSFER_COMMIT);
         let rec_aad = same_fields(DOMAIN_RECOVERY_BUNDLE_AAD);
         let tr_aad = same_fields(DOMAIN_TRANSFER_BUNDLE_AAD);
+        // M6-B2DE / B2DE2 — the three device-enrollment domains. The approval is the newest and
+        // the most dangerous to confuse: it is a full grant, so a byte-collision with a device
+        // certificate would let one verify as the other.
+        let dev_cert = same_fields(DOMAIN_DEVICE_CERT);
+        let dev_req = same_fields(DOMAIN_DEVICE_ENROLLMENT_REQUEST);
+        let dev_appr = same_fields(DOMAIN_DEVICE_ENROLLMENT_APPROVAL);
 
-        // Identical fields, five different byte strings.
-        let all = [&cert, &receipt, &commit, &rec_aad, &tr_aad];
+        // Identical fields, eight different byte strings.
+        let all = [&cert, &receipt, &commit, &rec_aad, &tr_aad, &dev_cert, &dev_req, &dev_appr];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
                 if i != j {

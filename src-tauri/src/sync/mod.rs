@@ -55,6 +55,12 @@ pub mod recovery;
 pub mod recovery_entry;
 pub mod routes;
 pub mod secret;
+/// M6-B2DE1 §3 — the single source of truth for which tables the business sync may touch.
+pub mod sync_policy;
+/// M6-B2E — legacy inventory, owner attestation, cutover readiness. INACTIVE.
+pub mod cutover;
+/// M6-B2D — the device's own cryptographic identity + enrollment. INACTIVE.
+pub mod device;
 /// M6-B2C4 — root custody and the two-phase authority transfer. INACTIVE.
 pub mod transfer;
 /// M6-B2C5 §4–§9 — the cross-host end-to-end proof. Tests only; no production code.

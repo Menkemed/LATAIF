@@ -48,7 +48,329 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0004_TENANT_TRUST_ROOTS,
     V0005_AUTHORITY_CERTIFICATES,
     V0006_AUTHORITY_TRANSFER_AND_ROOT_CUSTODY,
+    V0007_DEVICE_IDENTITY_AND_ENROLLMENT_REGISTRY,
+    V0008_LEGACY_INVENTORY_AND_CUTOVER_READINESS,
 ];
+
+/// M6-B2E — the legacy device inventory and cutover readiness.
+///
+/// ## The uncomfortable truth this migration is shaped around
+///
+/// **v0.8.23 has no stable device identity.** The §2 audit confirmed it: a client is a JWT
+/// naming a user, and `/sync/push` records `user_id` and nothing else. So there is no scan,
+/// no query and no heuristic that can enumerate the old device fleet. Technical completeness
+/// is not merely unimplemented here — it is *impossible* against the data that exists.
+///
+/// Everything below therefore models an **administrative owner declaration**, not a
+/// discovery. The tables are named for what they hold: an inventory the owner typed, and an
+/// attestation the owner signed their name to. Nothing in this schema may ever be presented
+/// as "the system found all your devices".
+///
+/// ## Why linking is manual
+///
+/// A column like `linked_device_id` is where a well-meaning future change would put
+/// "matched by hostname" or "matched by last sync time". Both would be guesses presented as
+/// facts, and a wrong guess here marks a device as accounted for when it is not. The column
+/// exists; the automation does not, and `resolution_reason` forces a human sentence.
+///
+/// `up_sql == reference_sql` (only CREATEs).
+pub const V0008_LEGACY_INVENTORY_AND_CUTOVER_READINESS: Migration = Migration {
+    version: 8,
+    name: "legacy_inventory_and_cutover_readiness",
+    up_sql: V0008_SQL,
+    reference_sql: V0008_SQL,
+};
+
+const V0008_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS legacy_device_inventory (
+    inventory_item_id   TEXT NOT NULL PRIMARY KEY,
+    tenant_id           TEXT NOT NULL,
+    branch_id           TEXT NOT NULL,
+
+    owner_label         TEXT NOT NULL,
+    device_description  TEXT,
+    expected_user_or_location TEXT,
+
+    status              TEXT NOT NULL,
+    -- ONLY ever set by an explicit owner decision. No IP, hostname, mDNS name, last-sync
+    -- time or database copy may populate this.
+    linked_device_id    TEXT,
+    resolution_reason   TEXT,
+
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    resolved_at         TEXT,
+    created_by          TEXT,
+    resolved_by         TEXT,
+
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+    FOREIGN KEY (linked_device_id) REFERENCES enrolled_devices(device_id) ON DELETE RESTRICT,
+
+    CHECK (status IN ('expected','enrolled','retired','lost','excluded','unknown')),
+    -- An item is only 'enrolled' because a human said which device it is.
+    CHECK (status <> 'enrolled' OR linked_device_id IS NOT NULL),
+    -- I4 — writing off a device needs a reason a person wrote. "lost" without a sentence is
+    -- how an unaccounted machine becomes a tidy row.
+    CHECK (status NOT IN ('retired','lost','excluded')
+           OR (resolution_reason IS NOT NULL AND length(trim(resolution_reason)) > 0)),
+    CHECK (status NOT IN ('enrolled','retired','lost','excluded') OR resolved_at IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_status
+    ON legacy_device_inventory (tenant_id, branch_id, status);
+
+-- A device answers for at most one inventory item. Two items pointing at one machine would
+-- make the resolved count a lie.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_linked_device_unique
+    ON legacy_device_inventory (linked_device_id) WHERE linked_device_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS legacy_inventory_attestations (
+    attestation_id      TEXT NOT NULL PRIMARY KEY,
+    tenant_id           TEXT NOT NULL,
+    branch_id           TEXT NOT NULL,
+
+    -- Which version of the inventory was attested. An attestation that did not name one
+    -- would silently keep applying to an inventory someone edited afterwards.
+    inventory_revision  INTEGER NOT NULL,
+    inventory_hash      TEXT NOT NULL,
+
+    item_count          INTEGER NOT NULL,
+    resolved_count      INTEGER NOT NULL,
+    unresolved_count    INTEGER NOT NULL,
+
+    attested_at         TEXT NOT NULL,
+    attested_by         TEXT NOT NULL,
+    -- The exact wording the owner agreed to, versioned: if the sentence ever changes, old
+    -- attestations must not silently inherit the new meaning.
+    statement_version   INTEGER NOT NULL,
+    statement_text      TEXT NOT NULL,
+
+    superseded_at       TEXT,
+
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+
+    CHECK (item_count >= 0),
+    CHECK (resolved_count >= 0),
+    CHECK (unresolved_count >= 0),
+    CHECK (resolved_count + unresolved_count = item_count),
+    -- §11 — an attestation with anything unresolved is not a completeness claim. The schema
+    -- refuses to record one, so no code path can create readiness from it.
+    CHECK (unresolved_count = 0),
+    CHECK (inventory_revision >= 1),
+    CHECK (statement_version >= 1)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attestation_one_current
+    ON legacy_inventory_attestations (tenant_id, branch_id) WHERE superseded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS sync_cutover_state (
+    tenant_id           TEXT NOT NULL,
+    branch_id           TEXT NOT NULL,
+
+    state               TEXT NOT NULL,
+    inventory_revision  INTEGER NOT NULL DEFAULT 1,
+    current_attestation_id TEXT,
+
+    -- §12 — the flag that keeps this slice honest. B3/B4 owns the write path; until it
+    -- exists, readiness can be reached and activation cannot.
+    protocol_v4_write_path_ready INTEGER NOT NULL DEFAULT 0,
+
+    -- §13 — legacy traffic seen AFTER an attestation. Deliberately a boolean and a
+    -- timestamp, NOT a device id: legacy clients have no identity, so naming a culprit
+    -- would be a fabrication.
+    legacy_activity_after_attestation INTEGER NOT NULL DEFAULT 0,
+    last_legacy_activity_at TEXT,
+
+    blocked_reason      TEXT,
+    updated_at          TEXT NOT NULL,
+    updated_by          TEXT,
+
+    PRIMARY KEY (tenant_id, branch_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+    FOREIGN KEY (current_attestation_id)
+        REFERENCES legacy_inventory_attestations(attestation_id) ON DELETE RESTRICT,
+
+    CHECK (state IN ('legacy_open','inventory_draft','inventory_attested',
+                     'enrollment_in_progress','ready_for_protocol_activation',
+                     'activation_blocked')),
+    -- §12 — v4_only and legacy_blackout_active are NOT valid values in this slice. They are
+    -- absent from the CHECK rather than merely unused, so a future edit that wants them has
+    -- to change the schema and notice this comment.
+    CHECK (protocol_v4_write_path_ready IN (0, 1)),
+    CHECK (legacy_activity_after_attestation IN (0, 1)),
+    CHECK (state <> 'ready_for_protocol_activation' OR current_attestation_id IS NOT NULL),
+    CHECK (state <> 'activation_blocked' OR blocked_reason IS NOT NULL),
+    CHECK (legacy_activity_after_attestation = 0 OR last_legacy_activity_at IS NOT NULL)
+);
+"#;
+
+/// M6-B2D — the device registry: who is allowed to be a client of this tenant.
+///
+/// ## Why a registry at all
+///
+/// The §2 audit found that a client's only identity is its JWT claims — a bearer token
+/// naming a *user*. Two machines with one login are indistinguishable. This is the server's
+/// side of fixing that: a row per device, keyed by a public key the device can prove it
+/// holds.
+///
+/// ## Why the public key lives here and the private key does not
+///
+/// Copy this database and you get every device's public key, every certificate, every
+/// state — and the ability to impersonate exactly none of them. That is the same separation
+/// as `sync_install_id.key` and `sync_tenant_root.key`, one level further down.
+///
+/// `up_sql == reference_sql` (only CREATEs).
+pub const V0007_DEVICE_IDENTITY_AND_ENROLLMENT_REGISTRY: Migration = Migration {
+    version: 7,
+    name: "device_identity_and_enrollment_registry",
+    up_sql: V0007_SQL,
+    reference_sql: V0007_SQL,
+};
+
+const V0007_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS enrolled_devices (
+    device_id           TEXT NOT NULL PRIMARY KEY,
+    tenant_id           TEXT NOT NULL,
+    branch_id           TEXT NOT NULL,
+    install_id          TEXT NOT NULL,
+    device_public_key   TEXT NOT NULL,
+    device_label        TEXT,
+
+    device_role         TEXT NOT NULL,
+    capabilities        TEXT NOT NULL,
+    protocol_min        INTEGER NOT NULL,
+    protocol_max        INTEGER NOT NULL,
+
+    state               TEXT NOT NULL,
+    active_certificate_serial TEXT,
+
+    created_at          TEXT NOT NULL,
+    enrolled_at         TEXT,
+    last_seen_at        TEXT,
+    revoked_at          TEXT,
+    retired_at          TEXT,
+
+    created_by          TEXT,
+    revoked_by          TEXT,
+    retired_by          TEXT,
+
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+
+    CHECK (state IN ('pending','active','revoked','retired','compromised',
+                     'reenrollment_required')),
+    CHECK (protocol_min >= 1),
+    CHECK (protocol_max >= protocol_min),
+    -- Every terminal state records when it happened.
+    CHECK (state <> 'active'   OR (enrolled_at IS NOT NULL
+                                   AND active_certificate_serial IS NOT NULL)),
+    CHECK (state <> 'revoked'  OR revoked_at IS NOT NULL),
+    CHECK (state <> 'retired'  OR retired_at IS NOT NULL),
+    CHECK (state <> 'compromised' OR revoked_at IS NOT NULL)
+);
+
+-- One public key belongs to one device, tenant-wide. Two rows sharing a key would mean two
+-- "devices" that can each satisfy the other's proof-of-possession.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_device_public_key_unique
+    ON enrolled_devices (tenant_id, device_public_key);
+
+CREATE INDEX IF NOT EXISTS idx_device_install
+    ON enrolled_devices (tenant_id, install_id);
+
+CREATE TABLE IF NOT EXISTS device_certificates (
+    certificate_serial  TEXT NOT NULL PRIMARY KEY,
+    device_id           TEXT NOT NULL,
+    tenant_id           TEXT NOT NULL,
+    branch_id           TEXT NOT NULL,
+    install_id          TEXT NOT NULL,
+    device_public_key   TEXT NOT NULL,
+
+    authority_id        TEXT NOT NULL,
+    authority_epoch     INTEGER NOT NULL,
+    root_key_id         TEXT NOT NULL,
+    root_generation     INTEGER NOT NULL,
+
+    -- The complete signed certificate, verbatim. The columns are an index over it, never
+    -- the source of truth — every check re-derives from this blob.
+    certificate         TEXT NOT NULL,
+    payload_hash        TEXT NOT NULL,
+    previous_certificate_serial TEXT,
+
+    status              TEXT NOT NULL,
+    issued_at           TEXT NOT NULL,
+    issued_by           TEXT,
+    created_at          TEXT NOT NULL,
+    revoked_at          TEXT,
+
+    FOREIGN KEY (device_id) REFERENCES enrolled_devices(device_id) ON DELETE RESTRICT,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+
+    CHECK (status IN ('active','superseded','revoked','retired','compromised')),
+    CHECK (authority_epoch >= 1),
+    CHECK (root_generation >= 1),
+    CHECK (status NOT IN ('revoked','compromised') OR revoked_at IS NOT NULL)
+);
+
+-- At most ONE active certificate per device. Enforced by the DB rather than by a function a
+-- later refactor can drop: "a device has one current identity" is an invariant.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_device_cert_one_active
+    ON device_certificates (device_id) WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_device_cert_device
+    ON device_certificates (device_id, status);
+
+CREATE TABLE IF NOT EXISTS device_enrollment_requests (
+    request_id          TEXT NOT NULL PRIMARY KEY,
+    device_id           TEXT NOT NULL,
+    install_id          TEXT NOT NULL,
+    device_public_key   TEXT NOT NULL,
+    request_hash        TEXT NOT NULL,
+
+    requested_tenant_id TEXT NOT NULL,
+    requested_branch_id TEXT NOT NULL,
+    requested_role      TEXT NOT NULL,
+    requested_capabilities TEXT NOT NULL,
+    protocol_min        INTEGER NOT NULL,
+    protocol_max        INTEGER NOT NULL,
+
+    state               TEXT NOT NULL,
+    issued_certificate_serial TEXT,
+
+    created_at          TEXT NOT NULL,
+    imported_at         TEXT NOT NULL,
+    decided_at          TEXT,
+    decided_by          TEXT,
+    decision_reason     TEXT,
+
+    CHECK (state IN ('imported','approved','rejected','superseded')),
+    CHECK (state <> 'approved' OR (decided_at IS NOT NULL
+                                   AND issued_certificate_serial IS NOT NULL)),
+    CHECK (state <> 'rejected' OR decided_at IS NOT NULL)
+);
+
+-- A request nonce is used once. Re-importing the same request bytes is idempotent by
+-- request_id; a DIFFERENT request reusing a nonce is a replay and the index refuses it.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_enrollment_request_hash
+    ON device_enrollment_requests (request_hash);
+
+CREATE TABLE IF NOT EXISTS device_revocations (
+    device_id       TEXT NOT NULL,
+    certificate_serial TEXT NOT NULL,
+    tenant_id       TEXT NOT NULL,
+    reason_code     TEXT NOT NULL,
+    reason          TEXT,
+    revoked_at      TEXT NOT NULL,
+    revoked_by      TEXT NOT NULL,
+
+    PRIMARY KEY (device_id, certificate_serial),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+
+    CHECK (reason_code IN ('revoked','retired','compromised','reenrolled'))
+);
+"#;
 
 /// M6-B2C4 — the two-phase authority transfer and the custody of the private root.
 ///
@@ -652,7 +974,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
@@ -670,7 +992,7 @@ mod tests {
     // re-ran an already-applied version would be how a live shop loses data.
     #[test]
     fn a_partially_migrated_db_applies_only_the_missing_versions() {
-        for stop_at in [3usize, 5usize] {
+        for stop_at in [3usize, 5usize, 7usize] {
             let conn = base_db();
             let partial = &EMBEDDED_MIGRATIONS[..stop_at];
             let first = run_migrations(&conn, partial).unwrap();
@@ -679,7 +1001,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=6).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=8).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -692,7 +1014,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -794,7 +1116,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

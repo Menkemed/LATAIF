@@ -1,0 +1,42 @@
+{
+  "_comment": "M6-B2DE4 §8 — the ONE set of identifier vectors. The Rust validator (sync_policy::is_valid_sync_identifier) and the TypeScript validator (apply-change.ts isValidSyncIdentifier) are BOTH run over this file and must agree on every entry. A SEMANTIC drift test, not a textual one. Raw control characters (newline/tab/NUL) are proven behaviorally in the m6b2de4 apply gate and the Rust matrix, not carried in this JSON.",
+  "accept": [
+    "a",
+    "a1",
+    "a_b",
+    "abc_def_123",
+    "products",
+    "invoices",
+    "enrolled_devices",
+    "sync_changelog",
+    "tenant_trust_roots",
+    "legacy_inventory_attestations",
+    "reverses_entry_id",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "reject": [
+    "",
+    "A",
+    "Products",
+    "PRODUCTS",
+    "1a",
+    "_a",
+    "a-b",
+    "a.b",
+    "main.products",
+    "temp.products",
+    "\"a\"",
+    "`a`",
+    "[a]",
+    "a b",
+    " a",
+    "a ",
+    "a;",
+    "a--b",
+    "a/*b*/",
+    "a; DROP TABLE users",
+    "ä",
+    "a‑b",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+}
