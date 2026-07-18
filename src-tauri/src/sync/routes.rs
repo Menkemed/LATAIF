@@ -1197,7 +1197,12 @@ mod legacy_push_tests {
     #[test]
     fn every_forbidden_table_is_rejected_by_push() {
         let forbidden = all_forbidden_tables();
-        assert_eq!(forbidden.len(), 21, "16 control-plane + 5 internal (incl. sync_change_quarantine)");
+        assert_eq!(
+            forbidden.len(),
+            23,
+            "16 control-plane + 7 internal (incl. sync_change_quarantine and the v0010 CAS tables \
+             canonical_entities / operation_ledger — a client can never push to them)"
+        );
         for table in forbidden {
             let mut conn = db();
             let r = push(&mut conn, &[change_on(table, "x", "update")]);

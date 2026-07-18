@@ -51,6 +51,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0007_DEVICE_IDENTITY_AND_ENROLLMENT_REGISTRY,
     V0008_LEGACY_INVENTORY_AND_CUTOVER_READINESS,
     V0009_SYNC_SCHEMA_AND_QUARANTINE,
+    V0010_CANONICAL_REVISION_CAS,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -261,6 +262,109 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_squarantine_change
 
 CREATE INDEX IF NOT EXISTS idx_squarantine_open
     ON sync_change_quarantine (tenant_id, branch_id, state);
+"#;
+
+/// M6-B3B1 — the server-authoritative CAS engine's canonical revision store and operation ledger.
+///
+/// ## Why NEW tables and not an extension of v0001's `canonical_records` / `operations`
+///
+/// The §2 audit established that v0001 already created `canonical_records` and `operations` as the
+/// inactive CAS foundation. Extending them would be the natural first choice — but it is provably
+/// UNSAFE with the shared migration runner. `run_migrations` re-runs `verify_no_drift` for EVERY
+/// already-applied migration on every startup (mod.rs:194-197 of the server runner), and
+/// `compare_table` requires the live table's columns/indexes to EQUAL the owning migration's
+/// `reference_sql` exactly (strict `!=`). Adding a single column or index to `canonical_records` or
+/// `operations` would therefore make v0001's own drift check fail on the next run — and old
+/// migrations must never be edited to compensate (the directive forbids it, and it would rewrite a
+/// frozen checksum's meaning). So the v0001 tables are frozen. B3B1 lands its ACTIVE-design CAS
+/// state as two new, self-contained tables that carry the full contract the placeholders lack
+/// (`canonical_hash`, `is_tombstone` by name, `action`, `applied_revision`, `completed_at`, and a
+/// GLOBAL `operation_id` uniqueness constraint). The v0001 tables are left untouched and inert.
+///
+/// Still INACTIVE: no route, pull path, or cutover step reads or writes these tables. Only the
+/// internal `cas_engine` module and its tests touch them. `up_sql == reference_sql` (only CREATEs).
+///
+/// ## Name mapping (directive contract → column)
+/// Canonical Entity: current_revision=`current_revision`, canonical_data=`canonical_data`,
+/// is_tombstone=`is_tombstone`, last_operation_id=`last_operation_id`, canonical_hash=`canonical_hash`.
+/// Operation Ledger: a TYPED principal (`principal_type` ∈ user|device|system + opaque `principal_id`,
+/// no users FK — see the table comment), request_hash=`request_hash`, result_status=`result_status`.
+pub const V0010_CANONICAL_REVISION_CAS: Migration = Migration {
+    version: 10,
+    name: "canonical_revision_cas",
+    up_sql: V0010_SQL,
+    reference_sql: V0010_SQL,
+};
+
+const V0010_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS canonical_entities (
+    tenant_id         TEXT NOT NULL,
+    branch_id         TEXT NOT NULL,
+    table_name        TEXT NOT NULL,
+    record_id         TEXT NOT NULL,
+
+    current_revision  INTEGER NOT NULL,
+    canonical_data    TEXT NOT NULL,
+    is_tombstone      INTEGER NOT NULL DEFAULT 0,
+    last_operation_id TEXT NOT NULL,
+    canonical_hash    TEXT NOT NULL,
+
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+
+    PRIMARY KEY (tenant_id, branch_id, table_name, record_id),
+
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+
+    CHECK (current_revision >= 1),
+    CHECK (is_tombstone IN (0, 1)),
+    CHECK (length(canonical_hash) = 64)
+);
+
+CREATE INDEX IF NOT EXISTS idx_canonical_entities_table
+    ON canonical_entities (tenant_id, branch_id, table_name);
+
+CREATE TABLE IF NOT EXISTS operation_ledger (
+    operation_id      TEXT NOT NULL PRIMARY KEY,
+    tenant_id         TEXT NOT NULL,
+    branch_id         TEXT NOT NULL,
+
+    -- M6-B3B1A — a TYPED principal, deliberately NOT a users foreign key. A device principal has no
+    -- users row (a device is not an artificial user, and several devices may belong to one user); a
+    -- system principal is not a device. The route authenticates and classifies the principal before
+    -- the engine sees it — here it is only recorded and folded into the request hash.
+    principal_type    TEXT NOT NULL,
+    principal_id      TEXT NOT NULL,
+
+    table_name        TEXT NOT NULL,
+    record_id         TEXT NOT NULL,
+    action            TEXT NOT NULL,
+
+    base_revision     INTEGER NOT NULL,
+    request_hash      TEXT NOT NULL,
+
+    result_status     TEXT NOT NULL,
+    applied_revision  INTEGER,
+    result_json       TEXT NOT NULL,
+
+    created_at        TEXT NOT NULL,
+    completed_at      TEXT NOT NULL,
+
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+
+    CHECK (principal_type IN ('user', 'device', 'system')),
+    CHECK (length(principal_id) >= 1),
+    CHECK (action IN ('insert', 'update', 'delete')),
+    CHECK (base_revision >= 0),
+    CHECK (length(request_hash) = 64),
+    CHECK (result_status IN ('applied', 'conflict')),
+    CHECK (applied_revision IS NULL OR applied_revision >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operation_ledger_record
+    ON operation_ledger (tenant_id, branch_id, table_name, record_id);
 "#;
 
 /// M6-B2D — the device registry: who is allowed to be a client of this tenant.
@@ -1030,10 +1134,13 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
+        // M6-B3B1 — the new CAS tables (v0010), alongside the untouched v0001 placeholders.
+        assert!(table_exists(&conn, "canonical_entities"));
+        assert!(table_exists(&conn, "operation_ledger"));
         // M6-B2A
         assert!(table_exists(&conn, "primary_host_config"));
         // M6-B2C4
@@ -1059,7 +1166,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=9).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=10).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1072,7 +1179,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1167,6 +1274,68 @@ mod tests {
         );
     }
 
+    // ── M6-B3B1 §3 — v0010 declares its structure exactly as it applies it ───
+    #[test]
+    fn v0010_reference_equals_up_and_only_creates() {
+        assert_eq!(
+            V0010_CANONICAL_REVISION_CAS.up_sql,
+            V0010_CANONICAL_REVISION_CAS.reference_sql
+        );
+        let up = V0010_SQL.to_uppercase();
+        assert!(!up.contains("ALTER TABLE"), "v0010 must not touch v0001's frozen tables");
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
+    // ── M6-B3B1 §3 — the CAS tables carry their state invariants in the DB ────
+    #[test]
+    fn v0010_check_constraints_reject_invalid_cas_states() {
+        let conn = base_db();
+        run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
+        let h64 = "a".repeat(64);
+
+        // canonical_entities: revision >= 1, is_tombstone in (0,1), hash length 64.
+        let entity = |rid: &str, rev: i64, tomb: i64, hash: &str| {
+            conn.execute(
+                "INSERT INTO canonical_entities
+                   (tenant_id, branch_id, table_name, record_id, current_revision, canonical_data,
+                    is_tombstone, last_operation_id, canonical_hash, created_at, updated_at)
+                 VALUES ('tenant-1','branch-main','products',?1,?2,'{}',?3,'op',?4,'n','n')",
+                params![rid, rev, tomb, hash],
+            )
+        };
+        assert!(entity("e1", 1, 0, &h64).is_ok());
+        assert!(entity("e2", 0, 0, &h64).is_err(), "revision must be >= 1");
+        assert!(entity("e3", 1, 2, &h64).is_err(), "is_tombstone must be 0/1");
+        assert!(entity("e4", 1, 0, "short").is_err(), "canonical_hash must be 64 chars");
+
+        // operation_ledger: typed principal (no users FK), action/status/base/hash contracts, GLOBAL
+        // op_id uniqueness. `ptype`/`pid` are free — a device/system principal has no users row.
+        let op = |oid: &str, ptype: &str, pid: &str, action: &str, base: i64, hash: &str, status: &str| {
+            conn.execute(
+                "INSERT INTO operation_ledger
+                   (operation_id, tenant_id, branch_id, principal_type, principal_id, table_name,
+                    record_id, action, base_revision, request_hash, result_status, applied_revision,
+                    result_json, created_at, completed_at)
+                 VALUES (?1,'tenant-1','branch-main',?2,?3,'products','r',?4,?5,?6,?7,1,'{}','n','n')",
+                params![oid, ptype, pid, action, base, hash, status],
+            )
+        };
+        // M6-B3B1A — device and system principals persist WITHOUT any users row (there is no users FK).
+        assert!(op("o1", "user", "user-owner", "insert", 0, &h64, "applied").is_ok());
+        assert!(op("o1d", "device", "dev-ed25519-abc", "insert", 0, &h64, "applied").is_ok(), "device needs no users row");
+        assert!(op("o1s", "system", "self-desktop", "insert", 0, &h64, "applied").is_ok(), "system needs no users row");
+        assert!(op("o6", "robot", "x", "insert", 0, &h64, "applied").is_err(), "principal_type enum");
+        assert!(op("o7", "user", "", "insert", 0, &h64, "applied").is_err(), "principal_id must be non-empty");
+        assert!(op("o2", "user", "u", "frobnicate", 0, &h64, "applied").is_err(), "action enum");
+        assert!(op("o3", "user", "u", "update", -1, &h64, "applied").is_err(), "base_revision >= 0");
+        assert!(op("o4", "user", "u", "update", 1, "short", "applied").is_err(), "request_hash 64 chars");
+        assert!(op("o5", "user", "u", "update", 1, &h64, "maybe").is_err(), "result_status enum");
+        // The v0001 `operations` table keyed (tenant_id, operation_id); v0010 makes operation_id
+        // globally unique, matching the directive's `Eindeutigkeit: operation_id`.
+        assert!(op("o1", "user", "u", "update", 1, &h64, "applied").is_err(), "operation_id is globally unique");
+    }
+
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
     #[test]
     fn migration_is_idempotent() {
@@ -1174,7 +1343,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

@@ -60,6 +60,10 @@ pub mod sync_policy;
 /// M6-B3A §3 — the canonical business-schema allowlist (tables + per-table fields), read from the
 /// same manifest the TS client imports. The full table + field allowlist and payload validation.
 pub mod sync_schema;
+/// M6-B3B1 — the server-authoritative CAS engine (revision model, base_revision CAS, operation_id
+/// idempotency, conflict envelope, tombstones). INACTIVE: reachable only from internal Rust + tests;
+/// no route, pull path or cutover step consults it.
+pub mod cas_engine;
 /// M6-B2E — legacy inventory, owner attestation, cutover readiness. INACTIVE.
 pub mod cutover;
 /// M6-B2D — the device's own cryptographic identity + enrollment. INACTIVE.

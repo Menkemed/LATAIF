@@ -109,6 +109,10 @@ pub const INTERNAL_TABLES: &[&str] = &[
     "sync_change_quarantine",
     "canonical_records",
     "operations",
+    // M6-B3B1 §14 — the server-authoritative CAS tables (v0010). Server-only; a client must never be
+    // able to push to them on any sync path (kept identical in apply-change.ts INTERNAL_TABLES).
+    "canonical_entities",
+    "operation_ledger",
     "schema_migrations",
 ];
 
@@ -470,6 +474,9 @@ mod tests {
             // v0001 protocol scaffolding.
             ("canonical_records", InternalForbidden),
             ("operations", InternalForbidden),
+            // v0010 server-authoritative CAS store + operation ledger (M6-B3B1).
+            ("canonical_entities", InternalForbidden),
+            ("operation_ledger", InternalForbidden),
             // v0009 quarantine bookkeeping.
             ("sync_change_quarantine", InternalForbidden),
             // v0002–v0008 control plane.

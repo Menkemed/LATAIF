@@ -122,6 +122,10 @@ const INTERNAL_TABLES: readonly string[] = [
   'sync_change_quarantine',
   'canonical_records',
   'operations',
+  // M6-B3B1 §14 — the server-authoritative CAS tables (v0010); server-only, never client-synced.
+  // Kept identical to INTERNAL_TABLES in sync_policy.rs (a Rust test asserts exact set equality).
+  'canonical_entities',
+  'operation_ledger',
   'schema_migrations',
 ];
 // @sync-policy:internal:end
