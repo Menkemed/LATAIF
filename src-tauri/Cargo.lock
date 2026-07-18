@@ -2320,6 +2320,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "uuid",

@@ -1,4 +1,4 @@
-use axum::{extract::DefaultBodyLimit, response::Html, Router};
+use axum::{response::Html, Router};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 async fn serve_mobile_page() -> Html<&'static str> {
@@ -57,6 +57,9 @@ pub mod routes;
 pub mod secret;
 /// M6-B2DE1 §3 — the single source of truth for which tables the business sync may touch.
 pub mod sync_policy;
+/// M6-B3A §3 — the canonical business-schema allowlist (tables + per-table fields), read from the
+/// same manifest the TS client imports. The full table + field allowlist and payload validation.
+pub mod sync_schema;
 /// M6-B2E — legacy inventory, owner attestation, cutover readiness. INACTIVE.
 pub mod cutover;
 /// M6-B2D — the device's own cryptographic identity + enrollment. INACTIVE.
@@ -209,15 +212,15 @@ impl SyncServer {
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any);
-        // Body-Limit auf 50 MB hochsetzen — Handy-Fotos als base64 sind oft 5-15 MB.
-        let body_limit = DefaultBodyLimit::max(50 * 1024 * 1024);
+        // M6-B3A3 §3 — the 50 MB raw push-body limit now lives INSIDE build_api_router (applied to the
+        // /api routes, before the auth route_layer), so production and the runtime integration test
+        // share the EXACT same router construction + layer order — only the limit value differs.
         let app = Router::new()
-            .nest("/api", routes::api_routes(state.clone()))
+            .nest("/api", routes::build_api_router(state.clone(), routes::MAX_SYNC_PUSH_BODY_BYTES))
             .route("/mobile", axum::routing::get(serve_mobile_page))
             .route("/zxing-wasm.js", axum::routing::get(serve_zxing_wasm_js))
             .route("/zxing_reader.wasm", axum::routing::get(serve_zxing_wasm))
             .route("/", axum::routing::get(serve_root))
-            .layer(body_limit)
             .layer(cors)
             .with_state(state);
         let https_app = app.clone();

@@ -104,6 +104,9 @@ const _: () = {
 /// The transport's own tables. Not business, not something a client pushes.
 pub const INTERNAL_TABLES: &[&str] = &[
     "sync_changelog",
+    // M6-B3A §7 — the quarantine for withheld poisoned changelog rows. Transport bookkeeping;
+    // never itself synced (kept identical in apply-change.ts INTERNAL_TABLES).
+    "sync_change_quarantine",
     "canonical_records",
     "operations",
     "schema_migrations",
@@ -288,9 +291,15 @@ mod tests {
     fn s13_unknown_tables_are_named_not_guessed() {
         let p = classify("some_future_table_we_have_not_seen");
         assert_eq!(p, SyncTablePolicy::Unknown, "an unseen table is Unknown, not a guess");
-        // …and Unknown is ACCEPTED. This is the M6_FULL_BUSINESS_TABLE_ALLOWLIST_OPEN gap,
-        // and it is a deliberate, reported choice — not forbidding it silently.
-        assert!(!p.is_forbidden(), "Unknown is accepted; the open allowlist is reported, not enforced");
+        // `classify` answers the TRUST-boundary question only: Unknown is not control-plane/internal,
+        // so `is_forbidden` (the denylist) is false. The ALLOWLIST is a separate, now-CLOSED gate:
+        // M6-B3A's `sync_schema::is_business_table` refuses this exact name as SYNC_TABLE_NOT_ALLOWED
+        // at push/pull/apply (see `sync_schema::allowlist_gate_accepts_business_rejects_unknown_*`).
+        assert!(!p.is_forbidden(), "Unknown is not control-plane-forbidden; the allowlist gate refuses it");
+        assert!(
+            !super::super::sync_schema::is_business_table("some_future_table_we_have_not_seen"),
+            "M6-B3A: an unknown table is NOT in the business allowlist — no longer silently accepted"
+        );
     }
 
     // ── the two lists never overlap ──────────────────────────────────────────
@@ -461,6 +470,8 @@ mod tests {
             // v0001 protocol scaffolding.
             ("canonical_records", InternalForbidden),
             ("operations", InternalForbidden),
+            // v0009 quarantine bookkeeping.
+            ("sync_change_quarantine", InternalForbidden),
             // v0002–v0008 control plane.
             ("primary_host_config", ControlPlaneForbidden),
             ("server_credentials", ControlPlaneForbidden),

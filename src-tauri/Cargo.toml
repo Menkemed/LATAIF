@@ -67,3 +67,10 @@ hkdf = "0.12"
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+# M6-B3A3 §2 — Router::oneshot for the raw-push-route runtime integration test. tower 0.5 is already
+# resolved transitively via axum, and the `util` feature it needs is enabled by axum too, so this
+# adds no new crate/version to Cargo.lock — it is only a dev-time handle to drive the REAL router
+# in-process (same routes, same auth middleware, same DefaultBodyLimit) without opening a socket.
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

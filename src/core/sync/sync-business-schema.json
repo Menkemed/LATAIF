@@ -1,0 +1,1408 @@
+{
+  "schema_version": 1,
+  "description": "LATAIF legacy-sync business schema SSOT (M6-B3A). Canonical allowlist of the tables and per-table payload fields the legacy sync_changelog transport may carry. trackChange snapshots the full row (SELECT *), so allowed_fields is the table's exact column set. Enforced at both the Rust server ingress and the TypeScript client apply path. Generated from src/core/db/schema.sql + database.ts + operations/migration.ts; a drift gate re-derives and compares.",
+  "enforced": [
+    "table_allowlist",
+    "field_allowlist",
+    "allowed_operations",
+    "payload_shape",
+    "limits"
+  ],
+  "reserved_not_enforced_in_b3a": [
+    "required_fields",
+    "immutable_fields"
+  ],
+  "limits": {
+    "max_payload_bytes": 33554432,
+    "max_fields": 256
+  },
+  "tables": {
+    "agent_settlement_payments": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "created_at",
+        "id",
+        "method",
+        "note",
+        "paid_at",
+        "transfer_id"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "agent_transfers": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "actual_sale_price",
+        "agent_id",
+        "agent_price",
+        "branch_id",
+        "buyer_info",
+        "commission_amount",
+        "commission_paid_from",
+        "commission_rate",
+        "commission_type",
+        "commission_value",
+        "created_at",
+        "created_by",
+        "excess_split_pct",
+        "id",
+        "invoice_id",
+        "minimum_price",
+        "notes",
+        "product_id",
+        "return_by",
+        "returned_at",
+        "settled_at",
+        "settlement_amount",
+        "settlement_model",
+        "settlement_paid_amount",
+        "settlement_status",
+        "sold_at",
+        "staff_id",
+        "status",
+        "sync_status",
+        "transfer_number",
+        "transferred_at",
+        "updated_at",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "agents": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "active",
+        "branch_id",
+        "commission_rate",
+        "company",
+        "created_at",
+        "customer_id",
+        "email",
+        "id",
+        "name",
+        "notes",
+        "phone",
+        "sync_status",
+        "total_commission",
+        "total_sales",
+        "updated_at",
+        "version",
+        "whatsapp"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "bank_transfers": {
+      "allowed_operations": [
+        "insert",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "direction",
+        "id",
+        "notes",
+        "transfer_date"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "consignments": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "agreed_price",
+        "agreement_date",
+        "branch_id",
+        "buyer_id",
+        "commission_amount",
+        "commission_rate",
+        "commission_type",
+        "commission_value",
+        "consignment_number",
+        "consignor_id",
+        "created_at",
+        "created_by",
+        "excess_split_pct",
+        "expiry_date",
+        "id",
+        "invoice_id",
+        "minimum_price",
+        "notes",
+        "payout_amount",
+        "payout_date",
+        "payout_method",
+        "payout_paid_amount",
+        "payout_reference",
+        "payout_status",
+        "product_id",
+        "sale_method",
+        "sale_price",
+        "staff_id",
+        "status",
+        "sync_status",
+        "updated_at",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "credit_applications": {
+      "allowed_operations": [
+        "insert",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "created_at",
+        "credit_id",
+        "id",
+        "payment_id"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "credit_notes": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "cash_refund_amount",
+        "created_at",
+        "created_by",
+        "credit_note_number",
+        "customer_id",
+        "id",
+        "invoice_id",
+        "issued_at",
+        "notes",
+        "reason",
+        "receivable_cancel_amount",
+        "refund_method",
+        "sales_return_id",
+        "total_amount",
+        "vat_amount"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "customer_credits": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "customer_id",
+        "id",
+        "note",
+        "source_id",
+        "source_type",
+        "status",
+        "used_amount"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "customer_gold_credits": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "customer_id",
+        "fulfilled_grams",
+        "id",
+        "karat",
+        "notes",
+        "settlement_credit_id",
+        "source_order_id",
+        "source_repair_id",
+        "status",
+        "updated_at",
+        "weight_grams"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "customer_messages": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "body",
+        "branch_id",
+        "channel",
+        "created_at",
+        "created_by",
+        "customer_id",
+        "direction",
+        "id",
+        "kind",
+        "linked_entity_id",
+        "linked_entity_type",
+        "sent_at",
+        "subject"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "customers": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "budget_max",
+        "budget_min",
+        "company",
+        "country",
+        "created_at",
+        "created_by",
+        "customer_type",
+        "email",
+        "first_name",
+        "id",
+        "language",
+        "last_contact_at",
+        "last_name",
+        "last_purchase_at",
+        "notes",
+        "personal_id",
+        "phone",
+        "preferences",
+        "purchase_count",
+        "sales_stage",
+        "sync_status",
+        "total_profit",
+        "total_revenue",
+        "updated_at",
+        "vat_account_number",
+        "version",
+        "vip_level",
+        "whatsapp"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "debt_payments": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "created_at",
+        "debt_id",
+        "id",
+        "notes",
+        "paid_at",
+        "source"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "debts": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "counterparty",
+        "created_at",
+        "created_by",
+        "customer_id",
+        "direction",
+        "due_date",
+        "id",
+        "loan_number",
+        "notes",
+        "settled_at",
+        "source",
+        "staff_id",
+        "status",
+        "updated_at"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "documents": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "ai_suggestions",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "doc_class",
+        "extracted_fields",
+        "file_name",
+        "file_path",
+        "file_size",
+        "file_type",
+        "id",
+        "linked_entity_id",
+        "linked_entity_type",
+        "ocr_confidence",
+        "ocr_reviewed",
+        "ocr_text",
+        "sync_status",
+        "thumbnail_path",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "employees": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "base_salary",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "email",
+        "employment_status",
+        "id",
+        "name",
+        "notes",
+        "phone",
+        "role",
+        "updated_at",
+        "user_id"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "expense_payments": {
+      "allowed_operations": [
+        "insert",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "created_at",
+        "expense_id",
+        "id",
+        "method",
+        "note",
+        "paid_at",
+        "reference"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "expenses": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "category",
+        "created_at",
+        "created_by",
+        "description",
+        "employee_id",
+        "expense_date",
+        "expense_number",
+        "id",
+        "paid_amount",
+        "payment_method",
+        "recurring_template_id",
+        "related_entity_id",
+        "related_module",
+        "status",
+        "supplier_id"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "gold_movements": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "direction",
+        "id",
+        "karat",
+        "moved_at",
+        "notes",
+        "related_order_id",
+        "related_repair_id",
+        "source_bucket",
+        "source_id",
+        "target_bucket",
+        "target_id",
+        "weight_grams"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "gold_payables": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "direction",
+        "fulfilled_grams",
+        "id",
+        "karat",
+        "notes",
+        "settlement_expense_id",
+        "settlement_type",
+        "source_order_id",
+        "source_order_line_id",
+        "source_repair_id",
+        "source_repair_line_id",
+        "status",
+        "supplier_id",
+        "updated_at",
+        "weight_grams"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "invoice_edits": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "edited_at",
+        "edited_by",
+        "id",
+        "invoice_id",
+        "new_snapshot",
+        "old_snapshot",
+        "reason",
+        "revision"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "invoice_lines": {
+      "allowed_operations": [
+        "insert",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "description",
+        "id",
+        "invoice_id",
+        "line_total",
+        "lot_id",
+        "position",
+        "product_id",
+        "purchase_price_snapshot",
+        "quantity",
+        "tax_scheme",
+        "unit_price",
+        "vat_amount",
+        "vat_rate"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "invoices": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "butterfly",
+        "created_at",
+        "created_by",
+        "currency",
+        "customer_id",
+        "due_at",
+        "gross_amount",
+        "id",
+        "invoice_number",
+        "issued_at",
+        "margin_snapshot",
+        "net_amount",
+        "notes",
+        "offer_id",
+        "paid_amount",
+        "purchase_price_snapshot",
+        "sale_price_snapshot",
+        "special_mark",
+        "staff_id",
+        "status",
+        "sync_status",
+        "tax_scheme_snapshot",
+        "tip_amount",
+        "updated_at",
+        "vat_amount",
+        "vat_rate_snapshot",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "ledger_entries": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "account",
+        "amount",
+        "branch_id",
+        "counterparty_id",
+        "counterparty_type",
+        "created_at",
+        "created_by",
+        "currency",
+        "direction",
+        "entry_no",
+        "id",
+        "metadata_json",
+        "occurred_at",
+        "recorded_at",
+        "reverses_entry_id",
+        "source_id",
+        "source_line_id",
+        "source_module",
+        "tax_scheme_snapshot",
+        "tenant_id",
+        "transaction_id",
+        "vat_rate_snapshot"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "metal_payments": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "created_at",
+        "id",
+        "metal_id",
+        "method",
+        "note",
+        "paid_at"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "offer_lines": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "id",
+        "line_total",
+        "offer_id",
+        "position",
+        "product_id",
+        "tax_scheme",
+        "unit_price",
+        "vat_rate"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "offers": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "created_by",
+        "currency",
+        "customer_id",
+        "follow_up_at",
+        "id",
+        "invoice_id",
+        "notes",
+        "offer_number",
+        "sent_at",
+        "sent_via",
+        "status",
+        "subtotal",
+        "sync_status",
+        "tax_scheme",
+        "total",
+        "updated_at",
+        "valid_until",
+        "vat_amount",
+        "vat_rate",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "order_lines": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "cost_amount",
+        "created_at",
+        "description",
+        "expense_id",
+        "id",
+        "invoice_id",
+        "is_customer_facing",
+        "line_total",
+        "material_details",
+        "material_kind",
+        "order_id",
+        "ordered_supplier_id",
+        "position",
+        "product_id",
+        "quantity",
+        "status",
+        "supplier_id",
+        "tax_scheme",
+        "unit_price",
+        "vat_rate"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "order_payments": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "card_brand",
+        "converted_to_invoice",
+        "created_at",
+        "id",
+        "method",
+        "note",
+        "order_id",
+        "paid_at",
+        "reference"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "orders": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "actual_delivery",
+        "agreed_price",
+        "attributes",
+        "branch_id",
+        "category_id",
+        "condition",
+        "created_at",
+        "created_by",
+        "custom_meta",
+        "custom_product_spec",
+        "customer_id",
+        "deposit_amount",
+        "deposit_date",
+        "deposit_paid",
+        "existing_product_id",
+        "expected_delivery",
+        "expected_margin",
+        "extra_gold_value",
+        "fully_paid",
+        "goldsmith_supplier_id",
+        "id",
+        "invoice_id",
+        "labor_cost",
+        "notes",
+        "order_number",
+        "payment_method",
+        "product_id",
+        "remaining_amount",
+        "requested_brand",
+        "requested_details",
+        "requested_model",
+        "requested_reference",
+        "serial_number",
+        "status",
+        "supplier_name",
+        "supplier_price",
+        "sync_status",
+        "tax_amount",
+        "type",
+        "updated_at",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "partner_transactions": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "id",
+        "method",
+        "notes",
+        "paid_at_actual",
+        "partner_id",
+        "payment_status",
+        "transaction_date",
+        "transaction_number",
+        "type"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "partners": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "active",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "email",
+        "id",
+        "name",
+        "notes",
+        "phone",
+        "share_percentage",
+        "updated_at"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "payments": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "card_brand",
+        "created_at",
+        "created_by",
+        "id",
+        "invoice_id",
+        "method",
+        "notes",
+        "received_at",
+        "reference",
+        "sync_status",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "precious_metals": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "created_by",
+        "current_spot_price",
+        "customer_id",
+        "description",
+        "id",
+        "images",
+        "karat",
+        "linked_expense_id",
+        "melt_value",
+        "metal_type",
+        "notes",
+        "paid_amount",
+        "payment_status",
+        "purchase_price_per_gram",
+        "purchase_total",
+        "sale_price",
+        "spot_price_at_purchase",
+        "status",
+        "supplier_id",
+        "supplier_name",
+        "updated_at",
+        "weight_grams"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "production_records": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "created_by",
+        "id",
+        "labor_cost",
+        "notes",
+        "overhead_cost",
+        "production_date",
+        "record_number",
+        "status",
+        "total_cost",
+        "total_value"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "products": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "ai_confirmed_at",
+        "ai_corrections",
+        "ai_identified_snapshot",
+        "attributes",
+        "branch_id",
+        "brand",
+        "category_id",
+        "condition",
+        "created_at",
+        "created_by",
+        "days_in_stock",
+        "expected_margin",
+        "id",
+        "image_description",
+        "image_embedding",
+        "image_hash",
+        "images",
+        "last_offer_price",
+        "last_sale_price",
+        "max_sale_price",
+        "min_sale_price",
+        "name",
+        "notes",
+        "paid_from",
+        "planned_sale_price",
+        "purchase_currency",
+        "purchase_date",
+        "purchase_price",
+        "purchase_source",
+        "quantity",
+        "scope_of_delivery",
+        "sku",
+        "source_type",
+        "stock_status",
+        "storage_location",
+        "supplier_name",
+        "sync_status",
+        "tax_scheme",
+        "updated_at",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "purchase_inbox": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "created_by",
+        "id",
+        "images",
+        "note",
+        "status"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "purchase_lines": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "description",
+        "id",
+        "line_total",
+        "position",
+        "product_id",
+        "purchase_id",
+        "quantity",
+        "source_order_line_id",
+        "tax_scheme",
+        "unit_price",
+        "vat_amount",
+        "vat_rate"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "purchase_payments": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "created_at",
+        "id",
+        "method",
+        "note",
+        "paid_at",
+        "purchase_id",
+        "reference"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "purchase_return_lines": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "id",
+        "line_total",
+        "product_id",
+        "purchase_line_id",
+        "quantity",
+        "return_id",
+        "unit_price"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "purchase_returns": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "created_by",
+        "id",
+        "notes",
+        "purchase_id",
+        "refund_amount",
+        "refund_method",
+        "return_date",
+        "return_number",
+        "status",
+        "supplier_id",
+        "total_amount"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "purchases": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "created_by",
+        "id",
+        "notes",
+        "paid_amount",
+        "purchase_date",
+        "purchase_number",
+        "remaining_amount",
+        "source_order_id",
+        "staff_id",
+        "status",
+        "supplier_id",
+        "supplier_snapshot",
+        "total_amount",
+        "updated_at"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "recurring_expense_templates": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "active",
+        "amount",
+        "branch_id",
+        "category",
+        "created_at",
+        "created_by",
+        "day_of_month",
+        "description",
+        "employee_id",
+        "end_date",
+        "id",
+        "last_generated_period",
+        "pay_now_default",
+        "payment_method",
+        "start_date",
+        "supplier_id",
+        "updated_at"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "repair_lines": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "cost_amount",
+        "created_at",
+        "description",
+        "due_date",
+        "expense_id",
+        "id",
+        "material_details",
+        "material_kind",
+        "notes",
+        "position",
+        "repair_id",
+        "status",
+        "supplier_id",
+        "updated_at",
+        "work_type"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "repairs": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "actual_cost",
+        "branch_id",
+        "charge_to_customer",
+        "completed_at",
+        "created_at",
+        "created_by",
+        "customer_card_brand",
+        "customer_id",
+        "customer_paid_amount",
+        "customer_paid_from",
+        "customer_payment_date",
+        "customer_payment_ledger_id",
+        "customer_payment_method",
+        "customer_payment_status",
+        "diagnosed_at",
+        "diagnosis",
+        "estimated_cost",
+        "estimated_ready",
+        "external_vendor",
+        "id",
+        "images",
+        "internal_cost",
+        "internal_paid_from",
+        "invoice_id",
+        "issue_description",
+        "item_attributes",
+        "item_brand",
+        "item_category_id",
+        "item_description",
+        "item_model",
+        "item_reference",
+        "item_serial",
+        "lot_id",
+        "margin",
+        "notes",
+        "picked_up_at",
+        "product_id",
+        "received_at",
+        "repair_number",
+        "repair_scope",
+        "repair_type",
+        "staff_id",
+        "started_at",
+        "status",
+        "sync_status",
+        "tax_scheme",
+        "updated_at",
+        "version",
+        "voucher_code",
+        "workshop_supplier_id"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "sales_return_lines": {
+      "allowed_operations": [
+        "insert",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "id",
+        "invoice_line_id",
+        "line_total",
+        "product_id",
+        "quantity",
+        "return_id",
+        "unit_price",
+        "vat_amount"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "sales_returns": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "created_at",
+        "created_by",
+        "customer_id",
+        "id",
+        "invoice_id",
+        "notes",
+        "product_disposition",
+        "reason",
+        "refund_amount",
+        "refund_method",
+        "refund_paid_amount",
+        "refund_paid_date",
+        "refund_status",
+        "return_date",
+        "return_number",
+        "staff_id",
+        "status",
+        "total_amount",
+        "vat_corrected"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "stock_lots": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "acquired_at",
+        "branch_id",
+        "created_at",
+        "id",
+        "product_id",
+        "purchase_id",
+        "purchase_line_id",
+        "qty_remaining",
+        "qty_total",
+        "status",
+        "unit_cost"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "supplier_credits": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "id",
+        "note",
+        "source_purchase_id",
+        "source_return_id",
+        "status",
+        "supplier_id",
+        "used_amount"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "suppliers": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "active",
+        "address",
+        "branch_id",
+        "cpr",
+        "cpr_image",
+        "created_at",
+        "created_by",
+        "email",
+        "id",
+        "name",
+        "notes",
+        "phone",
+        "updated_at"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "tasks": {
+      "allowed_operations": [
+        "insert",
+        "update",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "assigned_to",
+        "auto_generated",
+        "branch_id",
+        "completed_at",
+        "created_at",
+        "created_by",
+        "description",
+        "due_at",
+        "id",
+        "linked_entity_id",
+        "linked_entity_type",
+        "priority",
+        "status",
+        "sync_status",
+        "title",
+        "type",
+        "version"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    }
+  }
+}

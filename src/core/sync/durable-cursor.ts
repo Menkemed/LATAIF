@@ -68,6 +68,9 @@ export interface SyncChangeRef {
   table_name: string;
   record_id: string;
   action: string;
+  // M6-B3A — the raw payload, present on pulled changes. Only ever HASHED for a quarantine record,
+  // never stored raw. Optional so the strict M2 callers (which never quarantine) need not carry it.
+  data?: string;
 }
 
 // Fehler mit genau dem Kontext, der zum Nachvollziehen noetig ist — OHNE Payload/sensible Daten.
@@ -100,19 +103,52 @@ export interface BatchApplyOps {
   commit(): void;
   /** Transaktion verwerfen (z.B. db.run('ROLLBACK')) — verwirft ALLE Changes des Batches. */
   rollback(): void;
+  // M6-B3A §9/§10 — OPTIONAL. Wenn gesetzt, wird eine DETERMINISTISCHE Policy-Ablehnung
+  // (SyncPoisonError: verbotene/unbekannte Tabelle, ungueltiges/nicht-erlaubtes Feld, kaputter
+  // Payload) NICHT als Batch-Fehler behandelt, sondern hier gemeldet — dauerhaft QUARANTAENISIERT
+  // IN DERSELBEN Transaktion — und der Batch laeuft weiter. So werden gueltige Changes vor UND nach
+  // einer vergifteten Zeile angewandt und gemeinsam-atomar committed; die vergiftete Zeile gilt als
+  // quarantaenisiert, NICHT als angewandt. Ohne diesen Hook (Default) bleibt das strikte
+  // Alles-oder-Nichts-Verhalten: jede Poison-Ablehnung bricht den Batch ab (Rollback). Ein
+  // Poison wird strukturell erkannt (`isSyncPoison`), damit dieses Modul den Fehlertyp nicht
+  // importieren muss. `code` ist der stabile SYNC_*-Code der Ablehnung.
+  onPoison?(change: SyncChangeRef, code: string): void;
 }
 
-// Wendet ALLE Changes atomar an: begin → jede Change → commit. Beim ERSTEN Fehler: rollback
-// (verwirft den ganzen Batch aus dem In-Memory-Stand) und wirft einen SyncApplyError mit dem
-// Kontext der fehlgeschlagenen Change. KEIN Change wird uebersprungen, keine Changes NACH dem
-// Fehler werden angewandt.
+// Ein SyncPoisonError traegt `code` + `isSyncPoison === true`. Strukturell geprueft, damit
+// durable-cursor keine apply-change-Kopplung braucht (bleibt reiner Orchestrator).
+function poisonCodeOf(err: unknown): string | null {
+  if (err && typeof err === 'object' && (err as { isSyncPoison?: unknown }).isSyncPoison === true) {
+    const c = (err as { code?: unknown }).code;
+    return typeof c === 'string' ? c : 'SYNC_POISON';
+  }
+  return null;
+}
+
+// Wendet ALLE Changes atomar an: begin → jede Change → commit.
+//  • Ohne ops.onPoison: beim ERSTEN Fehler rollback (verwirft den ganzen Batch) + SyncApplyError —
+//    kein Change wird uebersprungen (M2-A Alles-oder-Nichts, unveraendert).
+//  • Mit ops.onPoison (M6-B3A): eine deterministische SyncPoisonError-Ablehnung wird ueber
+//    onPoison quarantaenisiert und uebersprungen (Batch laeuft weiter); JEDER ANDERE Fehler (echter
+//    transienter DB-Fault) fuehrt weiterhin zu rollback + SyncApplyError. Quarantaene-Insert und
+//    angewandte Changes committen gemeinsam in EINER Transaktion.
 export function applyChangesAtomic(changes: SyncChangeRef[], ops: BatchApplyOps): void {
   ops.begin();
   let current: SyncChangeRef | null = null;
   try {
     for (const change of changes) {
       current = change;
-      ops.applyChange(change);
+      try {
+        ops.applyChange(change);
+      } catch (err) {
+        const code = poisonCodeOf(err);
+        if (ops.onPoison && code !== null) {
+          // Deterministische Ablehnung → in derselben Tx quarantaenisieren, dann weiter.
+          ops.onPoison(change, code);
+          continue;
+        }
+        throw err; // transient oder kein onPoison → Batch abbrechen (aeusserer catch → rollback)
+      }
     }
     ops.commit();
   } catch (err) {

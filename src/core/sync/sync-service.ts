@@ -12,6 +12,9 @@ import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
 // the applySyncChange dispatcher) lives in the node-safe `apply-change.ts` so the behavioral gate
 // can drive the REAL functions against a real sql.js database. Same implementation, one home.
 import { applySyncChange, assertSyncIdentifier } from './apply-change';
+// M6-B3A §9/§11 — the client's durable quarantine writer + status reader (node-safe, driven by the
+// b3a gate too).
+import { recordClientQuarantine, quarantineStatus, type QuarantineStatus } from './quarantine';
 // Re-exported so existing import paths (`from '.../sync-service'`) keep working.
 export { isControlPlaneTable, isValidSyncIdentifier } from './apply-change';
 
@@ -51,6 +54,18 @@ export function onSyncStatus(fn: SyncListener): () => void {
 }
 
 export function getSyncStatus(): SyncStatus { return currentStatus; }
+
+// ── M6-B3A §11 — quarantine visibility ──
+// A local diagnostic snapshot of the client's open sync quarantine (count, last reason, oldest /
+// newest). Surfaced for a status/diagnostics view and to gate cutover-readiness. Safe to call
+// anytime; returns zeros when the table is empty or sync is unconfigured.
+export function getSyncQuarantineStatus(): QuarantineStatus {
+  try {
+    return quarantineStatus(getDatabase() as unknown as import('./apply-change').SqlDb);
+  } catch {
+    return { openCount: 0, lastReason: null, oldestOpenAt: null, newestOpenAt: null };
+  }
+}
 
 // ── Config ──
 
@@ -197,17 +212,32 @@ async function pullChanges(): Promise<number> {
       applyChangesAtomic(changes, {
         begin: () => db.run('BEGIN'),
         applyChange: (change) => {
-          // M6-B2DE4 §5 — the REAL apply dispatcher (control-plane denylist → SYNC_CONTROL_PLANE_
-          // TABLE_FORBIDDEN, canonical table name → SYNC_TABLE_NAME_INVALID, canonical column
-          // names → SYNC_COLUMN_NAME_INVALID, then applyUpsert / DELETE). It throws BEFORE any SQL
-          // string is built, so a poisoned change aborts the whole batch (applyChangesAtomic rolls
-          // back) and the cursor does NOT advance. record_id stays a bound parameter.
+          // M6-B2DE4 §5 / M6-B3A §4/§5 — the REAL apply dispatcher (control-plane denylist, canonical
+          // table name, business allowlist, allowed operation, then the payload field/shape/limit
+          // contract, then applyUpsert / DELETE). Every guard throws a SyncPoisonError BEFORE any SQL
+          // string is built. record_id stays a bound parameter.
           applySyncChange(db, change as unknown as import('./apply-change').ApplyChange);
           // Only reached when the change applied cleanly: track inserted products for the
           // duplicate-review event fired after the store reload.
           if (change.action === 'insert' && change.table_name === 'products') {
             insertedProductIds.push(change.record_id);
           }
+        },
+        // M6-B3A §9/§10 — a DETERMINISTIC policy rejection (SyncPoisonError) does not stall the whole
+        // batch: the change is written to the LOCAL quarantine IN THIS SAME transaction (never applied,
+        // never counted as applied) and the batch continues. Valid changes before AND after it are
+        // applied and committed atomically together; only then does the cursor advance. A genuine
+        // transient DB fault is NOT a SyncPoisonError → applyChangesAtomic still rolls the whole batch
+        // back and leaves the cursor untouched (→ idempotent re-pull). Closes the head-of-line DoS.
+        onPoison: (change, code) => {
+          recordClientQuarantine(db, {
+            changeId: (change as { id?: number | string }).id ?? null,
+            tableName: change.table_name,
+            recordId: change.record_id,
+            rawData: (change as { data?: string }).data,
+            reasonCode: code,
+            now: new Date().toISOString(),
+          });
         },
         commit: () => db.run('COMMIT'),
         rollback: () => { db.run('ROLLBACK'); insertedProductIds.length = 0; },

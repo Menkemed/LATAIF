@@ -49,6 +49,8 @@ pub const ERR_INVALID: &str = "INVENTORY_INVALID";
 pub const ERR_REASON_REQUIRED: &str = "INVENTORY_RESOLUTION_REASON_REQUIRED";
 pub const ERR_DEVICE_NOT_ACTIVE: &str = "INVENTORY_LINKED_DEVICE_NOT_ACTIVE";
 pub const ERR_NOT_READY: &str = "CUTOVER_NOT_READY";
+/// M6-B3A §11 — an unresolved sync quarantine blocks cutover readiness.
+pub const ERR_QUARANTINE_UNRESOLVED: &str = "SYNC_QUARANTINE_UNRESOLVED";
 /// §12 — the one that keeps this slice from being a foot-gun.
 pub const ERR_V4_NOT_READY: &str = "PROTOCOL_V4_WRITE_PATH_NOT_READY";
 
@@ -646,6 +648,24 @@ pub fn evaluate_readiness(
         blocking.push("legacy activity observed after the attestation".to_string());
     }
 
+    // M6-B3A §11 — an unresolved sync quarantine blocks readiness. A poisoned or foreign change was
+    // withheld and awaits owner review (`open`); calling the cutover complete while it sits there
+    // would claim a clean, converged state that is not clean. `unwrap_or(0)` keeps a pre-v0009 DB
+    // (no quarantine table) from being blocked by a query error rather than by real quarantine.
+    let open_quarantine: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_change_quarantine WHERE state = 'open' AND tenant_id = ?1",
+            rusqlite::params![tenant_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if open_quarantine > 0 {
+        blocking.push(format!(
+            "{ERR_QUARANTINE_UNRESOLVED}: {open_quarantine} open sync quarantine entr{}",
+            if open_quarantine == 1 { "y" } else { "ies" }
+        ));
+    }
+
     Ok(ReadinessReport {
         state: cur.state,
         has_attestation,
@@ -1079,6 +1099,51 @@ mod tests {
             )
             .is_err(),
             "the schema refuses a blackout state in this slice");
+    }
+
+    // ── M6-B3A §11: an OPEN sync quarantine blocks cutover readiness ──────────
+    #[test]
+    fn b3a_open_quarantine_blocks_readiness() {
+        let e = env();
+        let d = tmp_dir();
+        let device_id = e.enroll_device(&d);
+        let a = add_item(&e.conn, "tenant-1", "branch-main", "Counter", None, None, &e.owner).unwrap();
+        let b = add_item(&e.conn, "tenant-1", "branch-main", "Old tablet", None, None, &e.owner).unwrap();
+        link_to_device(&e.conn, &a, &device_id, &e.owner).unwrap();
+        resolve_item(&e.conn, &b, ItemStatus::Retired, "scrapped 2025", &e.owner).unwrap();
+        attest_inventory(&e.conn, "tenant-1", "branch-main", ATTESTATION_CONFIRMATION, &e.owner).unwrap();
+
+        // Precondition — ready with NO quarantine.
+        let r0 = evaluate_readiness(&e.conn, "tenant-1", "branch-main", INSTALL_A, State::Primary).unwrap();
+        assert!(r0.is_ready(), "precondition: ready without quarantine: {:?}", r0.blocking_reasons);
+
+        // An OPEN quarantine entry for this tenant blocks readiness, naming SYNC_QUARANTINE_UNRESOLVED.
+        e.conn
+            .execute(
+                "INSERT INTO sync_change_quarantine (quarantine_id, change_id, source, tenant_id, branch_id, \
+                 table_name_redacted, record_id_hash, payload_hash, reason_code, first_seen_at, last_seen_at, \
+                 occurrence_count, state) VALUES ('q:1', 1, 'pull_scan', 'tenant-1', 'branch-main', \
+                 'products<len=8>', 'aaaaaaaa', 'bbbbbbbb', 'SYNC_FIELD_NOT_ALLOWED', 't', 't', 1, 'open')",
+                [],
+            )
+            .unwrap();
+        let r1 = evaluate_readiness(&e.conn, "tenant-1", "branch-main", INSTALL_A, State::Primary).unwrap();
+        assert!(!r1.is_ready(), "an open quarantine must block readiness");
+        assert!(
+            r1.blocking_reasons.iter().any(|b| b.contains(ERR_QUARANTINE_UNRESOLVED)),
+            "the block names SYNC_QUARANTINE_UNRESOLVED: {:?}",
+            r1.blocking_reasons
+        );
+
+        // Resolving it restores readiness (no automatic deletion — a human transition).
+        e.conn
+            .execute(
+                "UPDATE sync_change_quarantine SET state = 'resolved', resolved_at = 't' WHERE quarantine_id = 'q:1'",
+                [],
+            )
+            .unwrap();
+        let r2 = evaluate_readiness(&e.conn, "tenant-1", "branch-main", INSTALL_A, State::Primary).unwrap();
+        assert!(r2.is_ready(), "resolving the quarantine restores readiness: {:?}", r2.blocking_reasons);
     }
 
     // ── I7/I8: legacy activity after the attestation blocks and needs a new one ──

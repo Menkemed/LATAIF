@@ -326,6 +326,31 @@ CREATE TABLE IF NOT EXISTS sync_changelog (
   created_at  TEXT NOT NULL
 );
 
+-- ── SYNC CHANGE QUARANTINE (M6-B3A §9) ──
+-- Client-side, LOCAL-ONLY second line of defence. A pulled change that violates the business-schema
+-- contract (forbidden/unknown table, non-canonical or disallowed field, malformed/oversized payload)
+-- is written here — never applied, never counted as applied — so the pull cursor can advance past it
+-- without a head-of-line stall. NEVER synced (not in the business allowlist; in INTERNAL_TABLES). Only
+-- HASHES and a redacted table name are kept — no raw payload, no secrets. Deduped by change_id so an
+-- identical re-pull increments occurrence_count instead of inserting a duplicate.
+CREATE TABLE IF NOT EXISTS sync_change_quarantine (
+  quarantine_id        TEXT PRIMARY KEY,
+  change_id            INTEGER,           -- server changelog id (dedup key when present)
+  source               TEXT NOT NULL,     -- 'pull'
+  table_name_redacted  TEXT NOT NULL,
+  record_id_hash       TEXT NOT NULL,
+  payload_hash         TEXT NOT NULL,
+  reason_code          TEXT NOT NULL,
+  first_seen_at        TEXT NOT NULL,
+  last_seen_at         TEXT NOT NULL,
+  occurrence_count     INTEGER NOT NULL DEFAULT 1,
+  state                TEXT NOT NULL DEFAULT 'open',   -- open, resolved, discarded_after_review
+  resolution_note      TEXT,
+  resolved_at          TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_quarantine_change ON sync_change_quarantine(change_id) WHERE change_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sync_quarantine_open ON sync_change_quarantine(state) WHERE state = 'open';
+
 -- ── KPI CACHE ──
 CREATE TABLE IF NOT EXISTS kpi_cache (
   branch_id   TEXT NOT NULL,

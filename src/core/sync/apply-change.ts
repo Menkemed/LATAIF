@@ -10,8 +10,21 @@
 // `sync-service.ts` (production) and the m6b2de4 regression gate (a real sql.js database) import
 // the SAME functions — no mirrored second implementation.
 //
+// M6-B3A §3/§4/§5 — the apply path is now bounded by the canonical business-schema SSOT
+// (`sync-business-schema.json`): only allow-listed tables, only their exact payload fields, only
+// insert/update/delete, and hard payload limits. A change that violates the contract throws a
+// `SyncPoisonError` carrying a stable code; the pull orchestration turns that into a DURABLE
+// QUARANTINE (never applied, never counted as applied) instead of a permanent head-of-line stall.
+// Rust reads the SAME manifest file (`sync_schema.rs`); a drift gate proves the two never diverge.
+//
 // Nothing about the applyUpsert CONFLICT logic (SELECT COUNT → UPDATE-if-exists else INSERT)
-// changed in the move; only its home did.
+// changed here; the stale-replay behaviour of a fully valid change is deliberately untouched.
+
+// The canonical, machine-readable business-schema SSOT. Rust (`src-tauri/src/sync/sync_schema.rs`)
+// reads the exact same file via include_str!; the m6b3a drift gate re-derives it from the live
+// frontend schema and compares. Imported with an explicit JSON attribute so the SAME import line
+// resolves under Vite (production bundle) AND `node` (the behavioral gate strips types).
+import SYNC_BUSINESS_SCHEMA from './sync-business-schema.json' with { type: 'json' };
 
 // The minimal shape of the sql.js database handle the apply path uses. Kept structural so a
 // test can pass a real sql.js `Database` (production) without a dependency on this module.
@@ -27,10 +40,48 @@ export interface ApplyChange {
   data: string;
 }
 
-// ── Stable error codes (the contract the client and the tests assert on) ────────
+// ── Stable error codes (the contract the client, the server and the tests assert on) ────────
 export const SYNC_CONTROL_PLANE_TABLE_FORBIDDEN = 'SYNC_CONTROL_PLANE_TABLE_FORBIDDEN';
 export const SYNC_TABLE_NAME_INVALID = 'SYNC_TABLE_NAME_INVALID';
 export const SYNC_COLUMN_NAME_INVALID = 'SYNC_COLUMN_NAME_INVALID';
+// M6-B3A §4/§5 — schema-contract violations. All deterministic (the same change fails identically
+// forever), so all are QUARANTINE-eligible, never transient.
+export const SYNC_TABLE_NOT_ALLOWED = 'SYNC_TABLE_NOT_ALLOWED';
+export const SYNC_FIELD_NOT_ALLOWED = 'SYNC_FIELD_NOT_ALLOWED';
+export const SYNC_PAYLOAD_INVALID = 'SYNC_PAYLOAD_INVALID';
+export const SYNC_PAYLOAD_TOO_LARGE = 'SYNC_PAYLOAD_TOO_LARGE';
+// M6-B3A1 §3 — the change's operation is not one this table's contract permits. allowed_operations
+// is now the EXACT set a production writer emits for the table (not a blanket insert/update/delete),
+// so e.g. an insert into an update-only table, or a delete on an insert-only ledger, is refused.
+export const SYNC_OPERATION_NOT_ALLOWED = 'SYNC_OPERATION_NOT_ALLOWED';
+// M6-B3A1 §6 — the raw JSON carried a duplicate key (envelope or payload). serde_json / JSON.parse
+// both silently keep the last; we refuse the whole batch rather than let a duplicate slip past a
+// validator that only sees the collapsed object.
+export const SYNC_PAYLOAD_DUPLICATE_KEY = 'SYNC_PAYLOAD_DUPLICATE_KEY';
+
+// M6-B3A §9 — a DETERMINISTIC policy rejection (forbidden/unknown table, non-canonical or
+// disallowed field, malformed or oversized payload). It carries a stable `code`. The pull
+// orchestration (durable-cursor) treats a SyncPoisonError as "quarantine this one change and keep
+// going", and ANY OTHER throw (a genuine sql.js/DB fault) as "transient → roll back the whole
+// batch, do not advance the cursor". The distinction is the whole of the poison-vs-transient
+// contract, so it is a structural marker (`isSyncPoison`) — durable-cursor stays dependency-free
+// and never imports this class. The code is ALSO in the message so `message.includes(code)`
+// (the m6b2de4 assertion style) keeps working.
+export class SyncPoisonError extends Error {
+  readonly code: string;
+  readonly isSyncPoison = true as const;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'SyncPoisonError';
+    this.code = code;
+  }
+}
+
+/** Is this a deterministic policy rejection (→ quarantine) rather than a transient DB fault
+ *  (→ rollback)? Checked structurally so durable-cursor need not import the class. */
+export function isSyncPoisonError(e: unknown): e is SyncPoisonError {
+  return !!e && typeof e === 'object' && (e as { isSyncPoison?: unknown }).isSyncPoison === true;
+}
 
 // ═══════════════════════════════════════════════════════════
 // M6-B2DE1 §6 — control-plane denylist, the CLIENT'S second line of defence.
@@ -38,7 +89,7 @@ export const SYNC_COLUMN_NAME_INVALID = 'SYNC_COLUMN_NAME_INVALID';
 // The server already filters these tables out of every pull, so in a healthy system this list
 // never fires. It exists for the unhealthy one: a tampered server, a version skew, a stale row
 // that predates the server-side filter. If a control-plane row ever reaches the apply path, the
-// client refuses the WHOLE batch fail-closed rather than write a single trust or identity row.
+// client refuses it fail-closed rather than write a single trust or identity row.
 //
 // These arrays MUST stay identical to `CONTROL_PLANE_TABLES` / `INTERNAL_TABLES` in
 // `src-tauri/src/sync/sync_policy.rs` (the canonical policy; this is a drift-secured mirror).
@@ -68,6 +119,7 @@ const CONTROL_PLANE_TABLES: readonly string[] = [
 // @sync-policy:internal:begin
 const INTERNAL_TABLES: readonly string[] = [
   'sync_changelog',
+  'sync_change_quarantine',
   'canonical_records',
   'operations',
   'schema_migrations',
@@ -107,24 +159,150 @@ export function redactIdentifier(name: unknown): string {
 }
 
 /** Fail-closed gate: throws the stable code (`SYNC_TABLE_NAME_INVALID` / `SYNC_COLUMN_NAME_INVALID`)
- *  on any non-canonical identifier, so a crafted table or column name aborts the whole apply
- *  batch instead of reaching SQL. The thrown message carries only a REDACTED preview. */
+ *  on any non-canonical identifier, so a crafted table or column name is quarantined instead of
+ *  reaching SQL. The thrown message carries only a REDACTED preview. */
 export function assertSyncIdentifier(kind: 'table' | 'column', name: unknown): void {
   if (!isValidSyncIdentifier(name)) {
     const code = kind === 'table' ? SYNC_TABLE_NAME_INVALID : SYNC_COLUMN_NAME_INVALID;
-    throw new Error(
+    throw new SyncPoisonError(
+      code,
       `[Sync] ${code}: refusing to use ${kind} name ${redactIdentifier(name)} as a SQL ` +
-        `identifier — not a canonical [a-z][a-z0-9_]* name. Whole batch rejected.`,
+        `identifier — not a canonical [a-z][a-z0-9_]* name.`,
     );
   }
 }
 
-// ── The upsert (conflict logic UNCHANGED from sync-service.ts) ──────────────────
+// ═══════════════════════════════════════════════════════════
+// M6-B3A §3/§4/§5 — the business-schema SSOT, loaded once from the canonical manifest.
+// ═══════════════════════════════════════════════════════════
+interface TableContract {
+  allowed_operations: string[];
+  record_id_field: string;
+  allowed_fields: string[];
+  required_fields: string[];
+  immutable_fields: string[];
+}
+interface SyncSchema {
+  schema_version: number;
+  limits: { max_payload_bytes: number; max_fields: number };
+  tables: Record<string, TableContract>;
+}
+const SCHEMA = SYNC_BUSINESS_SCHEMA as unknown as SyncSchema;
+
+interface CompiledContract {
+  fields: Set<string>;
+  ops: Set<string>;
+  recordIdField: string;
+}
+const BUSINESS_TABLES: Map<string, CompiledContract> = new Map(
+  Object.entries(SCHEMA.tables).map(([t, c]) => [
+    t,
+    { fields: new Set(c.allowed_fields), ops: new Set(c.allowed_operations), recordIdField: c.record_id_field },
+  ]),
+);
+const MAX_PAYLOAD_CHARS = SCHEMA.limits.max_payload_bytes;
+const MAX_FIELDS = SCHEMA.limits.max_fields;
+
+/** M6-B3A §4 — is this table in the business allowlist (a canonical, explicitly-contracted table)? */
+export function isBusinessSyncTable(table: string): boolean {
+  return BUSINESS_TABLES.has(table);
+}
+
+export type SyncTableClass = 'business' | 'control-plane' | 'invalid' | 'unknown';
+
+/** M6-B3A §4 — the four disjoint classes a sync `table_name` can fall into. `business` is the only
+ *  transportable/appliable one; every other class is refused (control-plane/internal is filtered,
+ *  invalid and unknown are quarantined). */
+export function classifySyncTable(table: string): SyncTableClass {
+  if (isControlPlaneTable(table)) return 'control-plane';
+  if (!isValidSyncIdentifier(table)) return 'invalid';
+  if (BUSINESS_TABLES.has(table)) return 'business';
+  return 'unknown';
+}
+
+// M6-B3A §5 — count the TOP-LEVEL key:value separators in the raw JSON, skipping string contents
+// (with escapes) and any nested object/array. If this exceeds the parsed key count, the payload
+// carried DUPLICATE top-level keys — which JSON.parse silently collapses (last wins). trackChange
+// never emits duplicates, so any is a crafted payload; refuse it rather than let client and server
+// potentially resolve a duplicate differently.
+function topLevelKeyCount(raw: string): number {
+  let depth = 0, count = 0, inString = false, escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') depth--;
+    else if (ch === ':' && depth === 1) count++;
+  }
+  return count;
+}
+
+/**
+ * M6-B3A §5 — validate an insert/update payload against the table contract BEFORE any SQL is built.
+ * Throws a `SyncPoisonError` (quarantine-eligible) on any violation. Returns the parsed object on
+ * success. This does NOT invent business type/value rules — only transport-shape safety:
+ *   • well-formed JSON object (not array/scalar/null)  → SYNC_PAYLOAD_INVALID
+ *   • no duplicate top-level keys                        → SYNC_PAYLOAD_INVALID
+ *   • within the char and field-count limits            → SYNC_PAYLOAD_TOO_LARGE
+ *   • every key a canonical identifier                   → SYNC_COLUMN_NAME_INVALID
+ *   • every key in the table's allowed_fields            → SYNC_FIELD_NOT_ALLOWED
+ */
+function validateBusinessPayload(contract: CompiledContract, rawData: string): Record<string, unknown> {
+  // Size first — cheap and bounds everything below. `rawData.length` is UTF-16 units; UTF-8 bytes
+  // are always ≥ that, so this can only ever be MORE permissive than a byte limit, never less —
+  // fine for a DoS bound set far (32 MB) above any real photo payload.
+  if (rawData.length > MAX_PAYLOAD_CHARS) {
+    throw new SyncPoisonError(
+      SYNC_PAYLOAD_TOO_LARGE,
+      `[Sync] ${SYNC_PAYLOAD_TOO_LARGE}: payload of ${rawData.length} chars exceeds the ${MAX_PAYLOAD_CHARS} limit.`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawData);
+  } catch {
+    throw new SyncPoisonError(SYNC_PAYLOAD_INVALID, `[Sync] ${SYNC_PAYLOAD_INVALID}: payload is not valid JSON.`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new SyncPoisonError(SYNC_PAYLOAD_INVALID, `[Sync] ${SYNC_PAYLOAD_INVALID}: payload is not a JSON object.`);
+  }
+  const data = parsed as Record<string, unknown>;
+  const keys = Object.keys(data);
+  if (keys.length > MAX_FIELDS) {
+    throw new SyncPoisonError(
+      SYNC_PAYLOAD_TOO_LARGE,
+      `[Sync] ${SYNC_PAYLOAD_TOO_LARGE}: payload has ${keys.length} fields, over the ${MAX_FIELDS} limit.`,
+    );
+  }
+  if (topLevelKeyCount(rawData) > keys.length) {
+    throw new SyncPoisonError(SYNC_PAYLOAD_DUPLICATE_KEY, `[Sync] ${SYNC_PAYLOAD_DUPLICATE_KEY}: payload has duplicate top-level keys.`);
+  }
+  for (const k of keys) {
+    // Canonical charset first (a non-canonical key would poison the SQL identifier), then the
+    // per-table allowlist (a canonical-but-unknown column is the exact poisoning case B3A closes).
+    assertSyncIdentifier('column', k);
+    if (!contract.fields.has(k)) {
+      throw new SyncPoisonError(
+        SYNC_FIELD_NOT_ALLOWED,
+        `[Sync] ${SYNC_FIELD_NOT_ALLOWED}: field ${redactIdentifier(k)} is not in the table contract.`,
+      );
+    }
+  }
+  return data;
+}
+
+// ── The upsert (conflict logic UNCHANGED since M6-B2DE4) ────────────────────────
 export function applyUpsert(db: SqlDb, table: string, id: string, data: Record<string, unknown>): void {
   // M6-B2DE3 §3 — this function builds SQL by interpolating the table name AND every column key
   // as identifiers. Gate both against the canonical charset before any string-building. The
-  // dispatcher already gates the table, but applyUpsert is a reusable sink and must not rely on
-  // its caller — and the column keys come straight from the (attacker-reachable) payload.
+  // dispatcher already gates the table AND the fields, but applyUpsert is a reusable sink and must
+  // not rely on its caller — the column keys come straight from the (attacker-reachable) payload.
   assertSyncIdentifier('table', table);
   // v0.4.1 — `id` aus den Spalten herausfiltern. Die /mobile-Capture-Seite schickt `id` MIT im
   // data-Objekt. Ohne diesen Filter entsteht `INSERT INTO t (id, id, …)` → der Change scheitert.
@@ -155,29 +333,77 @@ export function applyUpsert(db: SqlDb, table: string, id: string, data: Record<s
 }
 
 /**
- * M6-B2DE4 §5 — the ONE apply dispatcher, used by the production pull loop and driven directly by
- * the behavioral gate. Every guard runs BEFORE any SQL string is built:
- *   1. control-plane denylist  → SYNC_CONTROL_PLANE_TABLE_FORBIDDEN
- *   2. canonical table name    → SYNC_TABLE_NAME_INVALID
- *   3. canonical column names  → SYNC_COLUMN_NAME_INVALID (inside applyUpsert)
- * `record_id` stays a bound parameter, never an identifier. A throw here aborts the whole batch
- * (applyChangesAtomic rolls back) so a poisoned change is never applied and the cursor never
- * advances past it.
+ * M6-B2DE4 §5 / M6-B3A §4/§5 — the ONE apply dispatcher, used by the production pull loop and driven
+ * directly by the behavioral gate. Every guard runs BEFORE any SQL string is built:
+ *   1. control-plane / internal denylist → SYNC_CONTROL_PLANE_TABLE_FORBIDDEN
+ *   2. canonical table name              → SYNC_TABLE_NAME_INVALID
+ *   3. business allowlist (unknown table)→ SYNC_TABLE_NOT_ALLOWED
+ *   4. operation ∈ allowed_operations    → SYNC_PAYLOAD_INVALID
+ *   5. payload shape / fields / limits    → SYNC_PAYLOAD_INVALID / SYNC_FIELD_NOT_ALLOWED /
+ *                                           SYNC_COLUMN_NAME_INVALID / SYNC_PAYLOAD_TOO_LARGE
+ * Every failure is a `SyncPoisonError` — deterministic, so the pull orchestration QUARANTINES the
+ * one change (never applied, never counted as applied) instead of stalling the cursor. `record_id`
+ * stays a bound parameter, never an identifier.
  */
+/**
+ * M6-B3A §3 — the PURE contract verdict (no DB, no apply, no throw). Returns the stable violation
+ * code, or null if the change satisfies the business-schema contract. Same helpers as
+ * `applySyncChange` (classifySyncTable + validateBusinessPayload), so the two cannot semantically
+ * diverge; the Rust server mirrors this as `sync_schema::change_contract_violation`, and the
+ * shared-vector drift gate runs one fixture through BOTH to prove they agree.
+ */
+export function changeContractViolation(table: string, action: string, rawData: string): string | null {
+  const cls = classifySyncTable(table);
+  if (cls === 'control-plane') return SYNC_CONTROL_PLANE_TABLE_FORBIDDEN;
+  if (cls === 'invalid') return SYNC_TABLE_NAME_INVALID;
+  if (cls === 'unknown') return SYNC_TABLE_NOT_ALLOWED;
+  const contract = BUSINESS_TABLES.get(table) as CompiledContract;
+  if (!contract.ops.has(action)) return SYNC_OPERATION_NOT_ALLOWED;
+  if (action === 'insert' || action === 'update') {
+    try {
+      validateBusinessPayload(contract, rawData);
+    } catch (e) {
+      return isSyncPoisonError(e) ? e.code : SYNC_PAYLOAD_INVALID;
+    }
+  }
+  return null;
+}
+
 export function applySyncChange(db: SqlDb, change: ApplyChange): void {
-  if (isControlPlaneTable(change.table_name)) {
-    throw new Error(
+  const cls = classifySyncTable(change.table_name);
+  if (cls === 'control-plane') {
+    throw new SyncPoisonError(
+      SYNC_CONTROL_PLANE_TABLE_FORBIDDEN,
       `[Sync] ${SYNC_CONTROL_PLANE_TABLE_FORBIDDEN}: refusing to apply ` +
-        `${redactIdentifier(change.table_name)} from the sync stream (control-plane table). ` +
-        `Whole batch rejected.`,
+        `${redactIdentifier(change.table_name)} from the sync stream (control-plane/internal table).`,
     );
   }
-  assertSyncIdentifier('table', change.table_name);
-  // change.data kann ein base64-Foto (~1 MB) sein — NIE das ganze Objekt loggen.
-  const data = JSON.parse(change.data);
+  if (cls === 'invalid') {
+    // Non-canonical table name → SYNC_TABLE_NAME_INVALID (redacted), via the shared gate.
+    assertSyncIdentifier('table', change.table_name);
+  }
+  if (cls === 'unknown') {
+    throw new SyncPoisonError(
+      SYNC_TABLE_NOT_ALLOWED,
+      `[Sync] ${SYNC_TABLE_NOT_ALLOWED}: table ${redactIdentifier(change.table_name)} is canonical but not ` +
+        `in the business-schema allowlist.`,
+    );
+  }
+  // ── business table ──
+  const contract = BUSINESS_TABLES.get(change.table_name) as CompiledContract;
+  if (!contract.ops.has(change.action)) {
+    throw new SyncPoisonError(
+      SYNC_OPERATION_NOT_ALLOWED,
+      `[Sync] ${SYNC_OPERATION_NOT_ALLOWED}: operation ${redactIdentifier(change.action)} is not permitted for this table.`,
+    );
+  }
   if (change.action === 'insert' || change.action === 'update') {
+    // change.data kann ein base64-Foto (~1 MB) sein — NIE das ganze Objekt loggen.
+    const data = validateBusinessPayload(contract, change.data);
     applyUpsert(db, change.table_name, change.record_id, data);
   } else if (change.action === 'delete') {
+    // §5 — DELETE carries no data contract: the canonical, allow-listed table is validated above
+    // and `record_id` is a bound parameter. Nothing else is required.
     db.run(`DELETE FROM ${change.table_name} WHERE id = ?`, [change.record_id]);
   }
 }

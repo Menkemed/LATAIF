@@ -1,14 +1,21 @@
 use axum::{
-    extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
+    http::{HeaderMap, StatusCode},
     middleware,
     routing::{get, post},
     Json, Router,
 };
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::sync::Arc;
 
 use super::{auth, models::*, AppState};
+
+/// M6-B3A3 §3 — the production limit on a raw `/sync/push` body. 50 MB covers the largest legit
+/// batch (pushChanges LIMITs 100 changes; a mobile photo at 1600px @ 0.85 is ~0.5 MB base64). It is
+/// the value production always uses; only the test router substitutes a small limit to prove the
+/// exact boundary without a 50 MB allocation.
+pub const MAX_SYNC_PUSH_BODY_BYTES: usize = 50 * 1024 * 1024;
 
 pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let protected = Router::new()
@@ -30,6 +37,17 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // waere schlechter, als sie zu entfernen: hier gibt es nichts zu erlauben.
         .route("/health", get(health))
         .merge(protected)
+}
+
+/// M6-B3A3 §3 — the SAME /api router production runs, with the raw-body limit applied, parametrized
+/// by `body_limit`. The layer order is fixed here (body limit OUTSIDE the routes, so it runs before
+/// the auth route_layer and the handler) and is identical for production and tests — only the limit
+/// value differs. Production calls it with `MAX_SYNC_PUSH_BODY_BYTES`; the runtime integration test
+/// calls it with a tiny limit to hit the exact boundary cheaply. `DefaultBodyLimit` returns 413
+/// BEFORE the handler runs, so an oversized body never reaches the dup scan, a changelog write, a
+/// quarantine write or an activity mark.
+pub fn build_api_router(state: Arc<AppState>, body_limit: usize) -> Router<Arc<AppState>> {
+    api_routes(state).layer(DefaultBodyLimit::max(body_limit))
 }
 
 async fn health() -> &'static str {
@@ -147,6 +165,14 @@ pub enum PushBatchError {
     /// shared changelog would detonate on every client that later applies it — so it is refused
     /// at the source. A malformed request, not a server fault: 400.
     InvalidIdentifier(String),
+    /// M6-B3A §4 — a canonical, non-forbidden table that is NOT in the business-schema allowlist.
+    /// `some_new_table` is no longer accepted by default. A malformed request: 400.
+    TableNotAllowed(String),
+    /// M6-B3A §5/§6 — the change violates the payload contract: a disallowed or non-canonical
+    /// field, a malformed/oversized payload, or an operation the table does not permit. Carries
+    /// the stable code so the operator log is specific. The confirmed products+invalid-key
+    /// poisoning is refused here. A malformed request: 400.
+    SchemaViolation { code: &'static str, table: String },
     Db(rusqlite::Error),
     /// §11 — the batch committed to the changelog but the legacy-activity invalidation could
     /// not be written. This must fail the whole push: a client landing data while the
@@ -201,6 +227,48 @@ pub fn apply_legacy_push_batch(
             );
             return Err(PushBatchError::InvalidIdentifier(change.table_name.clone()));
         }
+        // M6-B3A §4 — the business allowlist. A canonical, non-forbidden name that is NOT in the
+        // manifest is refused (SYNC_TABLE_NOT_ALLOWED) — `some_new_table` is no longer accepted by
+        // default. Closes M6_FULL_BUSINESS_TABLE_ALLOWLIST_OPEN at the push ingress.
+        if !super::sync_schema::is_business_table(&change.table_name) {
+            eprintln!(
+                "[sync] push refused: {} ({})",
+                super::sync_schema::ERR_TABLE_NOT_ALLOWED,
+                super::sync_policy::redact_identifier(&change.table_name)
+            );
+            return Err(PushBatchError::TableNotAllowed(change.table_name.clone()));
+        }
+        // M6-B3A1 §3 — the operation must be one the table's contract permits. allowed_operations is
+        // the EXACT per-table set a production writer emits (not a blanket insert/update/delete), so an
+        // insert into an update-only table, or a delete on an insert-only ledger, is refused here.
+        if !super::sync_schema::is_operation_allowed(&change.table_name, &change.action) {
+            eprintln!(
+                "[sync] push refused: {} (op {} not permitted for table {})",
+                super::sync_schema::ERR_OPERATION_NOT_ALLOWED,
+                super::sync_policy::redact_identifier(&change.action),
+                super::sync_policy::redact_identifier(&change.table_name)
+            );
+            return Err(PushBatchError::SchemaViolation {
+                code: super::sync_schema::ERR_OPERATION_NOT_ALLOWED,
+                table: change.table_name.clone(),
+            });
+        }
+        // M6-B3A §5/§6 — insert/update payloads must satisfy the field/shape/limit contract. DELETE
+        // carries no data contract (canonical, allow-listed table + bound record_id is enough). The
+        // confirmed poisoning case — a canonical allow-listed table (`products`) carrying an invalid
+        // or non-allowed payload column — is refused HERE, at the source, before it lands in the
+        // changelog. Only a bounded, redacted diagnostic is logged: never the raw payload/fields.
+        if change.action == "insert" || change.action == "update" {
+            if let Err(code) = super::sync_schema::validate_business_payload(&change.table_name, &change.data) {
+                eprintln!(
+                    "[sync] push refused: {} (table {}, payload_hash {})",
+                    code,
+                    super::sync_policy::redact_identifier(&change.table_name),
+                    super::sync_schema::digest_hex(&change.data)
+                );
+                return Err(PushBatchError::SchemaViolation { code, table: change.table_name.clone() });
+            }
+        }
     }
 
     // IMMEDIATE: take the write lock up front instead of upgrading mid-batch.
@@ -233,10 +301,34 @@ pub fn apply_legacy_push_batch(
     Ok(count)
 }
 
+/// M6-B3A4 §3 — does the request carry a JSON content-type? Restores the check the pre-B3A `Json`
+/// extractor performed and the B3A `Bytes` switch silently dropped. Mirrors axum's `json_content_type`:
+/// `application/json`, `application/json; charset=…` (parameters ignored) and any
+/// `application/<vendor>+json` suffix are JSON; a missing header, `text/plain` and
+/// `application/octet-stream` are not. Dependency-free (no `mime` crate) and case-insensitive on the
+/// media type — every supported producer (desktop + mobile uploader, v0.8.23 + current) sends
+/// `application/json`, so requiring a JSON content-type refuses nothing legitimate.
+fn is_json_content_type(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(text) = value.to_str() else {
+        return false;
+    };
+    // media type = everything before the first ';' (drop parameters like charset), trimmed+lowercased
+    let media = text.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    media == "application/json" || (media.starts_with("application/") && media.ends_with("+json"))
+}
+
 async fn sync_push(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<SyncPushRequest>,
+    // M6-B3A4 §3 — the request headers, read ONLY to enforce the JSON content-type contract below. A
+    // FromRequestParts extractor, so it precedes the Bytes body extractor.
+    headers: HeaderMap,
+    // M6-B3A1 §6 — take the RAW body (not the `Json` extractor) so a duplicate JSON key can be caught
+    // BEFORE serde_json collapses it to the last value. Bytes must be the last extractor.
+    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // M6-B2A — central write gate. The ONLY state that may accept sync writes is a
     // primary whose recorded binding matches this installation. `should_serve()` already
@@ -254,6 +346,30 @@ async fn sync_push(
         );
         return Err(StatusCode::FORBIDDEN);
     }
+
+    // M6-B3A4 §3 — restore the JSON content-type contract. Checked AFTER the write gate so a
+    // non-writable server answers a uniform 403 (revealing no media-type policy), matching the
+    // established B3A gate-first order. On a writable primary a non-JSON body (missing header,
+    // text/plain, application/octet-stream) is 415 before the body is scanned or parsed. Every
+    // supported producer sends `application/json`, so no legitimate client is refused.
+    if !is_json_content_type(&headers) {
+        eprintln!("[sync] push 415: unsupported media type (expected application/json)");
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    // M6-B3A1 §6 — refuse a raw body carrying a duplicate JSON key at the envelope level (two
+    // `table_name`, `action`, `record_id`, `data`, …) before serde collapses it. The inner `data`
+    // payload's own duplicate keys are refused later by the per-change field/shape validation. So no
+    // duplicate — envelope or payload — can slip a value past the table/field/operation allowlists.
+    let raw = std::str::from_utf8(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if super::sync_schema::contains_duplicate_json_key(raw) {
+        eprintln!(
+            "[sync] push 400: {} (duplicate key in the push body)",
+            super::sync_schema::ERR_PAYLOAD_DUPLICATE_KEY
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let req: SyncPushRequest = serde_json::from_str(raw).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let mut db = state.db.lock().await;
     let now = chrono::Utc::now().to_rfc3339();
@@ -292,6 +408,25 @@ async fn sync_push(
             );
             StatusCode::BAD_REQUEST
         }
+        // M6-B3A §4 — a canonical but non-allow-listed table. A bad request, redacted.
+        PushBatchError::TableNotAllowed(table) => {
+            eprintln!(
+                "[sync] push 400: {} — table {} is not in the business allowlist",
+                super::sync_schema::ERR_TABLE_NOT_ALLOWED,
+                super::sync_policy::redact_identifier(&table)
+            );
+            StatusCode::BAD_REQUEST
+        }
+        // M6-B3A §5/§6 — a payload/operation contract violation. A bad request; the stable code and
+        // the redacted table name are logged, never the raw payload.
+        PushBatchError::SchemaViolation { code, table } => {
+            eprintln!(
+                "[sync] push 400: {} — table {}",
+                code,
+                super::sync_policy::redact_identifier(&table)
+            );
+            StatusCode::BAD_REQUEST
+        }
         PushBatchError::Db(err) => {
             eprintln!("[sync] push 500: database error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -320,28 +455,157 @@ struct PullParams {
 /// `scanned_max`, so neither can become a permanent head-of-line block. The two counts are kept
 /// SEPARATE (§4 diagnostics: `control_plane_filtered` vs `invalid_identifier`) — no raw attacker
 /// value is retained. Business rows in the same window are untouched.
+/// M6-B3A §8 — one changelog row the pull will WITHHOLD and permanently quarantine (never deliver),
+/// so the cursor can advance past it without a head-of-line stall. The raw `table_name`/`record_id`/
+/// `data` are kept only to compute a redacted name + hashes at persist time; never logged raw.
+pub struct QuarantineCandidate {
+    pub change_id: i64,
+    pub table_name: String,
+    pub record_id: String,
+    pub data: String,
+    pub reason_code: &'static str,
+}
+
 pub struct PullFilter {
     pub delivered: Vec<SyncChange>,
     pub scanned_max: i64,
-    pub control_plane_filtered: usize,
-    pub invalid_identifier_filtered: usize,
+    // §8 separated diagnostics.
+    pub control_plane_filtered: usize,       // filtered only (expected internal/control rows)
+    pub invalid_identifier_quarantined: usize,
+    pub unknown_table_quarantined: usize,
+    pub invalid_field_quarantined: usize,
+    pub invalid_payload_quarantined: usize,
+    // Every row that must be durably quarantined BEFORE the cursor may advance past it.
+    pub to_quarantine: Vec<QuarantineCandidate>,
 }
 
+/// M6-B2DE1 §5 / M6-B3A §8 — split a scanned changelog window into what a legacy client may see, what
+/// must be quarantined (and why), and how far the cursor may advance. A pure function so the whole
+/// contract is unit-testable without a live server:
+///   • valid allow-listed business row      → deliver
+///   • control-plane / internal row          → filter (expected; not quarantined)
+///   • non-canonical table identifier         → quarantine (SYNC_TABLE_NAME_INVALID)
+///   • canonical but unknown table            → quarantine (SYNC_TABLE_NOT_ALLOWED)
+///   • disallowed / non-canonical field        → quarantine (SYNC_FIELD_NOT_ALLOWED / _COLUMN_NAME_INVALID)
+///   • malformed / oversized payload           → quarantine (SYNC_PAYLOAD_INVALID / _TOO_LARGE)
+/// `scanned_max` is the highest id LOOKED AT — the cursor may reach it only once every withheld row
+/// up to it is durably quarantined (enforced in `sync_pull`). No raw attacker value is retained here.
 fn filter_forbidden_for_pull(rows: Vec<SyncChange>, since_id: i64) -> PullFilter {
     let scanned_max = rows.last().map(|c| c.id).unwrap_or(since_id);
     let mut delivered = Vec::new();
     let mut control_plane_filtered = 0usize;
-    let mut invalid_identifier_filtered = 0usize;
+    let mut invalid_identifier_quarantined = 0usize;
+    let mut unknown_table_quarantined = 0usize;
+    let mut invalid_field_quarantined = 0usize;
+    let mut invalid_payload_quarantined = 0usize;
+    let mut to_quarantine: Vec<QuarantineCandidate> = Vec::new();
+    let mut quarantine = |c: &SyncChange, code: &'static str, counter: &mut usize| {
+        *counter += 1;
+        to_quarantine.push(QuarantineCandidate {
+            change_id: c.id,
+            table_name: c.table_name.clone(),
+            record_id: c.record_id.clone(),
+            data: c.data.clone(),
+            reason_code: code,
+        });
+    };
     for c in rows {
-        if super::sync_policy::is_forbidden(&c.table_name) {
-            control_plane_filtered += 1;
-        } else if super::sync_policy::validate_sync_table_name(&c.table_name).is_err() {
-            invalid_identifier_filtered += 1;
-        } else {
-            delivered.push(c);
+        // The SAME classifier the client's `changeContractViolation` uses — so a row the client
+        // would refuse on apply is exactly a row the server withholds on pull.
+        match super::sync_schema::change_contract_violation(&c.table_name, &c.action, &c.data) {
+            // A valid, allow-listed business row (incl. a DELETE, which has no payload contract).
+            None => delivered.push(c),
+            // Control-plane / internal rows are EXPECTED to be withheld (the server never should have
+            // stored them; they are filtered, not quarantined — no operator follow-up needed).
+            Some(code) if code == super::sync_policy::ERR_CONTROL_PLANE_TABLE_FORBIDDEN => {
+                control_plane_filtered += 1;
+            }
+            Some(code) if code == super::sync_policy::ERR_TABLE_NAME_INVALID => {
+                quarantine(&c, code, &mut invalid_identifier_quarantined);
+            }
+            Some(code) if code == super::sync_schema::ERR_TABLE_NOT_ALLOWED => {
+                quarantine(&c, code, &mut unknown_table_quarantined);
+            }
+            Some(code)
+                if code == super::sync_schema::ERR_FIELD_NOT_ALLOWED
+                    || code == super::sync_schema::ERR_COLUMN_NAME_INVALID =>
+            {
+                quarantine(&c, code, &mut invalid_field_quarantined);
+            }
+            // SYNC_PAYLOAD_INVALID / SYNC_PAYLOAD_TOO_LARGE (incl. a disallowed operation).
+            Some(code) => {
+                quarantine(&c, code, &mut invalid_payload_quarantined);
+            }
         }
     }
-    PullFilter { delivered, scanned_max, control_plane_filtered, invalid_identifier_filtered }
+    PullFilter {
+        delivered,
+        scanned_max,
+        control_plane_filtered,
+        invalid_identifier_quarantined,
+        unknown_table_quarantined,
+        invalid_field_quarantined,
+        invalid_payload_quarantined,
+        to_quarantine,
+    }
+}
+
+/// M6-B3A §8 — durably quarantine every withheld row in ONE immediate transaction, BEFORE the pull
+/// returns its cursor. Deduped by `change_id` (idempotent re-scan bumps `occurrence_count`). Only a
+/// redacted table name and hashes are stored — never raw payloads or secrets. `Err(())` on any DB
+/// failure so `sync_pull` returns 500 and the client cursor does NOT advance past unquarantined rows.
+fn persist_pull_quarantine(
+    db: &mut rusqlite::Connection,
+    tenant_id: &str,
+    branch_id: &str,
+    now: &str,
+    rows: &[QuarantineCandidate],
+) -> Result<(), ()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| ())?;
+    for q in rows {
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM sync_change_quarantine WHERE change_id = ?1",
+                rusqlite::params![q.change_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| ())?;
+        if existing.is_some() {
+            tx.execute(
+                "UPDATE sync_change_quarantine SET occurrence_count = occurrence_count + 1, \
+                 last_seen_at = ?2, reason_code = ?3 WHERE change_id = ?1",
+                rusqlite::params![q.change_id, now, q.reason_code],
+            )
+            .map_err(|_| ())?;
+        } else {
+            tx.execute(
+                "INSERT INTO sync_change_quarantine \
+                 (quarantine_id, change_id, source, tenant_id, branch_id, table_name_redacted, \
+                  record_id_hash, payload_hash, reason_code, first_seen_at, last_seen_at, \
+                  occurrence_count, state) \
+                 VALUES (?1, ?2, 'pull_scan', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 1, 'open')",
+                rusqlite::params![
+                    format!("q:{}", q.change_id),
+                    q.change_id,
+                    tenant_id,
+                    branch_id,
+                    super::sync_policy::redact_identifier(&q.table_name),
+                    super::sync_schema::digest_hex(&q.record_id),
+                    super::sync_schema::digest_hex(&q.data),
+                    q.reason_code,
+                    now,
+                ],
+            )
+            .map_err(|_| ())?;
+        }
+    }
+    tx.commit().map_err(|_| ())
 }
 
 /// M6-B2DE4 §7 — persist the legacy-activity marking for a successful pull in its OWN immediate
@@ -402,11 +666,31 @@ async fn sync_pull(
         filter_forbidden_for_pull(rows, since_id)
     };
 
-    // §4 — separated diagnostics, counts only (no raw attacker value ever reaches a log line).
-    if filtered.control_plane_filtered > 0 || filtered.invalid_identifier_filtered > 0 {
+    // §8 — durably QUARANTINE every withheld invalid row BEFORE the cursor is allowed to advance
+    // past it. Quarantine persistence and the cursor decision are one fate: if this fails, the pull
+    // returns 500 and the client's cursor stays put → the same window is re-scanned and re-quarantined
+    // (idempotent by change_id). This is what lets `scanned_max` move past a poisoned row without ever
+    // delivering it — closing the head-of-line DoS — while never marking it applied.
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        persist_pull_quarantine(&mut db, &claims.tenant_id, &claims.branch_id, &now, &filtered.to_quarantine)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    // §8 — separated diagnostics, counts only (no raw attacker value ever reaches a log line).
+    let q_total = filtered.invalid_identifier_quarantined
+        + filtered.unknown_table_quarantined
+        + filtered.invalid_field_quarantined
+        + filtered.invalid_payload_quarantined;
+    if filtered.control_plane_filtered > 0 || q_total > 0 {
         eprintln!(
-            "[sync] pull withheld: control_plane_filtered={} invalid_identifier={}",
-            filtered.control_plane_filtered, filtered.invalid_identifier_filtered
+            "[sync] pull withheld: control_plane_filtered={} invalid_identifier_quarantined={} \
+             unknown_table_quarantined={} invalid_field_quarantined={} invalid_payload_quarantined={}",
+            filtered.control_plane_filtered,
+            filtered.invalid_identifier_quarantined,
+            filtered.unknown_table_quarantined,
+            filtered.invalid_field_quarantined,
+            filtered.invalid_payload_quarantined
         );
     }
     let (delivered, scanned_max) = (filtered.delivered, filtered.scanned_max);
@@ -701,16 +985,18 @@ mod legacy_push_tests {
             "Routenmenge geaendert — Modusmatrix und Gate neu bewerten"
         );
 
-        // 3. Jeder Schreibzugriff im Produktivcode geht in sync_changelog — also durch
-        //    apply_legacy_push_batch, und das erreicht man nur ueber das Gate.
+        // 3. Jeder Schreibzugriff im Produktivcode geht entweder in sync_changelog (Business-Daten,
+        //    also durch apply_legacy_push_batch hinter dem Gate) ODER in sync_change_quarantine
+        //    (M6-B3A §8: internes Quarantaene-Bookkeeping auf dem authentifizierten Pull-Pfad — keine
+        //    Business-Daten, nur redigierte Hashes). Keine dritte, ungegatete Schreibflaeche.
         let writers: Vec<&str> = ["INSERT INTO", "UPDATE ", "DELETE FROM"]
             .iter()
             .flat_map(|kw| prod.match_indices(kw).map(|(i, _)| &prod[i..(i + 40).min(prod.len())]))
             .collect();
         for w in &writers {
             assert!(
-                w.contains("sync_changelog"),
-                "unerwartete Schreibflaeche im Produktivcode: {w:?} — muss durch das Gate"
+                w.contains("sync_changelog") || w.contains("sync_change_quarantine"),
+                "unerwartete Schreibflaeche im Produktivcode: {w:?} — muss changelog (Gate) oder quarantine (B3A) sein"
             );
         }
         assert!(!writers.is_empty(), "Sanity: der Scanner sieht ueberhaupt Schreibzugriffe");
@@ -845,7 +1131,7 @@ mod legacy_push_tests {
         assert_eq!(f.scanned_max, 3, "S10: cursor advances past the withheld row, not stuck at it");
         // §4 — the diagnostics separate the two withholding reasons.
         assert_eq!(f.control_plane_filtered, 1, "the enrolled_devices row is control-plane");
-        assert_eq!(f.invalid_identifier_filtered, 0);
+        assert_eq!(f.invalid_identifier_quarantined, 0);
     }
 
     // ── S10: a window of ONLY control-plane rows delivers nothing but advances ─
@@ -876,7 +1162,7 @@ mod legacy_push_tests {
     fn s11_s12_client_guard_precedes_every_apply_action() {
         let ts = include_str!("../../../src/core/sync/apply-change.ts");
         let guard = ts
-            .find("isControlPlaneTable(change.table_name)")
+            .find("classifySyncTable(change.table_name)")
             .expect("the client apply guard must exist");
         let upsert = ts.find("applyUpsert(db, change.table_name").expect("applyUpsert call");
         let delete = ts.find("DELETE FROM ${change.table_name}").expect("delete path");
@@ -886,7 +1172,7 @@ mod legacy_push_tests {
         assert!(guard < delete, "guard must precede the delete path");
         // …and it throws (fail-closed), not merely skips.
         let after = &ts[guard..upsert];
-        assert!(after.contains("throw new Error"), "the guard must throw, not silently skip");
+        assert!(after.contains("throw new SyncPoisonError"), "the guard must throw, not silently skip");
         assert!(
             after.contains("SYNC_CONTROL_PLANE_TABLE_FORBIDDEN"),
             "and it must carry the stable error code"
@@ -911,7 +1197,7 @@ mod legacy_push_tests {
     #[test]
     fn every_forbidden_table_is_rejected_by_push() {
         let forbidden = all_forbidden_tables();
-        assert_eq!(forbidden.len(), 20, "16 control-plane + 4 internal — the whole denylist");
+        assert_eq!(forbidden.len(), 21, "16 control-plane + 5 internal (incl. sync_change_quarantine)");
         for table in forbidden {
             let mut conn = db();
             let r = push(&mut conn, &[change_on(table, "x", "update")]);
@@ -939,7 +1225,7 @@ mod legacy_push_tests {
             assert_eq!(f.scanned_max, 3, "{table}: cursor advances past the withheld row (no HOL block)");
             // Every forbidden table is a canonical control-plane/internal name → control-plane count.
             assert_eq!(f.control_plane_filtered, 1, "{table}: counted as control-plane");
-            assert_eq!(f.invalid_identifier_filtered, 0);
+            assert_eq!(f.invalid_identifier_quarantined, 0);
         }
     }
 
@@ -976,14 +1262,16 @@ mod legacy_push_tests {
             );
             assert_eq!(rows(&conn), 0, "{bad:?}: no changelog row written");
         }
-        // A canonical but UNKNOWN business table still flows — the gate is a charset, not a name
-        // list. (This is the M6_FULL_BUSINESS_TABLE_ALLOWLIST_OPEN boundary, unchanged.)
+        // M6-B3A §4 — a canonical but UNKNOWN business table is now REFUSED (SYNC_TABLE_NOT_ALLOWED).
+        // This is the M6_FULL_BUSINESS_TABLE_ALLOWLIST_OPEN boundary, now CLOSED: the gate is the
+        // manifest allowlist, not merely a charset.
         let mut conn = db();
-        assert_eq!(
-            push(&mut conn, &[change_on("some_new_table", "x", "update")]).unwrap(),
-            1,
-            "an unknown but canonical table is still accepted"
+        let r = push(&mut conn, &[change_on("some_new_table", "x", "update")]);
+        assert!(
+            matches!(r, Err(PushBatchError::TableNotAllowed(_))),
+            "an unknown but canonical table is now refused as not-allowed — got {r:?}"
         );
+        assert_eq!(rows(&conn), 0, "no changelog row for a non-allow-listed table");
     }
 
     // ── the CLIENT apply gates every identifier BEFORE building any SQL ──────
@@ -1035,7 +1323,7 @@ mod legacy_push_tests {
             .or_else(|| ts[g + 10..].find("\nlet "))
             .map(|i| i + g + 10)
             .unwrap_or(ts.len());
-        let throws = ts[g..body_end].contains("throw new Error");
+        let throws = ts[g..body_end].contains("throw new SyncPoisonError");
         let coded = ts[g..body_end].contains("SYNC_TABLE_NAME_INVALID")
             && ts[g..body_end].contains("SYNC_COLUMN_NAME_INVALID");
         assert!(throws, "the identifier gate must throw, not silently skip");
@@ -1200,7 +1488,7 @@ mod legacy_push_tests {
                 assert_eq!(f.scanned_max, 3, "{value:?}: cursor advances past it");
                 match outcome {
                     Outcome::Forbidden => assert_eq!(f.control_plane_filtered, 1, "{value:?}"),
-                    Outcome::Invalid => assert_eq!(f.invalid_identifier_filtered, 1, "{value:?}"),
+                    Outcome::Invalid => assert_eq!(f.invalid_identifier_quarantined, 1, "{value:?}"),
                 }
             }
         }
@@ -1251,21 +1539,20 @@ mod legacy_push_tests {
             .all(|c| c.table_name != "enrolled_devices" && c.table_name != "DROP TABLE users"));
         assert_eq!(f.scanned_max, 13, "cursor past BOTH filtered rows — no head-of-line block");
         assert_eq!(f.control_plane_filtered, 1, "the enrolled_devices row");
-        assert_eq!(f.invalid_identifier_filtered, 1, "the 'DROP TABLE users' row");
+        assert_eq!(f.invalid_identifier_quarantined, 1, "the 'DROP TABLE users' row");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // M6-B2DE4 §6 — the poisoned-changelog contract, SERVER half (a REAL push).
+    // M6-B3A §6/§13 — the poisoned-changelog DoS, CLOSED at the push ingress.
     //
-    // A canonical, allowed table_name carrying an INVALID payload COLUMN name. This proves — not
-    // assumes — that the current legacy server ACCEPTS it and it LANDS in the changelog, because
-    // the server stores `data` opaquely and never parses column names. The CLIENT half (refuses on
-    // apply, cursor stuck, blocks subsequent) is proven behaviorally in
-    // test/m6b2de4/identifier-apply-behavior.test.ts. Together: the DoS is real, fail-closed (no
-    // poison applied, no false success), and deferred to B3 — NOT fixed here.
+    // Under B2DE this exact push was ACCEPTED: `products` is a canonical, allowed table_name and the
+    // server stored `data` opaquely, so the poison landed in the changelog, was delivered, and
+    // choked every client on apply (the head-of-line DoS). B3A validates the payload against the
+    // table contract BEFORE the write, so the poisoned push is now refused and NOTHING lands. This
+    // is the test that flipped: it used to prove the server accepted it.
     // ═══════════════════════════════════════════════════════════════════════
     #[test]
-    fn m6_server_accepts_a_payload_column_poisoned_change_and_it_lands_in_the_changelog() {
+    fn m6_server_now_rejects_a_payload_column_poisoned_push() {
         let mut conn = db();
         let poisoned = SyncPushChange {
             table_name: "products".into(), // canonical, allowed — passes BOTH the denylist and charset
@@ -1273,27 +1560,40 @@ mod legacy_push_tests {
             action: "update".into(),
             data: "{\"BadColumn\": 1, \"another bad\": 2}".into(), // invalid column names in the payload
         };
-        let n = push(&mut conn, &[poisoned]).unwrap();
-        assert_eq!(
-            n, 1,
-            "§6: the server ACCEPTS it — table_name is canonical and the payload is opaque to the server"
+        let r = push(&mut conn, &[poisoned]);
+        assert!(
+            matches!(
+                r,
+                Err(PushBatchError::SchemaViolation { code, .. })
+                    if code == super::super::sync_schema::ERR_COLUMN_NAME_INVALID
+            ),
+            "§6: the payload-poisoned push is REFUSED (SYNC_COLUMN_NAME_INVALID), not accepted — got {r:?}"
         );
-        let (table, data): (String, String) = conn
-            .query_row(
-                "SELECT table_name, data FROM sync_changelog WHERE record_id='p1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(table, "products");
-        assert!(data.contains("BadColumn"), "§6: the poisoned payload landed verbatim in the changelog");
+        assert_eq!(
+            rows(&conn),
+            0,
+            "§6/§13: nothing lands in the changelog — no poison to detonate on any client later"
+        );
 
-        // …and a pull WOULD deliver it: `products` is a valid business identifier, so neither the
-        // control-plane denylist nor the charset gate withholds it. The poison is in the columns,
-        // which the server never inspects — the client is the one that must refuse it on apply.
-        let f = filter_forbidden_for_pull(vec![pull_row(1, "products")], 0);
-        assert_eq!(f.delivered.len(), 1, "§6: the poisoned row is delivered — the table name is clean");
-        assert_eq!(f.invalid_identifier_filtered, 0, "§6: the server-side filter cannot see the payload columns");
+        // A canonical-but-UNKNOWN column (not in the products contract) is refused too, as
+        // SYNC_FIELD_NOT_ALLOWED (distinct from the non-canonical case above).
+        let mut conn2 = db();
+        let field_poison = SyncPushChange {
+            table_name: "products".into(),
+            record_id: "p2".into(),
+            action: "update".into(),
+            data: "{\"bad_column\": 1}".into(),
+        };
+        let r2 = push(&mut conn2, &[field_poison]);
+        assert!(
+            matches!(
+                r2,
+                Err(PushBatchError::SchemaViolation { code, .. })
+                    if code == super::super::sync_schema::ERR_FIELD_NOT_ALLOWED
+            ),
+            "§5: a canonical-but-unknown column is SYNC_FIELD_NOT_ALLOWED — got {r2:?}"
+        );
+        assert_eq!(rows(&conn2), 0);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1356,6 +1656,918 @@ mod legacy_push_tests {
             )
             .unwrap();
         assert!(rev.is_none() && op.is_none() && pv.is_none(), "legacy path stays legacy");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // M6-B3A §12 — Q1–Q16: the schema-allowlist + pull-quarantine contract.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // A `db()` plus the real v0009 quarantine table (from the migration SQL, not a hand copy).
+    fn db_q() -> Connection {
+        let conn = db();
+        conn.execute_batch(crate::sync::migrations::V0009_SYNC_SCHEMA_AND_QUARANTINE.up_sql).unwrap();
+        conn
+    }
+    fn pull_full(id: i64, table: &str, record: &str, action: &str, data: &str) -> SyncChange {
+        SyncChange {
+            id,
+            table_name: table.into(),
+            record_id: record.into(),
+            branch_id: "branch-main".into(),
+            action: action.into(),
+            data: data.into(),
+            created_at: "n".into(),
+        }
+    }
+    fn pull_d(id: i64, table: &str, action: &str, data: &str) -> SyncChange {
+        pull_full(id, table, &format!("r{id}"), action, data)
+    }
+    fn pchg(table: &str, record: &str, action: &str, data: &str) -> SyncPushChange {
+        SyncPushChange { table_name: table.into(), record_id: record.into(), action: action.into(), data: data.into() }
+    }
+    fn open_quarantine(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM sync_change_quarantine WHERE state='open'", [], |r| r.get(0)).unwrap()
+    }
+
+    // ── Q1–Q8: server ingress (push) ─────────────────────────────────────────
+    #[test]
+    fn q1_valid_table_and_allowed_fields_accepted() {
+        let mut conn = db();
+        let n = push(&mut conn, &[pchg("products", "p1", "insert", r#"{"id":"p1","brand":"Rolex","name":"Sub"}"#)]).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(rows(&conn), 1);
+    }
+
+    #[test]
+    fn q2_unknown_table_rejects_whole_batch() {
+        let mut conn = db();
+        let r = push(&mut conn, &[change("ok1"), change_on("some_unknown_table", "x", "update"), change("ok2")]);
+        assert!(matches!(r, Err(PushBatchError::TableNotAllowed(_))), "got {r:?}");
+        assert_eq!(rows(&conn), 0, "no partial acceptance");
+    }
+
+    #[test]
+    fn q3_forbidden_table_rejects_whole_batch() {
+        let mut conn = db();
+        let r = push(&mut conn, &[change("ok1"), change_on("users", "x", "update")]);
+        assert!(matches!(r, Err(PushBatchError::ControlPlaneForbidden(_))), "got {r:?}");
+        assert_eq!(rows(&conn), 0);
+    }
+
+    #[test]
+    fn q4_valid_table_unknown_field_rejected() {
+        let mut conn = db();
+        let r = push(&mut conn, &[pchg("products", "p1", "update", r#"{"bad_field":1}"#)]);
+        assert!(
+            matches!(r, Err(PushBatchError::SchemaViolation { code, .. }) if code == super::super::sync_schema::ERR_FIELD_NOT_ALLOWED),
+            "got {r:?}"
+        );
+        assert_eq!(rows(&conn), 0);
+    }
+
+    #[test]
+    fn q5_invalid_field_identifier_rejected() {
+        let mut conn = db();
+        let r = push(&mut conn, &[pchg("products", "p1", "update", r#"{"Bad Field":1}"#)]);
+        assert!(
+            matches!(r, Err(PushBatchError::SchemaViolation { code, .. }) if code == super::super::sync_schema::ERR_COLUMN_NAME_INVALID),
+            "got {r:?}"
+        );
+        assert_eq!(rows(&conn), 0);
+    }
+
+    #[test]
+    fn q6_invalid_payload_form_rejected() {
+        for bad in [r#"[1,2,3]"#, r#""a string""#, "not json at all"] {
+            let mut conn = db();
+            let r = push(&mut conn, &[pchg("products", "p1", "update", bad)]);
+            assert!(
+                matches!(r, Err(PushBatchError::SchemaViolation { code, .. }) if code == super::super::sync_schema::ERR_PAYLOAD_INVALID),
+                "{bad:?}: got {r:?}"
+            );
+            assert_eq!(rows(&conn), 0, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn q7_mixed_valid_invalid_batch_writes_nothing() {
+        let mut conn = db();
+        let r = push(&mut conn, &[change("ok1"), pchg("products", "p2", "update", r#"{"bad_field":1}"#), change("ok2")]);
+        assert!(r.is_err());
+        assert_eq!(rows(&conn), 0, "the surrounding valid rows do not survive — all-or-nothing");
+    }
+
+    #[test]
+    fn q8_rejected_batch_is_not_legacy_activity() {
+        let mut conn = db_with_attestation();
+        let r = push(&mut conn, &[pchg("products", "p1", "update", r#"{"bad_field":1}"#)]);
+        assert!(matches!(r, Err(PushBatchError::SchemaViolation { .. })));
+        assert_eq!(rows(&conn), 0);
+        let (flag, state) = cutover_flags(&conn);
+        assert_eq!(flag, 0, "a refused push is not activity — readiness stands");
+        assert_eq!(state, "ready_for_protocol_activation");
+    }
+
+    // ── Q9–Q16: server pull quarantine ───────────────────────────────────────
+    #[test]
+    fn q9_to_q13_pull_delivers_valid_quarantines_invalid_and_advances() {
+        let mut conn = db_q();
+        let scanned = vec![
+            pull_d(1, "products", "update", r#"{"id":"r1","brand":"Rolex"}"#), // valid
+            pull_d(2, "products", "update", r#"{"bad_field":1}"#),              // poison field
+            pull_d(3, "some_unknown_table", "update", "{}"),                    // unknown table
+            pull_d(4, "enrolled_devices", "update", "{}"),                      // control-plane
+            pull_d(5, "invoices", "update", r#"{"id":"r5"}"#),                  // valid
+        ];
+        let f = filter_forbidden_for_pull(scanned, 0);
+        // Q9 — only valid business rows delivered
+        assert_eq!(f.delivered.len(), 2);
+        assert!(f.delivered.iter().all(|c| c.table_name == "products" || c.table_name == "invoices"));
+        // Q10 — every invalid DATA row quarantined; Q11 — control-plane only filtered (not quarantined)
+        assert_eq!(f.invalid_field_quarantined, 1);
+        assert_eq!(f.unknown_table_quarantined, 1);
+        assert_eq!(f.control_plane_filtered, 1);
+        assert_eq!(f.to_quarantine.len(), 2);
+        // Q12 — cursor over ALL scanned ids (incl. withheld); Q13 — no head-of-line block
+        assert_eq!(f.scanned_max, 5);
+        persist_pull_quarantine(&mut conn, "tenant-1", "branch-main", "2026-07-18", &f.to_quarantine).unwrap();
+        assert_eq!(open_quarantine(&conn), 2);
+    }
+
+    #[test]
+    fn q14_identical_repull_does_not_duplicate_quarantine() {
+        let mut conn = db_q();
+        let mk = || vec![pull_d(2, "products", "update", r#"{"bad_field":1}"#)];
+        persist_pull_quarantine(&mut conn, "tenant-1", "branch-main", "t1", &filter_forbidden_for_pull(mk(), 0).to_quarantine).unwrap();
+        persist_pull_quarantine(&mut conn, "tenant-1", "branch-main", "t2", &filter_forbidden_for_pull(mk(), 0).to_quarantine).unwrap();
+        let (cnt, occ): (i64, i64) = conn
+            .query_row("SELECT COUNT(*), MAX(occurrence_count) FROM sync_change_quarantine", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(cnt, 1, "one row, deduped by change_id");
+        assert_eq!(occ, 2, "occurrence_count bumped on re-pull, not a duplicate");
+    }
+
+    #[test]
+    fn q15_quarantine_persist_failure_is_a_hard_error() {
+        let mut conn = db_q();
+        conn.execute_batch("DROP TABLE sync_change_quarantine").unwrap();
+        let f = filter_forbidden_for_pull(vec![pull_d(2, "products", "update", r#"{"bad_field":1}"#)], 0);
+        assert!(!f.to_quarantine.is_empty());
+        // Persist fails → Err → sync_pull returns 500 → the client cursor never advances past it.
+        assert!(persist_pull_quarantine(&mut conn, "tenant-1", "branch-main", "t", &f.to_quarantine).is_err());
+    }
+
+    #[test]
+    fn q16_quarantine_stores_no_raw_secrets() {
+        let mut conn = db_q();
+        let secret_record = "super-secret-record-id-1234";
+        let secret_payload = r#"{"password_hash":"TOPSECRET-HASH","bad_field":"leak-me-please"}"#;
+        let scanned = vec![pull_full(2, "products", secret_record, "update", secret_payload)];
+        let f = filter_forbidden_for_pull(scanned, 0);
+        persist_pull_quarantine(&mut conn, "tenant-1", "branch-main", "t", &f.to_quarantine).unwrap();
+        let (tbl, rec, pay): (String, String, String) = conn
+            .query_row(
+                "SELECT table_name_redacted, record_id_hash, payload_hash FROM sync_change_quarantine",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(!rec.contains("super-secret"), "record id is hashed, not raw");
+        assert!(!pay.contains("TOPSECRET") && !pay.contains("leak-me"), "payload is hashed, not raw");
+        assert!(rec.len() <= 8 && pay.len() <= 8, "hashes are bounded 8-hex");
+        assert_eq!(tbl, "products<len=8>", "table name is redacted with its length");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // M6-B3A1 §3/§4 — the per-table operation matrix (O1–O10).
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // O1/O2/O3/O4/O5/O10 — table-driven over the WHOLE manifest: every allowed op is accepted, every
+    // disallowed op is SYNC_OPERATION_NOT_ALLOWED (never silently reinterpreted), and the exact
+    // insert/update/delete table counts are asserted (49/36/37 — proving the matrix is not uniform).
+    #[test]
+    fn o1_o5_o10_operation_matrix_enforced_for_every_table() {
+        let schema = super::super::sync_schema::schema();
+        let (mut ins, mut upd, mut del) = (0usize, 0usize, 0usize);
+        for (table, contract) in &schema.tables {
+            for op in ["insert", "update", "delete"] {
+                let mut conn = db();
+                let data = if op == "delete" { "{}" } else { r#"{"id":"x"}"# };
+                let r = push(&mut conn, &[pchg(table, "x", op, data)]);
+                if contract.ops.contains(op) {
+                    assert!(r.is_ok(), "{table}/{op}: an allowed operation must be accepted, got {r:?}");
+                    assert_eq!(rows(&conn), 1, "{table}/{op}");
+                } else {
+                    assert!(
+                        matches!(&r, Err(PushBatchError::SchemaViolation { code, .. }) if *code == super::super::sync_schema::ERR_OPERATION_NOT_ALLOWED),
+                        "{table}/{op}: a disallowed operation must be SYNC_OPERATION_NOT_ALLOWED, got {r:?}"
+                    );
+                    assert_eq!(rows(&conn), 0, "{table}/{op}: no changelog row — O10, never silently reinterpreted");
+                }
+            }
+            if contract.ops.contains("insert") { ins += 1; }
+            if contract.ops.contains("update") { upd += 1; }
+            if contract.ops.contains("delete") { del += 1; }
+        }
+        assert_eq!((ins, upd, del), (50, 36, 37), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+    }
+
+    // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).
+    #[test]
+    fn o6_mixed_valid_and_disallowed_operation_writes_nothing() {
+        let mut conn = db();
+        let r = push(
+            &mut conn,
+            &[
+                pchg("products", "p1", "insert", r#"{"id":"p1"}"#),
+                pchg("purchase_inbox", "pi1", "delete", "{}"), // purchase_inbox has no delete → not allowed
+                pchg("invoices", "i1", "update", r#"{"id":"i1"}"#),
+            ],
+        );
+        assert!(
+            matches!(&r, Err(PushBatchError::SchemaViolation { code, .. }) if *code == super::super::sync_schema::ERR_OPERATION_NOT_ALLOWED),
+            "got {r:?}"
+        );
+        assert_eq!(rows(&conn), 0, "the surrounding valid changes do not survive");
+    }
+
+    // O7/O9 — a HISTORICAL disallowed-operation changelog row is quarantined on pull (with the
+    // operation code) and the cursor still advances past it.
+    #[test]
+    fn o7_o9_historical_disallowed_operation_is_quarantined_and_cursor_advances() {
+        let mut conn = db_q();
+        let scanned = vec![
+            pull_d(1, "products", "update", r#"{"id":"r1"}"#),        // valid
+            pull_d(2, "purchase_inbox", "delete", "{}"),             // disallowed op (purchase_inbox has no delete)
+            pull_d(3, "invoices", "update", r#"{"id":"r3"}"#),        // valid
+        ];
+        let f = filter_forbidden_for_pull(scanned, 0);
+        assert_eq!(f.delivered.len(), 2, "O7: the disallowed-op row is withheld");
+        assert_eq!(f.to_quarantine.len(), 1);
+        assert_eq!(
+            f.to_quarantine[0].reason_code,
+            super::super::sync_schema::ERR_OPERATION_NOT_ALLOWED,
+            "O7: quarantined with the operation code"
+        );
+        assert_eq!(f.scanned_max, 3, "O9: cursor advances past the quarantined row");
+        persist_pull_quarantine(&mut conn, "tenant-1", "branch-main", "t", &f.to_quarantine).unwrap();
+        assert_eq!(open_quarantine(&conn), 1);
+    }
+
+    // ── M6-B3A1 §6 — the inner `data` payload's duplicate keys are refused (SYNC_PAYLOAD_DUPLICATE_KEY)
+    //    at push; none bypasses the field/operation allowlist. (Envelope duplicates are proven in
+    //    sync_schema::dup_scanner_detects_duplicates_at_every_object_level and rejected by sync_push.)
+    #[test]
+    fn dup_data_payload_keys_rejected_by_push() {
+        for data in [r#"{"brand":"a","brand":"b"}"#, r#"{"bad_col":"a","bad_col":"b"}"#, r#"{"id":"a","id":"b"}"#] {
+            let mut conn = db();
+            let r = push(&mut conn, &[pchg("products", "p1", "update", data)]);
+            assert!(
+                matches!(&r, Err(PushBatchError::SchemaViolation { code, .. }) if *code == super::super::sync_schema::ERR_PAYLOAD_DUPLICATE_KEY),
+                "{data}: got {r:?}"
+            );
+            assert_eq!(rows(&conn), 0, "{data}: no changelog row for a duplicate-key payload");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // M6-B3A2 §5 — released-legacy (v0.8.23) payload compatibility.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // The EXACT payloads the v0.8.23 mobile picture uploader sends (mobile_page.rs, byte-identical at
+    // tag v0.8.23 = 114cc64) MUST all be accepted by the current embedded server — no quarantine, no
+    // operation/field false-rejection. Notably the purchase_inbox INSERT the desktop never emits.
+    #[test]
+    fn legacy_compat_v0823_mobile_fixtures_are_accepted() {
+        let mobile: &[(&str, &str, &str)] = &[
+            ("products", "insert", r#"{"id":"p1","branch_id":"b","category_id":"cat-watch","brand":"Rolex","name":"Sub","sku":null,"quantity":1,"condition":"","scope_of_delivery":"[]","purchase_date":"2026-07-18","purchase_price":100,"purchase_currency":"BHD","planned_sale_price":null,"stock_status":"in_stock","tax_scheme":"MARGIN","source_type":"OWN","notes":null,"images":"[]","image_hash":null,"attributes":"{}","created_at":"t","updated_at":"t","created_by":null}"#),
+            ("customers", "insert", r#"{"id":"c1","branch_id":"b","first_name":"A","last_name":"B","created_at":"t","updated_at":"t"}"#),
+            ("repairs", "insert", r#"{"id":"r1","branch_id":"b","repair_number":"REP","voucher_code":"ABCD1234","customer_id":"c1","item_brand":"X","item_model":"Y","issue_description":"broken","repair_type":"internal","status":"received","received_at":"t","images":"[]","notes":null,"created_at":"t","updated_at":"t","created_by":null}"#),
+            ("purchase_inbox", "insert", r#"{"id":"pi1","branch_id":"b","images":"[]","note":null,"status":"pending","created_at":"t","created_by":null}"#),
+        ];
+        for (t, op, data) in mobile {
+            let mut conn = db();
+            let n = push(&mut conn, &[pchg(t, "x", op, data)])
+                .unwrap_or_else(|e| panic!("v0.8.23 mobile {t}/{op} MUST be accepted, got {e:?}"));
+            assert_eq!(n, 1, "{t}/{op}");
+            assert_eq!(rows(&conn), 1, "{t}/{op}");
+        }
+        // representative non-uniform desktop cases (insert-only ledger, insert+delete invoice_lines).
+        let desktop: &[(&str, &str, &str)] = &[
+            ("ledger_entries", "insert", r#"{"id":"l1","account":"CASH","amount":"5"}"#),
+            ("invoice_lines", "insert", r#"{"id":"il1","invoice_id":"i1"}"#),
+            ("invoice_lines", "delete", "{}"),
+        ];
+        for (t, op, data) in desktop {
+            let mut conn = db();
+            assert!(push(&mut conn, &[pchg(t, "x", op, data)]).is_ok(), "{t}/{op} must be accepted");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // M6-B3A2 §9/§10/§11 — the raw-body route contract.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // §9 — the 50 MB body limit is configured AND applied to the router (unchanged by the Bytes
+    // switch). Derived from the max legit batch: pushChanges LIMITs 100 changes and a mobile photo
+    // (1600px @ 0.85) is ~0.5 MB base64 → ~50 MB worst case. axum's DefaultBodyLimit returns 413
+    // BEFORE the handler buffers the body, so an oversized body triggers no JSON parse, no DB write,
+    // no quarantine and no legacy-activity mark.
+    #[test]
+    fn raw_body_50mb_limit_configured_and_applied() {
+        // §3 — the production limit is the constant, applied via build_api_router; mod.rs passes the
+        // constant (never a smaller literal). The BEHAVIOURAL boundary proof is the runtime
+        // integration test `raw_push_runtime::body_limit_boundary`.
+        assert_eq!(MAX_SYNC_PUSH_BODY_BYTES, 50 * 1024 * 1024, "the production limit is 50 MB");
+        let r = include_str!("routes.rs");
+        let prod = &r[..r.find("#[cfg(test)]").unwrap_or(r.len())];
+        assert!(prod.contains("DefaultBodyLimit::max(body_limit)"), "build_api_router applies the parametrized limit");
+        let m = include_str!("mod.rs");
+        assert!(
+            m.contains("build_api_router(state.clone(), routes::MAX_SYNC_PUSH_BODY_BYTES)"),
+            "production builds the router with the 50 MB constant"
+        );
+    }
+
+    // §11 — gate order. `sync_push` takes the raw Bytes body; the write gate runs first, THEN the
+    // duplicate scan, THEN the parse, THEN the DB apply. Auth is a route_layer on the protected
+    // routes, so it runs before every protected handler. Therefore no unauthenticated request reaches
+    // the expensive dup scan, a changelog write, a quarantine write or an activity mark.
+    #[test]
+    fn raw_body_gate_order_auth_before_dup_scan_and_db() {
+        let src = include_str!("routes.rs");
+        let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        assert!(prod.contains("body: axum::body::Bytes"), "sync_push takes the raw Bytes body");
+        let push_at = prod.find("async fn sync_push").expect("sync_push");
+        let body = &prod[push_at..];
+        let gate = body.find("may_write_sync()").expect("primary gate");
+        let dup = body.find("contains_duplicate_json_key").expect("dup scan");
+        let parse = body.find("SyncPushRequest = serde_json::from_str").expect("parse");
+        let apply = body.find("apply_legacy_push_batch").expect("apply");
+        assert!(gate < dup, "the primary/write gate precedes the duplicate scan");
+        assert!(dup < parse && parse < apply, "dup scan + parse precede the DB apply");
+        // auth composition: a route_layer over the protected routes (incl. /sync/push).
+        assert!(prod.contains("route_layer(middleware::from_fn_with_state"), "auth is a route_layer");
+        assert!(prod.contains(".route(\"/sync/push\", post(sync_push))"), "/sync/push is protected");
+    }
+
+    // §10 — the parse contract the Bytes handler enforces, tested on the EXACT calls sync_push makes
+    // (`str::from_utf8` then `serde_json::from_str::<SyncPushRequest>`): valid → Ok; empty / malformed
+    // / wrong-structure / trailing-garbage → Err (→ 400); non-UTF-8 bytes rejected before JSON.
+    #[test]
+    fn raw_body_parse_contract() {
+        assert!(serde_json::from_str::<SyncPushRequest>(r#"{"changes":[]}"#).is_ok());
+        assert!(serde_json::from_str::<SyncPushRequest>(
+            r#"{"changes":[{"table_name":"products","record_id":"p","action":"insert","data":"{}"}]}"#
+        ).is_ok());
+        for bad in [
+            "",                       // empty
+            "   ",                    // whitespace only
+            "not json at all",       // malformed
+            "{",                      // truncated
+            r#"{"foo":1}"#,          // wrong structure (no `changes`)
+            r#"{"changes":{}}"#,     // wrong type for `changes`
+            r#"{"changes":[]}x"#,    // trailing garbage
+            r#"{"changes":[]} {"a":1}"#, // two values
+        ] {
+            assert!(serde_json::from_str::<SyncPushRequest>(bad).is_err(), "must be a 400: {bad:?}");
+        }
+        // A non-UTF-8 body is rejected by the handler's `str::from_utf8` BEFORE any JSON handling —
+        // arbitrary binary is never treated as JSON. Built at runtime so the check is not const-folded.
+        let non_utf8: Vec<u8> = (0u8..4).map(|i| [0xff, 0xfe, 0x00, 0x01][i as usize]).collect();
+        assert!(std::str::from_utf8(&non_utf8).is_err());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // M6-B3A3 §2/§4/§5 + M6-B3A4 §3–§10 — RUNTIME integration proof: drive the ACTUAL production route.
+    //
+    // No rebuilt handler, no direct sync_push() call, no source-scan-as-proof. Every request goes
+    // through `build_api_router` — the SAME function `SyncServer::start` runs in production — via
+    // `tower::oneshot`: real /api/sync/push route, real auth middleware, real primary/write gate,
+    // real DefaultBodyLimit, real AppState + test DB. Only the body-limit VALUE differs (a small
+    // limit so the exact boundary is proven without a 50 MB allocation); the router construction and
+    // layer order are identical to production.
+    //
+    // B3A3 proved the body-limit boundary and basic auth/primary order. B3A4 completes the raw-route
+    // contract on the SAME real router: the JSON content-type matrix (C1–C6), the full JSON route
+    // matrix (J1–J11), the full auth matrix (A1–A5), the primary/write-gate matrix (P1–P3), a
+    // table-driven DB non-mutation proof over every rejection class, a full successful desktop push
+    // with the legacy-activity contract, and the released mobile fixtures end-to-end. B3A5 hardens the
+    // non-mutation proof to the FULL cutover state (state / activity flag / timestamp / attestation id),
+    // runs the whole negative matrix against an ARMED cutover row to prove no rejected request ever sets
+    // state=activation_blocked, and adds the positive attestation contract (a valid push DOES block it).
+    // ═══════════════════════════════════════════════════════════════════════
+    mod runtime {
+        use super::db_q;
+        use crate::sync::{auth, primary, routes, AppState};
+        use axum::body::Body;
+        use axum::http::Request;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use tower::util::ServiceExt; // Router::oneshot
+
+        const SECRET: &str = "runtime-integration-secret";
+        const MAX: usize = routes::MAX_SYNC_PUSH_BODY_BYTES;
+
+        fn state(primary: primary::State) -> Arc<AppState> {
+            Arc::new(AppState {
+                db: Mutex::new(db_q()), // sync_changelog + sync_cutover_state + sync_change_quarantine
+                jwt_secret: SECRET.to_string(),
+                frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
+                primary_state: primary,
+            })
+        }
+        // Replicate the PRODUCTION composition: build_api_router nested under /api (as SyncServer::start
+        // does), so requests hit the real `/api/sync/push` path with the real layer order. Only the
+        // body-limit value differs from production; the router construction is identical.
+        fn router(state: Arc<AppState>, body_limit: usize) -> axum::Router {
+            axum::Router::new()
+                .nest("/api", routes::build_api_router(state.clone(), body_limit))
+                .with_state(state)
+        }
+        fn token() -> String {
+            auth::create_token("u", "tenant-1", "branch-main", "owner", SECRET).unwrap()
+        }
+        fn req(token: Option<&str>, content_type: Option<&str>, body: Vec<u8>) -> Request<Body> {
+            let mut b = Request::builder().method("POST").uri("/api/sync/push");
+            if let Some(t) = token {
+                b = b.header("authorization", format!("Bearer {t}"));
+            }
+            if let Some(c) = content_type {
+                b = b.header("content-type", c);
+            }
+            b.body(Body::from(body)).unwrap()
+        }
+        // A VALID products-insert push padded to EXACTLY `target` bytes (`notes` is a real column, so
+        // padding it keeps the payload legitimate → the handler accepts an under/at-limit body).
+        fn valid_push_of_size(target: usize) -> Vec<u8> {
+            let prefix = r#"{"changes":[{"table_name":"products","record_id":"p1","action":"insert","data":"{\"id\":\"p1\",\"branch_id\":\"b\",\"category_id\":\"c\",\"brand\":\"X\",\"name\":\"Y\",\"purchase_price\":1,\"notes\":\""#;
+            let suffix = r#"\"}"}]}"#;
+            let overhead = prefix.len() + suffix.len();
+            let pad = target.saturating_sub(overhead);
+            format!("{prefix}{}{suffix}", "a".repeat(pad)).into_bytes()
+        }
+        async fn count(state: &Arc<AppState>, table: &str) -> i64 {
+            let db = state.db.lock().await;
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+        }
+        async fn activity_marks(state: &Arc<AppState>) -> i64 {
+            let db = state.db.lock().await;
+            db.query_row(
+                "SELECT COUNT(*) FROM sync_cutover_state WHERE legacy_activity_after_attestation = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        }
+        // §7/§8 — an AppState whose cutover row is ARMED (owner has attested): state
+        // `ready_for_protocol_activation`, `current_attestation_id` set. `record_legacy_activity` is live
+        // here, so a SUCCESSFUL push through the router invalidates readiness in the same transaction
+        // (state → activation_blocked, flag → 1) — and a REJECTED push must leave ALL of it untouched, a
+        // real proof the apply path was never entered. `primary` lets B3A5 build an armed READ-ONLY
+        // server too, so the write-gate 403 path runs over the same armed row. Same quarantine table as
+        // `state()`.
+        fn armed_with(primary: primary::State) -> Arc<AppState> {
+            let conn = super::db_with_attestation();
+            conn.execute_batch(crate::sync::migrations::V0009_SYNC_SCHEMA_AND_QUARANTINE.up_sql)
+                .unwrap();
+            Arc::new(AppState {
+                db: Mutex::new(conn),
+                jwt_secret: SECRET.to_string(),
+                frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
+                primary_state: primary,
+            })
+        }
+        fn armed_state() -> Arc<AppState> {
+            armed_with(primary::State::Primary)
+        }
+        // §2/§7 (B3A5) — the FULL cutover-state snapshot for a before==after non-mutation proof: the
+        // changelog + quarantine counts, PLUS the exact sync_cutover_state row for the token's
+        // tenant/branch — `state`, the `legacy_activity_after_attestation` flag, the
+        // `last_legacy_activity_at` timestamp, and `current_attestation_id`. `cutover` is `None` when no
+        // cutover row exists (a bare db_q). A rejected router request must leave ALL of this byte-
+        // identical; in particular it must NEVER flip `state` to `activation_blocked`.
+        #[derive(Debug, PartialEq, Clone)]
+        struct Snapshot {
+            changelog: i64,
+            quarantine: i64,
+            // (state, legacy_activity_after_attestation, last_legacy_activity_at, current_attestation_id)
+            cutover: Option<(String, i64, Option<String>, Option<String>)>,
+        }
+        async fn snapshot(state: &Arc<AppState>) -> Snapshot {
+            use rusqlite::OptionalExtension;
+            let db = state.db.lock().await;
+            let changelog: i64 =
+                db.query_row("SELECT COUNT(*) FROM sync_changelog", [], |r| r.get(0)).unwrap();
+            let quarantine: i64 = db
+                .query_row("SELECT COUNT(*) FROM sync_change_quarantine", [], |r| r.get(0))
+                .unwrap();
+            let cutover = db
+                .query_row(
+                    "SELECT state, legacy_activity_after_attestation, last_legacy_activity_at, \
+                     current_attestation_id FROM sync_cutover_state \
+                     WHERE tenant_id='tenant-1' AND branch_id='branch-main'",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .unwrap();
+            Snapshot { changelog, quarantine, cutover }
+        }
+        // A products-insert push whose ENVELOPE is well-formed but whose inner `data` string carries a
+        // DUPLICATE key (`id` twice). The envelope dup scanner does not see keys inside a string value,
+        // so this is refused only by per-change payload validation → SYNC_PAYLOAD_DUPLICATE_KEY → 400.
+        fn inner_dup_body() -> Vec<u8> {
+            br#"{"changes":[{"table_name":"products","record_id":"p1","action":"insert","data":"{\"id\":\"p1\",\"id\":\"p2\"}"}]}"#.to_vec()
+        }
+        // An ENVELOPE-level duplicate key (`action` twice), refused by the raw dup scanner → 400.
+        fn envelope_dup_body() -> Vec<u8> {
+            br#"{"changes":[{"table_name":"products","record_id":"p1","action":"insert","action":"update","data":"{}"}]}"#.to_vec()
+        }
+
+        // §4 — R1 under / R2 exactly-at / R3 one-byte-over, through the REAL router with a 1024-byte
+        // limit. R3 is 413 with NO side effect (no changelog, no quarantine, no activity mark).
+        #[tokio::test]
+        async fn body_limit_boundary() {
+            const LIMIT: usize = 1024;
+
+            // R1 — just under the limit → accepted.
+            let s1 = state(primary::State::Primary);
+            let r1 = router(s1.clone(), LIMIT)
+                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(LIMIT - 1)))
+                .await
+                .unwrap();
+            assert_eq!(r1.status().as_u16(), 200, "R1 under-limit valid push is accepted");
+            assert_eq!(count(&s1, "sync_changelog").await, 1, "R1 wrote exactly one changelog row");
+
+            // R2 — exactly at the limit → accepted (DefaultBodyLimit rejects only when EXCEEDED).
+            let s2 = state(primary::State::Primary);
+            let r2 = router(s2.clone(), LIMIT)
+                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(LIMIT)))
+                .await
+                .unwrap();
+            assert_eq!(r2.status().as_u16(), 200, "R2 exactly-at-limit valid push is accepted");
+            assert_eq!(count(&s2, "sync_changelog").await, 1);
+
+            // R3 — one byte over → 413, and NOTHING happened server-side.
+            let s3 = state(primary::State::Primary);
+            let r3 = router(s3.clone(), LIMIT)
+                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(LIMIT + 1)))
+                .await
+                .unwrap();
+            assert_eq!(r3.status().as_u16(), 413, "R3 over-limit → 413 Payload Too Large");
+            assert_eq!(count(&s3, "sync_changelog").await, 0, "R3: no changelog row (handler never ran)");
+            assert_eq!(count(&s3, "sync_change_quarantine").await, 0, "R3: no quarantine row");
+            assert_eq!(activity_marks(&s3).await, 0, "R3: no legacy-activity mark, no partial transaction");
+        }
+
+        // §4 note — axum's DefaultBodyLimit enforces the limit on the STREAMED bytes as the body is
+        // read (http_body_util::Limited), NOT on a Content-Length pre-check. Proof: a body whose
+        // declared length is small but whose actual stream exceeds the limit is still rejected. So
+        // the boundary test above already exercises during-read enforcement; there is no separate
+        // "Content-Length says OK but stream overflows" bypass to guard.
+        #[tokio::test]
+        async fn body_limit_enforced_during_read_not_by_content_length() {
+            const LIMIT: usize = 64;
+            let s = state(primary::State::Primary);
+            // 200 bytes of body → far over the 64-byte limit → 413 while reading.
+            let r = router(s.clone(), LIMIT)
+                .oneshot(req(Some(&token()), Some("application/json"), vec![b'a'; 200]))
+                .await
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 413, "an over-limit body is rejected as it streams in");
+            assert_eq!(count(&s, "sync_changelog").await, 0);
+        }
+
+        // §5 — the auth matrix through the REAL router. EVERY unauthenticated or bad-token variant is
+        // 401 at the auth route_layer, BEFORE the handler, the body extractor (body limit) and the dup
+        // scanner. So no unauthenticated request can write a changelog row, quarantine anything, mark
+        // legacy activity, or even make the server buffer/scan its body. The A2 and A4 assertions carry
+        // the sharp edges: A2 is 401 NOT 400 (a 400 would mean the dup scanner ran, i.e. the handler was
+        // reached); A4 is 401 NOT 413 (auth precedes body extraction, so the oversized body is never
+        // buffered — stronger than a 413 after buffering).
+        #[tokio::test]
+        async fn auth_matrix() {
+            let cases: &[(&str, Option<&str>, Vec<u8>, usize)] = &[
+                ("A1 valid body, no auth", None, valid_push_of_size(300), MAX),
+                ("A2 dup-key body, no auth", None, envelope_dup_body(), MAX),
+                ("A3 large under-limit, no auth", None, valid_push_of_size(900), 1024),
+                ("A4 over-limit body, no auth", None, vec![b'a'; 4096], 1024),
+                ("A5 invalid token", Some("not.a.valid.jwt"), valid_push_of_size(300), MAX),
+            ];
+            for (label, tok, body, limit) in cases {
+                let s = state(primary::State::Primary);
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), *limit)
+                    .oneshot(req(*tok, Some("application/json"), body.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 401, "{label} → 401 at the auth layer");
+                assert_ne!(r.status().as_u16(), 400, "{label}: dup scanner NOT reached");
+                assert_ne!(r.status().as_u16(), 413, "{label}: body NOT buffered (auth precedes body limit)");
+                assert_eq!(snapshot(&s).await, before, "{label}: DB untouched (no write/quarantine/mark)");
+            }
+        }
+
+        // §6 — the primary/write-gate matrix. On a read-only (copied/restored) server EVERY push is 403,
+        // and the gate runs BEFORE the dup scanner: a duplicate-key body on a read-only server is 403
+        // (gate), NOT 400 (dup) — pinning gate-before-dup order behaviourally. Nothing is written.
+        #[tokio::test]
+        async fn primary_gate_matrix() {
+            let cases: &[(&str, Vec<u8>)] = &[
+                ("P1 valid push", valid_push_of_size(300)),
+                ("P2 dup-key push", envelope_dup_body()),
+                ("P3 max allowed push", valid_push_of_size(1024)),
+            ];
+            for (label, body) in cases {
+                let s = state(primary::State::ReadOnly);
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), 1024)
+                    .oneshot(req(Some(&token()), Some("application/json"), body.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 403, "{label} on read-only → 403 (gate before dup parse)");
+                assert_eq!(snapshot(&s).await, before, "{label}: DB untouched");
+            }
+        }
+
+        // §8 — one full, legitimate desktop push through the whole router (valid auth, active primary,
+        // application/json, allowed table/op/fields): 200, exactly one changelog row, no quarantine. Plus
+        // the legacy-activity contract: on an ARMED cutover the same successful push flips the readiness
+        // invalidation flag to 1 IN THE SAME breath (record_legacy_activity), while it stays 0 on a
+        // non-attested server (the normal pre-cutover case).
+        #[tokio::test]
+        async fn successful_desktop_push_and_activity_contract() {
+            // non-attested primary → 200, one changelog row, no quarantine, NO activity mark.
+            let s = state(primary::State::Primary);
+            let r = router(s.clone(), MAX)
+                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .await
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 200, "valid desktop push → 200");
+            assert_eq!(count(&s, "sync_changelog").await, 1, "exactly one changelog row");
+            assert_eq!(count(&s, "sync_change_quarantine").await, 0, "no quarantine");
+            assert_eq!(activity_marks(&s).await, 0, "no attestation → no legacy-activity mark");
+
+            // armed primary → the same push lands AND invalidates readiness together.
+            let a = armed_state();
+            let ra = router(a.clone(), MAX)
+                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .await
+                .unwrap();
+            assert_eq!(ra.status().as_u16(), 200, "valid desktop push on armed cutover → 200");
+            assert_eq!(count(&a, "sync_changelog").await, 1, "one changelog row");
+            assert_eq!(activity_marks(&a).await, 1, "armed attestation → legacy activity marked in the same tx");
+        }
+
+        // §3 — the content-type contract through the REAL router, on a writable primary. The restored
+        // JSON content-type check accepts application/json (with or without a charset parameter) and any
+        // application/*+json vendor type, and refuses a missing header, text/plain and
+        // application/octet-stream with 415 — writing nothing. Every supported producer sends
+        // application/json, so C1/C2 are the real-world calls; C3 proves the +json suffix; C4–C6 are the
+        // refused shapes. This corrects the SILENT loosening the B3A `Bytes` switch introduced (a
+        // missing content-type used to be accepted); it is now 415, matching the pre-B3A `Json` contract.
+        #[tokio::test]
+        async fn content_type_contract() {
+            let good = valid_push_of_size(300);
+            for (label, ct) in &[
+                ("C1 application/json", "application/json"),
+                ("C2 json + charset", "application/json; charset=utf-8"),
+                ("C3 vendor +json", "application/vnd.lataif+json"),
+            ] {
+                let s = state(primary::State::Primary);
+                let r = router(s.clone(), MAX)
+                    .oneshot(req(Some(&token()), Some(ct), good.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 200, "{label} → accepted");
+                assert_eq!(count(&s, "sync_changelog").await, 1, "{label}: one changelog row");
+            }
+            for (label, ct) in &[
+                ("C4 missing", None),
+                ("C5 text/plain", Some("text/plain")),
+                ("C6 octet-stream", Some("application/octet-stream")),
+            ] {
+                let s = state(primary::State::Primary);
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), MAX)
+                    .oneshot(req(Some(&token()), *ct, good.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 415, "{label} → 415 Unsupported Media Type");
+                assert_eq!(snapshot(&s).await, before, "{label}: DB untouched (no changelog/quarantine/mark)");
+            }
+        }
+
+        // §4 — the full JSON route matrix through the REAL router (valid auth, active primary,
+        // application/json). J1 is the only success; J2–J11 are each a 400 that rejects the WHOLE request
+        // with no partial processing, no changelog row, no quarantine row and no activity mark. J8/J9 are
+        // envelope duplicate keys (identical and \u-escaped-equivalent); J10 is a duplicate key inside the
+        // `data` payload (caught by per-change validation, not the envelope scanner); J11 is non-UTF-8.
+        #[tokio::test]
+        async fn json_route_matrix() {
+            // J1 — the positive control: a valid push is accepted.
+            let s1 = state(primary::State::Primary);
+            let r1 = router(s1.clone(), MAX)
+                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .await
+                .unwrap();
+            assert_eq!(r1.status().as_u16(), 200, "J1 valid push → 200");
+            assert_eq!(count(&s1, "sync_changelog").await, 1);
+
+            // J9 — a \u-escaped key that DECODES to `table_name`, duplicating the literal one. Built as a
+            // normal Rust string so `\\u0074` reaches the wire as the six bytes `t`.
+            let j9 = "{\"changes\":[{\"table_name\":\"products\",\"\\u0074able_name\":\"users\",\"record_id\":\"p1\",\"action\":\"insert\",\"data\":\"{}\"}]}".as_bytes().to_vec();
+            let bad: &[(&str, Vec<u8>)] = &[
+                ("J2 empty body", b"".to_vec()),
+                ("J3 whitespace only", b"   ".to_vec()),
+                ("J4 malformed JSON", b"not json at all".to_vec()),
+                ("J5 trailing garbage", br#"{"changes":[]}x"#.to_vec()),
+                ("J6 wrong top-level struct", br#"{"foo":1}"#.to_vec()),
+                ("J7 wrong envelope field types", br#"{"changes":{}}"#.to_vec()),
+                ("J8 identical envelope dup key", br#"{"changes":[{"table_name":"products","table_name":"users","record_id":"p1","action":"insert","data":"{}"}]}"#.to_vec()),
+                ("J9 escaped-equivalent envelope dup key", j9),
+                ("J10 dup key in inner data", inner_dup_body()),
+                ("J11 non-UTF-8", vec![0xff, 0xfe, 0x00, 0x01]),
+            ];
+            for (label, body) in bad {
+                let s = state(primary::State::Primary);
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), MAX)
+                    .oneshot(req(Some(&token()), Some("application/json"), body.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 400, "{label} → 400, whole request rejected");
+                assert_eq!(snapshot(&s).await, before, "{label}: no partial processing (DB untouched)");
+            }
+        }
+
+        // §9 — the released mobile picture-uploader payloads (v0.8.23 = current, mobile_page.rs) driven
+        // through the WHOLE router. The purchase_inbox INSERT the desktop never emits — the case a
+        // desktop-only operation matrix would have wrongly quarantined — is accepted here, plus products
+        // and repairs inserts. Each lands exactly one changelog row and NOTHING is quarantined.
+        #[tokio::test]
+        async fn released_mobile_through_router() {
+            let mobile: &[(&str, &str, &str)] = &[
+                ("purchase_inbox insert", "purchase_inbox", r#"{"id":"pi1","branch_id":"b","images":"[]","note":null,"status":"pending","created_at":"t","created_by":null}"#),
+                ("products insert", "products", r#"{"id":"p1","branch_id":"b","category_id":"cat-watch","brand":"Rolex","name":"Sub","sku":null,"quantity":1,"condition":"","scope_of_delivery":"[]","purchase_date":"2026-07-18","purchase_price":100,"purchase_currency":"BHD","planned_sale_price":null,"stock_status":"in_stock","tax_scheme":"MARGIN","source_type":"OWN","notes":null,"images":"[]","image_hash":null,"attributes":"{}","created_at":"t","updated_at":"t","created_by":null}"#),
+                ("repairs insert", "repairs", r#"{"id":"r1","branch_id":"b","repair_number":"REP","voucher_code":"ABCD1234","customer_id":"c1","item_brand":"X","item_model":"Y","issue_description":"broken","repair_type":"internal","status":"received","received_at":"t","images":"[]","notes":null,"created_at":"t","updated_at":"t","created_by":null}"#),
+            ];
+            for (label, table, data) in mobile {
+                let s = state(primary::State::Primary);
+                // json! serialises `data` (a &str of inner JSON) as the escaped string the `data` field
+                // expects — no brace-escaping, no chance of a malformed envelope skewing the result.
+                let body = serde_json::json!({
+                    "changes": [{ "table_name": table, "record_id": "x", "action": "insert", "data": data }]
+                })
+                .to_string();
+                let r = router(s.clone(), MAX)
+                    .oneshot(req(Some(&token()), Some("application/json"), body.into_bytes()))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 200, "{label}: released mobile payload accepted (not SYNC_OPERATION_NOT_ALLOWED)");
+                assert_eq!(count(&s, "sync_changelog").await, 1, "{label}: one changelog row");
+                assert_eq!(count(&s, "sync_change_quarantine").await, 0, "{label}: no quarantine");
+            }
+        }
+
+        // §2/§3 (B3A5) — the FULL negative router matrix, EVERY case run against an ARMED cutover row
+        // (state=ready_for_protocol_activation, current_attestation_id=att-1). Each rejection leaves the
+        // COMPLETE snapshot byte-identical: no changelog, no quarantine, and — the point of this slice —
+        // no cutover-state change. `state` stays ready_for_protocol_activation (NEVER activation_blocked),
+        // the attestation id, the activity flag and the activity timestamp are untouched. The write-gate
+        // cases (P1–P3) use an armed READ-ONLY server so the 403 path runs over the same armed row; every
+        // other class rejects on an armed primary after the gate. Because the row is armed, a state change
+        // here would be a REAL regression (a rejected request invalidating readiness), so "unchanged" is
+        // a strong proof, not a vacuous one.
+        #[tokio::test]
+        async fn full_cutover_nonmutation_matrix() {
+            // (label, read_only, token, content_type, body, body_limit)
+            struct C(&'static str, bool, Option<&'static str>, Option<&'static str>, Vec<u8>, usize);
+            let dup = envelope_dup_body();
+            let inner = inner_dup_body();
+            let big = valid_push_of_size(300);
+            let cases = vec![
+                // A — auth (armed primary; 401 at the route_layer, before the handler)
+                C("A1 unauth valid", false, None, Some("application/json"), big.clone(), MAX),
+                C("A2 unauth dup", false, None, Some("application/json"), dup.clone(), MAX),
+                C("A3 unauth large", false, None, Some("application/json"), valid_push_of_size(900), 1024),
+                C("A4 unauth oversized", false, None, Some("application/json"), vec![b'a'; 4096], 1024),
+                C("A5 invalid token", false, Some("x.y.z"), Some("application/json"), big.clone(), MAX),
+                // P — write gate (armed READ-ONLY; 403 before dup/parse)
+                C("P1 ro valid", true, Some("T"), Some("application/json"), big.clone(), 1024),
+                C("P2 ro dup", true, Some("T"), Some("application/json"), dup.clone(), 1024),
+                C("P3 ro max", true, Some("T"), Some("application/json"), valid_push_of_size(1024), 1024),
+                // C — content-type (armed primary; 415)
+                C("C4 missing ct", false, Some("T"), None, big.clone(), MAX),
+                C("C5 text/plain", false, Some("T"), Some("text/plain"), big.clone(), MAX),
+                C("C6 octet-stream", false, Some("T"), Some("application/octet-stream"), big.clone(), MAX),
+                // J — JSON matrix (armed primary; 400)
+                C("J2 empty", false, Some("T"), Some("application/json"), b"".to_vec(), MAX),
+                C("J3 whitespace", false, Some("T"), Some("application/json"), b"   ".to_vec(), MAX),
+                C("J4 malformed", false, Some("T"), Some("application/json"), b"not json".to_vec(), MAX),
+                C("J5 trailing garbage", false, Some("T"), Some("application/json"), br#"{"changes":[]}x"#.to_vec(), MAX),
+                C("J6 wrong struct", false, Some("T"), Some("application/json"), br#"{"foo":1}"#.to_vec(), MAX),
+                C("J7 wrong types", false, Some("T"), Some("application/json"), br#"{"changes":{}}"#.to_vec(), MAX),
+                C("J8 envelope dup", false, Some("T"), Some("application/json"), dup.clone(), MAX),
+                C("J9 escaped dup", false, Some("T"), Some("application/json"), "{\"changes\":[{\"table_name\":\"products\",\"\\u0074able_name\":\"users\",\"record_id\":\"p1\",\"action\":\"insert\",\"data\":\"{}\"}]}".as_bytes().to_vec(), MAX),
+                C("J10 inner dup", false, Some("T"), Some("application/json"), inner.clone(), MAX),
+                C("J11 non-utf8", false, Some("T"), Some("application/json"), vec![0xff, 0xfe, 0x00, 0x01], MAX),
+                // Body-limit (armed primary; 413 at Bytes extraction)
+                C("BL over limit", false, Some("T"), Some("application/json"), vec![b'a'; 2048], 1024),
+                C("BL stream over", false, Some("T"), Some("application/json"), vec![b'a'; 200], 64),
+                // Schema (armed primary; 400/403 in apply, before record_legacy_activity + commit)
+                C("S unknown table", false, Some("T"), Some("application/json"), br#"{"changes":[{"table_name":"nope_table","record_id":"r","action":"insert","data":"{}"}]}"#.to_vec(), MAX),
+                C("S forbidden field", false, Some("T"), Some("application/json"), br#"{"changes":[{"table_name":"products","record_id":"p1","action":"insert","data":"{\"id\":\"p1\",\"evil_col\":1}"}]}"#.to_vec(), MAX),
+                C("S disallowed op", false, Some("T"), Some("application/json"), br#"{"changes":[{"table_name":"ledger_entries","record_id":"l1","action":"delete","data":"{}"}]}"#.to_vec(), MAX),
+                C("S control-plane", false, Some("T"), Some("application/json"), br#"{"changes":[{"table_name":"enrolled_devices","record_id":"r","action":"insert","data":"{}"}]}"#.to_vec(), MAX),
+                C("S invalid identifier", false, Some("T"), Some("application/json"), br#"{"changes":[{"table_name":"Bad Table","record_id":"r","action":"insert","data":"{}"}]}"#.to_vec(), MAX),
+            ];
+            let armed_precondition =
+                Some(("ready_for_protocol_activation".to_string(), 0i64, None, Some("att-1".to_string())));
+            for C(label, ro, tok, ct, body, limit) in &cases {
+                let s = armed_with(if *ro { primary::State::ReadOnly } else { primary::State::Primary });
+                let before = snapshot(&s).await;
+                assert_eq!(before.cutover, armed_precondition, "{label}: armed precondition (attested + ready)");
+                let real_tok: Option<String> = match *tok {
+                    None => None,
+                    Some("T") => Some(token()),
+                    Some(other) => Some(other.to_string()),
+                };
+                let r = router(s.clone(), *limit)
+                    .oneshot(req(real_tok.as_deref(), *ct, body.clone()))
+                    .await
+                    .unwrap();
+                let code = r.status().as_u16();
+                assert!(code >= 400, "{label}: must be rejected, got {code}");
+                let after = snapshot(&s).await;
+                assert_eq!(after, before, "{label}: FULL cutover snapshot byte-identical (status {code})");
+                assert_eq!(
+                    after.cutover.as_ref().map(|c| c.0.as_str()),
+                    Some("ready_for_protocol_activation"),
+                    "{label}: a rejected request must NOT set state=activation_blocked"
+                );
+            }
+        }
+
+        // §4 (B3A5) — the positive attestation contract through the REAL router, and its exact negative.
+        // Fixture: attested + readiness-capable (state=ready_for_protocol_activation,
+        // current_attestation_id=att-1). A valid authorised legacy push lands one changelog row AND
+        // invalidates readiness in the SAME transaction: state → activation_blocked, flag → 1, timestamp
+        // set, and the attestation id is PRESERVED (record_legacy_activity records which attestation was
+        // overtaken; only a re-attestation replaces it — see cutover.rs). From the SAME prepared state a
+        // REJECTED push (invalid identifier / control-plane / duplicate key / disallowed operation)
+        // changes NOTHING: no changelog, state stays ready_for_protocol_activation.
+        #[tokio::test]
+        async fn attested_push_invalidates_readiness_but_rejections_do_not() {
+            // positive — a valid push blocks activation together with the changelog row.
+            let s = armed_state();
+            let r = router(s.clone(), MAX)
+                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .await
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 200, "attested valid push → 200");
+            let after = snapshot(&s).await;
+            assert_eq!(after.changelog, 1, "exactly one changelog row");
+            assert_eq!(after.quarantine, 0, "no quarantine");
+            let cut = after.cutover.expect("cutover row present");
+            assert_eq!(cut.0, "activation_blocked", "readiness invalidated → activation_blocked");
+            assert_eq!(cut.1, 1, "legacy_activity_after_attestation = 1");
+            assert!(cut.2.is_some(), "last_legacy_activity_at set");
+            assert_eq!(cut.3.as_deref(), Some("att-1"), "current_attestation_id preserved (records the overtaken attestation)");
+
+            // negative — the SAME prepared state (fresh armed fixture each), four rejection classes, each inert.
+            let rejects: &[(&str, Vec<u8>)] = &[
+                ("invalid identifier", br#"{"changes":[{"table_name":"Bad Table","record_id":"r","action":"insert","data":"{}"}]}"#.to_vec()),
+                ("control plane", br#"{"changes":[{"table_name":"enrolled_devices","record_id":"r","action":"insert","data":"{}"}]}"#.to_vec()),
+                ("duplicate key", envelope_dup_body()),
+                ("disallowed operation", br#"{"changes":[{"table_name":"ledger_entries","record_id":"l1","action":"delete","data":"{}"}]}"#.to_vec()),
+            ];
+            for (label, body) in rejects {
+                let s = armed_state();
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), MAX)
+                    .oneshot(req(Some(&token()), Some("application/json"), body.clone()))
+                    .await
+                    .unwrap();
+                assert!(r.status().as_u16() >= 400, "{label}: rejected");
+                let after = snapshot(&s).await;
+                assert_eq!(after.changelog, 0, "{label}: no changelog row");
+                assert_eq!(after, before, "{label}: cutover state unchanged");
+                assert_eq!(
+                    after.cutover.as_ref().map(|c| c.0.as_str()),
+                    Some("ready_for_protocol_activation"),
+                    "{label}: state must stay ready_for_protocol_activation (readiness NOT invalidated by a rejected push)"
+                );
+            }
+        }
     }
 }
 

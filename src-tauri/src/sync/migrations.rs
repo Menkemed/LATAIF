@@ -50,6 +50,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0006_AUTHORITY_TRANSFER_AND_ROOT_CUSTODY,
     V0007_DEVICE_IDENTITY_AND_ENROLLMENT_REGISTRY,
     V0008_LEGACY_INVENTORY_AND_CUTOVER_READINESS,
+    V0009_SYNC_SCHEMA_AND_QUARANTINE,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -205,6 +206,61 @@ CREATE TABLE IF NOT EXISTS sync_cutover_state (
     CHECK (state <> 'activation_blocked' OR blocked_reason IS NOT NULL),
     CHECK (legacy_activity_after_attestation = 0 OR last_legacy_activity_at IS NOT NULL)
 );
+"#;
+
+/// M6-B3A §7 — the server-side quarantine for changelog rows that violate the business-schema
+/// contract (unknown table, non-canonical / disallowed field, malformed payload). New poisoning is
+/// refused at push (§6); this table holds HISTORICAL or foreign rows already in `sync_changelog` so
+/// a pull can permanently withhold them and STILL advance its cursor past them — closing the
+/// head-of-line DoS without ever applying, or counting as applied, a poisoned change.
+///
+/// Only HASHES and a redacted table name are kept — never a raw payload, never a secret, never a
+/// record id in the clear. `InternalForbidden` (added to `sync_policy::INTERNAL_TABLES`): it is
+/// transport bookkeeping and must never itself be synced. Deduped by `change_id` so an identical
+/// re-scan bumps `occurrence_count` instead of inserting a duplicate.
+///
+/// `up_sql == reference_sql` (only CREATEs).
+pub const V0009_SYNC_SCHEMA_AND_QUARANTINE: Migration = Migration {
+    version: 9,
+    name: "sync_schema_and_quarantine",
+    up_sql: V0009_SQL,
+    reference_sql: V0009_SQL,
+};
+
+const V0009_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS sync_change_quarantine (
+    quarantine_id        TEXT NOT NULL PRIMARY KEY,
+    -- sync_changelog.id of the withheld row (the dedup key; always present for a server-side scan).
+    change_id            INTEGER,
+    source               TEXT NOT NULL,      -- 'pull_scan'
+    tenant_id            TEXT,
+    branch_id            TEXT,
+
+    -- Bounded, injection-free diagnostics ONLY. No raw payload, no cleartext record id, no secret.
+    table_name_redacted  TEXT NOT NULL,
+    record_id_hash       TEXT NOT NULL,
+    payload_hash         TEXT NOT NULL,
+    reason_code          TEXT NOT NULL,
+
+    first_seen_at        TEXT NOT NULL,
+    last_seen_at         TEXT NOT NULL,
+    occurrence_count     INTEGER NOT NULL DEFAULT 1,
+
+    state                TEXT NOT NULL DEFAULT 'open',
+    resolution_note      TEXT,
+    resolved_at          TEXT,
+
+    CHECK (state IN ('open','resolved','discarded_after_review')),
+    CHECK (occurrence_count >= 1),
+    CHECK (state = 'open' OR resolved_at IS NOT NULL)
+);
+
+-- Idempotent re-scan: one quarantine row per changelog id. A repeated scan bumps occurrence_count.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_squarantine_change
+    ON sync_change_quarantine (change_id) WHERE change_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_squarantine_open
+    ON sync_change_quarantine (tenant_id, branch_id, state);
 "#;
 
 /// M6-B2D — the device registry: who is allowed to be a client of this tenant.
@@ -974,7 +1030,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
@@ -983,6 +1039,8 @@ mod tests {
         // M6-B2C4
         assert!(table_exists(&conn, "authority_transfers"));
         assert!(table_exists(&conn, "root_custody"));
+        // M6-B3A
+        assert!(table_exists(&conn, "sync_change_quarantine"));
     }
 
     // ── M6-B2C4 §3 — an existing DB picks up exactly what it is missing ──────
@@ -1001,7 +1059,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=8).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=9).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1014,7 +1072,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1116,7 +1174,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());
