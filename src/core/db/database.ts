@@ -8,6 +8,10 @@ import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { v4 as uuid } from 'uuid';
 import { DEFAULT_CATEGORIES } from '../models/default-categories';
 import SCHEMA from './schema.sql?raw';
+// MEDIA-03A — additive, INACTIVE core media schema (content-addressed store).
+// Applied idempotently at the end of runMigrations(); creates empty tables +
+// invariant triggers only. No writer, no FS files, no sync activation.
+import { applyMediaSchema } from './media-schema';
 import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
 import {
@@ -1734,6 +1738,11 @@ function runMigrations(database: Database): void {
       }
     }
   }
+
+  // MEDIA-03A — additive inactive core media schema. Runs AFTER the migration
+  // loop so every entity table the media_links scope triggers reference already
+  // exists. Idempotent (all statements are IF NOT EXISTS); writes no data.
+  applyMediaSchema(database);
 
   // Generische Daten-Heilung VOR den fachlichen Daten-Migrationen — die sollen
   // schon mit echten NULLs arbeiten.
