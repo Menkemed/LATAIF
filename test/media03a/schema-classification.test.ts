@@ -14,7 +14,7 @@
 //
 //   legacy_sync_apply            — frontend table IN the active sync allowlist
 //   legacy_local_non_sync        — runtime table deliberately NOT synced
-//   local_inactive_media         — the 6 MEDIA-03A tables (empty, never synced)
+//   local_inactive_media         — the 10 media tables (03A core + 03B rotation/backup; empty, never synced)
 //   deprecated_or_unreachable_ddl — declared but unreachable (must be justified)
 //
 // §5 (needs MEDIA03A_EXISTING_DB) additionally separates the MATERIALIZATION state
@@ -136,7 +136,7 @@ if (existing) {
   const deprecated = [...staticAll].filter((t) => !rtAfter.includes(t)).sort();     // must be empty
 
   const EXPECT_PENDING = [...MEDIA_TABLES, 'sync_change_quarantine'].sort();
-  ok(JSON.stringify(pendingBefore) === JSON.stringify(EXPECT_PENDING), `pending(before) is exactly the 6 media + sync_change_quarantine (got ${JSON.stringify(pendingBefore)})`);
+  ok(JSON.stringify(pendingBefore) === JSON.stringify(EXPECT_PENDING), `pending(before) is exactly the ${MEDIA_TABLES.length} media + sync_change_quarantine (got ${JSON.stringify(pendingBefore)})`);
   ok(matBefore.length === staticAll.size - EXPECT_PENDING.length, `declared_and_materialized(before) = ${staticAll.size - EXPECT_PENDING.length} (got ${matBefore.length})`);
   ok(deprecated.length === 0, `deprecated_or_unreachable is empty — every declared table materializes under the real init (got ${JSON.stringify(deprecated)})`);
   ok(rtAfter.length === staticAll.size, `runtime(after full init) user tables = static declared = ${staticAll.size} (got ${rtAfter.length})`);

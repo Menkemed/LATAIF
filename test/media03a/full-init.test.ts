@@ -3,7 +3,7 @@
 //
 // Run:  node test/media03a/full-init.test.ts
 //   optional: MEDIA03A_EXISTING_DB=<byte-identical lataif.db copy> enables Part B,
-//             the real 73→80 upgrade proof on an actual productive snapshot.
+//             the real 73→84 upgrade proof on an actual productive snapshot.
 //
 // §1 — THE ACTUAL DB INITIALIZATION CALL PATH (verified against the code, not a
 //      prior claim). Source: src/core/db/database.ts.
@@ -27,7 +27,7 @@
 //   runMigrations:     database.ts:200; calls applyMediaSchema(database) at :1745,
 //                      then healSyncStringNulls at :1749. Its own body is idempotent
 //                      ALTER / CREATE TABLE IF NOT EXISTS on legacy tables.
-//   applyMediaSchema:  the ONLY source of the 6 media tables (media-schema.ts:530),
+//   applyMediaSchema:  the ONLY source of the media tables (media-schema.ts:530),
 //                      invoked exclusively at database.ts:1745 (inside runMigrations).
 //   export / persist:  saveDatabase() (:2774) / flushDatabase() (:2816) via
 //                      getDatabase().export() (:2826) — the sql.js byte image the
@@ -44,14 +44,14 @@
 // (db.run(SCHEMA)) and the real applyMediaSchema function (imported, not reimplemented).
 // Part B additionally proves runMigrations' remaining statements cannot change the
 // outcome on a real snapshot: every legacy table except sync_change_quarantine is
-// already materialized, so the only deltas are quarantine (schema.sql) + 6 media.
+// already materialized, so the only deltas are quarantine (schema.sql) + the media tables.
 // ════════════════════════════════════════════════════════════════════════════
 
 import initSqlJs from 'sql.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { applyMediaSchema, MEDIA_TABLES } from '../../src/core/db/media-schema.ts';
+import { applyMediaSchema, MEDIA_TABLES, MEDIA_03A_STATEMENTS } from '../../src/core/db/media-schema.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -86,8 +86,8 @@ for (const m of SCHEMA.matchAll(/CREATE TABLE(?:\s+IF NOT EXISTS)?\s+([A-Za-z0-9
 // ════════════════════════════════════════════════════════════════════════════
 // Part A — mechanism proof through the REAL functions (no external file needed).
 //   Boots a base DB with the real schema.sql, then applies the real applyMediaSchema,
-//   and proves: +6 media (and nothing else), persistence across export/reopen,
-//   idempotency of a second full pass, and that pre-existing rows are untouched.
+//   and proves: + all media tables (and nothing else), persistence across
+//   export/reopen, idempotency of a second full pass, pre-existing rows untouched.
 // ════════════════════════════════════════════════════════════════════════════
 {
   const db: any = new SQL.Database();
@@ -100,8 +100,8 @@ for (const m of SCHEMA.matchAll(/CREATE TABLE(?:\s+IF NOT EXISTS)?\s+([A-Za-z0-9
   applyMediaSchema(db);
   const T1 = userTables(db);
   const added = T1.filter((t) => !T0.includes(t)).sort();
-  ok(sortedEq(added, MEDIA), `A: applyMediaSchema adds EXACTLY the 6 media tables (got ${JSON.stringify(added)})`);
-  ok(mediaAllEmpty(db), 'A: all 6 media tables are empty');
+  ok(sortedEq(added, MEDIA), `A: applyMediaSchema adds EXACTLY the ${MEDIA.length} media tables (got ${JSON.stringify(added)})`);
+  ok(mediaAllEmpty(db), `A: all ${MEDIA.length} media tables are empty`);
 
   // seed a self-adapting products row to prove data survives re-init
   const info = db.exec('PRAGMA table_info(products)')[0].values as unknown[][];
@@ -132,7 +132,7 @@ for (const m of SCHEMA.matchAll(/CREATE TABLE(?:\s+IF NOT EXISTS)?\s+([A-Za-z0-9
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Part B — the REAL 73→80 upgrade proof on a byte-identical productive snapshot.
+// Part B — the REAL 73→84 upgrade proof on a byte-identical productive snapshot.
 // ════════════════════════════════════════════════════════════════════════════
 const existing = process.env.MEDIA03A_EXISTING_DB;
 if (existing) {
@@ -159,9 +159,9 @@ if (existing) {
   applyMediaSchema(db);
   const R2 = userTables(db);
   const dMedia = R2.filter((t) => !R1.includes(t)).sort();
-  ok(sortedEq(dMedia, MEDIA), `B/R2: applyMediaSchema added EXACTLY the 6 media tables (got ${JSON.stringify(dMedia)})`);
-  ok(R2.length === R0.length + (hadQuar0 ? 0 : 1) + MEDIA.length, `B/R2: user table count is R0+1(quarantine)+6(media) = ${R0.length + 7} (got ${R2.length})`);
-  ok(mediaAllEmpty(db), 'B/R2: all 6 media tables are empty');
+  ok(sortedEq(dMedia, MEDIA), `B/R2: applyMediaSchema added EXACTLY the ${MEDIA.length} media tables (got ${JSON.stringify(dMedia)})`);
+  ok(R2.length === R0.length + (hadQuar0 ? 0 : 1) + MEDIA.length, `B/R2: user table count is R0+1(quarantine)+${MEDIA.length}(media) = ${R0.length + (hadQuar0 ? 0 : 1) + MEDIA.length} (got ${R2.length})`);
+  ok(mediaAllEmpty(db), `B/R2: all ${MEDIA.length} media tables are empty`);
   const bizAfter = Object.fromEntries(BIZ.map((t) => [t, rowCount(db, t)]));
   ok(BIZ.every((t) => bizBefore[t] === bizAfter[t]), `B/R2: business row counts unchanged (${JSON.stringify(bizBefore)} == ${JSON.stringify(bizAfter)})`);
 
@@ -191,12 +191,33 @@ if (existing) {
   console.log(`     media  tables : 0 → ${R2.filter((t) => MEDIA.includes(t)).length}`);
   console.log(`     user   tables : ${R0.length} → ${R2.length}`);
   console.log(`     system tables : ${JSON.stringify(sys0)} → ${JSON.stringify(sys4)}`);
+
+  // ── Part C (§18 path-3) — the MEDIA-03A → MEDIA-03B upgrade. Build the 80-table
+  //    03A state (74 legacy + 6 core media) on the SAME snapshot via the real
+  //    schema.sql + the 03A-only DDL subset, then apply the full schema and prove
+  //    EXACTLY the 4 rotation/backup tables are added and the 6 core are unchanged.
+  const dbC: any = new SQL.Database(readFileSync(existing));
+  dbC.run(SCHEMA);
+  for (const s of MEDIA_03A_STATEMENTS) dbC.run(s);
+  const c80 = userTables(dbC);
+  const media03a = c80.filter((t) => MEDIA.includes(t)).sort();
+  ok(media03a.length === 6, `C: MEDIA-03A state has exactly 6 core media tables (got ${media03a.length})`);
+  ok(c80.length === R0.length + 1 + 6, `C: MEDIA-03A state user tables = 74 legacy + 6 media = ${R0.length + 7} (got ${c80.length})`);
+  applyMediaSchema(dbC);
+  const c84 = userTables(dbC);
+  const addedC = c84.filter((t) => !c80.includes(t)).sort();
+  const EXPECT_03B = ['media_backup_generation_pins', 'media_backup_sets', 'media_rotation_jobs', 'tenant_key_rotation_jobs'];
+  ok(JSON.stringify(addedC) === JSON.stringify(EXPECT_03B), `C: 03B adds EXACTLY the 4 rotation/backup tables (got ${JSON.stringify(addedC)})`);
+  ok(media03a.every((t) => c84.includes(t)), 'C: the 6 core media tables are unchanged by 03B');
+  ok(c84.length === c80.length + 4, `C: MEDIA-03A → MEDIA-03B is 80 → 84 (got ${c80.length} → ${c84.length})`);
+  dbC.close();
+  console.log(`  §18 path-3: MEDIA-03A ${c80.length} → MEDIA-03B ${c84.length} (+4 rotation/backup, 6 core unchanged)`);
 } else {
-  console.log('  (Part B real-snapshot 73→80 proof SKIPPED — set MEDIA03A_EXISTING_DB)');
+  console.log('  (Part B/C real-snapshot 73→84 proof SKIPPED — set MEDIA03A_EXISTING_DB)');
 }
 
 if (fails.length) {
   console.log(`\nMEDIA03A-R3 full-init: ${PASS}/${PASS + FAIL} checks passed — ${FAIL} FAILED`);
   process.exit(1);
 }
-console.log(`MEDIA03A-R3 full-init: ${PASS}/${PASS} checks passed` + (existing ? ' (incl. real 73→80 snapshot upgrade + reopen + idempotency)' : ' (Part A mechanism only)'));
+console.log(`MEDIA03A-R3 full-init: ${PASS}/${PASS} checks passed` + (existing ? ' (incl. real 73→84 snapshot upgrade + reopen + idempotency + 03A→03B path)' : ' (Part A mechanism only)'));
