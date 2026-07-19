@@ -1,5 +1,8 @@
 #[cfg(windows)]
 mod printing;
+// MEDIA-04A-1 — isolated guarded image storage core. Compiled and unit-tested,
+// but deliberately not yet wired to any command/UI/DB (see src/media/mod.rs).
+mod media;
 mod sync;
 
 use std::sync::atomic::{AtomicBool, Ordering};

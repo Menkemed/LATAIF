@@ -22,6 +22,12 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# MEDIA-04A-1 — pure-Rust image decode/encode for the guarded stock-image core.
+# default-features disabled to avoid pulling GIF/BMP/TIFF/… encoders; only the
+# three input formats we accept are enabled (output is always JPEG). The `webp`
+# feature uses the pure-Rust `image-webp` crate — no native system dependency.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
 # Sync server (embedded)
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
