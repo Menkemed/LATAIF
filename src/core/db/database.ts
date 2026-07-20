@@ -2835,29 +2835,126 @@ export function getDatabase(): Database {
   return db;
 }
 
+// ── MEDIA-04A-2B2-R3/R4 — DB-lifecycle lease + exclusive swap gate ─────
+//
+// Long-running app modules (currently: the media orchestrator) need to
+// prove that the same sql.js instance they wrote to is the one that
+// `saveDatabaseDurably()` will flush to disk. The coalescer resolves the
+// snapshot lazily via `getDatabase().export()`, so a `db = new SQL.Database(...)`
+// between the caller's guard and the actual export would silently persist a
+// foreign DB.
+//
+// R4: the reader/writer serialisation lives in the pure, Node-testable
+// `DbLifecycleController` (db-lifecycle.ts). A media operation takes a
+// *shared* lease; reload/reset run an *exclusive* swap that (1) serialises
+// against other swaps, (2) blocks new leases the instant it starts, (3)
+// waits for active leases to drain, then (4) replaces `db` and bumps the
+// epoch. Because a swap blocks new leases before it waits, a steady stream
+// of leases cannot starve it; because leases wait while a swap is in
+// progress, no new lease can overtake a swap. A lease that observes a
+// drifted `db`/epoch (defence in depth) refuses its save with
+// `DbLeaseInvalidatedError`.
+import { DbLifecycleController, DbLeaseInvalidatedError } from './db-lifecycle';
+
+export { DbLeaseInvalidatedError };
+
+const dbLifecycle = new DbLifecycleController();
+
+export interface DbLease {
+  readonly db: Database;
+  readonly epoch: number;
+  /** Persist the pinned instance durably. Throws `DbLeaseInvalidatedError`
+   *  if the module-level db or its epoch has drifted since the lease was
+   *  taken, or the lease was already released. */
+  saveDurably(): Promise<void>;
+  /** Idempotent — safe to call in a finally block. */
+  release(): void;
+}
+
+/** Take a lease on the current sql.js DB. Awaits any in-flight reload/reset
+ *  swap so a new lease can never overtake one. Fails fast if the DB is not
+ *  yet initialised. While the lease is held, reload/reset block on it. */
+export async function acquireDbLease(): Promise<DbLease> {
+  const lease = await dbLifecycle.acquireLease();
+  if (!db) {
+    lease.release();
+    throw new Error('Database not initialized');
+  }
+  const leaseDb = db;
+  const leaseEpoch = lease.epoch;
+  let released = false;
+  return {
+    get db() {
+      return leaseDb;
+    },
+    get epoch() {
+      return leaseEpoch;
+    },
+    async saveDurably() {
+      if (released) throw new DbLeaseInvalidatedError('lease released');
+      if (db !== leaseDb || dbLifecycle.currentEpoch() !== leaseEpoch) {
+        // Belt-and-braces: the exclusive gate should already prevent this
+        // while the lease is live, but if a code path ever bypasses it the
+        // mismatch is caught here BEFORE the coalescer snapshots the wrong
+        // instance.
+        throw new DbLeaseInvalidatedError('db instance drifted mid-lease');
+      }
+      await saveDatabaseDurably();
+    },
+    release() {
+      if (released) return;
+      released = true;
+      lease.release();
+    },
+  };
+}
+
+/** How many leases are currently held. Exposed for diagnostics/tests only. */
+export function activeDbLeaseCount(): number {
+  return dbLifecycle.activeLeaseCount();
+}
+
+/** Current DB lifecycle epoch (bumped on every reload/reset swap). Exposed
+ *  for tests to prove monotonic progression. */
+export function currentDbEpoch(): number {
+  return dbLifecycle.currentEpoch();
+}
+
 // Diagnostic: re-read the DB file from disk into memory. Returns false if file absent.
 export async function reloadDbFromDisk(): Promise<boolean> {
-  const SQL = await initSqlJs({ locateFile: () => wasmUrl });
-  const saved = await loadSavedDb();
-  if (!saved) return false;
-  if (db) { db.close(); db = null; }
-  db = new SQL.Database(saved);
-  db.run(SCHEMA);
-  runMigrations(db);
-  return true;
+  let ok = false;
+  // R4: exclusive swap — serialised against other swaps, blocks new leases,
+  // waits for active leases to drain. Epoch bumps only on an actual swap.
+  await dbLifecycle.runExclusiveSwap(async () => {
+    const SQL = await initSqlJs({ locateFile: () => wasmUrl });
+    const saved = await loadSavedDb();
+    if (!saved) return; // no file → no swap, no epoch bump
+    if (db) { db.close(); db = null; }
+    db = new SQL.Database(saved);
+    db.run(SCHEMA);
+    runMigrations(db);
+    dbLifecycle.bumpEpoch();
+    ok = true;
+  });
+  return ok;
 }
 
 export async function resetDatabase(): Promise<void> {
-  if (isTauri()) {
-    try {
-      const fs = await getTauriFs();
-      const path = await getDbFilePath();
-      await fs.remove(path).catch(() => {});
-    } catch { /* */ }
-  }
-  localStorage.removeItem(STORAGE_KEY);
-  lastKnownDiskSig = null; // D2: Datei entfernt → Baseline verwerfen, sonst sähe der nächste
-  //                          (frische) Save die neu erzeugte Datei als „stale" an.
-  lastTmpPath = null;
-  if (db) { db.close(); db = null; }
+  // R4: same exclusive-swap gate as reload — no destructive swap while an
+  // ingest holds a lease, and reset serialises against a concurrent reload.
+  await dbLifecycle.runExclusiveSwap(async () => {
+    if (isTauri()) {
+      try {
+        const fs = await getTauriFs();
+        const path = await getDbFilePath();
+        await fs.remove(path).catch(() => {});
+      } catch { /* */ }
+    }
+    localStorage.removeItem(STORAGE_KEY);
+    lastKnownDiskSig = null; // D2: Datei entfernt → Baseline verwerfen, sonst sähe der nächste
+    //                          (frische) Save die neu erzeugte Datei als „stale" an.
+    lastTmpPath = null;
+    if (db) { db.close(); db = null; }
+    dbLifecycle.bumpEpoch();
+  });
 }

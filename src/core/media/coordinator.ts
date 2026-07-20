@@ -24,6 +24,7 @@ import type {
   CommitResult,
   MediaBytes,
   MediaCommandGateway,
+  PrepareResult,
   RustStoredDescriptor,
 } from './gateway.ts';
 
@@ -119,6 +120,18 @@ export interface FinalizeResult {
   thumbnail: RustStoredDescriptor & { storage_key: string };
 }
 
+/**
+ * The pre-publication intent snapshot stored in `media_ingest_jobs.result_json`
+ * between `registerPendingIntent` and `finalize`. Carrying the descriptors +
+ * derived storage keys here lets recovery converge from Disk alone — the DB
+ * side does not depend on the Rust journal to know WHAT to reconstruct.
+ */
+export interface PendingIntentPayload {
+  kind: 'intent';
+  main: RustStoredDescriptor & { storage_key: string };
+  thumbnail: RustStoredDescriptor & { storage_key: string };
+}
+
 export interface RecoveryReport {
   tenantId: string;
   ingestRequestId: string;
@@ -196,6 +209,110 @@ export class MediaDbCoordinator {
   // ── public API ───────────────────────────────────────────────────────────
 
   /**
+   * Register the pre-publication intent for an ingest. Creates (or updates)
+   * `media_ingest_jobs` with the full recovery manifest — scope, entity, role,
+   * class + the expected main/thumbnail descriptors and derived storage keys —
+   * so that a crash between checkpoint 1 (this call's save) and finalize
+   * still leaves enough on-disk state to converge.
+   *
+   * Idempotent: repeated calls with the same request identity and prepared
+   * descriptors are no-ops. Conflicting hash → MEDIA_INGEST_REQUEST_CONFLICT;
+   * conflicting descriptors → MEDIA_DB_MEDIA_CONFLICT. If the job is already
+   * `ready`, this is a no-op (finalize has already frozen the result).
+   *
+   * Writes only the job row — NO blobs, generations, objects, variants or
+   * links are opened here. The Rust files are not published yet.
+   */
+  registerPendingIntent(input: FinalizeInput, prepared: PrepareResult): void {
+    validateFinalizeInput(input);
+    if (prepared.request_hash !== input.requestHash) {
+      // The caller must pass through the identical hash on both fronts —
+      // anything else is a programmer error, not a recoverable conflict.
+      throw new CoordinatorError('MEDIA_INVALID_INPUT');
+    }
+    const intent = intentPayloadFor(input.tenantId, prepared);
+    const now = timestamp();
+    const existing = this.jobRow(input.tenantId, input.ingestRequestId);
+    if (existing) {
+      if (existing.request_hash !== input.requestHash) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+      }
+      if (existing.state === 'ready') {
+        // Already finalized — register is a no-op.
+        return;
+      }
+      // Verify prior intent (if any) matches. A prepared with different
+      // descriptors under the same request_hash is a hard content conflict.
+      const prior = parseCachedIntent(existing.result_json);
+      if (prior && !intentsEqual(prior, intent)) {
+        throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT');
+      }
+      this.db.run(
+        `UPDATE media_ingest_jobs
+            SET state = 'accepted',
+                request_hash = $h,
+                scope_kind = $sk,
+                branch_id = $br,
+                requested_entity_type = $et,
+                requested_entity_id = $ei,
+                requested_role = $role,
+                security_class = $sc,
+                retention_class = $rc,
+                result_json = $j,
+                updated_at = $now
+          WHERE tenant_id = $t AND ingest_request_id = $r`,
+        [
+          input.requestHash,
+          input.scopeKind,
+          input.branchId,
+          input.entityType,
+          input.entityId,
+          input.role,
+          input.securityClass ?? 'internal',
+          input.retentionClass ?? 'standard',
+          JSON.stringify(intent),
+          now,
+          input.tenantId,
+          input.ingestRequestId,
+        ] as unknown[],
+      );
+      return;
+    }
+    const jobId = `job-${input.ingestRequestId}`;
+    this.db.run(
+      `INSERT INTO media_ingest_jobs
+        (tenant_id, job_id, ingest_request_id, request_hash,
+         scope_kind, branch_id,
+         requested_entity_type, requested_entity_id, requested_role,
+         security_class, retention_class, transform_profile,
+         result_json,
+         state, attempt_count, created_at, started_at, updated_at)
+       VALUES
+        ($t, $j, $r, $h,
+         $sk, $br,
+         $et, $ei, $role,
+         $sc, $rc, 'stock_image',
+         $intent,
+         'accepted', 0, $now, $now, $now)`,
+      [
+        input.tenantId,
+        jobId,
+        input.ingestRequestId,
+        input.requestHash,
+        input.scopeKind,
+        input.branchId,
+        input.entityType,
+        input.entityId,
+        input.role,
+        input.securityClass ?? 'internal',
+        input.retentionClass ?? 'standard',
+        JSON.stringify(intent),
+        now,
+      ] as unknown[],
+    );
+  }
+
+  /**
    * Drive one full ingest to a `ready` job and an active link. Idempotent
    * under retry with the same `(tenant, ingest_request_id, request_hash)`;
    * hard-fails a request-id collision with a different hash.
@@ -212,8 +329,8 @@ export class MediaDbCoordinator {
       if (existing.request_hash !== input.requestHash) {
         throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
       }
-      if (existing.state === 'ready' && existing.result_json) {
-        const cached = JSON.parse(String(existing.result_json)) as FinalizeResult;
+      const cached = parseCachedResult(existing.result_json);
+      if (existing.state === 'ready' && cached) {
         return cached;
       }
       // Any other state falls through and re-enters the finalize path.
@@ -228,6 +345,17 @@ export class MediaDbCoordinator {
       ingestRequestId: input.ingestRequestId,
       requestHash: input.requestHash,
     });
+
+    // If a previous checkpoint registered an intent, the Rust commit must
+    // return exactly those descriptors — a divergence means the request
+    // was re-prepared with different content and we refuse the finalize.
+    const priorIntent = parseCachedIntent(existing?.result_json);
+    if (priorIntent) {
+      const nowIntent = intentPayloadFrom(input.tenantId, commitResult);
+      if (!intentsEqual(priorIntent, nowIntent)) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+      }
+    }
 
     const mainBytes = await this.readVerified(
       input.tenantId,
@@ -299,7 +427,7 @@ export class MediaDbCoordinator {
                 completed_at    = $now,
                 updated_at      = $now
           WHERE tenant_id = $t AND ingest_request_id = $r`,
-        [mediaId, mainBlobId, JSON.stringify(result), now, input.tenantId, input.ingestRequestId] as unknown[],
+        [mediaId, mainBlobId, encodeCachedResult(result), now, input.tenantId, input.ingestRequestId] as unknown[],
       );
 
       // Bytes are held only for the caller's post-tx verification; nothing
@@ -804,8 +932,9 @@ export class MediaDbCoordinator {
     if (existing && existing.request_hash !== input.requestHash) {
       throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
     }
-    if (existing?.state === 'ready' && existing.result_json) {
-      return JSON.parse(String(existing.result_json)) as FinalizeResult;
+    if (existing?.state === 'ready') {
+      const cached = parseCachedResult(existing.result_json);
+      if (cached) return cached;
     }
     const commitResult = await this.gateway.commitStockImage({
       tenantScope: input.tenantId,
@@ -846,7 +975,7 @@ export class MediaDbCoordinator {
             SET state = 'ready', target_media_id = $m, target_blob_id = $b,
                 result_json = $j, completed_at = $now, updated_at = $now
           WHERE tenant_id = $t AND ingest_request_id = $r`,
-        [mediaId, mainBlobId, JSON.stringify(result), now, input.tenantId, input.ingestRequestId] as unknown[],
+        [mediaId, mainBlobId, encodeCachedResult(result), now, input.tenantId, input.ingestRequestId] as unknown[],
       );
       return result;
     });
@@ -882,6 +1011,97 @@ function validateFinalizeInput(input: FinalizeInput): void {
 
 function timestamp(now?: Date): string {
   return (now ?? new Date()).toISOString();
+}
+
+// ── result_json discriminator helpers ───────────────────────────────────────
+//
+// After R1 the `result_json` slot carries either the pre-publication
+// intent (state=accepted/finalizing) or the frozen finalize result
+// (state=ready). A discriminator field disambiguates the two shapes so
+// no reader confuses one for the other.
+
+function encodeCachedResult(result: FinalizeResult): string {
+  return JSON.stringify({ kind: 'result', value: result });
+}
+
+function parseCachedResult(raw: unknown): FinalizeResult | null {
+  if (raw == null) return null;
+  try {
+    const parsed = JSON.parse(String(raw));
+    if (parsed && parsed.kind === 'result' && parsed.value) {
+      return parsed.value as FinalizeResult;
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+function parseCachedIntent(raw: unknown): PendingIntentPayload | null {
+  if (raw == null) return null;
+  try {
+    const parsed = JSON.parse(String(raw));
+    if (parsed && parsed.kind === 'intent' && parsed.main && parsed.thumbnail) {
+      return parsed as PendingIntentPayload;
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+/** Storage-key format contract shared with the Rust core (`{scope}/{aa}/{hash}.{ext}`). */
+function storageKeyFor(scope: string, hash: string, extension: string): string {
+  return `${scope}/${hash.slice(0, 2)}/${hash}.${extension}`;
+}
+
+function intentPayloadFor(scope: string, prepared: PrepareResult): PendingIntentPayload {
+  return {
+    kind: 'intent',
+    main: {
+      ...prepared.main_descriptor,
+      storage_key: storageKeyFor(scope, prepared.main_descriptor.hash, prepared.main_descriptor.extension),
+    },
+    thumbnail: {
+      ...prepared.thumbnail_descriptor,
+      storage_key: storageKeyFor(scope, prepared.thumbnail_descriptor.hash, prepared.thumbnail_descriptor.extension),
+    },
+  };
+}
+
+/** Build an intent-shaped snapshot from a CommitResult — same shape as the
+ *  intent we would have written pre-publication, so recovery can compare
+ *  them for equality without leaking any commit-only fields. */
+function intentPayloadFrom(scope: string, commit: CommitResult): PendingIntentPayload {
+  return {
+    kind: 'intent',
+    main: {
+      ...commit.main_descriptor,
+      storage_key: commit.main_storage_key,
+    },
+    thumbnail: {
+      ...commit.thumbnail_descriptor,
+      storage_key: commit.thumbnail_storage_key,
+    },
+  };
+  void scope; // scope is implicit in the storage_key format; kept for symmetry
+}
+
+function intentsEqual(a: PendingIntentPayload, b: PendingIntentPayload): boolean {
+  return (
+    a.main.hash === b.main.hash &&
+    a.main.byte_size === b.main.byte_size &&
+    a.main.content_kind === b.main.content_kind &&
+    a.main.mime_type === b.main.mime_type &&
+    a.main.extension === b.main.extension &&
+    a.main.storage_key === b.main.storage_key &&
+    a.thumbnail.hash === b.thumbnail.hash &&
+    a.thumbnail.byte_size === b.thumbnail.byte_size &&
+    a.thumbnail.content_kind === b.thumbnail.content_kind &&
+    a.thumbnail.mime_type === b.thumbnail.mime_type &&
+    a.thumbnail.extension === b.thumbnail.extension &&
+    a.thumbnail.storage_key === b.thumbnail.storage_key
+  );
 }
 
 function paramsToPositional(
