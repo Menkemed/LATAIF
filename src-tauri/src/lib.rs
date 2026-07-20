@@ -11,6 +11,11 @@ use tauri::Manager;
 
 struct AppHandleState {
     server: Arc<sync::SyncServer>,
+    // MEDIA-04A-2A-R2 — the single, process-shared media ingest service.
+    // Every #[tauri::command] handler clones this Arc, so all commands share
+    // the same identity_locks registry and the per-(scope, id) serialisation
+    // contract actually holds across concurrent handler invocations.
+    media_ingest: Arc<media::ingest::MediaIngestService>,
 }
 
 const SYNC_PORT: u16 = 3001;
@@ -1572,6 +1577,97 @@ mod reload_bridge_tests {
     }
 }
 
+// ── MEDIA-04A-2A — guarded media command bridge ──────────────────────────────
+// Thin wrappers over `media::ingest::MediaIngestService`. They resolve the
+// production media root (`<app_data_dir>/media`) and delegate; all real logic,
+// durability and idempotency live in the tested service. No UI calls these yet,
+// and no SQL.js metadata is written. Errors are mapped to their stable public
+// code string (no path/OS detail leaks to JS). Image bytes travel as `Vec<u8>`
+// (never a base64 string and never a free source path); over IPC this currently
+// serializes as a byte array — a raw-body transport is a later optimization when
+// the UI wires these in (04A-2B/04A-3).
+
+// MEDIA-04A-2A-R2 — return the shared, process-scoped ingest service. All 5
+// command handlers reach the service through this helper, so they observe the
+// same identity_locks registry and their per-(scope, id) serialisation
+// actually stacks up. Previously this built a fresh service per call, which
+// meant no two handlers ever shared a lock.
+fn media_ingest_service(
+    state: &tauri::State<'_, AppHandleState>,
+) -> Arc<media::ingest::MediaIngestService> {
+    state.media_ingest.clone()
+}
+
+#[tauri::command]
+fn media_prepare_stock_image(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    ingest_request_id: String,
+    request_hash: String,
+    image_bytes: Vec<u8>,
+    original_name: Option<String>,
+) -> Result<media::ingest::PrepareResult, String> {
+    // IPC boundary guard: refuse oversized uploads before allocating a service,
+    // touching the media root or handing bytes to the image decoder. The same
+    // ceiling is re-checked inside `prepare`, so any code path that bypasses
+    // this wrapper still fails safe.
+    if image_bytes.len() > media::ingest::MAX_INGEST_INPUT_BYTES {
+        return Err("MEDIA_INGEST_INPUT_TOO_LARGE".to_string());
+    }
+    let svc = media_ingest_service(&state);
+    svc.prepare(
+        &tenant_scope,
+        &ingest_request_id,
+        &request_hash,
+        &image_bytes,
+        original_name.as_deref(),
+    )
+    .map_err(|e| e.code().to_string())
+}
+
+#[tauri::command]
+fn media_commit_stock_image(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    ingest_request_id: String,
+    request_hash: String,
+) -> Result<media::ingest::CommitResult, String> {
+    let svc = media_ingest_service(&state);
+    svc.commit(&tenant_scope, &ingest_request_id, &request_hash)
+        .map_err(|e| e.code().to_string())
+}
+
+#[tauri::command]
+fn media_abort_stock_image(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    ingest_request_id: String,
+) -> Result<media::ingest::AbortResult, String> {
+    let svc = media_ingest_service(&state);
+    svc.abort(&tenant_scope, &ingest_request_id)
+        .map_err(|e| e.code().to_string())
+}
+
+#[tauri::command]
+fn media_read_verified(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    hash: String,
+    extension: String,
+) -> Result<media::ingest::MediaBytes, String> {
+    let svc = media_ingest_service(&state);
+    svc.read(&tenant_scope, &hash, &extension)
+        .map_err(|e| e.code().to_string())
+}
+
+#[tauri::command]
+fn media_recover_ingests(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<Vec<media::ingest::RecoveryOutcome>, String> {
+    let svc = media_ingest_service(&state);
+    svc.recover().map_err(|e| e.code().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1589,7 +1685,13 @@ pub fn run() {
             let db_path = app_dir.join("lataif_sync_server.db");
 
             let server = Arc::new(sync::SyncServer::new(db_path, SYNC_PORT));
-            app.manage(AppHandleState { server });
+            // MEDIA-04A-2A-R2 — build the ingest service exactly once, at app
+            // setup, and share it via Tauri-managed state. Building one per
+            // command handler (the previous shape) gave each handler its own
+            // identity_locks map, silently breaking the concurrency contract.
+            let media_ingest =
+                Arc::new(media::ingest::MediaIngestService::new(app_dir.join("media")));
+            app.manage(AppHandleState { server, media_ingest });
 
             // M5-B — native WebView2-Reload-Bruecke (nur Windows) auf dem Main-Webview
             // installieren: F5/Ctrl+R nativ unterdruecken und als Tauri-Event ans Frontend
@@ -1651,6 +1753,12 @@ pub fn run() {
             sync_server_status,
             discover_lan_servers,
             print_raw_zpl,
+            // MEDIA-04A-2A — guarded media command bridge (registered; no UI caller yet).
+            media_prepare_stock_image,
+            media_commit_stock_image,
+            media_abort_stock_image,
+            media_read_verified,
+            media_recover_ingests,
             finalize_application_shutdown
         ])
         .run(tauri::generate_context!())

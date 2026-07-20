@@ -48,7 +48,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A tenant scope must be a single safe path segment (no separators, no `..`).
-fn is_valid_scope(scope: &str) -> bool {
+pub(crate) fn is_valid_scope(scope: &str) -> bool {
     !scope.is_empty()
         && scope.len() <= 64
         && scope
@@ -149,11 +149,21 @@ fn canonical_root_existing(root: &Path) -> Result<PathBuf, MediaError> {
     }
 }
 
+/// Create the media root if missing and return its canonical, link-free path.
+/// Shared by the ingest layer so journal/temp paths use the same trusted base.
+pub(crate) fn ensure_root_canonical(root: &Path) -> Result<PathBuf, MediaError> {
+    fs::create_dir_all(root).map_err(|e| MediaError::Io(safe_io(&e)))?;
+    canonical_root_existing(root)
+}
+
 /// Walk every component of `target` below `canon_root`; if any *existing*
 /// component (a tenant dir, hash-prefix dir, or the file itself) is a
 /// symlink/junction/reparse point, refuse the operation. Non-existent
 /// components are fine — they will be created as real directories.
-fn assert_no_reparse_under_root(canon_root: &Path, target: &Path) -> Result<(), MediaError> {
+pub(crate) fn assert_no_reparse_under_root(
+    canon_root: &Path,
+    target: &Path,
+) -> Result<(), MediaError> {
     let rel = target
         .strip_prefix(canon_root)
         .map_err(|_| MediaError::PathOutsideRoot)?;

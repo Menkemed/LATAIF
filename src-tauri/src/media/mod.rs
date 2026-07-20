@@ -10,6 +10,9 @@
 #![allow(dead_code, unused_imports)]
 
 mod detect;
+// MEDIA-04A-2A — guarded ingest service + durable file journal. `pub(crate)` so
+// the thin Tauri command wrappers in `lib.rs` can reach it; still no UI/DB.
+pub(crate) mod ingest;
 mod normalize;
 mod storage;
 
