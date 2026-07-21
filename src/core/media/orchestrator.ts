@@ -43,7 +43,12 @@ import type {
   AbortResult,
   RecoveryOutcome,
 } from './gateway.ts';
-import type { FinalizeInput, FinalizeResult, RecoveryReport } from './coordinator.ts';
+import type {
+  FinalizeInput,
+  FinalizeResult,
+  RecoveryReport,
+  ReplaceInput,
+} from './coordinator.ts';
 import { MediaDbCoordinator } from './coordinator.ts';
 
 // ── error contract ──────────────────────────────────────────────────────────
@@ -69,6 +74,16 @@ export class OrchestratorError extends Error {
 export interface IngestAndFinalizeInput extends FinalizeInput {
   imageBytes: Uint8Array;
   originalName?: string;
+}
+
+export interface ReplaceStockImageInput extends ReplaceInput {
+  imageBytes: Uint8Array;
+  originalName?: string;
+}
+
+export interface RemoveStockMediaLinkInput {
+  tenantId: string;
+  linkId: string;
 }
 
 export interface AbortStockImageInput {
@@ -262,6 +277,107 @@ export class StockMediaOrchestrator {
   }
 
   /**
+   * Replace one existing link's image, durably (3A-R2).
+   *
+   * Identical two-checkpoint shape as the ingest path, with ONE decisive
+   * difference at step 2: the registered intent is a *replace* intent — it
+   * freezes `operation:'replace'` plus the exact `previousLinkId`. That is
+   * what makes a crash between publish and commit recoverable: without it,
+   * `recover()` could only see "some ingest for product X, slot N" and would
+   * re-run it as an append, leaving two links fighting over one slot.
+   *
+   *   1. Acquire DB lease            (pins the sql.js instance)
+   *   2. prepareStockImage           (Rust normalises + stages; no publish)
+   *   3. registerPendingReplaceIntent(durable operation + target + slot)
+   *   4. lease.saveDurably           — checkpoint 1
+   *   5. coordinator.replace         (Rust commit + verify + one atomic tx:
+   *                                   retire old link, insert new at the very
+   *                                   same slot)
+   *   6. lease.saveDurably           — checkpoint 2
+   *
+   * Failure behaviour mirrors the ingest path exactly. In particular a cp2
+   * failure leaves the DB finalized in memory but on-disk at the cp1 intent —
+   * `recoverPendingStockMedia` then converges it as a REPLACE, never as an
+   * append. No physical file is ever deleted here; the old rendition stays on
+   * disk and the retired link row is kept as audit + legacy-suppression proof.
+   */
+  async replaceStockImage(input: ReplaceStockImageInput): Promise<FinalizeResult> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+
+        let prepareResult: PrepareResult;
+        try {
+          prepareResult = await this.gateway.prepareStockImage({
+            tenantScope: input.tenantId,
+            ingestRequestId: input.ingestRequestId,
+            requestHash: input.requestHash,
+            imageBytes: input.imageBytes,
+            originalName: input.originalName,
+          });
+        } catch (e) {
+          throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
+        }
+
+        coordinator.registerPendingReplaceIntent(input, prepareResult);
+
+        try {
+          await lease.saveDurably();
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+
+        const dbResult = await coordinator.replace(input);
+
+        try {
+          await lease.saveDurably();
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+
+        return dbResult;
+      } finally {
+        lease.release();
+      }
+    });
+  }
+
+  /**
+   * Remove one link from a gallery, durably (3A-R2).
+   *
+   * `coordinator.remove` already does the whole array surgery — retire,
+   * compact the survivors down, promote the new head — inside ONE atomic tx.
+   * The only thing missing for production was that the result never reached
+   * the disk; this path adds exactly that, under the same lease + ops-lock as
+   * every other media mutation.
+   *
+   * No pre-publication checkpoint is needed: there is no Rust publication to
+   * order against, and the tx is all-or-nothing. A save failure leaves the
+   * on-disk gallery at its pre-remove state and is safely retryable, because
+   * removing an already-retired link is a no-op.
+   *
+   * NOTHING is physically deleted — not the link row, not the blob, not the
+   * file on disk.
+   */
+  async removeStockMediaLink(input: RemoveStockMediaLinkInput): Promise<void> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+        coordinator.remove(input);
+        try {
+          await lease.saveDurably();
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+      } finally {
+        lease.release();
+      }
+    });
+  }
+
+  /**
    * Reconcile every open ingest against the Rust core and the DB, then save
    * once if anything moved. Idempotent — a follow-up call is a no-op.
    *
@@ -279,6 +395,7 @@ export class StockMediaOrchestrator {
         const dbChanged = dbReport.some(
           (r) =>
             r.action === 'finalized_from_ready_rust' ||
+            r.action === 'replaced_from_ready_rust' ||
             r.action === 'quarantined_verification_failed',
         );
         if (dbChanged) {

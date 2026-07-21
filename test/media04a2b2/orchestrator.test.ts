@@ -211,6 +211,35 @@ function baseInput(overrides: Partial<IngestAndFinalizeInput> = {}): IngestAndFi
   };
 }
 
+/**
+ * 3A-R1: recovery reads the gallery slot from the DURABLE intent, never from a
+ * default. A hand-planted "crashed mid-finalize" job row must therefore carry
+ * a v2 intent payload, exactly as `registerPendingIntent` would have written
+ * it — descriptors matching what the fake gateway's commit returns.
+ */
+function intentJson(
+  scope = 't1',
+  linkIntent: { isPrimary: boolean; sortOrder: number } = { isPrimary: true, sortOrder: 0 },
+): string {
+  const desc = (h: string, size: number, w: number, ht: number) => ({
+    hash: h,
+    extension: 'jpg',
+    content_kind: 'raster_image',
+    mime_type: 'image/jpeg',
+    byte_size: size,
+    width: w,
+    height: ht,
+    storage_key: `${scope}/${h.slice(0, 2)}/${h}.jpg`,
+  });
+  return JSON.stringify({
+    kind: 'intent',
+    intentVersion: 2,
+    main: desc(MAIN.hash, MAIN.bytes.length, 800, 600),
+    thumbnail: desc(THUMB.hash, THUMB.bytes.length, 200, 150),
+    linkIntent,
+  });
+}
+
 // ── lease helpers ──────────────────────────────────────────────────────────
 //
 // A production DbLease pins a concrete sql.js instance and refuses to save
@@ -428,10 +457,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-r','req-r', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     gateway.presetIngest('t1', 'req-r', HASH_REQ, MAIN, THUMB);
     const r = await orch.recoverPendingStockMedia();
@@ -448,10 +477,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-r','req-r', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     gateway.presetIngest('t1', 'req-r', HASH_REQ, MAIN, THUMB);
     await orch.recoverPendingStockMedia();
@@ -468,10 +497,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-r','req-r', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     gateway.presetIngest('t1', 'req-r', HASH_REQ, MAIN, THUMB);
     gateway.deleteFile('t1', HASH_MAIN);
@@ -1055,10 +1084,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-ir2','req-ir2', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     gateway.presetIngest('t1', 'req-ir2', HASH_REQ, MAIN, THUMB);
     db.run(`INSERT INTO products (id, branch_id) VALUES ('p-ir', 'b1')`);

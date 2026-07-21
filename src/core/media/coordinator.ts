@@ -65,13 +65,16 @@ export interface FinalizeInput {
   scopeKind: 'branch' | 'tenant';
   role: string;
   /**
-   * Link options — see LINK_INTENT_CANONICAL below. In this slice these
-   * are canonical constants (true / 0). Passing anything else is rejected
-   * before any DB or Rust-gateway work. If a later slice needs to freeze
-   * per-request link options for recovery, it will do so in a purpose-built
-   * schema slot; the current media_ingest_jobs manifest has no field
-   * suitable for storing them, so silently guessing them at recover time is
-   * not an option we take.
+   * Gallery position for this image (3A-R1). Both values are now real inputs,
+   * frozen into the durable intent (`PendingIntentPayload.linkIntent`) before
+   * the Rust core publishes anything, so recovery reproduces the EXACT slot
+   * instead of guessing.
+   *
+   * Legal combinations are decided against the live active-link count for the
+   * (tenant, scope, entity, role) slot — see `assertAppendPosition`:
+   *   • first image  (activeCount = 0)  → isPrimary = true,  sortOrder = 0
+   *   • append       (activeCount = N)  → isPrimary = false, sortOrder = N
+   * Both default to the first-image shape when omitted.
    */
   isPrimary?: boolean;
   sortOrder?: number;
@@ -80,15 +83,24 @@ export interface FinalizeInput {
 }
 
 /**
- * The 2B1 link-intent contract. Both values are constants; a caller passing
- * anything else fails input validation with MEDIA_INVALID_INPUT before we
- * touch the DB or the Rust core. Recovery uses these same constants, so its
- * output byte-matches a first-time finalize with identical intent.
+ * The frozen link position for one ingest request. Persisted inside
+ * `PendingIntentPayload` so a crash/restart replays the identical slot.
  */
-export const LINK_INTENT_CANONICAL = {
+export interface LinkIntent {
+  isPrimary: boolean;
+  sortOrder: number;
+}
+
+/**
+ * The shape a brand-new gallery's first entry must take. Kept as a named
+ * constant because both `finalize` and `recover` reason about it, and the
+ * legacy (pre-3A-R1) intent payloads that carry no `linkIntent` are known to
+ * mean exactly this.
+ */
+export const LINK_INTENT_FIRST_IMAGE: LinkIntent = {
   isPrimary: true,
   sortOrder: 0,
-} as const;
+};
 
 /**
  * A "same-request" replace: finalize the new ingest exactly like a fresh
@@ -118,6 +130,9 @@ export interface FinalizeResult {
   linkId: string;
   main: RustStoredDescriptor & { storage_key: string };
   thumbnail: RustStoredDescriptor & { storage_key: string };
+  /** The gallery slot this request actually occupies (3A-R1). Frozen with the
+   *  result so a later retry can be told it asked for a different position. */
+  linkIntent: LinkIntent;
 }
 
 /**
@@ -128,9 +143,29 @@ export interface FinalizeResult {
  */
 export interface PendingIntentPayload {
   kind: 'intent';
+  /**
+   * Intent-payload version. Every accepted value is enumerated here and
+   * validated on read; anything else fails closed.
+   *   v1 — pre-3A-R1: no `linkIntent`, no `operation`. Unambiguously meant an
+   *        APPEND of the first image (true/0), because that era's writer
+   *        hard-enforced exactly that shape.
+   *   v2 — 3A-R1: explicit `linkIntent`, still append-only.
+   *   v3 — 3A-R2: explicit `operation`; `replace` additionally carries the
+   *        `previousLinkId` it must retire.
+   */
+  intentVersion?: 1 | 2 | 3;
+  /** What recovery must REDO. Absent (v1/v2) ⇒ 'append'. */
+  operation?: IntentOperation;
+  /** Required iff `operation === 'replace'`; forbidden otherwise. */
+  previousLinkId?: string;
   main: RustStoredDescriptor & { storage_key: string };
   thumbnail: RustStoredDescriptor & { storage_key: string };
+  /** Present from v2 onward. Frozen BEFORE the Rust core publishes. */
+  linkIntent?: LinkIntent;
 }
+
+/** The two gallery-mutating ingest operations a durable intent can describe. */
+export type IntentOperation = 'append' | 'replace';
 
 export interface RecoveryReport {
   tenantId: string;
@@ -140,10 +175,22 @@ export interface RecoveryReport {
     | 'noop_already_ready'
     | 'noop_terminal_state'
     | 'finalized_from_ready_rust'
+    | 'replaced_from_ready_rust'
     | 'left_pending_no_rust_result'
     | 'left_pending_no_manifest'
+    | 'left_pending_replace_target_gone'
     | 'quarantined_verification_failed';
 }
+
+/**
+ * What a durable intent tells recovery to REDO. Derived exclusively from the
+ * frozen `result_json` — never guessed from the job's column set, because an
+ * append and a replace are indistinguishable at the column level yet produce
+ * completely different galleries.
+ */
+type RecoveryPlan =
+  | { op: 'append'; input: FinalizeInput }
+  | { op: 'replace'; input: ReplaceInput };
 
 // ── the ambient sql.js `Database` handle ───────────────────────────────────
 //
@@ -206,6 +253,70 @@ export class MediaDbCoordinator {
     );
   }
 
+  // ── gallery helpers (3A-R1) ──────────────────────────────────────────────
+  //
+  // A "gallery" is every ACTIVE link sharing (tenant, scope, branch, entity,
+  // role). `sort_order` carries no DB-level unique index (only `is_primary`
+  // and the natural media key do), so ordering is an APPLICATION invariant
+  // that these helpers own — and that also means compaction can renumber
+  // rows freely without transient index collisions.
+
+  /** All active links of one gallery slot, ordered by position. */
+  private activeGalleryLinks(slot: {
+    tenantId: string;
+    scopeKind: 'branch' | 'tenant';
+    branchId: string | null;
+    entityType: string;
+    entityId: string;
+    role: string;
+  }): Array<Record<string, unknown>> {
+    const branchPred =
+      slot.scopeKind === 'branch' ? `branch_id = $br` : `branch_id IS NULL`;
+    const bound: Record<string, unknown> = {
+      $t: slot.tenantId,
+      $sk: slot.scopeKind,
+      $et: slot.entityType,
+      $ei: slot.entityId,
+      $role: slot.role,
+    };
+    if (slot.scopeKind === 'branch') bound.$br = slot.branchId;
+    return allRows(
+      this.db,
+      `SELECT link_id, media_id, sort_order, is_primary
+         FROM media_links
+        WHERE tenant_id = $t AND scope_kind = $sk AND ${branchPred}
+          AND entity_type = $et AND entity_id = $ei AND media_role = $role
+          AND deleted_at IS NULL
+        ORDER BY sort_order ASC`,
+      bound,
+    );
+  }
+
+  /**
+   * Enforce the append-only gallery contract for a NEW link:
+   *   activeCount = 0  → isPrimary = true,  sortOrder = 0
+   *   activeCount = N  → isPrimary = false, sortOrder = N
+   * Also re-validates that the existing gallery is itself well-formed, so a
+   * corrupted gallery can never be silently appended to.
+   */
+  private assertAppendPosition(input: FinalizeInput, intent: LinkIntent): void {
+    const existing = this.activeGalleryLinks({
+      tenantId: input.tenantId,
+      scopeKind: input.scopeKind,
+      branchId: input.branchId,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      role: input.role,
+    });
+    assertGalleryWellFormed(existing);
+    const n = existing.length;
+    const expected: LinkIntent =
+      n === 0 ? { ...LINK_INTENT_FIRST_IMAGE } : { isPrimary: false, sortOrder: n };
+    if (!linkIntentsEqual(intent, expected)) {
+      throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT');
+    }
+  }
+
   // ── public API ───────────────────────────────────────────────────────────
 
   /**
@@ -230,7 +341,71 @@ export class MediaDbCoordinator {
       // anything else is a programmer error, not a recoverable conflict.
       throw new CoordinatorError('MEDIA_INVALID_INPUT');
     }
-    const intent = intentPayloadFor(input.tenantId, prepared);
+    const linkIntent = linkIntentOf(input);
+    const intent = intentPayloadFor(input.tenantId, prepared, linkIntent, 'append');
+    this.persistIntent(input, intent, (prior) => {
+      // Position is validated exactly ONCE — when the slot is first frozen.
+      // Re-validating on a resume would misread the request's own link (or a
+      // concurrently appended one) as a changed gallery size.
+      if (!prior) this.assertAppendPosition(input, linkIntent);
+    });
+  }
+
+  /**
+   * Register the pre-publication intent for a REPLACE (3A-R2).
+   *
+   * A replace and an append are indistinguishable at the job-column level —
+   * both carry scope/entity/role/class — yet they produce entirely different
+   * galleries. Without this the crash-recovery path would re-run a replace as
+   * an append and duplicate the slot. So the durable payload additionally
+   * freezes `operation:'replace'` and the exact `previousLinkId` to retire.
+   *
+   * The slot is NOT chosen here: a replace inherits the old link's exact
+   * position, so it is read off the live link row and frozen. A caller that
+   * explicitly asks for a different position gets MEDIA_DB_MEDIA_CONFLICT.
+   */
+  registerPendingReplaceIntent(input: ReplaceInput, prepared: PrepareResult): void {
+    validateFinalizeInput(input);
+    if (prepared.request_hash !== input.requestHash) {
+      throw new CoordinatorError('MEDIA_INVALID_INPUT');
+    }
+    if (!input.previousLinkId) {
+      throw new CoordinatorError('MEDIA_INVALID_INPUT');
+    }
+    const existingJob = this.jobRow(input.tenantId, input.ingestRequestId);
+    if (existingJob?.state === 'ready') {
+      // Already finalized — nothing left to intend.
+      if (existingJob.request_hash !== input.requestHash) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+      }
+      return;
+    }
+    // Read the slot from the live target so the frozen intent is exact.
+    const inherited = this.inheritedSlotOf(input);
+    const intent = intentPayloadFor(
+      input.tenantId,
+      prepared,
+      inherited,
+      'replace',
+      input.previousLinkId,
+    );
+    this.persistIntent(input, intent, () => {
+      // Nothing extra: a replace re-uses an occupied slot, so the append
+      // position rule deliberately does not apply.
+    });
+  }
+
+  /**
+   * Shared job-row writer for both intent flavours. Enforces the identity
+   * rules (hash, already-ready, prior-intent equality) and hands the caller a
+   * hook that runs exactly once, before the row is written, with the prior
+   * intent (if any) so it can decide whether extra validation is due.
+   */
+  private persistIntent(
+    input: FinalizeInput,
+    intent: PendingIntentPayload,
+    beforeWrite: (prior: PendingIntentPayload | null) => void,
+  ): void {
     const now = timestamp();
     const existing = this.jobRow(input.tenantId, input.ingestRequestId);
     if (existing) {
@@ -238,15 +413,18 @@ export class MediaDbCoordinator {
         throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
       }
       if (existing.state === 'ready') {
-        // Already finalized — register is a no-op.
+        // Already finalized — register is a no-op. NOT a second write.
         return;
       }
-      // Verify prior intent (if any) matches. A prepared with different
-      // descriptors under the same request_hash is a hard content conflict.
+      // Verify prior intent (if any) matches — descriptors, link intent,
+      // operation AND replace target. Same request id + same hash but a
+      // different slot/operation/target is a hard conflict, caught here
+      // before any publication.
       const prior = parseCachedIntent(existing.result_json);
       if (prior && !intentsEqual(prior, intent)) {
         throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT');
       }
+      beforeWrite(prior);
       this.db.run(
         `UPDATE media_ingest_jobs
             SET state = 'accepted',
@@ -278,6 +456,9 @@ export class MediaDbCoordinator {
       );
       return;
     }
+    // Fresh job: this call IS the freeze, so the same one-shot validation
+    // applies here as on the resume path above.
+    beforeWrite(null);
     const jobId = `job-${input.ingestRequestId}`;
     this.db.run(
       `INSERT INTO media_ingest_jobs
@@ -331,10 +512,46 @@ export class MediaDbCoordinator {
       }
       const cached = parseCachedResult(existing.result_json);
       if (existing.state === 'ready' && cached) {
+        // A retry of a finished request. If the caller EXPLICITLY asks for a
+        // different slot than the one this request occupies, saying "fine,
+        // here is your old result" would silently accept a changed intent —
+        // so surface it instead. An omitted position is a plain retry.
+        if (input.isPrimary !== undefined || input.sortOrder !== undefined) {
+          const asked = linkIntentOf(input);
+          const owned = cached.linkIntent ?? LINK_INTENT_FIRST_IMAGE;
+          if (!linkIntentsEqual(asked, owned)) {
+            throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+          }
+        }
         return cached;
       }
       // Any other state falls through and re-enters the finalize path.
     }
+
+    // The slot this call asks for. If a durable intent already froze one, THAT
+    // is authoritative and the caller must match it exactly.
+    const priorIntent = parseCachedIntent(existing?.result_json);
+    if (priorIntent && operationOf(priorIntent) !== 'append') {
+      // The durable intent says this request must RETIRE a link. Running it
+      // through the plain append path would leave two links on one slot, so
+      // it is refused — `replace()` is the only legal continuation.
+      throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_INTENT_OPERATION_MISMATCH');
+    }
+    const requestedIntent = linkIntentOf(input);
+    const frozenIntent = priorIntent?.linkIntent ?? null;
+    if (frozenIntent && !linkIntentsEqual(frozenIntent, requestedIntent)) {
+      // Same request id + same hash, different gallery position → conflict,
+      // BEFORE the Rust core is asked to publish.
+      throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+    }
+    const linkIntent = frozenIntent ?? requestedIntent;
+    // Validate the position ONLY when nothing has frozen it yet — i.e. a
+    // direct finalize() with no prior checkpoint. When an intent exists the
+    // slot was already validated at freeze time and re-checking would
+    // misjudge a resume (the request's own link inflates the count).
+    // The post-write gallery assertion inside the tx is the backstop that
+    // catches any slot collision regardless of which path we took.
+    if (!frozenIntent) this.assertAppendPosition(input, linkIntent);
 
     // Drive the Rust core to a published state, then verify both finals via
     // the same gateway. Verification is the pre-link contract: if the file
@@ -349,9 +566,8 @@ export class MediaDbCoordinator {
     // If a previous checkpoint registered an intent, the Rust commit must
     // return exactly those descriptors — a divergence means the request
     // was re-prepared with different content and we refuse the finalize.
-    const priorIntent = parseCachedIntent(existing?.result_json);
     if (priorIntent) {
-      const nowIntent = intentPayloadFrom(input.tenantId, commitResult);
+      const nowIntent = intentPayloadFrom(input.tenantId, commitResult, linkIntent, 'append');
       if (!intentsEqual(priorIntent, nowIntent)) {
         throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
       }
@@ -397,9 +613,21 @@ export class MediaDbCoordinator {
       const variantId = variantIdFor(mediaId, 'thumbnail');
       this.ensureVariant(input.tenantId, variantId, mediaId, thumbBlobId, now);
 
-      // 4) Active link at the target entity.
+      // 4) Active link at the target entity, at the frozen gallery slot.
       const linkId = linkIdFor({ ...input, mediaId });
-      this.ensureLink(input, linkId, mediaId, now);
+      this.ensureLink(input, linkId, mediaId, now, linkIntent);
+      // Backstop: whatever the path in, the resulting gallery must satisfy
+      // the full contract. A slot collision rolls the whole tx back.
+      assertGalleryWellFormed(
+        this.activeGalleryLinks({
+          tenantId: input.tenantId,
+          scopeKind: input.scopeKind,
+          branchId: input.branchId,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          role: input.role,
+        }),
+      );
 
       // 5) Freeze the successful result on the job.
       const result: FinalizeResult = {
@@ -417,6 +645,7 @@ export class MediaDbCoordinator {
           ...commitResult.thumbnail_descriptor,
           storage_key: commitResult.thumbnail_storage_key,
         },
+        linkIntent: { ...linkIntent },
       };
       this.db.run(
         `UPDATE media_ingest_jobs
@@ -445,56 +674,193 @@ export class MediaDbCoordinator {
    */
   async replace(input: ReplaceInput): Promise<FinalizeResult> {
     validateFinalizeInput(input);
+    // Idempotency FIRST: a completed replace has already retired the previous
+    // link, so re-validating it would wrongly report LINK_NOT_FOUND. The job
+    // is the authority on "did this request already run".
+    const existingJob = this.jobRow(input.tenantId, input.ingestRequestId);
+    if (existingJob) {
+      if (existingJob.request_hash !== input.requestHash) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+      }
+      if (existingJob.state === 'ready') {
+        const cached = parseCachedResult(existingJob.result_json);
+        if (cached) return cached;
+      }
+    }
+    // A durable replace intent, if one was frozen at checkpoint 1, is the
+    // authority on WHAT this request replaces. A caller pointing the same
+    // request id at a different target is a conflict — never a silent retarget.
+    const frozen = parseCachedIntent(existingJob?.result_json);
+    if (frozen) {
+      if (operationOf(frozen) !== 'replace') {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_INTENT_OPERATION_MISMATCH');
+      }
+      if (frozen.previousLinkId !== input.previousLinkId) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_INTENT_TARGET_MISMATCH');
+      }
+    }
+
+    // 3A-R1 slot preservation: a replace INHERITS the old link's exact
+    // position. The caller may not reorder or re-flag as a side effect —
+    // if it tried, that is a conflict, not a silent override.
+    const inherited = this.inheritedSlotOf(input);
+    const slotInput: ReplaceInput = {
+      ...input,
+      isPrimary: inherited.isPrimary,
+      sortOrder: inherited.sortOrder,
+    };
+
+    // Ordering inside the single tx: retire the old link FIRST (its
+    // deleted_at drops it out of the partial-unique primary index), then the
+    // finalize path inserts the new link at the very same slot. Doing it in
+    // this order is what makes "replace the primary" legal — otherwise the
+    // two rows would collide on ux_ml_primary_*.
+    return this.finalizeWithPreamble(
+      slotInput,
+      () => {
+        const now = timestamp();
+        this.db.run(
+          `UPDATE media_links
+              SET deleted_at = $now, is_primary = 0
+            WHERE tenant_id = $t AND link_id = $l AND deleted_at IS NULL`,
+          [now, input.tenantId, input.previousLinkId] as unknown[],
+        );
+      },
+      inherited,
+      'replace',
+      input.previousLinkId,
+    );
+  }
+
+  /**
+   * The exact gallery slot a replace must inherit, read off the live target
+   * link. Also enforces that the target really belongs to the addressed
+   * (tenant, scope, branch, entity, role) — a link id alone is not enough to
+   * authorise a mutation, otherwise a caller could retire another branch's or
+   * another entity's link by guessing an id.
+   *
+   * A caller that additionally names a position must name the inherited one:
+   * a replace may not reorder or re-flag as a side effect.
+   */
+  private inheritedSlotOf(input: ReplaceInput): LinkIntent {
     const oldLink = this.linkRow(input.tenantId, input.previousLinkId);
     if (!oldLink) {
       throw new CoordinatorError('MEDIA_DB_LINK_NOT_FOUND');
     }
-    if (oldLink.entity_type !== input.entityType || oldLink.entity_id !== input.entityId) {
+    if (oldLink.deleted_at != null) {
+      // Already retired — there is no slot left to inherit.
       throw new CoordinatorError('MEDIA_DB_LINK_NOT_FOUND');
     }
-    // The finalize call itself is the atomic tx around the DB half. If the
-    // previous link is primary and the new one wants to be primary too we
-    // first drop the old primary flag *inside the same tx*, then insert the
-    // new active link. The exact ordering happens through the ambient tx:
-    // ensureLink() will see the freshly-updated old row and be free to set
-    // is_primary=1.
-    const previousWasPrimary = Number(oldLink.is_primary) === 1;
-    const finalize = await this.finalizeWithPreamble(input, () => {
-      if (previousWasPrimary) {
-        this.db.run(
-          `UPDATE media_links
-              SET is_primary = 0
-            WHERE tenant_id = $t AND link_id = $l`,
-          [input.tenantId, input.previousLinkId] as unknown[],
-        );
+    if (
+      oldLink.entity_type !== input.entityType ||
+      oldLink.entity_id !== input.entityId ||
+      oldLink.media_role !== input.role ||
+      oldLink.scope_kind !== input.scopeKind ||
+      (input.scopeKind === 'branch'
+        ? oldLink.branch_id !== input.branchId
+        : oldLink.branch_id != null)
+    ) {
+      throw new CoordinatorError('MEDIA_DB_LINK_NOT_FOUND');
+    }
+    const inherited: LinkIntent = {
+      isPrimary: Number(oldLink.is_primary) === 1,
+      sortOrder: Number(oldLink.sort_order),
+    };
+    if (input.isPrimary !== undefined || input.sortOrder !== undefined) {
+      const asked = linkIntentOf(input);
+      if (!linkIntentsEqual(asked, inherited)) {
+        throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT');
       }
-      // AFTER the new link is durably placed (finalize path completes) we
-      // logically retire the old link. Physical bytes stay put.
-      // The retirement itself is a plain UPDATE also inside the same tx.
-      const now = timestamp();
-      this.db.run(
-        `UPDATE media_links
-            SET deleted_at = $now, is_primary = 0
-          WHERE tenant_id = $t AND link_id = $l`,
-        [now, input.tenantId, input.previousLinkId] as unknown[],
-      );
-    });
-    return finalize;
+    }
+    return inherited;
   }
 
-  /** Logical remove: the link is closed out; no blob, generation or file
-   *  is dropped. Idempotent — deleting an already-deleted link is a no-op. */
+  /**
+   * Logical remove that PRESERVES the array semantics of the gallery.
+   *
+   * All inside one transaction:
+   *   • retire the target link (row is kept — it is the legacy-suppression
+   *     evidence and the audit trail; nothing is ever hard-deleted)
+   *   • compact every higher sort_order down by one, so the remaining links
+   *     stay contiguous 0..N-2
+   *   • if the removed link was the primary and others remain, the link that
+   *     lands at sort_order 0 becomes the new primary
+   *
+   * Ordering note: the target's `deleted_at` is set BEFORE any promotion, so
+   * the retired row has already left the partial-unique primary index and no
+   * transient collision is possible. `sort_order` carries no unique index at
+   * all, so the renumbering UPDATE is collision-free by construction.
+   *
+   * Idempotent — removing an already-retired link is a no-op.
+   */
   remove(input: RemoveLinkInput): void {
     const row = this.linkRow(input.tenantId, input.linkId);
     if (!row) throw new CoordinatorError('MEDIA_DB_LINK_NOT_FOUND');
     if (row.deleted_at != null) return;
+
+    const slot = {
+      tenantId: input.tenantId,
+      scopeKind: row.scope_kind as 'branch' | 'tenant',
+      branchId: row.branch_id == null ? null : String(row.branch_id),
+      entityType: String(row.entity_type),
+      entityId: String(row.entity_id),
+      role: String(row.media_role),
+    };
+    const removedSort = Number(row.sort_order);
+    const removedWasPrimary = Number(row.is_primary) === 1;
     const now = timestamp();
-    this.db.run(
-      `UPDATE media_links
-          SET deleted_at = $now, is_primary = 0
-        WHERE tenant_id = $t AND link_id = $l`,
-      [now, input.tenantId, input.linkId] as unknown[],
-    );
+
+    this.withTx(() => {
+      // 1) Retire the target — leaves the primary index immediately.
+      this.db.run(
+        `UPDATE media_links
+            SET deleted_at = $now, is_primary = 0
+          WHERE tenant_id = $t AND link_id = $l`,
+        [now, input.tenantId, input.linkId] as unknown[],
+      );
+
+      // 2) Compact the survivors: everything above the hole moves down one.
+      const branchPred =
+        slot.scopeKind === 'branch' ? `branch_id = $br` : `branch_id IS NULL`;
+      const params: unknown[] = [];
+      params.push(removedSort, slot.tenantId, slot.scopeKind);
+      if (slot.scopeKind === 'branch') params.push(slot.branchId);
+      params.push(slot.entityType, slot.entityId, slot.role);
+      this.db.run(
+        `UPDATE media_links
+            SET sort_order = sort_order - 1
+          WHERE sort_order > $removed
+            AND tenant_id = $t AND scope_kind = $sk AND ${branchPred}
+            AND entity_type = $et AND entity_id = $ei AND media_role = $role
+            AND deleted_at IS NULL`,
+        params,
+      );
+
+      // 3) Promote if the primary was the one removed and links remain.
+      if (removedWasPrimary) {
+        const survivors = this.activeGalleryLinks(slot);
+        if (survivors.length > 0) {
+          const head = survivors.find((s) => Number(s.sort_order) === 0);
+          if (!head) {
+            // Compaction should always leave a row at 0; if not, the gallery
+            // was already malformed — fail closed rather than guess.
+            throw new CoordinatorError(
+              'MEDIA_DB_MEDIA_CONFLICT',
+              'MEDIA_GALLERY_SORT_GAP',
+            );
+          }
+          this.db.run(
+            `UPDATE media_links
+                SET is_primary = 1
+              WHERE tenant_id = $t AND link_id = $l`,
+            [slot.tenantId, String(head.link_id)] as unknown[],
+          );
+        }
+      }
+
+      // 4) Whatever remains must satisfy the full gallery contract.
+      assertGalleryWellFormed(this.activeGalleryLinks(slot));
+    });
   }
 
   /**
@@ -534,17 +900,29 @@ export class MediaDbCoordinator {
         out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'noop_terminal_state' });
         continue;
       }
-      const input = this.resolveInputFromJobRow(r);
-      if (!input) {
+      const plan = this.resolvePlanFromJobRow(r);
+      if (!plan) {
         out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'left_pending_no_manifest' });
         continue;
       }
       try {
-        await this.finalize(input);
-        out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'finalized_from_ready_rust' });
+        if (plan.op === 'replace') {
+          await this.replace(plan.input);
+          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'replaced_from_ready_rust' });
+        } else {
+          await this.finalize(plan.input);
+          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'finalized_from_ready_rust' });
+        }
       } catch (e) {
         const err = e as { code?: string; message?: string };
         const code = err.code ?? err.message ?? '';
+        if (code === 'MEDIA_DB_LINK_NOT_FOUND') {
+          // A frozen replace whose target vanished (removed or replaced by
+          // another op in the meantime). Re-running it as an append would
+          // resurrect an image the user deleted — leave it pending instead.
+          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'left_pending_replace_target_gone' });
+          continue;
+        }
         if (
           code === 'MEDIA_INGEST_FILE_MISSING' ||
           code === 'MEDIA_INGEST_HASH_MISMATCH' ||
@@ -573,7 +951,7 @@ export class MediaDbCoordinator {
    * when the row cannot support recovery — a manifest inserted by an older
    * writer without the required scope fields.
    */
-  private resolveInputFromJobRow(row: Record<string, unknown>): FinalizeInput | null {
+  private resolvePlanFromJobRow(row: Record<string, unknown>): RecoveryPlan | null {
     const scopeKind = row.scope_kind as 'branch' | 'tenant' | null | undefined;
     const entityType = row.requested_entity_type as string | null | undefined;
     const entityId = row.requested_entity_id as string | null | undefined;
@@ -581,7 +959,19 @@ export class MediaDbCoordinator {
     const hash = row.request_hash as string | null | undefined;
     if (!scopeKind || !entityType || !entityId || !role || !hash) return null;
     if (scopeKind !== 'branch' && scopeKind !== 'tenant') return null;
-    return {
+    // 3A-R1/R2: the gallery slot AND the operation come from the DURABLE
+    // intent, never from a default. A corrupt intent, or a job with no intent
+    // at all, cannot be recovered without guessing → refuse (the caller
+    // reports left_pending_no_manifest).
+    let intent: PendingIntentPayload | null;
+    try {
+      intent = parseCachedIntent(row.result_json);
+    } catch {
+      return null; // corrupt payload — fail closed
+    }
+    const linkIntent = intent?.linkIntent;
+    if (!intent || !linkIntent) return null;
+    const base: FinalizeInput = {
       tenantId: String(row.tenant_id),
       branchId: scopeKind === 'branch' ? (row.branch_id ? String(row.branch_id) : null) : null,
       ingestRequestId: String(row.ingest_request_id),
@@ -590,13 +980,19 @@ export class MediaDbCoordinator {
       entityId,
       scopeKind,
       role,
-      // Link options are constants under the 2B1 contract — recovery
-      // reproduces them exactly, not guesses them.
-      isPrimary: LINK_INTENT_CANONICAL.isPrimary,
-      sortOrder: LINK_INTENT_CANONICAL.sortOrder,
+      isPrimary: linkIntent.isPrimary,
+      sortOrder: linkIntent.sortOrder,
       securityClass: (row.security_class as FinalizeInput['securityClass']) ?? 'internal',
       retentionClass: (row.retention_class as FinalizeInput['retentionClass']) ?? 'standard',
     };
+    if (operationOf(intent) === 'replace') {
+      // parseCachedIntent already guaranteed a non-empty previousLinkId for a
+      // replace; the guard keeps the type narrow without a cast.
+      const previousLinkId = intent.previousLinkId;
+      if (!previousLinkId) return null;
+      return { op: 'replace', input: { ...base, previousLinkId } };
+    }
+    return { op: 'append', input: base };
   }
 
   private markJobQuarantined(tenantId: string, ingestRequestId: string, code: string): void {
@@ -847,7 +1243,13 @@ export class MediaDbCoordinator {
     );
   }
 
-  private ensureLink(input: FinalizeInput, linkId: string, mediaId: string, now: string): void {
+  private ensureLink(
+    input: FinalizeInput,
+    linkId: string,
+    mediaId: string,
+    now: string,
+    linkIntent: LinkIntent,
+  ): void {
     const existing = this.linkRow(input.tenantId, linkId);
     if (existing) {
       if (
@@ -859,9 +1261,8 @@ export class MediaDbCoordinator {
       ) {
         throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT');
       }
-      // Re-activate a previously soft-deleted link (idempotent re-finalize).
-      // The link-intent contract makes primary/sort_order constants — passing
-      // them positionally here just reads as `1`/`0`.
+      // Re-activate a previously soft-deleted link (idempotent re-finalize)
+      // at the frozen slot — never at a guessed one.
       if (existing.deleted_at != null) {
         this.db.run(
           `UPDATE media_links
@@ -870,8 +1271,8 @@ export class MediaDbCoordinator {
                   sort_order = $so
             WHERE tenant_id = $t AND link_id = $l`,
           [
-            LINK_INTENT_CANONICAL.isPrimary ? 1 : 0,
-            LINK_INTENT_CANONICAL.sortOrder,
+            linkIntent.isPrimary ? 1 : 0,
+            linkIntent.sortOrder,
             input.tenantId,
             linkId,
           ] as unknown[],
@@ -894,8 +1295,8 @@ export class MediaDbCoordinator {
         input.entityId,
         mediaId,
         input.role,
-        LINK_INTENT_CANONICAL.sortOrder,
-        LINK_INTENT_CANONICAL.isPrimary ? 1 : 0,
+        linkIntent.sortOrder,
+        linkIntent.isPrimary ? 1 : 0,
         now,
       ] as unknown[],
     );
@@ -923,6 +1324,16 @@ export class MediaDbCoordinator {
   private async finalizeWithPreamble(
     input: FinalizeInput,
     preambleInsideTx: () => void,
+    /** The exact slot the new link must take. For `replace` this is the old
+     *  link's inherited position; the append-position check is deliberately
+     *  NOT applied, because a replace re-uses an existing slot instead of
+     *  appending a new one. */
+    slot: LinkIntent,
+    /** Which operation this preamble implements, and (for a replace) the link
+     *  it retires. Both are compared against the durable intent so a frozen
+     *  replace can never be finished as an append or against another target. */
+    operation: IntentOperation,
+    previousLinkId?: string,
   ): Promise<FinalizeResult> {
     // Perform the same steps as `finalize()` but with a pre-hook inside the
     // atomic tx. Duplicating the flow keeps `finalize()` a single well-formed
@@ -936,6 +1347,20 @@ export class MediaDbCoordinator {
       const cached = parseCachedResult(existing.result_json);
       if (cached) return cached;
     }
+    const priorIntent = parseCachedIntent(existing?.result_json);
+    if (priorIntent) {
+      if (operationOf(priorIntent) !== operation) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_INTENT_OPERATION_MISMATCH');
+      }
+      if ((priorIntent.previousLinkId ?? undefined) !== previousLinkId) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_INTENT_TARGET_MISMATCH');
+      }
+    }
+    const frozen = priorIntent?.linkIntent;
+    if (frozen && !linkIntentsEqual(frozen, slot)) {
+      throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+    }
+    const linkIntent = frozen ?? slot;
     const commitResult = await this.gateway.commitStockImage({
       tenantScope: input.tenantId,
       ingestRequestId: input.ingestRequestId,
@@ -956,7 +1381,18 @@ export class MediaDbCoordinator {
       const variantId = variantIdFor(mediaId, 'thumbnail');
       this.ensureVariant(input.tenantId, variantId, mediaId, thumbBlobId, now);
       const linkId = linkIdFor({ ...input, mediaId });
-      this.ensureLink(input, linkId, mediaId, now);
+      this.ensureLink(input, linkId, mediaId, now, linkIntent);
+      // Same backstop as `finalize`: a replace must leave a valid gallery.
+      assertGalleryWellFormed(
+        this.activeGalleryLinks({
+          tenantId: input.tenantId,
+          scopeKind: input.scopeKind,
+          branchId: input.branchId,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          role: input.role,
+        }),
+      );
       const result: FinalizeResult = {
         jobId: this.readJobId(input.tenantId, input.ingestRequestId),
         ingestRequestId: input.ingestRequestId,
@@ -969,6 +1405,7 @@ export class MediaDbCoordinator {
         linkId,
         main: { ...commitResult.main_descriptor, storage_key: commitResult.main_storage_key },
         thumbnail: { ...commitResult.thumbnail_descriptor, storage_key: commitResult.thumbnail_storage_key },
+        linkIntent: { ...linkIntent },
       };
       this.db.run(
         `UPDATE media_ingest_jobs
@@ -997,16 +1434,73 @@ function validateFinalizeInput(input: FinalizeInput): void {
   if (input.scopeKind === 'tenant' && input.branchId != null) {
     throw new CoordinatorError('MEDIA_INVALID_INPUT');
   }
-  // Link-intent contract (R2): no schema slot exists to freeze per-request
-  // link options, so we forbid non-canonical values up front rather than
-  // silently guessing them at recover time. Undefined is fine — it maps
-  // to the canonical constant.
-  if (input.isPrimary !== undefined && input.isPrimary !== LINK_INTENT_CANONICAL.isPrimary) {
+  // 3A-R1 link-intent: real values now, but structurally sane ones only.
+  // (Whether the position is legal for THIS gallery is decided later against
+  // the live active-link count — see `assertAppendPosition`.)
+  if (input.isPrimary !== undefined && typeof input.isPrimary !== 'boolean') {
     throw new CoordinatorError('MEDIA_INVALID_INPUT');
   }
-  if (input.sortOrder !== undefined && input.sortOrder !== LINK_INTENT_CANONICAL.sortOrder) {
-    throw new CoordinatorError('MEDIA_INVALID_INPUT');
+  if (input.sortOrder !== undefined) {
+    const s = input.sortOrder;
+    if (typeof s !== 'number' || !Number.isInteger(s) || s < 0) {
+      throw new CoordinatorError('MEDIA_INVALID_INPUT');
+    }
   }
+}
+
+/** The caller's requested slot, defaulted to the first-image shape. */
+function linkIntentOf(input: FinalizeInput): LinkIntent {
+  return {
+    isPrimary: input.isPrimary ?? LINK_INTENT_FIRST_IMAGE.isPrimary,
+    sortOrder: input.sortOrder ?? LINK_INTENT_FIRST_IMAGE.sortOrder,
+  };
+}
+
+function linkIntentsEqual(a: LinkIntent, b: LinkIntent): boolean {
+  return a.isPrimary === b.isPrimary && a.sortOrder === b.sortOrder;
+}
+
+/**
+ * The canonical gallery invariants, checked against a set of ACTIVE link rows
+ * (already ordered by sort_order):
+ *   • sort_order values are integers, unique, and contiguous 0..N-1
+ *   • N = 0 → no primary
+ *   • N > 0 → exactly one primary, and it sits at sort_order 0
+ *
+ * The DB's partial-unique index only guarantees "at most one primary"; the
+ * "exactly one, at position 0, with no gaps" half is ours to enforce, both
+ * here and in the resolver. Throws MEDIA_DB_MEDIA_CONFLICT on any violation.
+ */
+function assertGalleryWellFormed(rows: Array<Record<string, unknown>>): void {
+  const issue = inspectGallery(rows);
+  if (issue) throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', issue);
+}
+
+/** Non-throwing variant — returns a stable reason string, or null if valid.
+ *  Shared with the read-only resolver so both sides judge identically. */
+export function inspectGallery(rows: Array<Record<string, unknown>>): string | null {
+  const n = rows.length;
+  const seen = new Set<number>();
+  let primaries = 0;
+  let primaryAtZero = false;
+  for (const r of rows) {
+    const so = Number(r.sort_order);
+    if (!Number.isInteger(so) || so < 0) return 'MEDIA_GALLERY_SORT_INVALID';
+    if (seen.has(so)) return 'MEDIA_GALLERY_SORT_DUPLICATE';
+    seen.add(so);
+    if (Number(r.is_primary) === 1) {
+      primaries++;
+      if (so === 0) primaryAtZero = true;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    if (!seen.has(i)) return 'MEDIA_GALLERY_SORT_GAP';
+  }
+  if (n === 0) return primaries > 0 ? 'MEDIA_GALLERY_PRIMARY_WITHOUT_ITEMS' : null;
+  if (primaries === 0) return 'MEDIA_GALLERY_NO_PRIMARY';
+  if (primaries > 1) return 'MEDIA_GALLERY_MULTIPLE_PRIMARY';
+  if (!primaryAtZero) return 'MEDIA_GALLERY_PRIMARY_NOT_FIRST';
+  return null;
 }
 
 function timestamp(now?: Date): string {
@@ -1024,30 +1518,135 @@ function encodeCachedResult(result: FinalizeResult): string {
   return JSON.stringify({ kind: 'result', value: result });
 }
 
-function parseCachedResult(raw: unknown): FinalizeResult | null {
-  if (raw == null) return null;
+/**
+ * The single authority on what a `media_ingest_jobs.result_json` cell means.
+ *
+ * Exactly four outcomes, and nothing in between:
+ *   absent  — the cell is NULL/undefined; the job simply has no payload yet
+ *   intent  — a structurally valid, version-validated pre-publication intent
+ *   result  — a structurally valid frozen finalize result
+ *   corrupt — anything else: non-JSON, an unknown `kind`, an unknown
+ *             `intentVersion`, a malformed `linkIntent`/`operation`, a
+ *             `replace` without its `previousLinkId` (or vice versa), or a
+ *             `result` missing an identity field
+ *
+ * `corrupt` is deliberately NOT collapsed into `absent`: treating a damaged
+ * payload as "nothing stored" would let the writer re-derive a slot it never
+ * chose. Every caller fails closed on `corrupt` instead.
+ */
+type ResultJsonView =
+  | { kind: 'absent' }
+  | { kind: 'intent'; intent: PendingIntentPayload }
+  | { kind: 'result'; result: FinalizeResult }
+  | { kind: 'corrupt' };
+
+const CORRUPT: ResultJsonView = { kind: 'corrupt' };
+
+function parseResultJson(raw: unknown): ResultJsonView {
+  if (raw == null) return { kind: 'absent' };
+  let parsed: any;
   try {
-    const parsed = JSON.parse(String(raw));
-    if (parsed && parsed.kind === 'result' && parsed.value) {
-      return parsed.value as FinalizeResult;
-    }
+    parsed = JSON.parse(String(raw));
   } catch {
-    // fall through
+    return CORRUPT; // the column is ours alone — non-JSON means damage
   }
-  return null;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return CORRUPT;
+  if (parsed.kind === 'result') return parseResultEnvelope(parsed);
+  if (parsed.kind === 'intent') return parseIntentEnvelope(parsed);
+  return CORRUPT; // unknown discriminator → fail closed
 }
 
-function parseCachedIntent(raw: unknown): PendingIntentPayload | null {
-  if (raw == null) return null;
-  try {
-    const parsed = JSON.parse(String(raw));
-    if (parsed && parsed.kind === 'intent' && parsed.main && parsed.thumbnail) {
-      return parsed as PendingIntentPayload;
-    }
-  } catch {
-    // fall through
+function parseResultEnvelope(parsed: any): ResultJsonView {
+  const v = parsed.value;
+  if (!v || typeof v !== 'object') return CORRUPT;
+  const identityOk =
+    typeof v.jobId === 'string' &&
+    typeof v.ingestRequestId === 'string' &&
+    typeof v.requestHash === 'string' &&
+    v.state === 'ready' &&
+    typeof v.mediaId === 'string' &&
+    typeof v.linkId === 'string';
+  if (!identityOk) return CORRUPT;
+  if (v.linkIntent !== undefined && !isValidLinkIntent(v.linkIntent)) return CORRUPT;
+  return { kind: 'result', result: v as FinalizeResult };
+}
+
+function parseIntentEnvelope(parsed: any): ResultJsonView {
+  if (!parsed.main || !parsed.thumbnail) return CORRUPT;
+  const ver = parsed.intentVersion;
+  if (ver !== undefined && ver !== 1 && ver !== 2 && ver !== 3) return CORRUPT;
+
+  // ── operation (v3+) ──
+  const hasOp = parsed.operation !== undefined;
+  if (hasOp && parsed.operation !== 'append' && parsed.operation !== 'replace') {
+    return CORRUPT;
   }
-  return null;
+  const operation: IntentOperation = hasOp ? parsed.operation : 'append';
+  // A previousLinkId only ever belongs to a replace, and a replace is useless
+  // without one — either mismatch is ambiguous, so both fail closed.
+  const prev = parsed.previousLinkId;
+  if (operation === 'replace') {
+    if (typeof prev !== 'string' || prev === '') return CORRUPT;
+  } else if (prev !== undefined) {
+    return CORRUPT;
+  }
+
+  // ── linkIntent ──
+  if ('linkIntent' in parsed && parsed.linkIntent !== undefined) {
+    if (!isValidLinkIntent(parsed.linkIntent)) return CORRUPT;
+    return {
+      kind: 'intent',
+      intent: { ...(parsed as PendingIntentPayload), operation },
+    };
+  }
+  // No linkIntent at all — only legal for a v1 payload, which meant an APPEND
+  // of the first image and nothing else. A v3 replace without a slot would be
+  // a guess, so it is rejected above by the operation check landing here.
+  if (operation !== 'append') return CORRUPT;
+  return {
+    kind: 'intent',
+    intent: {
+      ...(parsed as PendingIntentPayload),
+      intentVersion: 1,
+      operation: 'append',
+      linkIntent: { ...LINK_INTENT_FIRST_IMAGE },
+    },
+  };
+}
+
+function isValidLinkIntent(li: any): boolean {
+  return (
+    !!li &&
+    typeof li.isPrimary === 'boolean' &&
+    typeof li.sortOrder === 'number' &&
+    Number.isInteger(li.sortOrder) &&
+    li.sortOrder >= 0
+  );
+}
+
+/** The frozen finalize result, or null when the cell holds an intent/nothing.
+ *  Throws on a damaged cell — a corrupt payload must never read as "absent". */
+function parseCachedResult(raw: unknown): FinalizeResult | null {
+  const view = parseResultJson(raw);
+  if (view.kind === 'corrupt') throw corruptIntent();
+  return view.kind === 'result' ? view.result : null;
+}
+
+/** The frozen pre-publication intent, or null when the cell holds a result/
+ *  nothing. Throws on a damaged cell. */
+function parseCachedIntent(raw: unknown): PendingIntentPayload | null {
+  const view = parseResultJson(raw);
+  if (view.kind === 'corrupt') throw corruptIntent();
+  return view.kind === 'intent' ? view.intent : null;
+}
+
+function corruptIntent(): CoordinatorError {
+  return new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_INTENT_CORRUPT');
+}
+
+/** The operation a stored intent describes, defaulted for pre-v3 payloads. */
+function operationOf(intent: PendingIntentPayload): IntentOperation {
+  return intent.operation ?? 'append';
 }
 
 /** Storage-key format contract shared with the Rust core (`{scope}/{aa}/{hash}.{ext}`). */
@@ -1055,9 +1654,18 @@ function storageKeyFor(scope: string, hash: string, extension: string): string {
   return `${scope}/${hash.slice(0, 2)}/${hash}.${extension}`;
 }
 
-function intentPayloadFor(scope: string, prepared: PrepareResult): PendingIntentPayload {
+function intentPayloadFor(
+  scope: string,
+  prepared: PrepareResult,
+  linkIntent: LinkIntent,
+  operation: IntentOperation,
+  previousLinkId?: string,
+): PendingIntentPayload {
   return {
     kind: 'intent',
+    intentVersion: 3,
+    operation,
+    ...(operation === 'replace' ? { previousLinkId } : {}),
     main: {
       ...prepared.main_descriptor,
       storage_key: storageKeyFor(scope, prepared.main_descriptor.hash, prepared.main_descriptor.extension),
@@ -1066,15 +1674,26 @@ function intentPayloadFor(scope: string, prepared: PrepareResult): PendingIntent
       ...prepared.thumbnail_descriptor,
       storage_key: storageKeyFor(scope, prepared.thumbnail_descriptor.hash, prepared.thumbnail_descriptor.extension),
     },
+    linkIntent: { ...linkIntent },
   };
 }
 
 /** Build an intent-shaped snapshot from a CommitResult — same shape as the
  *  intent we would have written pre-publication, so recovery can compare
  *  them for equality without leaking any commit-only fields. */
-function intentPayloadFrom(scope: string, commit: CommitResult): PendingIntentPayload {
+function intentPayloadFrom(
+  scope: string,
+  commit: CommitResult,
+  linkIntent: LinkIntent,
+  operation: IntentOperation,
+  previousLinkId?: string,
+): PendingIntentPayload {
+  void scope; // scope is implicit in the storage_key format; kept for symmetry
   return {
     kind: 'intent',
+    intentVersion: 3,
+    operation,
+    ...(operation === 'replace' ? { previousLinkId } : {}),
     main: {
       ...commit.main_descriptor,
       storage_key: commit.main_storage_key,
@@ -1083,11 +1702,21 @@ function intentPayloadFrom(scope: string, commit: CommitResult): PendingIntentPa
       ...commit.thumbnail_descriptor,
       storage_key: commit.thumbnail_storage_key,
     },
+    linkIntent: { ...linkIntent },
   };
-  void scope; // scope is implicit in the storage_key format; kept for symmetry
 }
 
+/**
+ * Full manifest equality — content descriptors AND the frozen link intent.
+ *
+ * The Rust-computed `request_hash` binds only the *bytes* + normalisation
+ * params; it does NOT cover the gallery position. So a retry that reuses the
+ * same `ingest_request_id` and the same hash but asks for a DIFFERENT slot
+ * must be caught here, by exact manifest comparison, before any Rust commit.
+ */
 function intentsEqual(a: PendingIntentPayload, b: PendingIntentPayload): boolean {
+  const aLink = a.linkIntent ?? LINK_INTENT_FIRST_IMAGE;
+  const bLink = b.linkIntent ?? LINK_INTENT_FIRST_IMAGE;
   return (
     a.main.hash === b.main.hash &&
     a.main.byte_size === b.main.byte_size &&
@@ -1100,7 +1729,13 @@ function intentsEqual(a: PendingIntentPayload, b: PendingIntentPayload): boolean
     a.thumbnail.content_kind === b.thumbnail.content_kind &&
     a.thumbnail.mime_type === b.thumbnail.mime_type &&
     a.thumbnail.extension === b.thumbnail.extension &&
-    a.thumbnail.storage_key === b.thumbnail.storage_key
+    a.thumbnail.storage_key === b.thumbnail.storage_key &&
+    linkIntentsEqual(aLink, bLink) &&
+    // 3A-R2: the operation and its target are part of the manifest identity.
+    // Same request id + same bytes + same slot but "replace X" vs "append"
+    // (or "replace Y") are different requests and must not be conflated.
+    operationOf(a) === operationOf(b) &&
+    (a.previousLinkId ?? null) === (b.previousLinkId ?? null)
   );
 }
 

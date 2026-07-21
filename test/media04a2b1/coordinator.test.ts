@@ -225,6 +225,37 @@ function baseInput(overrides: Partial<FinalizeInput> = {}): FinalizeInput {
   };
 }
 
+/**
+ * 3A-R1: recovery reads the gallery slot from the DURABLE intent, never from a
+ * default. A hand-planted "crashed mid-finalize" job row must therefore carry
+ * a v2 intent payload, exactly as `registerPendingIntent` would have written
+ * it — descriptors matching what the fake gateway's commit returns.
+ */
+function intentJson(
+  scope = 't1',
+  linkIntent: { isPrimary: boolean; sortOrder: number } = { isPrimary: true, sortOrder: 0 },
+  main = MAIN,
+  thumb = THUMB,
+): string {
+  const desc = (h: string, size: number, w: number, ht: number) => ({
+    hash: h,
+    extension: 'jpg',
+    content_kind: 'raster_image',
+    mime_type: 'image/jpeg',
+    byte_size: size,
+    width: w,
+    height: ht,
+    storage_key: `${scope}/${h.slice(0, 2)}/${h}.jpg`,
+  });
+  return JSON.stringify({
+    kind: 'intent',
+    intentVersion: 2,
+    main: desc(main.hash, main.byte_size, 800, 600),
+    thumbnail: desc(thumb.hash, thumb.byte_size, 200, 150),
+    linkIntent,
+  });
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // main
 // ══════════════════════════════════════════════════════════════════════════
@@ -364,10 +395,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-9','req-9', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     fake.presetIngest('t1', 'req-9', HASH_REQ, { main: MAIN, thumb: THUMB });
 
@@ -396,10 +427,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-9b','req-9b', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','finalizing', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'finalizing', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     fake.presetIngest('t1', 'req-9b', HASH_REQ, { main: MAIN, thumb: THUMB });
     const report = await coord.recover();
@@ -435,10 +466,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-9d','req-9d', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     fake.presetIngest('t1', 'req-9d', HASH_REQ, { main: MAIN, thumb: THUMB });
     const r1 = await coord.recover();
@@ -458,10 +489,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-9e','req-9e', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     fake.presetIngest('t1', 'req-9e', HASH_REQ, { main: MAIN, thumb: THUMB });
     fake.deleteFile('t1', HASH_MAIN);
@@ -485,10 +516,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-9f','req-9f', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     fake.presetIngest('t1', 'req-9f', HASH_REQ, { main: MAIN, thumb: THUMB });
     fake.tamperFile('t1', HASH_MAIN, new Uint8Array(999));
@@ -503,10 +534,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-9g','req-9g', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     // No presetIngest → gateway.commitStockImage rejects.
     const report = await coord.recover();
@@ -522,10 +553,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-9h','req-9h', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     fake.presetIngest('t1', 'req-9h', HASH_REQ, { main: MAIN, thumb: THUMB });
     const first = await coord.recover();
@@ -607,12 +638,14 @@ async function main(): Promise<void> {
     fake.presetIngest('t1', 'req-1', HASH_REQ, { main: MAIN, thumb: THUMB });
     const first = await coord.finalize(baseInput({ ingestRequestId: 'req-1' }));
     fake.presetIngest('t1', 'req-2', pad64('c0de'), { main: MAIN, thumb: THUMB });
-    // Point the replace's new link at a branch where p1 does not live — the
-    // media_links entity-scope trigger fires and rolls the whole tx back.
-    // (Same slot p1; only the branch changes to force a scope mismatch.)
+    // Point the replace's new link at a branch where p1 does not live. 3A-R1
+    // hardened `replace` to require an EXACT slot match (entity/role/scope/
+    // branch) against the previous link, so this is now refused up front as a
+    // link-not-found instead of only later by the entity-scope trigger — and
+    // still without touching the old link.
     await throws(
-      'replace to wrong branch → ENTITY_NOT_FOUND',
-      'MEDIA_ENTITY_NOT_FOUND',
+      'replace to wrong branch → LINK_NOT_FOUND',
+      'MEDIA_DB_LINK_NOT_FOUND',
       () =>
         coord.replace({
           ...baseInput({ ingestRequestId: 'req-2', requestHash: pad64('c0de'), branchId: 'b2' }),
@@ -730,34 +763,47 @@ async function main(): Promise<void> {
     fake.commitShouldThrow = null;
   }
 
-  // ── §22 link-intent contract: isPrimary=false rejected ────────────────
+  // ── §22 gallery contract: first image may not be non-primary ──────────
+  // (3A-R1: isPrimary/sortOrder are real inputs now; what makes this illegal
+  // is the POSITION — an empty gallery only accepts true/0.)
   {
     const { db, coord, fake } = await freshDb(SQL);
     fake.presetIngest('t1', 'req-1', HASH_REQ, { main: MAIN, thumb: THUMB });
     await throws(
-      'isPrimary=false → INVALID_INPUT',
-      'MEDIA_INVALID_INPUT',
+      'first image as non-primary → MEDIA_DB_MEDIA_CONFLICT',
+      'MEDIA_DB_MEDIA_CONFLICT',
       () => coord.finalize(baseInput({ ingestRequestId: 'req-1', isPrimary: false })),
     );
     const jobs = db.exec(`SELECT COUNT(*) FROM media_ingest_jobs`)[0].values[0][0];
     const links = db.exec(`SELECT COUNT(*) FROM media_links`)[0].values[0][0];
     const blobs = db.exec(`SELECT COUNT(*) FROM media_blobs`)[0].values[0][0];
     ok(Number(jobs) === 0 && Number(links) === 0 && Number(blobs) === 0,
-      `no DB rows after INVALID_INPUT (jobs=${jobs} links=${links} blobs=${blobs})`);
+      `no DB rows after position conflict (jobs=${jobs} links=${links} blobs=${blobs})`);
   }
 
-  // ── §23 link-intent contract: sortOrder != 0 rejected ─────────────────
+  // ── §23 gallery contract: a sort_order gap is rejected ────────────────
   {
     const { db, coord, fake } = await freshDb(SQL);
     fake.presetIngest('t1', 'req-1', HASH_REQ, { main: MAIN, thumb: THUMB });
     await throws(
-      'sortOrder=7 → INVALID_INPUT',
-      'MEDIA_INVALID_INPUT',
+      'sortOrder=7 on an empty gallery → MEDIA_DB_MEDIA_CONFLICT',
+      'MEDIA_DB_MEDIA_CONFLICT',
       () => coord.finalize(baseInput({ ingestRequestId: 'req-1', sortOrder: 7 })),
     );
     const rows = ['media_ingest_jobs','media_links','media_blobs','media_blob_generations','media_objects','media_variants']
       .map((t) => Number(db.exec(`SELECT COUNT(*) FROM ${t}`)[0].values[0][0]));
-    ok(rows.every((n) => n === 0), `no DB rows anywhere after INVALID_INPUT (${rows.join(',')})`);
+    ok(rows.every((n) => n === 0), `no DB rows anywhere after position conflict (${rows.join(',')})`);
+    // Structurally invalid values still fail earlier, as plain input errors.
+    await throws(
+      'negative sortOrder → MEDIA_INVALID_INPUT',
+      'MEDIA_INVALID_INPUT',
+      () => coord.finalize(baseInput({ ingestRequestId: 'req-1', sortOrder: -1 })),
+    );
+    await throws(
+      'non-integer sortOrder → MEDIA_INVALID_INPUT',
+      'MEDIA_INVALID_INPUT',
+      () => coord.finalize(baseInput({ ingestRequestId: 'req-1', sortOrder: 1.5 })),
+    );
   }
 
   // ── §24 explicit canonical values are accepted ─────────────────────────
@@ -790,10 +836,10 @@ async function main(): Promise<void> {
       `INSERT INTO media_ingest_jobs
         (tenant_id, job_id, ingest_request_id, request_hash,
          scope_kind, branch_id, requested_entity_type, requested_entity_id, requested_role,
-         security_class, retention_class, state, attempt_count, created_at, updated_at)
+         security_class, retention_class, result_json, state, attempt_count, created_at, updated_at)
        VALUES ('t1','job-req-26','req-26', $h, 'branch','b1','product','p1','stock_image',
-               'internal','standard','accepted', 1, 'n','n')`,
-      [HASH_REQ] as unknown[],
+               'internal','standard',$intent,'accepted', 1, 'n','n')`,
+      [HASH_REQ, intentJson()] as unknown[],
     );
     fake.presetIngest('t1', 'req-26', HASH_REQ, { main: MAIN, thumb: THUMB });
     const report = await coord.recover();
