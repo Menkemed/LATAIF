@@ -141,17 +141,52 @@ export class ProductMediaResolver {
   /**
    * Resolve the full ordered gallery for one product.
    *
-   * Order of decision:
-   *   1. Are there ACTIVE links? → validate the whole gallery, then verified-
-   *      read every item. One bad item fails the WHOLE result.
-   *   2. No active links but link history exists? → `none` (suppressed).
-   *   3. No link history at all? → parse the legacy column.
+   * Decision order (3B2A-R1 — atomic visible cutover):
+   *   `products.images` being empty is the SINGLE durable switch between the
+   *   legacy gallery and the new media gallery. A cutover imports every legacy
+   *   image, verifies the exact manifest, and only THEN clears the column, so:
+   *
+   *   1. Legacy column is non-empty  → the cutover has NOT finished (or the
+   *      product was never migrated). Show the FULL legacy gallery, even if
+   *      some new links already exist — never a partial media gallery.
+   *      (A malformed legacy value fails closed to `legacy_format_error`.)
+   *   2. Legacy column empty + ACTIVE links → migration complete: validate the
+   *      gallery, verified-read every item (one bad item fails the whole result).
+   *   3. Legacy empty + NO active links but link history → `none` (a
+   *      deliberately emptied gallery; deleted images never resurrect).
+   *   4. Nothing at all → `none`.
    */
   async resolveProductMedia(productId: string): Promise<ProductMediaResolution> {
     const db = this.dbProvider();
+
+    // Parse legacy up front — it is the authority on "cutover finished?".
+    const legacyRaw = this.legacyImagesValue(db, productId);
+    const legacy = parseLegacyImages(legacyRaw);
+    if (!legacy.ok) return { kind: 'legacy_format_error', code: legacy.code };
+
     const active = this.activeGallery(db, productId);
 
-    if (active.length > 0) {
+    // ── No active links ────────────────────────────────────────────────────
+    if (active.length === 0) {
+      // A retired link is proof the gallery was deliberately emptied → `none`,
+      // even if a legacy value lingers: a deleted image never resurrects.
+      if (this.hasLinkHistory(db, productId)) return { kind: 'none' };
+      // Never migrated → the legacy column is authoritative.
+      if (legacy.items.length > 0) return { kind: 'legacy', items: legacy.items };
+      return { kind: 'none' };
+    }
+
+    // ── Active links present ───────────────────────────────────────────────
+    // 3B2A-R1 atomic switch: while `products.images` is still populated the
+    // cutover has NOT finished, so the FULL legacy gallery stays visible — a
+    // partial media gallery must never show. Only the durable clear of the
+    // column flips visibility to the new gallery.
+    if (legacy.items.length > 0) {
+      return { kind: 'legacy', items: legacy.items };
+    }
+
+    {
+      // Migrated (legacy cleared) with active links → the media gallery.
       // Gallery invariants — shared with the coordinator so both sides judge
       // identically. Never pick one arbitrarily via LIMIT 1.
       const issue = inspectGallery(active);
@@ -198,20 +233,6 @@ export class ProductMediaResolver {
       }
       return { kind: 'media', items };
     }
-
-    // No active links. Has this product EVER had one? A retired row is proof
-    // the gallery was deliberately emptied → legacy must stay suppressed.
-    if (this.hasLinkHistory(db, productId)) {
-      return { kind: 'none' };
-    }
-
-    // Never migrated → legacy column is authoritative.
-    const legacyRaw = this.legacyImagesValue(db, productId);
-    if (legacyRaw === undefined) return { kind: 'none' }; // no such product row
-    const parsed = parseLegacyImages(legacyRaw);
-    if (!parsed.ok) return { kind: 'legacy_format_error', code: parsed.code };
-    if (parsed.items.length === 0) return { kind: 'none' };
-    return { kind: 'legacy', items: parsed.items };
   }
 
   /** Convenience: just the primary entry of a resolved gallery. */
@@ -271,23 +292,16 @@ export class ProductMediaResolver {
   }
 
   /**
-   * Any link row at all for THIS scope — active OR retired.
-   *
-   * Scope-bound on purpose (3A-R2 §4). Matching on (tenant, entity, role)
-   * alone was wrong in both directions: a link belonging to another branch
-   * would suppress this branch's legacy column (an image silently
-   * disappearing), and a tenant-scoped row could do the same across the whole
-   * install. Migration state is per (tenant, branch, product, role) and the
-   * query says so.
+   * Any link row at all for THIS scope — active OR retired. Scope-bound so a
+   * foreign branch's link can never suppress this branch's legacy column
+   * (migration state is per tenant+branch+product+role).
    */
   private hasLinkHistory(db: RawDb, productId: string): boolean {
     const r = firstRow(
       db,
       `SELECT 1 AS hit FROM media_links
-        WHERE tenant_id = $t
-          AND scope_kind = 'branch' AND branch_id = $br
-          AND entity_type = 'product' AND entity_id = $p
-          AND media_role = $role
+        WHERE tenant_id = $t AND scope_kind = 'branch' AND branch_id = $br
+          AND entity_type = 'product' AND entity_id = $p AND media_role = $role
         LIMIT 1`,
       { $t: this.tenantId, $br: this.branchId, $p: productId, $role: this.role },
     );

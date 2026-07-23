@@ -247,8 +247,11 @@ async function main(): Promise<void> {
   {
     const { db, gw, coord, urls, make } = await harness(SQL);
     await append(coord, gw, 0);
-    // A legacy value is present, but a broken gallery must NOT fall back to it.
-    db.run(`UPDATE products SET images = '["data:image/png;base64,LEAK"]' WHERE id='p1'`);
+    // A MIGRATED product: legacy already cleared. A broken media gallery must
+    // surface an integrity error, never a stale legacy value. (3B2A-R1: while
+    // legacy is still populated the resolver shows legacy — that path is
+    // covered separately; here the column is empty, the migrated state.)
+    db.run(`UPDATE products SET images = '[]' WHERE id='p1'`);
     gw.readShouldThrow = 'MEDIA_FILE_MISSING';
     const c = make();
     await c.load({ productId: 'p1', tenantId: 't1', branchId: 'b1' });
@@ -267,7 +270,7 @@ async function main(): Promise<void> {
     // inspectGallery reports MEDIA_GALLERY_SORT_DUPLICATE (no index on
     // sort_order, so this is insertable, unlike a second is_primary).
     db.run(`UPDATE media_links SET sort_order = 0 WHERE entity_id='p1' AND sort_order=1`);
-    db.run(`UPDATE products SET images = '["data:image/png;base64,LEAK"]' WHERE id='p1'`);
+    db.run(`UPDATE products SET images = '[]' WHERE id='p1'`); // migrated product
     const c = make();
     await c.load({ productId: 'p1', tenantId: 't1', branchId: 'b1' });
     ok(c.state.status === 'error', `conflict → error (got ${c.state.status})`);
@@ -457,7 +460,7 @@ async function main(): Promise<void> {
   {
     const { db, gw, coord, states, make } = await harness(SQL);
     await append(coord, gw, 0);
-    db.run(`UPDATE products SET images='["data:image/png;base64,LEAK"]' WHERE id='p1'`);
+    db.run(`UPDATE products SET images='[]' WHERE id='p1'`); // migrated product
     gw.readShouldThrow = 'MEDIA_FILE_MISSING';
     const c = make();
     await c.load({ productId: 'p1', tenantId: 't1', branchId: 'b1' });

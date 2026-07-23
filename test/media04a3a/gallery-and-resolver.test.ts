@@ -391,14 +391,23 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── §15 media wins over legacy ────────────────────────────────────────
+  // ── §15 legacy stays visible until the atomic clear (3B2A-R1) ─────────
   {
+    // A populated `products.images` means the cutover has NOT finished, so the
+    // FULL legacy gallery stays visible even though a new link already exists —
+    // a partial media gallery must never show. Only clearing the column flips
+    // visibility to the new media gallery.
     const { db, gw, coord, resolver } = await fresh(SQL);
     db.run(`UPDATE products SET images = '["data:image/jpeg;base64,AAAA"]' WHERE id='p1'`);
     await append(coord, gw, 0);
-    const r = await resolver.resolveProductMedia('p1');
-    ok(r.kind === 'media', `new media wins over legacy (got ${r.kind})`);
-    if (r.kind === 'media') ok(r.items.length === 1, 'legacy is not appended to the gallery');
+    let r = await resolver.resolveProductMedia('p1');
+    ok(r.kind === 'legacy', `legacy visible until clear (got ${r.kind})`);
+    if (r.kind === 'legacy') ok(r.items.length === 1, 'full legacy shown, not a partial media gallery');
+    // The durable clear is the single visibility switch → now media wins.
+    db.run(`UPDATE products SET images = '[]' WHERE id='p1'`);
+    r = await resolver.resolveProductMedia('p1');
+    ok(r.kind === 'media', `media wins once legacy cleared (got ${r.kind})`);
+    if (r.kind === 'media') ok(r.items.length === 1, 'exactly the migrated gallery');
   }
 
   // ── §16 no link history + legacy → legacy in array order ──────────────
@@ -440,14 +449,16 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── §20 integrity failure never falls back to legacy ──────────────────
+  // ── §20 migrated product: broken media never falls back to legacy ─────
   {
-    const { db, gw, coord, resolver } = await fresh(SQL);
-    db.run(`UPDATE products SET images = '["data:legacy"]' WHERE id='p1'`);
-    await append(coord, gw, 0);
+    // A MIGRATED product has an empty legacy column. If its media gallery then
+    // breaks, the resolver must surface an integrity error — never resurrect a
+    // stale legacy value (there is none) and never silently hide the loss.
+    const { gw, coord, resolver } = await fresh(SQL);
+    await append(coord, gw, 0);           // legacy already '[]' from the seed
     gw.deleteFile('t1', img(0).main.hash);
     const r = await resolver.resolveProductMedia('p1');
-    ok(r.kind === 'integrity_error', `broken media + legacy → integrity_error, no fallback (got ${r.kind})`);
+    ok(r.kind === 'integrity_error', `migrated + broken media → integrity_error (got ${r.kind})`);
   }
 
   // ── §21 conflict states are reported, never resolved arbitrarily ──────
