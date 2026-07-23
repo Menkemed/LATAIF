@@ -19,6 +19,9 @@ import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { query } from '@/core/db/helpers';
 import { usePermission } from '@/hooks/usePermission';
+import { useAuthStore } from '@/stores/authStore';
+import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
+import { presentationSrcs, isResolvingMedia } from '@/core/media/presentation';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
@@ -68,6 +71,34 @@ export function ProductDetail() {
   );
 
   const product = useMemo(() => products.find(p => p.id === id), [products, id]);
+
+  // ── MEDIA-04A-3B1: geordnete Galerie aus dem read-only Resolver ──
+  // Autorisierter Scope: branchId aus der Session (der productStore lädt
+  // Produkte ausschliesslich für diese Branch), tenantId = DB-autoritativer
+  // Owner genau dieser Branch (branches.tenant_id). Kein Default: fehlt eines
+  // von beiden, bleibt der Hook idle und die Anzeige fällt auf den bisherigen
+  // product.images-Pfad zurück.
+  const sessionBranchId = useAuthStore(s => s.session?.branchId);
+  const tenantId = useMemo(() => {
+    if (!sessionBranchId) return undefined;
+    const rows = query('SELECT tenant_id FROM branches WHERE id = ?', [sessionBranchId]);
+    const t = rows.length > 0 ? (rows[0].tenant_id as string | null) : null;
+    return t || undefined;
+  }, [sessionBranchId]);
+  // Im Edit-Modus zeigt der Upload-Pfad weiter form.images — der Resolver
+  // ruht dann (enabled=false), damit keine parallele Object-URL-Galerie läuft.
+  const media = useProductMediaPresentation(
+    id, tenantId, sessionBranchId, !editing,
+  );
+  // MEDIA-04A-3B1-R1 — fail-closed: NUR eine abgeschlossene media/legacy-
+  // Auflösung liefert Bilder. Während idle/loading zeigt die Anzeige KEIN
+  // product.images (kein transienter Legacy-Flash); integrity_error/conflict →
+  // leer, niemals Legacy. product.images bleibt ausschliesslich der Edit-Pfad.
+  const galleryImages = useMemo(() => presentationSrcs(media), [media]);
+  const hasAuthorisedKey = !!id && !!tenantId && !!sessionBranchId;
+  // Skeleton statt „kein Bild"-Platzhalter solange ein autorisierter Resolve
+  // wirklich läuft.
+  const mediaResolving = !editing && isResolvingMedia(media, hasAuthorisedKey);
 
   // Phase 6 — Stock-Lots fuer Display: zeigt alle aktiven Lots mit Source-Purchase
   // + Supplier in eigener Card. Macht sichtbar dass das Produkt mehrere Kaufpreise
@@ -620,22 +651,28 @@ export function ProductDetail() {
                   </div>
                 </div>
               </div>
-            ) : product.images.length > 0 ? (
+            ) : galleryImages.length > 0 ? (
               // v0.7.17 — `contain` damit das volle User-Foto sichtbar bleibt.
               // v0.7.19 — Klick oeffnet Lightbox.
+              // MEDIA-04A-3B1 — Quelle ist galleryImages (Resolver-Galerie in
+              // sortOrder, sonst product.images-Fallback).
               <img
-                src={product.images[0]} alt=""
+                src={galleryImages[0]} alt=""
                 onClick={() => setLightboxIdx(0)}
                 style={{ width: '100%', height: 400, objectFit: 'contain', background: '#F2F7FA', cursor: 'zoom-in' }}
               />
+            ) : mediaResolving ? (
+              // MEDIA-04A-3B1-R1 — Skeleton während des Resolve; niemals
+              // product.images transient anzeigen.
+              <div className="animate-pulse flex items-center justify-center" style={{ height: 400, background: '#EBF1F5' }} />
             ) : (
               <div className="flex items-center justify-center" style={{ height: 400 }}>
                 <Package size={64} strokeWidth={0.8} style={{ color: '#6B7280' }} />
               </div>
             )}
-            {!editing && product.images.length > 1 && (
+            {!editing && galleryImages.length > 1 && (
               <div className="flex gap-2" style={{ padding: '8px 12px', borderTop: '1px solid #E5E9EE' }}>
-                {product.images.slice(1, 5).map((img, i) => (
+                {galleryImages.slice(1, 5).map((img, i) => (
                   <div
                     key={i}
                     className="rounded"
@@ -645,21 +682,21 @@ export function ProductDetail() {
                     <img src={img} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                   </div>
                 ))}
-                {product.images.length > 5 && (
+                {galleryImages.length > 5 && (
                   <div
                     className="rounded flex items-center justify-center"
                     onClick={() => setLightboxIdx(5)}
                     style={{ width: 56, height: 56, background: '#FFFFFF', border: '1px solid #E5E9EE', fontSize: 11, color: '#6B7280', cursor: 'zoom-in' }}
                   >
-                    +{product.images.length - 5}
+                    +{galleryImages.length - 5}
                   </div>
                 )}
               </div>
             )}
             {/* v0.7.19 Foto-Lightbox */}
-            {lightboxIdx !== null && product.images.length > 0 && (
+            {lightboxIdx !== null && galleryImages.length > 0 && (
               <ImageLightbox
-                images={product.images}
+                images={galleryImages}
                 index={lightboxIdx}
                 onClose={() => setLightboxIdx(null)}
                 alt={`${product.brand || ''} ${product.name || ''}`.trim()}
