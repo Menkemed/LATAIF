@@ -35,6 +35,10 @@ export function useProductMediaPresentation(
   tenantId: string | undefined,
   branchId: string | undefined,
   enabled = true,
+  /** Bump to force an explicit re-resolve WITHOUT a key change — e.g. right
+   *  after a durable edit save, so the new gallery replaces the old one and the
+   *  previous Object-URLs are revoked exactly once (3B2C2-R2). */
+  reloadNonce = 0,
 ): PresentationState {
   const [state, setState] = useState<PresentationState>(IDLE_STATE);
   const controllerRef = useRef<ProductMediaPresentationController | null>(null);
@@ -81,7 +85,9 @@ export function useProductMediaPresentation(
       return;
     }
     void controller.load({ productId, tenantId, branchId });
-  }, [productId, tenantId, branchId, enabled]);
+    // `reloadNonce` is a dep so a post-save bump re-resolves the SAME key: the
+    // controller revokes the old URLs exactly once and shows the new gallery.
+  }, [productId, tenantId, branchId, enabled, reloadNonce]);
 
   return state;
 }

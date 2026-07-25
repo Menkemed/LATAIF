@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle, ChevronDown, BarChart3, PieChart, Receipt, Factory } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
@@ -22,6 +22,7 @@ import { usePermission } from '@/hooks/usePermission';
 import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
 import { presentationSrcs, isResolvingMedia } from '@/core/media/presentation';
+import { presentationToResolverStatus, type ResolverStatus } from '@/core/media/product-edit-draft';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
@@ -35,11 +36,19 @@ export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/collection');
-  const { products, categories, loadProducts, loadCategories, updateProduct, deleteProduct, nextAvailableSku, isSkuTaken, getProductLinks } = useProductStore();
+  const { products, categories, loadProducts, loadCategories, updateProduct, editProductWithMedia, deleteProduct, nextAvailableSku, isSkuTaken, getProductLinks } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
   const [editing, setEditing] = useState(false);
+  // MEDIA-04A-3B2C2-R2: bump to force the resolver to re-resolve after a durable
+  // edit save (new gallery in, old Object-URLs revoked once). Refs guard the
+  // async save from applying UI updates onto a different/unmounted product.
+  const [mediaReloadNonce, setMediaReloadNonce] = useState(0);
+  const mountedRef = useRef(true);
+  const idRef = useRef(id);
+  idRef.current = id;
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   const [form, setForm] = useState<Partial<Product>>({});
   const [formAttrs, setFormAttrs] = useState<Record<string, string | number | boolean | string[]>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -85,10 +94,13 @@ export function ProductDetail() {
     const t = rows.length > 0 ? (rows[0].tenant_id as string | null) : null;
     return t || undefined;
   }, [sessionBranchId]);
-  // Im Edit-Modus zeigt der Upload-Pfad weiter form.images — der Resolver
-  // ruht dann (enabled=false), damit keine parallele Object-URL-Galerie läuft.
+  // MEDIA-04A-3B2C2-R1: the resolver stays ACTIVE during edit — the draft shows
+  // the existing gallery via the SAME live object URLs (media.items), so their
+  // identity (mediaId) is matched back on save and no URL is revoked mid-edit.
+  // The presentation controller still owns the URL lifecycle (revoke-exactly-
+  // once on re-resolve / dispose), proven by the 3B1 suite.
   const media = useProductMediaPresentation(
-    id, tenantId, sessionBranchId, !editing,
+    id, tenantId, sessionBranchId, !!id && !!tenantId && !!sessionBranchId, mediaReloadNonce,
   );
   // MEDIA-04A-3B1-R1 — fail-closed: NUR eine abgeschlossene media/legacy-
   // Auflösung liefert Bilder. Während idle/loading zeigt die Anzeige KEIN
@@ -396,7 +408,7 @@ export function ProductDetail() {
     return e;
   }
 
-  function handleSave() {
+  async function handleSave() {
     if (!id) return;
     // Plan §Quick-Capture (User-Spec): kein blockierendes Required, auch
     // nicht im Edit-Mode. validate() läuft nur noch für visuelle Inline-Hints —
@@ -447,13 +459,44 @@ export function ProductDetail() {
       } catch { /* snapshot parse error → no correction tracking */ }
     }
 
-    updateProduct(id, {
+    const payload: Partial<Product> = {
       ...form,
       attributes: formAttrs,
       expectedMargin: margin,
       ...(updatedCorrections ? { aiCorrections: updatedCorrections } as Partial<Product> : {}),
-    });
-    setEditing(false);
+    };
+
+    // MEDIA-04A-3B2C2-R1: EVERY ProductDetail edit save goes through the durable
+    // C2 path — text-only, media, legacy (cutover first) alike. The old
+    // updateProduct image path is unreachable here, so no base64/object URL can
+    // ever be written to products.images. A non-final gallery (loading/pending/
+    // conflict/integrity_error) maps to a non-editable status → fail closed.
+    const status: ResolverStatus = presentationToResolverStatus(media.status);
+    const resolved = media.status === 'media' ? media.items.map(i => ({ url: i.url, mediaId: i.mediaId })) : [];
+    const { images: _dropImages, ...textPayload } = payload;
+    const startId = id;
+    const res = await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status });
+    // Stale-save guard: the user navigated to another product or the view
+    // unmounted while the durable save ran — never apply this result onto a
+    // different/gone product (no stale state, no foreign gallery).
+    if (!mountedRef.current || idRef.current !== startId) return;
+    if (res.status === 'edited') {
+      // Durable save done → force a resolver re-resolve: the new gallery loads
+      // and the old Object-URLs are revoked exactly once. Then leave edit mode.
+      setMediaReloadNonce(n => n + 1);
+      setEditing(false);
+      return;
+    }
+    if (res.status === 'cutover_reload') {
+      // Legacy cut over durably → re-resolve to the now-materialised media
+      // gallery; keep the editor open so the user edits it as media next.
+      setMediaReloadNonce(n => n + 1);
+      return;
+    }
+    // blocked / incomplete / conflict → NO refresh; editor stays OPEN, draft
+    // intact, and a retry reuses the SAME frozen batch (typed conflict if the
+    // draft changed under the same batch id).
+    setErrors(e => ({ ...e, _media: res.errorCode }));
   }
 
   function labelFor(key: string): string {
@@ -521,7 +564,14 @@ export function ProductDetail() {
                   } catch (e) { setAiResult(String(e)); }
                   setAiLoading(false);
                 }} disabled={aiLoading}><Sparkles size={14} /> {aiLoading ? 'Analyzing...' : 'AI Price'}</Button>
-                {perm.canEditProducts && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>}
+                {perm.canEditProducts && <Button variant="secondary" onClick={() => {
+                  // On a migrated product, seed the edit image list from the
+                  // RESOLVED gallery (display object URLs) so the ImageUpload
+                  // shows the existing images; their identity (mediaId) is kept
+                  // via media.items and matched back on save.
+                  if (media.status === 'media') setForm(f => ({ ...f, images: media.srcs }));
+                  setEditing(true);
+                }}><Edit3 size={14} /> Edit</Button>}
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 <Button variant="primary" onClick={() => navigate(`/offers?product=${id}`)}>Create Offer</Button>
               </>

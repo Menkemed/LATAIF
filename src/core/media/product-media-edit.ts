@@ -21,6 +21,7 @@ import type {
   EditPlanEnvelope,
   EditBaselineLink,
   EditTargetSlot,
+  ProductEditIntent,
 } from './coordinator.ts';
 import type { PrepareResult, RustStoredDescriptor } from './gateway.ts';
 
@@ -45,6 +46,8 @@ export interface BuildEditPlanArgs {
   desired: EditDesiredSlot[];
   /** Prepared descriptors for every `source:'new'` slot, keyed by requestId. */
   prepared: Map<string, PrepareResult>;
+  /** Optional product text/sync/audit half, applied in the same tx (3B2C2). */
+  productEdit?: ProductEditIntent;
 }
 
 /** Storage-key format contract shared with the Rust core + coordinator. */
@@ -107,10 +110,14 @@ export async function buildEditPlanEnvelope(
     t.source === 'keep' ? `keep:${t.mediaId}` : `new:${t.requestId}`,
     t.storedHash,
   ]);
+  const productForHash = args.productEdit
+    ? { set: args.productEdit.set, baseline: args.productEdit.baseline, inv: args.productEdit.invalidateImageDerived, sync: args.productEdit.withSync, audit: args.productEdit.audit }
+    : null;
   const canonical = JSON.stringify({
     scope: [args.tenantId, args.scopeKind, args.branchId, args.entityType, args.entityId, args.role],
     baseline: baselineForHash,
     target: targetForHash,
+    productEdit: productForHash,
   });
   const planHash = await digestHex(canonical);
 
@@ -124,6 +131,7 @@ export async function buildEditPlanEnvelope(
     role: args.role,
     baseline: args.baseline.slice().sort((a, b) => a.sortOrder - b.sortOrder),
     target,
+    ...(args.productEdit ? { productEdit: args.productEdit } : {}),
     planHash,
   };
   return { kind: 'edit_plan', version: 1, plan, newRenditions };

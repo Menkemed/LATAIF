@@ -130,6 +130,28 @@ export type EditTargetSlot =
    *  Rust commit. */
   | { source: 'new'; requestId: string; requestHash: string; storedHash: string };
 
+/**
+ * The product text/sync/audit half of an edit (3B2C2). Frozen so a restart
+ * applies the EXACT same product-field update + exactly one sync changelog +
+ * exactly one audit row, in the SAME transaction as the link mutation.
+ */
+export interface ProductEditIntent {
+  /** Whitelisted column → target value (see ALLOWED_PRODUCT_EDIT_COLUMNS). */
+  set: Array<[string, string | number | null]>;
+  /** The baseline value of each `set` column, in the SAME order — the conflict
+   *  guard. The product must be at this baseline (or already at the target),
+   *  else it changed under us and the edit is refused. Stored as values (not a
+   *  hash) so the guard is a plain synchronous comparison inside the tx. */
+  baseline: Array<string | number | null>;
+  /** Reset image_hash/description/embedding to NULL (the gallery changed, so the
+   *  derived AI fields must be recomputed by the reconciler). */
+  invalidateImageDerived: boolean;
+  /** Emit the one durable sync changelog row (skipped when sync is off). */
+  withSync: boolean;
+  /** One audit row for the whole edit. */
+  audit: { module: string; changedBy: string | null; newValueJson: string };
+}
+
 /** The full, deterministic edit plan — the durable SSOT for the whole batch. */
 export interface EditPlan {
   batchId: string;
@@ -144,9 +166,23 @@ export interface EditPlan {
   /** The desired gallery, ordered 0..M-1 (index 0 = primary). M may be 0 only
    *  if the UI allows an empty gallery; otherwise ≥ 1. */
   target: EditTargetSlot[];
-  /** Canonical hash of {baseline,target} — the plan identity. */
+  /** Optional product text/sync/audit half — applied in the SAME tx (3B2C2). */
+  productEdit?: ProductEditIntent;
+  /** Canonical hash of {baseline,target,productEdit} — the plan identity. */
   planHash: string;
 }
+
+/** Product columns an edit may set — the whitelist that also guards the
+ *  interpolated column names in the UPDATE from any injection. Mirrors the
+ *  productStore updateProduct field map (never includes id/branch/images). */
+export const ALLOWED_PRODUCT_EDIT_COLUMNS: ReadonlySet<string> = new Set([
+  'category_id', 'brand', 'name', 'sku', 'quantity', 'condition',
+  'storage_location', 'purchase_date', 'purchase_price', 'purchase_currency',
+  'planned_sale_price', 'min_sale_price', 'max_sale_price', 'last_offer_price',
+  'last_sale_price', 'stock_status', 'tax_scheme', 'expected_margin',
+  'supplier_name', 'purchase_source', 'paid_from', 'source_type', 'notes',
+  'scope_of_delivery', 'attributes', 'ai_corrections',
+]);
 
 /** The durable envelope stored in `media_ingest_jobs.result_json` for an edit
  *  batch. Frozen prepared descriptors per new image let recovery re-drive the
@@ -1052,13 +1088,24 @@ export class MediaDbCoordinator {
       mediaId: b.mediaId, storedHash: b.storedHash, sortOrder: b.sortOrder, isPrimary: b.isPrimary,
     })));
 
-    if (curSig === tgtSig) {
-      this.markEditReady(plan, irid);
-      return { status: 'noop_already_applied', batchId: plan.batchId };
-    }
-    if (curSig !== baseSig) {
+    // Gallery must be at its frozen BASELINE (normal) or already at the TARGET
+    // (a prior tx that never durably saved) — anything else changed under us.
+    const galleryAtBaseline = curSig === baseSig;
+    const galleryAtTarget = curSig === tgtSig;
+    if (!galleryAtBaseline && !galleryAtTarget) {
       throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_BASELINE_CHANGED');
     }
+    // Product half (3B2C2): the product must be at its baseline or already at
+    // the target — else the product row changed under us.
+    if (plan.productEdit) {
+      const st = this.productEditState(plan);
+      if (!st.atBaseline && !st.atTarget) {
+        throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_PRODUCT_BASELINE_CHANGED');
+      }
+    }
+    // "Nothing to do" is ONLY job.state==='ready' (checked at the top). Here the
+    // job is still accepted, so we (re)apply idempotently: a save-loss after a
+    // prior tx dropped its changelog/audit too, so re-running writes them once.
 
     // Commit + verify every NEW image BEFORE the tx (mirrors finalize). A
     // divergence from the frozen prepared descriptor fails closed.
@@ -1141,11 +1188,58 @@ export class MediaDbCoordinator {
       // 5) The resulting gallery must satisfy the full contract.
       assertGalleryWellFormed(this.activeGalleryLinks(scope));
 
-      // 6) Freeze the job as applied (result_json keeps the plan; state=ready
+      // 6) Product half (3B2C2): fields + exactly one changelog + one audit,
+      //    in THIS same transaction as the link mutation.
+      if (plan.productEdit) this.applyProductEditInTx(plan, plan.productEdit, now);
+
+      // 7) Freeze the job as applied (result_json keeps the plan; state=ready
       //    makes a re-run a pure no-op).
       this.markEditReady(plan, irid);
     });
     return { status: 'edit_applied', batchId: plan.batchId };
+  }
+
+  /** Current product row is at the plan's baseline / already at the target for
+   *  the frozen `set` columns (synchronous value comparison — no hashing). */
+  private productEditState(plan: EditPlan): { atBaseline: boolean; atTarget: boolean } {
+    const pe = plan.productEdit!;
+    if (pe.set.length === 0) return { atBaseline: true, atTarget: true }; // gallery-only edit
+    const cols = pe.set.map(([c]) => c); // whitelisted → safe to interpolate
+    const row = firstRow(this.db, `SELECT ${cols.join(', ')} FROM products WHERE id = $id`, { $id: plan.entityId });
+    const cur = cols.map((c) => (row ? (row[c] ?? null) : null));
+    return {
+      atBaseline: valuesEqual(cur, pe.baseline),
+      atTarget: valuesEqual(cur, pe.set.map(([, v]) => v)),
+    };
+  }
+
+  /** Apply the product text fields + exactly one sync changelog + one audit row.
+   *  Column names come from a fixed whitelist (validated at parse time), so the
+   *  interpolation is injection-safe. */
+  private applyProductEditInTx(plan: EditPlan, pe: ProductEditIntent, now: string): void {
+    const parts: string[] = pe.set.map(([c]) => `${c} = ?`);
+    const vals: unknown[] = pe.set.map(([, v]) => v);
+    if (pe.invalidateImageDerived) parts.push('image_hash = NULL', 'image_description = NULL', 'image_embedding = NULL');
+    parts.push('updated_at = ?'); vals.push(now);
+    vals.push(plan.entityId);
+    // `parts` always contains updated_at, so the SET clause is never empty even
+    // for a gallery-only edit (set = []).
+    this.db.run(`UPDATE products SET ${parts.join(', ')} WHERE id = ?`, vals);
+    if (pe.withSync) {
+      // Echo the full row (sync replicates the whole record, like trackChange).
+      const full = firstRow(this.db, `SELECT * FROM products WHERE id = $id`, { $id: plan.entityId }) ?? {};
+      this.db.run(
+        `INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at)
+         VALUES ('products', ?, ?, 'update', ?, 0, ?)`,
+        [plan.entityId, plan.branchId, JSON.stringify(full), now] as unknown[],
+      );
+    }
+    // Deterministic audit id per batch → a save-loss retry never doubles it.
+    this.db.run(
+      `INSERT INTO audit_log (id, branch_id, module, entity_type, entity_id, action_type, field_name, old_value, new_value, changed_by, changed_at)
+       VALUES (?, ?, ?, 'products', ?, 'UPDATE', NULL, NULL, ?, ?, ?)`,
+      [`audit-edit-${plan.batchId}`, plan.branchId, pe.audit.module, plan.entityId, pe.audit.newValueJson, pe.audit.changedBy, now] as unknown[],
+    );
   }
 
   /** The current gallery as an edit-plan baseline (scope-exact). Read under the
@@ -2037,6 +2131,26 @@ function parseEditPlanEnvelope(parsed: any): ResultJsonView {
   for (const r of parsed.newRenditions) {
     if (!r || typeof r.requestId !== 'string' || !r.main || !r.thumbnail) return CORRUPT;
   }
+  // Optional product text/sync/audit half (3B2C2).
+  if (p.productEdit !== undefined) {
+    const pe = p.productEdit;
+    if (!pe || typeof pe !== 'object') return CORRUPT;
+    if (!Array.isArray(pe.set)) return CORRUPT;
+    for (const kv of pe.set) {
+      if (!Array.isArray(kv) || kv.length !== 2) return CORRUPT;
+      if (typeof kv[0] !== 'string' || !ALLOWED_PRODUCT_EDIT_COLUMNS.has(kv[0])) return CORRUPT;
+      const v = kv[1];
+      if (v !== null && typeof v !== 'string' && typeof v !== 'number') return CORRUPT;
+    }
+    if (!Array.isArray(pe.baseline) || pe.baseline.length !== pe.set.length) return CORRUPT;
+    for (const v of pe.baseline) {
+      if (v !== null && typeof v !== 'string' && typeof v !== 'number') return CORRUPT;
+    }
+    if (typeof pe.invalidateImageDerived !== 'boolean' || typeof pe.withSync !== 'boolean') return CORRUPT;
+    if (!pe.audit || typeof pe.audit !== 'object' || typeof pe.audit.module !== 'string' ||
+        (pe.audit.changedBy !== null && typeof pe.audit.changedBy !== 'string') ||
+        typeof pe.audit.newValueJson !== 'string') return CORRUPT;
+  }
   return { kind: 'edit_plan', env: parsed as EditPlanEnvelope };
 }
 
@@ -2161,6 +2275,19 @@ function recoverySortKey(row: Record<string, unknown>): number {
 /** The synthetic ingest_request_id an edit plan is stored under. */
 function editRequestId(batchId: string): string {
   return `edit:${batchId}`;
+}
+
+/** Loose value-array equality for the product-edit convergence guard: NULL vs
+ *  non-NULL must differ; otherwise compare by string form (sql.js may hand back
+ *  a number where the plan froze a numeric string, and vice versa). */
+function valuesEqual(a: Array<unknown>, b: Array<unknown>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if ((x == null) !== (y == null)) return false;
+    if (x != null && String(x) !== String(y)) return false;
+  }
+  return true;
 }
 
 /** Canonical, order-stable signature of a gallery for baseline/target equality.

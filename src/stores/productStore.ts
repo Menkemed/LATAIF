@@ -12,11 +12,15 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
 import { saveDatabaseDurably } from '@/core/db/database';
 import { createProductWithDurableMedia, sameImageIntent, shouldStartEmbedding, type ProductCreateResult } from '@/core/media/product-media-create';
-import { createRequestId, canonicalRequestHash, type DecodedLegacyImage } from '@/core/media/product-media-cutover';
-import { getStockMediaOrchestrator, type IngestAndFinalizeInput } from '@/core/media/orchestrator';
+import { createRequestId, canonicalRequestHash, decodeDataUrl, ProductMediaCutoverService, type DecodedLegacyImage } from '@/core/media/product-media-cutover';
+import { getStockMediaOrchestrator, type IngestAndFinalizeInput, type EditScope, type EditNewImageInput } from '@/core/media/orchestrator';
+import { buildEditPlanEnvelope } from '@/core/media/product-media-edit';
+import type { ProductEditIntent } from '@/core/media/coordinator';
+import { canEditImages, draftFromSrcs, buildImageEditInputs, diffProductText, editHasChanges, type ResolverStatus } from '@/core/media/product-edit-draft';
 import { runStartupMediaRecovery, type CompletedProductScope } from '@/core/media/startup-recovery';
 import { findProductsNeedingEmbedding } from '@/core/media/embedding-reconcile';
 import { TauriMediaGateway } from '@/core/media/gateway';
+import { isSyncConfigured } from '@/core/sync/sync-service';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -50,6 +54,17 @@ export interface ProductLink { label: string; count: number; }
 // `products.image_embedding` column (no schema change).
 const retryCreateManifests = new Map<string, { images: string[] }>();
 const embeddingInFlight = new Set<string>();
+// MEDIA-04A-3B2C2 — retain the frozen edit batch id per product so a retry
+// reuses the SAME durable batch (no duplicate links/changelog/audit).
+const retryEditBatches = new Map<string, string>();
+
+export type EditProductResult =
+  | { status: 'edited'; batchId: string }
+  | { status: 'edit_incomplete'; errorCode: string; batchId?: string }
+  | { status: 'edit_conflict'; errorCode: string }
+  | { status: 'blocked'; errorCode: string }
+  /** Legacy product cut over durably — the UI must reload + retry the edit. */
+  | { status: 'cutover_reload' };
 
 /**
  * MEDIA-04A-3B2B-R3 — trigger startup media recovery (idempotent, once per DB
@@ -209,6 +224,12 @@ interface ProductStore {
    * the synchronous `createProduct`.
    */
   createProductWithMedia: (data: Partial<Product>, retryProductId?: string) => Promise<ProductCreateResult>;
+  editProductWithMedia: (
+    id: string,
+    data: Partial<Product>,
+    editImages: { srcs: string[]; resolved: Array<{ url: string; mediaId: string }>; status: ResolverStatus },
+    retryEditId?: string,
+  ) => Promise<EditProductResult>;
   updateProduct: (id: string, data: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
@@ -748,6 +769,121 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
     get().loadProducts();
     return result;
+  },
+
+  // ── MEDIA-04A-3B2C2 — durable existing-product edit (text + media atomic) ──
+  editProductWithMedia: async (id, data, editImages, retryEditId) => {
+    // Fail closed: image editing only on a fully-resolved, valid gallery.
+    if (!canEditImages(editImages.status)) {
+      return { status: 'blocked', errorCode: 'MEDIA_EDIT_GALLERY_NOT_READY' };
+    }
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = ''; }
+    const tRows = branchId ? query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]) : [];
+    const tenantId = tRows.length > 0 ? (tRows[0].tenant_id as string | null) : null;
+    if (!branchId || !tenantId) return { status: 'blocked', errorCode: 'MEDIA_EDIT_SCOPE_REQUIRED' };
+    const role = 'stock_image';
+    const scope: EditScope = { tenantId, scopeKind: 'branch', branchId, entityType: 'product', entityId: id, role };
+    const orchestrator = await getStockMediaOrchestrator();
+
+    // Legacy product → cut over FIRST (durable), then ask the UI to reload and
+    // retry against the now-materialised media gallery (the draft's object URLs
+    // only make sense post-cutover).
+    if (editImages.status === 'legacy') {
+      try {
+        const cutoverDb = () => getDatabase() as unknown as { run(sql: string, params?: unknown[]): void; exec(sql: string, params?: unknown[]): Array<{ columns: string[]; values: unknown[][] }> };
+        const cutover = new ProductMediaCutoverService({
+          dbProvider: cutoverDb,
+          orchestrator,
+          commitLegacyCleared: async (pid: string) => { getDatabase().run(`UPDATE products SET images = '[]' WHERE id = ?`, [pid]); await saveDatabaseDurably(); },
+          tenantId, branchId, role,
+        });
+        await cutover.ensureProductMediaCutover(id);
+      } catch (e) {
+        return { status: 'edit_incomplete', errorCode: (e as { message?: string })?.message ?? 'MEDIA_EDIT_CUTOVER_FAILED' };
+      }
+      get().loadProducts();
+      return { status: 'cutover_reload' };
+    }
+
+    // Build stable draft items from the flat srcs + the resolved (url→mediaId).
+    const draftRes = draftFromSrcs(editImages.srcs, editImages.resolved);
+    if (!draftRes.ok) return { status: 'blocked', errorCode: draftRes.error };
+    const baselineMediaIds = editImages.resolved.map((r) => r.mediaId);
+    const imgRes = buildImageEditInputs(draftRes.value, baselineMediaIds);
+    if (!imgRes.ok) return { status: 'blocked', errorCode: imgRes.error };
+    const { newImages, galleryChanged } = imgRes.value;
+
+    // Product text diff (only changed whitelisted columns).
+    const cur = query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown> | undefined;
+    const cols: Array<{ col: string; baseline: string | number | null; target: string | number | null }> = [];
+    const map: Record<string, string> = {
+      categoryId: 'category_id', brand: 'brand', name: 'name', sku: 'sku', quantity: 'quantity', condition: 'condition',
+      storageLocation: 'storage_location', purchaseDate: 'purchase_date', purchasePrice: 'purchase_price',
+      plannedSalePrice: 'planned_sale_price', minSalePrice: 'min_sale_price', maxSalePrice: 'max_sale_price',
+      stockStatus: 'stock_status', taxScheme: 'tax_scheme', expectedMargin: 'expected_margin',
+      supplierName: 'supplier_name', purchaseSource: 'purchase_source', paidFrom: 'paid_from', sourceType: 'source_type', notes: 'notes',
+    };
+    const dd = data as Record<string, unknown>;
+    for (const [k, c] of Object.entries(map)) {
+      if (!(k in dd)) continue;
+      const target = (dd[k] ?? null) as string | number | null;
+      cols.push({ col: c, baseline: (cur?.[c] ?? null) as string | number | null, target });
+    }
+    if (data.scopeOfDelivery !== undefined) cols.push({ col: 'scope_of_delivery', baseline: (cur?.scope_of_delivery ?? null) as string, target: JSON.stringify(data.scopeOfDelivery || []) });
+    if (data.attributes !== undefined) cols.push({ col: 'attributes', baseline: (cur?.attributes ?? null) as string, target: JSON.stringify(data.attributes || {}) });
+    const aiCorr = (dd.aiCorrections ?? undefined) as string | undefined;
+    if (aiCorr !== undefined) cols.push({ col: 'ai_corrections', baseline: (cur?.ai_corrections ?? null) as string, target: aiCorr });
+    const textDiff = diffProductText(cols);
+
+    if (!editHasChanges(textDiff.set, galleryChanged)) return { status: 'edited', batchId: '' };
+
+    const productEdit: ProductEditIntent = {
+      set: textDiff.set, baseline: textDiff.baseline,
+      invalidateImageDerived: galleryChanged,
+      withSync: isSyncConfigured(),
+      audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify(Object.fromEntries(textDiff.set)) },
+    };
+
+    // Decode new images → prepare inputs (requestId = clientId, content hash).
+    const batchId = retryEditId ?? retryEditBatches.get(id) ?? `edit:${tenantId}:${branchId}:${id}:${role}:${uuid()}`;
+    retryEditBatches.set(id, batchId);
+    let newItems: EditNewImageInput[];
+    try {
+      newItems = await Promise.all(newImages.map(async (n) => {
+        const decoded: DecodedLegacyImage = decodeDataUrl(n.dataUrl);
+        return { tenantId, ingestRequestId: n.clientId, requestHash: await canonicalRequestHash(decoded.bytes, tenantId), imageBytes: decoded.bytes };
+      }));
+    } catch (e) {
+      return { status: 'edit_incomplete', errorCode: (e as { message?: string })?.message ?? 'MEDIA_EDIT_DECODE_FAILED', batchId };
+    }
+    const hashByClient = new Map(newItems.map((n) => [n.ingestRequestId, n.requestHash]));
+
+    try {
+      const env = await orchestrator.prepareAndRegisterEdit(scope, newItems, async (baseline, prepared) =>
+        buildEditPlanEnvelope({
+          batchId, tenantId, branchId, scopeKind: 'branch', entityType: 'product', entityId: id, role,
+          baseline,
+          desired: draftRes.value.map((it) => {
+            if (it.kind === 'existing') return { source: 'keep' as const, mediaId: it.mediaId };
+            if (it.kind === 'new') return { source: 'new' as const, requestId: it.clientId, requestHash: hashByClient.get(it.clientId) ?? '' };
+            // draftFromSrcs never yields legacy (buildImageEditInputs already
+            // refused it) — this is unreachable, kept for exhaustiveness.
+            throw new Error('MEDIA_EDIT_LEGACY_NOT_CUTOVER');
+          }),
+          prepared, productEdit,
+        }, async (s) => canonicalRequestHash(new TextEncoder().encode(s), 'edit-plan')));
+      await orchestrator.applyEditDurably(env);
+    } catch (e) {
+      const msg = (e as { message?: string })?.message ?? String(e);
+      if (/BASELINE_CHANGED|PLAN_CONFLICT/.test(msg)) return { status: 'edit_conflict', errorCode: msg };
+      return { status: 'edit_incomplete', errorCode: msg, batchId };
+    }
+
+    retryEditBatches.delete(id);
+    eventBus.emit('product.updated', 'product', id, data);
+    get().loadProducts();
+    return { status: 'edited', batchId };
   },
 
   updateProduct: (id, data) => {
