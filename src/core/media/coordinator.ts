@@ -97,6 +97,76 @@ export interface BatchIntent {
   expectedCount: number;
 }
 
+// ── edit-batch plan (3B2C1) ─────────────────────────────────────────────────
+//
+// An EXISTING gallery is edited (add/replace/remove — the UI has no reorder
+// contract) as ONE durable batch: read the current gallery, freeze a
+// deterministic target, prepare+publish any new images, then swap the whole
+// link set in a SINGLE atomic transaction. A remove-only edit has NO new image,
+// so the plan — not any per-image ingest job — is the durable SSOT.
+//
+// Visibility (scoped for 3B2C1): the LINK MUTATION is DB-atomic — the active
+// gallery is either the full OLD set or the full NEW set, never a partial one,
+// and the durable save is what promotes the new set on disk. The user-facing
+// "visible switch / refresh only after the durable save" is a UI concern wired
+// in 3B2C2 (no ProductDetail/ImageUpload/store activation here).
+
+/** One live link of the gallery at freeze time (the plan's baseline). */
+export interface EditBaselineLink {
+  linkId: string;
+  mediaId: string;
+  /** Current main stored-blob hash — the conflict guard compares against it. */
+  storedHash: string;
+  sortOrder: number;
+  isPrimary: boolean;
+}
+
+/** One slot of the desired gallery, ordered: index = final sort_order, 0 = primary. */
+export type EditTargetSlot =
+  /** Keep an existing gallery media at this (possibly new) slot. */
+  | { source: 'keep'; mediaId: string; storedHash: string }
+  /** A brand-new image: prepared+published under `requestId`; `storedHash` is
+   *  its main stored hash (frozen from the prepare), `requestHash` drives the
+   *  Rust commit. */
+  | { source: 'new'; requestId: string; requestHash: string; storedHash: string };
+
+/** The full, deterministic edit plan — the durable SSOT for the whole batch. */
+export interface EditPlan {
+  batchId: string;
+  tenantId: string;
+  branchId: string | null;
+  scopeKind: 'branch' | 'tenant';
+  entityType: string;
+  entityId: string;
+  role: string;
+  /** The gallery as read at freeze time, sorted 0..N-1. */
+  baseline: EditBaselineLink[];
+  /** The desired gallery, ordered 0..M-1 (index 0 = primary). M may be 0 only
+   *  if the UI allows an empty gallery; otherwise ≥ 1. */
+  target: EditTargetSlot[];
+  /** Canonical hash of {baseline,target} — the plan identity. */
+  planHash: string;
+}
+
+/** The durable envelope stored in `media_ingest_jobs.result_json` for an edit
+ *  batch. Frozen prepared descriptors per new image let recovery re-drive the
+ *  publish and detect divergence without re-reading the Rust journal. */
+export interface EditPlanEnvelope {
+  kind: 'edit_plan';
+  version: 1;
+  plan: EditPlan;
+  newRenditions: Array<{
+    requestId: string;
+    main: RustStoredDescriptor & { storage_key: string };
+    thumbnail: RustStoredDescriptor & { storage_key: string };
+  }>;
+}
+
+export interface EditApplyResult {
+  status: 'edit_applied' | 'noop_already_applied';
+  batchId: string;
+}
+
 /**
  * The frozen link position for one ingest request. Persisted inside
  * `PendingIntentPayload` so a crash/restart replays the identical slot.
@@ -202,7 +272,11 @@ export interface RecoveryReport {
     | 'left_pending_no_rust_result'
     | 'left_pending_no_manifest'
     | 'left_pending_replace_target_gone'
-    | 'quarantined_verification_failed';
+    | 'quarantined_verification_failed'
+    // 3B2C1 edit-batch outcomes
+    | 'edit_applied_from_plan'
+    | 'noop_edit_already_applied'
+    | 'left_pending_edit_baseline_changed';
 }
 
 /**
@@ -892,6 +966,240 @@ export class MediaDbCoordinator {
     });
   }
 
+  // ── edit-batch (3B2C1) ─────────────────────────────────────────────────
+
+  /**
+   * Durably freeze an edit plan (the SSOT for a whole add/replace/remove batch,
+   * including remove-only). Stored as a single `edit_plan` job — NOT per-image
+   * intents — so the plan survives a restart even when no new image exists.
+   *
+   * Idempotent: same batch + same `planHash` re-registers as a no-op. A
+   * different plan under the same batch id (→ different planHash) is a typed
+   * conflict, never a silent overwrite. Writes only the job row; publishes
+   * nothing.
+   */
+  registerEditPlan(env: EditPlanEnvelope): void {
+    const plan = env.plan;
+    if (plan.scopeKind === 'branch' && !plan.branchId) throw new CoordinatorError('MEDIA_INVALID_INPUT');
+    if (!/^[0-9a-f]{64}$/.test(plan.planHash)) throw new CoordinatorError('MEDIA_INVALID_INPUT');
+    const irid = editRequestId(plan.batchId);
+    const now = timestamp();
+    const existing = this.jobRow(plan.tenantId, irid);
+    const encoded = JSON.stringify(env);
+    if (existing) {
+      if (existing.request_hash !== plan.planHash) {
+        // Same batch id, different plan identity → hard conflict.
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_EDIT_PLAN_CONFLICT');
+      }
+      if (existing.state === 'ready') return; // already applied — nothing to re-intend
+      const prior = parseCachedEditPlan(existing.result_json);
+      if (prior && prior.plan.planHash !== plan.planHash) {
+        throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_PLAN_CONFLICT');
+      }
+      this.db.run(
+        `UPDATE media_ingest_jobs
+            SET state = 'accepted', request_hash = $h, scope_kind = $sk, branch_id = $br,
+                requested_entity_type = $et, requested_entity_id = $ei, requested_role = $role,
+                security_class = 'internal', retention_class = 'standard',
+                result_json = $j, updated_at = $now
+          WHERE tenant_id = $t AND ingest_request_id = $r`,
+        [plan.planHash, plan.scopeKind, plan.branchId, plan.entityType, plan.entityId, plan.role, encoded, now, plan.tenantId, irid] as unknown[],
+      );
+      return;
+    }
+    this.db.run(
+      `INSERT INTO media_ingest_jobs
+        (tenant_id, job_id, ingest_request_id, request_hash, scope_kind, branch_id,
+         requested_entity_type, requested_entity_id, requested_role,
+         security_class, retention_class, transform_profile, result_json,
+         state, attempt_count, created_at, started_at, updated_at)
+       VALUES ($t, $j, $r, $h, $sk, $br, $et, $ei, $role, 'internal', 'standard', 'stock_image', $j2, 'accepted', 0, $now, $now, $now)`,
+      [plan.tenantId, `job-${irid}`, irid, plan.planHash, plan.scopeKind, plan.branchId, plan.entityType, plan.entityId, plan.role, encoded, now] as unknown[],
+    );
+  }
+
+  /**
+   * Apply a frozen edit plan atomically. Convergence rules (drive recovery too):
+   *   • current gallery == TARGET   → already applied (save may have been lost
+   *     after a successful tx); just mark the job ready. Idempotent.
+   *   • current gallery == BASELINE → apply the plan.
+   *   • otherwise                   → the baseline changed under us → conflict.
+   *     Never publish, never mutate, never revive a removed link.
+   *
+   * The whole link swap — retire removed, reposition kept, insert new, one
+   * primary at slot 0, contiguous 0..N-1 — is ONE sql.js transaction. A crash
+   * before it leaves the OLD gallery; a crash after the tx but before the
+   * durable save re-converges here (current==target → mark ready). Product
+   * media stays strictly (tenant, branch, entity, role)-scoped.
+   */
+  async applyEditBatch(env: EditPlanEnvelope): Promise<EditApplyResult> {
+    const plan = env.plan;
+    const irid = editRequestId(plan.batchId);
+    const job = this.jobRow(plan.tenantId, irid);
+    if (job?.state === 'ready') return { status: 'noop_already_applied', batchId: plan.batchId };
+
+    const scope = {
+      tenantId: plan.tenantId, scopeKind: plan.scopeKind, branchId: plan.branchId,
+      entityType: plan.entityType, entityId: plan.entityId, role: plan.role,
+    };
+    const current = this.activeGalleryWithHash(scope);
+    const curSig = gallerySignature(current.map((r) => ({
+      mediaId: String(r.media_id), storedHash: String(r.stored_blob_hash),
+      sortOrder: Number(r.sort_order), isPrimary: Number(r.is_primary) === 1,
+    })));
+    const tgtSig = gallerySignature(targetGallery(plan));
+    const baseSig = gallerySignature(plan.baseline.map((b) => ({
+      mediaId: b.mediaId, storedHash: b.storedHash, sortOrder: b.sortOrder, isPrimary: b.isPrimary,
+    })));
+
+    if (curSig === tgtSig) {
+      this.markEditReady(plan, irid);
+      return { status: 'noop_already_applied', batchId: plan.batchId };
+    }
+    if (curSig !== baseSig) {
+      throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_BASELINE_CHANGED');
+    }
+
+    // Commit + verify every NEW image BEFORE the tx (mirrors finalize). A
+    // divergence from the frozen prepared descriptor fails closed.
+    const commits = new Map<string, CommitResult>();
+    for (const slot of plan.target) {
+      if (slot.source !== 'new') continue;
+      const commit = await this.gateway.commitStockImage({
+        tenantScope: plan.tenantId, ingestRequestId: slot.requestId, requestHash: slot.requestHash,
+      });
+      if (commit.main_descriptor.hash !== slot.storedHash) {
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_EDIT_RENDITION_DIVERGED');
+      }
+      await this.readVerified(plan.tenantId, commit.main_descriptor);
+      await this.readVerified(plan.tenantId, commit.thumbnail_descriptor);
+      commits.set(slot.requestId, commit);
+    }
+
+    const now = timestamp();
+    const branchPred = plan.scopeKind === 'branch' ? 'branch_id = $br' : 'branch_id IS NULL';
+    const curByMedia = new Map(current.map((r) => [String(r.media_id), r]));
+    const targetMediaIds = new Set(plan.target.map((s) => (s.source === 'keep' ? s.mediaId : mediaIdFor(s.requestId))));
+
+    this.withTx(() => {
+      // 1) Drop every current primary flag first so no transient collision on
+      //    the partial-unique primary index while we reshuffle.
+      const clearBound: Record<string, unknown> = { $t: plan.tenantId, $sk: plan.scopeKind, $et: plan.entityType, $ei: plan.entityId, $role: plan.role };
+      if (plan.scopeKind === 'branch') clearBound.$br = plan.branchId;
+      this.dbRun(
+        `UPDATE media_links SET is_primary = 0
+          WHERE tenant_id = $t AND scope_kind = $sk AND ${branchPred}
+            AND entity_type = $et AND entity_id = $ei AND media_role = $role AND deleted_at IS NULL`,
+        clearBound,
+      );
+
+      // 2) Retire removed links (kept row = audit + legacy-suppression proof).
+      for (const [mediaId, row] of curByMedia) {
+        if (targetMediaIds.has(mediaId)) continue;
+        this.db.run(`UPDATE media_links SET deleted_at = $now, is_primary = 0 WHERE tenant_id = $t AND link_id = $l`,
+          [now, plan.tenantId, String(row.link_id)] as unknown[]);
+      }
+
+      // 3) Place every target slot in order (primary set last).
+      plan.target.forEach((slot, i) => {
+        if (slot.source === 'keep') {
+          const row = curByMedia.get(slot.mediaId);
+          if (!row) throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_KEEP_MISSING');
+          this.db.run(`UPDATE media_links SET sort_order = $so, is_primary = 0 WHERE tenant_id = $t AND link_id = $l`,
+            [i, plan.tenantId, String(row.link_id)] as unknown[]);
+        } else {
+          const commit = commits.get(slot.requestId)!;
+          const input: FinalizeInput = {
+            tenantId: plan.tenantId, branchId: plan.branchId, ingestRequestId: slot.requestId,
+            requestHash: slot.requestHash, entityType: plan.entityType, entityId: plan.entityId,
+            scopeKind: plan.scopeKind, role: plan.role, isPrimary: false, sortOrder: i,
+            securityClass: 'internal', retentionClass: 'standard',
+          };
+          const mainBlobId = blobIdFor(commit.main_descriptor.hash);
+          const thumbBlobId = blobIdFor(commit.thumbnail_descriptor.hash);
+          this.ensureBlobGeneration(plan.tenantId, mainBlobId, commit.main_descriptor, commit.main_storage_key, now);
+          this.ensureBlobGeneration(plan.tenantId, thumbBlobId, commit.thumbnail_descriptor, commit.thumbnail_storage_key, now);
+          const mediaId = mediaIdFor(slot.requestId);
+          this.ensureObject(input, mainBlobId, mediaId, now);
+          const variantId = variantIdFor(mediaId, 'thumbnail');
+          this.ensureVariant(plan.tenantId, variantId, mediaId, thumbBlobId, now);
+          const linkId = linkIdFor({ ...input, mediaId });
+          this.ensureLink(input, linkId, mediaId, now, { isPrimary: false, sortOrder: i });
+        }
+      });
+
+      // 4) Promote the slot-0 link to primary (N>0). N==0 leaves no primary.
+      if (plan.target.length > 0) {
+        const head = plan.target[0];
+        const headMediaId = head.source === 'keep' ? head.mediaId : mediaIdFor(head.requestId);
+        const linkId = head.source === 'keep'
+          ? String(curByMedia.get(headMediaId)!.link_id)
+          : linkIdFor({ tenantId: plan.tenantId, scopeKind: plan.scopeKind, branchId: plan.branchId, entityType: plan.entityType, entityId: plan.entityId, role: plan.role, mediaId: headMediaId });
+        this.db.run(`UPDATE media_links SET is_primary = 1 WHERE tenant_id = $t AND link_id = $l`, [plan.tenantId, linkId] as unknown[]);
+      }
+
+      // 5) The resulting gallery must satisfy the full contract.
+      assertGalleryWellFormed(this.activeGalleryLinks(scope));
+
+      // 6) Freeze the job as applied (result_json keeps the plan; state=ready
+      //    makes a re-run a pure no-op).
+      this.markEditReady(plan, irid);
+    });
+    return { status: 'edit_applied', batchId: plan.batchId };
+  }
+
+  /** The current gallery as an edit-plan baseline (scope-exact). Read under the
+   *  ops-lock+lease at freeze time so the plan pins the exact starting point. */
+  readGalleryBaseline(scope: {
+    tenantId: string; scopeKind: 'branch' | 'tenant'; branchId: string | null;
+    entityType: string; entityId: string; role: string;
+  }): EditBaselineLink[] {
+    return this.activeGalleryWithHash(scope).map((r) => ({
+      linkId: String(r.link_id),
+      mediaId: String(r.media_id),
+      storedHash: String(r.stored_blob_hash),
+      sortOrder: Number(r.sort_order),
+      isPrimary: Number(r.is_primary) === 1,
+    }));
+  }
+
+  private markEditReady(plan: EditPlan, irid: string): void {
+    const now = timestamp();
+    this.db.run(
+      `UPDATE media_ingest_jobs SET state = 'ready', completed_at = $now, updated_at = $now
+        WHERE tenant_id = $t AND ingest_request_id = $r`,
+      [now, plan.tenantId, irid] as unknown[],
+    );
+  }
+
+  private dbRun(sql: string, bound: Record<string, unknown>): void {
+    const { sql: compiled, values } = paramsToPositional(sql, bound);
+    this.db.run(compiled, values);
+  }
+
+  /** The active gallery joined down to each link's current main stored hash —
+   *  the shape the edit conflict guard compares against the plan. */
+  private activeGalleryWithHash(scope: {
+    tenantId: string; scopeKind: 'branch' | 'tenant'; branchId: string | null;
+    entityType: string; entityId: string; role: string;
+  }): Array<Record<string, unknown>> {
+    const branchPred = scope.scopeKind === 'branch' ? 'l.branch_id = $br' : 'l.branch_id IS NULL';
+    const bound: Record<string, unknown> = { $t: scope.tenantId, $sk: scope.scopeKind, $et: scope.entityType, $ei: scope.entityId, $role: scope.role };
+    if (scope.scopeKind === 'branch') bound.$br = scope.branchId;
+    return allRows(
+      this.db,
+      `SELECT l.link_id, l.media_id, l.sort_order, l.is_primary, g.stored_blob_hash
+         FROM media_links l
+         JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id AND o.deleted_at IS NULL
+         JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id AND b.deleted_at IS NULL AND b.blob_status = 'present'
+         JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no AND g.gen_status = 'available' AND g.deleted_at IS NULL
+        WHERE l.tenant_id = $t AND l.scope_kind = $sk AND ${branchPred}
+          AND l.entity_type = $et AND l.entity_id = $ei AND l.media_role = $role AND l.deleted_at IS NULL
+        ORDER BY l.sort_order ASC`,
+      bound,
+    );
+  }
+
   /**
    * Reconcile every job on the local DB against the Rust core, driving each
    * non-terminal one to a durably consistent DB state. Not a probe — a real
@@ -938,6 +1246,30 @@ export class MediaDbCoordinator {
       }
       if (state === 'failed' || state === 'quarantined' || state === 'expired') {
         out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'noop_terminal_state' });
+        continue;
+      }
+      // ── edit-batch plan (3B2C1) — distinct from append/replace/create ──
+      let editEnv: EditPlanEnvelope | null = null;
+      try { editEnv = parseCachedEditPlan(r.result_json); } catch { editEnv = null; }
+      if (editEnv) {
+        try {
+          const res = await this.applyEditBatch(editEnv);
+          out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: res.status === 'noop_already_applied' ? 'noop_edit_already_applied' : 'edit_applied_from_plan' });
+        } catch (e) {
+          const err = e as { code?: string; message?: string };
+          const code = err.message ?? err.code ?? '';
+          if (code === 'MEDIA_EDIT_BASELINE_CHANGED') {
+            // The gallery moved under the plan — never force a stale edit onto it.
+            out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_edit_baseline_changed' });
+          } else if (code === 'MEDIA_INGEST_FILE_MISSING' || code === 'MEDIA_INGEST_HASH_MISMATCH' || code === 'MEDIA_INGEST_VERIFICATION_FAILED') {
+            this.markJobQuarantined(tenantId, irid, code);
+            out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'quarantined_verification_failed' });
+          } else if (code === 'MEDIA_INGEST_NOT_FOUND' || code === 'MEDIA_INGEST_INVALID_STATE') {
+            out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_no_rust_result' });
+          } else {
+            throw e;
+          }
+        }
         continue;
       }
       const plan = this.resolvePlanFromJobRow(r);
@@ -1654,6 +1986,7 @@ type ResultJsonView =
   | { kind: 'absent' }
   | { kind: 'intent'; intent: PendingIntentPayload }
   | { kind: 'result'; result: FinalizeResult }
+  | { kind: 'edit_plan'; env: EditPlanEnvelope }
   | { kind: 'corrupt' };
 
 const CORRUPT: ResultJsonView = { kind: 'corrupt' };
@@ -1669,7 +2002,42 @@ function parseResultJson(raw: unknown): ResultJsonView {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return CORRUPT;
   if (parsed.kind === 'result') return parseResultEnvelope(parsed);
   if (parsed.kind === 'intent') return parseIntentEnvelope(parsed);
+  if (parsed.kind === 'edit_plan') return parseEditPlanEnvelope(parsed);
   return CORRUPT; // unknown discriminator → fail closed
+}
+
+function parseEditPlanEnvelope(parsed: any): ResultJsonView {
+  if (parsed.version !== 1) return CORRUPT;
+  const p = parsed.plan;
+  if (!p || typeof p !== 'object') return CORRUPT;
+  const scopeOk =
+    typeof p.batchId === 'string' && p.batchId.length > 0 &&
+    typeof p.tenantId === 'string' && p.tenantId.length > 0 &&
+    (p.scopeKind === 'branch' || p.scopeKind === 'tenant') &&
+    (p.scopeKind === 'branch' ? typeof p.branchId === 'string' && p.branchId.length > 0 : p.branchId == null) &&
+    typeof p.entityType === 'string' && typeof p.entityId === 'string' && typeof p.role === 'string' &&
+    typeof p.planHash === 'string' && /^[0-9a-f]{64}$/.test(p.planHash);
+  if (!scopeOk) return CORRUPT;
+  if (!Array.isArray(p.baseline) || !Array.isArray(p.target)) return CORRUPT;
+  for (const b of p.baseline) {
+    if (!b || typeof b.linkId !== 'string' || typeof b.mediaId !== 'string' ||
+        typeof b.storedHash !== 'string' || !Number.isInteger(b.sortOrder) || b.sortOrder < 0 ||
+        typeof b.isPrimary !== 'boolean') return CORRUPT;
+  }
+  for (const t of p.target) {
+    if (!t || (t.source !== 'keep' && t.source !== 'new')) return CORRUPT;
+    if (t.source === 'keep') {
+      if (typeof t.mediaId !== 'string' || typeof t.storedHash !== 'string') return CORRUPT;
+    } else {
+      if (typeof t.requestId !== 'string' || typeof t.storedHash !== 'string' ||
+          typeof t.requestHash !== 'string' || !/^[0-9a-f]{64}$/.test(t.requestHash)) return CORRUPT;
+    }
+  }
+  if (!Array.isArray(parsed.newRenditions)) return CORRUPT;
+  for (const r of parsed.newRenditions) {
+    if (!r || typeof r.requestId !== 'string' || !r.main || !r.thumbnail) return CORRUPT;
+  }
+  return { kind: 'edit_plan', env: parsed as EditPlanEnvelope };
 }
 
 function parseResultEnvelope(parsed: any): ResultJsonView {
@@ -1754,11 +2122,19 @@ function parseCachedResult(raw: unknown): FinalizeResult | null {
 }
 
 /** The frozen pre-publication intent, or null when the cell holds a result/
- *  nothing. Throws on a damaged cell. */
+ *  edit-plan/nothing. Throws on a damaged cell. */
 function parseCachedIntent(raw: unknown): PendingIntentPayload | null {
   const view = parseResultJson(raw);
   if (view.kind === 'corrupt') throw corruptIntent();
   return view.kind === 'intent' ? view.intent : null;
+}
+
+/** The frozen edit-plan envelope, or null when the cell holds anything else.
+ *  Throws on a damaged cell. */
+function parseCachedEditPlan(raw: unknown): EditPlanEnvelope | null {
+  const view = parseResultJson(raw);
+  if (view.kind === 'corrupt') throw corruptIntent();
+  return view.kind === 'edit_plan' ? view.env : null;
 }
 
 function corruptIntent(): CoordinatorError {
@@ -1780,6 +2156,28 @@ function recoverySortKey(row: Record<string, unknown>): number {
   } catch {
     return Number.MAX_SAFE_INTEGER;
   }
+}
+
+/** The synthetic ingest_request_id an edit plan is stored under. */
+function editRequestId(batchId: string): string {
+  return `edit:${batchId}`;
+}
+
+/** Canonical, order-stable signature of a gallery for baseline/target equality.
+ *  Sorted by slot so it is independent of row order. */
+function gallerySignature(items: Array<{ mediaId: string; storedHash: string; sortOrder: number; isPrimary: boolean }>): string {
+  const sorted = items.slice().sort((a, b) => a.sortOrder - b.sortOrder);
+  return JSON.stringify(sorted.map((i) => [i.sortOrder, i.mediaId, i.storedHash, i.isPrimary ? 1 : 0]));
+}
+
+/** The gallery an edit plan's target describes (mediaId derived for new slots). */
+function targetGallery(plan: EditPlan): Array<{ mediaId: string; storedHash: string; sortOrder: number; isPrimary: boolean }> {
+  return plan.target.map((slot, i) => ({
+    mediaId: slot.source === 'keep' ? slot.mediaId : mediaIdFor(slot.requestId),
+    storedHash: slot.storedHash,
+    sortOrder: i,
+    isPrimary: i === 0,
+  }));
 }
 
 function isValidBatchIntent(b: any): boolean {

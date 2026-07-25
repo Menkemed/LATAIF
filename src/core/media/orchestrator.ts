@@ -48,8 +48,30 @@ import type {
   FinalizeResult,
   RecoveryReport,
   ReplaceInput,
+  EditPlanEnvelope,
+  EditBaselineLink,
+  EditApplyResult,
 } from './coordinator.ts';
 import { MediaDbCoordinator } from './coordinator.ts';
+
+// ── edit-batch DTOs (3B2C1) ──────────────────────────────────────────────────
+
+export interface EditScope {
+  tenantId: string;
+  scopeKind: 'branch' | 'tenant';
+  branchId: string | null;
+  entityType: string;
+  entityId: string;
+  role: string;
+}
+
+export interface EditNewImageInput {
+  tenantId: string;
+  ingestRequestId: string;
+  requestHash: string;
+  imageBytes: Uint8Array;
+  originalName?: string;
+}
 
 // ── error contract ──────────────────────────────────────────────────────────
 
@@ -368,6 +390,96 @@ export class StockMediaOrchestrator {
           }
         }
         return out;
+      } finally {
+        lease.release();
+      }
+    });
+  }
+
+  /**
+   * Phase 1 of a durable EDIT batch (3B2C1): under the ops-lock + lease, read
+   * the current gallery as the plan's baseline, prepare+stage every NEW image,
+   * let the caller freeze the deterministic plan from (baseline, prepared), then
+   * register the plan durably and checkpoint ONCE.
+   *
+   *   read baseline → prepare each new image → buildEnv(baseline, prepared)
+   *   → registerEditPlan → saveDurably   ← the single durable EDIT checkpoint
+   *
+   * After this resolves, the whole plan (add/replace/remove, incl. remove-only)
+   * is durable as ONE `edit_plan` job, and the OLD gallery is still the visible
+   * one (no link was touched). A crash BEFORE it resolves leaves nothing durable
+   * and every staged rendition is aborted — no orphan journal, old gallery
+   * intact. Publishes nothing here.
+   */
+  async prepareAndRegisterEdit(
+    scope: EditScope,
+    newItems: EditNewImageInput[],
+    buildEnv: (baseline: EditBaselineLink[], prepared: Map<string, PrepareResult>) => Promise<EditPlanEnvelope>,
+  ): Promise<EditPlanEnvelope> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      const prepared: Array<{ tenantScope: string; ingestRequestId: string }> = [];
+      let checkpointed = false;
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+        const baseline = coordinator.readGalleryBaseline(scope);
+        const preparedMap = new Map<string, PrepareResult>();
+        for (const item of newItems) {
+          let result: PrepareResult;
+          try {
+            result = await this.gateway.prepareStockImage({
+              tenantScope: item.tenantId,
+              ingestRequestId: item.ingestRequestId,
+              requestHash: item.requestHash,
+              imageBytes: item.imageBytes,
+              originalName: item.originalName,
+            });
+          } catch (e) {
+            throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
+          }
+          prepared.push({ tenantScope: item.tenantId, ingestRequestId: item.ingestRequestId });
+          preparedMap.set(item.ingestRequestId, result);
+        }
+        const env = await buildEnv(baseline, preparedMap);
+        coordinator.registerEditPlan(env);
+        try {
+          await lease.saveDurably();
+          checkpointed = true;
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+        return env;
+      } finally {
+        if (!checkpointed) {
+          for (const p of prepared) {
+            try { await this.gateway.abortStockImage(p); } catch { /* best-effort cleanup */ }
+          }
+        }
+        lease.release();
+      }
+    });
+  }
+
+  /**
+   * Phase 2 of a durable EDIT batch (3B2C1): publish+verify the new images and
+   * swap the whole link set in ONE atomic transaction, then persist. Idempotent
+   * and convergent — a re-run when the gallery already equals the target is a
+   * no-op; a re-run against the frozen baseline re-applies; a changed baseline
+   * is a conflict (never a forced stale edit). A save failure here leaves the
+   * OLD gallery on disk and is safely retried by recovery.
+   */
+  async applyEditDurably(env: EditPlanEnvelope): Promise<EditApplyResult> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+        const result = await coordinator.applyEditBatch(env);
+        try {
+          await lease.saveDurably();
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+        return result;
       } finally {
         lease.release();
       }
