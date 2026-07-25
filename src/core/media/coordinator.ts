@@ -78,8 +78,23 @@ export interface FinalizeInput {
    */
   isPrimary?: boolean;
   sortOrder?: number;
+  /**
+   * Durable batch grouping (3B2B-R2). When a product is created with N images
+   * up front, every slot's intent carries the same `batchId` + `expectedCount`,
+   * frozen into `result_json`. This makes the whole batch — and how many slots
+   * it should have — recoverable from the DB alone after a restart, with no
+   * dependency on a JS-side retry map. Absent for single/legacy ingests.
+   */
+  batch?: BatchIntent;
   securityClass?: 'public' | 'internal' | 'sensitive' | 'highly_sensitive';
   retentionClass?: 'transient' | 'standard' | 'legal_hold';
+}
+
+/** Durable batch grouping metadata, frozen into every slot's intent. */
+export interface BatchIntent {
+  batchId: string;
+  /** How many slots (0..expectedCount-1) this batch is supposed to have. */
+  expectedCount: number;
 }
 
 /**
@@ -162,6 +177,9 @@ export interface PendingIntentPayload {
   thumbnail: RustStoredDescriptor & { storage_key: string };
   /** Present from v2 onward. Frozen BEFORE the Rust core publishes. */
   linkIntent?: LinkIntent;
+  /** Durable batch grouping (3B2B-R2). Present when this slot is part of a
+   *  create-batch; enables restart recovery of the whole batch from the DB. */
+  batch?: BatchIntent;
 }
 
 /** The two gallery-mutating ingest operations a durable intent can describe. */
@@ -170,6 +188,11 @@ export type IntentOperation = 'append' | 'replace';
 export interface RecoveryReport {
   tenantId: string;
   ingestRequestId: string;
+  /** Scope of the recovered job — lets the caller tell which product's batch
+   *  just advanced/completed (3B2B-R3). Absent when the row had no manifest. */
+  branchId?: string | null;
+  productId?: string;
+  role?: string;
   jobState: string;
   action:
     | 'noop_already_ready'
@@ -342,12 +365,18 @@ export class MediaDbCoordinator {
       throw new CoordinatorError('MEDIA_INVALID_INPUT');
     }
     const linkIntent = linkIntentOf(input);
-    const intent = intentPayloadFor(input.tenantId, prepared, linkIntent, 'append');
+    const intent = intentPayloadFor(input.tenantId, prepared, linkIntent, 'append', undefined, input.batch);
     this.persistIntent(input, intent, (prior) => {
       // Position is validated exactly ONCE — when the slot is first frozen.
       // Re-validating on a resume would misread the request's own link (or a
       // concurrently appended one) as a changed gallery size.
-      if (!prior) this.assertAppendPosition(input, linkIntent);
+      //
+      // A BATCH intent (3B2B-R2) is exempt: its slots are registered up front,
+      // before ANY of the batch's links exist, so the live active-count check
+      // would wrongly reject slot 1..N-1. The batch's slot correctness is
+      // enforced instead at finalize time by the gallery well-formedness
+      // backstop (each slot finalizes in ascending order → a valid prefix).
+      if (!prior && !input.batch) this.assertAppendPosition(input, linkIntent);
     });
   }
 
@@ -886,32 +915,43 @@ export class MediaDbCoordinator {
    * - Verification fails (missing/mismatch)  → quarantined_verification_failed
    */
   async recover(): Promise<RecoveryReport[]> {
-    const rows = allRows(this.db, `SELECT * FROM media_ingest_jobs`);
+    // Order by the frozen slot ascending so a create-batch finalizes 0,1,2,…:
+    // each intermediate gallery is then a valid prefix and the finalize
+    // well-formedness backstop never trips on a transient gap. Jobs without a
+    // resolvable slot sort last; ties keep a stable order.
+    const rows = allRows(this.db, `SELECT * FROM media_ingest_jobs`).slice().sort((a, b) => {
+      return recoverySortKey(a) - recoverySortKey(b);
+    });
     const out: RecoveryReport[] = [];
     for (const r of rows) {
       const tenantId = String(r.tenant_id);
       const irid = String(r.ingest_request_id);
       const state = String(r.state);
+      const scope = {
+        branchId: r.branch_id == null ? null : String(r.branch_id),
+        productId: r.requested_entity_id == null ? undefined : String(r.requested_entity_id),
+        role: r.requested_role == null ? undefined : String(r.requested_role),
+      };
       if (state === 'ready') {
-        out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'noop_already_ready' });
+        out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'noop_already_ready' });
         continue;
       }
       if (state === 'failed' || state === 'quarantined' || state === 'expired') {
-        out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'noop_terminal_state' });
+        out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'noop_terminal_state' });
         continue;
       }
       const plan = this.resolvePlanFromJobRow(r);
       if (!plan) {
-        out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'left_pending_no_manifest' });
+        out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_no_manifest' });
         continue;
       }
       try {
         if (plan.op === 'replace') {
           await this.replace(plan.input);
-          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'replaced_from_ready_rust' });
+          out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'replaced_from_ready_rust' });
         } else {
           await this.finalize(plan.input);
-          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'finalized_from_ready_rust' });
+          out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'finalized_from_ready_rust' });
         }
       } catch (e) {
         const err = e as { code?: string; message?: string };
@@ -920,7 +960,7 @@ export class MediaDbCoordinator {
           // A frozen replace whose target vanished (removed or replaced by
           // another op in the meantime). Re-running it as an append would
           // resurrect an image the user deleted — leave it pending instead.
-          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'left_pending_replace_target_gone' });
+          out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_replace_target_gone' });
           continue;
         }
         if (
@@ -929,7 +969,7 @@ export class MediaDbCoordinator {
           code === 'MEDIA_INGEST_VERIFICATION_FAILED'
         ) {
           this.markJobQuarantined(tenantId, irid, code);
-          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'quarantined_verification_failed' });
+          out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'quarantined_verification_failed' });
           continue;
         }
         if (
@@ -937,7 +977,7 @@ export class MediaDbCoordinator {
           code === 'MEDIA_INGEST_INVALID_STATE' ||
           code === 'MEDIA_INGEST_REQUEST_CONFLICT'
         ) {
-          out.push({ tenantId, ingestRequestId: irid, jobState: state, action: 'left_pending_no_rust_result' });
+          out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_no_rust_result' });
           continue;
         }
         throw e; // anything else is a bug, not a recovery outcome
@@ -993,6 +1033,34 @@ export class MediaDbCoordinator {
       return { op: 'replace', input: { ...base, previousLinkId } };
     }
     return { op: 'append', input: base };
+  }
+
+  /**
+   * True if any ingest job for (tenant, branch, product, role) is still in a
+   * non-terminal state. Used post-recovery to tell whether a product's batch is
+   * fully done (→ eligible for its once-only embedding side effect). Mirrors
+   * the resolver's pending check so both agree on "batch complete".
+   */
+  hasPendingIngestForScope(
+    tenantId: string,
+    branchId: string | null,
+    productId: string,
+    role: string,
+  ): boolean {
+    const branchPred = branchId == null ? 'branch_id IS NULL' : 'branch_id = $br';
+    const bound: Record<string, unknown> = { $t: tenantId, $p: productId, $role: role };
+    if (branchId != null) bound.$br = branchId;
+    const r = firstRow(
+      this.db,
+      `SELECT 1 AS hit FROM media_ingest_jobs
+        WHERE tenant_id = $t AND ${branchPred}
+          AND requested_entity_type = 'product' AND requested_entity_id = $p
+          AND requested_role = $role
+          AND state NOT IN ('ready','failed','quarantined','expired')
+        LIMIT 1`,
+      bound,
+    );
+    return r != null;
   }
 
   private markJobQuarantined(tenantId: string, ingestRequestId: string, code: string): void {
@@ -1476,6 +1544,54 @@ function assertGalleryWellFormed(rows: Array<Record<string, unknown>>): void {
   if (issue) throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', issue);
 }
 
+/**
+ * Classify the NON-TERMINAL ingest jobs of one product scope for the resolver's
+ * pending decision (3B2B-R4). The pending/skeleton state is reserved for an
+ * in-flight create-BATCH; a pending replace (or a single non-batch append) must
+ * never hide an already-complete gallery.
+ *
+ *   • `create_pending` — a well-formed create-batch is still filling. The
+ *     resolver shows a skeleton, never a partial gallery.
+ *   • `conflict`       — a corrupt intent, or two contradictory create-batches
+ *     (different batchId or expectedCount) racing on one scope. Fail closed.
+ *   • `none`           — nothing that should pend the gallery: no non-terminal
+ *     jobs, or only replace / single-append jobs → the existing gallery (or the
+ *     legacy fallback) stays authoritative.
+ *
+ * Input is the raw `result_json` cell of each non-terminal job; parsing reuses
+ * the canonical `parseCachedIntent` so a damaged payload fails closed here too.
+ */
+export type PendingIngestClass =
+  | { kind: 'none' }
+  | { kind: 'create_pending'; batchId: string; expectedCount: number }
+  | { kind: 'conflict'; code: string };
+
+export function classifyPendingIngest(resultJsons: unknown[]): PendingIngestClass {
+  let batchId: string | null = null;
+  let expectedCount = 0;
+  for (const raw of resultJsons) {
+    let intent: PendingIntentPayload | null;
+    try {
+      intent = parseCachedIntent(raw);
+    } catch {
+      // A damaged create/append payload is ambiguous — never a silent partial.
+      return { kind: 'conflict', code: 'MEDIA_INTENT_CORRUPT' };
+    }
+    if (!intent) continue; // no manifest yet — nothing to pend on
+    if (operationOf(intent) === 'replace') continue; // replace never pends a gallery
+    if (!intent.batch) continue; // single (non-batch) append never pends a gallery
+    // A create-batch slot. All slots of one batch must agree on identity.
+    if (batchId === null) {
+      batchId = intent.batch.batchId;
+      expectedCount = intent.batch.expectedCount;
+    } else if (batchId !== intent.batch.batchId || expectedCount !== intent.batch.expectedCount) {
+      return { kind: 'conflict', code: 'MEDIA_BATCH_CONTRADICTION' };
+    }
+  }
+  if (batchId !== null) return { kind: 'create_pending', batchId, expectedCount };
+  return { kind: 'none' };
+}
+
 /** Non-throwing variant — returns a stable reason string, or null if valid.
  *  Shared with the read-only resolver so both sides judge identically. */
 export function inspectGallery(rows: Array<Record<string, unknown>>): string | null {
@@ -1591,6 +1707,11 @@ function parseIntentEnvelope(parsed: any): ResultJsonView {
     return CORRUPT;
   }
 
+  // ── batch (3B2B-R2, optional) ──
+  if ('batch' in parsed && parsed.batch !== undefined) {
+    if (!isValidBatchIntent(parsed.batch)) return CORRUPT;
+  }
+
   // ── linkIntent ──
   if ('linkIntent' in parsed && parsed.linkIntent !== undefined) {
     if (!isValidLinkIntent(parsed.linkIntent)) return CORRUPT;
@@ -1649,6 +1770,27 @@ function operationOf(intent: PendingIntentPayload): IntentOperation {
   return intent.operation ?? 'append';
 }
 
+/** Sort key for recovery ordering: the frozen slot (sortOrder) of a job, or a
+ *  large sentinel when it has no resolvable intent (processed last). */
+function recoverySortKey(row: Record<string, unknown>): number {
+  try {
+    const intent = parseCachedIntent(row.result_json);
+    const so = intent?.linkIntent?.sortOrder;
+    return typeof so === 'number' ? so : Number.MAX_SAFE_INTEGER;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
+function isValidBatchIntent(b: any): boolean {
+  return (
+    !!b &&
+    typeof b.batchId === 'string' && b.batchId.length > 0 &&
+    typeof b.expectedCount === 'number' &&
+    Number.isInteger(b.expectedCount) && b.expectedCount > 0
+  );
+}
+
 /** Storage-key format contract shared with the Rust core (`{scope}/{aa}/{hash}.{ext}`). */
 function storageKeyFor(scope: string, hash: string, extension: string): string {
   return `${scope}/${hash.slice(0, 2)}/${hash}.${extension}`;
@@ -1660,12 +1802,14 @@ function intentPayloadFor(
   linkIntent: LinkIntent,
   operation: IntentOperation,
   previousLinkId?: string,
+  batch?: BatchIntent,
 ): PendingIntentPayload {
   return {
     kind: 'intent',
     intentVersion: 3,
     operation,
     ...(operation === 'replace' ? { previousLinkId } : {}),
+    ...(batch ? { batch: { ...batch } } : {}),
     main: {
       ...prepared.main_descriptor,
       storage_key: storageKeyFor(scope, prepared.main_descriptor.hash, prepared.main_descriptor.extension),

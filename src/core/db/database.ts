@@ -2376,7 +2376,22 @@ export async function initDatabase(): Promise<Database> {
     backfillConsumedProducts(db);
   }
 
+  // MEDIA-04A-3B2B-R3 — complete any half-published create-batch, once per
+  // epoch. Fire-and-forget + fail-safe: it must never block or fail init.
+  void triggerStartupMediaRecoverySafe();
+
   return db;
+}
+
+/** Fire-and-forget startup media recovery via a dynamic import (avoids a static
+ *  circular dependency with the store). Never throws. */
+async function triggerStartupMediaRecoverySafe(): Promise<void> {
+  try {
+    const { triggerStartupMediaRecovery } = await import('../../stores/productStore');
+    await triggerStartupMediaRecovery();
+  } catch {
+    // Non-fatal: the resolver keeps showing `pending`, never a partial gallery.
+  }
 }
 
 async function hashPassword(password: string): Promise<string> {
@@ -2936,6 +2951,8 @@ export async function reloadDbFromDisk(): Promise<boolean> {
     dbLifecycle.bumpEpoch();
     ok = true;
   });
+  // New epoch after a real reload → re-arm startup recovery (fire-and-forget).
+  if (ok) void triggerStartupMediaRecoverySafe();
   return ok;
 }
 

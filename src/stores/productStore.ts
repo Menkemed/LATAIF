@@ -10,6 +10,13 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // AI-Embedding + Text-Felder (SKU/Serial/Reference). image-hash.ts wird nicht
 // mehr importiert.
 import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
+import { saveDatabaseDurably } from '@/core/db/database';
+import { createProductWithDurableMedia, sameImageIntent, shouldStartEmbedding, type ProductCreateResult } from '@/core/media/product-media-create';
+import { createRequestId, canonicalRequestHash, type DecodedLegacyImage } from '@/core/media/product-media-cutover';
+import { getStockMediaOrchestrator, type IngestAndFinalizeInput } from '@/core/media/orchestrator';
+import { runStartupMediaRecovery, type CompletedProductScope } from '@/core/media/startup-recovery';
+import { findProductsNeedingEmbedding } from '@/core/media/embedding-reconcile';
+import { TauriMediaGateway } from '@/core/media/gateway';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -33,6 +40,112 @@ const PRODUCT_LINK_TABLES: { table: string; label: string }[] = [
 ];
 
 export interface ProductLink { label: string; count: number; }
+
+// MEDIA-04A-3B2B-R1 — retry intent + embedding guards (module-scoped, per JS
+// session). `retryCreateManifests` freezes the ORIGINAL create intent for a
+// product that partially failed, so a retry uses the exact same ordered image
+// list; a retry that supplies a DIFFERENT list is a typed conflict, never a
+// silent overwrite. `embeddingInFlight` dedups the async embedding within a
+// session; durable at-most-once is additionally keyed on the existing
+// `products.image_embedding` column (no schema change).
+const retryCreateManifests = new Map<string, { images: string[] }>();
+const embeddingInFlight = new Set<string>();
+
+/**
+ * MEDIA-04A-3B2B-R3 — trigger startup media recovery (idempotent, once per DB
+ * epoch). Called fire-and-forget after DB init / reload. Any create-batch left
+ * half-published is completed here; products that thereby become complete are
+ * fed to the embedding guard exactly once.
+ *
+ * Fail-safe: never throws, never blocks the app. The resolver keeps showing a
+ * `pending` skeleton (never a partial gallery) until a pass succeeds.
+ */
+export async function triggerStartupMediaRecovery(): Promise<void> {
+  try {
+    const { currentDbEpoch } = await import('@/core/db/database');
+    const orch = await getStockMediaOrchestrator();
+    await runStartupMediaRecovery({
+      currentEpoch: () => currentDbEpoch(),
+      recover: () => orch.recoverPendingStockMedia(),
+      onCompletedProducts: (scopes) => {
+        useProductStore.getState().loadProducts();
+        for (const s of scopes) void embedRecoveredProduct(s);
+      },
+      log: (m, e) => console.warn('[media] ' + m, e),
+    });
+  } catch (e) {
+    console.warn('[media] startup recovery trigger failed', e);
+  }
+  // Durable, scope-exact reconciliation (3B2B-R4). Runs on EVERY init/reload,
+  // even when the once-per-epoch recovery above was skipped: it catches
+  // products whose batch completed in a prior session (recovery ran before the
+  // store hook existed) or that crashed after media-ready but before embedding.
+  // The embedding guard makes it at-most-once per product, so re-running is safe.
+  void reconcileMediaEmbeddings();
+}
+
+/**
+ * MEDIA-04A-3B2B-R4 — start the embedding for every product with a complete,
+ * cutover-visible media gallery that still has no `image_embedding`. Read-only
+ * DB scan; each candidate goes through the existing at-most-once embedding guard
+ * (durable marker + in-flight set). Never throws.
+ */
+export async function reconcileMediaEmbeddings(): Promise<void> {
+  try {
+    if (!isAiConfigured()) return;
+    const scopes = findProductsNeedingEmbedding(getDatabase() as unknown as { exec: (s: string, p?: unknown[]) => Array<{ columns: string[]; values: unknown[][] }> });
+    for (const s of scopes) void embedRecoveredProduct(s);
+  } catch (e) {
+    console.warn('[media] embedding reconciliation failed', e);
+  }
+}
+
+/**
+ * Best-effort AI embedding for a product whose batch completed only at startup
+ * recovery (its base64 was never persisted — no base64 in SQLite by design).
+ * Reads the primary rendition back from the media store, then runs the EXISTING
+ * embedding guard: fires at most once (durable `image_embedding` marker +
+ * in-flight set). This is the honest bound — at-most-once per product; no
+ * stronger exactly-once claim across a mid-compute crash.
+ */
+async function embedRecoveredProduct(scope: CompletedProductScope): Promise<void> {
+  try {
+    if (!isAiConfigured()) return;
+    const pid = scope.productId;
+    const already = query('SELECT image_embedding FROM products WHERE id = ?', [pid]);
+    const embVal = already.length > 0 ? already[0].image_embedding : null;
+    if (!shouldStartEmbedding({ configured: true, hasImage: true, alreadyComputed: embVal != null && String(embVal).length > 0, inFlight: embeddingInFlight.has(pid) })) return;
+    // Resolve the primary rendition (hash + mime + extension) from the DB.
+    const rows = query(
+      `SELECT g.stored_blob_hash AS hash, g.extension AS ext, g.mime_type AS mime
+         FROM media_links l
+         JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id AND o.deleted_at IS NULL
+         JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id AND b.blob_status = 'present'
+         JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no
+        WHERE l.tenant_id = ? AND l.branch_id = ? AND l.entity_type = 'product' AND l.entity_id = ?
+          AND l.media_role = ? AND l.is_primary = 1 AND l.deleted_at IS NULL LIMIT 1`,
+      [scope.tenantId, scope.branchId, pid, scope.role],
+    );
+    if (rows.length === 0) return;
+    const hash = String(rows[0].hash); const ext = String(rows[0].ext); const mime = String(rows[0].mime);
+    embeddingInFlight.add(pid);
+    try {
+      const read = await new TauriMediaGateway().readVerifiedMedia({ tenantScope: scope.tenantId, hash, extension: ext });
+      let bin = '';
+      for (let i = 0; i < read.bytes.length; i++) bin += String.fromCharCode(read.bytes[i]);
+      const dataUrl = `data:${mime};base64,${btoa(bin)}`;
+      const { description, embedding } = await computeImageEmbedding(dataUrl);
+      getDatabase().run('UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?', [description, JSON.stringify(embedding), pid]);
+      saveDatabase();
+      trackUpdate('products', pid, { imageDescription: description, imageEmbedding: embedding });
+      useProductStore.getState().loadProducts();
+    } finally {
+      embeddingInFlight.delete(pid);
+    }
+  } catch (e) {
+    console.warn('[media] recovered-product embedding failed', e);
+  }
+}
 
 /**
  * Liefert pro productId die Liste der verknuepften Record-Typen (nur die mit
@@ -87,6 +200,15 @@ interface ProductStore {
   getProduct: (id: string) => Product | undefined;
   getCategory: (id: string) => Category | undefined;
   createProduct: (data: Partial<Product>) => Product;
+  /**
+   * MEDIA-04A-3B2B — create a new product whose photos live in the durable
+   * media system, not in `products.images`. Strict order: product row
+   * (images='[]') → durable save → ordered media append → success only when all
+   * media is durable. Retry with the returned productId reuses the same product
+   * (no duplicate). Used by the Collection create flow; every other caller keeps
+   * the synchronous `createProduct`.
+   */
+  createProductWithMedia: (data: Partial<Product>, retryProductId?: string) => Promise<ProductCreateResult>;
   updateProduct: (id: string, data: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
@@ -472,6 +594,160 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       }
     }
     return product;
+  },
+
+  createProductWithMedia: async (data, retryProductId) => {
+    // Stable id across retries — reusing it is what keeps a retry from creating
+    // a second product.
+    const id = retryProductId ?? uuid();
+
+    // Authorised scope only: branch from the session, tenant = the DB-authoritative
+    // owner of that branch. No default — reject if either is missing.
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = ''; }
+    const tenantRows = branchId ? query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]) : [];
+    const tenantId = tenantRows.length > 0 ? (tenantRows[0].tenant_id as string | null) : null;
+    if (!branchId || !tenantId) {
+      return { status: 'product_save_failed', productId: id, errorCode: 'MEDIA_CREATE_SCOPE_REQUIRED' };
+    }
+
+    const now = new Date().toISOString();
+    const imageDataUrls = Array.isArray(data.images) ? data.images : [];
+    // The frozen original intent (if this product partially failed before). The
+    // create core rejects a retry whose image list differs from it.
+    const frozen = retryProductId ? retryCreateManifests.get(retryProductId) : undefined;
+    void sameImageIntent; // intent comparison lives in the create core
+
+    const orchestrator = await getStockMediaOrchestrator();
+    const role = 'stock_image';
+    // Durable batch grouping — one batch per product create, stable across
+    // retries, frozen into every slot's intent for restart recovery.
+    const batchId = `create:${tenantId}:${branchId}:${id}:${role}`;
+
+    const result = await createProductWithDurableMedia(id, imageDataUrls, {
+      expectedImages: frozen?.images,
+      productExists: (pid) => query('SELECT 1 FROM products WHERE id = ?', [pid]).length > 0,
+      insertProductRow: (pid) => {
+        const margin = data.plannedSalePrice ? data.plannedSalePrice - (data.purchasePrice || 0) : undefined;
+        // Identical column set to createProduct, but images is ALWAYS '[]' — no
+        // base64/data URL is ever written to products.images on this path.
+        getDatabase().run(
+          `INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition, scope_of_delivery,
+            storage_location, purchase_date, purchase_price, purchase_currency, planned_sale_price,
+            min_sale_price, max_sale_price,
+            stock_status, tax_scheme, expected_margin, days_in_stock, supplier_name, purchase_source, paid_from, source_type, notes, images, attributes, created_at, updated_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)`,
+          [pid, branchId, data.categoryId || '', data.brand || '', data.name || '', data.sku || null, Math.max(1, data.quantity || 1),
+           data.condition || '', JSON.stringify(data.scopeOfDelivery || []),
+           data.storageLocation || null, data.purchaseDate || now.split('T')[0], data.purchasePrice || 0,
+           data.purchaseCurrency || 'BHD', data.plannedSalePrice || null,
+           data.minSalePrice || null, data.maxSalePrice || null,
+           (data.stockStatus as StockStatus) || 'in_stock', data.taxScheme || 'MARGIN', margin || null,
+           data.supplierName || null, data.purchaseSource || null, data.paidFrom || null, data.sourceType || 'OWN', data.notes || null,
+           JSON.stringify(data.attributes || {}), now, now,
+           (() => { try { return currentUserId(); } catch { return null; } })()],
+        );
+      },
+      saveDurably: () => saveDatabaseDurably(),
+      // Roll back a non-durable insert AND its in-memory batch job rows, so a
+      // failed batch checkpoint leaves no ghost product and no orphan ingest
+      // job in the in-memory DB (nothing was durable to begin with).
+      rollbackProductRow: (pid) => {
+        try {
+          getDatabase().run('DELETE FROM products WHERE id = ?', [pid]);
+          getDatabase().run(
+            `DELETE FROM media_ingest_jobs WHERE requested_entity_id = ? AND requested_role = ? AND tenant_id = ? AND branch_id = ?`,
+            [pid, role, tenantId, branchId],
+          );
+          // R5: also undo the in-memory durable insert record (sync + audit).
+          // The save never landed, so these rows are non-durable too — dropping
+          // them leaves NO stranded changelog/audit for a product that will not
+          // exist. Keyed by (table, record) — the fresh insert wrote at most one.
+          getDatabase().run(`DELETE FROM sync_changelog WHERE table_name = 'products' AND record_id = ?`, [pid]);
+          getDatabase().run(`DELETE FROM audit_log WHERE entity_type = 'products' AND entity_id = ?`, [pid]);
+        } catch { /* nothing durable to undo */ }
+      },
+      // Build one durable-batch item per image: computed content hash, fixed
+      // slot 0..N-1, and the shared batch grouping (batchId + expectedCount).
+      buildBatchItems: async (pid, images: DecodedLegacyImage[]) => {
+        const items: IngestAndFinalizeInput[] = [];
+        for (let i = 0; i < images.length; i++) {
+          const bytes = images[i].bytes;
+          items.push({
+            tenantId, branchId, entityType: 'product', entityId: pid,
+            scopeKind: 'branch', role,
+            ingestRequestId: createRequestId(tenantId, branchId, pid, role, i),
+            requestHash: await canonicalRequestHash(bytes, tenantId),
+            isPrimary: i === 0, sortOrder: i,
+            imageBytes: bytes,
+            batch: { batchId, expectedCount: images.length },
+          });
+        }
+        return items;
+      },
+      prepareAndRegisterBatch: (items) => orchestrator.prepareAndRegisterBatch(items as IngestAndFinalizeInput[]),
+      finalizeBatch: (items) => orchestrator.finalizeBatch(items as IngestAndFinalizeInput[]),
+      // DURABLE insert side effects — written in-memory BEFORE the batch
+      // checkpoint so they persist atomically with the product row + intents.
+      // trackInsert is non-idempotent (auto-id changelog/audit rows), so it is
+      // driven only on a fresh insert; a retry never re-enters this path.
+      recordDurableInsert: (pid) => {
+        trackInsert('products', pid, { brand: data.brand, name: data.name, categoryId: data.categoryId, purchasePrice: data.purchasePrice });
+      },
+      // TRANSIENT side effects only — rebuilt by the normal load after a
+      // restart, so a crash between the checkpoint and here loses nothing durable.
+      onProductInserted: (pid) => {
+        eventBus.emit('product.created', 'product', pid, { brand: data.brand, name: data.name });
+        get().loadProducts();
+      },
+      onFullSuccess: (pid, firstImageDataUrl) => {
+        // AI embedding — eventual at-most-once. Fires on full success whether
+        // this was the fresh create or a completing retry (a partial attempt
+        // never reaches here). Guarded so it computes at most once:
+        //   • durable marker: only when products.image_embedding is still empty
+        //     (survives restarts without a schema change),
+        //   • session marker: `embeddingInFlight` dedups the async compute so a
+        //     rapid double retry cannot start it twice.
+        if (!firstImageDataUrl) return;
+        const imgUrl = firstImageDataUrl;
+        const already = query('SELECT image_embedding FROM products WHERE id = ?', [pid]);
+        const embVal = already.length > 0 ? already[0].image_embedding : null;
+        if (!shouldStartEmbedding({
+          configured: isAiConfigured(),
+          hasImage: true,
+          alreadyComputed: embVal != null && String(embVal).length > 0,
+          inFlight: embeddingInFlight.has(pid),
+        })) return;
+        embeddingInFlight.add(pid);
+        computeImageEmbedding(imgUrl)
+          .then(({ description, embedding }) => {
+            try {
+              getDatabase().run(
+                'UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
+                [description, JSON.stringify(embedding), pid],
+              );
+              saveDatabase();
+              trackUpdate('products', pid, { imageDescription: description, imageEmbedding: embedding });
+              get().loadProducts();
+            } catch (err) { console.warn('[productStore] embedding persist failed:', err); }
+          })
+          .catch(err => { console.warn('[productStore] embedding compute failed:', err); })
+          .finally(() => { embeddingInFlight.delete(pid); });
+      },
+    });
+
+    // Freeze or clear the retry manifest based on the outcome.
+    if (result.status === 'created') {
+      retryCreateManifests.delete(id);
+    } else {
+      // media_incomplete or product_save_failed → keep the ORIGINAL intent for
+      // an exact retry (product_save_failed retains it too: the row was rolled
+      // back, so a retry safely re-inserts with the same images).
+      retryCreateManifests.set(id, { images: imageDataUrls });
+    }
+
+    get().loadProducts();
+    return result;
   },
 
   updateProduct: (id, data) => {

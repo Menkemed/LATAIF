@@ -61,6 +61,9 @@ export interface PresentationItem {
 export type PresentationState =
   | { status: 'idle'; srcs: [] }
   | { status: 'loading'; srcs: [] }
+  /** A create-batch is still being finalized (3B2B-R3). The view shows a
+   *  skeleton and NEVER a partial gallery; startup-recovery flips it to media. */
+  | { status: 'pending'; srcs: [] }
   | { status: 'media'; srcs: string[]; items: PresentationItem[] }
   | { status: 'legacy'; srcs: string[] }
   | { status: 'empty'; srcs: [] }
@@ -93,7 +96,9 @@ export function presentationSrcs(state: PresentationState): string[] {
  */
 export function isResolvingMedia(state: PresentationState, hasAuthorisedKey: boolean): boolean {
   if (!hasAuthorisedKey) return false;
-  return state.status === 'loading' || state.status === 'idle';
+  // `pending` (a batch still finalizing) also shows a skeleton — never a
+  // partial gallery — until startup-recovery completes it.
+  return state.status === 'loading' || state.status === 'idle' || state.status === 'pending';
 }
 
 // ── dependencies ────────────────────────────────────────────────────────────
@@ -285,6 +290,9 @@ export class ProductMediaPresentationController {
         return { status: 'legacy', srcs: resolution.items };
       case 'none':
         return { status: 'empty', srcs: [] };
+      case 'pending':
+        // A batch is still finalizing — show a skeleton, never a partial view.
+        return { status: 'pending', srcs: [] };
       case 'integrity_error':
       case 'conflict':
       case 'legacy_format_error':

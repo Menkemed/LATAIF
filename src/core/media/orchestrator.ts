@@ -99,6 +99,10 @@ export interface RecoveryOrchestrationResult {
   /** Whether the DB changed materially and therefore a durable save was
    *  requested. */
   dbChanged: boolean;
+  /** Products whose media is now COMPLETE after this recovery pass — i.e. a
+   *  create-batch that finalized here and has no remaining pending ingest job.
+   *  The caller feeds these (once) to the embedding guard (3B2B-R3 item 4). */
+  completedProductIds: Array<{ tenantId: string; branchId: string | null; productId: string; role: string }>;
 }
 
 // ── dependencies ────────────────────────────────────────────────────────────
@@ -277,6 +281,100 @@ export class StockMediaOrchestrator {
   }
 
   /**
+   * Phase 1 of a durable create-batch (3B2B-R2): prepare + register the intent
+   * for EVERY slot up front, then persist ONCE.
+   *
+   *   for each item: prepareStockImage (Rust stages bytes) + registerPendingIntent
+   *   → saveDurably   ← the single durable BATCH checkpoint
+   *
+   * After this resolves, the DB holds one `accepted` job per slot (each with its
+   * frozen slot + content hash + batch grouping) AND whatever else the caller
+   * made durable in the same instance (e.g. the product row). A crash from here
+   * on is fully recoverable from the DB alone via `recoverPendingStockMedia`,
+   * with no dependency on any JS-side map. A crash BEFORE this resolves leaves
+   * nothing durable — the caller rolls back its in-memory rows.
+   *
+   * Nothing is published here; the staged renditions stay in the Rust journal.
+   */
+  async prepareAndRegisterBatch(items: IngestAndFinalizeInput[]): Promise<void> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      // Rust requests we staged this call. If we fail BEFORE the durable
+      // checkpoint, none of them has a durable DB intent, so each must be
+      // aborted — a staged rendition may never be published without a durable
+      // intent behind it.
+      const prepared: Array<{ tenantScope: string; ingestRequestId: string }> = [];
+      let checkpointed = false;
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+        for (const input of items) {
+          let result: PrepareResult;
+          try {
+            result = await this.gateway.prepareStockImage({
+              tenantScope: input.tenantId,
+              ingestRequestId: input.ingestRequestId,
+              requestHash: input.requestHash,
+              imageBytes: input.imageBytes,
+              originalName: input.originalName,
+            });
+          } catch (e) {
+            throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
+          }
+          prepared.push({ tenantScope: input.tenantId, ingestRequestId: input.ingestRequestId });
+          coordinator.registerPendingIntent(input, result);
+        }
+        try {
+          await lease.saveDurably();
+          checkpointed = true;
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+      } finally {
+        // Only abort when the batch never became durable. After the checkpoint
+        // the intents are committed and `finalizeBatch`/recovery will publish
+        // them — aborting there would strand a durable intent.
+        if (!checkpointed) {
+          for (const p of prepared) {
+            try { await this.gateway.abortStockImage(p); } catch { /* best-effort cleanup */ }
+          }
+        }
+        lease.release();
+      }
+    });
+  }
+
+  /**
+   * Phase 2 of a durable create-batch (3B2B-R2): finalize (publish + link)
+   * every slot, then persist once. Idempotent — a slot already `ready` returns
+   * its cached result, so a retry or a recovery re-run never duplicates a link.
+   * A finalize that fails part-way leaves the batch recoverable (the remaining
+   * `accepted` jobs are completed by `recoverPendingStockMedia`).
+   */
+  async finalizeBatch(items: IngestAndFinalizeInput[]): Promise<FinalizeResult[]> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+        const out: FinalizeResult[] = [];
+        for (const input of items) {
+          out.push(await coordinator.finalize(input));
+          // Persist after EACH slot so a crash mid-batch keeps the images
+          // published so far durable (a reopen shows 0..k, and recovery only
+          // has to finish the remaining slots).
+          try {
+            await lease.saveDurably();
+          } catch (e) {
+            this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+          }
+        }
+        return out;
+      } finally {
+        lease.release();
+      }
+    });
+  }
+
+  /**
    * Replace one existing link's image, durably (3A-R2).
    *
    * Identical two-checkpoint shape as the ingest path, with ONE decisive
@@ -405,7 +503,20 @@ export class StockMediaOrchestrator {
             this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
           }
         }
-        return { rustReport, dbReport, dbChanged };
+        // A product's batch is COMPLETE if a slot finalized this pass AND the
+        // product now has no pending ingest job left. Deduped by scope.
+        const finalized = new Map<string, { tenantId: string; branchId: string | null; productId: string; role: string }>();
+        for (const r of dbReport) {
+          if (r.action !== 'finalized_from_ready_rust' && r.action !== 'replaced_from_ready_rust') continue;
+          if (!r.productId || !r.role) continue;
+          const scope = { tenantId: r.tenantId, branchId: r.branchId ?? null, productId: r.productId, role: r.role };
+          const key = `${scope.tenantId}|${scope.branchId}|${scope.productId}|${scope.role}`;
+          if (!finalized.has(key)) finalized.set(key, scope);
+        }
+        const completedProductIds = [...finalized.values()].filter(
+          (s) => !coordinator.hasPendingIngestForScope(s.tenantId, s.branchId, s.productId, s.role),
+        );
+        return { rustReport, dbReport, dbChanged, completedProductIds };
       } finally {
         lease.release();
       }

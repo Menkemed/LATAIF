@@ -2,6 +2,18 @@ import { create } from 'zustand';
 import { authService, type Session, type UserBranch } from '@/core/auth/auth';
 import type { UserRole } from '@/core/models/types';
 
+/**
+ * MEDIA-04A-3B2B-R5 — fire startup media recovery + embedding reconciliation
+ * once a session (branch/tenant) is available. Dynamic import breaks the
+ * store→store cycle; fire-and-forget so it never blocks auth. Idempotent:
+ * recovery is once-per-epoch, reconciliation is guarded per product.
+ */
+function triggerMediaRecoveryPostAuth(): void {
+  void import('@/stores/productStore')
+    .then((m) => m.triggerStartupMediaRecovery())
+    .catch(() => { /* never blocks auth */ });
+}
+
 interface AuthStore {
   session: Session | null;
   branches: UserBranch[];
@@ -30,6 +42,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (session) {
       const branches = authService.getUserBranches(session.userId);
       set({ session, branches });
+      triggerMediaRecoveryPostAuth();
     }
   },
 
@@ -39,6 +52,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       const session = await authService.login(email, password);
       const branches = authService.getUserBranches(session.userId);
       set({ session, branches, loading: false });
+      // MEDIA-04A-3B2B-R5: with the branch/tenant now available, drive startup
+      // media recovery + embedding reconciliation. Recovery itself is
+      // once-per-epoch (a no-op if the boot pass already ran); the reconciliation
+      // re-scans and can now start embeddings that needed an authenticated,
+      // AI-configured session. Fire-and-forget, never blocks login.
+      triggerMediaRecoveryPostAuth();
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
       throw err;

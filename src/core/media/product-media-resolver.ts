@@ -23,7 +23,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import type { MediaCommandGateway } from './gateway.ts';
-import { inspectGallery } from './coordinator.ts';
+import { inspectGallery, classifyPendingIngest } from './coordinator.ts';
 
 // ── DB shape (same minimal surface the coordinator consumes) ────────────────
 
@@ -46,6 +46,11 @@ export type ProductMediaResolution =
   | { kind: 'media'; items: ResolvedMediaItem[] }
   | { kind: 'legacy'; items: string[] }
   | { kind: 'none' }
+  /** A create-batch (or any ingest) is still in flight — some ingest jobs for
+   *  this product are not yet settled. The view must show a loading/pending
+   *  state, NEVER a partial media gallery. Startup-recovery flips this to
+   *  `media` once every slot is finalized. (3B2B-R3) */
+  | { kind: 'pending'; code: string }
   | { kind: 'integrity_error'; code: string; mediaId?: string }
   | { kind: 'conflict'; code: string }
   | { kind: 'legacy_format_error'; code: string };
@@ -165,6 +170,20 @@ export class ProductMediaResolver {
     if (!legacy.ok) return { kind: 'legacy_format_error', code: legacy.code };
 
     const active = this.activeGallery(db, productId);
+
+    // ── Batch/ingest still in flight (3B2B-R3, refined in R4) ──────────────
+    // A create-batch registers all N job intents durably, then publishes them.
+    // Until every slot of that batch is published the media gallery is
+    // incomplete — show `pending`, never a partial gallery. But ONLY a create
+    // batch pends the view: a pending REPLACE (or a single non-batch append)
+    // must leave an already-complete gallery visible, and two contradictory
+    // create-batches (or a corrupt intent) are a `conflict`, never a silent
+    // partial. Legacy-mid-cutover keeps its full legacy column (handled below).
+    if (legacy.items.length === 0) {
+      const pend = classifyPendingIngest(this.nonTerminalIntents(db, productId));
+      if (pend.kind === 'conflict') return { kind: 'conflict', code: pend.code };
+      if (pend.kind === 'create_pending') return { kind: 'pending', code: 'MEDIA_BATCH_IN_PROGRESS' };
+    }
 
     // ── No active links ────────────────────────────────────────────────────
     if (active.length === 0) {
@@ -289,6 +308,28 @@ export class ProductMediaResolver {
         ORDER BY l.sort_order ASC`,
       { $t: this.tenantId, $br: this.branchId, $p: productId, $role: this.role },
     );
+  }
+
+  /**
+   * The raw `result_json` of every NON-TERMINAL ingest job for this
+   * product/scope — the create-batch leaves N `accepted` jobs between the
+   * durable checkpoint and full publication. Handed to `classifyPendingIngest`
+   * so the resolver can tell an in-flight create-batch (→ pending) apart from a
+   * pending replace / single append (→ existing gallery stays visible) and from
+   * contradictory batches (→ conflict). Once every job is `ready` (or terminally
+   * failed) this is empty and the active gallery is authoritative.
+   */
+  private nonTerminalIntents(db: RawDb, productId: string): unknown[] {
+    const rows = allRows(
+      db,
+      `SELECT result_json FROM media_ingest_jobs
+        WHERE tenant_id = $t AND branch_id = $br
+          AND requested_entity_type = 'product' AND requested_entity_id = $p
+          AND requested_role = $role
+          AND state NOT IN ('ready','failed','quarantined','expired')`,
+      { $t: this.tenantId, $br: this.branchId, $p: productId, $role: this.role },
+    );
+    return rows.map((r) => r.result_json);
   }
 
   /**

@@ -13,6 +13,7 @@ import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/Dupl
 import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
+import { decideProductCreateUi } from '@/core/media/product-media-create';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { getStockAggregates, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
@@ -227,12 +228,16 @@ function CardPrice({ product, lot }: { product: Product; lot?: LotAggregate }) {
 export function WatchList() {
   const navigate = useNavigate();
   const {
-    products, categories, loadProducts, loadCategories, createProduct,
+    products, categories, loadProducts, loadCategories, createProductWithMedia,
     searchQuery, setSearchQuery, filterCategory, setFilterCategory,
     filterStatus, setFilterStatus, getStockValue, nextAvailableSku,
     isSkuTaken, findPossibleDuplicates, getProductLinks, deleteProducts,
   } = useProductStore();
   const [showNew, setShowNew] = useState(false);
+  // MEDIA-04A-3B2B — create-with-media flow state.
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createWarning, setCreateWarning] = useState<string | null>(null);
+  const [retryProductId, setRetryProductId] = useState<string | null>(null);
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -379,6 +384,9 @@ export function WatchList() {
       condition: cat?.conditionOptions?.[0] || '', taxScheme: 'MARGIN',
       scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
     });
+    // Fresh create session → drop any prior partial-create state.
+    setCreateWarning(null);
+    setRetryProductId(null);
     setShowNew(true);
   }
 
@@ -439,16 +447,40 @@ export function WatchList() {
       setDuplicateMatches(possible);
       return;
     }
-    createProduct(form);
-    setErrors({});
-    setShowNew(false);
+    void runCreate();
   }
 
   function confirmCreateAnyway() {
-    createProduct(form);
-    setErrors({});
     setDuplicateMatches([]);
-    setShowNew(false);
+    void runCreate();
+  }
+
+  // MEDIA-04A-3B2B — durable create-with-media. On a partial failure the
+  // product exists but its images are not fully in place: the modal stays open,
+  // shows a clear warning, and a re-submit reuses the SAME product id (no
+  // second product, no duplicate media links). Only a full success closes.
+  async function runCreate() {
+    if (createBusy) return;
+    setCreateBusy(true);
+    try {
+      const result = await createProductWithMedia(form, retryProductId ?? undefined);
+      const ui = decideProductCreateUi(result);
+      setErrors({});
+      if (ui.closeModal) {
+        setCreateWarning(null);
+        setRetryProductId(null);
+        setShowNew(false);
+      } else {
+        setRetryProductId(ui.retainProductId);
+        setCreateWarning(
+          ui.message === 'media_incomplete'
+            ? 'Product saved, but its images are not fully in place yet. Press “Retry images” to finish — the same product is reused.'
+            : 'Could not save the product. Nothing was created — please try again.',
+        );
+      }
+    } finally {
+      setCreateBusy(false);
+    }
   }
 
   function updateAttr(key: string, value: string | number | boolean) {
@@ -1083,9 +1115,19 @@ export function WatchList() {
             </div>
           ) : null}
 
+          {/* MEDIA-04A-3B2B — partial-create warning. The product exists but its
+              images are not fully in place; the modal stays open so the user can
+              retry without creating a second product. */}
+          {createWarning && (
+            <div className="rounded" style={{ marginTop: 12, padding: 12, background: '#FBF3E7', border: '1px solid #E7D3AE', fontSize: 12, color: '#8A5A00' }}>
+              {createWarning}
+            </div>
+          )}
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate}>Add to Collection</Button>
+            <Button variant="primary" onClick={handleCreate} disabled={createBusy}>
+              {createBusy ? 'Saving…' : retryProductId ? 'Retry images' : 'Add to Collection'}
+            </Button>
           </div>
         </div>
       </Modal>

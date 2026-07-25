@@ -342,6 +342,51 @@ export class ProductMediaCutoverService {
     return out;
   }
 
+  /**
+   * The new-product create contract (inactive core; wired by 3B2B).
+   *
+   * Places image[i] at slot i by its FIXED list index — not at the current
+   * active count. That distinction is what makes a create RETRY idempotent:
+   * re-passing the same full list re-finalizes the SAME per-index request ids,
+   * so already-imported images are no-ops (the coordinator short-circuits a
+   * ready job) and only the missing tail is created — no duplicate links, order
+   * preserved. `appendOrderedProductImages` (append-at-end) is the wrong tool
+   * here precisely because its slot shifts by the already-imported count.
+   *
+   * NEVER touches `products.images`. The caller must have persisted the product
+   * row durably first (the entity-existence trigger enforces its presence).
+   */
+  async placeOrderedProductImages(
+    productId: string,
+    images: Array<Uint8Array | DecodedLegacyImage>,
+  ): Promise<FinalizeResult[]> {
+    const out: FinalizeResult[] = [];
+    for (let i = 0; i < images.length; i++) {
+      const raw = images[i];
+      const bytes = raw instanceof Uint8Array ? raw : raw.bytes;
+      const requestHash = await this.hashOf(bytes, this.tenantId);
+      const input: IngestAndFinalizeInput = {
+        tenantId: this.tenantId,
+        branchId: this.branchId,
+        entityType: 'product',
+        entityId: productId,
+        scopeKind: 'branch',
+        role: this.role,
+        ingestRequestId: createRequestId(this.tenantId, this.branchId, productId, this.role, i),
+        requestHash,
+        isPrimary: i === 0,
+        sortOrder: i,
+        imageBytes: bytes,
+      };
+      try {
+        out.push(await this.deps.orchestrator.ingestAndFinalizeStockImage(input));
+      } catch (e) {
+        throw new CutoverError('MEDIA_CUTOVER_INGEST_FAILED', asMessage(e), e);
+      }
+    }
+    return out;
+  }
+
   // ── queries ────────────────────────────────────────────────────────────────
 
   /** Any link row at all for THIS scope — active OR retired. */
@@ -438,6 +483,16 @@ export function appendRequestId(
   tenantId: string, branchId: string, productId: string, role: string, slot: number,
 ): string {
   return `append:${tenantId}:${branchId}:${productId}:${role}:${slot}`;
+}
+
+/** Stable id per (tenant, branch, product, role, slot) for the new-product
+ *  create path. Distinct namespace so a create, a later append and a legacy
+ *  cutover never collide on the same request identity; keyed by the FIXED list
+ *  index so a create retry re-uses the same ids and never duplicates. */
+export function createRequestId(
+  tenantId: string, branchId: string, productId: string, role: string, slot: number,
+): string {
+  return `create:${tenantId}:${branchId}:${productId}:${role}:${slot}`;
 }
 
 // ── default legacy decoder: data: URL only ──────────────────────────────────
