@@ -18,10 +18,16 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Bhd } from '@/components/ui/Bhd';
 import { Package, ArrowRight, Plus } from 'lucide-react';
 import { getRecentCorrectionsAsPrompt, useProductStore } from '@/stores/productStore';
-import { computeImageEmbedding, cosineSimilarity, identifyProduct, isAiConfigured, pairwiseVisualMatch, type AiCategoryId } from '@/core/ai/ai-service';
+import { computeImageEmbedding, cosineSimilarity, isAiConfigured, pairwiseVisualMatch, type AiCategoryId } from '@/core/ai/ai-service';
+import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { trackUpdate } from '@/core/sync/track';
+import { frozenSyncTarget, shouldApplySyncAutoIdentify } from '@/core/media/ai-image-source';
 import type { Product } from '@/core/models/types';
+
+// Per-product supersession registry for sync auto-identify: a newer run for the
+// same product bumps the epoch, so the older in-flight run refuses to apply.
+const syncAutoIdentifyEpoch = new Map<string, number>();
 
 interface PendingReview {
   incoming: Product;
@@ -67,10 +73,21 @@ async function runAutoIdentify(productId: string): Promise<void> {
   const alreadyIdentified = !!incoming.condition && !!incoming.name && incoming.name.trim().length > 3;
   if (alreadyIdentified) return;
 
+  // Freeze the target (product id + primary image ref) and claim a fresh epoch
+  // BEFORE the async AI call — a newer run for the same product supersedes this.
+  const frozen = frozenSyncTarget({ id: productId, imageRef: incoming.images[0] });
+  const myEpoch = (syncAutoIdentifyEpoch.get(productId) ?? 0) + 1;
+  syncAutoIdentifyEpoch.set(productId, myEpoch);
+
   try {
-    const result = await identifyProduct({
+    // MEDIA-04A-3B2C3-R3: route the synced image through the SINGLE central
+    // adapter (fail-closed on a malformed/oversized/non-raster remote payload;
+    // never a direct provider call). Require a validated image — the sync
+    // auto-identify has no text-only fallback.
+    const aiOut = await identifyProductFromResolvedInput({
+      productId: undefined,
+      formImage0: incoming.images[0],
       categoryId: incoming.categoryId as AiCategoryId,
-      imageBase64: incoming.images[0],
       hints: {
         brand: incoming.brand || undefined,
         name: incoming.name || undefined,
@@ -78,9 +95,21 @@ async function runAutoIdentify(productId: string): Promise<void> {
       },
       recentCorrections: getRecentCorrectionsAsPrompt(incoming.brand, incoming.categoryId),
     });
+    if (!aiOut.ok || !aiOut.usedImage) return; // unsafe/invalid remote image → skip
+    const result = aiOut.result;
     const store = useProductStore.getState();
     const current = store.products.find(p => p.id === productId);
-    if (!current) return;
+    // Stale-target guard: skip if the product vanished, its primary image changed
+    // or was removed under the in-flight call, or a newer auto-identify run for
+    // this product superseded us.
+    if (!shouldApplySyncAutoIdentify({
+      myEpoch,
+      latestEpoch: syncAutoIdentifyEpoch.get(productId) ?? myEpoch,
+      targetExists: !!current,
+      frozenImageKey: frozen.imageKey,
+      currentImageKey: current?.images?.[0],
+    })) return;
+    if (!current) return; // guard already covers this; narrows the type below.
     const patch: Partial<Product> = {};
     if (result.brand) patch.brand = result.brand;
     if (result.name) patch.name = result.name;

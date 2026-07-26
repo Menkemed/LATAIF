@@ -23,6 +23,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
 import { presentationSrcs, isResolvingMedia } from '@/core/media/presentation';
 import { presentationToResolverStatus, type ResolverStatus } from '@/core/media/product-edit-draft';
+import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
@@ -49,7 +50,11 @@ export function ProductDetail() {
   const idRef = useRef(id);
   idRef.current = id;
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+  // MEDIA-04A-3B2C3-R1: AI request supersession + frozen picked-image guard.
+  const aiReqRef = useRef(0);
+  const aiImgRef = useRef<string | undefined>(undefined);
   const [form, setForm] = useState<Partial<Product>>({});
+  aiImgRef.current = form.images?.[0]; // R1: mirror current picked image for the stale guard
   const [formAttrs, setFormAttrs] = useState<Record<string, string | number | boolean | string[]>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -661,12 +666,26 @@ export function ProductDetail() {
                           return;
                         }
                         setAiBusy(true);
+                        const startId = id;
+                        const myReq = ++aiReqRef.current;
+                        const frozenImg = form.images?.[0];
                         try {
-                          const result = await ai.identifyProduct({
+                          // MEDIA-04A-3B2C3-R3: route through the SINGLE central
+                          // adapter — it resolves+validates+freezes the safe image
+                          // input (ephemeral / durable primary, never blob:/thumb)
+                          // and calls the provider; components never call it direct.
+                          const aiOut = await identifyProductFromResolvedInput({
+                            productId: id,
+                            formImage0: hasImage ? form.images![0] : undefined,
                             categoryId: form.categoryId as AiCategoryId,
-                            imageBase64: hasImage ? form.images![0] : undefined,
                             hints: hasHints ? { brand: form.brand, name: form.name, reference: form.sku } : undefined,
                           });
+                          if (!aiOut.ok) { if (aiOut.blocking) alert(`AI: ${aiOut.error}`); setAiBusy(false); return; }
+                          const result = aiOut.result;
+                          // Stale/supersession guard: drop the result if the view
+                          // unmounted, the product switched, a newer AI request
+                          // superseded this one, or the picked image changed.
+                          if (!mountedRef.current || idRef.current !== startId || aiReqRef.current !== myReq || aiImgRef.current !== frozenImg) return;
                           setForm(f => {
                             const updated = { ...f };
                             if (result.brand) updated.brand = result.brand;

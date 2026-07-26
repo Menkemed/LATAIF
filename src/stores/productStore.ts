@@ -17,6 +17,8 @@ import { getStockMediaOrchestrator, type IngestAndFinalizeInput, type EditScope,
 import { buildEditPlanEnvelope } from '@/core/media/product-media-edit';
 import type { ProductEditIntent } from '@/core/media/coordinator';
 import { canEditImages, draftFromSrcs, buildImageEditInputs, diffProductText, editHasChanges, type ResolverStatus } from '@/core/media/product-edit-draft';
+import { ProductMediaResolver } from '@/core/media/product-media-resolver';
+import { validateEphemeralImage, selectDurablePrimary, validateDurableBytes, isObjectUrl, type AiImageSource } from '@/core/media/ai-image-source';
 import { runStartupMediaRecovery, type CompletedProductScope } from '@/core/media/startup-recovery';
 import { findProductsNeedingEmbedding } from '@/core/media/embedding-reconcile';
 import { TauriMediaGateway } from '@/core/media/gateway';
@@ -75,6 +77,76 @@ export type EditProductResult =
  * Fail-safe: never throws, never blocks the app. The resolver keeps showing a
  * `pending` skeleton (never a partial gallery) until a pass succeeds.
  */
+// ── MEDIA-04A-3B2C3 — safe AI-identifier image input ────────────────────────
+export type AiImageInputResult =
+  | { ok: true; dataUrl: string; source: AiImageSource }
+  | { ok: false; error: string; blocking: boolean };
+
+async function sha256HexOfBytes(bytes: Uint8Array): Promise<string> {
+  const h = await crypto.subtle.digest('SHA-256', bytes as unknown as ArrayBuffer);
+  return Array.from(new Uint8Array(h)).map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+function decodeBase64ToBytes(b64: string): Uint8Array {
+  const clean = b64.replace(/\s/g, '');
+  const bin = atob(clean);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Resolve the safe AI-identifier image input for a call site (3B2C3):
+ *   • a fresh `data:` URL   → ephemeral_new (frozen by content hash, never
+ *     persisted, never a blob: URL);
+ *   • a blob: URL / no URL for an EXISTING product → durable_primary read
+ *     scope-exact + verified through the resolver (active primary, master
+ *     raster, hash integrity) — never products.images, never a thumbnail.
+ * Fail-closed: `blocking:true` means DO NOT call the provider (object URL,
+ * pending/conflict/integrity, unsupported MIME); `blocking:false` means "no
+ * usable image" so the caller may still run a text-only identification.
+ * In-memory only — no temp file, no base64 in SQLite, no image-content logging.
+ */
+export async function resolveAiImageInput(productId: string | undefined, formImage0: string | undefined): Promise<AiImageInputResult> {
+  try {
+    // A freshly picked, not-yet-persisted image: fully validate it (syntax,
+    // base64 decode, MIME↔magic-byte match, byte + pixel bounds, no SVG/active
+    // content) and freeze the hash from the DECODED bytes.
+    if (formImage0 && formImage0.startsWith('data:')) {
+      const val = await validateEphemeralImage(formImage0, `ai:${productId ?? 'new'}`, { decodeBase64: decodeBase64ToBytes, hashBytes: sha256HexOfBytes });
+      return val.ok ? { ok: true, dataUrl: formImage0, source: val.source } : { ok: false, error: val.error, blocking: val.error !== 'MEDIA_AI_NO_IMAGE' };
+    }
+    // An existing product's verified active primary (blob: display URL or none).
+    if (!productId) return { ok: false, error: 'MEDIA_AI_NO_IMAGE', blocking: false };
+    let branchId: string; try { branchId = currentBranchId(); } catch { branchId = ''; }
+    const tRows = branchId ? query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]) : [];
+    const tenantId = tRows.length > 0 ? (tRows[0].tenant_id as string | null) : null;
+    if (!branchId || !tenantId) return { ok: false, error: 'MEDIA_AI_SCOPE_REQUIRED', blocking: true };
+    const resolver = new ProductMediaResolver({ dbProvider: () => getDatabase() as never, gateway: new TauriMediaGateway(), tenantId, branchId });
+    const resolution = await resolver.resolvePrimaryProductMedia(productId);
+    const items = resolution.kind === 'media' ? resolution.items.map((i) => ({ mediaId: i.mediaId, mimeType: i.mimeType, sortOrder: i.sortOrder, isPrimary: i.isPrimary })) : [];
+    const primRes = resolution.kind === 'media' ? { kind: 'media' as const, items } : { kind: resolution.kind } as { kind: 'legacy' | 'none' | 'pending' | 'conflict' | 'integrity_error' | 'legacy_format_error' };
+    const sel = selectDurablePrimary({ tenantId, branchId, productId }, primRes);
+    if (!sel.ok) {
+      const nonBlocking = sel.error === 'MEDIA_AI_NO_PRIMARY' || sel.error === 'MEDIA_AI_NOT_MIGRATED';
+      // If the display URL was an object URL we STILL never fall back to it.
+      void isObjectUrl;
+      return { ok: false, error: sel.error, blocking: !nonBlocking };
+    }
+    // Build the provider data: URL from the VERIFIED primary bytes, in memory.
+    const prim = resolution.kind === 'media' ? resolution.items.find((i) => i.isPrimary && i.sortOrder === 0) : undefined;
+    if (!prim) return { ok: false, error: 'MEDIA_AI_NO_PRIMARY', blocking: false };
+    // Final content-shape check on the VERIFIED primary bytes (main raster, not
+    // a thumbnail) before building the provider data: URL from those bytes.
+    const dv = validateDurableBytes(prim.bytes, prim.mimeType);
+    if (!dv.ok) return { ok: false, error: dv.error, blocking: true };
+    let bin = ''; for (let i = 0; i < prim.bytes.length; i++) bin += String.fromCharCode(prim.bytes[i]);
+    const dataUrl = `data:${prim.mimeType};base64,${btoa(bin)}`;
+    return { ok: true, dataUrl, source: sel.source };
+  } catch (e) {
+    return { ok: false, error: (e as { message?: string })?.message ?? 'MEDIA_AI_INPUT_FAILED', blocking: true };
+  }
+}
+
 export async function triggerStartupMediaRecovery(): Promise<void> {
   try {
     const { currentDbEpoch } = await import('@/core/db/database');

@@ -102,6 +102,12 @@ export function ConsignmentList() {
   });
   const [aiBusy, setAiBusy] = useState(false);
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
+  // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
+  const aiReqRef = useRef(0);
+  const aiMountedRef = useRef(true);
+  useEffect(() => { aiMountedRef.current = true; return () => { aiMountedRef.current = false; }; }, []);
+  const aiImgRef = useRef<string | undefined>(undefined);
+  aiImgRef.current = productForm.images?.[0];
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
 
@@ -963,12 +969,23 @@ export function ConsignmentList() {
                         return;
                       }
                       setAiBusy(true);
+                      const myReq = ++aiReqRef.current;
+                      const frozenImg = productForm.images?.[0];
                       try {
-                        const result = await ai.identifyProduct({
+                        // MEDIA-04A-3B2C3-R3: route through the SINGLE central adapter
+                        // (safe fresh data: URL only for a not-yet-saved product;
+                        // never a blob:/object URL) — no direct provider call.
+                        const { shouldApplyEphemeralResult } = await import('@/core/media/ai-image-source');
+                        const { identifyProductFromResolvedInput } = await import('@/core/ai/identify-adapter');
+                        const aiOut = await identifyProductFromResolvedInput({
+                          productId: undefined,
+                          formImage0: hasImage ? productForm.images![0] : undefined,
                           categoryId: productForm.categoryId as AiCategoryId,
-                          imageBase64: hasImage ? productForm.images![0] : undefined,
                           hints: hasHints ? { brand: productForm.brand, name: productForm.name, reference: productForm.sku } : undefined,
                         });
+                        if (!aiOut.ok) { if (aiOut.blocking) alert(`AI: ${aiOut.error}`); setAiBusy(false); return; }
+                        const result = aiOut.result;
+                        if (!shouldApplyEphemeralResult({ myRequestId: myReq, latestRequestId: aiReqRef.current, unmounted: !aiMountedRef.current, frozenImage: frozenImg, currentImage: aiImgRef.current })) { setAiBusy(false); return; }
                         // Plan §Consignment §AI-Identify: zwei getrennte setStates.
                         // Updater von setProductForm muss PURE bleiben — kein verschachteltes
                         // setForm darin (würde unter React 18 strict mode doppelt feuern und

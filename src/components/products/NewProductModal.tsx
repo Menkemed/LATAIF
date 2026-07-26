@@ -51,6 +51,12 @@ export function NewProductModal({
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
+  // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
+  const aiReqRef = useRef(0);
+  const aiMountedRef = useRef(true);
+  useEffect(() => { aiMountedRef.current = true; return () => { aiMountedRef.current = false; }; }, []);
+  const aiImgRef = useRef<string | undefined>(undefined);
+  aiImgRef.current = form.images?.[0];
 
   useEffect(() => { loadCategories(); }, [loadCategories]);
 
@@ -375,13 +381,26 @@ export function NewProductModal({
                   try {
                     // AI-Learning: User-Korrekturen aus aehnlichen Items als
                     // Few-Shot mitsenden (siehe getRecentCorrectionsAsPrompt).
+                    const myReq = ++aiReqRef.current;
+                    const frozenImg = form.images?.[0];
                     const { getRecentCorrectionsAsPrompt } = await import('@/stores/productStore');
-                    const result = await ai.identifyProduct({
+                    const { shouldApplyEphemeralResult } = await import('@/core/media/ai-image-source');
+                    const { identifyProductFromResolvedInput } = await import('@/core/ai/identify-adapter');
+                    // MEDIA-04A-3B2C3-R3: route through the SINGLE central adapter
+                    // (safe fresh data: URL only; never a blob:/object URL) — no
+                    // direct provider call.
+                    const aiOut = await identifyProductFromResolvedInput({
+                      productId: undefined,
+                      formImage0: hasImage ? form.images![0] : undefined,
                       categoryId: form.categoryId as AiCategoryId,
-                      imageBase64: hasImage ? form.images![0] : undefined,
                       hints: hasHints ? { brand: form.brand, name: form.name, reference: form.sku } : undefined,
                       recentCorrections: getRecentCorrectionsAsPrompt(form.brand, form.categoryId),
                     });
+                    if (!aiOut.ok) { if (aiOut.blocking) alert(`AI: ${aiOut.error}`); setAiBusy(false); return; }
+                    const result = aiOut.result;
+                    // Stale/supersession guard: drop the result if a newer request
+                    // superseded it, the modal unmounted, or the picked image changed.
+                    if (!shouldApplyEphemeralResult({ myRequestId: myReq, latestRequestId: aiReqRef.current, unmounted: !aiMountedRef.current, frozenImage: frozenImg, currentImage: aiImgRef.current })) { setAiBusy(false); return; }
                     setForm(f => {
                       const updated = { ...f };
                       if (result.brand) updated.brand = result.brand;

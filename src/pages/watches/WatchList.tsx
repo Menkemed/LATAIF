@@ -256,6 +256,12 @@ export function WatchList() {
   // Wiederöffnen für dieselbe Eingabe nach Cancel.
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
+  // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
+  const aiReqRef = useRef(0);
+  const aiMountedRef = useRef(true);
+  useEffect(() => { aiMountedRef.current = true; return () => { aiMountedRef.current = false; }; }, []);
+  const aiImgRef = useRef<string | undefined>(undefined);
+  aiImgRef.current = form.images?.[0];
 
   // ── Multi-Select + Delete (v0.7.20) ──
   // selectMode aktiviert Checkboxen auf den Karten. linksMap haelt pro Produkt
@@ -973,12 +979,23 @@ export function WatchList() {
                       return;
                     }
                     setAiBusy(true);
+                    const myReq = ++aiReqRef.current;
+                    const frozenImg = form.images?.[0];
                     try {
-                      const result = await ai.identifyProduct({
+                      // MEDIA-04A-3B2C3-R3: route through the SINGLE central adapter
+                      // (safe fresh data: URL only for a not-yet-saved product;
+                      // never a blob:/object URL) — no direct provider call.
+                      const { shouldApplyEphemeralResult } = await import('@/core/media/ai-image-source');
+                      const { identifyProductFromResolvedInput } = await import('@/core/ai/identify-adapter');
+                      const aiOut = await identifyProductFromResolvedInput({
+                        productId: undefined,
+                        formImage0: hasImage ? form.images![0] : undefined,
                         categoryId: form.categoryId as AiCategoryId,
-                        imageBase64: hasImage ? form.images![0] : undefined,
                         hints: hasHints ? { brand: form.brand, name: form.name, reference: form.sku } : undefined,
                       });
+                      if (!aiOut.ok) { if (aiOut.blocking) alert(`AI: ${aiOut.error}`); setAiBusy(false); return; }
+                      const result = aiOut.result;
+                      if (!shouldApplyEphemeralResult({ myRequestId: myReq, latestRequestId: aiReqRef.current, unmounted: !aiMountedRef.current, frozenImage: frozenImg, currentImage: aiImgRef.current })) { setAiBusy(false); return; }
                       setForm(f => {
                         const updated = { ...f };
                         if (result.brand) updated.brand = result.brand;
