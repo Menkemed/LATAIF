@@ -64,6 +64,10 @@ pub mod sync_schema;
 /// idempotency, conflict envelope, tombstones). INACTIVE: reachable only from internal Rust + tests;
 /// no route, pull path or cutover step consults it.
 pub mod cas_engine;
+/// M6-B3B2 / MEDIA-04A-3B2C4B1 — the versioned operation protocol (V2) binding CAS + operation
+/// identity + atomic changelog/audit. INACTIVE: reachable only from internal Rust + tests; no route,
+/// pull path, cutover step or mobile client consults it.
+pub mod operation_protocol;
 /// M6-B2E — legacy inventory, owner attestation, cutover readiness. INACTIVE.
 pub mod cutover;
 /// M6-B2D — the device's own cryptographic identity + enrollment. INACTIVE.

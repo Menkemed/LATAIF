@@ -52,6 +52,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0008_LEGACY_INVENTORY_AND_CUTOVER_READINESS,
     V0009_SYNC_SCHEMA_AND_QUARANTINE,
     V0010_CANONICAL_REVISION_CAS,
+    V0011_OPERATION_CHANGELOG_AUDIT,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -295,6 +296,67 @@ pub const V0010_CANONICAL_REVISION_CAS: Migration = Migration {
     up_sql: V0010_SQL,
     reference_sql: V0010_SQL,
 };
+
+/// M6-B3B2 — the two additive server-side sinks the versioned operation protocol writes ATOMICALLY
+/// with each applied CAS mutation (one changelog + one audit per applied op, in the same tx):
+///   • `sync_operation_changelog` — the downstream replication feed (what changed, at which revision).
+///   • `sync_operation_audit`      — who applied what (typed principal), for the audit trail.
+/// The durable operation RESULT SSOT is `operation_ledger` (v0010); these do not replace it. Existing
+/// v0001–v0010 tables and the legacy sync path are untouched. Additive CREATE … IF NOT EXISTS only:
+/// existing DBs gain empty tables; a full-DB copy / updater recovery re-applies idempotently.
+pub const V0011_OPERATION_CHANGELOG_AUDIT: Migration = Migration {
+    version: 11,
+    name: "operation_changelog_audit",
+    up_sql: V0011_SQL,
+    reference_sql: V0011_SQL,
+};
+
+const V0011_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS sync_operation_changelog (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id      TEXT NOT NULL,
+    branch_id      TEXT NOT NULL,
+    table_name     TEXT NOT NULL,
+    record_id      TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    revision       INTEGER NOT NULL,
+    canonical_hash TEXT NOT NULL,
+    is_tombstone   INTEGER NOT NULL DEFAULT 0,
+    operation_id   TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+    CHECK (action IN ('insert', 'update', 'delete', 'recreate')),
+    CHECK (revision >= 1),
+    CHECK (is_tombstone IN (0, 1)),
+    CHECK (length(canonical_hash) = 64)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_op_changelog_scope
+    ON sync_operation_changelog (tenant_id, branch_id, table_name, record_id);
+
+CREATE TABLE IF NOT EXISTS sync_operation_audit (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id     TEXT NOT NULL,
+    tenant_id        TEXT NOT NULL,
+    branch_id        TEXT NOT NULL,
+    principal_type   TEXT NOT NULL,
+    principal_id     TEXT NOT NULL,
+    table_name       TEXT NOT NULL,
+    record_id        TEXT NOT NULL,
+    action           TEXT NOT NULL,
+    applied_revision INTEGER NOT NULL,
+    created_at       TEXT NOT NULL,
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+    CHECK (principal_type IN ('user', 'device', 'system')),
+    CHECK (action IN ('insert', 'update', 'delete', 'recreate')),
+    CHECK (applied_revision >= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_op_audit_op
+    ON sync_operation_audit (operation_id);
+"#;
 
 const V0010_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS canonical_entities (
@@ -1134,7 +1196,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
@@ -1166,7 +1228,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=10).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=11).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1179,7 +1241,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1343,7 +1405,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

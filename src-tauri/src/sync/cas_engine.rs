@@ -107,15 +107,37 @@ pub enum Action {
     Insert,
     Update,
     Delete,
+    /// M6-B3B2 — an EXPLICIT, revision-valid recreate of a tombstoned entity. Applies iff the
+    /// entity is present, IS a tombstone, and `base_revision == current_revision` (the tombstone's
+    /// revision). It un-tombstones with a fresh revision. It can NEVER resurrect via a stale
+    /// revision (that is a conflict), and a plain `Insert`/`Update` on a tombstone stays a conflict.
+    Recreate,
 }
 
 impl Action {
+    /// The action as it appears in the request hash + result envelope (distinguishes a recreate
+    /// from an insert for idempotency + audit).
     pub fn as_str(self) -> &'static str {
         match self {
             Action::Insert => "insert",
             Action::Update => "update",
             Action::Delete => "delete",
+            Action::Recreate => "recreate",
         }
+    }
+    /// The action string STORED in `operation_ledger.action`, whose CHECK predates recreate and
+    /// only allows insert/update/delete. A recreate is recorded as an `insert` there (it writes a
+    /// full fresh record); the recreate distinction is preserved in the request hash + result_json.
+    pub fn ledger_action(self) -> &'static str {
+        match self {
+            Action::Recreate => "insert",
+            other => other.as_str(),
+        }
+    }
+    /// The action string used for the B3A schema-contract check. A recreate is validated under the
+    /// `insert` contract (it carries a full record payload).
+    fn schema_action(self) -> &'static str {
+        self.ledger_action()
     }
 }
 
@@ -348,6 +370,18 @@ fn decide(op: &OperationInput, current: &Option<EntityState>) -> Decision {
             },
             _ => Decision::Conflict,
         },
+        // Recreate (M6-B3B2): applies iff present, IS a tombstone, and base == current (the
+        // tombstone's own revision) — an EXPLICIT revision-valid resurrection. A stale base
+        // (older than the tombstone) is a conflict, so a late create/update can never resurrect.
+        Action::Recreate => match current {
+            Some(e) if e.is_tombstone && e.current_revision == op.base_revision => Decision::Apply {
+                new_revision: e.current_revision + 1,
+                new_data: op.payload.clone(),
+                new_tombstone: false,
+                new_hash: canonical_state_hash(&op.payload, false),
+            },
+            _ => Decision::Conflict,
+        },
     }
 }
 
@@ -414,11 +448,29 @@ pub fn apply_operations(
     now: &str,
     ops: &[OperationInput],
 ) -> Result<Vec<OpResult>, CasError> {
+    // ── processing §9 — one immediate transaction; write lock up front so CAS is serialized ──
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(CasError::Db)?;
+    let results = apply_operations_in_tx(&tx, now, ops)?;
+    tx.commit().map_err(CasError::Db)?;
+    Ok(results)
+}
+
+/// M6-B3B2 — the same batch semantics as [`apply_operations`], but on a CALLER-OWNED transaction so
+/// an outer versioned-protocol layer can add its single changelog + audit rows in the SAME atomic
+/// transaction and commit once. The caller MUST hold an immediate/write transaction. Preflight +
+/// per-op CAS are identical; nothing here commits or rolls back.
+pub(crate) fn apply_operations_in_tx(
+    tx: &Transaction,
+    now: &str,
+    ops: &[OperationInput],
+) -> Result<Vec<OpResult>, CasError> {
     // ── preflight §9 — B3A contract + per-op request hash ──
     let mut prepared: Vec<(&OperationInput, String)> = Vec::with_capacity(ops.len());
     for (i, op) in ops.iter().enumerate() {
         if let Some(code) =
-            sync_schema::change_contract_violation(&op.table_name, op.action.as_str(), &op.payload)
+            sync_schema::change_contract_violation(&op.table_name, op.action.schema_action(), &op.payload)
         {
             return Err(CasError::ValidationRejected { index: i, code });
         }
@@ -455,16 +507,12 @@ pub fn apply_operations(
         }
     }
 
-    // ── processing §9 — one immediate transaction; write lock up front so CAS is serialized ──
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(CasError::Db)?;
+    // ── processing §9 — on the caller-owned write transaction; CAS serialized by that lock ──
     let mut results = Vec::with_capacity(prepared.len());
     for (op, rh) in &prepared {
-        let res = process_one(&tx, now, op, rh).map_err(CasError::Db)?;
+        let res = process_one(tx, now, op, rh).map_err(CasError::Db)?;
         results.push(res);
     }
-    tx.commit().map_err(CasError::Db)?;
     Ok(results)
 }
 
@@ -529,12 +577,16 @@ fn process_one(
                 // the row is still at `base_revision` and not a tombstone. Under the immediate
                 // transaction this always matches the row `decide` saw; the guard is defence in
                 // depth against any weaker isolation.
+                // The current tombstone state the decision required: update/delete apply to a LIVE
+                // row (0); an explicit recreate applies to a TOMBSTONE (1). This keeps the SQL-level
+                // CAS guard exact for every action.
+                let expected_current_tombstone = matches!(op.action, Action::Recreate) as i64;
                 let rows = tx.execute(
                     "UPDATE canonical_entities
                         SET current_revision = ?1, canonical_data = ?2, is_tombstone = ?3,
                             last_operation_id = ?4, canonical_hash = ?5, updated_at = ?6
                       WHERE tenant_id = ?7 AND branch_id = ?8 AND table_name = ?9 AND record_id = ?10
-                        AND current_revision = ?11 AND is_tombstone = 0",
+                        AND current_revision = ?11 AND is_tombstone = ?12",
                     params![
                         new_revision,
                         new_data,
@@ -546,7 +598,8 @@ fn process_one(
                         op.branch_id,
                         op.table_name,
                         op.record_id,
-                        op.base_revision
+                        op.base_revision,
+                        expected_current_tombstone
                     ],
                 )?;
                 if rows != 1 {
@@ -593,7 +646,7 @@ fn insert_ledger(
             op.principal.id(),
             op.table_name,
             op.record_id,
-            op.action.as_str(),
+            op.action.ledger_action(),
             op.base_revision,
             request_hash,
             result_status,

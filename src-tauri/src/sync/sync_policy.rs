@@ -113,6 +113,10 @@ pub const INTERNAL_TABLES: &[&str] = &[
     // able to push to them on any sync path (kept identical in apply-change.ts INTERNAL_TABLES).
     "canonical_entities",
     "operation_ledger",
+    // M6-B3B2 §v0011 — the versioned operation protocol's server-side changelog + audit sinks.
+    // Server-only transport bookkeeping; a client must never push to them on any sync path.
+    "sync_operation_changelog",
+    "sync_operation_audit",
     "schema_migrations",
 ];
 
@@ -477,6 +481,9 @@ mod tests {
             // v0010 server-authoritative CAS store + operation ledger (M6-B3B1).
             ("canonical_entities", InternalForbidden),
             ("operation_ledger", InternalForbidden),
+            // v0011 versioned operation protocol changelog + audit (M6-B3B2).
+            ("sync_operation_changelog", InternalForbidden),
+            ("sync_operation_audit", InternalForbidden),
             // v0009 quarantine bookkeeping.
             ("sync_change_quarantine", InternalForbidden),
             // v0002–v0008 control plane.

@@ -126,6 +126,10 @@ const INTERNAL_TABLES: readonly string[] = [
   // Kept identical to INTERNAL_TABLES in sync_policy.rs (a Rust test asserts exact set equality).
   'canonical_entities',
   'operation_ledger',
+  // M6-B3B2 §v0011 — the versioned operation-protocol server-side changelog + audit sinks;
+  // server-only, never client-synced. Kept identical to INTERNAL_TABLES in sync_policy.rs.
+  'sync_operation_changelog',
+  'sync_operation_audit',
   'schema_migrations',
 ];
 // @sync-policy:internal:end
