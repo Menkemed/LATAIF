@@ -1199,10 +1199,11 @@ mod legacy_push_tests {
         let forbidden = all_forbidden_tables();
         assert_eq!(
             forbidden.len(),
-            28,
-            "16 control-plane + 12 internal (incl. sync_change_quarantine, the v0010 CAS tables, \
-             the v0011 operation-protocol changelog/audit sinks, and the v0012/v0013 mobile-upload \
-             inbox + claim tables — a client can never push to them)"
+            29,
+            "16 control-plane + 13 internal (incl. sync_change_quarantine, the v0010 CAS tables, \
+             the v0011 operation-protocol changelog/audit sinks, the v0012/v0013 mobile-upload \
+             inbox + claim tables, and the v0014 mobile_runtime_scope binding — a client can never \
+             push to them)"
         );
         for table in forbidden {
             let mut conn = db();

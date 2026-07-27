@@ -123,6 +123,9 @@ pub const INTERNAL_TABLES: &[&str] = &[
     "mobile_upload_image",
     // MOBILE-04B2A2 §v0013 — the internal per-job claim/lease for the JS handoff worker.
     "mobile_upload_claim",
+    // MOBILE-04B2A3 §v0014 — the canonical runtime-scope binding SSOT. Server-internal; a client can
+    // never push to it (kept identical in apply-change.ts INTERNAL_TABLES).
+    "mobile_runtime_scope",
     "schema_migrations",
 ];
 
@@ -494,6 +497,8 @@ mod tests {
             ("mobile_upload_inbox", InternalForbidden),
             ("mobile_upload_image", InternalForbidden),
             ("mobile_upload_claim", InternalForbidden),
+            // v0014 canonical runtime-scope binding SSOT (MOBILE-04B2A3).
+            ("mobile_runtime_scope", InternalForbidden),
             // v0009 quarantine bookkeeping.
             ("sync_change_quarantine", InternalForbidden),
             // v0002–v0008 control plane.

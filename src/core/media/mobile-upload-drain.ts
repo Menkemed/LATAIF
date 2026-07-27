@@ -16,6 +16,7 @@
 import type { ProductCreateResult } from './product-media-create';
 import type { MobileUploadReceiptIntent } from '../../stores/productStore';
 import type { PrepareResult } from './gateway';
+import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
 
 /** One image prepared out-of-band (Rust staged + rendered it) for the durable create batch — an
  *  opaque descriptor, no bytes. */
@@ -109,11 +110,12 @@ export type ReadyVerdict = 'ready' | 'pending' | 'broken';
 export interface MobileDrainDeps {
   bridge: MobileUploadBridge;
   claimantInstanceId: string;
-  /** MOBILE-04B2A2-R5 §2 — hard runtime gate. Returns true ONLY when a canonical Rust scope source
-   *  exists. When it is absent or returns false, EVERY drain entry (direct start, worker tick,
-   *  post-auth trigger, epoch change) aborts BEFORE issuing any claim — never falling back to the
-   *  hardcoded scope. Left optional so undefined defaults to BLOCKED (fail closed). */
-  runtimeScopeEvidence?: () => boolean;
+  /** MOBILE-04B2A3-R1 §1/§2 — read the CURRENT Rust scope evidence FRESH from the server (the
+   *  registered read command derives the install id server-side). Called at every guard boundary —
+   *  worker creation, each claim cycle, before prepare, before the checkpoint, and immediately before
+   *  ready/quarantine — so a once-read revision NEVER outlives a later rebind. The wiring may dedup a
+   *  concurrent read but must never return a stale revision as truth. Absent → BLOCKED (fail closed). */
+  readScopeEvidence?: () => Promise<RuntimeScopeEvidence | null>;
   /** The current authenticated desktop scope, or null when not authenticated. */
   currentScope: () => { tenantId: string; branchId: string } | null;
   /** The durable sql.js source-binding for this upload. Keyed by the FULL identity incl. user. */
@@ -150,8 +152,19 @@ export interface DrainOutcome { code: DrainCode; detail?: string }
 
 /** MOBILE-04B2A2-R5 §2 — true when NO canonical runtime scope evidence is available, i.e. the drain
  *  must NOT run. Fail closed: a missing predicate is treated as blocked. */
-function runtimeScopeBlocked(deps: MobileDrainDeps): boolean {
-  return !(deps.runtimeScopeEvidence?.() ?? false);
+/** MOBILE-04B2A3-R1 — one FRESH read of the Rust scope evidence, reduced to (available, revision).
+ *  `available` requires a configured binding that exactly matches the active auth/DB scope; `revision`
+ *  is the current binding revision (0 when unbound). Never uses a hardcoded scope fallback. */
+async function freshScope(deps: MobileDrainDeps): Promise<{ available: boolean; revision: number }> {
+  const ev = deps.readScopeEvidence ? await deps.readScopeEvidence() : null;
+  return { available: runtimeScopeAvailable(ev, deps.currentScope()), revision: runtimeBindingRevisionOf(ev) };
+}
+
+/** A running claim is fenced when the scope is no longer available OR the binding revision moved away
+ *  from the one the claim started under — either way it must NOT write ready/quarantine. */
+async function claimFenced(deps: MobileDrainDeps, entryRevision: number): Promise<boolean> {
+  const s = await freshScope(deps);
+  return !s.available || s.revision !== entryRevision;
 }
 
 // error codes stamped onto quarantined Rust jobs
@@ -259,6 +272,12 @@ export class MaterializeError extends Error {
  *  crash-safe: the durable receipt + product make a resume converge to the SAME product. */
 export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDrainDeps): Promise<DrainOutcome> {
   const u = grant.authenticatedUserId; // ORIGIN user — every per-job call is keyed by it + the token
+  // MOBILE-04B2A3-R1 — read FRESH evidence at entry and capture the binding revision this claim runs
+  // under. If the Rust binding rebinds (or is revoked) across any async step, the claim must NOT mark
+  // ready/quarantine — it releases. A once-read revision never becomes stale truth.
+  const entry = await freshScope(deps);
+  if (!entry.available) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); return { code: 'scope_blocked' }; }
+  const entryRevision = entry.revision;
   // Scope: only ever process a job that belongs to the current authenticated desktop scope.
   const scope = deps.currentScope();
   if (!scope || scope.tenantId !== grant.tenantId || scope.branchId !== grant.branchId) {
@@ -285,7 +304,7 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
       return { code: 'operation_conflict' };
     }
     // Resume: product + matching receipt are already durable — just finish/verify + ready.
-    return finishReady(grant, deps, 'resumed');
+    return finishReady(grant, deps, 'resumed', entryRevision);
   }
 
   if (exists) {
@@ -301,12 +320,22 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
   try {
     prepared = await deps.preparePreparedMedia(grant);
   } catch (e) {
+    // A3 fence (fresh read): if the binding changed during prepare, do not write a terminal state.
+    if (await claimFenced(deps, entryRevision)) {
+      await deps.bridge.release(u, grant.uploadEventId, grant.claimToken);
+      return { code: 'deferred', detail: 'scope_fenced' };
+    }
     if (e instanceof MaterializeError && e.kind === 'broken') {
       await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_MANIFEST);
       return { code: 'manifest_invalid' };
     }
     await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); // token lost / transient → retry
     return { code: 'deferred', detail: 'prepare_unavailable' };
+  }
+  // A3 fence (fresh read) immediately before the durable product+receipt checkpoint.
+  if (await claimFenced(deps, entryRevision)) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken);
+    return { code: 'deferred', detail: 'scope_fenced' };
   }
   const metadataHash = await canonicalProductMetadataHash(projectionFieldsFromMetadata(grant.metadataJson));
   const manifestHash = await preparedManifestHash(grant.images, identitiesFromPrepared(prepared));
@@ -322,11 +351,15 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
     return { code: 'deferred', detail: result.errorCode };
   }
   // 'created' or 'media_incomplete' → product durable. Verify before marking ready.
-  return finishReady(grant, deps, 'ready');
+  return finishReady(grant, deps, 'ready', entryRevision);
 }
 
-async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode: DrainCode): Promise<DrainOutcome> {
+async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode: DrainCode, entryRevision: number): Promise<DrainOutcome> {
   const u = grant.authenticatedUserId;
+  // MOBILE-04B2A3 — a scope/revision change during the (async) verify + mark sequence must never
+  // produce a ready or quarantine write from this now-stale claim. Re-check on entry and again
+  // right before the terminal mark.
+  if (await claimFenced(deps, entryRevision)) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); return { code: 'deferred', detail: 'scope_fenced' }; }
   const verdict = await deps.verifyReady(grant);
   if (verdict === 'broken') {
     await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_BROKEN);
@@ -365,6 +398,9 @@ async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode
     await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_BATCH_MISMATCH);
     return { code: 'operation_conflict', detail: ERR_BATCH_MISMATCH };
   }
+  // Final A3 fence (fresh read) immediately before the terminal write: a rebind after verification
+  // must never mark ready.
+  if (await claimFenced(deps, entryRevision)) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); return { code: 'deferred', detail: 'scope_fenced' }; }
   const outcome = await deps.bridge.markReady(
     u, grant.uploadEventId, grant.claimToken, grant.entityId, grant.payloadHash, grant.entityId,
   );
@@ -375,10 +411,10 @@ async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode
 /** Drain up to `max` jobs this pass. Stops on the first idle claim (nothing to do) or a rejected
  *  ready (our epoch lost the lease). Returns the per-job outcomes. */
 export async function drainMobileUploads(deps: MobileDrainDeps, max = 25): Promise<DrainOutcome[]> {
-  // R5 §2: hard stop BEFORE the first claim when there is no canonical runtime scope evidence.
-  if (runtimeScopeBlocked(deps)) return [{ code: 'scope_blocked' }];
   const out: DrainOutcome[] = [];
   for (let i = 0; i < max; i++) {
+    // R1 §2: read FRESH evidence before EVERY claim — a rebind mid-pass stops the next claim.
+    if (!(await freshScope(deps)).available) { out.push({ code: 'scope_blocked' }); break; }
     let grant: ClaimGrant | null;
     try {
       grant = await deps.bridge.claim(deps.claimantInstanceId, MOBILE_DRAIN_LEASE_SECONDS);
@@ -403,7 +439,10 @@ export class MobileUploadDrainWorker {
   private paused = false;
   private readonly deps: MobileDrainDeps;
   readonly epoch: number;
-  constructor(deps: MobileDrainDeps, epoch: number) { this.deps = deps; this.epoch = epoch; }
+  /** MOBILE-04B2A3 — the binding revision this worker was minted for (from a fresh read at creation);
+   *  a later revision fences it. */
+  readonly bindingRevision: number;
+  constructor(deps: MobileDrainDeps, epoch: number, bindingRevision: number) { this.deps = deps; this.epoch = epoch; this.bindingRevision = bindingRevision; }
 
   pause(): void { this.paused = true; }
   resume(): void { this.paused = false; }
@@ -412,8 +451,11 @@ export class MobileUploadDrainWorker {
 
   /** Run one drain pass, single-flighted. Skips silently when paused or unauthenticated. */
   async tick(): Promise<DrainOutcome[]> {
-    if (runtimeScopeBlocked(this.deps)) return [{ code: 'scope_blocked' }]; // R5 §2: no canonical scope → never claim
     if (this.paused) return [{ code: 'idle' }];
+    // R1 §2: read FRESH evidence; block if the scope is unavailable OR the binding revision moved
+    // away from the one this worker was minted for (a rebind fences the stale worker).
+    const s = await freshScope(this.deps);
+    if (!s.available || s.revision !== this.bindingRevision) return [{ code: 'scope_blocked' }];
     if (!this.deps.currentScope()) return [{ code: 'idle' }]; // not authenticated yet
     if (this.inFlight) return this.inFlight; // single-flight: coalesce concurrent triggers
     this.inFlight = drainMobileUploads(this.deps).catch(() => [{ code: 'idle' as const }]);
@@ -427,13 +469,14 @@ let currentWorker: { key: string; worker: MobileUploadDrainWorker } | null = nul
 
 /** Get-or-create the worker for the given epoch + deps. A different epoch or scope key yields a
  *  fresh worker (the previous one is abandoned). Returns null when unauthenticated. */
-export function getMobileUploadDrainWorker(deps: MobileDrainDeps, epoch: number): MobileUploadDrainWorker | null {
-  if (runtimeScopeBlocked(deps)) return null; // R5 §2: no canonical scope → no worker at all
+export async function getMobileUploadDrainWorker(deps: MobileDrainDeps, epoch: number): Promise<MobileUploadDrainWorker | null> {
+  // R1 §2: FRESH read at worker creation. No available binding → no worker at all.
+  const s = await freshScope(deps);
   const scope = deps.currentScope();
-  if (!scope) return null;
-  const key = `${epoch}:${scope.tenantId}:${scope.branchId}`;
+  if (!s.available || !scope) return null;
+  const key = `${epoch}:${scope.tenantId}:${scope.branchId}:${s.revision}`;
   if (!currentWorker || currentWorker.key !== key) {
-    currentWorker = { key, worker: new MobileUploadDrainWorker(deps, epoch) };
+    currentWorker = { key, worker: new MobileUploadDrainWorker(deps, epoch, s.revision) };
   }
   return currentWorker.worker;
 }
@@ -442,9 +485,7 @@ export function getMobileUploadDrainWorker(deps: MobileDrainDeps, epoch: number)
  *  and is a no-op when unauthenticated, paused, or the Rust bridge is unavailable (e.g. web preview
  *  with no Tauri: the claim invoke rejects and the pass simply ends). */
 export function triggerMobileUploadDrainSafe(deps: MobileDrainDeps, epoch: number): void {
-  if (runtimeScopeBlocked(deps)) return; // R5 §2: post-auth / lifecycle-resume → no-op while blocked
-  try {
-    const w = getMobileUploadDrainWorker(deps, epoch);
-    if (w) void w.tick();
-  } catch { /* never break the caller */ }
+  // R1 §2: getMobileUploadDrainWorker reads FRESH evidence and returns null while blocked; the tick
+  // reads fresh again and fences. Fire-and-forget; never throws.
+  void getMobileUploadDrainWorker(deps, epoch).then((w) => { if (w) void w.tick(); }).catch(() => { /* never break the caller */ });
 }

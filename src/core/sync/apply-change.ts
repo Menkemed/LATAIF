@@ -135,6 +135,9 @@ const INTERNAL_TABLES: readonly string[] = [
   'mobile_upload_image',
   // MOBILE-04B2A2 §v0013 — the internal per-job claim/lease; server-only, never synced.
   'mobile_upload_claim',
+  // MOBILE-04B2A3 §v0014 — the canonical runtime-scope binding SSOT; server-only, never synced.
+  // Kept identical to INTERNAL_TABLES in sync_policy.rs (a Rust test asserts exact set equality).
+  'mobile_runtime_scope',
   'schema_migrations',
 ];
 // @sync-policy:internal:end

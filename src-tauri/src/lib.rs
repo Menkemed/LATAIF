@@ -1732,15 +1732,26 @@ fn mobile_lease_until(now: chrono::DateTime<chrono::Utc>, lease_seconds: i64) ->
     (now + chrono::Duration::seconds(lease_seconds.clamp(1, 3600))).to_rfc3339()
 }
 
+// MOBILE-04B2A3-R1 §3 — every internal mobile MUTATION wrapper now logically requires the caller's
+// expected (binding_revision, tenant, branch) and passes the server-side revision fence BEFORE it
+// mutates. `server_instance_id` is ALWAYS derived server-side from the install id (open_config_db) —
+// never taken from the caller — and the fence reads the SSOT itself. The commands stay unregistered,
+// so this is a fully-tested internal guard, not a runtime activation. (The JS bridge does not invoke
+// these — the drain fences JS-side on fresh evidence — so no renderer supplies these expectations.)
 #[allow(dead_code)]
 #[tauri::command]
 fn mobile_upload_claim(
     state: tauri::State<'_, AppHandleState>,
     claimant_instance_id: String,
     lease_seconds: i64,
+    expected_binding_revision: i64,
+    expected_tenant_id: String,
+    expected_branch_id: String,
 ) -> Result<Option<sync::mobile_upload::ClaimGrant>, String> {
     mobile_runtime_gate()?;
-    let (mut conn, _) = open_config_db(&state.server)?;
+    let (mut conn, install_id) = open_config_db(&state.server)?;
+    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
+        .map_err(|e| e.to_string())?;
     let now = chrono::Utc::now();
     let token = uuid::Uuid::new_v4().to_string();
     // Scope by the fixed desktop tenant/branch across ALL origin users; lease as the worker.
@@ -1765,9 +1776,14 @@ fn mobile_upload_prepare_image(
     claim_token: String,
     slot: i64,
     tenant_scope: String,
+    expected_binding_revision: i64,
+    expected_tenant_id: String,
+    expected_branch_id: String,
 ) -> Result<media::ingest::PrepareResult, String> {
     mobile_runtime_gate()?;
-    let (conn, _) = open_config_db(&state.server)?;
+    let (conn, install_id) = open_config_db(&state.server)?;
+    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
+        .map_err(|e| e.to_string())?;
     let trusted = mobile_job_trusted(&origin_authenticated_user_id);
     let now = chrono::Utc::now().to_rfc3339();
     // Claim-gated load (token + processing + unexpired lease) that yields the full provenance.
@@ -1794,9 +1810,14 @@ fn mobile_upload_renew(
     claim_token: String,
     claimant_instance_id: String,
     lease_seconds: i64,
+    expected_binding_revision: i64,
+    expected_tenant_id: String,
+    expected_branch_id: String,
 ) -> Result<bool, String> {
     mobile_runtime_gate()?;
-    let (conn, _) = open_config_db(&state.server)?;
+    let (conn, install_id) = open_config_db(&state.server)?;
+    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
+        .map_err(|e| e.to_string())?;
     let now = chrono::Utc::now();
     sync::mobile_upload::renew_claim(
         &conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &claimant_instance_id,
@@ -1812,9 +1833,14 @@ fn mobile_upload_release(
     origin_authenticated_user_id: String,
     upload_event_id: String,
     claim_token: String,
+    expected_binding_revision: i64,
+    expected_tenant_id: String,
+    expected_branch_id: String,
 ) -> Result<bool, String> {
     mobile_runtime_gate()?;
-    let (mut conn, _) = open_config_db(&state.server)?;
+    let (mut conn, install_id) = open_config_db(&state.server)?;
+    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
+        .map_err(|e| e.to_string())?;
     sync::mobile_upload::mark_retryable(&mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.code().to_string())
 }
@@ -1827,9 +1853,14 @@ fn mobile_upload_mark_quarantined(
     upload_event_id: String,
     claim_token: String,
     code: String,
+    expected_binding_revision: i64,
+    expected_tenant_id: String,
+    expected_branch_id: String,
 ) -> Result<bool, String> {
     mobile_runtime_gate()?;
-    let (mut conn, _) = open_config_db(&state.server)?;
+    let (mut conn, install_id) = open_config_db(&state.server)?;
+    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
+        .map_err(|e| e.to_string())?;
     sync::mobile_upload::mark_quarantined_claimed(&mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &code, &chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.code().to_string())
 }
@@ -1844,9 +1875,14 @@ fn mobile_upload_mark_ready(
     entity_id: String,
     payload_hash: String,
     product_id: String,
+    expected_binding_revision: i64,
+    expected_tenant_id: String,
+    expected_branch_id: String,
 ) -> Result<String, String> {
     mobile_runtime_gate()?;
-    let (mut conn, _) = open_config_db(&state.server)?;
+    let (mut conn, install_id) = open_config_db(&state.server)?;
+    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
+        .map_err(|e| e.to_string())?;
     let outcome = sync::mobile_upload::mark_ready(
         &mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &entity_id, &payload_hash, &product_id,
         &chrono::Utc::now().to_rfc3339(),
@@ -1858,6 +1894,49 @@ fn mobile_upload_mark_ready(
         sync::mobile_upload::ReadyOutcome::Rejected => "rejected",
     }
     .to_string())
+}
+
+// ── MOBILE-04B2A3 — canonical runtime-scope binding ─────────────────────────
+//
+// READ path (registered): report the active binding for THIS install as evidence, or
+// `configured=false` when unbound. Reveals only the configured scope — no secret — and the JS gate
+// must compare it, byte-for-byte, against the active auth/DB scope before it may ever claim.
+#[tauri::command]
+fn mobile_runtime_scope_evidence(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<sync::mobile_runtime_scope::RuntimeScopeEvidence, String> {
+    let (conn, install_id) = open_config_db(&state.server)?;
+    sync::mobile_runtime_scope::read_runtime_scope_evidence(&conn, &install_id)
+        .map_err(|e| e.to_string())
+}
+
+// CONFIGURE path — owner-gated. DELIBERATELY NOT registered in generate_handler! (see below): this
+// slice ships the SSOT + evidence contract but adds NO runtime configuration path, because there is
+// no dedicated secure owner-provisioning dialog for it yet (only a window.prompt owner flow exists).
+// Kept in the file (owner-gated, fully tested core) so a later slice can wire it behind a proper
+// dialog. Until then no binding can be created, so the evidence stays `configured=false` and the
+// mobile pipeline stays blocked. The owner is verified against the SERVER DB (bcrypt), never trusted
+// from the caller; the configured (tenant, branch) must exist in the server DB and belong together.
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_runtime_scope_configure(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    tenant_id: String,
+    branch_id: String,
+) -> Result<sync::mobile_runtime_scope::RuntimeScopeEvidence, String> {
+    let (conn, install_id) = open_config_db(&state.server)?;
+    // Owner identity is verified against tenant-1/branch-main (the owner-of-record scope); the scope
+    // BEING configured can be any valid (tenant, branch) — that is what decouples the binding from
+    // the seed constants.
+    let owner = sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sync::mobile_runtime_scope::configure_runtime_scope(
+        &conn, &install_id, &tenant_id, &branch_id, &owner, &now,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1958,6 +2037,11 @@ pub fn run() {
             // _mark_ready) are DELIBERATELY NOT registered here: runtime activation is blocked while
             // there is no canonical runtime scope source. Their wrappers remain in the file and also
             // fail closed (mobile_runtime_gate) so an accidental re-registration cannot activate them.
+            //
+            // MOBILE-04B2A3 — the runtime-scope EVIDENCE read is registered (read-only, no secret);
+            // the owner-gated `mobile_runtime_scope_configure` is DELIBERATELY NOT registered (no
+            // secure owner dialog for it yet), so no binding can be created at runtime.
+            mobile_runtime_scope_evidence,
             finalize_application_shutdown
         ])
         .run(tauri::generate_context!())

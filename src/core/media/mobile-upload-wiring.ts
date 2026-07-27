@@ -19,15 +19,31 @@ import {
   createTauriMobileUploadBridge, triggerMobileUploadDrainSafe, canonicalProductMetadataHash, MaterializeError,
   type ClaimGrant, type MobileDrainDeps, type ReadyVerdict, type DurableReceipt, type PreparedMediaItem, type BoundBatchJob, type GallerySlot,
 } from './mobile-upload-drain';
+import type { RuntimeScopeEvidence } from './runtime-scope-evidence';
 
-// MOBILE-04B2A2-R4 §1 — ACTIVATION IS BLOCKED. There is NO canonical runtime source of the
-// (tenant, branch) scope: server + desktop derive it from the hardcoded compile-time constant
-// "tenant-1"/"branch-main" (the server DB is scope-agnostic — its rows are keyed BY the constant,
-// never read as a source), and a user-created branch's real id can diverge (a UUID) from the fixed
-// Rust sync scope. Auto-activating the drain would be a hardcoded-scope activation, which R4 forbids.
-// The full internal chain (commands, saga, provenance, three-way batch verification) is built and
-// test-proven; it is NOT auto-started until a canonical runtime scope source exists.
-const RUNTIME_SCOPE_SOURCE_AVAILABLE = false;
+// MOBILE-04B2A3-R1 — the runtime scope source is the Rust-owned canonical binding (v0014), read
+// FRESH at every guard boundary. There is NO persistent cached evidence: a once-read revision must
+// never outlive a later rebind. The only permitted caching is de-duplicating a SINGLE concurrent
+// read (so parallel guards in one tick share one invoke), never returning a stale revision as truth.
+// The read command derives the install id server-side; the gate requires an EXACT match to the active
+// auth/DB scope. In this slice the owner-configure command is unregistered, so the binding is always
+// unconfigured → the gate stays closed and the pipeline never processes.
+let inFlightScopeRead: Promise<RuntimeScopeEvidence | null> | null = null;
+
+/** One FRESH read of the Rust scope evidence, de-duplicating only a concurrent in-flight read. Never
+ *  throws; returns null (→ blocked) without Tauri or on any error. */
+async function readScopeEvidence(): Promise<RuntimeScopeEvidence | null> {
+  if (inFlightScopeRead) return inFlightScopeRead; // dedup ONLY the concurrent read; no lasting cache
+  inFlightScopeRead = (async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<RuntimeScopeEvidence>('mobile_runtime_scope_evidence');
+    } catch {
+      return null; // no Tauri / read failed → fail closed
+    }
+  })();
+  try { return await inFlightScopeRead; } finally { inFlightScopeRead = null; }
+}
 
 const ROLE = 'stock_image';
 // Stable per-JS-session claimant instance id (a reload mints a new one — fine; the Rust lease/token
@@ -146,10 +162,10 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
   return {
     bridge,
     claimantInstanceId: CLAIMANT_INSTANCE_ID,
-    // R5 §2: NO canonical runtime scope source → the drain hard-blocks before any claim, no matter
-    // how it is entered (direct start, worker tick, post-auth trigger, epoch change). Never a
-    // hardcoded-scope fallback. This is the SAME gate the post-auth trigger consults below.
-    runtimeScopeEvidence: () => RUNTIME_SCOPE_SOURCE_AVAILABLE,
+    // MOBILE-04B2A3-R1: the gate reads the Rust canonical binding FRESH each time and the drain
+    // compares it EXACTLY to the active scope + fences on the binding revision. Never a hardcoded
+    // fallback. Unconfigured (production) → blocked before any claim, however the drain is entered.
+    readScopeEvidence,
     currentScope,
     readReceipt,
     productExists: (id) => query('SELECT 1 FROM products WHERE id = ?', [id]).length > 0,
@@ -168,7 +184,8 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
 /** Fire-and-forget drain trigger for the post-auth / media-recovery-complete / lifecycle-resume
  *  path. Never throws; a no-op without an authenticated scope or without Tauri. */
 export function triggerMobileUploadDrainPostAuth(epoch: number): void {
-  // Blocked: no canonical runtime scope source (R4 §1). Never auto-activate with a hardcoded scope.
-  if (!RUNTIME_SCOPE_SOURCE_AVAILABLE) return;
+  // MOBILE-04B2A3-R1: no pre-refresh — the drain reads FRESH Rust evidence at worker creation and at
+  // every guard, so it can never act on a stale revision. In production the binding is unconfigured →
+  // the gate blocks before any claim; the seed constants are never a fallback. Never throws.
   triggerMobileUploadDrainSafe(buildMobileUploadDrainDeps(), epoch);
 }

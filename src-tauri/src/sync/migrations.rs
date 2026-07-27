@@ -55,6 +55,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0011_OPERATION_CHANGELOG_AUDIT,
     V0012_MOBILE_UPLOAD_INBOX,
     V0013_MOBILE_UPLOAD_CLAIM,
+    V0014_MOBILE_RUNTIME_SCOPE,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -405,6 +406,35 @@ CREATE TABLE IF NOT EXISTS mobile_upload_claim (
         REFERENCES mobile_upload_inbox (tenant_id, branch_id, authenticated_user_id, upload_event_id)
         ON DELETE CASCADE
 );
+"#;
+
+// MOBILE-04B2A3 — the canonical runtime-scope binding SSOT. An explicit, owner-configured binding of
+// (tenant_id, branch_id) to THIS server/install (server_instance_id = the install id). It is the only
+// trusted runtime source of the mobile pipeline's scope: the fixed compile-time constants are NEVER a
+// productive source, and no first-writer/first-login auto-binding is permitted. INTERNAL / denylisted;
+// no route, no sync. History is preserved (each rebind supersedes the prior active row and bumps
+// binding_revision), while a PARTIAL UNIQUE INDEX enforces exactly one `active` binding per install.
+pub const V0014_MOBILE_RUNTIME_SCOPE: Migration = Migration {
+    version: 14,
+    name: "mobile_runtime_scope",
+    up_sql: V0014_SQL,
+    reference_sql: V0014_SQL,
+};
+const V0014_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS mobile_runtime_scope (
+    server_instance_id TEXT    NOT NULL,
+    binding_revision   INTEGER NOT NULL,
+    tenant_id          TEXT    NOT NULL,
+    branch_id          TEXT    NOT NULL,
+    configured_by      TEXT    NOT NULL,
+    configured_at      TEXT    NOT NULL,
+    status             TEXT    NOT NULL,
+    PRIMARY KEY (server_instance_id, binding_revision),
+    CHECK (binding_revision >= 1),
+    CHECK (status IN ('active','superseded'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mobile_runtime_scope_one_active
+    ON mobile_runtime_scope (server_instance_id) WHERE status = 'active';
 "#;
 
 const V0011_SQL: &str = r#"
@@ -1292,8 +1322,10 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         assert!(report.already_current.is_empty());
+        // MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014).
+        assert!(table_exists(&conn, "mobile_runtime_scope"));
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
         // M6-B3B1 — the new CAS tables (v0010), alongside the untouched v0001 placeholders.
@@ -1324,7 +1356,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=13).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=14).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1337,7 +1369,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1494,6 +1526,40 @@ mod tests {
         assert!(op("o1", "user", "u", "update", 1, &h64, "applied").is_err(), "operation_id is globally unique");
     }
 
+    // ── MOBILE-04B2A3 — v0014 declares its structure exactly as it applies it ─
+    #[test]
+    fn v0014_reference_equals_up_and_only_creates() {
+        assert_eq!(
+            V0014_MOBILE_RUNTIME_SCOPE.up_sql,
+            V0014_MOBILE_RUNTIME_SCOPE.reference_sql
+        );
+        let up = V0014_SQL.to_uppercase();
+        assert!(!up.contains("ALTER TABLE"), "v0014 must not touch frozen tables");
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
+    // ── MOBILE-04B2A3 — the binding table carries its invariants in the DB ────
+    #[test]
+    fn v0014_check_constraints_and_single_active_binding() {
+        let conn = base_db();
+        run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
+        let ins = |instance: &str, rev: i64, status: &str| {
+            conn.execute(
+                "INSERT INTO mobile_runtime_scope
+                   (server_instance_id, binding_revision, tenant_id, branch_id, configured_by, configured_at, status)
+                 VALUES (?1, ?2, 'tenant-1', 'branch-main', 'user-owner', 'now', ?3)",
+                params![instance, rev, status],
+            )
+        };
+        assert!(ins("inst-1", 1, "active").is_ok());
+        assert!(ins("inst-1", 0, "active").is_err(), "binding_revision must be >= 1");
+        assert!(ins("inst-1", 2, "frozen").is_err(), "status enum");
+        // exactly one ACTIVE binding per install (partial unique index); a superseded one is fine.
+        assert!(ins("inst-1", 2, "active").is_err(), "two active bindings for one install are refused");
+        assert!(ins("inst-1", 2, "superseded").is_ok(), "history rows (superseded) coexist");
+    }
+
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
     #[test]
     fn migration_is_idempotent() {
@@ -1501,7 +1567,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

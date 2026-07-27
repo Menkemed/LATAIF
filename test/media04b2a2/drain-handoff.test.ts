@@ -165,13 +165,17 @@ class FakeBridge implements MobileUploadBridge {
   stateOf(ev: string, u = 'user-origin') { return this.find(ev, u)?.state; }
 }
 
-function makeDeps(db: any, gw: FakeGateway, disk: Disk, bridge: FakeBridge, opts: { scope?: { tenantId: string; branchId: string } | null; badBrand?: boolean; scopeBlocked?: boolean } = {}): MobileDrainDeps {
+function makeDeps(db: any, gw: FakeGateway, disk: Disk, bridge: FakeBridge, opts: { scope?: { tenantId: string; branchId: string } | null; badBrand?: boolean; scopeBlocked?: boolean; bindingRevision?: () => number } = {}): MobileDrainDeps {
   const scope = opts.scope === undefined ? { tenantId: 't1', branchId: 'b1' } : opts.scope;
   return {
     bridge, claimantInstanceId: 'worker-1',
-    // R5 §2: tests exercise the real saga with a canonical scope present; opts.scopeBlocked models
-    // production (no canonical runtime scope source → hard block before any claim).
-    runtimeScopeEvidence: () => !opts.scopeBlocked,
+    // MOBILE-04B2A3-R1: FRESH evidence read each call. Tests exercise the real saga with a configured
+    // binding matching the active scope; opts.scopeBlocked models production (no binding → blocked);
+    // opts.bindingRevision drives the fence revision (default stable = 1).
+    readScopeEvidence: async () => {
+      if (opts.scopeBlocked || !scope) return null;
+      return { tenantId: scope.tenantId, branchId: scope.branchId, serverInstanceId: 'inst-test', bindingRevision: (opts.bindingRevision ?? (() => 1))(), configured: true };
+    },
     currentScope: () => scope,
     readReceipt: (t, b, u, ev) => {
       const r = db.exec(`SELECT payload_hash, entity_id, product_id, create_batch_id, canonical_product_metadata_hash, prepared_manifest_hash FROM mobile_upload_receipts WHERE tenant_id=? AND branch_id=? AND authenticated_user_id=? AND upload_event_id=?`, [t, b, u, ev]);
@@ -401,11 +405,11 @@ async function main(): Promise<void> {
     // per-epoch/scope worker identity + single-flight + pause + no-scope.
     bridge.seedAccepted('ev-w', 'prod-w', ['a']);
     const deps = makeDeps(db, gw, disk, bridge);
-    const w = getMobileUploadDrainWorker(deps, 1)!;
+    const w = (await getMobileUploadDrainWorker(deps, 1))!;
     await Promise.all([w.tick(), w.tick()]);
     ok(count(db, `SELECT COUNT(*) FROM products WHERE id='prod-w'`) === 1, 'single-flight one product');
-    ok(getMobileUploadDrainWorker(deps, 1) === w && getMobileUploadDrainWorker(deps, 2) !== w, 'per-epoch worker');
-    ok(getMobileUploadDrainWorker(makeDeps(db, gw, disk, bridge, { scope: null }), 3) === null, 'no worker without scope');
+    ok((await getMobileUploadDrainWorker(deps, 1)) === w && (await getMobileUploadDrainWorker(deps, 2)) !== w, 'per-epoch worker');
+    ok((await getMobileUploadDrainWorker(makeDeps(db, gw, disk, bridge, { scope: null }), 3)) === null, 'no worker without scope');
   }
 
   // ── §12 manifest structure unit ────────────────────────────────────────────
@@ -460,7 +464,14 @@ async function main(): Promise<void> {
     // mobile wiring only ever creates via prepared_media, and auto-activation is blocked.
     const wiring = readFileSync(join(repo, 'src/core/media/mobile-upload-wiring.ts'), 'utf8');
     ok(wiring.includes("kind: 'prepared_media'") && !wiring.includes("kind: 'data_urls'"), 'mobile wiring uses only prepared_media');
-    ok(/RUNTIME_SCOPE_SOURCE_AVAILABLE\s*=\s*false/.test(wiring) && /if\s*\(!RUNTIME_SCOPE_SOURCE_AVAILABLE\)\s*return;/.test(wiring), 'activation blocked: no canonical runtime scope source');
+    // MOBILE-04B2A3 — the gate is the Rust canonical binding compared EXACTLY to the active scope,
+    // no hardcoded flag. The post-auth trigger refreshes Rust evidence first; the deps predicate is
+    // runtimeScopeAvailable(cachedEvidence, currentScope()). Production stays blocked because the
+    // owner-configure command is unregistered, so the binding is never configured.
+    // R1: the gate reads Rust evidence FRESH each call (no persistent cache), via the read command.
+    ok(wiring.includes('readScopeEvidence') && wiring.includes("invoke<RuntimeScopeEvidence>('mobile_runtime_scope_evidence')"), 'gate reads the Rust canonical binding fresh');
+    ok(!/RUNTIME_SCOPE_SOURCE_AVAILABLE/.test(wiring), 'the hardcoded R4/R5 availability flag is gone');
+    ok(!/cachedRuntimeScopeEvidence/.test(wiring), 'no persistent cached-evidence trust (R1 §2)');
     const store = readFileSync(join(repo, 'src/stores/productStore.ts'), 'utf8');
     ok(!store.includes('mobile-prepared:'), 'no sentinel in the store create path');
   }
@@ -478,7 +489,7 @@ async function main(): Promise<void> {
 
     const dOut = await drainMobileUploads(blocked);
     ok(dOut.length === 1 && dOut[0].code === 'scope_blocked', 'direct drain → scope_blocked');
-    ok(getMobileUploadDrainWorker(blocked, 1) === null, 'no worker while scope blocked');
+    ok((await getMobileUploadDrainWorker(blocked, 1)) === null, 'no worker while scope blocked');
     triggerMobileUploadDrainSafe(blocked, 1); // must be a no-op, never throw
     await new Promise((r) => setTimeout(r, 0));
 
@@ -512,6 +523,40 @@ async function main(): Promise<void> {
     }
     ok(/MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE:\s*bool\s*=\s*false/.test(lib), 'rust runtime scope source blocked');
     ok(lib.includes('"MOBILE_RUNTIME_SCOPE_SOURCE_BLOCKED"'), 'rust gate returns typed block code');
+  }
+
+  // ── §18 A3: binding-revision change FENCES a running worker (no processing under stale rev) ──
+  {
+    const { db, gw, disk, bridge } = freshEnv(SQL);
+    bridge.seedAccepted('ev-fence', 'p-fence', ['a', 'b']);
+    let rev = 1;
+    const deps = makeDeps(db, gw, disk, bridge, { bindingRevision: () => rev });
+    const w1 = (await getMobileUploadDrainWorker(deps, 1))!;
+    ok(w1.bindingRevision === 1, 'worker captured revision 1 (from a fresh read)');
+    // Rust rebinds → revision changes. The already-created worker re-reads FRESH and is fenced.
+    rev = 2;
+    const out = await w1.tick();
+    ok(out.length === 1 && out[0].code === 'scope_blocked', 'stale-revision worker tick → scope_blocked');
+    ok(bridge.claimCount === 0, 'fenced worker issues 0 claims');
+    ok((await getMobileUploadDrainWorker(deps, 1)) !== w1, 'a new worker is minted for the new revision');
+    ok(count(db, `SELECT COUNT(*) FROM products`) === 0 && bridge.stateOf('ev-fence') === 'accepted', 'no processing; job stays accepted');
+    db.close();
+  }
+
+  // ── §19 A3: a rebind DURING an in-flight claim never marks ready — releases, job stays claimable ─
+  {
+    const { db, gw, disk, bridge } = freshEnv(SQL);
+    bridge.seedAccepted('ev-inflight', 'p-inflight', ['a', 'b']);
+    let rev = 1;
+    const deps = makeDeps(db, gw, disk, bridge, { bindingRevision: () => rev });
+    // Real create + verification run fully; the binding rebinds right AFTER verify, before markReady.
+    const origVerify = deps.verifyReady;
+    deps.verifyReady = async (g) => { const v = await origVerify(g); rev = 2; return v; };
+    const out = await processMobileUploadClaim((await bridge.claim('w', 120))!, deps);
+    ok(out.code === 'deferred' && out.detail === 'scope_fenced', `in-flight rebind → deferred/scope_fenced (got ${out.code}/${out.detail})`);
+    ok(bridge.stateOf('ev-inflight') === 'accepted', 'job released (not ready, not quarantined) → still claimable');
+    // the product may be durable (create is a real checkpoint) but the Rust job was NOT marked ready.
+    db.close();
   }
 
   console.log(`\nMOBILE-04B2A2 drain-handoff: ${PASS} passed, ${FAIL} failed`);

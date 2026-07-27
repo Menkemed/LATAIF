@@ -710,9 +710,9 @@ fn v0012_migration_partial_failure_and_rerun() {
         let e: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [t], |r| r.get(0)).unwrap();
         assert_eq!(e, 0, "no half-applied v0012 structure");
     }
-    // clean retry with the real list → v0012 (+v0013) applies; re-run idempotent.
+    // clean retry with the real list → v0012 (+v0013,v0014) applies; re-run idempotent.
     let rep = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-    assert_eq!(rep.applied, vec![12, 13]);
+    assert_eq!(rep.applied, vec![12, 13, 14]);
     let again = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
     assert!(again.applied.is_empty());
     for t in ["mobile_upload_inbox", "mobile_upload_image"] {
