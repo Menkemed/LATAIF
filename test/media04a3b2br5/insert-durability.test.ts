@@ -140,7 +140,7 @@ async function main(): Promise<void> {
     gw.commitShouldThrowFor = 'ALL'; // every publish fails → crash right after cp1
     const calls = { inserted: 0, fullSuccess: 0 };
     const images = imgs('p1', 3);
-    const res = await createProductWithDurableMedia('p1', urls(3), makeDeps(db, gw, disk, 't1', 'b1', images, calls));
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: urls(3) }, makeDeps(db, gw, disk, 't1', 'b1', images, calls));
     ok(res.status === 'media_incomplete', `publish failure → media_incomplete (got ${res.status})`);
     ok(calls.fullSuccess === 0, 'no full-success side effect on an incomplete create');
     // The DURABLE snapshot (cp1) is on disk: reopen and inspect it alone.
@@ -169,13 +169,13 @@ async function main(): Promise<void> {
     const gw = new FakeGateway(); const disk = new Disk();
     gw.commitShouldThrowFor = 'ALL';
     const images = imgs('p1', 2);
-    await createProductWithDurableMedia('p1', urls(2), makeDeps(db, gw, disk, 't1', 'b1', images, { inserted: 0, fullSuccess: 0 }));
+    await createProductWithDurableMedia('p1', { kind: 'data_urls', images: urls(2) }, makeDeps(db, gw, disk, 't1', 'b1', images, { inserted: 0, fullSuccess: 0 }));
     // Reopen at the cp1 snapshot and RETRY the same id (retryProductId path).
     const db2 = reopen(SQL, disk);
     const disk2 = new Disk(); disk2.image = db2.export();
     gw.commitShouldThrowFor = null;
     const calls = { inserted: 0, fullSuccess: 0 };
-    const res = await createProductWithDurableMedia('p1', urls(2), makeDeps(db2, gw, disk2, 't1', 'b1', images, calls));
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: urls(2) }, makeDeps(db2, gw, disk2, 't1', 'b1', images, calls));
     ok(res.status === 'created', `retry completes → created (got ${res.status})`);
     ok(count(db2, `SELECT COUNT(*) FROM products WHERE id='p1'`) === 1, 'retry: still exactly ONE product');
     ok(count(db2, `SELECT COUNT(*) FROM sync_changelog WHERE record_id='p1'`) === 1, 'retry: still exactly ONE changelog (recordDurableInsert not re-run)');
@@ -190,7 +190,7 @@ async function main(): Promise<void> {
     disk.failOnWrite = 1; // the cp1 durable save throws
     const calls = { inserted: 0, fullSuccess: 0 };
     const images = imgs('p1', 2);
-    const res = await createProductWithDurableMedia('p1', urls(2), makeDeps(db, gw, disk, 't1', 'b1', images, calls));
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: urls(2) }, makeDeps(db, gw, disk, 't1', 'b1', images, calls));
     ok(res.status === 'product_save_failed', `cp1 failure → product_save_failed (got ${res.status})`);
     ok(count(db, `SELECT COUNT(*) FROM products WHERE id='p1'`) === 0, 'rollback: no product row');
     ok(count(db, `SELECT COUNT(*) FROM media_ingest_jobs WHERE requested_entity_id='p1'`) === 0, 'rollback: no ingest jobs');
@@ -208,7 +208,7 @@ async function main(): Promise<void> {
     const gw = new FakeGateway(); const disk = new Disk();
     gw.commitShouldThrowFor = 'ALL';
     const images = imgs('p2', 2);
-    await createProductWithDurableMedia('p2', urls(2), makeDeps(db, gw, disk, 't2', 'b2', images, { inserted: 0, fullSuccess: 0 }));
+    await createProductWithDurableMedia('p2', { kind: 'data_urls', images: urls(2) }, makeDeps(db, gw, disk, 't2', 'b2', images, { inserted: 0, fullSuccess: 0 }));
     const db2 = reopen(SQL, disk);
     gw.commitShouldThrowFor = null;
     const disk2 = new Disk(); disk2.image = db2.export();

@@ -121,6 +121,8 @@ pub const INTERNAL_TABLES: &[&str] = &[
     // Server-internal; a client can never push to them (uploads use the dedicated route).
     "mobile_upload_inbox",
     "mobile_upload_image",
+    // MOBILE-04B2A2 §v0013 — the internal per-job claim/lease for the JS handoff worker.
+    "mobile_upload_claim",
     "schema_migrations",
 ];
 
@@ -491,6 +493,7 @@ mod tests {
             // v0012 mobile upload inbox (MOBILE-04B2A1).
             ("mobile_upload_inbox", InternalForbidden),
             ("mobile_upload_image", InternalForbidden),
+            ("mobile_upload_claim", InternalForbidden),
             // v0009 quarantine bookkeeping.
             ("sync_change_quarantine", InternalForbidden),
             // v0002–v0008 control plane.

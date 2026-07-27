@@ -226,7 +226,7 @@ fn is_valid_hash64(h: &str) -> bool {
 
 /// The canonical, Rust-computed request hash. Binds protocol version, scope, the
 /// operation, the SHA-256 of the *input* bytes and the normalization params.
-fn canonical_request_hash(scope: &str, input_bytes: &[u8]) -> String {
+pub(crate) fn canonical_request_hash(scope: &str, input_bytes: &[u8]) -> String {
     let input_sha = storage::sha256_hex(input_bytes);
     let material = format!("{PROTO_VERSION}|{scope}|stock_image|{input_sha}|{NORM_PARAMS}");
     storage::sha256_hex(material.as_bytes())

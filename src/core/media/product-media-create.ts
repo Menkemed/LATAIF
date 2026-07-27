@@ -24,6 +24,14 @@
 
 import type { DecodedLegacyImage } from './product-media-cutover.ts';
 import { decodeDataUrl } from './product-media-cutover.ts';
+import type { PreparedMediaItem } from './mobile-upload-drain.ts';
+
+// ── media source (discriminated union) ───────────────────────────────────────
+// The UI create path supplies data: URLs; the mobile handoff supplies opaque prepared descriptors.
+// The two never mix, and the prepared path never fabricates a URL/sentinel/DecodedLegacyImage.
+export type MediaSource =
+  | { kind: 'data_urls'; images: string[] }
+  | { kind: 'prepared_media'; items: PreparedMediaItem[] };
 
 // ── result contract ─────────────────────────────────────────────────────────
 
@@ -73,6 +81,9 @@ export interface CreateProductMediaDeps {
    *  each carrying its computed content hash, fixed slot and the shared batch
    *  grouping (batchId + expectedCount). Async because hashing is async. */
   buildBatchItems: (productId: string, images: DecodedLegacyImage[]) => Promise<unknown[]>;
+  /** MOBILE-04B2A2 — build the batch items from ALREADY-PREPARED descriptors (no bytes, no decode,
+   *  no sentinel). Required when the source is `prepared_media`. */
+  buildPreparedBatchItems?: (productId: string, items: PreparedMediaItem[]) => Promise<unknown[]>;
   /** Phase 1: prepare + register every slot's intent, then ONE durable save
    *  (the atomic product + N-intents batch checkpoint). Throws on failure. */
   prepareAndRegisterBatch: (items: unknown[]) => Promise<void>;
@@ -105,45 +116,48 @@ export interface CreateProductMediaDeps {
  */
 export async function createProductWithDurableMedia(
   productId: string,
-  imageDataUrls: string[],
+  source: MediaSource,
   deps: CreateProductMediaDeps,
 ): Promise<ProductCreateResult> {
+  // STRICT contract: only a discriminated MediaSource — no bare-string[] alias, no implicit
+  // normalization. UI callers pass `{ kind: 'data_urls', ... }`; mobile passes `{ kind: 'prepared_media', ... }`.
   const decode = deps.decode ?? decodeDataUrl;
+  const isPrepared = source.kind === 'prepared_media';
 
-  // Retry-intent freeze: a retry MUST reproduce the exact original ordered
-  // image list. A different list is a typed conflict — refused before any DB or
-  // media touch, so nothing is overwritten and no new slot is opened.
-  if (deps.expectedImages && !sameImageIntent(deps.expectedImages, imageDataUrls)) {
+  // Retry-intent freeze (data_urls only): a retry MUST reproduce the exact original ordered image
+  // list. A different list is a typed conflict — refused before any DB or media touch.
+  if (!isPrepared && deps.expectedImages && !sameImageIntent(deps.expectedImages, source.images)) {
     return { status: 'media_incomplete', productId, errorCode: 'MEDIA_CREATE_RETRY_INTENT_MISMATCH' };
   }
 
   const freshInsert = !deps.productExists(productId);
 
-  // Decode every image first. A bad data URL means we cannot build the batch —
-  // still create the product (durably, alone) so the user can retry with valid
-  // images, and report `media_incomplete`.
-  let decoded: DecodedLegacyImage[];
-  try {
-    decoded = imageDataUrls.map((src) => decode(src));
-  } catch (e) {
-    if (freshInsert) {
-      deps.insertProductRow(productId);
-      // Durable sync/audit rows in-memory BEFORE the save so the checkpoint
-      // persists them atomically with the product row.
-      deps.recordDurableInsert?.(productId);
-      try {
-        await deps.saveDurably();
-      } catch (se) {
-        deps.rollbackProductRow?.(productId);
-        return { status: 'product_save_failed', productId, errorCode: asMessage(se) };
+  // Build the per-slot batch items. Prepared media carries opaque descriptors — no decode, no
+  // sentinel, no DecodedLegacyImage. Data URLs are decoded first; a bad URL still creates the
+  // product (durably, alone) so the user can retry.
+  let items: unknown[];
+  if (isPrepared) {
+    items = await deps.buildPreparedBatchItems!(productId, source.items);
+  } else {
+    let decoded: DecodedLegacyImage[];
+    try {
+      decoded = source.images.map((src) => decode(src));
+    } catch (e) {
+      if (freshInsert) {
+        deps.insertProductRow(productId);
+        deps.recordDurableInsert?.(productId);
+        try {
+          await deps.saveDurably();
+        } catch (se) {
+          deps.rollbackProductRow?.(productId);
+          return { status: 'product_save_failed', productId, errorCode: asMessage(se) };
+        }
+        deps.onProductInserted?.(productId);
       }
-      deps.onProductInserted?.(productId);
+      return { status: 'media_incomplete', productId, errorCode: `MEDIA_CREATE_DECODE_FAILED:${asMessage(e)}` };
     }
-    return { status: 'media_incomplete', productId, errorCode: `MEDIA_CREATE_DECODE_FAILED:${asMessage(e)}` };
+    items = await deps.buildBatchItems(productId, decoded);
   }
-
-  // Build the per-slot batch items (hash + slot + batch grouping).
-  const items = await deps.buildBatchItems(productId, decoded);
 
   // Phase 1 — insert the product (in-memory) then prepare + register EVERY
   // slot's intent and persist ONCE: product row + N ingest-job intents become
@@ -184,7 +198,7 @@ export async function createProductWithDurableMedia(
   // 5) Full success — fresh create OR a retry that finally completed the media.
   //    The effect fires on both (a partial attempt never reached here); its own
   //    body enforces exactly-once via a durable already-done marker.
-  deps.onFullSuccess?.(productId, imageDataUrls[0]);
+  deps.onFullSuccess?.(productId, isPrepared ? undefined : source.images[0]);
   return { status: 'created', productId };
 }
 

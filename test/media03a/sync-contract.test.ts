@@ -52,7 +52,7 @@ const diff = (a: Set<string>, b: Set<string>) => [...a].filter((x) => !b.has(x))
 const source = (t: string) => [S.has(t) ? 'schema.sql' : null, D.has(t) ? 'database.ts' : null, M.has(t) ? 'migration.ts' : null].filter(Boolean).join('+') || '(none)';
 
 // ── set sizes ──
-ok(b2de48.size === 48, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 48 (got ${b2de48.size})`);
+ok(b2de48.size === 49, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 49 (got ${b2de48.size})`);
 ok(sync50.size === 50, `sync50 (allowlist) = 50 (got ${sync50.size})`);
 
 // ── sync50 − b2de48 : in the allowlist, NOT scanned by B2DE4 (all live in schema.sql) ──
@@ -70,11 +70,13 @@ console.log(`  sync50 − b2de48 = ${syncOnly.length} (synced business tables in
 // ── b2de48 − sync50 : scanned by B2DE4, deliberately NOT synced ──
 const b2deOnly = diff(b2de48, sync50);
 const EXPECT_B2DE_ONLY = [
+  // MOBILE-04B2A2: `mobile_upload_receipts` is the durable cross-DB upload receipt — local/control
+  // only, deliberately NEVER in the sync allowlist (sync50 stays 50, intersection stays 35).
   'audit_log', 'authoritative_revisions', 'b1_applied_envelopes', 'b1_op_meta', 'b1_operations',
-  'document_sequences', 'ledger_sequence', 'production_inputs', 'production_outputs',
+  'document_sequences', 'ledger_sequence', 'mobile_upload_receipts', 'production_inputs', 'production_outputs',
   'scrap_trade_lines', 'scrap_trade_payments', 'scrap_trades', 'tax_payments',
 ].sort();
-ok(JSON.stringify(b2deOnly) === JSON.stringify(EXPECT_B2DE_ONLY), `b2de48 − sync50 is the 13 non-synced local/control tables (got ${JSON.stringify(b2deOnly)})`);
+ok(JSON.stringify(b2deOnly) === JSON.stringify(EXPECT_B2DE_ONLY), `b2de48 − sync50 is the 14 non-synced local/control tables (got ${JSON.stringify(b2deOnly)})`);
 for (const t of b2deOnly) {
   ok(b2de48.has(t) && !sync50.has(t), `${t}: declared in ${source(t)}, control-plane/local — scanned for identifier grammar but intentionally not synced`);
 }
@@ -84,7 +86,7 @@ console.log(`  b2de48 − sync50 = ${b2deOnly.length} (control-plane/local table
 const inter = [...sync50].filter((t) => b2de48.has(t));
 ok(inter.length === 35, `sync50 ∩ b2de48 = 35 (got ${inter.length})`);
 ok(inter.length + syncOnly.length === 50, 'intersection + sync-only accounts for all 50 sync tables');
-ok(inter.length + b2deOnly.length === 48, 'intersection + b2de-only accounts for all 48 B2DE4 tables');
+ok(inter.length + b2deOnly.length === 49, 'intersection + b2de-only accounts for all 49 B2DE4 tables');
 
 // ── B2DE4 is a documented grammar subset, not the sync schema ──
 // (its scan excludes schema.sql on purpose; that is WHY 15 real sync tables are absent from it)
@@ -114,4 +116,4 @@ if (fails.length) {
   process.exit(1);
 }
 console.log(`MEDIA03A-R3 sync-contract: ${PASS}/${PASS} checks passed ` +
-  `(sync50 backed by real DDL + field contract, ${fieldTotal} allowed_fields total; b2de48 reconciled: 35 shared, 15 schema.sql-only, 13 non-synced)`);
+  `(sync50 backed by real DDL + field contract, ${fieldTotal} allowed_fields total; b2de48 reconciled: 35 shared, 15 schema.sql-only, 14 non-synced)`);

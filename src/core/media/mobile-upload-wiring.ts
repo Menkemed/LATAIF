@@ -1,0 +1,174 @@
+// MOBILE-04B2A2 — production wiring for the mobile upload drain worker.
+//
+// Assembles the real dependencies (Tauri bridge + sql.js queries + productStore.createProductWithMedia
+// + ProductMediaResolver) into a MobileDrainDeps, and exposes a guarded fire-and-forget trigger for
+// the post-auth / lifecycle-resume path. Kept OUT of mobile-upload-drain.ts so the saga stays
+// framework-free and unit-testable. Everything is a no-op without an authenticated scope or without
+// Tauri (the claim invoke rejects and the pass ends), so it is safe to call at boot and in the web
+// preview. It only processes jobs whose scope matches the current authenticated desktop context; the
+// job's ORIGIN user comes from the Rust ClaimGrant, never from JS. Images are prepared in Rust — no
+// bytes/data-URLs cross into JS.
+
+import { getDatabase } from '@/core/db/database';
+import { query, currentBranchId } from '@/core/db/helpers';
+import type { Product } from '@/core/models/types';
+import { TauriMediaGateway } from '@/core/media/gateway';
+import { ProductMediaResolver } from '@/core/media/product-media-resolver';
+import { useProductStore } from '@/stores/productStore';
+import {
+  createTauriMobileUploadBridge, triggerMobileUploadDrainSafe, canonicalProductMetadataHash, MaterializeError,
+  type ClaimGrant, type MobileDrainDeps, type ReadyVerdict, type DurableReceipt, type PreparedMediaItem, type BoundBatchJob, type GallerySlot,
+} from './mobile-upload-drain';
+
+// MOBILE-04B2A2-R4 §1 — ACTIVATION IS BLOCKED. There is NO canonical runtime source of the
+// (tenant, branch) scope: server + desktop derive it from the hardcoded compile-time constant
+// "tenant-1"/"branch-main" (the server DB is scope-agnostic — its rows are keyed BY the constant,
+// never read as a source), and a user-created branch's real id can diverge (a UUID) from the fixed
+// Rust sync scope. Auto-activating the drain would be a hardcoded-scope activation, which R4 forbids.
+// The full internal chain (commands, saga, provenance, three-way batch verification) is built and
+// test-proven; it is NOT auto-started until a canonical runtime scope source exists.
+const RUNTIME_SCOPE_SOURCE_AVAILABLE = false;
+
+const ROLE = 'stock_image';
+// Stable per-JS-session claimant instance id (a reload mints a new one — fine; the Rust lease/token
+// enforce single-claim, not this id).
+const CLAIMANT_INSTANCE_ID = `desktop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+const bridge = createTauriMobileUploadBridge();
+
+function currentScope(): { tenantId: string; branchId: string } | null {
+  let branchId: string;
+  try { branchId = currentBranchId(); } catch { return null; }
+  if (!branchId) return null;
+  const rows = query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]);
+  const tenantId = rows.length > 0 ? (rows[0].tenant_id as string | null) : null;
+  return tenantId ? { tenantId, branchId } : null;
+}
+
+function readReceipt(tenantId: string, branchId: string, authenticatedUserId: string, uploadEventId: string): DurableReceipt | null {
+  const rows = query(
+    'SELECT payload_hash, entity_id, product_id, create_batch_id, canonical_product_metadata_hash, prepared_manifest_hash FROM mobile_upload_receipts WHERE tenant_id = ? AND branch_id = ? AND authenticated_user_id = ? AND upload_event_id = ?',
+    [tenantId, branchId, authenticatedUserId, uploadEventId],
+  );
+  if (rows.length === 0) return null;
+  return {
+    payloadHash: String(rows[0].payload_hash), entityId: String(rows[0].entity_id),
+    productId: String(rows[0].product_id), createBatchId: String(rows[0].create_batch_id),
+    canonicalProductMetadataHash: String(rows[0].canonical_product_metadata_hash),
+    preparedManifestHash: String(rows[0].prepared_manifest_hash),
+  };
+}
+
+async function readBoundBatch(entityId: string): Promise<BoundBatchJob[]> {
+  const rows = query(
+    'SELECT ingest_request_id, request_hash FROM media_ingest_jobs WHERE requested_entity_id = ? AND requested_role = ?',
+    [entityId, ROLE],
+  );
+  return rows.map((r) => ({ ingestRequestId: String(r.ingest_request_id), requestHash: String(r.request_hash) }));
+}
+
+async function readGalleryManifest(entityId: string): Promise<GallerySlot[]> {
+  const rows = query('SELECT sort_order, is_primary FROM media_links WHERE entity_id = ? AND deleted_at IS NULL ORDER BY sort_order', [entityId]);
+  return rows.map((r) => ({ sortOrder: Number(r.sort_order), isPrimary: !!Number(r.is_primary) }));
+}
+async function readSideEffectCounts(entityId: string): Promise<{ changelog: number; audit: number }> {
+  const cl = query(`SELECT COUNT(*) AS n FROM sync_changelog WHERE table_name = 'products' AND record_id = ?`, [entityId]);
+  const au = query(`SELECT COUNT(*) AS n FROM audit_log WHERE entity_type = 'products' AND entity_id = ?`, [entityId]);
+  return { changelog: cl.length ? Number(cl[0].n) : 0, audit: au.length ? Number(au[0].n) : 0 };
+}
+function deriveCreateBatchId(entityId: string): string {
+  const s = currentScope();
+  return s ? `create:${s.tenantId}:${s.branchId}:${entityId}:${ROLE}` : '';
+}
+
+/** Prepare every image via the Rust media core (bytes stay in Rust) → ordered opaque descriptors. */
+async function preparePreparedMedia(grant: ClaimGrant): Promise<PreparedMediaItem[]> {
+  const scope = currentScope();
+  if (!scope) throw new MaterializeError('unavailable');
+  const sorted = [...grant.images].sort((a, b) => a.slot - b.slot);
+  const out: PreparedMediaItem[] = [];
+  for (const im of sorted) {
+    let prepared;
+    try {
+      prepared = await bridge.prepareImage(grant.authenticatedUserId, grant.uploadEventId, grant.claimToken, im.slot, scope.tenantId);
+    } catch (e) {
+      // A staging integrity/manifest failure is permanent → quarantine; anything else (stale token,
+      // transient IPC) → retry. Rust returns MOBILE_UPLOAD_INTEGRITY_FAILURE / _MANIFEST_INVALID.
+      const msg = String((e as Error)?.message ?? e);
+      throw new MaterializeError(/INTEGRITY|MANIFEST/i.test(msg) ? 'broken' : 'unavailable');
+    }
+    // The prepared identity is the SERVER-derived request id — JS uses it verbatim, never invents it.
+    out.push({ slot: im.slot, isPrimary: im.slot === 0, ingestRequestId: prepared.ingest_request_id, prepared });
+  }
+  return out;
+}
+
+function collectionDataFromGrant(grant: ClaimGrant): Partial<Product> {
+  let meta: Record<string, unknown> = {};
+  try { meta = JSON.parse(grant.metadataJson) as Record<string, unknown>; } catch { meta = {}; }
+  const str = (k: string) => (typeof meta[k] === 'string' ? (meta[k] as string) : undefined);
+  return {
+    categoryId: str('categoryId') ?? '',
+    brand: str('brand') ?? '',
+    name: str('name') ?? '',
+    sku: str('sku'),
+    attributes: (meta.attributes && typeof meta.attributes === 'object') ? (meta.attributes as Record<string, unknown>) : {},
+    images: [], // prepared mode: media flows via prepared descriptors, never data URLs
+  } as Partial<Product>;
+}
+
+async function readProductMetadataHash(productId: string): Promise<string | null> {
+  const rows = query('SELECT brand, name, category_id, sku, attributes FROM products WHERE id = ?', [productId]);
+  if (rows.length === 0) return null;
+  const r = rows[0];
+  let attrs: unknown = {};
+  try { attrs = r.attributes ? JSON.parse(String(r.attributes)) : {}; } catch { attrs = {}; }
+  return canonicalProductMetadataHash({ brand: r.brand, name: r.name, categoryId: r.category_id, sku: r.sku, attributes: attrs });
+}
+
+async function verifyReady(grant: ClaimGrant): Promise<ReadyVerdict> {
+  const scope = currentScope();
+  if (!scope) return 'pending';
+  const resolver = new ProductMediaResolver({
+    dbProvider: () => getDatabase() as never, gateway: new TauriMediaGateway(),
+    tenantId: scope.tenantId, branchId: scope.branchId,
+  });
+  const r = await resolver.resolveProductMedia(grant.entityId);
+  if (r.kind === 'pending') return 'pending';           // media still finishing → resume later
+  if (r.kind !== 'media') return 'broken';              // legacy/conflict/integrity → fail closed
+  const imgs = query('SELECT images FROM products WHERE id = ?', [grant.entityId]);
+  if (imgs.length === 0 || String(imgs[0].images) !== '[]') return 'broken'; // no base64 in products.images
+  if (r.items.length !== grant.images.length) return 'broken';               // gallery == ordered manifest
+  return 'ready';
+}
+
+/** Assemble the production drain dependencies. Safe to build anytime; nothing runs until `tick`. */
+export function buildMobileUploadDrainDeps(): MobileDrainDeps {
+  return {
+    bridge,
+    claimantInstanceId: CLAIMANT_INSTANCE_ID,
+    // R5 §2: NO canonical runtime scope source → the drain hard-blocks before any claim, no matter
+    // how it is entered (direct start, worker tick, post-auth trigger, epoch change). Never a
+    // hardcoded-scope fallback. This is the SAME gate the post-auth trigger consults below.
+    runtimeScopeEvidence: () => RUNTIME_SCOPE_SOURCE_AVAILABLE,
+    currentScope,
+    readReceipt,
+    productExists: (id) => query('SELECT 1 FROM products WHERE id = ?', [id]).length > 0,
+    readProductMetadataHash,
+    readBoundBatch,
+    readGalleryManifest,
+    readSideEffectCounts,
+    deriveCreateBatchId,
+    preparePreparedMedia,
+    createProduct: (grant, prepared, receiptIntent) =>
+      useProductStore.getState().createProductWithMedia(collectionDataFromGrant(grant), grant.entityId, receiptIntent, { kind: 'prepared_media', items: prepared }),
+    verifyReady,
+  };
+}
+
+/** Fire-and-forget drain trigger for the post-auth / media-recovery-complete / lifecycle-resume
+ *  path. Never throws; a no-op without an authenticated scope or without Tauri. */
+export function triggerMobileUploadDrainPostAuth(epoch: number): void {
+  // Blocked: no canonical runtime scope source (R4 §1). Never auto-activate with a hardcoded scope.
+  if (!RUNTIME_SCOPE_SOURCE_AVAILABLE) return;
+  triggerMobileUploadDrainSafe(buildMobileUploadDrainDeps(), epoch);
+}

@@ -11,6 +11,10 @@ const T: &str = "tenant-1";
 const B: &str = "branch-main";
 const U: &str = "user-owner";
 const NOW: &str = "2026-07-26T00:00:00Z";
+const LEASE_A: &str = "2026-07-26T00:05:00Z";
+const NOW_LATE: &str = "2026-07-26T00:10:00Z";
+const LEASE_B: &str = "2026-07-26T00:15:00Z";
+const LEASE_FAR: &str = "2026-07-26T00:20:00Z";
 
 struct Temp(PathBuf);
 impl Temp {
@@ -514,6 +518,180 @@ fn replay_descriptor_mismatch_manifest_invalid() {
     tamper_then_expect(1, "UPDATE mobile_upload_image SET width=width+1 WHERE upload_event_id='ev-t' AND slot=0", ERR_MANIFEST_INVALID);
 }
 
+// ── MOBILE-04B2A2 — internal claim / lease / ready state machine ─────────────
+fn state_of(c: &Connection, event: &str) -> String {
+    c.query_row("SELECT state FROM mobile_upload_inbox WHERE upload_event_id=?1", [event], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn claim_accepted_then_mark_ready_exactly_once() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(160, 120, 4))], META), NOW).unwrap();
+    let g = claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    assert_eq!((g.upload_event_id.as_str(), g.entity_id.as_str()), ("ev-1", "prod-1"));
+    assert_eq!(g.images.len(), 1);
+    let img0 = fetch_claimed_image(&c, s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW).unwrap();
+    assert_eq!(sha256_hex(&img0), g.images[0].content_hash, "bounded single-image fetch returns verified bytes");
+    // an old / foreign claim token gets no bytes.
+    assert_eq!(fetch_claimed_image(&c, s.path(), &trusted(), "ev-1", "wrong-token", 0, NOW).unwrap_err().code(), ERR_CLAIM_INVALID);
+    assert_eq!(state_of(&c, "ev-1"), "processing");
+    // exactly one active claim: a second claim finds nothing (lease not expired).
+    assert!(claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_B, NOW).unwrap().is_none());
+    let r = mark_ready(&mut c, &trusted(), "ev-1", "tok-1", "prod-1", &g.payload_hash, "prod-1", NOW).unwrap();
+    assert_eq!(r, ReadyOutcome::MarkedReady);
+    let (st, pid): (String, Option<String>) = c.query_row(
+        "SELECT state, product_id FROM mobile_upload_inbox WHERE upload_event_id='ev-1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((st.as_str(), pid.as_deref()), ("ready", Some("prod-1")));
+    // ready is terminal — not re-claimable; re-marking is idempotent.
+    assert!(claim_next_job(&mut c, s.path(), T, B, "inst-9", "tok-9", LEASE_FAR, NOW_LATE).unwrap().is_none());
+    assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-1", "prod-1", &g.payload_hash, "prod-1", NOW).unwrap(), ReadyOutcome::AlreadyReady);
+}
+
+#[test]
+fn expired_claim_is_taken_over_and_old_token_is_stale() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(140, 120, 2))], META), NOW).unwrap();
+    let g1 = claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    // before expiry: not reclaimable.
+    assert!(claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_B, NOW).unwrap().is_none());
+    // after lease expiry: a new claimant takes over with a fresh token.
+    let g2 = claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_FAR, NOW_LATE).unwrap().unwrap();
+    assert_eq!(g2.claim_token, "tok-2");
+    // the crashed old claimant's token writes NOTHING.
+    assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-1", "prod-1", &g1.payload_hash, "prod-1", NOW_LATE).unwrap(), ReadyOutcome::Rejected);
+    assert!(!renew_claim(&c, &trusted(), "ev-1", "tok-1", "inst-1", LEASE_FAR, NOW_LATE).unwrap());
+    assert!(!mark_retryable(&mut c, &trusted(), "ev-1", "tok-1", NOW_LATE).unwrap());
+    assert_eq!(state_of(&c, "ev-1"), "processing", "stale calls left the takeover untouched");
+    // the current holder can complete.
+    assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-2", "prod-1", &g2.payload_hash, "prod-1", NOW_LATE).unwrap(), ReadyOutcome::MarkedReady);
+}
+
+#[test]
+fn mark_ready_requires_matching_entity_and_payload_hash() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(120, 120, 1))], META), NOW).unwrap();
+    let g = claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    // wrong entity id → rejected, job untouched.
+    assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-1", "prod-FOREIGN", &g.payload_hash, "prod-FOREIGN", NOW).unwrap(), ReadyOutcome::Rejected);
+    // wrong payload hash → rejected.
+    assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-1", "prod-1", &"f".repeat(64), "prod-1", NOW).unwrap(), ReadyOutcome::Rejected);
+    assert_eq!(state_of(&c, "ev-1"), "processing");
+    assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-1", "prod-1", &g.payload_hash, "prod-1", NOW).unwrap(), ReadyOutcome::MarkedReady);
+}
+
+#[test]
+fn claim_skips_and_quarantines_integrity_broken_job() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(150, 120, 3))], META), NOW).unwrap();
+    let mut b = sub("ev-2", vec![img_jpeg(jpeg(150, 120, 4))], META); b.entity_id = "prod-2".into();
+    accept_upload(&mut c, s.path(), &trusted(), &b, NOW).unwrap();
+    // corrupt only ev-1's blob (distinct salts → distinct files) so it is claimed first, fails
+    // verify, and is skipped in favour of the healthy ev-2.
+    let key1: String = c.query_row("SELECT storage_key FROM mobile_upload_image WHERE upload_event_id='ev-1'", [], |r| r.get(0)).unwrap();
+    std::fs::remove_file(s.path().join(&key1)).unwrap();
+    let g = claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    assert_eq!(g.upload_event_id, "ev-2", "healthy job claimed");
+    assert_eq!(state_of(&c, "ev-1"), "quarantined", "broken job quarantined, not handed off");
+}
+
+#[test]
+fn processing_claim_survives_reopen_and_reclaims_after_expiry() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    {
+        let mut c = init_db(d.path());
+        accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(130, 120, 5))], META), NOW).unwrap();
+        claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    }
+    // reopen (crash after claim): still processing; not reclaimable before expiry.
+    {
+        let mut c = open_db(d.path());
+        assert_eq!(state_of(&c, "ev-1"), "processing");
+        assert!(claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_B, NOW).unwrap().is_none());
+    }
+    // after expiry: reclaimed, exactly one product ever.
+    {
+        let mut c = open_db(d.path());
+        let g = claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_FAR, NOW_LATE).unwrap().unwrap();
+        assert_eq!(g.claim_token, "tok-2");
+        assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-2", "prod-1", &g.payload_hash, "prod-1", NOW_LATE).unwrap(), ReadyOutcome::MarkedReady);
+        assert_eq!(inbox_count(&c), 1);
+    }
+}
+
+#[test]
+fn renew_extends_lease_and_retryable_releases() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(120, 120, 6))], META), NOW).unwrap();
+    claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    // renew pushes the lease past NOW_LATE → still not reclaimable then.
+    assert!(renew_claim(&c, &trusted(), "ev-1", "tok-1", "inst-1", LEASE_FAR, NOW).unwrap());
+    assert!(claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_B, NOW_LATE).unwrap().is_none());
+    // graceful release → back to accepted → immediately reclaimable.
+    assert!(mark_retryable(&mut c, &trusted(), "ev-1", "tok-1", NOW_LATE).unwrap());
+    assert_eq!(state_of(&c, "ev-1"), "accepted");
+    let g = claim_next_job(&mut c, s.path(), T, B, "inst-3", "tok-3", LEASE_FAR, NOW_LATE).unwrap().unwrap();
+    assert_eq!(g.claim_token, "tok-3");
+}
+
+#[test]
+fn quarantined_claim_is_terminal() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(120, 120, 7))], META), NOW).unwrap();
+    claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    assert!(mark_quarantined_claimed(&mut c, &trusted(), "ev-1", "tok-1", ERR_MANIFEST_INVALID, NOW).unwrap());
+    assert_eq!(state_of(&c, "ev-1"), "quarantined");
+    // terminal: not reclaimable even after any expiry.
+    assert!(claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_FAR, NOW_LATE).unwrap().is_none());
+}
+
+#[test]
+fn fetch_image_is_claim_and_slot_fenced() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(150, 120, 3))], META), NOW).unwrap();
+    // no bytes before a claim exists.
+    assert_eq!(fetch_claimed_image(&c, s.path(), &trusted(), "ev-1", "tok-1", 0, NOW).unwrap_err().code(), ERR_CLAIM_INVALID);
+    let g = claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    // valid claim + slot → bytes; bad slot → integrity failure (no payload).
+    assert!(fetch_claimed_image(&c, s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW).is_ok());
+    assert_eq!(fetch_claimed_image(&c, s.path(), &trusted(), "ev-1", &g.claim_token, 9, NOW).unwrap_err().code(), ERR_INTEGRITY_FAILURE);
+    // once ready (not processing) → the claim gate is closed, no more bytes.
+    mark_ready(&mut c, &trusted(), "ev-1", &g.claim_token, "prod-1", &g.payload_hash, "prod-1", NOW).unwrap();
+    assert_eq!(fetch_claimed_image(&c, s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW).unwrap_err().code(), ERR_CLAIM_INVALID);
+}
+
+#[test]
+fn prepared_provenance_full_binding_deterministic_and_claim_gated() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    let mut sm = sub("ev-1", vec![img_jpeg(jpeg(150, 120, 3)), img_jpeg(jpeg(150, 120, 4))], META); sm.entity_id = "prod-X".into();
+    accept_upload(&mut c, s.path(), &trusted(), &sm, NOW).unwrap();
+    // no image for prepare before a claim exists.
+    assert_eq!(claimed_image_for_prepare(&c, s.path(), &trusted(), "ev-1", "tok-1", 0, NOW).unwrap_err().code(), ERR_CLAIM_INVALID);
+    let g = claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
+    let p0 = claimed_image_for_prepare(&c, s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW).unwrap();
+    assert_eq!(sha256_hex(&p0.bytes), p0.content_hash);
+    assert!(p0.is_primary && p0.entity_id == "prod-X" && p0.payload_hash == g.payload_hash, "provenance from the inbox row");
+    let p1 = claimed_image_for_prepare(&c, s.path(), &trusted(), "ev-1", &g.claim_token, 1, NOW).unwrap();
+    assert!(!p1.is_primary);
+    let id = |ev: &str, ent: &str, ph: &str, slot: i64, prim: bool, ch: &str| prepare_request_id(&trusted(), ev, ent, ph, slot, prim, ch);
+    let base = id("ev-1", &p0.entity_id, &p0.payload_hash, 0, true, &p0.content_hash);
+    assert_eq!(base, id("ev-1", &p0.entity_id, &p0.payload_hash, 0, true, &p0.content_hash), "same provenance → same id (restart replay)");
+    assert_ne!(base, id("ev-1", "prod-OTHER", &p0.payload_hash, 0, true, &p0.content_hash), "different entityId → different id");
+    assert_ne!(base, id("ev-1", &p0.entity_id, "ph-OTHER", 0, true, &p0.content_hash), "different payloadHash → different id");
+    assert_ne!(base, id("ev-1", &p0.entity_id, &p0.payload_hash, 0, false, &p0.content_hash), "primary flip → different id");
+    assert_ne!(base, id("ev-1", &p0.entity_id, &p0.payload_hash, 1, true, &p1.content_hash), "different slot → different id");
+    // expired lease (same token, but lease_until < now) → no prepare; and a stale token → no prepare.
+    assert_eq!(claimed_image_for_prepare(&c, s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW_LATE).unwrap_err().code(), ERR_CLAIM_INVALID);
+    assert_eq!(claimed_image_for_prepare(&c, s.path(), &trusted(), "ev-1", "stale", 0, NOW).unwrap_err().code(), ERR_CLAIM_INVALID);
+}
+
 #[test]
 fn v0012_migration_partial_failure_and_rerun() {
     let d = Temp::new("db");
@@ -532,9 +710,9 @@ fn v0012_migration_partial_failure_and_rerun() {
         let e: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [t], |r| r.get(0)).unwrap();
         assert_eq!(e, 0, "no half-applied v0012 structure");
     }
-    // clean retry with the real list → v0012 applies; re-run idempotent.
+    // clean retry with the real list → v0012 (+v0013) applies; re-run idempotent.
     let rep = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-    assert_eq!(rep.applied, vec![12]);
+    assert_eq!(rep.applied, vec![12, 13]);
     let again = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
     assert!(again.applied.is_empty());
     for t in ["mobile_upload_inbox", "mobile_upload_image"] {

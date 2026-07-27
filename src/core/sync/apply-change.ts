@@ -133,6 +133,8 @@ const INTERNAL_TABLES: readonly string[] = [
   // MOBILE-04B2A1 §v0012 — the durable server-side mobile upload inbox; server-only, never synced.
   'mobile_upload_inbox',
   'mobile_upload_image',
+  // MOBILE-04B2A2 §v0013 — the internal per-job claim/lease; server-only, never synced.
+  'mobile_upload_claim',
   'schema_migrations',
 ];
 // @sync-policy:internal:end

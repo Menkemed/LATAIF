@@ -16,6 +16,9 @@ struct AppHandleState {
     // the same identity_locks registry and the per-(scope, id) serialisation
     // contract actually holds across concurrent handler invocations.
     media_ingest: Arc<media::ingest::MediaIngestService>,
+    // MOBILE-04B2A2 — the controlled staging root the (future) upload path writes into and the
+    // internal claim/handoff commands read verified bytes from. Never a client-supplied path.
+    mobile_staging_root: std::path::PathBuf,
 }
 
 const SYNC_PORT: u16 = 3001;
@@ -1259,6 +1262,18 @@ async fn finalize_application_shutdown(
     Ok(())
 }
 
+// MOBILE-04B2A2-R5 §1 — the runtime gate must be closed and return the exact typed block, so a
+// direct wrapper call (or an accidental re-registration) writes nothing.
+#[cfg(test)]
+mod mobile_runtime_gate_tests {
+    #[test]
+    fn runtime_scope_source_is_blocked() {
+        assert!(!super::MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE, "runtime scope source must stay unavailable");
+        let e = super::mobile_runtime_gate().unwrap_err();
+        assert_eq!(e, "MOBILE_RUNTIME_SCOPE_SOURCE_BLOCKED");
+    }
+}
+
 #[cfg(test)]
 mod shutdown_tests {
     use super::shutdown::finalize_shutdown_sequence;
@@ -1668,6 +1683,183 @@ fn media_recover_ingests(
     svc.recover().map_err(|e| e.code().to_string())
 }
 
+// ── MOBILE-04B2A2 — internal mobile-upload claim/handoff bridge ───────────────
+// INTERNAL Tauri commands ONLY — no HTTP route, no `mobile_page.rs` change, no legacy /sync/push
+// touch. The JS/WebView drain worker uses these to lease one `accepted` upload job, hand its
+// verified images to createProductWithMedia, then mark the same job `ready`. The trusted scope is
+// ALWAYS the fixed desktop identity (server constants + the seeded `self-desktop` principal) — never
+// a JS-supplied tenant/branch/user. A fresh connection to the same server DB (WAL) reaches the
+// inbox; a busy DB surfaces as a Retryable the worker re-drives.
+#[allow(dead_code)]
+const MOBILE_TRUSTED_TENANT: &str = "tenant-1";
+#[allow(dead_code)]
+const MOBILE_TRUSTED_BRANCH: &str = "branch-main";
+
+// MOBILE-04B2A2-R5 §1 — RUNTIME DEACTIVATION. There is NO canonical runtime source of the
+// (tenant, branch) scope: server + desktop derive it from the fixed compile-time constants above,
+// and a user-created branch's real id can diverge. So these internal mobile-upload commands are
+// UNREGISTERED from generate_handler! below AND each wrapper additionally fails closed HERE — before
+// opening the DB, touching staging, claiming, preparing, or mutating any job status — so that a
+// later accidental re-registration cannot silently activate the pipeline. The command wrappers and
+// the whole Rust inbox/claim/prepare/receipt core remain in the codebase and fully tested; they are
+// simply not reachable at runtime until a canonical runtime scope source exists.
+#[allow(dead_code)]
+const MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE: bool = false;
+#[allow(dead_code)]
+fn mobile_runtime_gate() -> Result<(), String> {
+    if MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE {
+        Ok(())
+    } else {
+        // Fail closed BEFORE any DB / file / claim / prepare / status mutation.
+        Err("MOBILE_RUNTIME_SCOPE_SOURCE_BLOCKED".to_string())
+    }
+}
+
+// A per-JOB trusted identity: the fixed desktop tenant/branch + the ORIGIN user the job carries
+// (supplied by JS from the ClaimGrant, but only ever effective together with a matching claim token,
+// so a forged origin user resolves no claim row and writes nothing). NEVER `self-desktop` — that is
+// the worker/claimant principal, not the uploader.
+#[allow(dead_code)]
+fn mobile_job_trusted(origin_authenticated_user_id: &str) -> sync::mobile_upload::TrustedUploadContext {
+    sync::mobile_upload::TrustedUploadContext {
+        tenant_id: MOBILE_TRUSTED_TENANT.to_string(),
+        branch_id: MOBILE_TRUSTED_BRANCH.to_string(),
+        authenticated_user_id: origin_authenticated_user_id.to_string(),
+    }
+}
+#[allow(dead_code)]
+fn mobile_lease_until(now: chrono::DateTime<chrono::Utc>, lease_seconds: i64) -> String {
+    (now + chrono::Duration::seconds(lease_seconds.clamp(1, 3600))).to_rfc3339()
+}
+
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_upload_claim(
+    state: tauri::State<'_, AppHandleState>,
+    claimant_instance_id: String,
+    lease_seconds: i64,
+) -> Result<Option<sync::mobile_upload::ClaimGrant>, String> {
+    mobile_runtime_gate()?;
+    let (mut conn, _) = open_config_db(&state.server)?;
+    let now = chrono::Utc::now();
+    let token = uuid::Uuid::new_v4().to_string();
+    // Scope by the fixed desktop tenant/branch across ALL origin users; lease as the worker.
+    sync::mobile_upload::claim_next_job(
+        &mut conn, &state.mobile_staging_root, MOBILE_TRUSTED_TENANT, MOBILE_TRUSTED_BRANCH,
+        &claimant_instance_id, &token, &mobile_lease_until(now, lease_seconds), &now.to_rfc3339(),
+    )
+    .map_err(|e| e.code().to_string())
+}
+
+/// Prepare ONE claimed image directly from staging via the EXISTING media ingest core, returning
+/// only an opaque descriptor (main+thumbnail hash/size/dims + request hash). The raw bytes never
+/// leave Rust — no data URL, no base64, no byte array crosses IPC. The create batch later commits +
+/// links this prepared request by (scope, request_id, request_hash) with no bytes. Gated by the
+/// active claim token / scope / origin user; a stale token or bad slot yields no descriptor.
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_upload_prepare_image(
+    state: tauri::State<'_, AppHandleState>,
+    origin_authenticated_user_id: String,
+    upload_event_id: String,
+    claim_token: String,
+    slot: i64,
+    tenant_scope: String,
+) -> Result<media::ingest::PrepareResult, String> {
+    mobile_runtime_gate()?;
+    let (conn, _) = open_config_db(&state.server)?;
+    let trusted = mobile_job_trusted(&origin_authenticated_user_id);
+    let now = chrono::Utc::now().to_rfc3339();
+    // Claim-gated load (token + processing + unexpired lease) that yields the full provenance.
+    let p = sync::mobile_upload::claimed_image_for_prepare(
+        &conn, &state.mobile_staging_root, &trusted, &upload_event_id, &claim_token, slot, &now,
+    )
+    .map_err(|e| e.code().to_string())?;
+    // The prepared identity is SERVER-derived from the upload provenance — JS never supplies it.
+    let prepare_request_id = sync::mobile_upload::prepare_request_id(
+        &trusted, &upload_event_id, &p.entity_id, &p.payload_hash, slot, p.is_primary, &p.content_hash,
+    );
+    let request_hash = media::ingest::canonical_request_hash(&tenant_scope, &p.bytes);
+    media_ingest_service(&state)
+        .prepare(&tenant_scope, &prepare_request_id, &request_hash, &p.bytes, None)
+        .map_err(|e| e.code().to_string())
+}
+
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_upload_renew(
+    state: tauri::State<'_, AppHandleState>,
+    origin_authenticated_user_id: String,
+    upload_event_id: String,
+    claim_token: String,
+    claimant_instance_id: String,
+    lease_seconds: i64,
+) -> Result<bool, String> {
+    mobile_runtime_gate()?;
+    let (conn, _) = open_config_db(&state.server)?;
+    let now = chrono::Utc::now();
+    sync::mobile_upload::renew_claim(
+        &conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &claimant_instance_id,
+        &mobile_lease_until(now, lease_seconds), &now.to_rfc3339(),
+    )
+    .map_err(|e| e.code().to_string())
+}
+
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_upload_release(
+    state: tauri::State<'_, AppHandleState>,
+    origin_authenticated_user_id: String,
+    upload_event_id: String,
+    claim_token: String,
+) -> Result<bool, String> {
+    mobile_runtime_gate()?;
+    let (mut conn, _) = open_config_db(&state.server)?;
+    sync::mobile_upload::mark_retryable(&mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.code().to_string())
+}
+
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_upload_mark_quarantined(
+    state: tauri::State<'_, AppHandleState>,
+    origin_authenticated_user_id: String,
+    upload_event_id: String,
+    claim_token: String,
+    code: String,
+) -> Result<bool, String> {
+    mobile_runtime_gate()?;
+    let (mut conn, _) = open_config_db(&state.server)?;
+    sync::mobile_upload::mark_quarantined_claimed(&mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &code, &chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.code().to_string())
+}
+
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_upload_mark_ready(
+    state: tauri::State<'_, AppHandleState>,
+    origin_authenticated_user_id: String,
+    upload_event_id: String,
+    claim_token: String,
+    entity_id: String,
+    payload_hash: String,
+    product_id: String,
+) -> Result<String, String> {
+    mobile_runtime_gate()?;
+    let (mut conn, _) = open_config_db(&state.server)?;
+    let outcome = sync::mobile_upload::mark_ready(
+        &mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &entity_id, &payload_hash, &product_id,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .map_err(|e| e.code().to_string())?;
+    Ok(match outcome {
+        sync::mobile_upload::ReadyOutcome::MarkedReady => "marked_ready",
+        sync::mobile_upload::ReadyOutcome::AlreadyReady => "already_ready",
+        sync::mobile_upload::ReadyOutcome::Rejected => "rejected",
+    }
+    .to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1691,7 +1883,9 @@ pub fn run() {
             // identity_locks map, silently breaking the concurrency contract.
             let media_ingest =
                 Arc::new(media::ingest::MediaIngestService::new(app_dir.join("media")));
-            app.manage(AppHandleState { server, media_ingest });
+            let mobile_staging_root = app_dir.join("mobile-upload-staging");
+            let _ = std::fs::create_dir_all(&mobile_staging_root);
+            app.manage(AppHandleState { server, media_ingest, mobile_staging_root });
 
             // M5-B — native WebView2-Reload-Bruecke (nur Windows) auf dem Main-Webview
             // installieren: F5/Ctrl+R nativ unterdruecken und als Tauri-Event ans Frontend
@@ -1759,6 +1953,11 @@ pub fn run() {
             media_abort_stock_image,
             media_read_verified,
             media_recover_ingests,
+            // MOBILE-04B2A2-R5 §1 — the internal mobile-upload claim/handoff commands
+            // (mobile_upload_claim / _prepare_image / _renew / _release / _mark_quarantined /
+            // _mark_ready) are DELIBERATELY NOT registered here: runtime activation is blocked while
+            // there is no canonical runtime scope source. Their wrappers remain in the file and also
+            // fail closed (mobile_runtime_gate) so an accidental re-registration cannot activate them.
             finalize_application_shutdown
         ])
         .run(tauri::generate_context!())

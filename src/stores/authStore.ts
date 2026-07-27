@@ -11,7 +11,15 @@ import type { UserRole } from '@/core/models/types';
 function triggerMediaRecoveryPostAuth(): void {
   void import('@/stores/productStore')
     .then((m) => m.triggerStartupMediaRecovery())
-    .catch(() => { /* never blocks auth */ });
+    .catch(() => { /* never blocks auth */ })
+    // MOBILE-04B2A2 — only AFTER media startup recovery completes: drain the durable Rust mobile
+    // upload inbox into the product/media pipeline. Fire-and-forget and fully guarded — a no-op
+    // without an authenticated scope or without Tauri (web preview), and never blocks auth.
+    .finally(() => {
+      void Promise.all([import('@/core/media/mobile-upload-wiring'), import('@/core/db/database')])
+        .then(([w, db]) => w.triggerMobileUploadDrainPostAuth(db.currentDbEpoch()))
+        .catch(() => { /* never blocks auth */ });
+    });
 }
 
 interface AuthStore {

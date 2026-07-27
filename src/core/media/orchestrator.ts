@@ -94,8 +94,14 @@ export class OrchestratorError extends Error {
 // ── input DTOs ──────────────────────────────────────────────────────────────
 
 export interface IngestAndFinalizeInput extends FinalizeInput {
-  imageBytes: Uint8Array;
+  /** Raw bytes to prepare in JS→Rust. Absent when `prepared` is supplied (mobile handoff). */
+  imageBytes?: Uint8Array;
   originalName?: string;
+  /** MOBILE-04B2A2 — a descriptor already prepared ELSEWHERE (a Rust command reading the mobile
+   *  staging file). When present, the batch registers it directly, skipping `prepareStockImage`,
+   *  so no image bytes ever cross into JS. The prepared request is staged in the SAME media journal
+   *  the commit publishes from — keyed by (scope, ingestRequestId, requestHash). */
+  prepared?: PrepareResult;
 }
 
 export interface ReplaceStockImageInput extends ReplaceInput {
@@ -261,13 +267,15 @@ export class StockMediaOrchestrator {
         const coordinator = this.coordinatorFactory(lease.db, this.gateway);
 
         // 1) Rust prepare — normalise + hash + stage. Nothing is published.
+        const singleBytes = input.imageBytes;
+        if (!singleBytes) throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', 'imageBytes required for single ingest');
         let prepareResult: PrepareResult;
         try {
           prepareResult = await this.gateway.prepareStockImage({
             tenantScope: input.tenantId,
             ingestRequestId: input.ingestRequestId,
             requestHash: input.requestHash,
-            imageBytes: input.imageBytes,
+            imageBytes: singleBytes,
             originalName: input.originalName,
           });
         } catch (e) {
@@ -331,18 +339,27 @@ export class StockMediaOrchestrator {
         const coordinator = this.coordinatorFactory(lease.db, this.gateway);
         for (const input of items) {
           let result: PrepareResult;
-          try {
-            result = await this.gateway.prepareStockImage({
-              tenantScope: input.tenantId,
-              ingestRequestId: input.ingestRequestId,
-              requestHash: input.requestHash,
-              imageBytes: input.imageBytes,
-              originalName: input.originalName,
-            });
-          } catch (e) {
-            throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
+          if (input.prepared) {
+            // Already prepared out-of-band (mobile: a Rust command staged it from the upload file).
+            // Register it directly; do NOT add it to the abort list — its rendition was staged by
+            // the mobile prepare command, and a failed checkpoint here must leave it for recovery/GC,
+            // not abort a request this batch did not stage.
+            result = input.prepared;
+          } else {
+            if (!input.imageBytes) throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', 'no image bytes and no prepared descriptor');
+            try {
+              result = await this.gateway.prepareStockImage({
+                tenantScope: input.tenantId,
+                ingestRequestId: input.ingestRequestId,
+                requestHash: input.requestHash,
+                imageBytes: input.imageBytes,
+                originalName: input.originalName,
+              });
+            } catch (e) {
+              throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
+            }
+            prepared.push({ tenantScope: input.tenantId, ingestRequestId: input.ingestRequestId });
           }
-          prepared.push({ tenantScope: input.tenantId, ingestRequestId: input.ingestRequestId });
           coordinator.registerPendingIntent(input, result);
         }
         try {

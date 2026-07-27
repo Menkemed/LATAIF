@@ -61,6 +61,7 @@ pub const ERR_PATH_UNSAFE: &str = "MOBILE_UPLOAD_PATH_UNSAFE";
 pub const ERR_TARGET_CONFLICT: &str = "MOBILE_UPLOAD_TARGET_CONFLICT";
 pub const ERR_INTEGRITY_FAILURE: &str = "MOBILE_UPLOAD_INTEGRITY_FAILURE";
 pub const ERR_MANIFEST_INVALID: &str = "MOBILE_UPLOAD_MANIFEST_INVALID";
+pub const ERR_CLAIM_INVALID: &str = "MOBILE_UPLOAD_CLAIM_INVALID";
 
 /// The already-authenticated caller context. Built server-side from the verified session/JWT — a
 /// later route derives it from `Claims { sub, tenant_id, branch_id }`; the mobile payload never
@@ -319,14 +320,21 @@ fn stage_image_durably(staging_root: &Path, scope: &str, bytes: &[u8], hash: &st
 ///  3. PHYSICAL — every file is root-confined, not a symlink/junction, present, the right size, and
 ///     hashes to its recorded content hash. Never reconstructs a file from client data.
 fn verify_job_integrity(conn: &Connection, staging_root: &Path, t: &TrustedUploadContext, event: &str) -> Result<(), &'static str> {
+    verify_and_load_manifest(conn, staging_root, t, event).map(|_| ())
+}
+
+/// Same three fail-closed layers as `verify_job_integrity`, but returns the fully verified image
+/// manifest INCLUDING the physical bytes — the single source of truth for a handoff (never
+/// reconstructs from client data; the bytes are exactly what hashed to the recorded content hash).
+fn verify_and_load_manifest(conn: &Connection, staging_root: &Path, t: &TrustedUploadContext, event: &str) -> Result<Vec<ClaimedImage>, &'static str> {
     let canon = fs::canonicalize(staging_root).map_err(|_| ERR_INTEGRITY_FAILURE)?;
     let mut st = conn.prepare(
-        "SELECT slot, is_primary, storage_key, byte_size, content_hash FROM mobile_upload_image
+        "SELECT slot, is_primary, mime, width, height, byte_size, content_hash, storage_key FROM mobile_upload_image
           WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4 ORDER BY slot",
     ).map_err(|_| ERR_MANIFEST_INVALID)?;
-    let rows: Vec<(i64, i64, String, i64, String)> = st.query_map(
+    let rows: Vec<(i64, i64, String, i64, i64, i64, String, String)> = st.query_map(
         params![t.tenant_id, t.branch_id, t.authenticated_user_id, event],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
     ).map_err(|_| ERR_MANIFEST_INVALID)?.filter_map(|r| r.ok()).collect();
 
     // 1. manifest shape
@@ -337,7 +345,7 @@ fn verify_job_integrity(conn: &Connection, staging_root: &Path, t: &TrustedUploa
     let primaries: Vec<i64> = rows.iter().filter(|r| r.1 == 1).map(|r| r.0).collect();
     if primaries != vec![0] { return Err(ERR_MANIFEST_INVALID); } // exactly one primary, only at slot 0
     let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for (_, _, key, _, hash) in &rows {
+    for (_, _, _, _, _, _, hash, key) in &rows {
         if let Some(prev) = seen.insert(key, hash) { if prev != hash { return Err(ERR_MANIFEST_INVALID); } }
     }
 
@@ -350,16 +358,97 @@ fn verify_job_integrity(conn: &Connection, staging_root: &Path, t: &TrustedUploa
     ).map_err(|_| ERR_MANIFEST_INVALID)?;
     if recompute_stored_payload_hash(conn, t, event)? != stored_ph { return Err(ERR_MANIFEST_INVALID); }
 
-    // 3. physical
-    for (_, _, key, size, hash) in &rows {
-        let target = resolve_within_root(&canon, key).map_err(|_| ERR_PATH_UNSAFE)?;
+    // 3. physical + load verified bytes
+    let mut out = Vec::with_capacity(rows.len());
+    for (slot, prim, mime, w, h, size, hash, key) in rows {
+        let target = resolve_within_root(&canon, &key).map_err(|_| ERR_PATH_UNSAFE)?;
         if assert_no_reparse(&canon, &target).is_err() { return Err(ERR_PATH_UNSAFE); }
         let md = fs::metadata(&target).map_err(|_| ERR_INTEGRITY_FAILURE)?; // missing → fail closed
-        if md.len() as i64 != *size { return Err(ERR_INTEGRITY_FAILURE); }
+        if md.len() as i64 != size { return Err(ERR_INTEGRITY_FAILURE); }
         let bytes = fs::read(&target).map_err(|_| ERR_INTEGRITY_FAILURE)?;
-        if &sha256_hex(&bytes) != hash { return Err(ERR_INTEGRITY_FAILURE); }
+        if sha256_hex(&bytes) != hash { return Err(ERR_INTEGRITY_FAILURE); }
+        out.push(ClaimedImage {
+            slot: slot as usize, primary: prim == 1, mime, width: w as u32, height: h as u32,
+            byte_size: size as usize, content_hash: hash, storage_key: key,
+        }); // bytes verified here but NOT returned — fetched later, one at a time
     }
-    Ok(())
+    Ok(out)
+}
+
+/// Return ONE claimed image's verified bytes for the durable handoff — the bounded single-image
+/// transport. Re-checks that the caller still holds the active claim (matching `claim_token`) on a
+/// `processing` job in the trusted scope, then loads exactly that slot's staged file, root-confined
+/// and hash-verified. A stale/foreign token, a non-processing job, or a bad slot yields no bytes.
+/// Full provenance of one claimed image slot, gated by the CURRENT claim.
+#[derive(Debug)]
+pub struct ClaimedImageProvenance {
+    pub bytes: Vec<u8>,
+    pub content_hash: String,
+    pub is_primary: bool,
+    pub entity_id: String,
+    pub payload_hash: String,
+}
+
+pub fn fetch_claimed_image(
+    conn: &Connection, staging_root: &Path, trusted: &TrustedUploadContext,
+    upload_event_id: &str, claim_token: &str, slot: i64, now: &str,
+) -> Result<Vec<u8>, UploadError> {
+    Ok(claimed_image_for_prepare(conn, staging_root, trusted, upload_event_id, claim_token, slot, now)?.bytes)
+}
+
+/// Load one claimed image slot with the FULL provenance a prepare must bind. Claim gate (all must
+/// hold, else no bytes): an active claim with the matching `claim_token` on a job still `processing`
+/// whose lease has NOT expired (`lease_until >= now`) — so a stale/taken-over/expired claim prepares
+/// nothing. `entity_id` and `payload_hash` come from the inbox row (never trusted from JS).
+pub fn claimed_image_for_prepare(
+    conn: &Connection, staging_root: &Path, trusted: &TrustedUploadContext,
+    upload_event_id: &str, claim_token: &str, slot: i64, now: &str,
+) -> Result<ClaimedImageProvenance, UploadError> {
+    let job: Option<(String, String)> = conn.query_row(
+        "SELECT i.entity_id, i.payload_hash FROM mobile_upload_claim c
+           JOIN mobile_upload_inbox i
+             ON i.tenant_id=c.tenant_id AND i.branch_id=c.branch_id
+            AND i.authenticated_user_id=c.authenticated_user_id AND i.upload_event_id=c.upload_event_id
+          WHERE c.tenant_id=?1 AND c.branch_id=?2 AND c.authenticated_user_id=?3 AND c.upload_event_id=?4
+            AND c.claim_token=?5 AND i.state='processing' AND c.lease_until >= ?6",
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id, claim_token, now],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional().map_err(map_db)?;
+    let (entity_id, payload_hash) = job.ok_or_else(|| reject(ERR_CLAIM_INVALID))?;
+
+    let (storage_key, byte_size, content_hash, is_primary): (String, i64, String, i64) = conn.query_row(
+        "SELECT storage_key, byte_size, content_hash, is_primary FROM mobile_upload_image
+          WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4 AND slot=?5",
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id, slot],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional().map_err(map_db)?.ok_or_else(|| reject(ERR_INTEGRITY_FAILURE))?;
+
+    let canon = fs::canonicalize(staging_root).map_err(|_| reject(ERR_INTEGRITY_FAILURE))?;
+    let target = resolve_within_root(&canon, &storage_key).map_err(|_| reject(ERR_PATH_UNSAFE))?;
+    assert_no_reparse(&canon, &target)?;
+    let bytes = fs::read(&target).map_err(|_| reject(ERR_INTEGRITY_FAILURE))?;
+    if bytes.len() as i64 != byte_size || sha256_hex(&bytes) != content_hash {
+        return Err(reject(ERR_INTEGRITY_FAILURE));
+    }
+    Ok(ClaimedImageProvenance { bytes, content_hash, is_primary: is_primary != 0, entity_id, payload_hash })
+}
+
+/// Deterministic prepared-request identity, canonically bound to the FULL upload provenance — scope,
+/// origin user, uploadEventId, entityId, payloadHash, slot, primary and contentHash. It excludes the
+/// claim token (claims change across restart/takeover) so a valid re-prepare after recovery yields
+/// the SAME id (replay); any change to entityId / payloadHash / slot / primary / contentHash yields a
+/// DIFFERENT id, so the media journal's per-id hash-freeze turns any reuse-with-different-bytes into a
+/// typed conflict.
+pub fn prepare_request_id(
+    trusted: &TrustedUploadContext, upload_event_id: &str, entity_id: &str, payload_hash: &str,
+    slot: i64, primary: bool, content_hash: &str,
+) -> String {
+    let material = format!(
+        "mobile-prepare|v2|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id,
+        entity_id, payload_hash, slot, primary as i64, content_hash,
+    );
+    sha256_hex(material.as_bytes())
 }
 
 fn quarantine(conn: &Connection, t: &TrustedUploadContext, event: &str, code: &str, now: &str) -> Result<(), UploadError> {
@@ -557,6 +646,252 @@ pub fn get_upload_status(conn: &Connection, trusted: &TrustedUploadContext, uplo
         params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional().map_err(UploadError::Db)
+}
+
+// ── MOBILE-04B2A2 — internal claim / lease / ready state machine ──────────────
+// INTERNAL host bridge ONLY (Tauri commands), NEVER an HTTP route and never `mobile_page.rs`.
+// Lets the JS/WebView worker lease one `accepted` job, hand its verified images to
+// createProductWithMedia, then mark the same job `ready` — exactly once, restart-safe. The durable
+// resume anchor is the sql.js-side `mobile_upload_receipts` row (product-atomic), NOT this table.
+
+/// One verified image DESCRIPTOR in the claim manifest — NO bytes. The bytes are transferred later,
+/// one image at a time, via `fetch_claimed_image` (bounded single-image binary transport), so a
+/// claim never ships a 40 MiB JSON blob and JS never materialises all 8 images at once. `storage_key`
+/// is an opaque content-addressed token, never a filesystem path the JS side can act on.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimedImage {
+    pub slot: usize,
+    pub primary: bool,
+    pub mime: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_size: usize,
+    pub content_hash: String,
+    pub storage_key: String,
+}
+
+/// A granted lease on one `accepted` job, with its fully re-verified manifest + bytes.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimGrant {
+    pub tenant_id: String,
+    pub branch_id: String,
+    pub authenticated_user_id: String,
+    pub upload_event_id: String,
+    pub entity_id: String,
+    pub payload_hash: String,
+    pub mode: String,
+    pub metadata_json: String,
+    pub claim_token: String,
+    pub claimant_instance_id: String,
+    pub lease_until: String,
+    pub images: Vec<ClaimedImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadyOutcome {
+    /// This call transitioned processing → ready.
+    MarkedReady,
+    /// Idempotent: the job is already ready for the same entity id / payload hash / product id.
+    AlreadyReady,
+    /// Stale/forged claim token, identity mismatch, or non-processing state — NOTHING written.
+    Rejected,
+}
+
+/// Lease and claim one job for handoff. Picks the oldest job in scope that is `accepted` OR a
+/// `processing` job whose lease has expired (crash of a prior claimant), fully re-verifies its
+/// manifest+files, then transitions it to `processing` with a fresh `claim_token` + lease. An
+/// integrity-broken candidate is quarantined (fail closed) and skipped. Returns `None` when nothing
+/// is claimable. Exactly one active claim per job: the IMMEDIATE write lock + the partial UNIQUE
+/// entity index serialize concurrent claimants; a stale claimant's later calls no-op on token
+/// mismatch. `claim_token` / `claimant_instance_id` / `lease_until` / `now` are supplied by the host
+/// command (never trusted from JS payload fields).
+const CLAIM_PK_MATCH: &str =
+    "c.tenant_id=mobile_upload_inbox.tenant_id AND c.branch_id=mobile_upload_inbox.branch_id \
+     AND c.authenticated_user_id=mobile_upload_inbox.authenticated_user_id \
+     AND c.upload_event_id=mobile_upload_inbox.upload_event_id";
+
+pub fn claim_next_job(
+    conn: &mut Connection, staging_root: &Path, tenant_id: &str, branch_id: &str,
+    claimant_instance_id: &str, claim_token: &str, lease_until: &str, now: &str,
+) -> Result<Option<ClaimGrant>, UploadError> {
+    loop {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+        // Oldest claimable job in the (tenant, branch) scope, across ALL origin users: `accepted`
+        // (no claim row) OR `processing` whose claim lease has expired. The desktop worker leases as
+        // itself (claimantInstanceId); the job's ORIGIN user is read from the row, never assumed to
+        // be the worker. The whole pick→verify→claim runs under the IMMEDIATE write lock.
+        let cand: Option<(String, String, String, String, String)> = tx.query_row(
+            "SELECT i.authenticated_user_id, i.upload_event_id, i.entity_id, i.payload_hash, i.metadata_json
+               FROM mobile_upload_inbox i
+               LEFT JOIN mobile_upload_claim c
+                 ON c.tenant_id=i.tenant_id AND c.branch_id=i.branch_id
+                AND c.authenticated_user_id=i.authenticated_user_id AND c.upload_event_id=i.upload_event_id
+              WHERE i.tenant_id=?1 AND i.branch_id=?2
+                AND ( i.state='accepted'
+                      OR (i.state='processing' AND c.lease_until IS NOT NULL AND c.lease_until < ?3) )
+              ORDER BY i.created_at, i.upload_event_id LIMIT 1",
+            params![tenant_id, branch_id, now],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).optional().map_err(map_db)?;
+        let (origin_user, event, entity, ph, meta) = match cand {
+            Some(x) => x,
+            None => { let _ = tx.commit(); return Ok(None); }
+        };
+        // This job's trusted identity = (tenant, branch, ORIGIN user).
+        let job = TrustedUploadContext { tenant_id: tenant_id.to_string(), branch_id: branch_id.to_string(), authenticated_user_id: origin_user.clone() };
+        match verify_and_load_manifest(&tx, staging_root, &job, &event) {
+            Ok(images) => {
+                let n = tx.execute(
+                    &format!(
+                        "UPDATE mobile_upload_inbox SET state='processing', updated_at=?5
+                          WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4
+                            AND ( state='accepted'
+                                  OR ( state='processing' AND EXISTS (
+                                        SELECT 1 FROM mobile_upload_claim c WHERE {CLAIM_PK_MATCH} AND c.lease_until < ?6 ) ) )"),
+                    params![tenant_id, branch_id, origin_user, event, now, now],
+                ).map_err(map_db)?;
+                if n == 0 { let _ = tx.commit(); return Err(UploadError::Retryable); }
+                // Bind the fresh claim (replacing any expired one) atomically with the state change.
+                tx.execute(
+                    "INSERT INTO mobile_upload_claim
+                       (tenant_id, branch_id, authenticated_user_id, upload_event_id, claim_token,
+                        claimant_instance_id, lease_until, created_at, updated_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8)
+                     ON CONFLICT (tenant_id, branch_id, authenticated_user_id, upload_event_id)
+                     DO UPDATE SET claim_token=excluded.claim_token, claimant_instance_id=excluded.claimant_instance_id,
+                                   lease_until=excluded.lease_until, updated_at=excluded.updated_at",
+                    params![tenant_id, branch_id, origin_user, event, claim_token, claimant_instance_id, lease_until, now],
+                ).map_err(map_db)?;
+                tx.commit().map_err(map_db)?;
+                return Ok(Some(ClaimGrant {
+                    tenant_id: tenant_id.to_string(), branch_id: branch_id.to_string(),
+                    authenticated_user_id: origin_user, // ORIGIN user from the inbox job, immutable
+                    upload_event_id: event, entity_id: entity, payload_hash: ph,
+                    mode: "collection".into(), metadata_json: meta,
+                    claim_token: claim_token.to_string(), claimant_instance_id: claimant_instance_id.to_string(),
+                    lease_until: lease_until.to_string(), images,
+                }));
+            }
+            Err(code) => {
+                quarantine(&tx, &job, &event, code, now)?; // fail closed
+                tx.execute(
+                    "DELETE FROM mobile_upload_claim
+                      WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4",
+                    params![tenant_id, branch_id, origin_user, event],
+                ).map_err(map_db)?;
+                tx.commit().map_err(map_db)?;
+                continue; // try the next candidate
+            }
+        }
+    }
+}
+
+/// Extend the lease of a still-held claim. No-op (returns false) unless BOTH the claim token and the
+/// claimant id match the active claim row — a stale/foreign claimant (whose token was replaced on a
+/// takeover) cannot renew. A claim row only ever exists for a `processing` job.
+pub fn renew_claim(
+    conn: &Connection, trusted: &TrustedUploadContext, upload_event_id: &str,
+    claim_token: &str, claimant_instance_id: &str, new_lease_until: &str, now: &str,
+) -> Result<bool, UploadError> {
+    let n = conn.execute(
+        "UPDATE mobile_upload_claim SET lease_until=?5, updated_at=?6
+          WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4
+            AND claim_token=?7 AND claimant_instance_id=?8",
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id,
+            new_lease_until, now, claim_token, claimant_instance_id],
+    ).map_err(map_db)?;
+    Ok(n == 1)
+}
+
+/// Release a claim back to `accepted` (graceful abort / retry). Only a matching-token holder of a
+/// `processing` job can; the claim row is removed. Returns false on token/state mismatch.
+pub fn mark_retryable(
+    conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, now: &str,
+) -> Result<bool, UploadError> {
+    release_claimed(conn, trusted, upload_event_id, claim_token, "accepted", None, now)
+}
+
+/// Quarantine a claimed job (manifest/file mismatch discovered by the JS verify). Matching-token +
+/// `processing` only; the claim row is removed; nothing written otherwise.
+pub fn mark_quarantined_claimed(
+    conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, code: &str, now: &str,
+) -> Result<bool, UploadError> {
+    release_claimed(conn, trusted, upload_event_id, claim_token, "quarantined", Some(code), now)
+}
+
+/// Shared token-guarded transition of a `processing` job to a terminal/back state + claim removal.
+fn release_claimed(
+    conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str,
+    new_state: &str, error_code: Option<&str>, now: &str,
+) -> Result<bool, UploadError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+    let n = tx.execute(
+        &format!(
+            "UPDATE mobile_upload_inbox SET state=?5, error_code=?6, updated_at=?7
+              WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4
+                AND state='processing'
+                AND EXISTS (SELECT 1 FROM mobile_upload_claim c WHERE {CLAIM_PK_MATCH} AND c.claim_token=?8)"),
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id,
+            new_state, error_code, now, claim_token],
+    ).map_err(map_db)?;
+    if n == 1 {
+        tx.execute(
+            "DELETE FROM mobile_upload_claim
+              WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4",
+            params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id],
+        ).map_err(map_db)?;
+        tx.commit().map_err(map_db)?;
+        Ok(true)
+    } else {
+        let _ = tx.commit();
+        Ok(false)
+    }
+}
+
+/// Transition a claimed job to `ready` after the JS side has DURABLY created the product + receipt.
+/// Accepts ONLY with a matching claim token AND the exact entity id AND payload hash the claim
+/// carried — a foreign product id or a different payload can never mark this job ready. Idempotent:
+/// re-marking an already-ready job with the same identity returns `AlreadyReady` (crash-after-ready
+/// resume). Any mismatch → `Rejected`, nothing written.
+pub fn mark_ready(
+    conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str,
+    claim_token: &str, entity_id: &str, payload_hash: &str, product_id: &str, now: &str,
+) -> Result<ReadyOutcome, UploadError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+    let n = tx.execute(
+        &format!(
+            "UPDATE mobile_upload_inbox SET state='ready', product_id=?7, updated_at=?8
+              WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4
+                AND entity_id=?6 AND payload_hash=?9 AND state='processing'
+                AND EXISTS (SELECT 1 FROM mobile_upload_claim c WHERE {CLAIM_PK_MATCH} AND c.claim_token=?5)"),
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id,
+            claim_token, entity_id, product_id, now, payload_hash],
+    ).map_err(map_db)?;
+    if n == 1 {
+        tx.execute(
+            "DELETE FROM mobile_upload_claim
+              WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4",
+            params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id],
+        ).map_err(map_db)?;
+        tx.commit().map_err(map_db)?;
+        return Ok(ReadyOutcome::MarkedReady);
+    }
+    // No transition. Distinguish an idempotent already-ready job from a stale/forged attempt.
+    let existing: Option<(String, Option<String>, String, String)> = tx.query_row(
+        "SELECT state, product_id, entity_id, payload_hash FROM mobile_upload_inbox
+          WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4",
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional().map_err(map_db)?;
+    let _ = tx.commit();
+    match existing {
+        Some((st, pid, ent, ph))
+            if st == "ready" && pid.as_deref() == Some(product_id) && ent == entity_id && ph == payload_hash =>
+            Ok(ReadyOutcome::AlreadyReady),
+        _ => Ok(ReadyOutcome::Rejected),
+    }
 }
 
 #[cfg(test)]

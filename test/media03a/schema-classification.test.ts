@@ -64,6 +64,8 @@ const LEGACY_LOCAL_NON_SYNC = new Set<string>([
   'production_inputs', 'production_outputs', 'scrap_trade_lines', 'scrap_trade_payments', 'scrap_trades',
   'sessions', 'settings', 'sync_change_quarantine', 'sync_changelog', 'tax_payments', 'tenants',
   'user_branches', 'users',
+  // MOBILE-04B2A2 — local cross-DB source binding for the mobile upload drain worker; never synced.
+  'mobile_upload_receipts',
 ]);
 const LOCAL_INACTIVE_MEDIA = new Set<string>(MEDIA_TABLES);
 const DEPRECATED_OR_UNREACHABLE_DDL = new Set<string>(); // none; see §2 note below.
@@ -96,7 +98,7 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 // §1 — semantic contracts, from independent sources
 ok(LEGACY_SYNC_APPLY.size === 50, `legacy_sync_apply = 50 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
-ok(LEGACY_LOCAL_NON_SYNC.size === 24, `legacy_local_non_sync = 24 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
+ok(LEGACY_LOCAL_NON_SYNC.size === 25, `legacy_local_non_sync = 25 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');
 
 // media: scanner sees them (anti-hiding), they equal MEDIA_TABLES, none is synced

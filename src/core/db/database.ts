@@ -1729,6 +1729,24 @@ function runMigrations(database: Database): void {
     // Operation-/Revisions-/Cursor-State (geteilte, getestete SQL). Rein additiv,
     // idempotent (IF NOT EXISTS). Server-only-Tabellen bleiben am Server.
     ...B1_MIGRATION_SQL,
+    // ── MOBILE-04B2A2 — durable cross-DB source binding for the mobile upload drain worker.
+    // LOCAL, NEVER synced (legacy_local_non_sync). Written atomically with the product in the
+    // create checkpoint; PK on (tenant, branch, uploadEventId) makes "this upload already has a
+    // product" a durable, restart-surviving fact so a crash before Rust `ready` never doubles.
+    `CREATE TABLE IF NOT EXISTS mobile_upload_receipts (
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT NOT NULL,
+      authenticated_user_id TEXT NOT NULL,
+      upload_event_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      create_batch_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      canonical_product_metadata_hash TEXT NOT NULL,
+      prepared_manifest_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id)
+    )`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

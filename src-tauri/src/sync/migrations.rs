@@ -54,6 +54,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0010_CANONICAL_REVISION_CAS,
     V0011_OPERATION_CHANGELOG_AUDIT,
     V0012_MOBILE_UPLOAD_INBOX,
+    V0013_MOBILE_UPLOAD_CLAIM,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -375,6 +376,35 @@ CREATE INDEX IF NOT EXISTS idx_mobile_upload_inbox_state
 CREATE UNIQUE INDEX IF NOT EXISTS ux_mobile_upload_active_entity
     ON mobile_upload_inbox (tenant_id, branch_id, entity_id)
     WHERE state IN ('accepted','processing','ready');
+"#;
+
+// MOBILE-04B2A2 — internal per-job claim/lease so the JS/WebView worker can lease one `accepted`
+// job for handoff to createProductWithMedia. A SEPARATE, self-contained table (not ALTERs on the
+// inbox) so its canonical schema is drift-checkable exactly like every other migration. INTERNAL /
+// denylisted; no route, no sync. A `processing` inbox row has exactly one claim row (PK-bound);
+// terminal states have none. `ON DELETE CASCADE` keeps a claim from outliving its inbox row.
+pub const V0013_MOBILE_UPLOAD_CLAIM: Migration = Migration {
+    version: 13,
+    name: "mobile_upload_claim",
+    up_sql: V0013_SQL,
+    reference_sql: V0013_SQL,
+};
+const V0013_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS mobile_upload_claim (
+    tenant_id             TEXT NOT NULL,
+    branch_id             TEXT NOT NULL,
+    authenticated_user_id TEXT NOT NULL,
+    upload_event_id       TEXT NOT NULL,
+    claim_token           TEXT NOT NULL,
+    claimant_instance_id  TEXT NOT NULL,
+    lease_until           TEXT NOT NULL,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id),
+    FOREIGN KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id)
+        REFERENCES mobile_upload_inbox (tenant_id, branch_id, authenticated_user_id, upload_event_id)
+        ON DELETE CASCADE
+);
 "#;
 
 const V0011_SQL: &str = r#"
@@ -1262,7 +1292,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
@@ -1294,7 +1324,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=12).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=13).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1307,7 +1337,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1471,7 +1501,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

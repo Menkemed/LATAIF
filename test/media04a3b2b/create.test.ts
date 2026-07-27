@@ -218,7 +218,7 @@ async function main(): Promise<void> {
   // ── §1 product with 3 images → images='[]', media 0/1/2, durable batch ─
   {
     const { db, gw, deps, inserted, succeeded } = await freshEnv(SQL);
-    const res = await createProductWithDurableMedia('p1', [0, 1, 2].map((i) => dataUrl(`p1-${i}`)), deps);
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1, 2].map((i) => dataUrl(`p1-${i}`)) }, deps);
     ok(res.status === 'created', `created (got ${res.status})`);
     ok(productImages(db, 'p1') === '[]', 'products.images empty — no base64');
     ok(activeLinks(db, 'p1') === 3 && orderOf(db, 'p1') === '0,1,2', 'media 0,1,2');
@@ -230,7 +230,7 @@ async function main(): Promise<void> {
   // ── §2 no images → normal create, no media ────────────────────────────
   {
     const { db, gw, deps, inserted } = await freshEnv(SQL);
-    const res = await createProductWithDurableMedia('p1', [], deps);
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [] }, deps);
     ok(res.status === 'created', 'no-image create ok');
     ok(productImages(db, 'p1') === '[]' && activeLinks(db, 'p1') === 0, 'no media');
     ok(gw.commits.length === 0 && inserted.length === 1, 'no publish, inserted once');
@@ -240,7 +240,7 @@ async function main(): Promise<void> {
   {
     const { db, gw, disk, deps, inserted, succeeded } = await freshEnv(SQL);
     disk.failOnWrite = 1; // cp1 (first durable save) fails
-    const res = await createProductWithDurableMedia('p1', [dataUrl('x0'), dataUrl('x1')], deps);
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [dataUrl('x0'), dataUrl('x1')] }, deps);
     ok(res.status === 'product_save_failed', `product_save_failed (got ${res.status})`);
     ok(productCount(db, 'p1') === 0, 'NO ghost product row');
     ok(jobRows(db, 'p1') === 0, 'NO orphan ingest jobs');
@@ -252,7 +252,7 @@ async function main(): Promise<void> {
   {
     const { db, gw, deps, inserted, succeeded } = await freshEnv(SQL);
     gw.commitShouldThrowFor = `create:t1:b1:p1:${ROLE}:0`;
-    const res = await createProductWithDurableMedia('p1', [dataUrl('m0'), dataUrl('m1')], deps);
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [dataUrl('m0'), dataUrl('m1')] }, deps);
     ok(res.status === 'media_incomplete', `media_incomplete (got ${res.status})`);
     ok(productCount(db, 'p1') === 1 && productImages(db, 'p1') === '[]', 'product durable, no base64');
     ok(inserted.length === 1 && succeeded.length === 0, 'inserted once, no full success');
@@ -268,7 +268,7 @@ async function main(): Promise<void> {
     const { db, gw, disk, deps } = await freshEnv(SQL);
     const origCommit = gw.commitStockImage.bind(gw);
     (gw as any).commitStockImage = async (i: any) => { gw.commits.push(i.ingestRequestId); throw new Error('MEDIA_INGEST_NOT_FOUND'); };
-    const res = await createProductWithDurableMedia('p1', [0, 1, 2].map((i) => dataUrl(`ra-${i}`)), deps);
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1, 2].map((i) => dataUrl(`ra-${i}`)) }, deps);
     ok(res.status === 'media_incomplete', 'batch durable but publish failed');
     ok(acceptedJobs(db, 'p1') === 3, '3 accepted jobs durable');
     ok(activeLinks(db, 'p1') === 0, 'nothing published yet');
@@ -292,7 +292,7 @@ async function main(): Promise<void> {
   {
     const { db, gw, disk, deps } = await freshEnv(SQL);
     gw.commitShouldThrowFor = `create:t1:b1:p1:${ROLE}:1`; // slot 0 publishes, slot 1 fails
-    const res = await createProductWithDurableMedia('p1', [0, 1, 2].map((i) => dataUrl(`rb-${i}`)), deps);
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1, 2].map((i) => dataUrl(`rb-${i}`)) }, deps);
     ok(res.status === 'media_incomplete', 'partial at slot 1');
     ok(activeLinks(db, 'p1') === 1, 'image 0 durable');
     const db2 = reopen(SQL, disk);
@@ -309,7 +309,7 @@ async function main(): Promise<void> {
   {
     const { db, gw, disk, deps } = await freshEnv(SQL);
     gw.commitShouldThrowFor = `create:t1:b1:p1:${ROLE}:2`;
-    await createProductWithDurableMedia('p1', [0, 1, 2].map((i) => dataUrl(`rc-${i}`)), deps);
+    await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1, 2].map((i) => dataUrl(`rc-${i}`)) }, deps);
     ok(activeLinks(db, 'p1') === 2, 'images 0,1 durable');
     const db2 = reopen(SQL, disk);
     gw.commitShouldThrowFor = null;
@@ -325,7 +325,7 @@ async function main(): Promise<void> {
     const { db, gw, disk, deps } = await freshEnv(SQL);
     const origCommit = gw.commitStockImage.bind(gw);
     (gw as any).commitStockImage = async (i: any) => { gw.commits.push(i.ingestRequestId); throw new Error('boom'); };
-    await createProductWithDurableMedia('p1', [0, 1].map((i) => dataUrl(`rd-${i}`)), deps);
+    await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1].map((i) => dataUrl(`rd-${i}`)) }, deps);
     const db2 = reopen(SQL, disk);
     ok(acceptedJobs(db2, 'p1') === 2, '2 intents durable, recoverable from DB alone');
     (gw as any).commitStockImage = origCommit;
@@ -339,10 +339,10 @@ async function main(): Promise<void> {
   {
     const { db, gw, deps } = await freshEnv(SQL);
     gw.commitShouldThrowFor = `create:t1:b1:p1:${ROLE}:1`;
-    const first = await createProductWithDurableMedia('p1', [0, 1, 2].map((i) => dataUrl(`re-${i}`)), deps);
+    const first = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1, 2].map((i) => dataUrl(`re-${i}`)) }, deps);
     ok(first.status === 'media_incomplete', 'first partial');
     gw.commitShouldThrowFor = null;
-    const second = await createProductWithDurableMedia('p1', [0, 1, 2].map((i) => dataUrl(`re-${i}`)), deps);
+    const second = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1, 2].map((i) => dataUrl(`re-${i}`)) }, deps);
     ok(second.status === 'created', 'retry created');
     ok(productCount(db, 'p1') === 1, 'exactly one product');
     ok(activeLinks(db, 'p1') === 3 && totalLinks(db, 'p1') === 3, '3 links, no duplicates');
@@ -352,10 +352,10 @@ async function main(): Promise<void> {
   {
     const { db, gw, deps } = await freshEnv(SQL);
     gw.commitShouldThrowFor = `create:t1:b1:p1:${ROLE}:1`;
-    await createProductWithDurableMedia('p1', [0, 1, 2].map((i) => dataUrl(`rf-${i}`)), deps);
+    await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [0, 1, 2].map((i) => dataUrl(`rf-${i}`)) }, deps);
     ok(activeLinks(db, 'p1') === 1, 'slot 0 durable');
     gw.commitShouldThrowFor = null;
-    const rr = await createProductWithDurableMedia('p1', [dataUrl('rf-DIFFERENT'), dataUrl('rf-1'), dataUrl('rf-2')], { ...deps, expectedImages: undefined })
+    const rr = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [dataUrl('rf-DIFFERENT'), dataUrl('rf-1'), dataUrl('rf-2')] }, { ...deps, expectedImages: undefined })
       .catch((e: any) => ({ status: 'threw', errorCode: e.code ?? e.message } as any));
     const code = String((rr as any).errorCode ?? '');
     ok(rr.status !== 'created' && code.includes('CONFLICT'), `different hash in same batch → conflict (got ${rr.status}/${code})`);
@@ -367,15 +367,15 @@ async function main(): Promise<void> {
     const embedCalls = { n: 0 };
     const { db, gw, deps, inserted } = await freshEnv(SQL, { embedCalls });
     gw.commitShouldThrowFor = `create:t1:b1:p1:${ROLE}:0`;
-    const first = await createProductWithDurableMedia('p1', [dataUrl('s0'), dataUrl('s1')], deps);
+    const first = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [dataUrl('s0'), dataUrl('s1')] }, deps);
     ok(first.status === 'media_incomplete', 'first partial');
     ok(embedCalls.n === 0, 'no embedding on the partial');
     gw.commitShouldThrowFor = null;
-    const second = await createProductWithDurableMedia('p1', [dataUrl('s0'), dataUrl('s1')], deps);
+    const second = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [dataUrl('s0'), dataUrl('s1')] }, deps);
     ok(second.status === 'created', 'retry created');
     ok(embedCalls.n === 1, 'embedding fired exactly once on the completing retry');
     ok(inserted.length === 1, 'inserted once across create+retry');
-    const third = await createProductWithDurableMedia('p1', [dataUrl('s0'), dataUrl('s1')], deps);
+    const third = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [dataUrl('s0'), dataUrl('s1')] }, deps);
     ok(third.status === 'created' && embedCalls.n === 1, 'further retry: no 2nd embedding');
     ok(totalLinks(db, 'p1') === 2, 'still 2 links');
   }
@@ -385,20 +385,20 @@ async function main(): Promise<void> {
     const original = [dataUrl('i0'), dataUrl('i1')];
     const { db, gw, deps } = await freshEnv(SQL);
     gw.commitShouldThrowFor = `create:t1:b1:p1:${ROLE}:1`;
-    const first = await createProductWithDurableMedia('p1', original, deps);
+    const first = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: original }, deps);
     ok(first.status === 'media_incomplete', 'first partial');
     gw.commitShouldThrowFor = null;
-    const changed = await createProductWithDurableMedia('p1', [dataUrl('i0'), dataUrl('CHANGED')], { ...deps, expectedImages: original });
+    const changed = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: [dataUrl('i0'), dataUrl('CHANGED')] }, { ...deps, expectedImages: original });
     ok(changed.status === 'media_incomplete' && (changed as any).errorCode === 'MEDIA_CREATE_RETRY_INTENT_MISMATCH', `changed list → conflict (got ${(changed as any).errorCode})`);
     ok(activeLinks(db, 'p1') === 1, 'no new slot from the rejected retry');
-    const okr = await createProductWithDurableMedia('p1', original, { ...deps, expectedImages: original });
+    const okr = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: original }, { ...deps, expectedImages: original });
     ok(okr.status === 'created' && activeLinks(db, 'p1') === 2, 'original retry converges');
   }
 
   // ── §7 decode failure → product created durably, media_incomplete ─────
   {
     const { db, gw, deps } = await freshEnv(SQL);
-    const res = await createProductWithDurableMedia('p1', ['/not/a/data/url.jpg'], deps);
+    const res = await createProductWithDurableMedia('p1', { kind: 'data_urls', images: ['/not/a/data/url.jpg'] }, deps);
     ok(res.status === 'media_incomplete', `undecodable → media_incomplete (got ${res.status})`);
     ok(productCount(db, 'p1') === 1 && activeLinks(db, 'p1') === 0, 'product created, no links');
     ok(gw.commits.length === 0, 'no publish');

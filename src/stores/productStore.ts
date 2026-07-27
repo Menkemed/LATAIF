@@ -11,11 +11,12 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // mehr importiert.
 import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
 import { saveDatabaseDurably } from '@/core/db/database';
-import { createProductWithDurableMedia, sameImageIntent, shouldStartEmbedding, type ProductCreateResult } from '@/core/media/product-media-create';
+import { createProductWithDurableMedia, sameImageIntent, shouldStartEmbedding, type ProductCreateResult, type MediaSource } from '@/core/media/product-media-create';
 import { createRequestId, canonicalRequestHash, decodeDataUrl, ProductMediaCutoverService, type DecodedLegacyImage } from '@/core/media/product-media-cutover';
 import { getStockMediaOrchestrator, type IngestAndFinalizeInput, type EditScope, type EditNewImageInput } from '@/core/media/orchestrator';
 import { buildEditPlanEnvelope } from '@/core/media/product-media-edit';
 import type { ProductEditIntent } from '@/core/media/coordinator';
+import type { PreparedMediaItem } from '@/core/media/mobile-upload-drain';
 import { canEditImages, draftFromSrcs, buildImageEditInputs, diffProductText, editHasChanges, type ResolverStatus } from '@/core/media/product-edit-draft';
 import { ProductMediaResolver } from '@/core/media/product-media-resolver';
 import { validateEphemeralImage, selectDurablePrimary, validateDurableBytes, isObjectUrl, type AiImageSource } from '@/core/media/ai-image-source';
@@ -46,6 +47,20 @@ const PRODUCT_LINK_TABLES: { table: string; label: string }[] = [
 ];
 
 export interface ProductLink { label: string; count: number; }
+
+// MOBILE-04B2A2 — the durable cross-DB source binding written ATOMICALLY with the product in the
+// single create checkpoint. It is the sql.js-side resume anchor for the mobile upload drain worker:
+// a crash after the product is durable but before the Rust job is marked `ready` is reconciled by
+// finding this receipt for the same (tenant, branch, uploadEventId) → the SAME product → re-mark
+// ready, never a second product. `entity_id`/`product_id` are the pinned id; `payload_hash` is the
+// Rust job's frozen payload hash. Local, non-synced.
+export interface MobileUploadReceiptIntent {
+  uploadEventId: string;
+  payloadHash: string;
+  authenticatedUserId: string;
+  canonicalProductMetadataHash: string;
+  preparedManifestHash: string;
+}
 
 // MEDIA-04A-3B2B-R1 — retry intent + embedding guards (module-scoped, per JS
 // session). `retryCreateManifests` freezes the ORIGINAL create intent for a
@@ -295,7 +310,7 @@ interface ProductStore {
    * (no duplicate). Used by the Collection create flow; every other caller keeps
    * the synchronous `createProduct`.
    */
-  createProductWithMedia: (data: Partial<Product>, retryProductId?: string) => Promise<ProductCreateResult>;
+  createProductWithMedia: (data: Partial<Product>, retryProductId?: string, receiptIntent?: MobileUploadReceiptIntent, source?: MediaSource) => Promise<ProductCreateResult>;
   editProductWithMedia: (
     id: string,
     data: Partial<Product>,
@@ -689,7 +704,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     return product;
   },
 
-  createProductWithMedia: async (data, retryProductId) => {
+  createProductWithMedia: async (data, retryProductId, receiptIntent, source) => {
     // Stable id across retries — reusing it is what keeps a retry from creating
     // a second product.
     const id = retryProductId ?? uuid();
@@ -705,7 +720,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     }
 
     const now = new Date().toISOString();
-    const imageDataUrls = Array.isArray(data.images) ? data.images : [];
+    // MOBILE-04B2A2 — the media source is a discriminated union: the UI supplies `data_urls`; the
+    // mobile handoff supplies opaque `prepared_media` descriptors (no sentinel/data-URL/decode).
+    const src: MediaSource = source ?? { kind: 'data_urls', images: Array.isArray(data.images) ? data.images : [] };
+    const usingPrepared = src.kind === 'prepared_media';
     // The frozen original intent (if this product partially failed before). The
     // create core rejects a retry whose image list differs from it.
     const frozen = retryProductId ? retryCreateManifests.get(retryProductId) : undefined;
@@ -713,11 +731,11 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
     const orchestrator = await getStockMediaOrchestrator();
     const role = 'stock_image';
-    // Durable batch grouping — one batch per product create, stable across
+    // Durable batch grouping — deterministic from the (upload-bound) product id, stable across
     // retries, frozen into every slot's intent for restart recovery.
     const batchId = `create:${tenantId}:${branchId}:${id}:${role}`;
 
-    const result = await createProductWithDurableMedia(id, imageDataUrls, {
+    const result = await createProductWithDurableMedia(id, src, {
       expectedImages: frozen?.images,
       productExists: (pid) => query('SELECT 1 FROM products WHERE id = ?', [pid]).length > 0,
       insertProductRow: (pid) => {
@@ -758,6 +776,13 @@ export const useProductStore = create<ProductStore>((set, get) => ({
           // exist. Keyed by (table, record) — the fresh insert wrote at most one.
           getDatabase().run(`DELETE FROM sync_changelog WHERE table_name = 'products' AND record_id = ?`, [pid]);
           getDatabase().run(`DELETE FROM audit_log WHERE entity_type = 'products' AND entity_id = ?`, [pid]);
+          // MOBILE-04B2A2 — undo the non-durable source receipt too (nothing landed).
+          if (receiptIntent) {
+            getDatabase().run(
+              `DELETE FROM mobile_upload_receipts WHERE tenant_id = ? AND branch_id = ? AND authenticated_user_id = ? AND upload_event_id = ?`,
+              [tenantId, branchId, receiptIntent.authenticatedUserId, receiptIntent.uploadEventId],
+            );
+          }
         } catch { /* nothing durable to undo */ }
       },
       // Build one durable-batch item per image: computed content hash, fixed
@@ -778,6 +803,16 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         }
         return items;
       },
+      // MOBILE-04B2A2 — prepared descriptors → batch items with NO bytes/sentinel. The Rust-derived
+      // ingestRequestId (= prepareRequestId, upload-bound) is used verbatim; the orchestrator
+      // re-verifies the prepared result against the media journal on register+commit.
+      buildPreparedBatchItems: async (pid, prepared: PreparedMediaItem[]) => prepared.map((p): IngestAndFinalizeInput => ({
+        tenantId, branchId, entityType: 'product', entityId: pid, scopeKind: 'branch', role,
+        ingestRequestId: p.ingestRequestId, requestHash: p.prepared.request_hash,
+        isPrimary: p.isPrimary, sortOrder: p.slot,
+        prepared: p.prepared,
+        batch: { batchId, expectedCount: prepared.length },
+      })),
       prepareAndRegisterBatch: (items) => orchestrator.prepareAndRegisterBatch(items as IngestAndFinalizeInput[]),
       finalizeBatch: (items) => orchestrator.finalizeBatch(items as IngestAndFinalizeInput[]),
       // DURABLE insert side effects — written in-memory BEFORE the batch
@@ -786,6 +821,18 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // driven only on a fresh insert; a retry never re-enters this path.
       recordDurableInsert: (pid) => {
         trackInsert('products', pid, { brand: data.brand, name: data.name, categoryId: data.categoryId, purchasePrice: data.purchasePrice });
+        // MOBILE-04B2A2 — bind the mobile upload source to THIS product in the SAME durable
+        // checkpoint (fresh insert only). This receipt is the resume anchor: it makes "the product
+        // for uploadEventId already exists" a durable fact, so a crash before the Rust `ready`
+        // never causes a second product. Not synced. entity_id == product_id == the pinned id.
+        if (receiptIntent) {
+          getDatabase().run(
+            `INSERT OR IGNORE INTO mobile_upload_receipts
+               (tenant_id, branch_id, authenticated_user_id, upload_event_id, payload_hash, entity_id, create_batch_id, product_id, canonical_product_metadata_hash, prepared_manifest_hash, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [tenantId, branchId, receiptIntent.authenticatedUserId, receiptIntent.uploadEventId, receiptIntent.payloadHash, pid, batchId, pid, receiptIntent.canonicalProductMetadataHash, receiptIntent.preparedManifestHash, now],
+          );
+        }
       },
       // TRANSIENT side effects only — rebuilt by the normal load after a
       // restart, so a crash between the checkpoint and here loses nothing durable.
@@ -794,6 +841,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         get().loadProducts();
       },
       onFullSuccess: (pid, firstImageDataUrl) => {
+        // Prepared (mobile) mode carries no data URL — the "first image" is a sentinel, so skip the
+        // ephemeral-image embedding here (a durable-primary embedding can run via recovery later).
+        if (usingPrepared) return;
         // AI embedding — eventual at-most-once. Fires on full success whether
         // this was the fresh create or a completing retry (a partial attempt
         // never reaches here). Guarded so it computes at most once:
@@ -836,7 +886,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // media_incomplete or product_save_failed → keep the ORIGINAL intent for
       // an exact retry (product_save_failed retains it too: the row was rolled
       // back, so a retry safely re-inserts with the same images).
-      retryCreateManifests.set(id, { images: imageDataUrls });
+      // Retry-intent freeze only applies to the data_urls path (prepared media is deterministic
+      // from its upload identity and reprepared on retry).
+      retryCreateManifests.set(id, { images: src.kind === 'data_urls' ? src.images : [] });
     }
 
     get().loadProducts();
