@@ -130,6 +130,9 @@ const INTERNAL_TABLES: readonly string[] = [
   // server-only, never client-synced. Kept identical to INTERNAL_TABLES in sync_policy.rs.
   'sync_operation_changelog',
   'sync_operation_audit',
+  // MOBILE-04B2A1 §v0012 — the durable server-side mobile upload inbox; server-only, never synced.
+  'mobile_upload_inbox',
+  'mobile_upload_image',
   'schema_migrations',
 ];
 // @sync-policy:internal:end

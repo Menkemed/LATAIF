@@ -117,6 +117,10 @@ pub const INTERNAL_TABLES: &[&str] = &[
     // Server-only transport bookkeeping; a client must never push to them on any sync path.
     "sync_operation_changelog",
     "sync_operation_audit",
+    // MOBILE-04B2A1 §v0012 — the durable server-side mobile upload inbox (create-only).
+    // Server-internal; a client can never push to them (uploads use the dedicated route).
+    "mobile_upload_inbox",
+    "mobile_upload_image",
     "schema_migrations",
 ];
 
@@ -484,6 +488,9 @@ mod tests {
             // v0011 versioned operation protocol changelog + audit (M6-B3B2).
             ("sync_operation_changelog", InternalForbidden),
             ("sync_operation_audit", InternalForbidden),
+            // v0012 mobile upload inbox (MOBILE-04B2A1).
+            ("mobile_upload_inbox", InternalForbidden),
+            ("mobile_upload_image", InternalForbidden),
             // v0009 quarantine bookkeeping.
             ("sync_change_quarantine", InternalForbidden),
             // v0002–v0008 control plane.

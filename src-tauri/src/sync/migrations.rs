@@ -53,6 +53,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0009_SYNC_SCHEMA_AND_QUARANTINE,
     V0010_CANONICAL_REVISION_CAS,
     V0011_OPERATION_CHANGELOG_AUDIT,
+    V0012_MOBILE_UPLOAD_INBOX,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -310,6 +311,71 @@ pub const V0011_OPERATION_CHANGELOG_AUDIT: Migration = Migration {
     up_sql: V0011_SQL,
     reference_sql: V0011_SQL,
 };
+
+/// MOBILE-04B2A1 — the durable server-side mobile-upload inbox (create-only). Server-internal
+/// bookkeeping the Rust upload core writes; image BYTES live in the controlled staging root, never
+/// here. Additive CREATE … IF NOT EXISTS; existing v0001–v0011 + desktop schema untouched. Both
+/// tables are denylisted (sync_policy INTERNAL) — a client can never push to them.
+pub const V0012_MOBILE_UPLOAD_INBOX: Migration = Migration {
+    version: 12,
+    name: "mobile_upload_inbox",
+    up_sql: V0012_SQL,
+    reference_sql: V0012_SQL,
+};
+
+const V0012_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS mobile_upload_inbox (
+    tenant_id             TEXT NOT NULL,
+    branch_id             TEXT NOT NULL,
+    authenticated_user_id TEXT NOT NULL,
+    upload_event_id       TEXT NOT NULL,
+    protocol_version      INTEGER NOT NULL,
+    entity_id             TEXT NOT NULL,
+    mode                  TEXT NOT NULL,
+    payload_hash          TEXT NOT NULL,
+    metadata_json         TEXT NOT NULL,
+    state                 TEXT NOT NULL DEFAULT 'accepted',
+    product_id            TEXT,
+    error_code            TEXT,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT,
+    FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE RESTRICT,
+    CHECK (mode IN ('collection')),
+    CHECK (state IN ('accepted','processing','ready','conflict','quarantined')),
+    CHECK (length(payload_hash) = 64)
+);
+
+CREATE TABLE IF NOT EXISTS mobile_upload_image (
+    tenant_id             TEXT NOT NULL,
+    branch_id             TEXT NOT NULL,
+    authenticated_user_id TEXT NOT NULL,
+    upload_event_id       TEXT NOT NULL,
+    slot                  INTEGER NOT NULL,
+    is_primary            INTEGER NOT NULL,
+    mime                  TEXT NOT NULL,
+    width                 INTEGER NOT NULL,
+    height                INTEGER NOT NULL,
+    byte_size             INTEGER NOT NULL,
+    content_hash          TEXT NOT NULL,
+    storage_key           TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id, slot),
+    CHECK (is_primary IN (0,1)),
+    CHECK (width >= 1 AND height >= 1 AND byte_size >= 1),
+    CHECK (length(content_hash) = 64)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mobile_upload_inbox_state
+    ON mobile_upload_inbox (tenant_id, branch_id, state);
+
+-- MOBILE-04B2A1-R1 — at most ONE active (accepted/processing/ready) job may target a given
+-- product entity id, so a second event id can never race a duplicate create for the same product.
+-- Terminal jobs (conflict/quarantined) release the id. Partial UNIQUE → race-safe at the DB level.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mobile_upload_active_entity
+    ON mobile_upload_inbox (tenant_id, branch_id, entity_id)
+    WHERE state IN ('accepted','processing','ready');
+"#;
 
 const V0011_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS sync_operation_changelog (
@@ -1196,7 +1262,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         assert!(report.already_current.is_empty());
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
@@ -1228,7 +1294,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=11).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=12).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1241,7 +1307,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1405,7 +1471,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

@@ -68,6 +68,9 @@ pub mod cas_engine;
 /// identity + atomic changelog/audit. INACTIVE: reachable only from internal Rust + tests; no route,
 /// pull path, cutover step or mobile client consults it.
 pub mod operation_protocol;
+/// MOBILE-04B2A1 — durable server-side mobile upload inbox + staging core. INACTIVE: no route
+/// registers it, `/mobile` does not call it, and it never hands off to createProductWithMedia.
+pub mod mobile_upload;
 /// M6-B2E — legacy inventory, owner attestation, cutover readiness. INACTIVE.
 pub mod cutover;
 /// M6-B2D — the device's own cryptographic identity + enrollment. INACTIVE.

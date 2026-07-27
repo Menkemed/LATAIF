@@ -630,7 +630,7 @@ mod tests {
 
         // clean retry with the REAL migration list converges fully.
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![11]);
+        assert_eq!(report.applied, vec![11, 12]);
         for t in ["sync_operation_changelog", "sync_operation_audit"] {
             let e: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [t], |r| r.get(0)).unwrap();
             assert_eq!(e, 1, "v0011 fully applied on the clean retry");
@@ -668,7 +668,7 @@ mod tests {
         )
         .unwrap();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![11], "only the missing v0011 applies");
+        assert_eq!(report.applied, vec![11, 12], "only the missing v0011 applies");
         assert_eq!(report.already_current, (1..=10).collect::<Vec<_>>());
         // v0010 data unchanged
         let rev: i64 = conn.query_row(
@@ -677,7 +677,7 @@ mod tests {
         // re-run is idempotent (nothing re-applied)
         let again = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(again.applied.is_empty());
-        assert_eq!(again.already_current, (1..=11).collect::<Vec<_>>());
+        assert_eq!(again.already_current, (1..=12).collect::<Vec<_>>());
         // desktop business tables untouched
         assert_eq!(cnt(&conn, "products"), 0);
     }
