@@ -5,6 +5,15 @@ mod printing;
 mod media;
 mod sync;
 
+// MOBILE-04B2A5-H1 — test-only surface for the isolated E2E seed/verify tool. Compiled out entirely
+// unless the `e2e` feature is enabled (only the e2e example/harness turns it on); production builds
+// never expose these internals.
+#[cfg(feature = "e2e")]
+pub mod e2e_support {
+    pub use crate::sync::credentials::{provision_owner, PROVISION_CONFIRMATION};
+    pub use crate::sync::db::init_database;
+}
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;

@@ -2081,7 +2081,8 @@ function SyncTab() {
                 </button>
                 {/* MOBILE-04B2A5 — the secure owner dialog for the mobile-upload runtime scope. */}
                 <div style={{ marginTop: 8 }}>
-                  <Button variant="secondary" onClick={() => setShowScopeDialog(true)}>Configure mobile upload scope</Button>
+                  <button data-testid="open-scope-dialog" onClick={() => setShowScopeDialog(true)}
+                    style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #E5E9EE', background: '#fff', cursor: 'pointer' }}>Configure mobile upload scope</button>
                 </div>
               </div>
             )}

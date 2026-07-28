@@ -89,25 +89,26 @@ export function RuntimeScopeDialog({ open, onClose, onConfigured }: Props) {
   return (
     <Modal open={open} onClose={close} title="Mobile upload scope" width={560}>
       {phase === 'auth' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div data-testid="rs-phase-auth" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ fontSize: 13, color: '#6B7280' }}>
             Configuring the mobile-upload scope is an owner action. Sign in with the server owner
             credentials to load the available tenants and branches.
           </div>
-          <Input label="OWNER EMAIL" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="off" />
-          <Input label="OWNER PASSWORD" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="off" />
-          {error && <div style={{ color: '#B42318', fontSize: 13 }}>{error}</div>}
+          <Input label="OWNER EMAIL" data-testid="rs-email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="off" />
+          <Input label="OWNER PASSWORD" data-testid="rs-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="off" />
+          {error && <div data-testid="rs-error" style={{ color: '#B42318', fontSize: 13 }}>{error}</div>}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <Button variant="ghost" onClick={close} disabled={busy}>Cancel</Button>
-            <Button variant="primary" onClick={loadOptions} disabled={!email.trim() || !password || busy}>
+            <button data-testid="rs-load" onClick={loadOptions} disabled={!email.trim() || !password || busy}
+              style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #715DE3', background: '#715DE3', color: '#fff', cursor: 'pointer' }}>
               {busy ? 'Authorizing…' : 'Load options'}
-            </Button>
+            </button>
           </div>
         </div>
       )}
 
       {phase === 'configure' && opts && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div data-testid="rs-phase-configure" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ fontSize: 13, color: '#6B7280' }}>
             Server installation: <code>{opts.serverInstanceId.slice(0, 12)}…</code><br />
             {opts.configured
@@ -117,7 +118,7 @@ export function RuntimeScopeDialog({ open, onClose, onConfigured }: Props) {
 
           <div>
             <label style={labelStyle}>TENANT</label>
-            <select style={selectStyle} value={tenantId} onChange={(e) => { setTenantId(e.target.value); setBranchId(''); }}>
+            <select data-testid="rs-tenant" style={selectStyle} value={tenantId} onChange={(e) => { setTenantId(e.target.value); setBranchId(''); }}>
               <option value="">Select a tenant…</option>
               {opts.eligibleTenants.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.id})</option>)}
             </select>
@@ -125,41 +126,44 @@ export function RuntimeScopeDialog({ open, onClose, onConfigured }: Props) {
 
           <div>
             <label style={labelStyle}>BRANCH</label>
-            <select style={selectStyle} value={branchId} onChange={(e) => setBranchId(e.target.value)} disabled={!tenantId}>
+            <select data-testid="rs-branch" style={selectStyle} value={branchId} onChange={(e) => setBranchId(e.target.value)} disabled={!tenantId}>
               <option value="">Select a branch…</option>
               {branches.map((b) => <option key={b.id} value={b.id}>{b.name} ({b.id})</option>)}
             </select>
           </div>
 
           {rebind && (
-            <div style={{ background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: 12, fontSize: 13, color: '#9A3412' }}>
+            <div data-testid="rs-rebind-warning" style={{ background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: 12, fontSize: 13, color: '#9A3412' }}>
               <b>Rebind warning.</b> This changes the binding from <b>{opts.currentTenantId}/{opts.currentBranchId}</b> to
               {' '}<b>{tenantId}/{branchId}</b>. The binding revision will increase to {nextRevisionHint(opts)}.
               Mobile processing stays disabled — this only sets the scope.
             </div>
           )}
 
-          {error && <div style={{ color: '#B42318', fontSize: 13 }}>{error}</div>}
+          {error && <div data-testid="rs-error" style={{ color: '#B42318', fontSize: 13 }}>{error}</div>}
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
-            <Button variant="ghost" onClick={close} disabled={busy}>Cancel</Button>
-            <Button variant="primary" onClick={submit} disabled={!canConfigure(opts, tenantId, branchId) || busy}>
+            <button data-testid="rs-cancel" onClick={close} disabled={busy}
+              style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #E5E9EE', background: '#fff', cursor: 'pointer' }}>Cancel</button>
+            <button data-testid="rs-submit" onClick={submit} disabled={!canConfigure(opts, tenantId, branchId) || busy}
+              style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #715DE3', background: '#715DE3', color: '#fff', cursor: 'pointer' }}>
               {busy ? 'Saving…' : (rebind ? 'Rebind scope' : 'Bind scope')}
-            </Button>
+            </button>
           </div>
         </div>
       )}
 
       {phase === 'done' && doneRevision !== null && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ color: '#067647', fontSize: 14 }}>
+        <div data-testid="rs-phase-done" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div data-testid="rs-done" style={{ color: '#067647', fontSize: 14 }}>
             Scope bound: <b>{tenantId}</b> / <b>{branchId}</b> (revision {doneRevision}).
           </div>
           <div style={{ fontSize: 13, color: '#6B7280' }}>
             Mobile processing remains disabled — no uploads are claimed by configuring the scope.
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <Button variant="secondary" onClick={close}>Close</Button>
+            <button data-testid="rs-close" onClick={close}
+              style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #E5E9EE', background: '#fff', cursor: 'pointer' }}>Close</button>
           </div>
         </div>
       )}

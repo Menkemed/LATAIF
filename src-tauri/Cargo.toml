@@ -80,3 +80,10 @@ windows = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 # in-process (same routes, same auth middleware, same DefaultBodyLimit) without opening a socket.
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+[features]
+e2e = []
+
+[[example]]
+name = "e2e_scope_seed"
+required-features = ["e2e"]
