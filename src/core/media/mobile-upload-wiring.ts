@@ -17,7 +17,7 @@ import { ProductMediaResolver } from '@/core/media/product-media-resolver';
 import { useProductStore } from '@/stores/productStore';
 import {
   createTauriMobileUploadBridge, triggerMobileUploadDrainSafe, canonicalProductMetadataHash, MaterializeError,
-  type ClaimGrant, type MobileDrainDeps, type ReadyVerdict, type DurableReceipt, type PreparedMediaItem, type BoundBatchJob, type GallerySlot,
+  type ClaimGrant, type MobileDrainDeps, type ReadyVerdict, type DurableReceipt, type PreparedMediaItem, type BoundBatchJob, type GallerySlot, type DrainScope,
 } from './mobile-upload-drain';
 import type { RuntimeScopeEvidence } from './runtime-scope-evidence';
 
@@ -99,7 +99,7 @@ function deriveCreateBatchId(entityId: string): string {
 }
 
 /** Prepare every image via the Rust media core (bytes stay in Rust) → ordered opaque descriptors. */
-async function preparePreparedMedia(grant: ClaimGrant): Promise<PreparedMediaItem[]> {
+async function preparePreparedMedia(grant: ClaimGrant, sc: DrainScope): Promise<PreparedMediaItem[]> {
   const scope = currentScope();
   if (!scope) throw new MaterializeError('unavailable');
   const sorted = [...grant.images].sort((a, b) => a.slot - b.slot);
@@ -107,7 +107,8 @@ async function preparePreparedMedia(grant: ClaimGrant): Promise<PreparedMediaIte
   for (const im of sorted) {
     let prepared;
     try {
-      prepared = await bridge.prepareImage(grant.authenticatedUserId, grant.uploadEventId, grant.claimToken, im.slot, scope.tenantId);
+      // MOBILE-04B2A7-I1 — forward the validated worker scope so prepare_image passes the server fence.
+      prepared = await bridge.prepareImage(grant.authenticatedUserId, grant.uploadEventId, grant.claimToken, im.slot, scope.tenantId, sc);
     } catch (e) {
       // A staging integrity/manifest failure is permanent → quarantine; anything else (stale token,
       // transient IPC) → retry. Rust returns MOBILE_UPLOAD_INTEGRITY_FAILURE / _MANIFEST_INVALID.

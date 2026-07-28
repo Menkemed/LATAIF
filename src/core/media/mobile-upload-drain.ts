@@ -56,20 +56,32 @@ export interface ClaimGrant {
 }
 export type ReadyResult = 'marked_ready' | 'already_ready' | 'rejected';
 
+/** MOBILE-04B2A7-I1 — the caller's expected runtime scope, forwarded to EVERY registered mutation
+ *  command so the server-side revision fence can accept or reject it. Sourced ONLY from the freshly
+ *  validated worker scope (never a default/cache). The three keys are exactly the command argument
+ *  names, so the Tauri bridge spreads it straight into the invoke payload. */
+export interface DrainScope {
+  expectedBindingRevision: number;
+  expectedTenantId: string;
+  expectedBranchId: string;
+}
+
 export interface MobileUploadBridge {
-  claim(claimantInstanceId: string, leaseSeconds: number): Promise<ClaimGrant | null>;
+  claim(claimantInstanceId: string, leaseSeconds: number, scope: DrainScope): Promise<ClaimGrant | null>;
   /** Prepare ONE claimed image via the Rust media core (bytes stay in Rust). Returns an opaque
    *  descriptor whose `ingest_request_id` is the SERVER-derived, provenance-bound prepareRequestId
    *  (JS does not supply it). Rejects for a stale/foreign token, wrong origin user, a non-processing
    *  job, or a bad slot. NO image bytes cross IPC. */
-  prepareImage(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, slot: number, tenantScope: string): Promise<PrepareResult>;
-  renew(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, claimantInstanceId: string, leaseSeconds: number): Promise<boolean>;
-  release(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string): Promise<boolean>;
-  markQuarantined(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, code: string): Promise<boolean>;
-  markReady(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, entityId: string, payloadHash: string, productId: string): Promise<ReadyResult>;
+  prepareImage(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, slot: number, tenantScope: string, scope: DrainScope): Promise<PrepareResult>;
+  renew(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, claimantInstanceId: string, leaseSeconds: number, scope: DrainScope): Promise<boolean>;
+  release(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, scope: DrainScope): Promise<boolean>;
+  markQuarantined(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, code: string, scope: DrainScope): Promise<boolean>;
+  markReady(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, entityId: string, payloadHash: string, productId: string, scope: DrainScope): Promise<ReadyResult>;
 }
 
-/** Production bridge over the internal Tauri commands. Injectable invoker for Node tests. */
+/** Production bridge over the internal Tauri commands. Injectable invoker for Node tests. Every call
+ *  spreads the caller-supplied `scope` (expected binding revision + tenant + branch) into the invoke
+ *  payload, so each registered command receives its scope expectation for the server-side fence. */
 export function createTauriMobileUploadBridge(
   invoker?: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
 ): MobileUploadBridge {
@@ -78,18 +90,18 @@ export function createTauriMobileUploadBridge(
     return mod.invoke<T>(cmd, args as Record<string, unknown> | undefined);
   });
   return {
-    claim: (claimantInstanceId, leaseSeconds) =>
-      invoke<ClaimGrant | null>('mobile_upload_claim', { claimantInstanceId, leaseSeconds }),
-    prepareImage: (originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope) =>
-      invoke<PrepareResult>('mobile_upload_prepare_image', { originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope }),
-    renew: (originAuthenticatedUserId, uploadEventId, claimToken, claimantInstanceId, leaseSeconds) =>
-      invoke<boolean>('mobile_upload_renew', { originAuthenticatedUserId, uploadEventId, claimToken, claimantInstanceId, leaseSeconds }),
-    release: (originAuthenticatedUserId, uploadEventId, claimToken) =>
-      invoke<boolean>('mobile_upload_release', { originAuthenticatedUserId, uploadEventId, claimToken }),
-    markQuarantined: (originAuthenticatedUserId, uploadEventId, claimToken, code) =>
-      invoke<boolean>('mobile_upload_mark_quarantined', { originAuthenticatedUserId, uploadEventId, claimToken, code }),
-    markReady: (originAuthenticatedUserId, uploadEventId, claimToken, entityId, payloadHash, productId) =>
-      invoke<ReadyResult>('mobile_upload_mark_ready', { originAuthenticatedUserId, uploadEventId, claimToken, entityId, payloadHash, productId }),
+    claim: (claimantInstanceId, leaseSeconds, scope) =>
+      invoke<ClaimGrant | null>('mobile_upload_claim', { claimantInstanceId, leaseSeconds, ...scope }),
+    prepareImage: (originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope, scope) =>
+      invoke<PrepareResult>('mobile_upload_prepare_image', { originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope, ...scope }),
+    renew: (originAuthenticatedUserId, uploadEventId, claimToken, claimantInstanceId, leaseSeconds, scope) =>
+      invoke<boolean>('mobile_upload_renew', { originAuthenticatedUserId, uploadEventId, claimToken, claimantInstanceId, leaseSeconds, ...scope }),
+    release: (originAuthenticatedUserId, uploadEventId, claimToken, scope) =>
+      invoke<boolean>('mobile_upload_release', { originAuthenticatedUserId, uploadEventId, claimToken, ...scope }),
+    markQuarantined: (originAuthenticatedUserId, uploadEventId, claimToken, code, scope) =>
+      invoke<boolean>('mobile_upload_mark_quarantined', { originAuthenticatedUserId, uploadEventId, claimToken, code, ...scope }),
+    markReady: (originAuthenticatedUserId, uploadEventId, claimToken, entityId, payloadHash, productId, scope) =>
+      invoke<ReadyResult>('mobile_upload_mark_ready', { originAuthenticatedUserId, uploadEventId, claimToken, entityId, payloadHash, productId, ...scope }),
   };
 }
 
@@ -135,7 +147,7 @@ export interface MobileDrainDeps {
   /** Prepare every image out-of-band via the Rust media core (bytes stay in Rust); returns the
    *  ordered opaque descriptors. Throws MaterializeError('broken') on hash/slot/scope mismatch or
    *  ('unavailable') on a stale token / transient error. */
-  preparePreparedMedia: (grant: ClaimGrant) => Promise<PreparedMediaItem[]>;
+  preparePreparedMedia: (grant: ClaimGrant, scope: DrainScope) => Promise<PreparedMediaItem[]>;
   /** createProductWithMedia — pins entityId, takes the already-prepared media descriptors (no
    *  bytes/data-URLs), and writes the receipt atomically with the product. */
   createProduct: (grant: ClaimGrant, prepared: PreparedMediaItem[], receiptIntent: MobileUploadReceiptIntent) => Promise<ProductCreateResult>;
@@ -155,9 +167,18 @@ export interface DrainOutcome { code: DrainCode; detail?: string }
 /** MOBILE-04B2A3-R1 — one FRESH read of the Rust scope evidence, reduced to (available, revision).
  *  `available` requires a configured binding that exactly matches the active auth/DB scope; `revision`
  *  is the current binding revision (0 when unbound). Never uses a hardcoded scope fallback. */
-async function freshScope(deps: MobileDrainDeps): Promise<{ available: boolean; revision: number }> {
+async function freshScope(deps: MobileDrainDeps): Promise<{ available: boolean; revision: number; scope: DrainScope | null }> {
+  const cur = deps.currentScope();
   const ev = deps.readScopeEvidence ? await deps.readScopeEvidence() : null;
-  return { available: runtimeScopeAvailable(ev, deps.currentScope()), revision: runtimeBindingRevisionOf(ev) };
+  const available = runtimeScopeAvailable(ev, cur);
+  const revision = runtimeBindingRevisionOf(ev);
+  // The scope triple is built ONLY from validated evidence + the active auth scope — never a default or
+  // cached value. `available` already requires `cur` to be present and to match the evidence exactly.
+  return {
+    available,
+    revision,
+    scope: available && cur ? { expectedBindingRevision: revision, expectedTenantId: cur.tenantId, expectedBranchId: cur.branchId } : null,
+  };
 }
 
 /** A running claim is fenced when the scope is no longer available OR the binding revision moved away
@@ -276,18 +297,22 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
   // under. If the Rust binding rebinds (or is revoked) across any async step, the claim must NOT mark
   // ready/quarantine — it releases. A once-read revision never becomes stale truth.
   const entry = await freshScope(deps);
-  if (!entry.available) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); return { code: 'scope_blocked' }; }
+  // MOBILE-04B2A7-I1 — fail closed: without a validated worker scope there is NO invoke at all.
+  if (!entry.available || !entry.scope) { return { code: 'scope_blocked' }; }
   const entryRevision = entry.revision;
+  // The validated scope this claim runs under — forwarded to every per-job command so the server fence
+  // accepts it while the binding is unchanged and rejects it the moment an owner rebinds.
+  const sc = entry.scope;
   // Scope: only ever process a job that belongs to the current authenticated desktop scope.
   const scope = deps.currentScope();
   if (!scope || scope.tenantId !== grant.tenantId || scope.branchId !== grant.branchId) {
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); // foreign — hand it straight back
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // foreign — hand it straight back
     return { code: 'foreign_scope' };
   }
   // Re-verify the handed-off manifest structure before creating anything.
   const mf = verifyGrantManifest(grant);
   if (!mf.ok) {
-    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, mf.code ?? ERR_MANIFEST);
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, mf.code ?? ERR_MANIFEST, sc);
     return { code: 'manifest_invalid' };
   }
 
@@ -296,20 +321,20 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
 
   if (receipt) {
     if (receipt.payloadHash !== grant.payloadHash) {
-      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_OP_CONFLICT);
+      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_OP_CONFLICT, sc);
       return { code: 'operation_conflict' };
     }
     if (receipt.entityId !== grant.entityId || !exists) {
-      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_RECEIPT_INCONSISTENT);
+      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_RECEIPT_INCONSISTENT, sc);
       return { code: 'operation_conflict' };
     }
     // Resume: product + matching receipt are already durable — just finish/verify + ready.
-    return finishReady(grant, deps, 'resumed', entryRevision);
+    return finishReady(grant, deps, 'resumed', entryRevision, sc);
   }
 
   if (exists) {
     // A product with our target id exists but has NO source receipt → foreign; never overwrite.
-    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_CONFLICT);
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_CONFLICT, sc);
     return { code: 'target_conflict' };
   }
 
@@ -318,23 +343,23 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
   // entityId pinned, the full-metadata projection hash bound into the receipt.
   let prepared: PreparedMediaItem[];
   try {
-    prepared = await deps.preparePreparedMedia(grant);
+    prepared = await deps.preparePreparedMedia(grant, sc);
   } catch (e) {
     // A3 fence (fresh read): if the binding changed during prepare, do not write a terminal state.
     if (await claimFenced(deps, entryRevision)) {
-      await deps.bridge.release(u, grant.uploadEventId, grant.claimToken);
+      await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
       return { code: 'deferred', detail: 'scope_fenced' };
     }
     if (e instanceof MaterializeError && e.kind === 'broken') {
-      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_MANIFEST);
+      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_MANIFEST, sc);
       return { code: 'manifest_invalid' };
     }
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); // token lost / transient → retry
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // token lost / transient → retry
     return { code: 'deferred', detail: 'prepare_unavailable' };
   }
   // A3 fence (fresh read) immediately before the durable product+receipt checkpoint.
   if (await claimFenced(deps, entryRevision)) {
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken);
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
     return { code: 'deferred', detail: 'scope_fenced' };
   }
   const metadataHash = await canonicalProductMetadataHash(projectionFieldsFromMetadata(grant.metadataJson));
@@ -347,28 +372,28 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
     preparedManifestHash: manifestHash,
   });
   if (result.status === 'product_save_failed') {
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); // nothing durable → retry later
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // nothing durable → retry later
     return { code: 'deferred', detail: result.errorCode };
   }
   // 'created' or 'media_incomplete' → product durable. Verify before marking ready.
-  return finishReady(grant, deps, 'ready', entryRevision);
+  return finishReady(grant, deps, 'ready', entryRevision, sc);
 }
 
-async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode: DrainCode, entryRevision: number): Promise<DrainOutcome> {
+async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode: DrainCode, entryRevision: number, sc: DrainScope): Promise<DrainOutcome> {
   const u = grant.authenticatedUserId;
   // MOBILE-04B2A3 — a scope/revision change during the (async) verify + mark sequence must never
   // produce a ready or quarantine write from this now-stale claim. Re-check on entry and again
   // right before the terminal mark.
-  if (await claimFenced(deps, entryRevision)) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); return { code: 'deferred', detail: 'scope_fenced' }; }
+  if (await claimFenced(deps, entryRevision)) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); return { code: 'deferred', detail: 'scope_fenced' }; }
   const verdict = await deps.verifyReady(grant);
   if (verdict === 'broken') {
-    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_BROKEN);
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_BROKEN, sc);
     return { code: 'operation_conflict', detail: ERR_BROKEN };
   }
   if (verdict === 'pending') {
     // durable product, media still finishing (startup recovery converges it) → release for a later
     // resume rather than hold the lease or mark a half-ready job.
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken);
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
     return { code: 'deferred', detail: 'pending' };
   }
   // Stored product must match the receipt-bound canonical projection over ALL written fields (not
@@ -376,7 +401,7 @@ async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode
   const receipt = deps.readReceipt(grant.tenantId, grant.branchId, u, grant.uploadEventId);
   const productHash = await deps.readProductMetadataHash(grant.entityId);
   if (!receipt || !productHash || productHash !== receipt.canonicalProductMetadataHash) {
-    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_METADATA_MISMATCH);
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_METADATA_MISMATCH, sc);
     return { code: 'operation_conflict', detail: ERR_METADATA_MISMATCH };
   }
   // THREE-WAY reconstruction of the canonical contract from three independent SSOTs — receipt,
@@ -395,14 +420,14 @@ async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode
     !galleryOk ||                                                     // gallery: slots 0..N-1, primary@0, == grant
     counts.changelog !== 1 || counts.audit !== 1                      // exactly one changelog + audit
   ) {
-    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_BATCH_MISMATCH);
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_BATCH_MISMATCH, sc);
     return { code: 'operation_conflict', detail: ERR_BATCH_MISMATCH };
   }
   // Final A3 fence (fresh read) immediately before the terminal write: a rebind after verification
   // must never mark ready.
-  if (await claimFenced(deps, entryRevision)) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken); return { code: 'deferred', detail: 'scope_fenced' }; }
+  if (await claimFenced(deps, entryRevision)) { await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); return { code: 'deferred', detail: 'scope_fenced' }; }
   const outcome = await deps.bridge.markReady(
-    u, grant.uploadEventId, grant.claimToken, grant.entityId, grant.payloadHash, grant.entityId,
+    u, grant.uploadEventId, grant.claimToken, grant.entityId, grant.payloadHash, grant.entityId, sc,
   );
   if (outcome === 'rejected') return { code: 'ready_rejected' }; // our lease was taken over
   return { code: successCode };
@@ -413,11 +438,13 @@ async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode
 export async function drainMobileUploads(deps: MobileDrainDeps, max = 25): Promise<DrainOutcome[]> {
   const out: DrainOutcome[] = [];
   for (let i = 0; i < max; i++) {
-    // R1 §2: read FRESH evidence before EVERY claim — a rebind mid-pass stops the next claim.
-    if (!(await freshScope(deps)).available) { out.push({ code: 'scope_blocked' }); break; }
+    // R1 §2: read FRESH evidence before EVERY claim — a rebind mid-pass stops the next claim. The
+    // validated scope is forwarded into the claim invoke; no scope → no claim (fail closed).
+    const fs = await freshScope(deps);
+    if (!fs.available || !fs.scope) { out.push({ code: 'scope_blocked' }); break; }
     let grant: ClaimGrant | null;
     try {
-      grant = await deps.bridge.claim(deps.claimantInstanceId, MOBILE_DRAIN_LEASE_SECONDS);
+      grant = await deps.bridge.claim(deps.claimantInstanceId, MOBILE_DRAIN_LEASE_SECONDS, fs.scope);
     } catch {
       break; // Retryable/transient — stop this pass; the next drain re-drives.
     }
