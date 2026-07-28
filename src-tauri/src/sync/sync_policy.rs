@@ -126,6 +126,8 @@ pub const INTERNAL_TABLES: &[&str] = &[
     // MOBILE-04B2A3 §v0014 — the canonical runtime-scope binding SSOT. Server-internal; a client can
     // never push to it (kept identical in apply-change.ts INTERNAL_TABLES).
     "mobile_runtime_scope",
+    // MOBILE-04B2A5-R1 §v0015 — the runtime-scope config audit sink. Server-internal; never synced.
+    "mobile_runtime_scope_audit",
     "schema_migrations",
 ];
 
@@ -499,6 +501,8 @@ mod tests {
             ("mobile_upload_claim", InternalForbidden),
             // v0014 canonical runtime-scope binding SSOT (MOBILE-04B2A3).
             ("mobile_runtime_scope", InternalForbidden),
+            // v0015 runtime-scope config audit sink (MOBILE-04B2A5-R1).
+            ("mobile_runtime_scope_audit", InternalForbidden),
             // v0009 quarantine bookkeeping.
             ("sync_change_quarantine", InternalForbidden),
             // v0002–v0008 control plane.

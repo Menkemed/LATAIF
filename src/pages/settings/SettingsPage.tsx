@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
+import { RuntimeScopeDialog } from './RuntimeScopeDialog';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { exportFile } from '@/core/utils/export-file';
@@ -1835,6 +1836,7 @@ function SyncTab() {
   // M6-B2A4: hat dieser Server ueberhaupt schon ein Owner-Passwort? Bis dahin ist
   // gar nichts moeglich — kein Login, kein Serverstart, keine Owner-Aktion.
   const [ownerSetupRequired, setOwnerSetupRequired] = useState(false);
+  const [showScopeDialog, setShowScopeDialog] = useState(false); // MOBILE-04B2A5
 
   async function refreshServer() {
     const { getServerStatus } = await import('@/core/sync/sync-server');
@@ -2077,6 +2079,10 @@ function SyncTab() {
                 >
                   Change server owner password
                 </button>
+                {/* MOBILE-04B2A5 — the secure owner dialog for the mobile-upload runtime scope. */}
+                <div style={{ marginTop: 8 }}>
+                  <Button variant="secondary" onClick={() => setShowScopeDialog(true)}>Configure mobile upload scope</Button>
+                </div>
               </div>
             )}
             {/* M6-B2A2: einmalige Bestaetigung einer erkannten Legacy-Serverrolle. */}
@@ -2185,6 +2191,9 @@ function SyncTab() {
           Changes are synced automatically every 30 seconds. The app works offline — changes are queued and synced when the server is reachable again.
         </p>
       </div>
+
+      {/* MOBILE-04B2A5 — dedicated secure owner dialog for the mobile-upload runtime scope. */}
+      <RuntimeScopeDialog open={showScopeDialog} onClose={() => setShowScopeDialog(false)} />
     </div>
   );
 }

@@ -56,6 +56,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0012_MOBILE_UPLOAD_INBOX,
     V0013_MOBILE_UPLOAD_CLAIM,
     V0014_MOBILE_RUNTIME_SCOPE,
+    V0015_MOBILE_RUNTIME_SCOPE_AUDIT,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -435,6 +436,35 @@ CREATE TABLE IF NOT EXISTS mobile_runtime_scope (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mobile_runtime_scope_one_active
     ON mobile_runtime_scope (server_instance_id) WHERE status = 'active';
+"#;
+
+// MOBILE-04B2A5-R1 §3 — the canonical, append-only audit sink for administrative runtime-scope
+// configuration events. There is no pre-existing server-config audit SSOT (sync_operation_audit is
+// the operation-protocol's own sink), so this is the smallest additive internal table. Exactly one
+// row per successful configure/rebind, written in the SAME BEGIN IMMEDIATE tx as the binding change.
+// It records WHO (verified owner id), WHAT (old→new tenant/branch + revision) and the RESULT — never
+// a password/secret/hash/token. INTERNAL / denylisted; no route, no sync.
+pub const V0015_MOBILE_RUNTIME_SCOPE_AUDIT: Migration = Migration {
+    version: 15,
+    name: "mobile_runtime_scope_audit",
+    up_sql: V0015_SQL,
+    reference_sql: V0015_SQL,
+};
+const V0015_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS mobile_runtime_scope_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_instance_id  TEXT    NOT NULL,
+    old_tenant_id       TEXT,
+    old_branch_id       TEXT,
+    old_binding_revision INTEGER,
+    new_tenant_id       TEXT    NOT NULL,
+    new_branch_id       TEXT    NOT NULL,
+    new_binding_revision INTEGER NOT NULL,
+    verified_owner_id   TEXT    NOT NULL,
+    result              TEXT    NOT NULL,
+    created_at          TEXT    NOT NULL,
+    CHECK (result IN ('configured','rebound'))
+);
 "#;
 
 const V0011_SQL: &str = r#"
@@ -1322,10 +1352,12 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
         assert!(report.already_current.is_empty());
         // MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014).
         assert!(table_exists(&conn, "mobile_runtime_scope"));
+        // MOBILE-04B2A5-R1 — the runtime-scope config audit sink (v0015).
+        assert!(table_exists(&conn, "mobile_runtime_scope_audit"));
         assert!(table_exists(&conn, "canonical_records"));
         assert!(table_exists(&conn, "operations"));
         // M6-B3B1 — the new CAS tables (v0010), alongside the untouched v0001 placeholders.
@@ -1356,7 +1388,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=14).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=15).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1369,7 +1401,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1560,6 +1592,16 @@ mod tests {
         assert!(ins("inst-1", 2, "superseded").is_ok(), "history rows (superseded) coexist");
     }
 
+    // ── MOBILE-04B2A5-R1 — v0015 declares its structure exactly as it applies it ─
+    #[test]
+    fn v0015_reference_equals_up_and_only_creates() {
+        assert_eq!(V0015_MOBILE_RUNTIME_SCOPE_AUDIT.up_sql, V0015_MOBILE_RUNTIME_SCOPE_AUDIT.reference_sql);
+        let up = V0015_SQL.to_uppercase();
+        assert!(!up.contains("ALTER TABLE"));
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
     #[test]
     fn migration_is_idempotent() {
@@ -1567,7 +1609,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

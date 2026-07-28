@@ -138,6 +138,8 @@ const INTERNAL_TABLES: readonly string[] = [
   // MOBILE-04B2A3 §v0014 — the canonical runtime-scope binding SSOT; server-only, never synced.
   // Kept identical to INTERNAL_TABLES in sync_policy.rs (a Rust test asserts exact set equality).
   'mobile_runtime_scope',
+  // MOBILE-04B2A5-R1 §v0015 — the runtime-scope config audit sink; server-only, never synced.
+  'mobile_runtime_scope_audit',
   'schema_migrations',
 ];
 // @sync-policy:internal:end

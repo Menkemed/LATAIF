@@ -105,6 +105,57 @@ pub fn read_runtime_scope_evidence(
     })
 }
 
+/// MOBILE-04B2A5 §2 — the SERVER-validated option set the owner dialog binds against. The
+/// `server_instance_id` is derived server-side (install id); the eligible tenants/branches are read
+/// from the server DB itself, so JS can only ever return a choice the server offered — no hardcoded
+/// or invented ids. Non-secret (branch names + the current binding), so it needs no credentials; the
+/// security boundary is `configure_runtime_scope`, which re-validates the choice and the owner.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeTenant { pub id: String, pub name: String }
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeBranch { pub id: String, pub tenant_id: String, pub name: String }
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeScopeOptions {
+    pub server_instance_id: String,
+    pub configured: bool,
+    pub current_tenant_id: Option<String>,
+    pub current_branch_id: Option<String>,
+    pub current_binding_revision: i64,
+    pub eligible_tenants: Vec<ScopeTenant>,
+    pub eligible_branches: Vec<ScopeBranch>,
+}
+
+pub fn read_runtime_scope_options(
+    conn: &Connection,
+    server_instance_id: &str,
+) -> Result<RuntimeScopeOptions, &'static str> {
+    let ev = read_runtime_scope_evidence(conn, server_instance_id)?;
+    let mut tenants = Vec::new();
+    {
+        let mut st = conn.prepare("SELECT id, name FROM tenants ORDER BY name, id").map_err(|_| ERR_SCOPE_DB)?;
+        let rows = st.query_map([], |r| Ok(ScopeTenant { id: r.get(0)?, name: r.get(1)? })).map_err(|_| ERR_SCOPE_DB)?;
+        for r in rows { tenants.push(r.map_err(|_| ERR_SCOPE_DB)?); }
+    }
+    let mut branches = Vec::new();
+    {
+        let mut st = conn.prepare("SELECT id, tenant_id, name FROM branches ORDER BY tenant_id, name, id").map_err(|_| ERR_SCOPE_DB)?;
+        let rows = st.query_map([], |r| Ok(ScopeBranch { id: r.get(0)?, tenant_id: r.get(1)?, name: r.get(2)? })).map_err(|_| ERR_SCOPE_DB)?;
+        for r in rows { branches.push(r.map_err(|_| ERR_SCOPE_DB)?); }
+    }
+    Ok(RuntimeScopeOptions {
+        server_instance_id: server_instance_id.to_string(),
+        configured: ev.configured,
+        current_tenant_id: if ev.configured { Some(ev.tenant_id) } else { None },
+        current_branch_id: if ev.configured { Some(ev.branch_id) } else { None },
+        current_binding_revision: ev.binding_revision,
+        eligible_tenants: tenants,
+        eligible_branches: branches,
+    })
+}
+
 /// Configure (or explicitly rebind) the runtime scope for this install. Owner-gated by construction:
 /// `owner` is a verified `OwnerAuth`. Idempotent for the SAME (tenant, branch) — it returns the
 /// current active evidence without a new revision. A DIFFERENT (tenant, branch) supersedes the prior
@@ -138,8 +189,9 @@ pub fn configure_runtime_scope(
         .optional()
         .map_err(|_| ERR_SCOPE_DB)?;
 
-    let next_revision = match &current {
-        // Idempotent: an identical re-configuration is a no-op (same revision, no history churn).
+    let (next_revision, result) = match &current {
+        // Idempotent: an identical re-configuration is a no-op (same revision, no history churn, and —
+        // per the canonical audit contract — NO audit event, since nothing changed).
         Some((t, b, _rev)) if t == tenant_id && b == branch_id => {
             tx.commit().map_err(|_| ERR_SCOPE_DB)?;
             return read_runtime_scope_evidence(conn, server_instance_id);
@@ -152,9 +204,9 @@ pub fn configure_runtime_scope(
                 params![server_instance_id],
             )
             .map_err(|_| ERR_SCOPE_DB)?;
-            rev + 1
+            (rev + 1, "rebound")
         }
-        None => 1,
+        None => (1, "configured"),
     };
 
     tx.execute(
@@ -162,6 +214,22 @@ pub fn configure_runtime_scope(
            (server_instance_id, binding_revision, tenant_id, branch_id, configured_by, configured_at, status)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
         params![server_instance_id, next_revision, tenant_id, branch_id, owner.user_id(), now],
+    )
+    .map_err(|_| ERR_SCOPE_DB)?;
+
+    // MOBILE-04B2A5-R1 §3 — exactly ONE canonical audit event per successful configure/rebind, in the
+    // SAME IMMEDIATE tx as the binding change. Records WHO (verified owner) + WHAT (old→new) + result;
+    // never a password/secret/hash/token.
+    let (old_t, old_b, old_rev) = match &current {
+        Some((t, b, rev)) => (Some(t.clone()), Some(b.clone()), Some(*rev)),
+        None => (None, None, None),
+    };
+    tx.execute(
+        "INSERT INTO mobile_runtime_scope_audit
+           (server_instance_id, old_tenant_id, old_branch_id, old_binding_revision,
+            new_tenant_id, new_branch_id, new_binding_revision, verified_owner_id, result, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![server_instance_id, old_t, old_b, old_rev, tenant_id, branch_id, next_revision, owner.user_id(), result, now],
     )
     .map_err(|_| ERR_SCOPE_DB)?;
 
@@ -265,6 +333,11 @@ mod tests {
                 VALUES ('user-owner','tenant-1','a@b.c','x','Admin','now','now');
             INSERT INTO user_branches (user_id,branch_id,role,is_default,created_at)
                 VALUES ('user-owner','branch-main','owner',1,'now');
+            -- a normal (non-owner) user, to prove the configure path denies anyone but the owner
+            INSERT INTO users (id,tenant_id,email,password_hash,name,created_at,updated_at)
+                VALUES ('user-clerk','tenant-1','clerk@b.c','x','Clerk','now','now');
+            INSERT INTO user_branches (user_id,branch_id,role,is_default,created_at)
+                VALUES ('user-clerk','branch-main','viewer',0,'now');
             -- a non-default tenant + a UUID branch (the id shape a real multi-branch deployment uses)
             INSERT INTO tenants (id,name,slug,created_at,updated_at) VALUES ('tenant-acme','Acme','acme','now','now');
             INSERT INTO branches (id,tenant_id,name,created_at,updated_at)
@@ -411,6 +484,94 @@ mod tests {
         assert_eq!(fence_runtime_scope(&conn, INST, 1, "tenant-acme", UUID_BRANCH).unwrap_err(), ERR_RUNTIME_SCOPE_REVISION_CONFLICT);
         // only the new binding does
         assert!(fence_runtime_scope(&conn, INST, 2, "tenant-1", "branch-main").is_ok());
+    }
+
+    // ── MOBILE-04B2A5 — secure owner provisioning ──────────────────────────────
+
+    // §2 — options are server-derived: the install id from Rust, the tenant/branch lists from the
+    // server DB itself, and the live current binding. JS can only ever return a choice offered here.
+    #[test]
+    fn options_are_server_derived_and_list_existing_scopes() {
+        let (mut conn, owner) = env();
+        let o = read_runtime_scope_options(&conn, INST).unwrap();
+        assert_eq!(o.server_instance_id, INST);
+        assert!(!o.configured && o.current_tenant_id.is_none() && o.current_binding_revision == 0);
+        assert!(o.eligible_tenants.iter().any(|t| t.id == "tenant-1") && o.eligible_tenants.iter().any(|t| t.id == "tenant-acme"));
+        let ub = o.eligible_branches.iter().find(|b| b.id == UUID_BRANCH).unwrap();
+        assert_eq!(ub.tenant_id, "tenant-acme");
+        assert!(o.eligible_branches.iter().find(|b| b.id == "branch-main").unwrap().tenant_id == "tenant-1");
+        // after configuring, the current binding is reflected
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let o2 = read_runtime_scope_options(&conn, INST).unwrap();
+        assert!(o2.configured && o2.current_tenant_id.as_deref() == Some("tenant-acme") && o2.current_branch_id.as_deref() == Some(UUID_BRANCH) && o2.current_binding_revision == 1);
+    }
+
+    // §3 — only a verified owner mints the OwnerAuth `configure` requires. A normal user, a wrong
+    // secret, and an unknown email are all denied by `authorize_owner` (the only OwnerAuth source).
+    #[test]
+    fn configure_owner_authorization_is_required() {
+        let (_conn, _owner) = env();
+        let (conn, _o) = env();
+        assert!(primary::authorize_owner(&conn, "tenant-1", "branch-main", "clerk@b.c", "anything").is_err(), "a non-owner is denied");
+        assert!(primary::authorize_owner(&conn, "tenant-1", "branch-main", "a@b.c", "wrong-secret").is_err(), "a wrong secret is denied");
+        assert!(primary::authorize_owner(&conn, "tenant-1", "branch-main", "ghost@b.c", PW).is_err(), "an unknown owner id is denied");
+        assert!(primary::authorize_owner(&conn, "tenant-1", "branch-main", "a@b.c", PW).is_ok(), "the real owner is allowed");
+    }
+
+    // §5/§6 — the binding-row history IS the durable audit trail. A rebind writes EXACTLY one new
+    // active row (bumping the revision once) and supersedes exactly one prior row (the old binding);
+    // an idempotent re-configure writes no new row. No secret is ever stored in it.
+    #[test]
+    fn rebind_writes_exactly_one_audit_history_event() {
+        let (mut conn, owner) = env();
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let rows0: i64 = conn.query_row("SELECT COUNT(*) FROM mobile_runtime_scope WHERE server_instance_id=?1", params![INST], |r| r.get(0)).unwrap();
+        assert_eq!(rows0, 1);
+        // rebind → exactly one new row (active rev2), the prior becomes the one superseded audit row.
+        configure_runtime_scope(&mut conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap();
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM mobile_runtime_scope WHERE server_instance_id=?1", params![INST], |r| r.get(0)).unwrap();
+        let active: i64 = conn.query_row("SELECT COUNT(*) FROM mobile_runtime_scope WHERE server_instance_id=?1 AND status='active'", params![INST], |r| r.get(0)).unwrap();
+        assert_eq!((total, active), (2, 1), "exactly one audit event per rebind; one active binding");
+        // the superseded audit row records the OLD binding + who/when — never a secret.
+        let (ot, ob, orev, by): (String, String, i64, String) = conn.query_row(
+            "SELECT tenant_id, branch_id, binding_revision, configured_by FROM mobile_runtime_scope WHERE server_instance_id=?1 AND status='superseded'",
+            params![INST], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!((ot.as_str(), ob.as_str(), orev, by.as_str()), ("tenant-acme", UUID_BRANCH, 1, "user-owner"));
+        // idempotent re-configure of the current binding writes NO new row.
+        configure_runtime_scope(&mut conn, INST, "tenant-1", "branch-main", &owner, "t2").unwrap();
+        let total2: i64 = conn.query_row("SELECT COUNT(*) FROM mobile_runtime_scope WHERE server_instance_id=?1", params![INST], |r| r.get(0)).unwrap();
+        assert_eq!(total2, 2, "idempotent configure adds no audit row");
+        // the whole table carries no credential-shaped columns/values.
+        let dump: String = conn.query_row("SELECT group_concat(configured_by) FROM mobile_runtime_scope", [], |r| r.get(0)).unwrap();
+        assert!(!dump.contains(PW) && !dump.contains("secret") && !dump.contains("$2"), "no password/hash in the audit history");
+    }
+
+    // §3 — the CANONICAL audit sink (v0015): exactly one append-only event per successful
+    // configure/rebind, with WHO + old→new + result, in the same tx; no secret; none for idempotent.
+    #[test]
+    fn canonical_audit_writes_exactly_one_event_per_change() {
+        let (mut conn, owner) = env();
+        let audit_n = |c: &Connection| -> i64 { c.query_row("SELECT COUNT(*) FROM mobile_runtime_scope_audit WHERE server_instance_id=?1", params![INST], |r| r.get(0)).unwrap() };
+        // first configure → one 'configured' event, old fields NULL, new revision 1.
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        assert_eq!(audit_n(&conn), 1);
+        let (ot, nrev, oid, res): (Option<String>, i64, String, String) = conn.query_row(
+            "SELECT old_tenant_id, new_binding_revision, verified_owner_id, result FROM mobile_runtime_scope_audit WHERE id=1",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert!(ot.is_none() && nrev == 1 && oid == owner.user_id() && res == "configured");
+        // rebind → exactly one MORE event ('rebound') recording old→new + old/new revision.
+        configure_runtime_scope(&mut conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap();
+        assert_eq!(audit_n(&conn), 2);
+        let (oldt, oldr, newt, newr, res2): (String, i64, String, i64, String) = conn.query_row(
+            "SELECT old_tenant_id, old_binding_revision, new_tenant_id, new_binding_revision, result FROM mobile_runtime_scope_audit WHERE id=2",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap();
+        assert_eq!((oldt.as_str(), oldr, newt.as_str(), newr, res2.as_str()), ("tenant-acme", 1, "tenant-1", 2, "rebound"));
+        // idempotent re-configure → NO new audit event.
+        configure_runtime_scope(&mut conn, INST, "tenant-1", "branch-main", &owner, "t2").unwrap();
+        assert_eq!(audit_n(&conn), 2, "idempotent configure emits no audit event");
+        // no secret anywhere in the audit sink.
+        let dump: String = conn.query_row("SELECT COALESCE(group_concat(verified_owner_id || result),'') FROM mobile_runtime_scope_audit", [], |r| r.get(0)).unwrap();
+        assert!(!dump.contains(PW) && !dump.contains("$2") && !dump.contains("secret"), "audit carries no credential");
     }
 
     // MOBILE-04B2A4 §2 — the real owner rebind uses BEGIN IMMEDIATE (the SAME write contract as the

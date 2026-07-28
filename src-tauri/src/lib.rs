@@ -1930,14 +1930,31 @@ fn mobile_runtime_scope_evidence(
         .map_err(|e| e.to_string())
 }
 
-// CONFIGURE path — owner-gated. DELIBERATELY NOT registered in generate_handler! (see below): this
-// slice ships the SSOT + evidence contract but adds NO runtime configuration path, because there is
-// no dedicated secure owner-provisioning dialog for it yet (only a window.prompt owner flow exists).
-// Kept in the file (owner-gated, fully tested core) so a later slice can wire it behind a proper
-// dialog. Until then no binding can be created, so the evidence stays `configured=false` and the
-// mobile pipeline stays blocked. The owner is verified against the SERVER DB (bcrypt), never trusted
-// from the caller; the configured (tenant, branch) must exist in the server DB and belong together.
-#[allow(dead_code)]
+// MOBILE-04B2A5-R1 §1 — OPTIONS read, OWNER-GATED. The data carries no password, but "not a secret"
+// is not the same as "public to any renderer user": reading the install's server-config options is an
+// owner action, so it goes through the SAME trusted owner path as configure (bcrypt via
+// authorize_owner). A normal user's invoke() is denied server-side regardless of any UI visibility.
+// The credentials are verified and dropped — never returned, logged, or stored.
+#[tauri::command]
+fn mobile_runtime_scope_options(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<sync::mobile_runtime_scope::RuntimeScopeOptions, String> {
+    let (conn, install_id) = open_config_db(&state.server)?;
+    sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    sync::mobile_runtime_scope::read_runtime_scope_options(&conn, &install_id)
+        .map_err(|e| e.to_string())
+}
+
+// MOBILE-04B2A5 §3/§4 — CONFIGURE path, owner-gated, now REGISTERED behind a dedicated secure dialog
+// (no window.prompt). The owner is verified against the SERVER DB (bcrypt) via `authorize_owner`,
+// never trusted from the caller; a normal user's invoke() is denied. `configured_by` comes from the
+// verified `OwnerAuth`, never the request body. The (tenant, branch) must exist in the server DB and
+// belong together; the write runs in the A4 transactional fence (BEGIN IMMEDIATE, monotonic revision,
+// exactly one active binding). Registering this does NOT activate the pipeline: the 6 mobile MUTATION
+// commands stay unregistered and the JS worker stays blocked — configuring a scope emits zero claims.
 #[tauri::command]
 fn mobile_runtime_scope_configure(
     state: tauri::State<'_, AppHandleState>,
@@ -2058,10 +2075,13 @@ pub fn run() {
             // there is no canonical runtime scope source. Their wrappers remain in the file and also
             // fail closed (mobile_runtime_gate) so an accidental re-registration cannot activate them.
             //
-            // MOBILE-04B2A3 — the runtime-scope EVIDENCE read is registered (read-only, no secret);
-            // the owner-gated `mobile_runtime_scope_configure` is DELIBERATELY NOT registered (no
-            // secure owner dialog for it yet), so no binding can be created at runtime.
+            // MOBILE-04B2A3 — the runtime-scope EVIDENCE read (read-only, no secret).
             mobile_runtime_scope_evidence,
+            // MOBILE-04B2A5 — the secure owner runtime-scope provisioning path: a non-secret OPTIONS
+            // read + the owner-gated CONFIGURE (bcrypt via authorize_owner). These configure the
+            // binding ONLY; the 6 mobile MUTATION commands stay unregistered and the worker blocked.
+            mobile_runtime_scope_options,
+            mobile_runtime_scope_configure,
             finalize_application_shutdown
         ])
         .run(tauri::generate_context!())
