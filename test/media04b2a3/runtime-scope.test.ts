@@ -64,13 +64,22 @@ function evidence(over: Partial<RuntimeScopeEvidence> = {}): RuntimeScopeEvidenc
   ok(!/tenant_id|branch_id|server_instance_id|install_id\s*:|binding_revision|configured\s*:/.test(evFn), 'read command takes no JS-supplied scope/install args');
   ok(/open_config_db\(&state\.server\)/.test(evFn) && /read_runtime_scope_evidence\(&conn, &install_id\)/.test(evFn), 'evidence uses the server-derived install id');
 
-  // R1 §3 — the server-side revision fence is required by EVERY internal mobile mutation wrapper.
+  // A4 §1/§3 — every internal mobile mutation wrapper builds the server-derived scope expectation and
+  // calls the *_fenced core (which couples the fence INSIDE its own IMMEDIATE tx), not a pre-SELECT.
   for (const w of ['mobile_upload_claim', 'mobile_upload_prepare_image', 'mobile_upload_renew', 'mobile_upload_release', 'mobile_upload_mark_quarantined', 'mobile_upload_mark_ready']) {
-    const body = lib.slice(lib.indexOf(`fn ${w}(`), lib.indexOf(`fn ${w}(`) + 900);
-    ok(/fence_runtime_scope\(&conn, &install_id,/.test(body), `${w} passes the server-side revision fence before mutating`);
+    const body = lib.slice(lib.indexOf(`fn ${w}(`), lib.indexOf(`fn ${w}(`) + 1200);
+    ok(/mobile_scope_expectation\(install_id,/.test(body) && /_fenced\(/.test(body), `${w} builds the scope expectation and calls the fenced core`);
+  }
+  // A4 — the fence is coupled inside the mutation's own IMMEDIATE transaction (the real protection is
+  // in the core, not the wrapper); the rebind uses the same IMMEDIATE write contract.
+  const mup = readFileSync(join(repo, 'src-tauri/src/sync/mobile_upload.rs'), 'utf8');
+  ok(/fn fence_scope\(/.test(mup) && /fence_scope\(&tx, scope\)/.test(mup), 'fence runs inside the mutation tx (fence_scope(&tx, scope))');
+  for (const f of ['claim_next_job_fenced', 'renew_claim_fenced', 'mark_retryable_fenced', 'mark_quarantined_claimed_fenced', 'mark_ready_fenced', 'claimed_image_for_prepare_fenced']) {
+    ok(new RegExp(`pub fn ${f}\\(`).test(mup), `fenced core exists: ${f}`);
   }
   const scope = readFileSync(join(repo, 'src-tauri/src/sync/mobile_runtime_scope.rs'), 'utf8');
   ok(/pub fn fence_runtime_scope\(/.test(scope) && /MOBILE_RUNTIME_SCOPE_REVISION_CONFLICT/.test(scope), 'fence core exists with the typed conflict');
+  ok(/TransactionBehavior::Immediate/.test(scope), 'the owner rebind uses the IMMEDIATE write contract');
 
   const migr = readFileSync(join(repo, 'src-tauri/src/sync/migrations.rs'), 'utf8');
   ok(/V0014_MOBILE_RUNTIME_SCOPE/.test(migr) && /version:\s*14/.test(migr) && /CREATE TABLE IF NOT EXISTS mobile_runtime_scope/.test(migr), 'v0014 migration creates mobile_runtime_scope');

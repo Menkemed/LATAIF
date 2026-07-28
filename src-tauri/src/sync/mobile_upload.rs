@@ -62,6 +62,25 @@ pub const ERR_TARGET_CONFLICT: &str = "MOBILE_UPLOAD_TARGET_CONFLICT";
 pub const ERR_INTEGRITY_FAILURE: &str = "MOBILE_UPLOAD_INTEGRITY_FAILURE";
 pub const ERR_MANIFEST_INVALID: &str = "MOBILE_UPLOAD_MANIFEST_INVALID";
 pub const ERR_CLAIM_INVALID: &str = "MOBILE_UPLOAD_CLAIM_INVALID";
+/// MOBILE-04B2A4 — the runtime binding moved (owner rebind) between claim and this mutation.
+pub const ERR_SCOPE_REVISION_CONFLICT: &str = "MOBILE_RUNTIME_SCOPE_REVISION_CONFLICT";
+
+/// MOBILE-04B2A4 — the transactional scope fence. Reads the CURRENT active runtime binding for the
+/// install WITHIN the caller's transaction (so the IMMEDIATE write lock serializes it against any
+/// concurrent rebind) and requires the caller's expectation to match exactly. `None` = scope-agnostic
+/// inbox mechanics (test-only, e.g. the state-machine unit tests); the production wrappers ALWAYS pass
+/// `Some`. On any drift → `ERR_SCOPE_REVISION_CONFLICT`, and the caller rolls the transaction back so
+/// nothing is written.
+fn fence_scope(
+    conn: &Connection,
+    scope: Option<&super::mobile_runtime_scope::RuntimeScopeExpectation>,
+) -> Result<(), UploadError> {
+    let exp = match scope { Some(e) => e, None => return Ok(()) };
+    super::mobile_runtime_scope::fence_runtime_scope(
+        conn, &exp.server_instance_id, exp.binding_revision, &exp.tenant_id, &exp.branch_id,
+    )
+    .map_err(|_| reject(ERR_SCOPE_REVISION_CONFLICT))
+}
 
 /// The already-authenticated caller context. Built server-side from the verified session/JWT — a
 /// later route derives it from `Claims { sub, tenant_id, branch_id }`; the mobile payload never
@@ -396,6 +415,23 @@ pub fn fetch_claimed_image(
     Ok(claimed_image_for_prepare(conn, staging_root, trusted, upload_event_id, claim_token, slot, now)?.bytes)
 }
 
+/// MOBILE-04B2A4 §3 — the prepare's Phase A / Phase C read, gated by the transactional scope fence.
+/// Runs the fence + the claim/lease/job/manifest/provenance read under ONE IMMEDIATE tx, so it sees a
+/// consistent snapshot serialized against any rebind. Phase A loads the provenance to prepare; Phase C
+/// re-runs it before the prepared descriptor is released — a caller compares the two content hashes
+/// and, on any drift or `ERR_SCOPE_REVISION_CONFLICT`, aborts the prepared artifact and returns
+/// nothing to JS.
+pub fn claimed_image_for_prepare_fenced(
+    conn: &mut Connection, scope: &super::mobile_runtime_scope::RuntimeScopeExpectation, staging_root: &Path,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, slot: i64, now: &str,
+) -> Result<ClaimedImageProvenance, UploadError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+    fence_scope(&tx, Some(scope))?;
+    let prov = claimed_image_for_prepare(&tx, staging_root, trusted, upload_event_id, claim_token, slot, now)?;
+    tx.commit().map_err(map_db)?;
+    Ok(prov)
+}
+
 /// Load one claimed image slot with the FULL provenance a prepare must bind. Claim gate (all must
 /// hold, else no bytes): an active claim with the matching `claim_token` on a job still `processing`
 /// whose lease has NOT expired (`lease_until >= now`) — so a stale/taken-over/expired claim prepares
@@ -716,8 +752,25 @@ pub fn claim_next_job(
     conn: &mut Connection, staging_root: &Path, tenant_id: &str, branch_id: &str,
     claimant_instance_id: &str, claim_token: &str, lease_until: &str, now: &str,
 ) -> Result<Option<ClaimGrant>, UploadError> {
+    claim_next_job_impl(conn, None, staging_root, tenant_id, branch_id, claimant_instance_id, claim_token, lease_until, now)
+}
+
+/// MOBILE-04B2A4 §1 — claim with the transactional scope fence coupled INSIDE the IMMEDIATE tx.
+pub fn claim_next_job_fenced(
+    conn: &mut Connection, scope: &super::mobile_runtime_scope::RuntimeScopeExpectation, staging_root: &Path,
+    tenant_id: &str, branch_id: &str, claimant_instance_id: &str, claim_token: &str, lease_until: &str, now: &str,
+) -> Result<Option<ClaimGrant>, UploadError> {
+    claim_next_job_impl(conn, Some(scope), staging_root, tenant_id, branch_id, claimant_instance_id, claim_token, lease_until, now)
+}
+
+fn claim_next_job_impl(
+    conn: &mut Connection, scope: Option<&super::mobile_runtime_scope::RuntimeScopeExpectation>, staging_root: &Path,
+    tenant_id: &str, branch_id: &str, claimant_instance_id: &str, claim_token: &str, lease_until: &str, now: &str,
+) -> Result<Option<ClaimGrant>, UploadError> {
     loop {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+        // §1 — fence FIRST, under the IMMEDIATE write lock, before reading/writing any job state.
+        fence_scope(&tx, scope)?;
         // Oldest claimable job in the (tenant, branch) scope, across ALL origin users: `accepted`
         // (no claim row) OR `processing` whose claim lease has expired. The desktop worker leases as
         // itself (claimantInstanceId); the job's ORIGIN user is read from the row, never assumed to
@@ -792,16 +845,36 @@ pub fn claim_next_job(
 /// claimant id match the active claim row — a stale/foreign claimant (whose token was replaced on a
 /// takeover) cannot renew. A claim row only ever exists for a `processing` job.
 pub fn renew_claim(
-    conn: &Connection, trusted: &TrustedUploadContext, upload_event_id: &str,
+    conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str,
     claim_token: &str, claimant_instance_id: &str, new_lease_until: &str, now: &str,
 ) -> Result<bool, UploadError> {
-    let n = conn.execute(
+    renew_claim_impl(conn, None, trusted, upload_event_id, claim_token, claimant_instance_id, new_lease_until, now)
+}
+
+/// MOBILE-04B2A4 §1 — renew with the transactional scope fence coupled inside the tx.
+pub fn renew_claim_fenced(
+    conn: &mut Connection, scope: &super::mobile_runtime_scope::RuntimeScopeExpectation,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str,
+    claimant_instance_id: &str, new_lease_until: &str, now: &str,
+) -> Result<bool, UploadError> {
+    renew_claim_impl(conn, Some(scope), trusted, upload_event_id, claim_token, claimant_instance_id, new_lease_until, now)
+}
+
+fn renew_claim_impl(
+    conn: &mut Connection, scope: Option<&super::mobile_runtime_scope::RuntimeScopeExpectation>,
+    trusted: &TrustedUploadContext, upload_event_id: &str,
+    claim_token: &str, claimant_instance_id: &str, new_lease_until: &str, now: &str,
+) -> Result<bool, UploadError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+    fence_scope(&tx, scope)?; // §1 — the lease extension is also fenced under the write lock
+    let n = tx.execute(
         "UPDATE mobile_upload_claim SET lease_until=?5, updated_at=?6
           WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4
             AND claim_token=?7 AND claimant_instance_id=?8",
         params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id,
             new_lease_until, now, claim_token, claimant_instance_id],
     ).map_err(map_db)?;
+    tx.commit().map_err(map_db)?;
     Ok(n == 1)
 }
 
@@ -810,7 +883,15 @@ pub fn renew_claim(
 pub fn mark_retryable(
     conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, now: &str,
 ) -> Result<bool, UploadError> {
-    release_claimed(conn, trusted, upload_event_id, claim_token, "accepted", None, now)
+    release_claimed(conn, None, trusted, upload_event_id, claim_token, "accepted", None, now)
+}
+
+/// MOBILE-04B2A4 §1 — release with the transactional scope fence coupled inside the tx.
+pub fn mark_retryable_fenced(
+    conn: &mut Connection, scope: &super::mobile_runtime_scope::RuntimeScopeExpectation,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, now: &str,
+) -> Result<bool, UploadError> {
+    release_claimed(conn, Some(scope), trusted, upload_event_id, claim_token, "accepted", None, now)
 }
 
 /// Quarantine a claimed job (manifest/file mismatch discovered by the JS verify). Matching-token +
@@ -818,15 +899,25 @@ pub fn mark_retryable(
 pub fn mark_quarantined_claimed(
     conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, code: &str, now: &str,
 ) -> Result<bool, UploadError> {
-    release_claimed(conn, trusted, upload_event_id, claim_token, "quarantined", Some(code), now)
+    release_claimed(conn, None, trusted, upload_event_id, claim_token, "quarantined", Some(code), now)
+}
+
+/// MOBILE-04B2A4 §1 — quarantine with the transactional scope fence coupled inside the tx.
+pub fn mark_quarantined_claimed_fenced(
+    conn: &mut Connection, scope: &super::mobile_runtime_scope::RuntimeScopeExpectation,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, code: &str, now: &str,
+) -> Result<bool, UploadError> {
+    release_claimed(conn, Some(scope), trusted, upload_event_id, claim_token, "quarantined", Some(code), now)
 }
 
 /// Shared token-guarded transition of a `processing` job to a terminal/back state + claim removal.
 fn release_claimed(
-    conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str,
+    conn: &mut Connection, scope: Option<&super::mobile_runtime_scope::RuntimeScopeExpectation>,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str,
     new_state: &str, error_code: Option<&str>, now: &str,
 ) -> Result<bool, UploadError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+    fence_scope(&tx, scope)?; // §1 — under the write lock, before any state change
     let n = tx.execute(
         &format!(
             "UPDATE mobile_upload_inbox SET state=?5, error_code=?6, updated_at=?7
@@ -859,7 +950,25 @@ pub fn mark_ready(
     conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str,
     claim_token: &str, entity_id: &str, payload_hash: &str, product_id: &str, now: &str,
 ) -> Result<ReadyOutcome, UploadError> {
+    mark_ready_impl(conn, None, trusted, upload_event_id, claim_token, entity_id, payload_hash, product_id, now)
+}
+
+/// MOBILE-04B2A4 §1 — mark ready with the transactional scope fence coupled inside the tx.
+pub fn mark_ready_fenced(
+    conn: &mut Connection, scope: &super::mobile_runtime_scope::RuntimeScopeExpectation,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, entity_id: &str,
+    payload_hash: &str, product_id: &str, now: &str,
+) -> Result<ReadyOutcome, UploadError> {
+    mark_ready_impl(conn, Some(scope), trusted, upload_event_id, claim_token, entity_id, payload_hash, product_id, now)
+}
+
+fn mark_ready_impl(
+    conn: &mut Connection, scope: Option<&super::mobile_runtime_scope::RuntimeScopeExpectation>,
+    trusted: &TrustedUploadContext, upload_event_id: &str,
+    claim_token: &str, entity_id: &str, payload_hash: &str, product_id: &str, now: &str,
+) -> Result<ReadyOutcome, UploadError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+    fence_scope(&tx, scope)?; // §1 — under the write lock, before the ready transition
     let n = tx.execute(
         &format!(
             "UPDATE mobile_upload_inbox SET state='ready', product_id=?7, updated_at=?8

@@ -1719,6 +1719,13 @@ fn mobile_runtime_gate() -> Result<(), String> {
 // (supplied by JS from the ClaimGrant, but only ever effective together with a matching claim token,
 // so a forged origin user resolves no claim row and writes nothing). NEVER `self-desktop` — that is
 // the worker/claimant principal, not the uploader.
+// MOBILE-04B2A4 — build the caller's expected runtime scope for the transactional fence. The
+// server_instance_id is the install id (server-derived), never from the caller.
+#[allow(dead_code)]
+fn mobile_scope_expectation(install_id: String, binding_revision: i64, tenant_id: String, branch_id: String) -> sync::mobile_runtime_scope::RuntimeScopeExpectation {
+    sync::mobile_runtime_scope::RuntimeScopeExpectation { server_instance_id: install_id, binding_revision, tenant_id, branch_id }
+}
+
 #[allow(dead_code)]
 fn mobile_job_trusted(origin_authenticated_user_id: &str) -> sync::mobile_upload::TrustedUploadContext {
     sync::mobile_upload::TrustedUploadContext {
@@ -1750,13 +1757,14 @@ fn mobile_upload_claim(
 ) -> Result<Option<sync::mobile_upload::ClaimGrant>, String> {
     mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
-    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
-        .map_err(|e| e.to_string())?;
+    // MOBILE-04B2A4 §1 — the scope fence is now coupled INSIDE the mutation's IMMEDIATE tx (no
+    // separate pre-SELECT), so a concurrent owner rebind cannot slip between check and mutation.
+    let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
     let now = chrono::Utc::now();
     let token = uuid::Uuid::new_v4().to_string();
     // Scope by the fixed desktop tenant/branch across ALL origin users; lease as the worker.
-    sync::mobile_upload::claim_next_job(
-        &mut conn, &state.mobile_staging_root, MOBILE_TRUSTED_TENANT, MOBILE_TRUSTED_BRANCH,
+    sync::mobile_upload::claim_next_job_fenced(
+        &mut conn, &scope, &state.mobile_staging_root, MOBILE_TRUSTED_TENANT, MOBILE_TRUSTED_BRANCH,
         &claimant_instance_id, &token, &mobile_lease_until(now, lease_seconds), &now.to_rfc3339(),
     )
     .map_err(|e| e.code().to_string())
@@ -1781,14 +1789,13 @@ fn mobile_upload_prepare_image(
     expected_branch_id: String,
 ) -> Result<media::ingest::PrepareResult, String> {
     mobile_runtime_gate()?;
-    let (conn, install_id) = open_config_db(&state.server)?;
-    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
-        .map_err(|e| e.to_string())?;
+    let (mut conn, install_id) = open_config_db(&state.server)?;
+    let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
     let trusted = mobile_job_trusted(&origin_authenticated_user_id);
     let now = chrono::Utc::now().to_rfc3339();
-    // Claim-gated load (token + processing + unexpired lease) that yields the full provenance.
-    let p = sync::mobile_upload::claimed_image_for_prepare(
-        &conn, &state.mobile_staging_root, &trusted, &upload_event_id, &claim_token, slot, &now,
+    // MOBILE-04B2A4 §3 — PHASE A: fence + claim/lease/job/provenance read under ONE IMMEDIATE tx.
+    let p = sync::mobile_upload::claimed_image_for_prepare_fenced(
+        &mut conn, &scope, &state.mobile_staging_root, &trusted, &upload_event_id, &claim_token, slot, &now,
     )
     .map_err(|e| e.code().to_string())?;
     // The prepared identity is SERVER-derived from the upload provenance — JS never supplies it.
@@ -1796,9 +1803,26 @@ fn mobile_upload_prepare_image(
         &trusted, &upload_event_id, &p.entity_id, &p.payload_hash, slot, p.is_primary, &p.content_hash,
     );
     let request_hash = media::ingest::canonical_request_hash(&tenant_scope, &p.bytes);
-    media_ingest_service(&state)
+    // PHASE B — media prepare under the deterministic, provenance-bound prepareRequestId.
+    let prepared = media_ingest_service(&state)
         .prepare(&tenant_scope, &prepare_request_id, &request_hash, &p.bytes, None)
-        .map_err(|e| e.code().to_string())
+        .map_err(|e| e.code().to_string())?;
+    // PHASE C — before RELEASING the prepared descriptor to JS, re-run the fenced read in a fresh
+    // IMMEDIATE tx: the binding revision/scope must be unchanged, the claim/lease/job still valid, and
+    // the manifest slot's content hash identical. On any drift (incl. a rebind that committed during
+    // Phase B) → ABORT the prepared artifact and return the typed conflict, never a stale descriptor.
+    let recheck = sync::mobile_upload::claimed_image_for_prepare_fenced(
+        &mut conn, &scope, &state.mobile_staging_root, &trusted, &upload_event_id, &claim_token, slot,
+        &chrono::Utc::now().to_rfc3339(),
+    );
+    let stale = match &recheck { Ok(p2) => p2.content_hash != p.content_hash, Err(_) => true };
+    if stale {
+        // Best-effort abort of the prepared journal/artifact; a leftover is a recoverable orphan the
+        // ingest recovery reconciles — never a foreign write and never a descriptor handed to JS.
+        let _ = media_ingest_service(&state).abort(&tenant_scope, &prepare_request_id);
+        return Err(sync::mobile_upload::ERR_SCOPE_REVISION_CONFLICT.to_string());
+    }
+    Ok(prepared)
 }
 
 #[allow(dead_code)]
@@ -1815,12 +1839,11 @@ fn mobile_upload_renew(
     expected_branch_id: String,
 ) -> Result<bool, String> {
     mobile_runtime_gate()?;
-    let (conn, install_id) = open_config_db(&state.server)?;
-    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
-        .map_err(|e| e.to_string())?;
+    let (mut conn, install_id) = open_config_db(&state.server)?;
+    let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
     let now = chrono::Utc::now();
-    sync::mobile_upload::renew_claim(
-        &conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &claimant_instance_id,
+    sync::mobile_upload::renew_claim_fenced(
+        &mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &claimant_instance_id,
         &mobile_lease_until(now, lease_seconds), &now.to_rfc3339(),
     )
     .map_err(|e| e.code().to_string())
@@ -1839,9 +1862,8 @@ fn mobile_upload_release(
 ) -> Result<bool, String> {
     mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
-    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
-        .map_err(|e| e.to_string())?;
-    sync::mobile_upload::mark_retryable(&mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &chrono::Utc::now().to_rfc3339())
+    let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    sync::mobile_upload::mark_retryable_fenced(&mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.code().to_string())
 }
 
@@ -1859,9 +1881,8 @@ fn mobile_upload_mark_quarantined(
 ) -> Result<bool, String> {
     mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
-    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
-        .map_err(|e| e.to_string())?;
-    sync::mobile_upload::mark_quarantined_claimed(&mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &code, &chrono::Utc::now().to_rfc3339())
+    let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    sync::mobile_upload::mark_quarantined_claimed_fenced(&mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &code, &chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.code().to_string())
 }
 
@@ -1881,10 +1902,9 @@ fn mobile_upload_mark_ready(
 ) -> Result<String, String> {
     mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
-    sync::mobile_runtime_scope::fence_runtime_scope(&conn, &install_id, expected_binding_revision, &expected_tenant_id, &expected_branch_id)
-        .map_err(|e| e.to_string())?;
-    let outcome = sync::mobile_upload::mark_ready(
-        &mut conn, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &entity_id, &payload_hash, &product_id,
+    let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    let outcome = sync::mobile_upload::mark_ready_fenced(
+        &mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &entity_id, &payload_hash, &product_id,
         &chrono::Utc::now().to_rfc3339(),
     )
     .map_err(|e| e.code().to_string())?;
@@ -1926,7 +1946,7 @@ fn mobile_runtime_scope_configure(
     tenant_id: String,
     branch_id: String,
 ) -> Result<sync::mobile_runtime_scope::RuntimeScopeEvidence, String> {
-    let (conn, install_id) = open_config_db(&state.server)?;
+    let (mut conn, install_id) = open_config_db(&state.server)?;
     // Owner identity is verified against tenant-1/branch-main (the owner-of-record scope); the scope
     // BEING configured can be any valid (tenant, branch) — that is what decouples the binding from
     // the seed constants.
@@ -1934,7 +1954,7 @@ fn mobile_runtime_scope_configure(
         .map_err(|code| code.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
     sync::mobile_runtime_scope::configure_runtime_scope(
-        &conn, &install_id, &tenant_id, &branch_id, &owner, &now,
+        &mut conn, &install_id, &tenant_id, &branch_id, &owner, &now,
     )
     .map_err(|e| e.to_string())
 }

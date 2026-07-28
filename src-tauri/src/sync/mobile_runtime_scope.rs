@@ -111,7 +111,7 @@ pub fn read_runtime_scope_evidence(
 /// active row and bumps `binding_revision`, so any worker fenced to the old revision is invalidated.
 /// Atomic: validation + supersede + insert happen in one transaction.
 pub fn configure_runtime_scope(
-    conn: &Connection,
+    conn: &mut Connection,
     server_instance_id: &str,
     tenant_id: &str,
     branch_id: &str,
@@ -120,7 +120,12 @@ pub fn configure_runtime_scope(
 ) -> Result<RuntimeScopeEvidence, &'static str> {
     validate_scope(conn, tenant_id, branch_id)?;
 
-    let tx = conn.unchecked_transaction().map_err(|_| ERR_SCOPE_DB)?;
+    // MOBILE-04B2A4 §2 — the rebind takes the SAME write contract as the mutations (BEGIN IMMEDIATE),
+    // so it serializes against any in-flight fenced mutation: it cannot commit between a mutation's
+    // fence-read and its write, and once it commits the old revision can never write again.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| ERR_SCOPE_DB)?;
 
     let current: Option<(String, String, i64)> = tx
         .query_row(
@@ -164,6 +169,16 @@ pub fn configure_runtime_scope(
     read_runtime_scope_evidence(conn, server_instance_id)
 }
 
+/// MOBILE-04B2A4 §1 — the caller's expected runtime scope, checked INSIDE a mutation's own IMMEDIATE
+/// transaction (not a separate pre-SELECT), so a concurrent owner rebind is serialized against it.
+#[derive(Debug, Clone)]
+pub struct RuntimeScopeExpectation {
+    pub server_instance_id: String,
+    pub binding_revision: i64,
+    pub tenant_id: String,
+    pub branch_id: String,
+}
+
 /// MOBILE-04B2A3-R1 §3 — the SERVER-SIDE revision fence every internal mobile MUTATION must pass
 /// before it opens the DB/files or writes. It reads the CURRENT active binding itself (the SSOT) and
 /// requires the caller's expectation to match it EXACTLY — install-derived `server_instance_id`, the
@@ -198,12 +213,35 @@ mod tests {
 
     const PW: &str = "correct-horse-battery";
 
+    fn seed(conn: &Connection) {
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(SEED_SQL).unwrap();
+        lataif_server::migrations::run_migrations(conn, migrations::EMBEDDED_MIGRATIONS).unwrap();
+        credentials::provision_owner(conn, PW, PW, credentials::PROVISION_CONFIRMATION).unwrap();
+    }
+
     // A DB with the base schema, all migrations, a provisioned owner (tenant-1/branch-main), plus a
     // SECOND, non-default tenant with a UUID branch — to prove the binding is scope-value-agnostic.
     fn env() -> (Connection, OwnerAuth) {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        conn.execute_batch(
+        seed(&conn);
+        let owner = primary::authorize_owner(&conn, "tenant-1", "branch-main", "a@b.c", PW).unwrap();
+        (conn, owner)
+    }
+
+    // MOBILE-04B2A4 §2 — a FILE-backed DB so two independent connections can contend for the write
+    // lock. Returns the dir so the caller can open a second connection to the same DB.
+    fn env_file() -> (Connection, OwnerAuth, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lataif_scope_{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("server.db")).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+        seed(&conn);
+        let owner = primary::authorize_owner(&conn, "tenant-1", "branch-main", "a@b.c", PW).unwrap();
+        (conn, owner, dir)
+    }
+
+    const SEED_SQL: &str =
             "
             CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
                 plan TEXT DEFAULT 'starter', active INTEGER DEFAULT 1, max_branches INTEGER DEFAULT 3,
@@ -231,14 +269,7 @@ mod tests {
             INSERT INTO tenants (id,name,slug,created_at,updated_at) VALUES ('tenant-acme','Acme','acme','now','now');
             INSERT INTO branches (id,tenant_id,name,created_at,updated_at)
                 VALUES ('b2b1f6a4-3c2e-4f1a-9d7c-0a1b2c3d4e5f','tenant-acme','Acme HQ','now','now');
-            ",
-        )
-        .unwrap();
-        lataif_server::migrations::run_migrations(&conn, migrations::EMBEDDED_MIGRATIONS).unwrap();
-        credentials::provision_owner(&conn, PW, PW, credentials::PROVISION_CONFIRMATION).unwrap();
-        let owner = primary::authorize_owner(&conn, "tenant-1", "branch-main", "a@b.c", PW).unwrap();
-        (conn, owner)
-    }
+            ";
 
     const INST: &str = "install-abc";
     const UUID_BRANCH: &str = "b2b1f6a4-3c2e-4f1a-9d7c-0a1b2c3d4e5f";
@@ -254,8 +285,8 @@ mod tests {
 
     #[test]
     fn configures_non_default_tenant_and_uuid_branch() {
-        let (conn, owner) = env();
-        let ev = configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let (mut conn, owner) = env();
+        let ev = configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
         assert!(ev.configured);
         assert_eq!(ev.tenant_id, "tenant-acme");
         assert_eq!(ev.branch_id, UUID_BRANCH);
@@ -266,32 +297,32 @@ mod tests {
 
     #[test]
     fn unknown_branch_is_rejected() {
-        let (conn, owner) = env();
-        let e = configure_runtime_scope(&conn, INST, "tenant-1", "no-such-branch", &owner, "t0").unwrap_err();
+        let (mut conn, owner) = env();
+        let e = configure_runtime_scope(&mut conn, INST, "tenant-1", "no-such-branch", &owner, "t0").unwrap_err();
         assert_eq!(e, ERR_SCOPE_BRANCH_UNKNOWN);
         assert!(!read_runtime_scope_evidence(&conn, INST).unwrap().configured, "nothing bound on rejection");
     }
 
     #[test]
     fn unknown_tenant_is_rejected() {
-        let (conn, owner) = env();
-        let e = configure_runtime_scope(&conn, INST, "tenant-ghost", UUID_BRANCH, &owner, "t0").unwrap_err();
+        let (mut conn, owner) = env();
+        let e = configure_runtime_scope(&mut conn, INST, "tenant-ghost", UUID_BRANCH, &owner, "t0").unwrap_err();
         assert_eq!(e, ERR_SCOPE_TENANT_UNKNOWN);
     }
 
     #[test]
     fn branch_of_another_tenant_is_rejected() {
-        let (conn, owner) = env();
+        let (mut conn, owner) = env();
         // branch-main belongs to tenant-1, not tenant-acme.
-        let e = configure_runtime_scope(&conn, INST, "tenant-acme", "branch-main", &owner, "t0").unwrap_err();
+        let e = configure_runtime_scope(&mut conn, INST, "tenant-acme", "branch-main", &owner, "t0").unwrap_err();
         assert_eq!(e, ERR_SCOPE_TENANT_MISMATCH);
     }
 
     #[test]
     fn same_binding_is_idempotent_no_revision_bump() {
-        let (conn, owner) = env();
-        let a = configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
-        let b = configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t1").unwrap();
+        let (mut conn, owner) = env();
+        let a = configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let b = configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t1").unwrap();
         assert_eq!(a, b, "same scope → same revision, idempotent");
         assert_eq!(b.binding_revision, 1);
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM mobile_runtime_scope WHERE server_instance_id=?1", params![INST], |r| r.get(0)).unwrap();
@@ -300,9 +331,9 @@ mod tests {
 
     #[test]
     fn rebind_bumps_revision_and_supersedes_prior() {
-        let (conn, owner) = env();
-        configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
-        let rebound = configure_runtime_scope(&conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap();
+        let (mut conn, owner) = env();
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let rebound = configure_runtime_scope(&mut conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap();
         assert_eq!(rebound.binding_revision, 2, "explicit rebind bumps the revision (fences old workers)");
         assert_eq!(rebound.tenant_id, "tenant-1");
         // exactly one ACTIVE row; the prior binding is kept as superseded history.
@@ -316,8 +347,8 @@ mod tests {
     fn binding_survives_reopen_identically() {
         // The binding is durable — a fresh connection to the same DB sees identical evidence. (We use
         // one in-memory DB the whole test; the point is that read is a plain query with no cache.)
-        let (conn, owner) = env();
-        let before = configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let (mut conn, owner) = env();
+        let before = configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
         let after = read_runtime_scope_evidence(&conn, INST).unwrap();
         assert_eq!(before, after, "restart-stable: same revision, tenant, branch");
         assert_eq!(after.binding_revision, 1);
@@ -325,9 +356,9 @@ mod tests {
 
     #[test]
     fn two_installs_bind_independently() {
-        let (conn, owner) = env();
-        configure_runtime_scope(&conn, "install-A", "tenant-1", "branch-main", &owner, "t0").unwrap();
-        configure_runtime_scope(&conn, "install-B", "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let (mut conn, owner) = env();
+        configure_runtime_scope(&mut conn, "install-A", "tenant-1", "branch-main", &owner, "t0").unwrap();
+        configure_runtime_scope(&mut conn, "install-B", "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
         assert_eq!(read_runtime_scope_evidence(&conn, "install-A").unwrap().tenant_id, "tenant-1");
         assert_eq!(read_runtime_scope_evidence(&conn, "install-B").unwrap().tenant_id, "tenant-acme");
     }
@@ -335,8 +366,8 @@ mod tests {
     // ── §4 — configured_by comes from the verified owner, never a caller-supplied name ──
     #[test]
     fn configured_by_is_the_verified_owner() {
-        let (conn, owner) = env();
-        configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let (mut conn, owner) = env();
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
         let by: String = conn.query_row(
             "SELECT configured_by FROM mobile_runtime_scope WHERE server_instance_id=?1 AND status='active'",
             params![INST], |r| r.get(0)).unwrap();
@@ -347,9 +378,9 @@ mod tests {
     // ── §1 — a superseded (inactive) binding reads as NOT configured ──
     #[test]
     fn superseded_binding_reads_as_unconfigured() {
-        let (conn, owner) = env();
-        configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
-        configure_runtime_scope(&conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap(); // rebind
+        let (mut conn, owner) = env();
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        configure_runtime_scope(&mut conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap(); // rebind
         // The superseded revision-1 row still exists but is never the evidence.
         let ev = read_runtime_scope_evidence(&conn, INST).unwrap();
         assert!(ev.configured && ev.binding_revision == 2 && ev.tenant_id == "tenant-1");
@@ -358,8 +389,8 @@ mod tests {
     // ── §3 — the server-side revision fence ──
     #[test]
     fn fence_passes_only_on_the_exact_current_binding() {
-        let (conn, owner) = env();
-        configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        let (mut conn, owner) = env();
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
         // exact match → ok
         assert!(fence_runtime_scope(&conn, INST, 1, "tenant-acme", UUID_BRANCH).is_ok());
         // stale revision → conflict
@@ -373,12 +404,36 @@ mod tests {
 
     #[test]
     fn fence_follows_a_rebind_to_the_new_revision() {
-        let (conn, owner) = env();
-        configure_runtime_scope(&conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
-        configure_runtime_scope(&conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap(); // → revision 2
+        let (mut conn, owner) = env();
+        configure_runtime_scope(&mut conn, INST, "tenant-acme", UUID_BRANCH, &owner, "t0").unwrap();
+        configure_runtime_scope(&mut conn, INST, "tenant-1", "branch-main", &owner, "t1").unwrap(); // → revision 2
         // the old revision no longer fences through
         assert_eq!(fence_runtime_scope(&conn, INST, 1, "tenant-acme", UUID_BRANCH).unwrap_err(), ERR_RUNTIME_SCOPE_REVISION_CONFLICT);
         // only the new binding does
         assert!(fence_runtime_scope(&conn, INST, 2, "tenant-1", "branch-main").is_ok());
+    }
+
+    // MOBILE-04B2A4 §2 — the real owner rebind uses BEGIN IMMEDIATE (the SAME write contract as the
+    // mutations), so it cannot commit while another connection holds the write lock. Proven on a
+    // file-backed DB: with a mutation's IMMEDIATE tx open on conn1, a rebind on conn2 (no wait) fails
+    // closed rather than slipping in.
+    #[test]
+    fn configure_takes_the_immediate_write_lock() {
+        let (mut c1, owner, dir) = env_file();
+        configure_runtime_scope(&mut c1, INST, "tenant-1", "branch-main", &owner, "t0").unwrap();
+        // conn1 holds the write lock (a stand-in for an in-flight fenced mutation).
+        let held = c1.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        // conn2 attempts the real rebind without waiting.
+        let mut c2 = Connection::open(dir.join("server.db")).unwrap();
+        c2.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+        let owner2 = primary::authorize_owner(&c2, "tenant-1", "branch-main", "a@b.c", PW).unwrap();
+        let r = configure_runtime_scope(&mut c2, INST, "tenant-acme", UUID_BRANCH, &owner2, "t1");
+        assert_eq!(r.unwrap_err(), ERR_SCOPE_DB, "rebind cannot commit while a mutation holds IMMEDIATE");
+        // once the mutation releases, the rebind proceeds and the revision advances monotonically.
+        held.commit().unwrap();
+        c2.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let ev = configure_runtime_scope(&mut c2, INST, "tenant-acme", UUID_BRANCH, &owner2, "t2").unwrap();
+        assert_eq!(ev.binding_revision, 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

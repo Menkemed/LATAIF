@@ -561,7 +561,7 @@ fn expired_claim_is_taken_over_and_old_token_is_stale() {
     assert_eq!(g2.claim_token, "tok-2");
     // the crashed old claimant's token writes NOTHING.
     assert_eq!(mark_ready(&mut c, &trusted(), "ev-1", "tok-1", "prod-1", &g1.payload_hash, "prod-1", NOW_LATE).unwrap(), ReadyOutcome::Rejected);
-    assert!(!renew_claim(&c, &trusted(), "ev-1", "tok-1", "inst-1", LEASE_FAR, NOW_LATE).unwrap());
+    assert!(!renew_claim(&mut c, &trusted(), "ev-1", "tok-1", "inst-1", LEASE_FAR, NOW_LATE).unwrap());
     assert!(!mark_retryable(&mut c, &trusted(), "ev-1", "tok-1", NOW_LATE).unwrap());
     assert_eq!(state_of(&c, "ev-1"), "processing", "stale calls left the takeover untouched");
     // the current holder can complete.
@@ -629,7 +629,7 @@ fn renew_extends_lease_and_retryable_releases() {
     accept_upload(&mut c, s.path(), &trusted(), &sub("ev-1", vec![img_jpeg(jpeg(120, 120, 6))], META), NOW).unwrap();
     claim_next_job(&mut c, s.path(), T, B, "inst-1", "tok-1", LEASE_A, NOW).unwrap().unwrap();
     // renew pushes the lease past NOW_LATE → still not reclaimable then.
-    assert!(renew_claim(&c, &trusted(), "ev-1", "tok-1", "inst-1", LEASE_FAR, NOW).unwrap());
+    assert!(renew_claim(&mut c, &trusted(), "ev-1", "tok-1", "inst-1", LEASE_FAR, NOW).unwrap());
     assert!(claim_next_job(&mut c, s.path(), T, B, "inst-2", "tok-2", LEASE_B, NOW_LATE).unwrap().is_none());
     // graceful release → back to accepted → immediately reclaimable.
     assert!(mark_retryable(&mut c, &trusted(), "ev-1", "tok-1", NOW_LATE).unwrap());
@@ -719,4 +719,109 @@ fn v0012_migration_partial_failure_and_rerun() {
         let e: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [t], |r| r.get(0)).unwrap();
         assert_eq!(e, 1);
     }
+}
+
+// ── MOBILE-04B2A4 — the transactional runtime-scope fence (coupled inside each mutation's own
+// IMMEDIATE tx) + the owner-rebind race contract. Binding rows are written directly here (the
+// owner-gated `configure_runtime_scope` is proven separately in mobile_runtime_scope.rs). ───────────
+const INSTALL: &str = "install-x4";
+fn scope_exp(rev: i64) -> crate::sync::mobile_runtime_scope::RuntimeScopeExpectation {
+    crate::sync::mobile_runtime_scope::RuntimeScopeExpectation {
+        server_instance_id: INSTALL.into(), binding_revision: rev, tenant_id: T.into(), branch_id: B.into(),
+    }
+}
+fn bind_scope(c: &Connection, rev: i64) {
+    c.execute("UPDATE mobile_runtime_scope SET status='superseded' WHERE server_instance_id=?1 AND status='active'", params![INSTALL]).unwrap();
+    c.execute(
+        "INSERT INTO mobile_runtime_scope (server_instance_id, binding_revision, tenant_id, branch_id, configured_by, configured_at, status)
+         VALUES (?1,?2,?3,?4,'user-owner','now','active')",
+        params![INSTALL, rev, T, B],
+    ).unwrap();
+}
+fn inbox_state(c: &Connection, ev: &str) -> String {
+    c.query_row("SELECT state FROM mobile_upload_inbox WHERE upload_event_id=?1", params![ev], |r| r.get(0)).unwrap()
+}
+fn claim_rows(c: &Connection) -> i64 { c.query_row("SELECT COUNT(*) FROM mobile_upload_claim", [], |r| r.get(0)).unwrap() }
+fn accept_one(c: &mut Connection, s: &Path, ev: &str) {
+    accept_upload(c, s, &trusted(), &sub(ev, vec![img_jpeg(jpeg(200, 150, 1))], META), NOW).unwrap();
+}
+
+// §5-A / §2 — the rebind uses the SAME write contract (BEGIN IMMEDIATE), so it serializes against an
+// in-flight mutation: while a mutation holds the IMMEDIATE lock the rebind cannot commit, and vice versa.
+#[test]
+fn a4_immediate_lock_serializes_rebind_against_mutation() {
+    let d = Temp::new("db4s"); let mut c1 = init_db(d.path());
+    bind_scope(&c1, 1);
+    let tx = c1.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap(); // mutation holds the lock
+    let c2 = open_db(d.path());
+    c2.busy_timeout(std::time::Duration::from_millis(0)).unwrap(); // do not wait
+    assert!(c2.execute_batch("BEGIN IMMEDIATE;").is_err(), "a rebind cannot begin its write while a mutation holds IMMEDIATE");
+    tx.commit().unwrap();
+    assert!(c2.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_ok(), "the rebind proceeds once the mutation commits");
+}
+
+// §5-B — rebind committed first → a worker still on the old revision writes NOTHING.
+#[test]
+fn a4_rebind_first_blocks_stale_claim() {
+    let d = Temp::new("db4b"); let s = Temp::new("stg4b"); let mut c = init_db(d.path());
+    accept_one(&mut c, s.path(), "ev-1");
+    bind_scope(&c, 1);
+    bind_scope(&c, 2); // owner rebound before the worker claims
+    let e = claim_next_job_fenced(&mut c, &scope_exp(1), s.path(), T, B, "inst", "tok", LEASE_A, NOW).unwrap_err();
+    assert_eq!(e.code(), ERR_SCOPE_REVISION_CONFLICT);
+    assert_eq!(inbox_state(&c, "ev-1"), "accepted", "0 claim mutation under a stale revision");
+    assert_eq!(claim_rows(&c), 0);
+    assert!(claim_next_job_fenced(&mut c, &scope_exp(2), s.path(), T, B, "inst", "tok", LEASE_A, NOW).unwrap().is_some(), "current revision claims fine");
+}
+
+// §5-C — claim under N, rebind to N+1, then every status mutation under N is refused with no write.
+#[test]
+fn a4_stale_revision_blocks_every_status_mutation() {
+    let d = Temp::new("db4c"); let s = Temp::new("stg4c"); let mut c = init_db(d.path());
+    accept_one(&mut c, s.path(), "ev-1");
+    bind_scope(&c, 1);
+    let g = claim_next_job_fenced(&mut c, &scope_exp(1), s.path(), T, B, "inst", "tok", LEASE_A, NOW).unwrap().unwrap();
+    bind_scope(&c, 2); // rebind after the claim
+    let e1 = renew_claim_fenced(&mut c, &scope_exp(1), &trusted(), "ev-1", "tok", "inst", LEASE_FAR, NOW).unwrap_err();
+    let e2 = mark_retryable_fenced(&mut c, &scope_exp(1), &trusted(), "ev-1", "tok", NOW).unwrap_err();
+    let e3 = mark_quarantined_claimed_fenced(&mut c, &scope_exp(1), &trusted(), "ev-1", "tok", "X", NOW).unwrap_err();
+    let e4 = mark_ready_fenced(&mut c, &scope_exp(1), &trusted(), "ev-1", "tok", &g.entity_id, &g.payload_hash, "prod-1", NOW).unwrap_err();
+    for e in [e1, e2, e3, e4] { assert_eq!(e.code(), ERR_SCOPE_REVISION_CONFLICT); }
+    assert_eq!(inbox_state(&c, "ev-1"), "processing", "job untouched");
+    assert_eq!(claim_rows(&c), 1, "the claim row survives — nothing was written");
+}
+
+// §5-D — prepare's fenced read (Phase A / Phase C) returns bytes ONLY for the current revision; a
+// rebind mid-prepare means no provenance can be handed back under the old revision.
+#[test]
+fn a4_prepare_fence_blocks_stale_scope() {
+    let d = Temp::new("db4d"); let s = Temp::new("stg4d"); let mut c = init_db(d.path());
+    accept_one(&mut c, s.path(), "ev-1");
+    bind_scope(&c, 1);
+    let g = claim_next_job_fenced(&mut c, &scope_exp(1), s.path(), T, B, "inst", "tok", LEASE_A, NOW).unwrap().unwrap();
+    let p = claimed_image_for_prepare_fenced(&mut c, &scope_exp(1), s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW).unwrap();
+    assert!(!p.bytes.is_empty());
+    bind_scope(&c, 2); // owner rebind
+    let e = claimed_image_for_prepare_fenced(&mut c, &scope_exp(1), s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW).unwrap_err();
+    assert_eq!(e.code(), ERR_SCOPE_REVISION_CONFLICT, "stale-revision prepare yields no bytes");
+    assert!(claimed_image_for_prepare_fenced(&mut c, &scope_exp(2), s.path(), &trusted(), "ev-1", &g.claim_token, 0, NOW).is_ok());
+}
+
+// §5-E — a NEW worker under N+1 correctly takes over the SAME restart-safe job after the old lease
+// lapses; exactly one job, one ready, no duplicate claim.
+#[test]
+fn a4_new_revision_worker_takes_over_restartable_job() {
+    let d = Temp::new("db4e"); let s = Temp::new("stg4e"); let mut c = init_db(d.path());
+    accept_one(&mut c, s.path(), "ev-1");
+    bind_scope(&c, 1);
+    let _a = claim_next_job_fenced(&mut c, &scope_exp(1), s.path(), T, B, "inst-A", "tok-A", LEASE_A, NOW).unwrap().unwrap();
+    bind_scope(&c, 2);
+    assert_eq!(renew_claim_fenced(&mut c, &scope_exp(1), &trusted(), "ev-1", "tok-A", "inst-A", LEASE_FAR, NOW).unwrap_err().code(), ERR_SCOPE_REVISION_CONFLICT);
+    let gb = claim_next_job_fenced(&mut c, &scope_exp(2), s.path(), T, B, "inst-B", "tok-B", LEASE_FAR, NOW_LATE).unwrap().unwrap();
+    assert_eq!(gb.upload_event_id, "ev-1");
+    let r = mark_ready_fenced(&mut c, &scope_exp(2), &trusted(), "ev-1", "tok-B", &gb.entity_id, &gb.payload_hash, "prod-1", NOW_LATE).unwrap();
+    assert_eq!(r, ReadyOutcome::MarkedReady);
+    assert_eq!(inbox_count(&c), 1);
+    assert_eq!(inbox_state(&c, "ev-1"), "ready");
+    assert_eq!(claim_rows(&c), 0, "claim removed on ready — no duplicate claim rows");
 }
