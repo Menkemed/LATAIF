@@ -507,22 +507,33 @@ async function main(): Promise<void> {
     db.close();
   }
 
-  // ── §17 R5: Rust runtime commands unregistered + wrappers fail closed (structural on lib.rs) ─
+  // ── §17 A6-I1: Rust runtime commands REGISTERED but scope-gated + evidence-driven (structural) ─
   {
     const lib = readFileSync(join(repo, 'src-tauri/src/lib.rs'), 'utf8');
-    const handler = lib.slice(lib.indexOf('generate_handler!['), lib.indexOf('finalize_application_shutdown') + 'finalize_application_shutdown'.length);
+    const hStart = lib.indexOf('generate_handler![');
+    const handler = lib.slice(hStart, lib.indexOf('finalize_application_shutdown', hStart) + 'finalize_application_shutdown'.length);
+    // MOBILE-04B2A6-I1: the six mutation commands are now registered (activation is scope-gated, not
+    // registration-blocked). Inertness comes from the evidence-driven gate + the in-tx fence, not from
+    // being absent from the handler.
     for (const cmd of ['mobile_upload_claim', 'mobile_upload_prepare_image', 'mobile_upload_renew', 'mobile_upload_release', 'mobile_upload_mark_quarantined', 'mobile_upload_mark_ready']) {
-      ok(!new RegExp(`^\\s*${cmd},`, 'm').test(handler), `command not registered: ${cmd}`);
+      ok(new RegExp(`^\\s*${cmd},`, 'm').test(handler), `command registered: ${cmd}`);
     }
-    // every wrapper fails closed at its first line, before opening the DB.
+    // every wrapper opens the config DB, builds the server-derived scope, then runs the evidence-driven
+    // gate BEFORE any claim/prepare/status mutation (the fenced core call).
     for (const cmd of ['mobile_upload_claim', 'mobile_upload_prepare_image', 'mobile_upload_renew', 'mobile_upload_release', 'mobile_upload_mark_quarantined', 'mobile_upload_mark_ready']) {
-      const body = lib.slice(lib.indexOf(`fn ${cmd}(`));
-      const gateAt = body.indexOf('mobile_runtime_gate()?;');
+      const body = lib.slice(lib.indexOf(`fn ${cmd}(`), lib.indexOf(`fn ${cmd}(`) + 1400);
       const dbAt = body.indexOf('open_config_db(');
-      ok(gateAt > 0 && gateAt < dbAt, `${cmd} gates before opening the DB`);
+      const scopeAt = body.indexOf('mobile_scope_expectation(install_id,');
+      const gateAt = body.indexOf('mobile_runtime_gate(&conn, &scope)?');
+      const fencedAt = body.search(/_fenced\(/);
+      ok(dbAt > 0 && scopeAt > dbAt && gateAt > scopeAt && fencedAt > gateAt, `${cmd} gates on evidence before the fenced mutation`);
+      ok(!/mobile_runtime_gate\(\)\?/.test(body), `${cmd} has no legacy arg-less gate`);
     }
-    ok(/MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE:\s*bool\s*=\s*false/.test(lib), 'rust runtime scope source blocked');
-    ok(lib.includes('"MOBILE_RUNTIME_SCOPE_SOURCE_BLOCKED"'), 'rust gate returns typed block code');
+    // the hard compile-time block is gone; the gate is evidence-driven (delegates to the SSOT fence).
+    ok(!/MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE/.test(lib), 'hard block constant removed');
+    ok(!/MOBILE_RUNTIME_SCOPE_SOURCE_BLOCKED/.test(lib), 'unconditional block error string removed');
+    const gate = lib.slice(lib.indexOf('fn mobile_runtime_gate('), lib.indexOf('fn mobile_runtime_gate(') + 500);
+    ok(/fence_runtime_scope\(/.test(gate), 'gate is evidence-driven (fresh-read exact-match fence)');
   }
 
   // ── §18 A3: binding-revision change FENCES a running worker (no processing under stale rev) ──

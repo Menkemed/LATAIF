@@ -54,16 +54,17 @@ function evidence(over: Partial<RuntimeScopeEvidence> = {}): RuntimeScopeEvidenc
   const hStart = lib.indexOf('generate_handler![');
   const handler = lib.slice(hStart, lib.indexOf('finalize_application_shutdown', hStart) + 'finalize_application_shutdown'.length);
   ok(/^\s*mobile_runtime_scope_evidence,/m.test(handler), 'read-only evidence command IS registered');
-  // A5 — the secure owner provisioning path IS now registered (options read + owner-gated configure),
-  // but the 6 mobile MUTATION commands are still NOT (checked below).
+  // A5 — the secure owner provisioning path IS registered (options read + owner-gated configure).
   ok(/^\s*mobile_runtime_scope_options,/m.test(handler), 'A5: options read IS registered');
   ok(/^\s*mobile_runtime_scope_configure,/m.test(handler), 'A5: owner-gated configure IS registered');
   ok(/fn mobile_runtime_scope_configure\(/.test(lib) && /authorize_owner\(/.test(lib.slice(lib.indexOf('fn mobile_runtime_scope_configure('), lib.indexOf('fn mobile_runtime_scope_configure(') + 900)), 'configure is owner-gated (authorize_owner)');
   // R1 §1 — the OPTIONS read is ALSO owner-gated (not public just because the data has no secret).
   const optFn = lib.slice(lib.indexOf('fn mobile_runtime_scope_options('), lib.indexOf('fn mobile_runtime_scope_options(') + 700);
   ok(/email:\s*String/.test(optFn) && /authorize_owner\(/.test(optFn), 'R1: options read is owner-gated (authorize_owner)');
+  // MOBILE-04B2A6-I1 — the 6 mobile MUTATION commands are now REGISTERED (activation is scope-gated,
+  // not registration-blocked). The evidence-driven gate + in-tx fence keep them inert until an owner binds.
   for (const m of ['mobile_upload_claim', 'mobile_upload_prepare_image', 'mobile_upload_renew', 'mobile_upload_release', 'mobile_upload_mark_quarantined', 'mobile_upload_mark_ready']) {
-    ok(!new RegExp(`^\\s*${m},`, 'm').test(handler), `A5: mutation command still unregistered: ${m}`);
+    ok(new RegExp(`^\\s*${m},`, 'm').test(handler), `A6: mutation command IS registered: ${m}`);
   }
   // A5 §3/§6 — configure derives configured_by from the verified owner, never from the request body.
   const cfgFn = lib.slice(lib.indexOf('fn mobile_runtime_scope_configure('), lib.indexOf('fn mobile_runtime_scope_configure(') + 900);

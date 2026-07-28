@@ -26,8 +26,10 @@ import type { RuntimeScopeEvidence } from './runtime-scope-evidence';
 // never outlive a later rebind. The only permitted caching is de-duplicating a SINGLE concurrent
 // read (so parallel guards in one tick share one invoke), never returning a stale revision as truth.
 // The read command derives the install id server-side; the gate requires an EXACT match to the active
-// auth/DB scope. In this slice the owner-configure command is unregistered, so the binding is always
-// unconfigured → the gate stays closed and the pipeline never processes.
+// auth/DB scope. MOBILE-04B2A6-I1: the owner options/configure and the six mutation commands are now
+// registered, so activation is scope-gated — until an owner explicitly configures a binding the evidence
+// reads `configured=false`, the gate stays closed, and the pipeline processes nothing. The worker still
+// starts only on an explicit trigger; registration alone never claims or processes an upload.
 let inFlightScopeRead: Promise<RuntimeScopeEvidence | null> | null = null;
 
 /** One FRESH read of the Rust scope evidence, de-duplicating only a concurrent in-flight read. Never

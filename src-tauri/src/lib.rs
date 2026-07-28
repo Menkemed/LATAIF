@@ -1271,15 +1271,66 @@ async fn finalize_application_shutdown(
     Ok(())
 }
 
-// MOBILE-04B2A2-R5 §1 — the runtime gate must be closed and return the exact typed block, so a
-// direct wrapper call (or an accidental re-registration) writes nothing.
+// MOBILE-04B2A6-I1 — the runtime gate is now EVIDENCE-DRIVEN. It reads the fresh active binding for the
+// install and opens ONLY on an exact (tenant, branch, binding_revision) match; missing / unconfigured /
+// stale / mismatched all fail closed. `fence_runtime_scope` reads only `mobile_runtime_scope`, so a
+// minimal table with directly-inserted rows is a faithful, migration-free harness for the gate.
 #[cfg(test)]
 mod mobile_runtime_gate_tests {
+    use super::sync::mobile_runtime_scope::RuntimeScopeExpectation;
+    use rusqlite::Connection;
+
+    fn db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE mobile_runtime_scope (
+                server_instance_id TEXT NOT NULL, binding_revision INTEGER NOT NULL,
+                tenant_id TEXT NOT NULL, branch_id TEXT NOT NULL, configured_by TEXT NOT NULL,
+                configured_at TEXT NOT NULL, status TEXT NOT NULL);",
+        )
+        .unwrap();
+        c
+    }
+    fn bind(c: &Connection, rev: i64, tenant: &str, branch: &str, status: &str) {
+        c.execute(
+            "INSERT INTO mobile_runtime_scope
+               (server_instance_id, binding_revision, tenant_id, branch_id, configured_by, configured_at, status)
+             VALUES ('inst', ?1, ?2, ?3, 'owner', 't', ?4)",
+            rusqlite::params![rev, tenant, branch, status],
+        )
+        .unwrap();
+    }
+    fn exp(rev: i64, tenant: &str, branch: &str) -> RuntimeScopeExpectation {
+        RuntimeScopeExpectation { server_instance_id: "inst".into(), binding_revision: rev, tenant_id: tenant.into(), branch_id: branch.into() }
+    }
+
+    // No binding at all → blocked (fail closed) with the conflict code, never a silent open.
     #[test]
-    fn runtime_scope_source_is_blocked() {
-        assert!(!super::MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE, "runtime scope source must stay unavailable");
-        let e = super::mobile_runtime_gate().unwrap_err();
-        assert_eq!(e, "MOBILE_RUNTIME_SCOPE_SOURCE_BLOCKED");
+    fn gate_blocks_without_binding() {
+        let c = db();
+        let e = super::mobile_runtime_gate(&c, &exp(1, "tenant-1", "branch-main")).unwrap_err();
+        assert_eq!(e, super::sync::mobile_runtime_scope::ERR_RUNTIME_SCOPE_REVISION_CONFLICT);
+    }
+
+    // A valid active binding + the EXACT scope opens; any tenant/branch/revision drift blocks.
+    #[test]
+    fn gate_opens_on_exact_binding_blocks_mismatch_and_stale() {
+        let c = db();
+        bind(&c, 1, "tenant-1", "branch-main", "active");
+        assert!(super::mobile_runtime_gate(&c, &exp(1, "tenant-1", "branch-main")).is_ok());
+        assert!(super::mobile_runtime_gate(&c, &exp(2, "tenant-1", "branch-main")).is_err(), "stale revision blocked");
+        assert!(super::mobile_runtime_gate(&c, &exp(1, "tenant-x", "branch-main")).is_err(), "wrong tenant blocked");
+        assert!(super::mobile_runtime_gate(&c, &exp(1, "tenant-1", "branch-x")).is_err(), "wrong branch blocked");
+    }
+
+    // After a rebind (old row superseded, new active revision) the OLD revision no longer opens.
+    #[test]
+    fn gate_follows_rebind_and_blocks_the_superseded_revision() {
+        let c = db();
+        bind(&c, 1, "tenant-1", "branch-main", "superseded");
+        bind(&c, 2, "tenant-acme", "branch-acme", "active");
+        assert!(super::mobile_runtime_gate(&c, &exp(1, "tenant-1", "branch-main")).is_err(), "old revision blocked after rebind");
+        assert!(super::mobile_runtime_gate(&c, &exp(2, "tenant-acme", "branch-acme")).is_ok(), "only the new binding opens");
     }
 }
 
@@ -1704,24 +1755,28 @@ const MOBILE_TRUSTED_TENANT: &str = "tenant-1";
 #[allow(dead_code)]
 const MOBILE_TRUSTED_BRANCH: &str = "branch-main";
 
-// MOBILE-04B2A2-R5 §1 — RUNTIME DEACTIVATION. There is NO canonical runtime source of the
-// (tenant, branch) scope: server + desktop derive it from the fixed compile-time constants above,
-// and a user-created branch's real id can diverge. So these internal mobile-upload commands are
-// UNREGISTERED from generate_handler! below AND each wrapper additionally fails closed HERE — before
-// opening the DB, touching staging, claiming, preparing, or mutating any job status — so that a
-// later accidental re-registration cannot silently activate the pipeline. The command wrappers and
-// the whole Rust inbox/claim/prepare/receipt core remain in the codebase and fully tested; they are
-// simply not reachable at runtime until a canonical runtime scope source exists.
-#[allow(dead_code)]
-const MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE: bool = false;
-#[allow(dead_code)]
-fn mobile_runtime_gate() -> Result<(), String> {
-    if MOBILE_RUNTIME_SCOPE_SOURCE_AVAILABLE {
-        Ok(())
-    } else {
-        // Fail closed BEFORE any DB / file / claim / prepare / status mutation.
-        Err("MOBILE_RUNTIME_SCOPE_SOURCE_BLOCKED".to_string())
-    }
+// MOBILE-04B2A6-I1 — RUNTIME ACTIVATION (scope-gated). The canonical runtime source of the
+// (tenant, branch) scope now exists (v0014 `mobile_runtime_scope`, owner-configured — MOBILE-04B2A3/A5),
+// so the gate is evidence-driven instead of a hard compile-time block. It reads the FRESH active binding
+// for THIS install (the SSOT, install-derived `server_instance_id`) and opens ONLY when there is an
+// active binding whose (tenant, branch, binding_revision) EXACTLY matches the caller's expectation.
+// Missing / unconfigured / stale / mismatched → fail closed with `ERR_RUNTIME_SCOPE_REVISION_CONFLICT`,
+// BEFORE any claim / prepare / status mutation. This is a fail-fast PRE-check; the authoritative fence
+// still runs INSIDE each mutation's BEGIN IMMEDIATE tx (unchanged `*_fenced` cores), so a rebind that
+// lands between this read and the write is still caught there. In production the binding is unconfigured
+// until an owner explicitly configures it, so every command stays blocked and nothing is processed.
+fn mobile_runtime_gate(
+    conn: &rusqlite::Connection,
+    scope: &sync::mobile_runtime_scope::RuntimeScopeExpectation,
+) -> Result<(), String> {
+    sync::mobile_runtime_scope::fence_runtime_scope(
+        conn,
+        &scope.server_instance_id,
+        scope.binding_revision,
+        &scope.tenant_id,
+        &scope.branch_id,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // A per-JOB trusted identity: the fixed desktop tenant/branch + the ORIGIN user the job carries
@@ -1764,11 +1819,13 @@ fn mobile_upload_claim(
     expected_tenant_id: String,
     expected_branch_id: String,
 ) -> Result<Option<sync::mobile_upload::ClaimGrant>, String> {
-    mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
     // MOBILE-04B2A4 §1 — the scope fence is now coupled INSIDE the mutation's IMMEDIATE tx (no
     // separate pre-SELECT), so a concurrent owner rebind cannot slip between check and mutation.
     let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    // MOBILE-04B2A6-I1 — evidence-driven gate: fail closed unless an active binding EXACTLY matches the
+    // caller's scope+revision. Runs before any claim/prepare/status mutation; the in-tx fence remains.
+    mobile_runtime_gate(&conn, &scope)?;
     let now = chrono::Utc::now();
     let token = uuid::Uuid::new_v4().to_string();
     // Scope by the fixed desktop tenant/branch across ALL origin users; lease as the worker.
@@ -1797,9 +1854,11 @@ fn mobile_upload_prepare_image(
     expected_tenant_id: String,
     expected_branch_id: String,
 ) -> Result<media::ingest::PrepareResult, String> {
-    mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
     let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    // MOBILE-04B2A6-I1 — evidence-driven gate: fail closed unless an active binding EXACTLY matches the
+    // caller's scope+revision. Runs before any claim/prepare/status mutation; the in-tx fence remains.
+    mobile_runtime_gate(&conn, &scope)?;
     let trusted = mobile_job_trusted(&origin_authenticated_user_id);
     let now = chrono::Utc::now().to_rfc3339();
     // MOBILE-04B2A4 §3 — PHASE A: fence + claim/lease/job/provenance read under ONE IMMEDIATE tx.
@@ -1847,9 +1906,11 @@ fn mobile_upload_renew(
     expected_tenant_id: String,
     expected_branch_id: String,
 ) -> Result<bool, String> {
-    mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
     let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    // MOBILE-04B2A6-I1 — evidence-driven gate: fail closed unless an active binding EXACTLY matches the
+    // caller's scope+revision. Runs before any claim/prepare/status mutation; the in-tx fence remains.
+    mobile_runtime_gate(&conn, &scope)?;
     let now = chrono::Utc::now();
     sync::mobile_upload::renew_claim_fenced(
         &mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &claimant_instance_id,
@@ -1869,9 +1930,11 @@ fn mobile_upload_release(
     expected_tenant_id: String,
     expected_branch_id: String,
 ) -> Result<bool, String> {
-    mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
     let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    // MOBILE-04B2A6-I1 — evidence-driven gate: fail closed unless an active binding EXACTLY matches the
+    // caller's scope+revision. Runs before any claim/prepare/status mutation; the in-tx fence remains.
+    mobile_runtime_gate(&conn, &scope)?;
     sync::mobile_upload::mark_retryable_fenced(&mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.code().to_string())
 }
@@ -1888,9 +1951,11 @@ fn mobile_upload_mark_quarantined(
     expected_tenant_id: String,
     expected_branch_id: String,
 ) -> Result<bool, String> {
-    mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
     let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    // MOBILE-04B2A6-I1 — evidence-driven gate: fail closed unless an active binding EXACTLY matches the
+    // caller's scope+revision. Runs before any claim/prepare/status mutation; the in-tx fence remains.
+    mobile_runtime_gate(&conn, &scope)?;
     sync::mobile_upload::mark_quarantined_claimed_fenced(&mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &code, &chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.code().to_string())
 }
@@ -1909,9 +1974,11 @@ fn mobile_upload_mark_ready(
     expected_tenant_id: String,
     expected_branch_id: String,
 ) -> Result<String, String> {
-    mobile_runtime_gate()?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
     let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    // MOBILE-04B2A6-I1 — evidence-driven gate: fail closed unless an active binding EXACTLY matches the
+    // caller's scope+revision. Runs before any claim/prepare/status mutation; the in-tx fence remains.
+    mobile_runtime_gate(&conn, &scope)?;
     let outcome = sync::mobile_upload::mark_ready_fenced(
         &mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &entity_id, &payload_hash, &product_id,
         &chrono::Utc::now().to_rfc3339(),
@@ -2078,11 +2145,19 @@ pub fn run() {
             media_abort_stock_image,
             media_read_verified,
             media_recover_ingests,
-            // MOBILE-04B2A2-R5 §1 — the internal mobile-upload claim/handoff commands
-            // (mobile_upload_claim / _prepare_image / _renew / _release / _mark_quarantined /
-            // _mark_ready) are DELIBERATELY NOT registered here: runtime activation is blocked while
-            // there is no canonical runtime scope source. Their wrappers remain in the file and also
-            // fail closed (mobile_runtime_gate) so an accidental re-registration cannot activate them.
+            // MOBILE-04B2A6-I1 — the internal mobile-upload claim/handoff commands are now REGISTERED,
+            // but activation is scope-gated: every wrapper's first act (after opening the config DB and
+            // building the caller's expected scope) is the evidence-driven `mobile_runtime_gate`, and
+            // the authoritative revision fence still runs INSIDE each mutation's BEGIN IMMEDIATE tx. In
+            // production the binding is unconfigured until an owner configures it, so all six fail closed
+            // and nothing is claimed, prepared, or mutated; the JS worker still starts only on an
+            // explicit trigger. Registration alone does not process anything.
+            mobile_upload_claim,
+            mobile_upload_prepare_image,
+            mobile_upload_renew,
+            mobile_upload_release,
+            mobile_upload_mark_quarantined,
+            mobile_upload_mark_ready,
             //
             // MOBILE-04B2A3 — the runtime-scope EVIDENCE read (read-only, no secret).
             mobile_runtime_scope_evidence,
