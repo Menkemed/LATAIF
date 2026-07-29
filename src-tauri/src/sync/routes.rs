@@ -23,6 +23,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/sync/pull", get(sync_pull))
         .route("/me", get(get_me))
         .route("/products/by-sku/{sku}", get(product_by_sku))
+        // MOBILE-04B2A8-I1 — authenticated mobile upload ingress. Separate route; `/sync/push` above is
+        // untouched. Same JWT auth layer + the same 50 MB body limit (build_api_router) as every /api route.
+        .route("/mobile/upload", post(mobile_upload_ingress))
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
     Router::new()
@@ -626,6 +629,101 @@ fn record_pull_activity(
     tx.commit().map_err(|_| ())
 }
 
+/// MOBILE-04B2A8-I1 — authenticated mobile upload ingress. The ONLY wire path that turns a mobile
+/// submission into a claimable job: it hands the request to the exactly-once SSOT `accept_upload`
+/// (idempotency key = tenant+branch+ORIGIN-user+uploadEventId; same event+hash → replay, same event +
+/// different hash → conflict; files staged BEFORE the DB commit, so a crash never leaves an accepted job
+/// without a verifiable staged file). Trust boundary: tenant/branch/user come EXCLUSIVELY from the
+/// verified JWT `Claims` — never from the body; any scope keys inside `metadata` are inert. No filename,
+/// path or MIME is trusted (bytes only; content-addressed staging; decode-integrity in validate_batch).
+async fn mobile_upload_ingress(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    // Fail-closed write gate: only a writable primary may accept uploads (a client / read-only server
+    // answers a uniform 403 and never stages a byte or writes an inbox row).
+    if !state.primary_state.may_write_sync() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // Fail-closed role check: a verified JWT always carries a role; an empty one is refused.
+    if claims.role.trim().is_empty() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // JSON content-type contract (same as /sync/push): a non-JSON body is 415 before it is parsed.
+    if !is_json_content_type(&headers) {
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let raw = std::str::from_utf8(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let req: MobileUploadIngressRequest =
+        serde_json::from_str(raw).map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Metadata must be a JSON object; scope keys in it are ignored (the trusted context wins).
+    if !req.metadata.is_object() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // Cheap pre-checks before decoding bytes (accept_upload re-validates authoritatively): at least one
+    // image, never more than the hard cap.
+    if req.images.is_empty() || req.images.len() > super::mobile_upload::MAX_UPLOAD_IMAGES {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    // Decode base64 image bytes (strict standard alphabet). A bad encoding is a 400.
+    let mut raw_images = Vec::with_capacity(req.images.len());
+    for im in &req.images {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(im.data_base64.trim())
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        raw_images.push(super::mobile_upload::RawUploadImage {
+            declared_mime: im.mime.clone(),
+            bytes,
+        });
+    }
+    // Trusted scope EXCLUSIVELY from the JWT — never from the request body.
+    let trusted = super::mobile_upload::TrustedUploadContext {
+        authenticated_user_id: claims.sub.clone(),
+        tenant_id: claims.tenant_id.clone(),
+        branch_id: claims.branch_id.clone(),
+    };
+    let submission = super::mobile_upload::UploadSubmission {
+        protocol_version: req.protocol_version,
+        upload_event_id: req.upload_event_id.clone(),
+        entity_id: req.entity_id.clone(),
+        mode: req.mode.clone(),
+        metadata_json: serde_json::to_string(&req.metadata).unwrap_or_default(),
+        images: raw_images,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut db = state.db.lock().await;
+    use super::mobile_upload::{accept_upload, UploadError, UploadOutcome};
+    match accept_upload(&mut db, &state.mobile_staging_root, &trusted, &submission, &now) {
+        Ok(UploadOutcome::Accepted { upload_event_id, payload_hash }) => Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "state": "accepted", "uploadEventId": upload_event_id, "payloadHash": payload_hash })),
+        )),
+        Ok(UploadOutcome::Replay { upload_event_id, state: job_state, product_id, payload_hash }) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({ "state": "replay", "jobState": job_state, "uploadEventId": upload_event_id, "productId": product_id, "payloadHash": payload_hash })),
+        )),
+        Ok(UploadOutcome::Conflict { upload_event_id }) => Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "state": "conflict", "uploadEventId": upload_event_id })),
+        )),
+        Ok(UploadOutcome::TargetConflict { upload_event_id }) => Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "state": "target_conflict", "uploadEventId": upload_event_id })),
+        )),
+        // A busy DB under contention is retryable (503) — NOT a business failure.
+        Err(UploadError::Retryable) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        Err(UploadError::Db(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        // A validation reject (bad protocol/mode/no-images/too-many/decode) → 422 with the stable code.
+        Err(e @ UploadError::Reject { .. }) => Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "state": "rejected", "code": e.code() })),
+        )),
+    }
+}
+
 async fn sync_pull(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -981,7 +1079,10 @@ mod legacy_push_tests {
             .collect();
         assert_eq!(
             routes,
-            vec!["/sync/push", "/sync/pull", "/me", "/products/by-sku/{sku}", "/auth/login", "/health"],
+            // MOBILE-04B2A8-I1 — `/mobile/upload` added: same protected group as /sync/push (JWT auth
+            // route_layer + the 50 MB body limit), plus a fail-closed primary-write gate and role check
+            // in the handler. Additive; the mode matrix / gate for every other route is unchanged.
+            vec!["/sync/push", "/sync/pull", "/me", "/products/by-sku/{sku}", "/mobile/upload", "/auth/login", "/health"],
             "Routenmenge geaendert — Modusmatrix und Gate neu bewerten"
         );
 
@@ -2082,6 +2183,7 @@ mod legacy_push_tests {
                 jwt_secret: SECRET.to_string(),
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 primary_state: primary,
+                mobile_staging_root: std::env::temp_dir().join("lataif-routes-test-staging"),
             })
         }
         // Replicate the PRODUCTION composition: build_api_router nested under /api (as SyncServer::start
@@ -2143,6 +2245,7 @@ mod legacy_push_tests {
                 jwt_secret: SECRET.to_string(),
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 primary_state: primary,
+                mobile_staging_root: std::env::temp_dir().join("lataif-routes-test-staging"),
             })
         }
         fn armed_state() -> Arc<AppState> {
@@ -2635,3 +2738,7 @@ fn product_from_frontend_db(db_path: &std::path::Path, sku: &str) -> Option<serd
 
     Some(product)
 }
+
+#[cfg(test)]
+#[path = "mobile_ingress_route_tests.rs"]
+mod mobile_ingress_route_tests;

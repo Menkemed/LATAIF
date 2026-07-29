@@ -110,6 +110,11 @@ pub struct AppState {
     /// changes while the server runs (a role change goes through an explicit command,
     /// which restarts the server).
     pub primary_state: primary::State,
+    /// MOBILE-04B2A8-I1 — the controlled staging root the authenticated mobile upload ingress
+    /// (`/api/mobile/upload` → `accept_upload`) publishes image bytes into. MUST be the SAME directory
+    /// the desktop worker's claim/prepare reads from (`AppHandleState.mobile_staging_root`), so a job
+    /// staged over HTTP is later found by prepare. Derived identically: `<app_data_dir>/mobile-upload-staging`.
+    pub mobile_staging_root: std::path::PathBuf,
 }
 
 pub struct SyncServer {
@@ -217,11 +222,23 @@ impl SyncServer {
             .map(|p| p.join("lataif.db"))
             .unwrap_or_else(|| std::path::PathBuf::from("lataif.db"));
 
+        // MOBILE-04B2A8-I1 — the SAME staging root the desktop worker uses (AppHandleState derives it as
+        // `<app_data_dir>/mobile-upload-staging`; db_path lives directly in app_data_dir, so its parent is
+        // that dir). Created up front so the first upload can publish into it. If it can't be derived the
+        // ingress simply has no staging root and every accept_upload fails closed (never a wrong dir).
+        let mobile_staging_root = self
+            .db_path
+            .parent()
+            .map(|p| p.join("mobile-upload-staging"))
+            .unwrap_or_else(|| std::path::PathBuf::from("mobile-upload-staging"));
+        let _ = std::fs::create_dir_all(&mobile_staging_root);
+
         let app_state = Arc::new(AppState {
             db: Mutex::new(conn),
             jwt_secret,
             frontend_db_path,
             primary_state: state,
+            mobile_staging_root,
         });
         let state = app_state;
 

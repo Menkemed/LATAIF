@@ -269,16 +269,19 @@ fn crash_matrix_and_reopen_exactly_once() {
 }
 
 #[test]
-fn no_products_writepath_no_route_registered() {
-    // structural: the core never writes products/applyUpsert, and no route wires it. Scan CODE
-    // lines only (strip comments — the module doc legitimately names what it must NOT do).
+fn core_has_no_products_writepath_and_ingress_is_authenticated() {
+    // MOBILE-04B2A8-I1 — the core still NEVER writes products / applyUpsert directly (the desktop drain
+    // does the durable product create); that safety invariant is permanent. What changed: `accept_upload`
+    // is now DELIBERATELY exposed behind the authenticated `/api/mobile/upload` route, so the old
+    // "not routed" assertion is intentionally lifted. We instead assert the route IS present, sits behind
+    // the JWT auth route_layer, and derives its trusted scope from the JWT — never from the request body.
     let src: String = include_str!("mobile_upload.rs").lines()
         .filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
-    assert!(!src.contains("INSERT INTO products") && !src.to_lowercase().contains("applyupsert"), "no products/applyUpsert write path");
+    assert!(!src.contains("INSERT INTO products") && !src.to_lowercase().contains("applyupsert"), "core has no products/applyUpsert write path");
     let routes = include_str!("routes.rs");
-    assert!(!routes.contains("mobile_upload") && !routes.contains("/mobile/v1"), "no V2 upload route registered");
-    let modrs = include_str!("mod.rs");
-    assert!(!modrs.contains("mobile/v1") && !modrs.contains("accept_upload"), "core is not routed from mod.rs");
+    assert!(routes.contains(".route(\"/mobile/upload\", post(mobile_upload_ingress))"), "the authenticated ingress route IS registered");
+    assert!(!routes.contains("/mobile/v1"), "no legacy V1 upload route");
+    assert!(routes.contains("authenticated_user_id: claims.sub"), "ingress trusted scope comes from the JWT Claims, never the request body");
 }
 
 // ── R1 §1 — concurrent exactly-once acceptance ──────────────────────────────
