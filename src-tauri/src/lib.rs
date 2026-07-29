@@ -12,6 +12,12 @@ mod sync;
 pub mod e2e_support {
     pub use crate::sync::credentials::{provision_owner, PROVISION_CONFIRMATION};
     pub use crate::sync::db::init_database;
+    // MOBILE-04B2A8-I3 — test-only Primary provisioning for the live ingress→worker smoke. These are the
+    // REAL production primitives (owner authorization + the owner-authorized primary transition + the
+    // install-id loader) exposed for the e2e seeder; the adoption CONTRACT is unchanged (an Unconfigured
+    // install may still only become Primary via a verified owner). Never compiled into a release build.
+    pub use crate::sync::install_id::load_or_create as load_install_id;
+    pub use crate::sync::primary::{authorize_owner, configure_as_owner, Mode};
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
