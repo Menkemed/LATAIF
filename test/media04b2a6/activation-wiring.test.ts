@@ -72,7 +72,13 @@ const handler = lib.slice(hStart, lib.indexOf('finalize_application_shutdown', h
 {
   // the drain is only ever entered through the explicit trigger helpers — never on import/module load.
   ok(/export function triggerMobileUploadDrainPostAuth/.test(wiring), 'the worker is entered only via an explicit trigger function');
-  ok(!/setInterval|setTimeout\(|addEventListener\(/.test(wiring), 'no timer/event auto-starts the worker at wiring load');
+  // MOBILE-04B2A13: the wiring now also arms a BOUNDED drain poller, but its timer (setInterval) lives
+  // ONLY inside the gated `buildDrainPollerDeps` factory and is armed EXCLUSIVELY via the explicit
+  // exported start — never at module load. So the invariant becomes: nothing before that factory arms a
+  // timer/event, and the poller is reachable only through the explicit start/stop exports.
+  const beforePoller = wiring.split('function buildDrainPollerDeps')[0];
+  ok(!/setInterval|setTimeout\(|addEventListener\(/.test(beforePoller), 'no timer/event auto-starts the worker at wiring load (poller timer confined to the gated factory)');
+  ok(/export function armMobileDrainPoller/.test(wiring) && /export function stopMobileDrainPoller/.test(wiring), 'the poller is armed/disarmed only via explicit exported arm/stop');
   // the drain still reads FRESH evidence and compares the current scope — no hardcoded activation.
   ok(/readScopeEvidence/.test(wiring) && /currentScope/.test(wiring), 'drain deps still gate on fresh scope evidence + the active scope');
   // no /sync/push (mobile-v1) route touched from this activation surface.

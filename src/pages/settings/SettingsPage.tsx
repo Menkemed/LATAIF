@@ -2194,7 +2194,14 @@ function SyncTab() {
       </div>
 
       {/* MOBILE-04B2A5 — dedicated secure owner dialog for the mobile-upload runtime scope. */}
-      <RuntimeScopeDialog open={showScopeDialog} onClose={() => setShowScopeDialog(false)} />
+      <RuntimeScopeDialog
+        open={showScopeDialog}
+        onClose={() => setShowScopeDialog(false)}
+        // MOBILE-04B2A13 — a successful owner configure/rebind arms the bounded drain poller for the
+        // newly bound scope (or replaces the old timer on a rebind). Without this a later configuration
+        // would not start the poller until the next login.
+        onConfigured={() => { void import('@/core/media/mobile-upload-wiring').then((w) => w.armMobileDrainPoller()).catch(() => {}); }}
+      />
     </div>
   );
 }

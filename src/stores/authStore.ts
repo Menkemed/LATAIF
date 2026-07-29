@@ -17,7 +17,14 @@ function triggerMediaRecoveryPostAuth(): void {
     // without an authenticated scope or without Tauri (web preview), and never blocks auth.
     .finally(() => {
       void Promise.all([import('@/core/media/mobile-upload-wiring'), import('@/core/db/database')])
-        .then(([w, db]) => w.triggerMobileUploadDrainPostAuth(db.currentDbEpoch()))
+        .then(([w, db]) => {
+          w.triggerMobileUploadDrainPostAuth(db.currentDbEpoch());
+          // MOBILE-04B2A13 — also ARM the bounded drain poller so a job that ARRIVES AFTER this login is
+          // processed without a fresh login. Arming is scope-gated: it registers a timer ONLY when a
+          // matching binding is already configured (no binding → no timer). A later owner configure arms
+          // it via SettingsPage. The immediate trigger above is preserved.
+          w.armMobileDrainPoller();
+        })
         .catch(() => { /* never blocks auth */ });
     });
 }
@@ -75,6 +82,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   logout: () => {
     authService.logout();
     set({ session: null, branches: [] });
+    // MOBILE-04B2A13 — stop the bounded drain poller on logout (no polling/claim without a session).
+    void import('@/core/media/mobile-upload-wiring')
+      .then((w) => w.stopMobileDrainPoller())
+      .catch(() => { /* nothing to stop / no Tauri */ });
   },
 
   switchBranch: (branchId) => {

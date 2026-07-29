@@ -9,8 +9,10 @@
 // job's ORIGIN user comes from the Rust ClaimGrant, never from JS. Images are prepared in Rust — no
 // bytes/data-URLs cross into JS.
 
-import { getDatabase } from '@/core/db/database';
+import { getDatabase, currentDbEpoch } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
+import { armDrainPoller, stopDrainPoller, type DrainPollerDeps } from './mobile-drain-poller';
+import { runtimeScopeAvailable, runtimeBindingRevisionOf } from './runtime-scope-evidence';
 import type { Product } from '@/core/models/types';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { ProductMediaResolver } from '@/core/media/product-media-resolver';
@@ -191,4 +193,43 @@ export function triggerMobileUploadDrainPostAuth(epoch: number): void {
   // every guard, so it can never act on a stale revision. In production the binding is unconfigured →
   // the gate blocks before any claim; the seed constants are never a fallback. Never throws.
   triggerMobileUploadDrainSafe(buildMobileUploadDrainDeps(), epoch);
+}
+
+// MOBILE-04B2A13 — bounded interval for the drain poller. Long enough to be a cheap background
+// heartbeat, short enough that a later-arriving job becomes visible within a few seconds.
+const DRAIN_POLL_INTERVAL_MS = 15_000;
+
+/** Real-dependency poller lifecycle. The timer is BOUND to the authorized scope key and delegates each
+ *  tick to the EXISTING trigger (fresh scope read + revision fence + its own single-flight); the poller
+ *  adds only the timing + arming contract. */
+function buildDrainPollerDeps(): DrainPollerDeps {
+  return {
+    intervalMs: DRAIN_POLL_INTERVAL_MS,
+    setIntervalFn: (fn, ms) => setInterval(fn, ms),
+    clearIntervalFn: (h) => clearInterval(h as ReturnType<typeof setInterval>),
+    // FRESH authorized scope key: non-null ONLY when authenticated AND evidence.configured AND the
+    // binding matches the active scope, keyed on the binding revision so any rebind changes the key.
+    computeScopeKey: async () => {
+      const scope = currentScope();               // null → not authenticated
+      if (!scope) return null;
+      const ev = await readScopeEvidence();        // FRESH; null (no Tauri / read error) → not armable
+      if (!runtimeScopeAvailable(ev, scope)) return null; // not configured / mismatch → not armable
+      return `${scope.tenantId}:${scope.branchId}:${runtimeBindingRevisionOf(ev)}`;
+    },
+    // Delegate to the existing gated trigger at the CURRENT epoch (a DB reload → new epoch → new worker).
+    triggerDrain: () => triggerMobileUploadDrainPostAuth(currentDbEpoch()),
+  };
+}
+
+/** Arm the bounded drain poller for the current authorized scope (a no-op — and NO timer — until an
+ *  owner has configured a matching binding). Called from the post-auth path (arms if already configured)
+ *  AND after a successful owner configure/rebind (arms/replaces for the new scope). Idempotent: a second
+ *  arm for the same scope never stacks a duplicate timer. */
+export function armMobileDrainPoller(): void {
+  void armDrainPoller(buildDrainPollerDeps());
+}
+
+/** Stop the drain poller (logout / shutdown). Idempotent. */
+export function stopMobileDrainPoller(): void {
+  stopDrainPoller({ clearIntervalFn: (h) => clearInterval(h as ReturnType<typeof setInterval>) });
 }
