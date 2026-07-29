@@ -13,6 +13,9 @@ import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/Dupl
 import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
+import { useAuthStore } from '@/stores/authStore';
+import { query } from '@/core/db/helpers';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { decideProductCreateUi } from '@/core/media/product-media-create';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { getStockAggregates, type LotAggregate } from '@/core/lots/lot-queries';
@@ -233,6 +236,17 @@ export function WatchList() {
     filterStatus, setFilterStatus, getStockValue, nextAvailableSku,
     isSkuTaken, findPossibleDuplicates, getProductLinks, deleteProducts,
   } = useProductStore();
+  // MOBILE-04B2A10 — authorised media scope for the collection thumbnails,
+  // derived ONCE (not per card). Same derivation as ProductDetail: branchId from
+  // the session, tenantId = branches.tenant_id (DB-authoritative). Missing either
+  // → the thumb falls back to the legacy column / placeholder, never a default.
+  const sessionBranchId = useAuthStore(s => s.session?.branchId);
+  const mediaTenantId = useMemo(() => {
+    if (!sessionBranchId) return undefined;
+    const rows = query('SELECT tenant_id FROM branches WHERE id = ?', [sessionBranchId]);
+    const t = rows.length > 0 ? (rows[0].tenant_id as string | null) : null;
+    return t || undefined;
+  }, [sessionBranchId]);
   const [showNew, setShowNew] = useState(false);
   // MEDIA-04A-3B2B — create-with-media flow state.
   const [createBusy, setCreateBusy] = useState(false);
@@ -660,13 +674,15 @@ export function WatchList() {
               >
                 <div className="flex items-center justify-center relative"
                   style={{ height: 180, background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', overflow: 'hidden' }}>
-                  {p.images.length > 0 ? (
-                    // v0.7.17 — `contain` statt `cover`: User-Foto bleibt vollstaendig sichtbar
-                    // (vorher schnitt `cover` Raender ab um die Karte zu fuellen).
-                    <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                  ) : (
-                    <Package size={36} strokeWidth={1} style={{ color: '#6B7280' }} />
-                  )}
+                  {/* MOBILE-04B2A10 — same resolver as ProductDetail; legacy `contain`
+                      look preserved (User-Foto vollstaendig sichtbar), media-pipeline
+                      products now render their gallery primary here too. */}
+                  <CollectionProductThumb
+                    product={p}
+                    tenantId={mediaTenantId}
+                    branchId={sessionBranchId}
+                    iconSize={36}
+                  />
                   {/* v0.7.20 — Select-Modus Overlays: Checkbox (saubere) oder Link-Badge (verknuepft). */}
                   {printMode && (
                     <span className="absolute flex items-center justify-center" style={{
@@ -1210,9 +1226,14 @@ export function WatchList() {
                 }}>
                   <div style={{ width: 36, height: 36, borderRadius: 6, overflow: 'hidden', background: '#FFFFFF', border: '1px solid #E5E9EE', flexShrink: 0 }}
                     className="flex items-center justify-center">
-                    {p.images.length > 0
-                      ? <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                      : <Package size={16} strokeWidth={1.2} style={{ color: '#9CA3AF' }} />}
+                    <CollectionProductThumb
+                      product={p}
+                      tenantId={mediaTenantId}
+                      branchId={sessionBranchId}
+                      iconSize={16}
+                      iconColor="#9CA3AF"
+                      iconStrokeWidth={1.2}
+                    />
                   </div>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
