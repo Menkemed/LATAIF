@@ -7,7 +7,9 @@
 //   • Purchase — Photo        → legt nur ein Foto in die purchase_inbox.
 //                               Die echte Purchase macht der Owner am Desktop.
 
-pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
+// MOBILE-04B2A9-I1 — the durable collection-upload queue module is included verbatim into the page,
+// right after <script>, so it defines `window.MobileUploadQueue` before the page IIFE uses it.
+pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -163,6 +165,10 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
   </div>
 
   <button id="cSaveBtn">Save Product</button>
+  <div id="cPending" class="hidden" style="margin-top:12px;padding:10px;border:1px solid #2A2A30;border-radius:8px;background:#111;">
+    <div id="cPendingText" style="font-size:13px;color:#BDBDBD;margin-bottom:8px;"></div>
+    <button id="cRetryPending" class="hidden" style="width:100%;">Retry pending uploads</button>
+  </div>
 </div>
 
 <!-- ─────────── Repair — New Intake ─────────── -->
@@ -276,6 +282,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
 </div>
 
 <script>
+"##, include_str!("mobile_upload_queue.js"), r##"
 (function () {
   const TOKEN_KEY = 'lataif_mobile_token';
   const BRANCH_KEY = 'lataif_mobile_branch';
@@ -300,9 +307,60 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     });
   }
 
+  // ── MOBILE-04B2A9 — durable collection upload queue (IndexedDB; image bytes NEVER in localStorage) ──
+  const UP_DB = 'lataif_mobile_uploads', UP_STORE = 'collectionUploads';
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const r = indexedDB.open(UP_DB, 1);
+      r.onupgradeneeded = () => { const db = r.result; if (!db.objectStoreNames.contains(UP_STORE)) db.createObjectStore(UP_STORE, { keyPath: 'uploadEventId' }); };
+      r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
+    });
+  }
+  const idbReq = (req) => new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
+  const idbStore = {
+    async get(id) { const db = await idbOpen(); return idbReq(db.transaction(UP_STORE, 'readonly').objectStore(UP_STORE).get(id)); },
+    async put(e) { const db = await idbOpen(); return idbReq(db.transaction(UP_STORE, 'readwrite').objectStore(UP_STORE).put(e)); },
+    async delete(id) { const db = await idbOpen(); return idbReq(db.transaction(UP_STORE, 'readwrite').objectStore(UP_STORE).delete(id)); },
+    async getAll() { const db = await idbOpen(); return idbReq(db.transaction(UP_STORE, 'readonly').objectStore(UP_STORE).getAll()); },
+  };
+  const uploadQueue = MobileUploadQueue.createQueue({
+    store: idbStore, fetchFn: (u, o) => fetch(u, o), genId: uuid, now: () => new Date().toISOString(),
+  });
+  // The queue is drained ONLY after login + an explicit user trigger (a Save click or the "Retry pending"
+  // button) — never automatically on load.
+  async function updatePending() {
+    try {
+      const all = await idbStore.getAll();
+      const active = all.filter((e) => e.state !== 'conflict' && e.state !== 'rejected');
+      const stuck = all.filter((e) => e.state === 'conflict' || e.state === 'rejected');
+      const el = $('cPending'); if (!el) return;
+      if (active.length + stuck.length === 0) { el.classList.add('hidden'); return; }
+      el.classList.remove('hidden');
+      let msg = '';
+      if (active.length) msg += active.length + ' upload(s) pending. ';
+      if (stuck.length) msg += stuck.length + ' need attention. ';
+      setText('cPendingText', msg.trim());
+      $('cRetryPending').classList.toggle('hidden', active.length === 0);
+    } catch (_) { /* IndexedDB unavailable → the queue simply does not surface, never throws */ }
+  }
+  async function drainPending() {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) { init(); return; }
+    $('cRetryPending').disabled = true;
+    try { await uploadQueue.drainAll(token); } catch (_) {}
+    $('cRetryPending').disabled = false;
+    await updatePending();
+  }
+
   function init() {
-    if (localStorage.getItem(TOKEN_KEY)) screen('modePicker');
+    if (localStorage.getItem(TOKEN_KEY)) { screen('modePicker'); onSignedIn(); }
     else screen('login');
+  }
+  // After a (re)login: recover a crash-interrupted `sending` to retryable and surface any pending uploads.
+  // Does NOT auto-drain — the user triggers a resend.
+  async function onSignedIn() {
+    try { await uploadQueue.recoverStaleSending(); } catch (_) {}
+    await updatePending();
   }
 
   // ── Login ──
@@ -324,6 +382,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
       localStorage.setItem(BRANCH_KEY, data.branch_id || 'branch-main');
       if (data.user_id) localStorage.setItem(USER_KEY, data.user_id);
       screen('modePicker');
+      onSignedIn();
     } catch (e) {
       setText('loginError', e.message || 'Login failed');
     }
@@ -645,48 +704,50 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
     userId: localStorage.getItem(USER_KEY) || null,
   });
 
-  // ── Collection — New Item ──
+  // ── Collection — New Item (MOBILE-04B2A9: durable queue → /api/mobile/upload) ──
+  function clearCollectionForm() {
+    $('cBrand').value = ''; $('cName').value = ''; $('cSku').value = '';
+    $('cPurchasePrice').value = ''; $('cSalePrice').value = ''; $('cNotes').value = '';
+    clearPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', EMPTY_C);
+  }
+  $('cRetryPending').onclick = drainPending;
   $('cSaveBtn').onclick = async () => {
     setText('cError', ''); setText('cSuccess', '');
     const brand = $('cBrand').value.trim();
     const name = $('cName').value.trim();
     const sku = $('cSku').value.trim();
-    if (!brand && !name && !sku && !photos.collection) {
-      return setText('cError', 'Add a photo or at least one detail.');
-    }
+    if (!photos.collection) return setText('cError', 'A photo is required for a mobile upload.');
+    if (!brand && !name && !sku) return setText('cError', 'Add at least one detail (brand, name or SKU).');
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) { init(); return setText('cError', 'Please sign in again.'); }
+    // Disable synchronously so a rapid double-click cannot enqueue a second event for the same capture.
     $('cSaveBtn').disabled = true;
     try {
-      const { now, branchId, userId } = ctx();
-      const productId = uuid();
-      let imageHash = null;
-      if (photos.collection) {
-        try { imageHash = await computePhash(photos.collection); } catch (e) { console.warn('pHash failed:', e); }
-      }
-      const productData = {
-        id: productId, branch_id: branchId,
-        category_id: $('cCategory').value || 'cat-watch',
-        brand, name,
-        sku: sku || null,
-        quantity: 1, condition: '', scope_of_delivery: '[]',
-        purchase_date: now.split('T')[0],
-        purchase_price: parseFloat($('cPurchasePrice').value) || 0,
-        purchase_currency: 'BHD',
-        planned_sale_price: parseFloat($('cSalePrice').value) || null,
-        stock_status: 'in_stock', tax_scheme: 'MARGIN', source_type: 'OWN',
-        notes: $('cNotes').value.trim() || null,
-        images: JSON.stringify(photos.collection ? [photos.collection] : []),
-        image_hash: imageHash,
-        attributes: '{}', created_at: now, updated_at: now, created_by: userId,
-      };
-      await pushChanges([{ table_name: 'products', record_id: productId, action: 'insert', data: JSON.stringify(productData) }]);
+      // Validated metadata only (the desktop worker builds the product from these fields); the pricing is
+      // completed by the owner on the desktop. No tenant/branch/user here — those come from the JWT server-side.
+      const metadata = { brand, name, categoryId: $('cCategory').value || 'cat-watch', sku: sku || null };
+      // Persist the durable entry (uploadEventId + bytes) BEFORE the first request, then send it ONCE.
+      const entry = await uploadQueue.enqueue({ metadata, images: [photos.collection] });
+      const r = await uploadQueue.drainEntry(entry.uploadEventId, token);
       const label = (brand + ' ' + name).trim() || sku || 'Item';
-      setText('cSuccess', label + ' saved. It appears on the desktop within 30 seconds.');
-      $('cBrand').value = ''; $('cName').value = ''; $('cSku').value = '';
-      $('cPurchasePrice').value = ''; $('cSalePrice').value = ''; $('cNotes').value = '';
-      clearPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', EMPTY_C);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      if (r.outcome === 'done') {
+        setText('cSuccess', label + ' uploaded. It appears on the desktop once the owner enables mobile uploads.');
+        clearCollectionForm(); window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else if (r.outcome === 'conflict') {
+        setText('cError', 'This exact upload was already received — no duplicate was created.');
+        clearCollectionForm();
+      } else if (r.outcome === 'rejected') {
+        setText('cError', 'Upload rejected (' + r.status + '). Retake the photo or reduce its size, then try again.');
+      } else if (r.outcome === 'reauth') {
+        localStorage.removeItem(TOKEN_KEY); init(); setText('loginError', 'Session expired. Please sign in again.');
+      } else {
+        // retryable / network: the durable entry keeps the photo + ids; it resumes on the next Retry trigger.
+        setText('cSuccess', label + ' queued — it will resume automatically. Use "Retry pending" to send now.');
+        clearCollectionForm();
+      }
+      await updatePending();
     } catch (e) {
-      if (e.message !== 'Session expired') setText('cError', e.message || 'Save failed');
+      setText('cError', (e && e.message) || 'Save failed');
     }
     $('cSaveBtn').disabled = false;
   };
@@ -773,7 +834,7 @@ pub const MOBILE_HTML: &str = r##"<!DOCTYPE html>
 })();
 </script>
 </body>
-</html>"##;
+</html>"##);
 
 // v0.4.1 — Landing-Seite fuer "/" (NICHT die Mobile-Capture). Verhindert, dass
 // am Counter beim Oeffnen der nackten Sync-URL die Mobile-Version erscheint.
