@@ -2125,6 +2125,36 @@ fn schedule_restore_snapshot(
     Ok(serde_json::json!({ "snapshotId": snapshot_id, "scheduled": true }))
 }
 
+/// Owner-gated SCHEDULE of a boot-time backup. There is NO command that snapshots the live process — a
+/// consistent snapshot needs enforced quiescence, so the actual copy runs at BOOT (all DBs closed). This
+/// only verifies the owner and writes a durable intent (id + createdAt + appVersion); the JS orchestrator
+/// then durably flushes the frontend DB and relaunches. On the next boot `execute_pending_backup` publishes
+/// the `complete` snapshot and clears the intent exactly once. No DB/media mutation here.
+#[tauri::command]
+fn schedule_backup_snapshot(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    // opaque, filesystem-safe single-segment id (no ':' — invalid on Windows).
+    let id = format!("snap-{}", now.replace([':', '.', '+'], "-"));
+    let intent = media::backup::BackupIntent {
+        id: id.clone(),
+        created_at: now,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    media::backup::write_backup_intent(&app_dir, &intent).map_err(|code| code.code().to_string())?;
+    Ok(serde_json::json!({ "snapshotId": id, "scheduled": true }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2153,6 +2183,14 @@ pub fn run() {
                 Ok(Some(_)) => { /* a pending restore was applied + the intent consumed */ }
                 Ok(None) => { /* nothing scheduled */ }
                 Err(e) => return Err(format!("scheduled restore failed: {}", e.code()).into()),
+            }
+            // MOBILE-04B2A12-U2-R1 — apply a SCHEDULED backup now, still before any DB/media open (all DBs
+            // closed → maximally consistent). Publishes the `complete` snapshot atomically and clears the
+            // intent exactly once. Fail-closed: any error aborts startup.
+            match media::backup::execute_pending_backup(&app_dir) {
+                Ok(Some(_)) => { /* a pending backup was published + the intent consumed */ }
+                Ok(None) => { /* nothing scheduled */ }
+                Err(e) => return Err(format!("scheduled backup failed: {}", e.code()).into()),
             }
             let db_path = app_dir.join("lataif_sync_server.db");
 
@@ -2256,6 +2294,7 @@ pub fn run() {
             mobile_runtime_scope_configure,
             list_restore_snapshots,
             schedule_restore_snapshot,
+            schedule_backup_snapshot,
             finalize_application_shutdown
         ])
         .run(tauri::generate_context!())

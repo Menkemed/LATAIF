@@ -11,8 +11,10 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import {
-  prepareAndRestore,
+  prepareAndScheduleRestore,
+  prepareAndScheduleBackup,
   type RestoreOrchestrationOps,
+  type BackupOrchestrationOps,
   type RestoreStatus,
 } from './restore-orchestration.ts';
 
@@ -37,8 +39,12 @@ export interface RestoreRuntimeDeps {
   invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   /** Pause auto-sync (stop the main writer). */
   pauseAutoSync: () => void;
+  /** Resume auto-sync + re-arm the drain poller — used to UNDO the block on a pre-schedule failure. */
+  resumeAutoSync: () => void;
   /** Stop the scoped mobile inbox drain poller/worker triggers. */
   stopMobileDrainPoller: () => void;
+  /** Re-arm the scoped mobile inbox drain poller (part of resuming writers). */
+  armMobileDrainPoller: () => void;
   /** Await any in-flight sync run to go idle. */
   waitForSyncIdle: () => Promise<void>;
   /** Durably flush + close the frontend DB so no later save clobbers the restored file. */
@@ -49,9 +55,9 @@ export interface RestoreRuntimeDeps {
 }
 
 /**
- * Map the restore orchestration steps onto concrete runtime primitives. `checkpointAndCloseServerDb` is a
- * deliberate no-op: the Rust `restore_snapshot` command stops the embedded server and checkpoints+closes
- * the server DB internally (there is no separate public checkpoint command).
+ * Map the restore orchestration steps onto concrete runtime primitives. `scheduleRestore` invokes the
+ * owner-gated schedule command (authorize + durable intent, NO mutation); the boot path applies the swap.
+ * `resumeWrites` undoes the block if a pre-schedule step fails (graceful; the app stays usable).
  */
 export function buildRestoreOrchestrationOps(
   params: RestoreParams,
@@ -64,20 +70,22 @@ export function buildRestoreOrchestrationOps(
       deps.stopMobileDrainPoller();
     },
     awaitWritersIdle: () => deps.waitForSyncIdle(),
-    flushAndCloseFrontendDb: () => deps.flushAndCloseFrontendDb(),
-    // No JS-side server-DB work: the restore is applied at BOOT (DBs closed), not in this process.
-    checkpointAndCloseServerDb: async () => {},
-    runRestore: async () => {
+    scheduleRestore: async () => {
       // SCHEDULE only — never a live in-process mutation. Pass ONLY the opaque id + owner credentials
-      // (never a path). The command re-resolves + re-validates and writes a durable intent; the boot path
-      // applies the swap after the relaunch and clears the intent exactly once.
+      // (never a path). The command authorizes the owner, re-resolves + re-validates, and writes a durable
+      // intent; the boot path applies the swap after the relaunch and clears the intent exactly once.
       await deps.invoke('schedule_restore_snapshot', {
         email: params.email,
         password: params.password,
         snapshotId: params.snapshotId,
       });
     },
+    flushAndCloseFrontendDb: () => deps.flushAndCloseFrontendDb(),
     restartApplication: () => deps.relaunch(),
+    resumeWrites: () => {
+      deps.resumeAutoSync();
+      deps.armMobileDrainPoller();
+    },
   };
 }
 
@@ -95,7 +103,9 @@ export async function buildDefaultRestoreDeps(
   return {
     invoke: (cmd, args) => core.invoke(cmd, args ?? {}),
     pauseAutoSync: () => sync.pauseAutoSync(),
+    resumeAutoSync: () => sync.resumeAutoSync(),
     stopMobileDrainPoller: () => wiring.stopMobileDrainPoller(),
+    armMobileDrainPoller: () => wiring.armMobileDrainPoller(),
     waitForSyncIdle: () => sync.waitForSyncIdle(),
     flushAndCloseFrontendDb: () => db.flushAndCloseForRestore(),
     relaunch: () => proc.relaunch(),
@@ -114,6 +124,79 @@ export async function listRestoreSnapshots(
   })) as SnapshotSummary[];
 }
 
+export interface BackupRuntimeDeps {
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  pauseAutoSync: () => void;
+  resumeAutoSync: () => void;
+  stopMobileDrainPoller: () => void;
+  armMobileDrainPoller: () => void;
+  waitForSyncIdle: () => Promise<void>;
+  saveDatabaseDurably: () => Promise<void>;
+  relaunch: () => Promise<void>;
+  setStatus?: (status: RestoreStatus | null) => void;
+}
+
+/**
+ * Map the backup orchestration steps. `scheduleBackup` invokes the owner-gated schedule command (authorize
+ * + durable intent, NO snapshot here); the snapshot itself runs at BOOT with the DBs closed. `flushFrontendDb`
+ * durably persists the frontend DB so the on-disk copy the boot snapshot reads is current (no close).
+ * `resumeWrites` undoes the block on a pre-schedule failure (graceful).
+ */
+export function buildBackupOrchestrationOps(
+  owner: { email: string; password: string },
+  deps: BackupRuntimeDeps,
+): BackupOrchestrationOps {
+  return {
+    setStatus: (s) => deps.setStatus?.(s),
+    blockWrites: () => { deps.pauseAutoSync(); deps.stopMobileDrainPoller(); },
+    awaitWritersIdle: () => deps.waitForSyncIdle(),
+    scheduleBackup: async () => {
+      await deps.invoke('schedule_backup_snapshot', { email: owner.email, password: owner.password });
+    },
+    flushFrontendDb: () => deps.saveDatabaseDurably(),
+    restartApplication: () => deps.relaunch(),
+    resumeWrites: () => { deps.resumeAutoSync(); deps.armMobileDrainPoller(); },
+  };
+}
+
+/**
+ * Schedule a boot-time backup (owner-gated) and relaunch. Quiesce → authorize + durable intent → durable
+ * frontend-DB flush → controlled restart; the boot path then produces the `complete` snapshot with the DBs
+ * closed. A pre-schedule failure (wrong owner) resumes writers and keeps the app usable; a post-schedule
+ * failure is fail-closed. Injectable via deps for headless testing.
+ */
+export async function scheduleBackupSnapshotWith(
+  owner: { email: string; password: string },
+  deps: BackupRuntimeDeps,
+): Promise<void> {
+  await prepareAndScheduleBackup(buildBackupOrchestrationOps(owner, deps));
+}
+
+/** Schedule a boot-time backup using the shipping modules (Tauri only). */
+export async function scheduleBackupSnapshot(
+  owner: { email: string; password: string },
+  setStatus?: (status: RestoreStatus | null) => void,
+): Promise<void> {
+  const [core, sync, db, wiring, proc] = await Promise.all([
+    import('@tauri-apps/api/core'),
+    import('@/core/sync/sync-service'),
+    import('@/core/db/database'),
+    import('@/core/media/mobile-upload-wiring'),
+    import('@tauri-apps/plugin-process'),
+  ]);
+  await scheduleBackupSnapshotWith(owner, {
+    invoke: (cmd, args) => core.invoke(cmd, args ?? {}),
+    pauseAutoSync: () => sync.pauseAutoSync(),
+    resumeAutoSync: () => sync.resumeAutoSync(),
+    stopMobileDrainPoller: () => wiring.stopMobileDrainPoller(),
+    armMobileDrainPoller: () => wiring.armMobileDrainPoller(),
+    waitForSyncIdle: () => sync.waitForSyncIdle(),
+    saveDatabaseDurably: () => db.saveDatabaseDurably(),
+    relaunch: () => proc.relaunch(),
+    setStatus,
+  });
+}
+
 /**
  * Drive an owner-authenticated restore in the safe order: quiesce the runtime, durably schedule the
  * restore (no live mutation), then relaunch — the BOOT path applies the swap while the DBs are closed. On
@@ -125,7 +208,7 @@ export async function startRestore(
 ): Promise<void> {
   const deps = await buildDefaultRestoreDeps(setStatus);
   const ops = buildRestoreOrchestrationOps(params, deps);
-  await prepareAndRestore(ops);
+  await prepareAndScheduleRestore(ops);
 }
 
 /**
@@ -135,5 +218,5 @@ export async function startRestore(
 export function installRestoreBridge(): void {
   if (typeof window === 'undefined') return;
   const w = window as unknown as Record<string, unknown>;
-  w.__lataifRestore = { listRestoreSnapshots, startRestore };
+  w.__lataifRestore = { listRestoreSnapshots, startRestore, scheduleBackupSnapshot };
 }

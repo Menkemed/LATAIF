@@ -260,6 +260,142 @@ fn snapshot_into_workspace(input: &SnapshotInput, ws: &Path) -> Result<BackupMan
     Ok(manifest)
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// MOBILE-04B2A12-U2-R1 — boot-scheduled backup. There is NO command that snapshots the live process. The
+// owner SCHEDULES a durable intent; the app relaunches; the boot path produces the snapshot while every DB
+// is CLOSED (maximally consistent), publishes atomically, and clears the intent exactly once.
+// ════════════════════════════════════════════════════════════════════════════
+
+pub const BACKUP_INTENT: &str = ".backup-intent";
+const BACKUP_INTENT_TMP: &str = ".backup-intent.tmp";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupIntent {
+    pub id: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "appVersion")]
+    pub app_version: String,
+}
+
+/// Durably record the pending-backup intent via temp → fsync → atomic rename.
+pub fn write_backup_intent(app_data_dir: &Path, intent: &BackupIntent) -> Result<(), MediaError> {
+    use std::io::Write as _;
+    let json = serde_json::to_vec(intent).map_err(|e| MediaError::Io(format!("intent ser: {}", e)))?;
+    let tmp = app_data_dir.join(BACKUP_INTENT_TMP);
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| MediaError::Io(format!("intent open: {}", e)))?;
+        f.write_all(&json).map_err(|e| MediaError::Io(format!("intent write: {}", e)))?;
+        f.sync_all().map_err(|e| MediaError::Io(format!("intent fsync: {}", e)))?;
+    }
+    fs::rename(&tmp, app_data_dir.join(BACKUP_INTENT))
+        .map_err(|e| MediaError::Io(format!("intent rename: {}", e)))
+}
+
+fn is_symlink(p: &Path) -> bool {
+    fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+}
+
+/// Full re-validation of a PUBLISHED backup dir: manifest `complete` + count, and every DB/media file
+/// present, not a symlink, with matching size + SHA-256. Returns Err (fail-closed) on any defect — used at
+/// boot to decide whether an existing target may be treated as done (so the intent is never consumed for a
+/// corrupt/incomplete dir).
+pub fn published_is_complete(out_dir: &Path) -> Result<(), MediaError> {
+    let raw = fs::read(out_dir.join("manifest.json")).map_err(|_| MediaError::RestoreIncompleteBackup)?;
+    let m: BackupManifest =
+        serde_json::from_slice(&raw).map_err(|_| MediaError::RestoreIncompleteBackup)?;
+    if m.status != "complete" || m.file_count != m.files.len() {
+        return Err(MediaError::RestoreIncompleteBackup);
+    }
+    let check = |rel: &str, size: u64, sha: &str| -> Result<(), MediaError> {
+        let abs = out_dir.join(rel);
+        if is_symlink(&abs) {
+            return Err(MediaError::PathReparsePointForbidden);
+        }
+        if !abs.exists() {
+            return Err(MediaError::FileMissing);
+        }
+        let bytes = fs::read(&abs).map_err(|e| MediaError::Io(format!("read: {}", e)))?;
+        if bytes.len() as u64 != size || sha256_hex(&bytes) != sha {
+            return Err(MediaError::FileHashMismatch);
+        }
+        Ok(())
+    };
+    check(&m.db.file_name, m.db.byte_size, &m.db.sha256)?;
+    for d in &m.additional_db_files {
+        check(&d.file_name, d.byte_size, &d.sha256)?;
+    }
+    for f in &m.files {
+        check(&f.rel_path, f.byte_size, &f.hash)?;
+    }
+    Ok(())
+}
+
+/// Read the pending backup intent, or None when absent/corrupt.
+pub fn read_backup_intent(app_data_dir: &Path) -> Option<BackupIntent> {
+    let raw = fs::read(app_data_dir.join(BACKUP_INTENT)).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+/// Durably consume the intent (no-op if already gone).
+pub fn clear_backup_intent(app_data_dir: &Path) -> Result<(), MediaError> {
+    let p = app_data_dir.join(BACKUP_INTENT);
+    if p.exists() {
+        fs::remove_file(&p).map_err(|e| MediaError::Io(format!("intent clear: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Boot-time application of a scheduled backup. MUST run before any DB/media file is opened. If an intent
+/// exists: produce the snapshot from the closed on-disk DBs and publish atomically, then clear the intent.
+/// Exactly-once:
+///   • crash BEFORE the snapshot → out_dir absent → the snapshot runs on the next boot (retry),
+///   • crash DURING the snapshot → only a temp workspace (keyed by the stable `created_at`) lingers; the
+///     next `snapshot()` removes it and rebuilds (temp cleaned + retry) — out_dir never partially exists
+///     (it appears only via the final atomic rename),
+///   • crash AFTER the atomic publish but before the intent was cleared → out_dir EXISTS → consume the
+///     intent without re-snapshotting (no double backup).
+pub fn execute_pending_backup(app_data_dir: &Path) -> Result<Option<String>, MediaError> {
+    let intent = match read_backup_intent(app_data_dir) {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    let backups = app_data_dir.join("backups");
+    let out_dir = backups.join(&intent.id);
+    if out_dir.exists() {
+        // A target already exists. Consume the intent ONLY if it is a genuinely complete, fully-valid
+        // snapshot (manifest `complete` + every DB/media file present with matching size + SHA-256). An
+        // atomic publish never leaves a partial dir, so an INVALID target is an anomaly — fail closed and
+        // keep the intent (never a false success, never a blind consume).
+        published_is_complete(&out_dir)?;
+        clear_backup_intent(app_data_dir)?;
+        return Ok(Some(intent.id));
+    }
+    fs::create_dir_all(&backups).map_err(|e| MediaError::Io(format!("mkbackups: {}", e)))?;
+    let front = app_data_dir.join("lataif.db");
+    let media_root = app_data_dir.join("media");
+    let server = app_data_dir.join("lataif_sync_server.db");
+    let conn = rusqlite::Connection::open(&front).map_err(|e| MediaError::Io(format!("open front: {}", e)))?;
+    let selection = collect_selection_from_db(&conn)?;
+    drop(conn);
+    let server_opt = if server.exists() { Some(server.as_path()) } else { None };
+    let input = SnapshotInput {
+        media_root: &media_root,
+        frontend_db: &front,
+        server_db: server_opt,
+        selection: &selection,
+        created_at: intent.created_at.clone(),
+        app_version: intent.app_version.clone(),
+        schema_version: "1".into(),
+        media_schema_version: "1".into(),
+        out_dir: &out_dir,
+        workspace_parent: &backups,
+    };
+    snapshot(&input)?; // cleans a stale temp ws (same created_at) + publishes `complete` atomically
+    clear_backup_intent(app_data_dir)?;
+    Ok(Some(intent.id))
+}
+
 #[cfg(test)]
 #[path = "backup_tests.rs"]
 mod backup_tests;

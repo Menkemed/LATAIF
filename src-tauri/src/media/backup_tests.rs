@@ -175,6 +175,160 @@ fn path_traversal_scope_fails_closed() {
     assert!(!l.out.exists(), "nothing published");
 }
 
+// ── MOBILE-04B2A12-U2-R1 — boot-scheduled backup: intent + execute_pending_backup exactly-once ──
+
+/// Build a real app_data_dir: media/ + a real sqlite lataif.db (1 link → master + thumbnail) + server DB.
+fn build_app(base: &std::path::Path, master: &[u8], thumb: &[u8]) {
+    let media = base.join("media");
+    std::fs::create_dir_all(&media).unwrap();
+    let (mh, ms) = put_media(&media, "t", master);
+    let (th, ts) = put_media(&media, "t", thumb);
+    let front = base.join("lataif.db");
+    let c = rusqlite::Connection::open(&front).unwrap();
+    c.execute_batch(&format!(
+        "CREATE TABLE media_links(tenant_id,media_id,media_role,deleted_at);
+         CREATE TABLE media_objects(tenant_id,media_id,master_blob_id,deleted_at);
+         CREATE TABLE media_blobs(tenant_id,blob_id,blob_status,current_generation_no);
+         CREATE TABLE media_blob_generations(tenant_id,blob_id,generation_no,gen_status,storage_key,stored_blob_hash,byte_size,extension);
+         CREATE TABLE media_variants(tenant_id,variant_id,media_id,variant_type,blob_id,deleted_at);
+         CREATE TABLE media_ingest_jobs(tenant_id,target_media_id,target_blob_id,state);
+         INSERT INTO media_links VALUES('t','m','stock_image',NULL);
+         INSERT INTO media_objects VALUES('t','m','bm',NULL);
+         INSERT INTO media_blobs VALUES('t','bm','present',1);
+         INSERT INTO media_blob_generations VALUES('t','bm',1,'available','t/{ma}/{mh}.jpg','{mh}',{ms},'jpg');
+         INSERT INTO media_variants VALUES('t','v','m','thumbnail','bt',NULL);
+         INSERT INTO media_blobs VALUES('t','bt','present',1);
+         INSERT INTO media_blob_generations VALUES('t','bt',1,'available','t/{ta}/{th}.jpg','{th}',{ts},'jpg');",
+        ma = &mh[0..2], mh = mh, ms = ms, ta = &th[0..2], th = th, ts = ts
+    )).unwrap();
+    drop(c);
+    let server = base.join("lataif_sync_server.db");
+    let sc = rusqlite::Connection::open(&server).unwrap();
+    sc.execute_batch("CREATE TABLE s(x); INSERT INTO s VALUES(1);").unwrap();
+    drop(sc);
+}
+fn intent(id: &str) -> BackupIntent {
+    BackupIntent { id: id.into(), created_at: "2026-07-30T00:00:00Z".into(), app_version: "0.8.23".into() }
+}
+
+#[test]
+fn scheduled_backup_runs_at_boot_and_never_repeats() {
+    let app = tmp();
+    build_app(&app, b"MASTER-A", b"THUMB-A");
+    write_backup_intent(&app, &intent("snap-boot-1")).unwrap();
+    assert_eq!(read_backup_intent(&app).unwrap().id, "snap-boot-1");
+
+    let applied = execute_pending_backup(&app).expect("boot backup ok");
+    assert_eq!(applied.as_deref(), Some("snap-boot-1"));
+    let out = app.join("backups").join("snap-boot-1");
+    assert_eq!(validate(&out), "complete");
+    assert!(!app.join(BACKUP_INTENT).exists(), "intent consumed on durable success");
+    // exactly-once: a second boot does nothing
+    assert_eq!(execute_pending_backup(&app).unwrap(), None, "no pending backup on the next boot");
+}
+
+#[test]
+fn crash_after_complete_before_intent_clear_consumes_without_double_backup() {
+    let app = tmp();
+    build_app(&app, b"MASTER-B", b"THUMB-B");
+    // first boot: snapshot published
+    write_backup_intent(&app, &intent("snap-boot-2")).unwrap();
+    execute_pending_backup(&app).unwrap();
+    let out = app.join("backups").join("snap-boot-2");
+    let published = std::fs::read(out.join("manifest.json")).unwrap();
+    // simulate a crash AFTER complete but before the intent was cleared: the intent is back, out_dir exists.
+    write_backup_intent(&app, &intent("snap-boot-2")).unwrap();
+    let applied = execute_pending_backup(&app).expect("consume ok");
+    assert_eq!(applied.as_deref(), Some("snap-boot-2"));
+    assert!(!app.join(BACKUP_INTENT).exists(), "intent consumed, not re-run");
+    assert_eq!(std::fs::read(out.join("manifest.json")).unwrap(), published, "snapshot NOT rewritten (no double backup)");
+}
+
+#[test]
+fn crash_during_backup_cleans_stale_temp_and_retries() {
+    let app = tmp();
+    build_app(&app, b"MASTER-C", b"THUMB-C");
+    write_backup_intent(&app, &intent("snap-boot-3")).unwrap();
+    // simulate a crashed prior attempt: a leftover temp workspace keyed by the stable created_at, out_dir absent
+    let backups = app.join("backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    let ws = backups.join(format!("backup-ws-{}", &sha256_hex("2026-07-30T00:00:00Z".as_bytes())[..16]));
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("garbage.tmp"), b"PARTIAL").unwrap();
+
+    let applied = execute_pending_backup(&app).expect("retry ok");
+    assert_eq!(applied.as_deref(), Some("snap-boot-3"));
+    assert!(!ws.exists(), "stale temp workspace removed");
+    assert_eq!(validate(&backups.join("snap-boot-3")), "complete", "snapshot published on retry");
+    assert!(!app.join(BACKUP_INTENT).exists());
+}
+
+#[test]
+fn boot_backup_captures_the_exact_flushed_on_disk_state() {
+    let app = tmp();
+    build_app(&app, b"MASTER-FLUSHED", b"THUMB-FLUSHED");
+    let on_disk_db = sha256_hex(&std::fs::read(app.join("lataif.db")).unwrap());
+    write_backup_intent(&app, &intent("snap-flush-1")).unwrap();
+    execute_pending_backup(&app).unwrap();
+    let raw = std::fs::read(app.join("backups").join("snap-flush-1").join("manifest.json")).unwrap();
+    let m: BackupManifest = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(m.db.sha256, on_disk_db, "boot snapshot contains exactly the on-disk (flushed) frontend DB");
+    // and the published copy is byte-identical to the DB that was on disk when the intent was written
+    assert_eq!(sha256_hex(&std::fs::read(app.join("backups").join("snap-flush-1").join("lataif.db")).unwrap()), on_disk_db);
+}
+
+#[test]
+fn no_intent_means_no_backup() {
+    let app = tmp();
+    build_app(&app, b"M", b"T");
+    // a crash AFTER the flush but BEFORE the intent leaves no intent → boot performs no backup.
+    assert_eq!(execute_pending_backup(&app).unwrap(), None);
+    assert!(!app.join("backups").exists() || std::fs::read_dir(app.join("backups")).unwrap().next().is_none(), "no snapshot produced");
+}
+
+#[test]
+fn corrupt_existing_target_keeps_intent_and_fails_closed() {
+    let app = tmp();
+    build_app(&app, b"MASTER-Q", b"THUMB-Q");
+    // publish a valid snapshot, then TAMPER one media file so the target is no longer fully valid.
+    write_backup_intent(&app, &intent("snap-corrupt-1")).unwrap();
+    execute_pending_backup(&app).unwrap();
+    let out = app.join("backups").join("snap-corrupt-1");
+    let raw = std::fs::read(out.join("manifest.json")).unwrap();
+    let m: BackupManifest = serde_json::from_slice(&raw).unwrap();
+    std::fs::write(out.join(&m.files[0].rel_path), b"TAMPERED").unwrap();
+    // a fresh boot with the SAME intent must NOT treat the corrupt target as done.
+    write_backup_intent(&app, &intent("snap-corrupt-1")).unwrap();
+    let err = execute_pending_backup(&app).unwrap_err();
+    assert_eq!(err.code(), "MEDIA_FILE_HASH_MISMATCH", "corrupt target fails closed");
+    assert!(read_backup_intent(&app).is_some(), "intent REMAINS (not blindly consumed)");
+    // an incomplete manifest is likewise rejected
+    let raw2 = std::fs::read_to_string(out.join("manifest.json")).unwrap().replace("\"complete\"", "\"partial\"");
+    std::fs::write(out.join("manifest.json"), raw2).unwrap();
+    assert_eq!(execute_pending_backup(&app).unwrap_err().code(), "MEDIA_RESTORE_INCOMPLETE_BACKUP");
+    assert!(read_backup_intent(&app).is_some(), "intent still remains for an incomplete target");
+}
+
+#[test]
+fn backup_intent_round_trips_and_ignores_corrupt() {
+    let app = tmp();
+    assert!(read_backup_intent(&app).is_none());
+    write_backup_intent(&app, &intent("snap-x")).unwrap();
+    let got = read_backup_intent(&app).unwrap();
+    assert_eq!((got.id.as_str(), got.app_version.as_str()), ("snap-x", "0.8.23"));
+    std::fs::write(app.join(BACKUP_INTENT), b"{ not json").unwrap();
+    assert!(read_backup_intent(&app).is_none(), "corrupt intent → None (no unintended backup)");
+    clear_backup_intent(&app).unwrap();
+    assert!(!app.join(BACKUP_INTENT).exists());
+}
+
+/// helper: parse a published manifest's status.
+fn validate(out: &std::path::Path) -> String {
+    let raw = std::fs::read(out.join("manifest.json")).unwrap();
+    let m: BackupManifest = serde_json::from_slice(&raw).unwrap();
+    m.status
+}
+
 #[cfg(windows)]
 #[test]
 fn symlinked_media_file_fails_closed_if_perm() {

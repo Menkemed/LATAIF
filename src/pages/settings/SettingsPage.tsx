@@ -10,6 +10,7 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { RuntimeScopeDialog } from './RuntimeScopeDialog';
+import { BackupRestorePanel } from './BackupRestorePanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { exportFile } from '@/core/utils/export-file';
@@ -3154,6 +3155,8 @@ function DangerZoneTab() {
             </label>
           </div>
         </div>
+        {/* MOBILE-04B2A12-U2 — full DB+media snapshot create + owner-gated boot-scheduled restore. */}
+        <BackupRestorePanel />
       </Card>
 
       <div style={{ marginTop: 24 }} />
