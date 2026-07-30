@@ -73,13 +73,21 @@ export interface BackupFileEntry {
 
 export type BackupStatus = 'in_progress' | 'complete';
 
+/** A backed-up SQLite file (its own consistent snapshot, checkpointed for WAL DBs). */
+export interface BackupDbFileEntry { fileName: string; byteSize: number; sha256: string }
+
 export interface BackupManifest {
   backupFormatVersion: number;
   createdAt: string;            // metadata ONLY — never an identity/causality key
   appVersion: string;
   schemaVersion: string;
   mediaSchemaVersion: string;
-  db: { fileName: string; byteSize: number; sha256: string };
+  /** The primary DB the media metadata + gallery links live in (`lataif.db`). */
+  db: BackupDbFileEntry;
+  /** MEDIA-04B2A12 — further consistent DB snapshots that belong to the SAME
+   *  point-in-time (e.g. the embedded server DB `lataif_sync_server.db`, checkpointed
+   *  so its WAL is folded in). Optional + backward-compatible: absent/[] = legacy. */
+  additionalDbFiles?: BackupDbFileEntry[];
   files: BackupFileEntry[];
   fileCount: number;
   status: BackupStatus;
@@ -173,16 +181,19 @@ export function collectRequiredMediaFiles(db: MediaDbQuery): BackupFileEntry[] {
 export function buildBackupManifest(args: {
   createdAt: string;
   appVersion: string; schemaVersion: string; mediaSchemaVersion: string;
-  db: { fileName: string; byteSize: number; sha256: string };
+  db: BackupDbFileEntry;
+  additionalDbFiles?: BackupDbFileEntry[];
   files: BackupFileEntry[];
 }): BackupManifest {
   for (const f of args.files) if (isUnsafeRelPath(f.relPath)) throw new Error('MEDIA_BACKUP_UNSAFE_PATH');
   if (isUnsafeRelPath(args.db.fileName)) throw new Error('MEDIA_BACKUP_UNSAFE_PATH');
+  for (const d of args.additionalDbFiles ?? []) if (isUnsafeRelPath(d.fileName)) throw new Error('MEDIA_BACKUP_UNSAFE_PATH');
   return {
     backupFormatVersion: BACKUP_FORMAT_VERSION,
     createdAt: args.createdAt,
     appVersion: args.appVersion, schemaVersion: args.schemaVersion, mediaSchemaVersion: args.mediaSchemaVersion,
     db: args.db,
+    additionalDbFiles: args.additionalDbFiles ?? [],
     files: args.files,
     fileCount: args.files.length,
     status: 'in_progress',
@@ -233,6 +244,14 @@ export function verifyBackupFiles(manifest: BackupManifest, fs: FilePresence): V
   if (!fs.exists(manifest.db.fileName)) return { ok: false, code: 'MEDIA_BACKUP_DB_MISSING' };
   if (fs.sizeOf(manifest.db.fileName) !== manifest.db.byteSize) return { ok: false, code: 'MEDIA_BACKUP_DB_SIZE' };
   if (fs.hashOf(manifest.db.fileName) !== manifest.db.sha256) return { ok: false, code: 'MEDIA_BACKUP_DB_HASH' };
+  // MEDIA-04B2A12 — every additional DB snapshot (e.g. the checkpointed server DB) verifies too.
+  for (const d of manifest.additionalDbFiles ?? []) {
+    if (isUnsafeRelPath(d.fileName)) return { ok: false, code: 'MEDIA_BACKUP_UNSAFE_PATH', relPath: d.fileName };
+    if (fs.isSymlink?.(d.fileName)) return { ok: false, code: 'MEDIA_BACKUP_SYMLINK', relPath: d.fileName };
+    if (!fs.exists(d.fileName)) return { ok: false, code: 'MEDIA_BACKUP_DB_MISSING', relPath: d.fileName };
+    if (fs.sizeOf(d.fileName) !== d.byteSize) return { ok: false, code: 'MEDIA_BACKUP_DB_SIZE', relPath: d.fileName };
+    if (fs.hashOf(d.fileName) !== d.sha256) return { ok: false, code: 'MEDIA_BACKUP_DB_HASH', relPath: d.fileName };
+  }
   return { ok: true };
 }
 
