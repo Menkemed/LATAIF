@@ -18,6 +18,11 @@ pub mod e2e_support {
     // install may still only become Primary via a verified owner). Never compiled into a release build.
     pub use crate::sync::install_id::load_or_create as load_install_id;
     pub use crate::sync::primary::{authorize_owner, configure_as_owner, Mode};
+    // MEDIA-04B2A12-I2 — the REAL backup snapshot host, exposed for the isolated snapshot smoke.
+    pub use crate::media::backup::{
+        collect_selection_from_db, snapshot as create_backup_snapshot, BackupManifest, MediaSelection,
+        SnapshotInput,
+    };
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};

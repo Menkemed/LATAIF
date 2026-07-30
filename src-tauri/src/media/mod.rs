@@ -9,6 +9,10 @@
 //! outside the module's own `cargo test` suite.
 #![allow(dead_code, unused_imports)]
 
+// MEDIA-04B2A12-I2 — real backup snapshot host. Compiled in test + e2e builds only (the production
+// snapshot activation is a reviewed follow-up); the cargo unit tests prove the real host I/O + fail-closed.
+#[cfg(any(test, feature = "e2e"))]
+pub mod backup;
 mod detect;
 // MEDIA-04A-2A — guarded ingest service + durable file journal. `pub(crate)` so
 // the thin Tauri command wrappers in `lib.rs` can reach it; still no UI/DB.

@@ -73,8 +73,50 @@ fn main() {
                 .unwrap();
             println!("{}", base64::engine::general_purpose::STANDARD.encode(&buf));
         }
+        // MEDIA-04B2A12-I2 — drive the REAL backup snapshot host against a real isolated app_data_dir.
+        // `backup <appDataDir> <outDir> <createdAt>` — reads lataif.db + media root + (optional) server DB,
+        // selects the required media from the SAME consistent DB, and publishes a consistent snapshot.
+        "backup" => {
+            let base = &db_path; // args[2] = appDataDir
+            let out_dir = std::path::PathBuf::from(
+                args.get(3).expect("usage: backup <appDataDir> <outDir> <createdAt>"),
+            );
+            let created_at = args.get(4).cloned().unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+            let front = base.join("lataif.db");
+            let media_root = base.join("media");
+            let server = base.join("lataif_sync_server.db");
+            let conn = Connection::open(&front).expect("open frontend db");
+            let selection =
+                lataif_lib::e2e_support::collect_selection_from_db(&conn).expect("collect selection");
+            drop(conn);
+            let server_opt = if server.exists() { Some(server.as_path()) } else { None };
+            let input = lataif_lib::e2e_support::SnapshotInput {
+                media_root: &media_root,
+                frontend_db: &front,
+                server_db: server_opt,
+                selection: &selection,
+                created_at,
+                app_version: "e2e".into(),
+                schema_version: "s1".into(),
+                media_schema_version: "m1".into(),
+                out_dir: &out_dir,
+                workspace_parent: out_dir.parent().unwrap_or(base),
+            };
+            match lataif_lib::e2e_support::create_backup_snapshot(&input) {
+                Ok(m) => println!(
+                    "BACKUP_OK files={} additional={} status={}",
+                    m.file_count,
+                    m.additional_db_files.len(),
+                    m.status
+                ),
+                Err(e) => {
+                    println!("BACKUP_ERR {}", e.code());
+                    std::process::exit(3);
+                }
+            }
+        }
         _ => {
-            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg> <db_path|salt>");
+            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup> <db_path|salt|appDataDir>");
             std::process::exit(2);
         }
     }
