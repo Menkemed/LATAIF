@@ -19,6 +19,9 @@ pub mod backup;
 pub mod restore;
 // MEDIA-04B2A12-R3 — boot recovery for an interrupted restore. PRODUCTION (runs before any DB opens).
 pub mod restore_recovery;
+// MOBILE-04B2A14-I1 — safe temporary staging GC. Production compiles the dry-run analysis only; `apply`
+// (real deletion) is test/e2e-gated and there is no automatic boot deletion.
+pub mod staging_gc;
 mod detect;
 // MEDIA-04A-2A — guarded ingest service + durable file journal. `pub(crate)` so
 // the thin Tauri command wrappers in `lib.rs` can reach it; still no UI/DB.

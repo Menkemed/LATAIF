@@ -29,6 +29,9 @@ pub mod e2e_support {
         restore as restore_snapshot, restore_crashing, validate_snapshot, CrashAt, RestoreInput,
     };
     pub use crate::media::restore_recovery::recover as boot_recover;
+    // MOBILE-04B2A14-I1 — safe temporary staging GC: dry-run analysis (also production) + the test/e2e-only
+    // real deletion, exposed for the isolated GC smoke.
+    pub use crate::media::staging_gc::{analyze as staging_gc_analyze, apply as staging_gc_apply};
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2155,6 +2158,26 @@ fn schedule_backup_snapshot(
     Ok(serde_json::json!({ "snapshotId": id, "scheduled": true }))
 }
 
+/// Owner-gated DRY-RUN of the temporary staging GC. Read-only: it NEVER deletes (the real deletion is
+/// test/e2e-only and there is no automatic boot deletion). Returns the plan (staging-relative keys +
+/// counts/sizes/reasons) — never an absolute path.
+#[tauri::command]
+fn staging_gc_dry_run(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<media::staging_gc::GcPlan, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    media::staging_gc::analyze(&app_dir, media::staging_gc::DEFAULT_GRACE_SECS, media::staging_gc::now_secs())
+        .map_err(|code| code.code().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2295,6 +2318,7 @@ pub fn run() {
             list_restore_snapshots,
             schedule_restore_snapshot,
             schedule_backup_snapshot,
+            staging_gc_dry_run,
             finalize_application_shutdown
         ])
         .run(tauri::generate_context!())

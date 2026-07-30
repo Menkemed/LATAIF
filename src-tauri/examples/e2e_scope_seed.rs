@@ -157,8 +157,43 @@ fn main() {
                 }
             }
         }
+        // MOBILE-04B2A14-I1 — drive the REAL staging GC host in an ISOLATED workdir. `gc <workDir> <dry|apply>`
+        // seeds a realistic staging tree (published backup + live media + orphan ws + orphan/referenced/…
+        // temps + a .restore-staging), then runs the dry-run or the (test/e2e-only) apply. Prints only
+        // counts — never a path.
+        "gc" => {
+            let work = &db_path; // args[2] = workDir
+            let mode = args.get(3).map(|s| s.as_str()).unwrap_or("dry");
+            let j = work.join("media").join(".ingest-journal");
+            let seed_file = |p: std::path::PathBuf, b: &[u8]| { std::fs::create_dir_all(p.parent().unwrap()).unwrap(); std::fs::write(&p, b).unwrap(); };
+            seed_file(work.join("backups").join("snap-KEEP").join("manifest.json"), b"{\"status\":\"complete\"}");
+            seed_file(work.join("backups").join("backup-ws-OLD").join("part.tmp"), b"PARTIAL");
+            seed_file(work.join("media").join("t").join("aa").join("aaaaaa.jpg"), b"MASTER");
+            seed_file(j.join("t__req1.main.jpg.tmp"), b"ORPHAN");
+            seed_file(j.join("t__req2.main.jpg.tmp"), b"REF");
+            seed_file(j.join("t__req2.json"), b"{\"state\":\"prepared\"}");
+            seed_file(work.join(".restore-staging").join("x"), b"R");
+            let now: u64 = 2_000_000_000; // fixed clock far above the seeded files' real mtimes
+            match mode {
+                "dry" => {
+                    let p = lataif_lib::e2e_support::staging_gc_analyze(work, 3600, now).expect("analyze");
+                    println!("GC_DRYRUN deletable={} retained={} bytes={}", p.deletable_count, p.retained_count, p.deletable_bytes);
+                }
+                "apply" => {
+                    let r = lataif_lib::e2e_support::staging_gc_apply(work, 3600, now).expect("apply");
+                    let orphans_gone = !work.join("backups").join("backup-ws-OLD").exists() && !j.join("t__req1.main.jpg.tmp").exists();
+                    let survivors = work.join("backups").join("snap-KEEP").join("manifest.json").exists()
+                        && work.join("media").join("t").join("aa").join("aaaaaa.jpg").exists()
+                        && j.join("t__req2.main.jpg.tmp").exists()
+                        && work.join(".restore-staging").join("x").exists();
+                    let r2 = lataif_lib::e2e_support::staging_gc_apply(work, 3600, now).expect("apply2");
+                    println!("GC_APPLY deleted={} skipped={} orphansGone={} survivors={} second={}", r.deleted, r.skipped, orphans_gone as u8, survivors as u8, r2.deleted);
+                }
+                other => { eprintln!("unknown gc mode: {}", other); std::process::exit(2); }
+            }
+        }
         _ => {
-            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup|restore|validate> <db_path|salt|appDataDir|backupDir>");
+            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup|restore|validate|gc> <db_path|salt|appDataDir|backupDir|workDir>");
             std::process::exit(2);
         }
     }
