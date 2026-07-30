@@ -26,6 +26,11 @@ function triggerMediaRecoveryPostAuth(): void {
           w.armMobileDrainPoller();
         })
         .catch(() => { /* never blocks auth */ });
+      // MOBILE-04B2A12-U1 — expose the safe restore surface (list + owner-gated restore orchestration) on
+      // window. Additive, no auto-run; a Danger-Zone UI (U2) will call it. No path ever crosses the bridge.
+      void import('@/core/lifecycle/restore-wiring')
+        .then((m) => m.installRestoreBridge())
+        .catch(() => { /* never blocks auth */ });
     });
 }
 

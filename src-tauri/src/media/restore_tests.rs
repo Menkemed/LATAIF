@@ -183,6 +183,202 @@ fn boot_recover_fails_closed_on_unrecoverable_journal_and_cleans_committed() {
 }
 
 #[test]
+fn list_snapshots_lists_only_safe_complete_prechecked() {
+    let b = tmp();
+    let app = b.join("app"); std::fs::create_dir_all(app.join("backups")).unwrap();
+    // one GOOD snapshot under <app>/backups/snap1
+    let src = b.join("src"); std::fs::create_dir_all(&src).unwrap();
+    build_live(&src, b"MASTER-A", b"THUMB-A");
+    make_backup(&src, &app.join("backups").join("snap1"), &b);
+    // a FOREIGN dir (no/incompatible manifest) → must be skipped
+    let foreign = app.join("backups").join("foreign"); std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("manifest.json"), b"{\"not\":\"a backup\"}").unwrap();
+    // an INCOMPLETE snapshot (status flipped) → must be skipped
+    let inc = app.join("backups").join("incomplete");
+    make_backup(&src, &inc, &b);
+    let raw = std::fs::read_to_string(inc.join("manifest.json")).unwrap().replace("\"complete\"", "\"in_progress\"");
+    std::fs::write(inc.join("manifest.json"), raw).unwrap();
+
+    let list = list_snapshots(&app).expect("list ok");
+    assert_eq!(list.len(), 1, "only the safe complete snapshot is listed");
+    let s = &list[0];
+    assert_eq!(s.snapshot_id, "snap1", "opaque id = dir segment, never a path");
+    assert_eq!(s.created_at, "2026-07-30T00:00:00Z");
+    assert_eq!(s.app_version, "e2e");
+    assert_eq!(s.media_file_count, 2);
+    assert!(s.db_size_bytes > 0 && s.media_size_bytes > 0, "sanitised sizes present");
+    // empty when there is no backups dir at all
+    assert!(list_snapshots(&b.join("nope")).unwrap().is_empty());
+}
+
+#[test]
+fn resolve_snapshot_id_rejects_traversal_absolute_nested_and_unknown() {
+    let b = tmp();
+    let app = b.join("app"); std::fs::create_dir_all(app.join("backups")).unwrap();
+    let src = b.join("src"); std::fs::create_dir_all(&src).unwrap();
+    build_live(&src, b"M", b"T");
+    make_backup(&src, &app.join("backups").join("good"), &b);
+
+    // unsafe ids are rejected without touching the filesystem
+    for bad in ["", ".", "..", "a/b", "a\\b", "../evil", "C:\\x"] {
+        assert_eq!(resolve_snapshot_id(&app, bad).unwrap_err().code(), "MEDIA_PATH_OUTSIDE_ROOT", "rejected: {:?}", bad);
+    }
+    // a safe-looking but UNKNOWN id fails (does not exist under the root)
+    assert!(resolve_snapshot_id(&app, "missing").is_err());
+    // the real id resolves under the canonical backups root
+    let p = resolve_snapshot_id(&app, "good").expect("good resolves");
+    assert!(p.ends_with("good"));
+    // restore_by_id refuses a traversal id BEFORE any mutation
+    assert_eq!(restore_by_id(&app, "../evil").unwrap_err().code(), "MEDIA_PATH_OUTSIDE_ROOT");
+}
+
+#[test]
+fn restore_by_id_round_trips_from_the_canonical_root() {
+    let b = tmp();
+    let app = b.join("app"); std::fs::create_dir_all(app.join("backups")).unwrap();
+    // snapshot of an ORIGINAL state, published under backups/snapX
+    let orig = b.join("orig"); std::fs::create_dir_all(&orig).unwrap();
+    build_live(&orig, b"ORIG-MASTER", b"ORIG-THUMB");
+    let m = make_backup(&orig, &app.join("backups").join("snapX"), &b);
+    let want = dir_hashes(&orig);
+    // put a DIFFERENT live tree into the app dir, then restore by id
+    build_live(&app, b"LIVE-MASTER-XX", b"LIVE-THUMB-XX");
+    assert_ne!({ let mut h = dir_hashes(&app); h.retain(|k, _| !k.starts_with("backups/")); h }, want, "app differs before restore");
+    let rm = restore_by_id(&app, "snapX").expect("restore by id ok");
+    assert_eq!(rm.status, "complete");
+    // the app's DB + media match the original snapshot (ignore the backups/ store itself)
+    let mut got = dir_hashes(&app); got.retain(|k, _| !k.starts_with("backups/"));
+    assert_eq!(got, want, "restored app tree is hash-identical to the snapshot");
+    assert_eq!(verify_restored(&app, &m).unwrap(), 2);
+}
+
+#[test]
+fn schedule_restore_writes_intent_without_mutation() {
+    let b = tmp();
+    let app = b.join("app"); std::fs::create_dir_all(app.join("backups")).unwrap();
+    build_live(&app, b"LIVE-MASTER", b"LIVE-THUMB");
+    make_backup(&app, &app.join("backups").join("snapX"), &b);
+    let live_before = { let mut h = dir_hashes(&app); h.retain(|k, _| !k.starts_with("backups/")); h };
+
+    schedule_restore(&app, "snapX").expect("schedule ok");
+    assert_eq!(std::fs::read_to_string(app.join(".restore-intent")).unwrap().trim(), "snapX", "intent written");
+    // NO DB/media mutation from scheduling
+    let live_after = { let mut h = dir_hashes(&app); h.retain(|k, _| !k.starts_with("backups/")); h };
+    assert_eq!(live_after, live_before, "scheduling performs no mutation");
+
+    // a traversal / unknown id writes NO intent (fails before)
+    std::fs::remove_file(app.join(".restore-intent")).unwrap();
+    assert!(schedule_restore(&app, "../evil").is_err());
+    assert!(schedule_restore(&app, "missing").is_err());
+    assert!(!app.join(".restore-intent").exists(), "no intent on a rejected schedule");
+}
+
+#[test]
+fn execute_pending_applies_once_and_never_repeats() {
+    let b = tmp();
+    let app = b.join("app"); std::fs::create_dir_all(app.join("backups")).unwrap();
+    // snapshot of an ORIGINAL state
+    let orig = b.join("orig"); std::fs::create_dir_all(&orig).unwrap();
+    build_live(&orig, b"ORIG-MASTER", b"ORIG-THUMB");
+    make_backup(&orig, &app.join("backups").join("snapX"), &b);
+    let want = dir_hashes(&orig);
+    // a DIFFERENT live tree; schedule + apply at boot
+    build_live(&app, b"LIVE-MASTER-X", b"LIVE-THUMB-X");
+    schedule_restore(&app, "snapX").unwrap();
+
+    let applied = execute_pending_restore(&app).expect("boot restore ok");
+    assert_eq!(applied.as_deref(), Some("snapX"), "the scheduled snapshot was applied");
+    let mut got = dir_hashes(&app); got.retain(|k, _| !k.starts_with("backups/"));
+    assert_eq!(got, want, "app tree == snapshot after boot restore");
+    assert!(!app.join(".restore-intent").exists(), "intent consumed on durable success");
+    // exactly-once: a second boot does NOTHING (no repeat)
+    assert_eq!(execute_pending_restore(&app).unwrap(), None, "no pending restore on the next boot");
+    let mut again = dir_hashes(&app); again.retain(|k, _| !k.starts_with("backups/"));
+    assert_eq!(again, want, "state unchanged — no repeat restore");
+}
+
+#[test]
+fn crash_during_scheduled_boot_restore_recovers_then_completes() {
+    let b = tmp();
+    let app = b.join("app"); std::fs::create_dir_all(app.join("backups")).unwrap();
+    let orig = b.join("orig"); std::fs::create_dir_all(&orig).unwrap();
+    build_live(&orig, b"ORIG-MASTER", b"ORIG-THUMB");
+    make_backup(&orig, &app.join("backups").join("snapX"), &b);
+    let want = dir_hashes(&orig);
+    build_live(&app, b"LIVE-MASTER-Y", b"LIVE-THUMB-Y");
+    let prior = { let mut h = dir_hashes(&app); h.retain(|k, _| !k.starts_with("backups/")); h };
+    schedule_restore(&app, "snapX").unwrap();
+    let backup_dir = app.join("backups").join("snapX");
+
+    // the boot restore hard-crashes mid-swap → journal + partial renames + intent still present
+    restore_crashing(&RestoreInput { backup_dir: &backup_dir, app_data_dir: &app }, CrashAt::SwapJournalled).unwrap_err();
+    assert!(app.join(".restore-journal").exists() && app.join(".restore-intent").exists(), "crash left journal + intent");
+
+    // next boot: recover() rolls the pre-commit crash back to the OLD state (intent kept → re-run)
+    recover(&app).unwrap();
+    let after_recover = { let mut h = dir_hashes(&app); h.retain(|k, _| !k.starts_with("backups/")); h };
+    assert_eq!(after_recover, prior, "rolled back to the exact prior state; intent survives");
+    assert!(app.join(".restore-intent").exists(), "intent still pending after rollback");
+    // then execute the pending restore to completion
+    assert_eq!(execute_pending_restore(&app).unwrap().as_deref(), Some("snapX"));
+    let mut got = dir_hashes(&app); got.retain(|k, _| !k.starts_with("backups/"));
+    assert_eq!(got, want, "scheduled restore completed after recovery");
+    assert!(!app.join(".restore-intent").exists(), "intent consumed exactly once");
+}
+
+#[test]
+fn commit_crash_before_intent_clear_is_consumed_by_recover_no_repeat() {
+    use crate::media::restore_recovery;
+    let b = tmp();
+    let app = b.join("app"); std::fs::create_dir_all(app.join("backups")).unwrap();
+    let orig = b.join("orig"); std::fs::create_dir_all(&orig).unwrap();
+    build_live(&orig, b"ORIG-MASTER", b"ORIG-THUMB");
+    make_backup(&orig, &app.join("backups").join("snapX"), &b);
+    let want = dir_hashes(&orig);
+    build_live(&app, b"LIVE-MASTER-Z", b"LIVE-THUMB-Z");
+    schedule_restore(&app, "snapX").unwrap();
+
+    // apply the restore fully, then simulate a crash AFTER the durable `done` commit but BEFORE the intent
+    // was cleared: a leftover `done` journal + a still-present intent.
+    restore_by_id(&app, "snapX").unwrap();
+    std::fs::write(app.join(".restore-journal"), b"done").unwrap();
+    assert!(app.join(".restore-intent").exists(), "intent still present at the crash point");
+
+    // boot recovery consumes the committed intent → NO repeat restore
+    recover(&app).unwrap();
+    assert!(!app.join(".restore-intent").exists(), "recover() cleared the committed intent");
+    assert_eq!(execute_pending_restore(&app).unwrap(), None, "no repeat restore after a committed crash");
+    let mut got = dir_hashes(&app); got.retain(|k, _| !k.starts_with("backups/"));
+    assert_eq!(got, want, "state is the snapshot, applied exactly once");
+    // sanity: the intent helpers round-trip
+    restore_recovery::write_intent(&app, "snapX").unwrap();
+    assert_eq!(restore_recovery::read_intent(&app).as_deref(), Some("snapX"));
+    restore_recovery::clear_intent(&app).unwrap();
+    assert_eq!(restore_recovery::read_intent(&app), None);
+}
+
+#[test]
+fn restore_moves_stale_server_wal_shm_sidecars_aside() {
+    let b = tmp();
+    let src = b.join("src"); std::fs::create_dir_all(&src).unwrap();
+    build_live(&src, b"SRC-MASTER", b"SRC-THUMB");
+    let backup = b.join("backup"); make_backup(&src, &backup, &b);
+
+    let live = b.join("live"); std::fs::create_dir_all(&live).unwrap();
+    build_live(&live, b"CUR-MASTER", b"CUR-THUMB");
+    // a stale WAL/SHM sitting next to the live server DB would be replayed over a swapped-in DB.
+    std::fs::write(live.join("lataif_sync_server.db-wal"), b"STALE-WAL").unwrap();
+    std::fs::write(live.join("lataif_sync_server.db-shm"), b"STALE-SHM").unwrap();
+
+    restore(&RestoreInput { backup_dir: &backup, app_data_dir: &live }, false).expect("restore ok");
+    // restored DB present, and the stale sidecars are GONE (moved aside as a unit, backup carries none).
+    assert!(live.join("lataif_sync_server.db").exists(), "restored server DB present");
+    assert!(!live.join("lataif_sync_server.db-wal").exists(), "stale -wal removed (not shadowing restored DB)");
+    assert!(!live.join("lataif_sync_server.db-shm").exists(), "stale -shm removed");
+    assert!(!live.join(".restore-rollback").exists() && !live.join(".restore-journal").exists());
+}
+
+#[test]
 fn simulated_swap_failure_rolls_back_to_exact_prior_state() {
     let b = tmp();
     let src = b.join("src"); std::fs::create_dir_all(&src).unwrap();

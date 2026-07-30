@@ -2850,6 +2850,19 @@ export async function flushDatabase(): Promise<void> {
   await saver.flush(10);
 }
 
+// MOBILE-04B2A12-U1 — durable flush + CLOSE the frontend DB for an atomic restore. After the Rust host
+// swaps `lataif.db` on disk, no JS save may fire again (it would clobber the restored file with the stale
+// in-memory DB before the relaunch). So: durably persist any pending state, then close the in-memory DB
+// under the exclusive-swap gate (drains active leases, blocks new ones); with `db === null` the save
+// coalescer's `isReady()` is false, so every later save no-ops until the controlled relaunch reloads the
+// restored file. Throws (fail-closed) if a durable save is impossible (active tx / persist error).
+export async function flushAndCloseForRestore(): Promise<void> {
+  await saveDatabaseDurably(); // durable persist first — throws on active tx / persist failure
+  await dbLifecycle.runExclusiveSwap(async () => {
+    if (db) { db.close(); db = null; }
+  });
+}
+
 // Synchroner Flush fuer Browser beforeunload (localStorage.setItem blockiert).
 // Nicht fuer Tauri verwenden — dort macht App.tsx einen async flushDatabase()
 // im CloseRequested-Handler.

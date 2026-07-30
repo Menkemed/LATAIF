@@ -21,6 +21,8 @@ use std::fs;
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use super::backup::{collect_selection_from_db, BackupManifest};
 use super::restore_recovery::{journal_write, rollback_to_prior, JOURNAL, ROLLBACK, STAGING};
 use super::storage::{read_verified_media, sha256_hex};
@@ -33,7 +35,8 @@ pub use super::restore_recovery::recover;
 pub const MAX_RESTORE_FORMAT_VERSION: u32 = super::backup::BACKUP_FORMAT_VERSION;
 const CRASH: &str = "SIMULATED_CRASH";
 
-/// Test-only crash points, taken right after a journal write or a rename group.
+/// Test-only crash points, taken right after a journal write or a rename group. Never exposed in a
+/// production build (constructed only by the `cfg(test, e2e)` crash-injection entry below).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashAt {
     AsideJournalled,
@@ -172,8 +175,10 @@ pub fn restore(input: &RestoreInput, inject_swap_failure: bool) -> Result<Backup
     restore_impl(input, inject_swap_failure, None)
 }
 
-/// Test-only: run the REAL swap but simulate a process crash right after `crash_at` — leaving the true
-/// on-disk state (journal + partial renames) for `recover()`, with NO in-process rollback/cleanup.
+/// Test/e2e-only: run the REAL swap but simulate a process crash right after `crash_at` — leaving the
+/// true on-disk state (journal + partial renames) for `recover()`, with NO in-process rollback/cleanup.
+/// Never compiled into a production build → the crash-injection surface is never exposed.
+#[cfg(any(test, feature = "e2e"))]
 pub fn restore_crashing(input: &RestoreInput, crash_at: CrashAt) -> Result<BackupManifest, MediaError> {
     restore_impl(input, false, Some(crash_at))
 }
@@ -227,7 +232,14 @@ fn restore_impl(
         journal_write(&journal_path, "aside-begin")?; // WRITE-AHEAD: declares the aside group before it runs
         crash(CrashAt::AsideJournalled)?;
         for name in &db_names {
-            move_path(&live.join(name), &rollback.join(name))?;
+            // Move the DB AND its WAL/SHM sidecars aside as one unit — a stale `-wal`/`-shm` left next to
+            // a swapped-in DB would be replayed over it on next open (silent corruption). The staged
+            // snapshot carries a checkpointed self-contained DB (no sidecars) so the restored DB is clean;
+            // rollback restores the old DB together with its sidecars.
+            for suffix in ["", "-wal", "-shm"] {
+                let f = format!("{}{}", name, suffix);
+                move_path(&live.join(&f), &rollback.join(&f))?;
+            }
         }
         move_path(&live.join("media"), &rollback.join("media"))?;
         crash(CrashAt::MovedAside)?;
@@ -280,6 +292,145 @@ pub fn verify_restored(app_data_dir: &Path, manifest: &BackupManifest) -> Result
         read_verified_media(&media_root, &s.scope, &s.hash, &s.extension)?;
     }
     Ok(selection.len())
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MEDIA-04B2A12-U1 — production safe listing + id-only restore (the surface the Tauri commands call).
+// The renderer NEVER supplies a filesystem path: it gets opaque ids from `list_snapshots` and passes an id
+// back to `restore_by_id`, which re-resolves it against the ONE canonical `<app_data_dir>/backups/` root.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A snapshotId must be a single safe path segment — never a traversal, absolute path, or nested path.
+fn is_unsafe_segment(id: &str) -> bool {
+    id.is_empty()
+        || id == "."
+        || id == ".."
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains('\0')
+        || (id.len() >= 2 && id.as_bytes()[1] == b':') // drive-letter absolute
+}
+
+/// Sanitised summary the UI can render. Carries NO absolute path — only the opaque id + date/version +
+/// aggregate sizes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotSummary {
+    /// Opaque id = the backup dir's single-segment name. Never a filesystem path.
+    pub snapshot_id: String,
+    pub created_at: String,
+    pub app_version: String,
+    pub db_size_bytes: u64,
+    pub media_size_bytes: u64,
+    pub media_file_count: usize,
+}
+
+/// Re-resolve an opaque snapshotId to its canonical backup dir under `<app_data_dir>/backups/`. Rejects any
+/// id that is not a single safe segment, is a symlink, or (after canonicalisation) does not sit DIRECTLY
+/// under the backups root. Never accepts a free/absolute path.
+pub fn resolve_snapshot_id(app_data_dir: &Path, snapshot_id: &str) -> Result<PathBuf, MediaError> {
+    if is_unsafe_segment(snapshot_id) {
+        return Err(MediaError::PathOutsideRoot);
+    }
+    let root = app_data_dir.join("backups");
+    let dir = root.join(snapshot_id);
+    if is_symlink(&dir) {
+        return Err(MediaError::PathReparsePointForbidden);
+    }
+    let root_c = fs::canonicalize(&root).map_err(io("backups root"))?;
+    let dir_c = fs::canonicalize(&dir).map_err(io("snapshot dir"))?;
+    if dir_c.parent() != Some(root_c.as_path()) {
+        return Err(MediaError::PathOutsideRoot); // escaped the canonical backups root
+    }
+    Ok(dir_c)
+}
+
+/// List ONLY safe, `complete`, fully pre-checked snapshots under `<app_data_dir>/backups/`. Any dir that
+/// fails the full pre-check (incomplete, foreign schema, tampered, symlink, unexpected file, unsafe name)
+/// is silently skipped — never surfaced. Returns opaque ids + sanitised totals only; no path leaves Rust.
+pub fn list_snapshots(app_data_dir: &Path) -> Result<Vec<SnapshotSummary>, MediaError> {
+    let root = app_data_dir.join("backups");
+    let mut out: Vec<SnapshotSummary> = Vec::new();
+    let entries = match fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(_) => return Ok(out), // no backups dir yet → empty list
+    };
+    for e in entries {
+        let path = match e {
+            Ok(x) => x.path(),
+            Err(_) => continue,
+        };
+        if is_symlink(&path) || !path.is_dir() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if !is_unsafe_segment(n) => n.to_string(),
+            _ => continue,
+        };
+        // FULL pre-check — only a valid, complete snapshot is ever listed.
+        let manifest = match validate_snapshot(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let db_size_bytes = manifest.db.byte_size
+            + manifest.additional_db_files.iter().map(|d| d.byte_size).sum::<u64>();
+        let media_size_bytes = manifest.files.iter().map(|f| f.byte_size).sum::<u64>();
+        out.push(SnapshotSummary {
+            snapshot_id: name,
+            created_at: manifest.created_at,
+            app_version: manifest.app_version,
+            db_size_bytes,
+            media_size_bytes,
+            media_file_count: manifest.files.len(),
+        });
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // newest first
+    Ok(out)
+}
+
+/// Restore by opaque id: re-resolve to the canonical root (rejecting traversal/foreign ids), then run the
+/// full atomic restore (which itself re-validates before touching anything). No crash injection.
+pub fn restore_by_id(app_data_dir: &Path, snapshot_id: &str) -> Result<BackupManifest, MediaError> {
+    let backup_dir = resolve_snapshot_id(app_data_dir, snapshot_id)?;
+    restore(&RestoreInput { backup_dir: &backup_dir, app_data_dir }, false)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MEDIA-04B2A12-U1-R1 — scheduled boot-time restore. A live restore never mutates the running process:
+// the owner SCHEDULES a durable intent (validated, no mutation), the app relaunches, and the boot path
+// applies the restore while every DB is closed, clearing the intent only on durable success (exactly-once).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Owner-gated SCHEDULE (called by the command after verifying the owner): re-resolve the opaque id to the
+/// canonical backups root, run the FULL pre-check, then durably record the pending intent. Performs NO
+/// DB/media mutation — a wrong/foreign/incomplete id fails here with nothing written.
+pub fn schedule_restore(app_data_dir: &Path, snapshot_id: &str) -> Result<(), MediaError> {
+    let backup_dir = resolve_snapshot_id(app_data_dir, snapshot_id)?;
+    validate_snapshot(&backup_dir)?; // full pre-check BEFORE any intent is written
+    super::restore_recovery::write_intent(app_data_dir, snapshot_id)
+}
+
+/// Boot-time application of a pending scheduled restore. MUST run before any DB/media file is opened (after
+/// `recover()` has reconciled any interrupted swap). If an intent exists: re-resolve + full re-validate,
+/// apply the atomic restore (own crash-safe journal), then durably clear the intent. Returns the applied
+/// snapshotId, or None when there is nothing to do. Fail-closed: on any error the intent is kept and the
+/// error propagates so the caller aborts startup without opening the DBs.
+///
+/// Exactly-once: the intent is the sole idempotency token. A crash mid-swap is rolled back by `recover()`
+/// and re-applied here (the intent survived); a crash after commit but before the intent is cleared is
+/// consumed by `recover()`'s `done` branch (or, in the sub-millisecond window after the journal was
+/// cleaned, re-applies the IDENTICAL snapshot idempotently and then clears the intent). Once the intent is
+/// durably gone, no further restore ever runs.
+pub fn execute_pending_restore(app_data_dir: &Path) -> Result<Option<String>, MediaError> {
+    let id = match super::restore_recovery::read_intent(app_data_dir) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let backup_dir = resolve_snapshot_id(app_data_dir, &id)?; // re-resolve under the canonical root
+    validate_snapshot(&backup_dir)?; // re-validate the on-disk snapshot (defence-in-depth)
+    restore(&RestoreInput { backup_dir: &backup_dir, app_data_dir }, false)?; // atomic, DBs closed at boot
+    super::restore_recovery::clear_intent(app_data_dir)?; // durable success → consume the intent
+    Ok(Some(id))
 }
 
 #[cfg(test)]

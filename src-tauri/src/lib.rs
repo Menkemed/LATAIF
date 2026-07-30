@@ -2069,6 +2069,62 @@ fn mobile_runtime_scope_configure(
     .map_err(|e| e.to_string())
 }
 
+// ── MEDIA-04B2A12-U1 — production safe backup listing + owner-gated atomic restore ──────────────────
+//
+// These are the ONLY production entry points into the atomic restore. The renderer never supplies a
+// filesystem path: `list_restore_snapshots` returns opaque ids (fully pre-checked, `complete` only) and
+// `restore_snapshot` takes an id, re-resolves it against the canonical `<app_data_dir>/backups/` root, and
+// re-validates before touching anything. The crash-injection surface (`restore_crashing`/`CrashAt`) is not
+// compiled here and is never exposed. Server-DB checkpoint+close is done INTERNALLY (no separate command).
+
+/// Owner-gated read-only listing of the safe, complete, pre-checked snapshots. Verified against the server
+/// DB (bcrypt) like every sensitive Settings/owner action; reveals only opaque ids + dates/version/sizes —
+/// never a path or any record content.
+#[tauri::command]
+fn list_restore_snapshots(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<Vec<media::restore::SnapshotSummary>, String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+        .map_err(|code| code.to_string())?;
+    drop(conn);
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    media::restore::list_snapshots(&app_dir).map_err(|code| code.code().to_string())
+}
+
+/// Owner-gated SCHEDULE of a boot-time restore. There is NO command that mutates DB/media while the app
+/// runs — the restore is applied by the boot path (DBs closed) after the controlled relaunch. Accepts ONLY
+/// an opaque `snapshotId` (never a free path). Order:
+///   1. verify the owner against the server DB (bcrypt) — a wrong owner is rejected BEFORE anything,
+///   2. re-resolve the id to the canonical backups root + FULL pre-check (read-only),
+///   3. durably record the pending-restore intent (temp→fsync→rename). NO DB/media mutation here.
+/// The JS orchestrator quiesces the runtime and relaunches ONLY on the Ok returned here; on the next boot,
+/// `execute_pending_restore` applies the swap and clears the intent exactly once.
+#[tauri::command]
+fn schedule_restore_snapshot(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    snapshot_id: String,
+) -> Result<serde_json::Value, String> {
+    // 1. owner gate (fresh connection, dropped immediately) — reject BEFORE writing any intent.
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    // 2+3. resolve + full pre-check + durable intent (no mutation). A traversal/foreign/incomplete id fails
+    //      here with NO intent written and nothing touched.
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    media::restore::schedule_restore(&app_dir, &snapshot_id)
+        .map_err(|code| code.code().to_string())?;
+    Ok(serde_json::json!({ "snapshotId": snapshot_id, "scheduled": true }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2088,6 +2144,15 @@ pub fn run() {
             // the committed state is kept; an unrecoverable journal fails startup closed (no DB/media use).
             if let Err(e) = media::restore_recovery::recover(&app_dir) {
                 return Err(format!("restore boot recovery failed: {}", e.code()).into());
+            }
+            // MEDIA-04B2A12-U1-R1 — apply a SCHEDULED restore now, still before any DB/media open and after
+            // the journal has been reconciled. Re-validates the snapshot, swaps DB+media as a unit (DBs
+            // closed), and clears the intent only on durable success (exactly-once). Fail-closed: any error
+            // aborts startup so the app never opens partially-restored DBs.
+            match media::restore::execute_pending_restore(&app_dir) {
+                Ok(Some(_)) => { /* a pending restore was applied + the intent consumed */ }
+                Ok(None) => { /* nothing scheduled */ }
+                Err(e) => return Err(format!("scheduled restore failed: {}", e.code()).into()),
             }
             let db_path = app_dir.join("lataif_sync_server.db");
 
@@ -2189,6 +2254,8 @@ pub fn run() {
             // binding ONLY; the 6 mobile MUTATION commands stay unregistered and the worker blocked.
             mobile_runtime_scope_options,
             mobile_runtime_scope_configure,
+            list_restore_snapshots,
+            schedule_restore_snapshot,
             finalize_application_shutdown
         ])
         .run(tauri::generate_context!())

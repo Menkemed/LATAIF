@@ -9,12 +9,13 @@
 //! outside the module's own `cargo test` suite.
 #![allow(dead_code, unused_imports)]
 
-// MEDIA-04B2A12-I2 — real backup snapshot host. Compiled in test + e2e builds only (the production
-// snapshot activation is a reviewed follow-up); the cargo unit tests prove the real host I/O + fail-closed.
-#[cfg(any(test, feature = "e2e"))]
+// MEDIA-04B2A12-I2 — real backup snapshot host (types + selection + snapshot). PRODUCTION-compiled since
+// U1: the restore path (validate + list + restore) reuses its manifest types and selection query. The
+// snapshot CREATION host is compiled but not yet exposed by any command (no backup-creation UI yet).
 pub mod backup;
-// MEDIA-04B2A12-R1 — real atomic DB+media restore (pre-check → atomic swap → rollback). test/e2e only.
-#[cfg(any(test, feature = "e2e"))]
+// MEDIA-04B2A12-R1/U1 — real atomic DB+media restore (pre-check → atomic swap → rollback). PRODUCTION
+// since U1 (validate_snapshot / list_snapshots / restore_by_id feed the owner-gated restore command); the
+// crash-injection surface (`restore_crashing`/`CrashAt`) stays `cfg(test, e2e)` and is never exposed.
 pub mod restore;
 // MEDIA-04B2A12-R3 — boot recovery for an interrupted restore. PRODUCTION (runs before any DB opens).
 pub mod restore_recovery;
