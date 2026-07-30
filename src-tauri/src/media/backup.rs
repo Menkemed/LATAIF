@@ -36,7 +36,7 @@ pub struct MediaSelection {
     pub role: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbFileEntry {
     #[serde(rename = "fileName")]
     pub file_name: String,
@@ -45,7 +45,7 @@ pub struct DbFileEntry {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     #[serde(rename = "relPath")]
     pub rel_path: String,
@@ -62,7 +62,7 @@ pub struct FileEntry {
     pub scope: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupManifest {
     #[serde(rename = "backupFormatVersion")]
     pub backup_format_version: u32,

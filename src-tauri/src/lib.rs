@@ -23,6 +23,12 @@ pub mod e2e_support {
         collect_selection_from_db, snapshot as create_backup_snapshot, BackupManifest, MediaSelection,
         SnapshotInput,
     };
+    // MEDIA-04B2A12-R1/R3 — the REAL atomic restore host + crash injection + boot recovery, exposed for
+    // the isolated restore + live-crash-restart smokes.
+    pub use crate::media::restore::{
+        restore as restore_snapshot, restore_crashing, validate_snapshot, CrashAt, RestoreInput,
+    };
+    pub use crate::media::restore_recovery::recover as boot_recover;
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2077,6 +2083,12 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let _ = std::fs::create_dir_all(&app_dir);
+            // MEDIA-04B2A12-R3 — boot recovery for an interrupted atomic restore. MUST run before ANY DB
+            // or media file is opened. A pre-commit journal rolls the tree back to the exact prior state;
+            // the committed state is kept; an unrecoverable journal fails startup closed (no DB/media use).
+            if let Err(e) = media::restore_recovery::recover(&app_dir) {
+                return Err(format!("restore boot recovery failed: {}", e.code()).into());
+            }
             let db_path = app_dir.join("lataif_sync_server.db");
 
             let server = Arc::new(sync::SyncServer::new(db_path, SYNC_PORT));

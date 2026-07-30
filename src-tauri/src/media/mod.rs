@@ -13,6 +13,11 @@
 // snapshot activation is a reviewed follow-up); the cargo unit tests prove the real host I/O + fail-closed.
 #[cfg(any(test, feature = "e2e"))]
 pub mod backup;
+// MEDIA-04B2A12-R1 — real atomic DB+media restore (pre-check → atomic swap → rollback). test/e2e only.
+#[cfg(any(test, feature = "e2e"))]
+pub mod restore;
+// MEDIA-04B2A12-R3 — boot recovery for an interrupted restore. PRODUCTION (runs before any DB opens).
+pub mod restore_recovery;
 mod detect;
 // MEDIA-04A-2A — guarded ingest service + durable file journal. `pub(crate)` so
 // the thin Tauri command wrappers in `lib.rs` can reach it; still no UI/DB.
@@ -55,6 +60,12 @@ pub enum MediaError {
     FileMissing,
     /// Stored bytes do not hash to the expected content hash.
     FileHashMismatch,
+    /// MEDIA-04B2A12-R1 — restore: manifest format version is unknown/newer than supported.
+    RestoreUnknownVersion,
+    /// MEDIA-04B2A12-R1 — restore: the backup is not `complete` (aborted snapshot).
+    RestoreIncompleteBackup,
+    /// MEDIA-04B2A12-R1 — restore: the backup dir carries a file the manifest does not list.
+    RestoreUnexpectedFile,
     /// Filesystem error (kind only, never a path).
     Io(String),
 }
@@ -73,6 +84,9 @@ impl MediaError {
             MediaError::InvalidExtension => "MEDIA_INVALID_EXTENSION",
             MediaError::FileMissing => "MEDIA_FILE_MISSING",
             MediaError::FileHashMismatch => "MEDIA_FILE_HASH_MISMATCH",
+            MediaError::RestoreUnknownVersion => "MEDIA_RESTORE_UNKNOWN_VERSION",
+            MediaError::RestoreIncompleteBackup => "MEDIA_RESTORE_INCOMPLETE_BACKUP",
+            MediaError::RestoreUnexpectedFile => "MEDIA_RESTORE_UNEXPECTED_FILE",
             MediaError::Io(_) => "MEDIA_IO_ERROR",
         }
     }

@@ -115,8 +115,50 @@ fn main() {
                 }
             }
         }
+        // MEDIA-04B2A12-R1 — drive the REAL atomic restore host. `restore <appDataDir> <backupDir>` fully
+        // pre-checks the snapshot, then swaps DB+media as a unit with rollback on any failure.
+        "restore" => {
+            let app_dir = &db_path; // args[2] = appDataDir
+            let backup_dir = std::path::PathBuf::from(args.get(3).expect("usage: restore <appDataDir> <backupDir>"));
+            let input = lataif_lib::e2e_support::RestoreInput { backup_dir: &backup_dir, app_data_dir: app_dir };
+            match lataif_lib::e2e_support::restore_snapshot(&input, false) {
+                Ok(m) => println!("RESTORE_OK files={} status={}", m.file_count, m.status),
+                Err(e) => {
+                    println!("RESTORE_ERR {}", e.code());
+                    std::process::exit(3);
+                }
+            }
+        }
+        // MEDIA-04B2A12-R3 — run the REAL restore up to a crash point, leaving the true on-disk state
+        // (journal + partial renames) for the app's boot recovery. `restore-crash <appDataDir> <backupDir> <point>`.
+        "restore-crash" => {
+            let app_dir = &db_path;
+            let backup_dir = std::path::PathBuf::from(args.get(3).expect("usage: restore-crash <appDataDir> <backupDir> <point>"));
+            let point = match args.get(4).map(|s| s.as_str()).unwrap_or("") {
+                "aside-journalled" => lataif_lib::e2e_support::CrashAt::AsideJournalled,
+                "moved-aside" => lataif_lib::e2e_support::CrashAt::MovedAside,
+                "swap-journalled" => lataif_lib::e2e_support::CrashAt::SwapJournalled,
+                "swapped-in" => lataif_lib::e2e_support::CrashAt::SwappedIn,
+                other => { eprintln!("unknown crash point: {}", other); std::process::exit(2); }
+            };
+            let input = lataif_lib::e2e_support::RestoreInput { backup_dir: &backup_dir, app_data_dir: app_dir };
+            match lataif_lib::e2e_support::restore_crashing(&input, point) {
+                Ok(_) => { println!("CRASH_NONE"); }
+                Err(e) => { println!("CRASHED {}", e.code()); }
+            }
+        }
+        // `validate <backupDir>` — pre-check only (no mutation), for the fail-closed cases.
+        "validate" => {
+            match lataif_lib::e2e_support::validate_snapshot(&db_path) {
+                Ok(m) => println!("VALIDATE_OK files={} status={}", m.file_count, m.status),
+                Err(e) => {
+                    println!("VALIDATE_ERR {}", e.code());
+                    std::process::exit(3);
+                }
+            }
+        }
         _ => {
-            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup> <db_path|salt|appDataDir>");
+            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup|restore|validate> <db_path|salt|appDataDir|backupDir>");
             std::process::exit(2);
         }
     }
