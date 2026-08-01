@@ -22,6 +22,8 @@ import { usePayablesStore, payablesTotal, overdueCount } from '@/stores/payables
 import { GaugeChart } from '@/components/charts/GaugeChart';
 import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { useMediaScope } from '@/hooks/useMediaScope';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { balanceOf, totalReceivables } from '@/core/ledger/queries';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
@@ -42,6 +44,7 @@ function fmt(v: number): string {
 
 export function Dashboard() {
   const navigate = useNavigate();
+  const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   const { products, categories, loadProducts, loadCategories, getStockValue, getStockByCategory } = useProductStore();
   // v0.6.9 — Need-to-Order Indikator (Sidebar + OrderList + Dashboard).
   const { orders, loadOrders, getOrderIdsNeedingPurchase } = useOrderStore();
@@ -410,7 +413,7 @@ export function Dashboard() {
           name: `${p.brand || ''} ${p.name}`.trim(),
           subtitle: cat ? `${cat.name}${agg.units > 1 ? ` · ${agg.units}× sold` : ''}` : `${agg.units}× sold`,
           price: agg.revenue,
-          imageUrl: p.images && p.images.length > 0 ? p.images[0] : undefined,
+          product: { id: p.id, images: p.images || [] },
         } as TopProductItem;
       })
       .filter((x): x is TopProductItem => !!x)
@@ -852,6 +855,8 @@ export function Dashboard() {
             <TopProductsList
               title="Top Selling Products"
               items={topSellingProducts}
+              mediaTenantId={mediaTenantId}
+              mediaBranchId={mediaBranchId}
               emptyText="No sales yet — top products will appear here once you make sales."
             />
             <TopProductsList
@@ -924,12 +929,13 @@ export function Dashboard() {
                   <Card key={p.id} hoverable noPadding onClick={() => navigate(`/collection/${p.id}`)}>
                     <div className="flex items-center justify-center relative"
                       style={{ height: 160, background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', overflow: 'hidden' }}>
-                      {p.images.length > 0 ? (
-                        // v0.7.17 — `contain` damit das ganze Foto sichtbar bleibt.
-                        <img src={p.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                      ) : (
-                        <Package size={32} strokeWidth={1} style={{ color: '#6B7280' }} />
-                      )}
+                      <CollectionProductThumb
+                        product={p}
+                        tenantId={mediaTenantId}
+                        branchId={mediaBranchId}
+                        imgStyle={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                        iconSize={32}
+                      />
                       {cat && (
                         <span className="absolute" style={{
                           top: 10, left: 10, fontSize: 10, padding: '2px 8px', borderRadius: 999,

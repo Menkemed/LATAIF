@@ -14,9 +14,10 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import type { CSSProperties } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Package } from 'lucide-react';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
-import { decideCollectionThumb } from '@/core/media/collection-thumb';
+import { decideCollectionThumb, planPendingRetry } from '@/core/media/collection-thumb';
 
 interface ThumbProps {
   product: { id: string; images: string[] };
@@ -45,11 +46,46 @@ export function CollectionProductThumb(props: ThumbProps) {
 function ResolvedThumb(props: ThumbProps) {
   const { product, tenantId, branchId, imgStyle, iconSize = 36, iconColor = '#6B7280', iconStrokeWidth = 1 } = props;
   const hasAuthKey = !!product.id && !!tenantId && !!branchId;
+
+  // DASH-I1 — bounded pending-retry. A resolve that lands on `pending` (the
+  // create-batch is still finalizing — common on a cold Dashboard that mounts
+  // ahead of the just-created product) would otherwise never re-run, since the
+  // resolve key is stable. We bump `reloadNonce` after a capped backoff to force
+  // a fresh resolve, up to `THUMB_PENDING_MAX_ATTEMPTS`, then fall back to the
+  // placeholder. Component-local (one chain per mount) + the controller's own
+  // single-flight guarantee ⇒ many cards never storm the resolver. No permanent
+  // poller; the timer is cleared on unmount / key change / any non-pending state.
+  const [nonce, setNonce] = useState(0);
+  const [pendingExhausted, setPendingExhausted] = useState(false);
+  const attemptsRef = useRef(0);
   // `enabled = hasAuthKey`: with no authorised tenant/branch the hook stays idle
   // (and still owns teardown), so we fall through to the placeholder — never a
   // cross-scope read.
-  const state = useProductMediaPresentation(product.id, tenantId, branchId, hasAuthKey);
-  const decision = decideCollectionThumb({ legacyFirst: undefined, state, hasAuthKey });
+  const state = useProductMediaPresentation(product.id, tenantId, branchId, hasAuthKey, nonce);
+
+  // A new resolve key is a brand-new retry budget (the previous chain's timer is
+  // torn down by the effect below, whose deps also change).
+  useEffect(() => {
+    attemptsRef.current = 0;
+    setPendingExhausted(false);
+  }, [product.id, tenantId, branchId, hasAuthKey]);
+
+  // `state` is a fresh object on every controller emit, so this re-runs on each
+  // resolve conclusion — including two consecutive `pending`s — with exactly one
+  // live timer (prior timer cleared in cleanup). `media`/`none`/`error` clear it
+  // and never schedule, so those states never spin a retry loop.
+  useEffect(() => {
+    if (!hasAuthKey || state.status !== 'pending') return;
+    const plan = planPendingRetry(attemptsRef.current);
+    if (!plan.retry) { setPendingExhausted(true); return; }
+    const timer = window.setTimeout(() => {
+      attemptsRef.current += 1;
+      setNonce((n) => n + 1);
+    }, plan.delayMs);
+    return () => window.clearTimeout(timer);
+  }, [state, hasAuthKey]);
+
+  const decision = decideCollectionThumb({ legacyFirst: undefined, state, hasAuthKey, pendingExhausted });
 
   if (decision.kind === 'image') {
     return <img src={decision.src} alt="" style={imgStyle ?? DEFAULT_IMG} />;

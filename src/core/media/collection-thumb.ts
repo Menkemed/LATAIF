@@ -24,6 +24,34 @@ export type ThumbDecision =
   | { kind: 'skeleton' }
   | { kind: 'placeholder' };
 
+// ── bounded pending-retry contract (DASH-I1) ────────────────────────────────
+//
+// A media-pipeline product whose create-batch is still finalizing resolves to
+// `kind: 'pending'`. A thumbnail mounted at that instant (e.g. the Dashboard's
+// cold first paint, which races ahead of the batch) would otherwise sit on that
+// one-shot `pending` forever — its resolve key never changes, so nothing re-runs
+// the resolver. These constants + `planPendingRetry` drive a bounded, backed-off
+// re-resolve chain that turns `pending → media` WITHOUT a remount, and falls back
+// to the placeholder once the budget is spent (never an endless skeleton). It is
+// pure/framework-agnostic so the contract is node-testable; the component owns
+// the timers. It changes NO lease/DB/resolver-core behaviour — each retry is just
+// another ordinary read-only resolve.
+export const THUMB_PENDING_MAX_ATTEMPTS = 8;
+export const THUMB_PENDING_BACKOFF_BASE_MS = 300;
+export const THUMB_PENDING_BACKOFF_CAP_MS = 1500;
+
+/**
+ * Decide the next step of the pending-retry chain from the number of retries
+ * ALREADY performed. Only ever consulted while the resolution is `pending`.
+ *   • `attempt < MAX` → retry after a capped exponential backoff
+ *   • `attempt >= MAX` → stop; the view shows the placeholder (exhausted)
+ */
+export function planPendingRetry(attempt: number): { retry: boolean; delayMs: number; exhausted: boolean } {
+  if (attempt >= THUMB_PENDING_MAX_ATTEMPTS) return { retry: false, delayMs: 0, exhausted: true };
+  const delayMs = Math.min(THUMB_PENDING_BACKOFF_BASE_MS * 2 ** attempt, THUMB_PENDING_BACKOFF_CAP_MS);
+  return { retry: true, delayMs, exhausted: false };
+}
+
 /**
  * Decide the thumbnail for ONE collection product.
  *
@@ -48,10 +76,13 @@ export function decideCollectionThumb(input: {
   legacyFirst: string | undefined;
   state: PresentationState;
   hasAuthKey: boolean;
+  /** DASH-I1: once the bounded pending-retry budget is spent, a still-`pending`
+   *  resolution must fall back to the placeholder instead of an endless skeleton. */
+  pendingExhausted?: boolean;
 }): ThumbDecision {
   if (input.legacyFirst) return { kind: 'image', src: input.legacyFirst };
   const primary = presentationSrcs(input.state)[0];
   if (primary) return { kind: 'image', src: primary };
-  if (isResolvingMedia(input.state, input.hasAuthKey)) return { kind: 'skeleton' };
+  if (!input.pendingExhausted && isResolvingMedia(input.state, input.hasAuthKey)) return { kind: 'skeleton' };
   return { kind: 'placeholder' };
 }

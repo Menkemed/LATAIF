@@ -2,12 +2,17 @@
 // Saubere Listen-Items mit Bild, Name, Subtitle, Preis rechts.
 import { useNavigate } from 'react-router-dom';
 import { Package } from 'lucide-react';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 
 export interface TopProductItem {
   id: string;
   name: string;
   subtitle?: string;
   price: number;
+  /** DASH-I1 — canonical resolver input (media-pipeline aware). Rows that carry a
+   *  product (Top Selling Products) resolve their thumbnail through the same path
+   *  as the collection; rows without one (Top Clients) keep the icon fallback. */
+  product?: { id: string; images: string[] };
   imageUrl?: string;
   unit?: string;
 }
@@ -17,6 +22,9 @@ interface TopProductsListProps {
   title?: string;
   formatPrice?: (v: number) => string;
   emptyText?: string;
+  /** Authorised media scope for `product`-bearing rows (DB-derived, via useMediaScope). */
+  mediaTenantId?: string;
+  mediaBranchId?: string;
 }
 
 export function TopProductsList({
@@ -24,6 +32,8 @@ export function TopProductsList({
   title = 'Top Products',
   formatPrice = (v) => `${v.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD`,
   emptyText = 'No data yet.',
+  mediaTenantId,
+  mediaBranchId,
 }: TopProductsListProps) {
   const navigate = useNavigate();
 
@@ -61,7 +71,17 @@ export function TopProductsList({
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 overflow: 'hidden', flexShrink: 0,
               }}>
-                {item.imageUrl ? (
+                {item.product ? (
+                  <CollectionProductThumb
+                    product={item.product}
+                    tenantId={mediaTenantId}
+                    branchId={mediaBranchId}
+                    imgStyle={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    iconSize={18}
+                    iconColor="#9CA3AF"
+                    iconStrokeWidth={1.5}
+                  />
+                ) : item.imageUrl ? (
                   <img src={item.imageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                 ) : (
                   <Package size={18} strokeWidth={1.5} style={{ color: '#9CA3AF' }} />
