@@ -70,8 +70,14 @@ const errorS: PresentationState = { status: 'error', code: 'X', srcs: [] };
   ok(!/<img src=\{p\.images\[0\]\}/.test(wl), 'no direct <img src={p.images[0]}> thumbnail remains in WatchList');
   // Scope derived ONCE (not per card).
   ok(/const mediaTenantId = useMemo/.test(wl) && /useAuthStore\(s => s\.session\?\.branchId\)/.test(wl), 'media scope (tenant+branch) derived once at the top');
-  // Excel export deliberately untouched this slice (separate evaluation).
-  ok(/const src = p\.images\?\.\[0\] \|\| '';/.test(wl), 'Excel export still reads legacy p.images[0] — left for a separate slice, not silently changed');
+  // MEDIA-CONSUMERS-EXPORT — the Excel export now resolves media-pipeline images
+  // via the canonical resolver, not raw `p.images[0]`.
+  ok(/import \{ buildCollectionWorkbookBuffer \}/.test(wl), 'WatchList export imports the workbook builder');
+  ok(/import \{ resolvePrimaryImageForExport \}/.test(wl), 'WatchList export imports the primary-image resolver helper');
+  ok(/buildCollectionWorkbookBuffer\(items,/.test(wl), 'export builds the workbook via buildCollectionWorkbookBuffer');
+  ok(/resolveImage: resolvePrimaryImageForExport/.test(wl), 'image resolution is wired through resolvePrimaryImageForExport');
+  // The obsolete raw-only image read is gone (no silent legacy-only fallback).
+  ok(!/const src = p\.images\?\.\[0\] \|\| '';/.test(wl), 'export no longer falls back to a raw p.images[0]-only implementation');
 }
 
 // ── §6 component fast-paths legacy BEFORE mounting the resolver hook ─────────
