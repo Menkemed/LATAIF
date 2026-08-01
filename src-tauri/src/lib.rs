@@ -2224,12 +2224,13 @@ pub fn run() {
                 Ok(None) => { /* nothing scheduled */ }
                 Err(e) => return Err(format!("scheduled backup failed: {}", e.code()).into()),
             }
-            // MOBILE-04B2A14-I3 — safe temporary staging GC. Runs AFTER recovery/restore/backup (so their
-            // intents/journals are already consumed) and BEFORE any DB/server start. It only ever removes
-            // proven orphans (stale `backup-ws-*` / orphan `.ingest-journal/*.tmp`, conservative grace);
-            // recovery ALWAYS precedes it. GC is best-effort cleanup, NOT a safety gate: a GC error is
-            // logged and boot continues (no protected file can have been touched — allowlist + re-check),
-            // so a cleanup failure never blocks startup or leaves an unsafe state.
+            // MOBILE-04B2A14-I3/BLOB-I3 — safe staging GC. Runs AFTER recovery/restore/backup (so their
+            // intents/journals are consumed) and BEFORE any DB/server start (the server DB is quiescent +
+            // read-only here). Order inside: temp targets (stale `backup-ws-*` / orphan `.ingest-journal/
+            // *.tmp`) then terminal mobile-staging blobs (server-DB liveness: only conflict/quarantined or
+            // no-row, past grace). It removes ONLY proven orphans; recovery ALWAYS precedes it. Best-effort,
+            // NOT a safety gate: an error is logged and boot continues (allowlist + TOCTOU re-check mean no
+            // protected file can have been touched), so a cleanup failure never blocks startup.
             match media::staging_gc::execute_boot_gc(&app_dir) {
                 Ok(r) => eprintln!("staging gc: deleted={} skipped={}", r.deleted, r.skipped),
                 Err(e) => eprintln!("staging gc skipped: {}", e.code()),

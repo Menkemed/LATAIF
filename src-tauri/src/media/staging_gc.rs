@@ -34,11 +34,17 @@ const MOBILE_STAGING_DIR: &str = "mobile-upload-staging";
 enum BlobRef {
     /// At least one inbox row is `accepted`/`processing`/`ready` → keep.
     Live,
-    /// The server DB could not be opened/queried → FAIL-CLOSED, keep.
+    /// The server DB could not be opened/queried, or the schema was unexpected → FAIL-CLOSED, keep.
     DbUnavailable,
-    /// No live-state reference across ALL inbox rows (only conflict/quarantined, or none) → orphan candidate.
+    /// An inbox row carries an UNKNOWN / future state (not one of the five known) → keep (never infer death).
+    UnknownState,
+    /// Every inbox row is EXPLICITLY `conflict`/`quarantined`, OR there is NO row at all (a pure filesystem
+    /// orphan) → an orphan candidate, still gated by the grace period.
     Dead,
 }
+
+const LIVE_STATES: [&str; 3] = ["accepted", "processing", "ready"];
+const TERMINAL_STATES: [&str; 2] = ["conflict", "quarantined"];
 
 /// Open the server DB READ-ONLY (never creating it). None on any error → the caller retains every blob.
 fn open_server_ro(path: &Path) -> Option<rusqlite::Connection> {
@@ -49,17 +55,60 @@ fn open_server_ro(path: &Path) -> Option<rusqlite::Connection> {
     .ok()
 }
 
-/// Content-addressed liveness for a staging blob: reuses the authoritative server-DB query
-/// `sync::mobile_upload::blob_still_referenced` (ref-count>0 in accepted|processing|ready). Any read/query
-/// failure → `DbUnavailable` (fail-closed retain), so a missing/corrupt/locked server DB never deletes.
-fn blob_referenced(conn: Option<&rusqlite::Connection>, scope: &str, storage_key: &str) -> BlobRef {
-    match conn {
-        None => BlobRef::DbUnavailable,
-        Some(c) => match crate::sync::mobile_upload::blob_still_referenced(c, scope, storage_key) {
-            Ok(true) => BlobRef::Live,
-            Ok(false) => BlobRef::Dead,
-            Err(_) => BlobRef::DbUnavailable,
-        },
+/// A staging blob's storage_key must be the canonical `{scope}/{hh}/{hash}.{ext}` shape (3 safe segments,
+/// a 2-char sub-dir, a file with an extension). A non-normalised key is RETAINED (never deleted).
+fn is_normalized_staging_rel(rel: &str) -> bool {
+    let segs: Vec<&str> = rel.split('/').collect();
+    segs.len() == 3
+        && segs.iter().all(|s| !s.is_empty() && *s != "." && *s != ".." && !s.contains('\\'))
+        && segs[1].len() == 2
+        && segs[2].contains('.')
+}
+
+/// EXPLICIT content-addressed liveness for a staging blob. Gathers EVERY inbox state joined to this exact
+/// `(tenant, storage_key)` and decides by explicit state, never by "absence of a live reference":
+///   • any accepted/processing/ready row  → `Live` (keep),
+///   • any state NOT in the five known    → `UnknownState` (keep — future/unknown states never infer death),
+///   • all rows conflict/quarantined, or no row at all → `Dead` (grace-gated orphan candidate).
+/// Any open/prepare/query/decode error (missing/corrupt/locked DB, unexpected schema) → `DbUnavailable`.
+fn blob_liveness(conn: Option<&rusqlite::Connection>, scope: &str, storage_key: &str) -> BlobRef {
+    let c = match conn {
+        Some(c) => c,
+        None => return BlobRef::DbUnavailable,
+    };
+    let mut stmt = match c.prepare(
+        "SELECT DISTINCT i.state FROM mobile_upload_image m \
+         JOIN mobile_upload_inbox i \
+           ON i.tenant_id=m.tenant_id AND i.branch_id=m.branch_id \
+          AND i.authenticated_user_id=m.authenticated_user_id AND i.upload_event_id=m.upload_event_id \
+         WHERE m.tenant_id=?1 AND m.storage_key=?2",
+    ) {
+        Ok(s) => s,
+        Err(_) => return BlobRef::DbUnavailable,
+    };
+    let rows = match stmt.query_map(rusqlite::params![scope, storage_key], |r| r.get::<_, String>(0)) {
+        Ok(r) => r,
+        Err(_) => return BlobRef::DbUnavailable,
+    };
+    let mut any_live = false;
+    let mut any_unknown = false;
+    for row in rows {
+        let s = match row {
+            Ok(s) => s,
+            Err(_) => return BlobRef::DbUnavailable,
+        };
+        if LIVE_STATES.contains(&s.as_str()) {
+            any_live = true;
+        } else if !TERMINAL_STATES.contains(&s.as_str()) {
+            any_unknown = true; // an unknown/future state → never treat the blob as dead
+        }
+    }
+    if any_live {
+        BlobRef::Live
+    } else if any_unknown {
+        BlobRef::UnknownState
+    } else {
+        BlobRef::Dead // every row is explicitly terminal, or there is no row (fs-orphan)
     }
 }
 
@@ -285,12 +334,15 @@ fn scan_mobile_blobs(
             Some("symlink")
         } else if !fs::canonicalize(&abs).map(|c| c.starts_with(&staging_canon)).unwrap_or(false) {
             Some("outside_staging_root")
+        } else if !is_normalized_staging_rel(&rel) {
+            Some("unnormalized_key") // a storage_key/scope that is not the canonical shape → retain
         } else {
-            match blob_referenced(server_conn, scope, &rel) {
+            match blob_liveness(server_conn, scope, &rel) {
                 BlobRef::Live => Some("referenced_by_inbox"),
+                BlobRef::UnknownState => Some("unknown_state"),
                 BlobRef::DbUnavailable => Some("server_db_unavailable"),
                 BlobRef::Dead => match age_secs(&abs, now) {
-                    Some(a) if a >= grace_secs => None, // proven-dead orphan
+                    Some(a) if a >= grace_secs => None, // explicitly terminal / no row, and past grace
                     _ => Some("within_grace_period"),
                 },
             }
@@ -372,11 +424,14 @@ fn still_deletable(
         if !fs::canonicalize(&abs).map(|c| c.starts_with(&staging_canon)).unwrap_or(false) {
             return false;
         }
+        if !is_normalized_staging_rel(rel) {
+            return false;
+        }
         let scope = rel.split('/').next().unwrap_or("");
         let conn = server_db.and_then(open_server_ro);
-        match blob_referenced(conn.as_ref(), scope, rel) {
+        match blob_liveness(conn.as_ref(), scope, rel) {
             BlobRef::Dead => matches!(age_secs(&abs, now), Some(a) if a >= grace_secs),
-            _ => false, // live or db-unavailable → keep
+            _ => false, // live / unknown-state / db-unavailable → keep
         }
     } else {
         // temporary target: journal SSOT + classify.
@@ -435,12 +490,16 @@ fn run_apply(
     Ok(GcApplyResult { deleted, skipped, planned: plan.deletable.len() })
 }
 
-/// PRODUCTION boot entry. Reached ONLY internally from `lib.rs setup()` — after recover + pending
-/// restore + pending backup, and before any DB/server start — never via a Tauri command or frontend API.
-/// TEMPORARY targets ONLY (backup-ws + ingest-journal tmp); it does NOT delete mobile-staging blobs
-/// (that remains apply-only/test-e2e until its own production activation). Conservative grace + real clock.
+/// PRODUCTION boot entry. Reached ONLY internally from `lib.rs setup()` — after recover + pending restore
+/// + pending backup, and BEFORE any DB/server start — never via a Tauri command or frontend API. Collects
+/// the TEMPORARY targets (backup-ws + ingest-journal tmp) AND terminal mobile-staging blobs. The server DB
+/// is opened READ-ONLY and is quiescent here (the embedded server has not started yet). If it is
+/// missing/corrupt/locked, every blob is retained (`server_db_unavailable`) while the temp targets still
+/// run independently — never a partial blob plan. Conservative grace + real clock; blob deletion never
+/// touches the media root, the frontend DB, backup/restore files, or `.ingest-journal`.
 pub fn execute_boot_gc(app_data_dir: &Path) -> Result<GcApplyResult, MediaError> {
-    run_apply(app_data_dir, None, DEFAULT_GRACE_SECS, now_secs(), false)
+    let server_db = app_data_dir.join("lataif_sync_server.db");
+    run_apply(app_data_dir, Some(&server_db), DEFAULT_GRACE_SECS, now_secs(), true)
 }
 
 /// APPLY the TEMPORARY targets with caller-chosen grace/now — test/e2e ONLY.

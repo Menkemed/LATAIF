@@ -185,6 +185,45 @@ fn blob_gc_deletes_only_terminal_unreferenced_blobs() {
 }
 
 #[test]
+fn blob_gc_unknown_state_and_unnormalized_key_are_retained() {
+    let app = tmp();
+    let c = open_server(&app);
+    // an UNKNOWN/future state (not one of the five) must never be inferred as dead
+    let unk = stage(&app, "t", "1111111111");
+    add_ref(&c, "t", "e1", &unk, "archived");
+    // a terminal ref alongside an unknown state → still retained (unknown wins over terminal)
+    let mixed = stage(&app, "t", "2222222222");
+    add_ref(&c, "t", "e2", &mixed, "quarantined");
+    add_ref(&c, "t", "e3", &mixed, "some_new_state");
+    drop(c);
+    // a non-normalised staging file (wrong shape) → retained regardless of the DB
+    write(&app.join(super::MOBILE_STAGING_DIR).join("t").join("x").join("bad.jpg"), b"B"); // hh len 1
+    write(&app.join(super::MOBILE_STAGING_DIR).join("loose.jpg"), b"L"); // 1 segment
+
+    let plan = analyze_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    let d = keys(&plan.deletable);
+    assert!(!d.contains(&blob_key(&unk)) && !d.contains(&blob_key(&mixed)), "unknown-state blobs retained");
+    assert!(!d.iter().any(|k| k.contains("/x/bad.jpg") || k.ends_with("/loose.jpg")), "non-normalised keys retained");
+    let reasons: std::collections::BTreeSet<_> = plan.retained.iter().map(|r| r.reason.as_str()).collect();
+    assert!(reasons.contains("unknown_state") && reasons.contains("unnormalized_key"), "explicit retain reasons present");
+    assert_eq!(apply_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap().deleted, 0, "nothing deletable → no delete");
+}
+
+#[test]
+fn blob_gc_is_independent_across_scopes() {
+    let app = tmp();
+    let c = open_server(&app);
+    // same hash in two scopes: A terminal-only (dead), B ready (live)
+    let a = stage(&app, "A", "9999999999"); add_ref(&c, "A", "eA", &a, "conflict");
+    let b = stage(&app, "B", "9999999999"); add_ref(&c, "B", "eB", &b, "ready");
+    drop(c);
+    let plan = analyze_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    let d = keys(&plan.deletable);
+    assert!(d.contains(&blob_key(&a)), "scope A terminal blob deletable");
+    assert!(!d.contains(&blob_key(&b)), "scope B live blob (same hash) retained — cross-scope independent");
+}
+
+#[test]
 fn blob_gc_fail_closed_on_missing_or_corrupt_server_db() {
     let app = tmp();
     let dead = stage(&app, "t", "eeeeeeeeee"); // would be dead if the DB said so

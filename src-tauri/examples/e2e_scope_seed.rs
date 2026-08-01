@@ -238,8 +238,24 @@ fn main() {
                 other => { eprintln!("unknown gc-blob mode: {}", other); std::process::exit(2); }
             }
         }
+        // MOBILE-04B2A14-BLOB-I3 — make a REAL drained upload's staging blob a terminal orphan for the boot
+        // smoke: `blob-terminal <appDataDir> <uploadEventId>` sets that inbox row to `quarantined` and
+        // back-dates its staging file past the grace, then prints its storage_key.
+        "blob-terminal" => {
+            let app = &db_path;
+            let evt = args.get(3).expect("usage: blob-terminal <appDataDir> <uploadEventId>");
+            let conn = rusqlite::Connection::open(app.join("lataif_sync_server.db")).expect("open server db");
+            conn.execute("UPDATE mobile_upload_inbox SET state='quarantined' WHERE upload_event_id=?1", rusqlite::params![evt]).expect("quarantine");
+            let key: String = conn.query_row("SELECT storage_key FROM mobile_upload_image WHERE upload_event_id=?1 LIMIT 1", rusqlite::params![evt], |r| r.get(0)).expect("storage_key");
+            drop(conn);
+            let f = app.join("mobile-upload-staging").join(&key);
+            let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 7200);
+            std::fs::File::options().write(true).open(&f).expect("open staged file").set_modified(old).expect("backdate");
+            println!("BLOB_TERMINAL_OK key={}", key);
+        }
         _ => {
-            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup|restore|validate|gc|gc-blob> <db_path|salt|appDataDir|backupDir|workDir>");
+            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup|restore|validate|gc|gc-blob|blob-terminal> <db_path|salt|appDataDir|backupDir|workDir>");
             std::process::exit(2);
         }
     }
