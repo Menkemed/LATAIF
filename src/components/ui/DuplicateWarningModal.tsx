@@ -12,6 +12,8 @@ import { Modal } from './Modal';
 import { Button } from './Button';
 import { StatusDot } from './StatusDot';
 import { Bhd } from './Bhd';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { useMediaScope } from '@/hooks/useMediaScope';
 import type { Product } from '@/core/models/types';
 
 export interface DuplicateMatch {
@@ -40,15 +42,31 @@ function scoreLabel(score: number): { text: string; color: string; bg: string } 
   return { text: 'Possibly similar', color: '#6E8AAA', bg: 'rgba(110,138,170,0.12)' };
 }
 
-// Kleiner Image-Block — fällt auf Package-Icon zurück wenn kein Bild da.
-function ItemImage({ src, size = 140 }: { src?: string; size?: number }) {
+// Kleiner Image-Block — persistierte Produkte über den kanonischen Media-Resolver
+// (media-pipeline-fähig); der noch nicht gespeicherte Kandidat nutzt seine
+// ephemere Capture-URL via `src`; sonst Package-Icon.
+function ItemImage({ product, tenantId, branchId, src, size = 140 }: {
+  product?: { id: string; images: string[] };
+  tenantId?: string;
+  branchId?: string;
+  src?: string;
+  size?: number;
+}) {
   return (
     <div style={{
       width: size, height: size, background: '#F2F7FA', borderRadius: 8,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       overflow: 'hidden', border: '1px solid #E5E9EE',
     }}>
-      {src ? (
+      {product ? (
+        <CollectionProductThumb
+          product={product}
+          tenantId={tenantId}
+          branchId={branchId}
+          imgStyle={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          iconSize={size * 0.3}
+        />
+      ) : src ? (
         <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       ) : (
         <Package size={size * 0.3} strokeWidth={1} style={{ color: '#6B7280' }} />
@@ -96,6 +114,7 @@ function SpecGrid({ specs }: { specs: { label: string; value: string }[] }) {
 }
 
 export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCreateAnyway, onPickExisting, onCopyDetails }: Props) {
+  const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   if (matches.length === 0) return null;
   const top = matches[0];
   const topSeverity = top.score >= 100 ? 'severe' : top.score >= 60 ? 'warn' : 'mild';
@@ -169,7 +188,7 @@ export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCr
               <span className="text-overline" style={{ color: '#0F0F10' }}>EXISTING ITEM</span>
               <StatusDot status={top.product.stockStatus} />
             </div>
-            <ItemImage src={top.product.images?.[0]} />
+            <ItemImage product={top.product} tenantId={mediaTenantId} branchId={mediaBranchId} />
             <div style={{ marginTop: 4 }}>
               <div style={{ fontSize: 11, color: '#6B7280' }}>{top.product.brand}</div>
               <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500, lineHeight: 1.3 }}>
@@ -229,7 +248,7 @@ export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCr
                     onMouseEnter={e => { if (onPickExisting) e.currentTarget.style.background = '#FAFBFC'; }}
                     onMouseLeave={e => { if (onPickExisting) e.currentTarget.style.background = 'transparent'; }}
                   >
-                    <ItemImage src={p.images?.[0]} size={48} />
+                    <ItemImage product={p} tenantId={mediaTenantId} branchId={mediaBranchId} size={48} />
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 10, color: '#6B7280' }}>{p.brand}</div>
                       <div style={{ fontSize: 12, color: '#0F0F10', fontWeight: 500, lineHeight: 1.2 }}>{p.name}</div>

@@ -7,6 +7,8 @@
 import { useMemo } from 'react';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { useMediaScope } from '@/hooks/useMediaScope';
 import type { Product, Category } from '@/core/models/types';
 
 interface ProductHoverCardProps {
@@ -19,9 +21,9 @@ export function ProductHoverCard({ product, categories }: ProductHoverCardProps)
     () => getProductSpecs(product, categories, { prominentOnly: false, includeSku: false, includeCondition: false }),
     [product, categories]
   );
+  const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   if (!product) return null;
   const cat = categories.find(c => c.id === product.categoryId);
-  const cover = (product.images || [])[0];
   const titleLine = `${product.brand || ''} ${product.name || ''}`.trim() || '(unnamed)';
 
   return (
@@ -37,23 +39,19 @@ export function ProductHoverCard({ product, categories }: ProductHoverCardProps)
     >
       {/* Cover Photo — v0.7.18: `contain` damit das volle Foto sichtbar bleibt
           (vorher schnitt `cover` die Raender ab). */}
-      {cover ? (
-        <div style={{ width: '100%', height: 160, background: '#F2F7FA', overflow: 'hidden' }}>
-          <img
-            src={cover}
-            alt=""
-            style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
-          />
-        </div>
-      ) : (
-        <div style={{
-          width: '100%', height: 80, background: '#F2F7FA',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 11, color: '#9CA3AF',
-        }}>
-          No image
-        </div>
-      )}
+      <div style={{
+        width: '100%', height: 160, background: '#F2F7FA', overflow: 'hidden',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <CollectionProductThumb
+          product={product}
+          tenantId={mediaTenantId}
+          branchId={mediaBranchId}
+          imgStyle={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+          iconSize={40}
+          iconColor="#9CA3AF"
+        />
+      </div>
 
       <div style={{ padding: 12 }}>
         {/* Category + SKU */}

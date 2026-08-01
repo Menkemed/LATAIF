@@ -12,6 +12,8 @@ import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { useMediaScope } from '@/hooks/useMediaScope';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
@@ -45,6 +47,7 @@ export function ConsignmentDetail() {
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { expenses, loadExpenses } = useExpenseStore();
@@ -425,19 +428,6 @@ export function ConsignmentDetail() {
             </div>
             <div style={{ padding: 14 }}>
               <div className="flex items-start gap-4" style={{ minWidth: 0 }}>
-                {product?.images && product.images.length > 0 ? (
-                  <img
-                    src={product.images[0]}
-                    alt={productLabel}
-                    className="cursor-pointer"
-                    onClick={() => product && navigate(`/collection/${product.id}`)}
-                    style={{
-                      width: 96, height: 96, borderRadius: 10,
-                    objectFit: 'cover', flexShrink: 0,
-                    border: '1px solid #E5E9EE', background: '#F2F7FA',
-                  }}
-                />
-              ) : (
                 <div
                   className={product ? 'cursor-pointer' : ''}
                   onClick={() => product && navigate(`/collection/${product.id}`)}
@@ -445,11 +435,22 @@ export function ConsignmentDetail() {
                     width: 96, height: 96, borderRadius: 10,
                     background: '#F2F7FA', border: '1px solid #E5E9EE',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flexShrink: 0,
+                    overflow: 'hidden', flexShrink: 0,
                   }}>
+                {product ? (
+                  <CollectionProductThumb
+                    product={product}
+                    tenantId={mediaTenantId}
+                    branchId={mediaBranchId}
+                    imgStyle={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    iconSize={28}
+                    iconColor="#9CA3AF"
+                    iconStrokeWidth={1.2}
+                  />
+                ) : (
                   <Package size={28} strokeWidth={1.2} style={{ color: '#9CA3AF' }} />
-                </div>
-              )}
+                )}
+              </div>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
                   Product

@@ -9,6 +9,8 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { useMediaScope } from '@/hooks/useMediaScope';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
@@ -63,6 +65,7 @@ export function InvoiceCreate() {
   const { invoices, loadInvoices, createDirectInvoice, recordPayment, editInvoice: editInvoiceFn, getInvoicePayments } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   // v0.6.9 — Soft-Reservation: Map product_id → { qty, orderNumbers[] } fuer den Picker-Hinweis.
   const { orders, loadOrders, getAllProductReservations } = useOrderStore();
   const { employees, loadEmployees } = useEmployeeStore();
@@ -557,20 +560,23 @@ export function InvoiceCreate() {
                       background: '#FAFBFC',
                       borderTop: '1px solid #E5E9EE',
                       display: 'grid',
-                      gridTemplateColumns: c.product.images?.length ? '100px 1fr' : '1fr',
+                      gridTemplateColumns: '100px 1fr',
                       gap: 18,
                       alignItems: 'start',
                     }}>
-                      {c.product.images?.length ? (
-                        <div style={{
-                          width: 100, height: 100, borderRadius: 10,
-                          background: '#FFFFFF', border: '1px solid #E5E9EE',
-                          overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        }}>
-                          <img src={c.product.images[0]} alt={c.product.name}
-                            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
-                        </div>
-                      ) : null}
+                      <div style={{
+                        width: 100, height: 100, borderRadius: 10,
+                        background: '#FFFFFF', border: '1px solid #E5E9EE',
+                        overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <CollectionProductThumb
+                          product={c.product}
+                          tenantId={mediaTenantId}
+                          branchId={mediaBranchId}
+                          imgStyle={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                          iconSize={32}
+                        />
+                      </div>
                       <div>
                         <div style={{ marginBottom: 8 }}>
                           <span style={{ fontSize: 11, color: '#9CA3AF', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Produkt-Specs</span>

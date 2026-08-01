@@ -3,9 +3,11 @@ import { v4 as uuid } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Receipt, Tags, GitBranch, Users, Hash, AlertTriangle,
-  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, Package, ExternalLink,
+  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, ExternalLink,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { useMediaScope } from '@/hooks/useMediaScope';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
@@ -2889,6 +2891,7 @@ function DuplicateMemberRow({
   const karat = String(attrs.karat || '').trim();
   const status = product.stockStatus || 'in_stock';
   const topEdgeScore = edgesToOthers.length > 0 ? Math.max(...edgesToOthers.map(e => e.score)) : 0;
+  const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
 
   return (
     <div style={{
@@ -2904,11 +2907,13 @@ function DuplicateMemberRow({
         width: 72, height: 72, background: '#F2F7FA', borderRadius: 8, overflow: 'hidden',
         display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid #E5E9EE',
       }}>
-        {product.images?.[0] ? (
-          <img src={product.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-        ) : (
-          <Package size={26} strokeWidth={1} style={{ color: '#6B7280' }} />
-        )}
+        <CollectionProductThumb
+          product={product}
+          tenantId={mediaTenantId}
+          branchId={mediaBranchId}
+          imgStyle={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          iconSize={26}
+        />
       </div>
 
       {/* Details */}

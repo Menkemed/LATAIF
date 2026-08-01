@@ -10,6 +10,8 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
+import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { useMediaScope } from '@/hooks/useMediaScope';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -73,6 +75,7 @@ export function OrderCreate() {
   const { createOrder, orders: existingOrders, loadOrders, getAllProductReservations } = useOrderStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { createGoldPayable } = useGoldStore();
 
@@ -1228,20 +1231,23 @@ export function OrderCreate() {
                       background: '#FAFBFC',
                       borderTop: '1px solid #E5E9EE',
                       display: 'grid',
-                      gridTemplateColumns: lineProduct.images?.length ? '100px 1fr' : '1fr',
+                      gridTemplateColumns: '100px 1fr',
                       gap: 18,
                       alignItems: 'start',
                     }}>
-                      {lineProduct.images?.length ? (
-                        <div style={{
-                          width: 100, height: 100, borderRadius: 10,
-                          background: '#FFFFFF', border: '1px solid #E5E9EE',
-                          overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        }}>
-                          <img src={lineProduct.images[0]} alt={lineProduct.name}
-                            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
-                        </div>
-                      ) : null}
+                      <div style={{
+                        width: 100, height: 100, borderRadius: 10,
+                        background: '#FFFFFF', border: '1px solid #E5E9EE',
+                        overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <CollectionProductThumb
+                          product={lineProduct}
+                          tenantId={mediaTenantId}
+                          branchId={mediaBranchId}
+                          imgStyle={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                          iconSize={32}
+                        />
+                      </div>
                       <div>
                         <div style={{ marginBottom: 8 }}>
                           <span style={{ fontSize: 11, color: '#9CA3AF', letterSpacing: '0.04em', textTransform: 'uppercase' }}>Produkt-Specs</span>
