@@ -125,6 +125,23 @@ fn future_mtime_and_grace_retain_fail_closed() {
     assert_eq!(strict.deletable_count, 0, "an effectively infinite grace deletes nothing");
 }
 
+#[test]
+fn execute_boot_gc_uses_real_clock_and_conservative_grace() {
+    let app = tmp();
+    let real_now = super::now_secs();
+    // an orphan tmp older than the default grace (1h) → deletable by the production boot path
+    let old = journal(&app).join("t__reqBOOT.main.jpg.tmp");
+    write(&old, b"OLD");
+    set_mtime(&old, real_now - super::DEFAULT_GRACE_SECS - 600);
+    // a fresh orphan tmp → within grace → retained
+    let young = journal(&app).join("t__reqFRESH.main.jpg.tmp");
+    write(&young, b"NEW");
+    let r = super::execute_boot_gc(&app).unwrap();
+    assert!(r.deleted >= 1, "boot GC deleted the old orphan under the real clock");
+    assert!(!old.exists(), "old orphan removed");
+    assert!(young.exists(), "fresh orphan retained by the conservative grace");
+}
+
 #[cfg(windows)]
 #[test]
 fn symlinked_temp_is_retained_if_perm() {

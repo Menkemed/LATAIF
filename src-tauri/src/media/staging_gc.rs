@@ -232,12 +232,11 @@ fn delete_path(abs: &Path) -> Result<bool, MediaError> {
     }
 }
 
-/// APPLY the GC (test/e2e ONLY). Re-analyses each file at delete time; a file that became referenced /
-/// young / unsafe between the dry-run and now is skipped. A missing file counts as skipped (idempotent,
-/// crash-repeatable). A per-file delete error is isolated to that file — it never aborts the run or drives
-/// a following deletion.
-#[cfg(any(test, feature = "e2e"))]
-pub fn apply(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcApplyResult, MediaError> {
+/// The real deletion loop (production). Re-analyses each file at delete time (TOCTOU); a file that became
+/// referenced / young / unsafe between the dry-run and now is skipped. A missing file counts as skipped
+/// (idempotent, crash-repeatable). A per-file delete error is isolated to that file — it never aborts the
+/// run or drives a following deletion. NEVER deletes a protected/enumerated-out path (allowlist + classify).
+fn run_apply(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcApplyResult, MediaError> {
     let plan = analyze(app_data_dir, grace_secs, now)?;
     let root_canon = fs::canonicalize(app_data_dir).map_err(io("app root"))?;
     let mut deleted = 0usize;
@@ -254,6 +253,21 @@ pub fn apply(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcApplyRe
         }
     }
     Ok(GcApplyResult { deleted, skipped, planned: plan.deletable.len() })
+}
+
+/// PRODUCTION boot entry. Reached ONLY internally from `lib.rs setup()` — after recover + pending
+/// restore + pending backup, and before any DB/server start — never via a Tauri command or frontend API.
+/// Uses the conservative default grace and the real wall clock; a production caller can therefore never
+/// pick an aggressive grace/now. Best-effort cleanup: it only ever removes proven orphans.
+pub fn execute_boot_gc(app_data_dir: &Path) -> Result<GcApplyResult, MediaError> {
+    run_apply(app_data_dir, DEFAULT_GRACE_SECS, now_secs())
+}
+
+/// APPLY with caller-chosen grace/now — test/e2e ONLY (the isolated GC smoke + cargo tests). Production
+/// deletion goes exclusively through `execute_boot_gc`, which hardcodes the conservative grace.
+#[cfg(any(test, feature = "e2e"))]
+pub fn apply(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcApplyResult, MediaError> {
+    run_apply(app_data_dir, grace_secs, now)
 }
 
 #[cfg(test)]
