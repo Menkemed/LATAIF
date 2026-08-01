@@ -125,6 +125,98 @@ fn future_mtime_and_grace_retain_fail_closed() {
     assert_eq!(strict.deletable_count, 0, "an effectively infinite grace deletes nothing");
 }
 
+// ── mobile-staging content-addressed blob GC (server-DB liveness) ──
+use rusqlite::params;
+fn server_path(app: &std::path::Path) -> std::path::PathBuf { app.join("lataif_sync_server.db") }
+fn open_server(app: &std::path::Path) -> rusqlite::Connection {
+    let c = rusqlite::Connection::open(server_path(app)).unwrap();
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mobile_upload_inbox(tenant_id,branch_id,authenticated_user_id,upload_event_id,state);
+         CREATE TABLE IF NOT EXISTS mobile_upload_image(tenant_id,branch_id,authenticated_user_id,upload_event_id,storage_key);",
+    ).unwrap();
+    c
+}
+fn add_ref(c: &rusqlite::Connection, scope: &str, ev: &str, storage_key: &str, state: &str) {
+    c.execute("INSERT INTO mobile_upload_inbox VALUES(?1,'b','u',?2,?3)", params![scope, ev, state]).unwrap();
+    c.execute("INSERT INTO mobile_upload_image VALUES(?1,'b','u',?2,?3)", params![scope, ev, storage_key]).unwrap();
+}
+/// seed a staging blob, return its storage_key (= staging-relative rel `{scope}/{hh}/{hash}.jpg`).
+fn stage(app: &std::path::Path, scope: &str, hash: &str) -> String {
+    let rel = format!("{scope}/{}/{}.jpg", &hash[0..2], hash);
+    write(&app.join(super::MOBILE_STAGING_DIR).join(scope).join(&hash[0..2]).join(format!("{hash}.jpg")), b"BLOB");
+    rel
+}
+fn blob_key(rel: &str) -> String { format!("{}/{}", super::MOBILE_STAGING_DIR, rel) }
+
+#[test]
+fn blob_gc_deletes_only_terminal_unreferenced_blobs() {
+    let app = tmp();
+    let c = open_server(&app);
+    // dead: only conflict + quarantined refs (shared hash, multiple terminal) → deletable
+    let dead = stage(&app, "t", "aaaaaaaaaa");
+    add_ref(&c, "t", "e1", &dead, "conflict");
+    add_ref(&c, "t", "e2", &dead, "quarantined");
+    // live: a ready ref → retained
+    let live = stage(&app, "t", "bbbbbbbbbb");
+    add_ref(&c, "t", "e3", &live, "ready");
+    // shared-live: one conflict + one processing (a live state wins) → retained
+    let shared = stage(&app, "t", "cccccccccc");
+    add_ref(&c, "t", "e4", &shared, "conflict");
+    add_ref(&c, "t", "e5", &shared, "processing");
+    // young dead: no refs at all → dead, but within grace → retained
+    let young = stage(&app, "t", "dddddddddd");
+    set_mtime(&app.join(super::MOBILE_STAGING_DIR).join("t").join("dd").join("dddddddddd.jpg"), NOW - 10);
+    drop(c);
+
+    let plan = analyze_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    let d = keys(&plan.deletable);
+    assert!(d.contains(&blob_key(&dead)), "terminal-only blob deletable");
+    assert!(!d.contains(&blob_key(&live)) && !d.contains(&blob_key(&shared)) && !d.contains(&blob_key(&young)),
+        "live/shared-live/young blobs retained");
+    let reasons: std::collections::BTreeSet<_> = plan.retained.iter().map(|r| r.reason.as_str()).collect();
+    assert!(reasons.contains("referenced_by_inbox") && reasons.contains("within_grace_period"), "blob retain reasons");
+
+    let r = apply_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    assert_eq!(r.deleted, 1, "only the dead blob deleted");
+    assert!(!app.join(super::MOBILE_STAGING_DIR).join("t").join("aa").join("aaaaaaaaaa.jpg").exists());
+    assert!(app.join(super::MOBILE_STAGING_DIR).join("t").join("bb").join("bbbbbbbbbb.jpg").exists(), "live blob survives");
+    assert!(app.join(super::MOBILE_STAGING_DIR).join("t").join("cc").join("cccccccccc.jpg").exists(), "shared-live blob survives");
+    assert_eq!(apply_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap().deleted, 0, "second run deletes 0");
+}
+
+#[test]
+fn blob_gc_fail_closed_on_missing_or_corrupt_server_db() {
+    let app = tmp();
+    let dead = stage(&app, "t", "eeeeeeeeee"); // would be dead if the DB said so
+    // missing DB → every blob retained (server_db_unavailable), nothing deletable, apply deletes 0
+    let plan = analyze_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    assert!(!keys(&plan.deletable).contains(&blob_key(&dead)), "missing server DB → blob retained");
+    assert!(plan.retained.iter().any(|r| r.reason == "server_db_unavailable"));
+    assert_eq!(apply_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap().deleted, 0, "no delete without a readable DB");
+    assert!(app.join(super::MOBILE_STAGING_DIR).join("t").join("ee").join("eeeeeeeeee.jpg").exists());
+    // corrupt DB bytes → still fail-closed
+    std::fs::write(server_path(&app), b"NOT A SQLITE DB").unwrap();
+    let plan2 = analyze_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    assert!(!keys(&plan2.deletable).contains(&blob_key(&dead)), "corrupt server DB → blob retained");
+}
+
+#[test]
+fn blob_gc_operation_guard_and_never_scans_media_root() {
+    let app = tmp();
+    let c = open_server(&app); let dead = stage(&app, "t", "ffffffffff"); add_ref(&c, "t", "e6", &dead, "conflict"); drop(c);
+    // a live media master + a media temp must never appear as a mobile-staging blob candidate
+    write(&app.join("media").join("t").join("ff").join("ffffffffff.jpg"), b"MASTER");
+    // operation pending → ALL retained (blobs too)
+    std::fs::write(app.join(".backup-intent"), b"{\"id\":\"x\",\"createdAt\":\"t\",\"appVersion\":\"v\"}").unwrap();
+    let plan = analyze_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    assert_eq!(plan.deletable_count, 0, "operation-in-progress retains blobs too");
+    std::fs::remove_file(app.join(".backup-intent")).unwrap();
+    let plan2 = analyze_with_blobs(&app, &server_path(&app), GRACE, NOW).unwrap();
+    assert!(!plan2.deletable.iter().any(|e| e.rel_key.starts_with("media/t/")) && !plan2.retained.iter().any(|r| r.rel_key.starts_with("media/t/")),
+        "media root is NEVER scanned by blob GC");
+    assert!(keys(&plan2.deletable).contains(&blob_key(&dead)), "the terminal staging blob is deletable once the operation clears");
+}
+
 #[test]
 fn execute_boot_gc_uses_real_clock_and_conservative_grace() {
     let app = tmp();

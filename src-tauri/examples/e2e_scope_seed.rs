@@ -192,8 +192,54 @@ fn main() {
                 other => { eprintln!("unknown gc mode: {}", other); std::process::exit(2); }
             }
         }
+        // MOBILE-04B2A14-BLOB-I1 — drive the REAL mobile-staging blob GC (server-DB liveness) in an ISOLATED
+        // workdir. `gc-blob <workDir> <dry|apply>` seeds a minimal server DB (inbox+image) + staging blobs
+        // whose refs are terminal (dead), live (ready), or absent+young, then dry-runs / applies. Counts only.
+        "gc-blob" => {
+            let work = &db_path;
+            let mode = args.get(3).map(|s| s.as_str()).unwrap_or("dry");
+            let sroot = work.join("mobile-upload-staging");
+            let stage = |scope: &str, hash: &str| -> String {
+                let rel = format!("{}/{}/{}.jpg", scope, &hash[0..2], hash);
+                let p = sroot.join(scope).join(&hash[0..2]).join(format!("{}.jpg", hash));
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, b"BLOB").unwrap();
+                rel
+            };
+            std::fs::create_dir_all(work).unwrap();
+            let server = work.join("lataif_sync_server.db");
+            let c = rusqlite::Connection::open(&server).unwrap();
+            c.execute_batch("CREATE TABLE IF NOT EXISTS mobile_upload_inbox(tenant_id,branch_id,authenticated_user_id,upload_event_id,state);\
+                             CREATE TABLE IF NOT EXISTS mobile_upload_image(tenant_id,branch_id,authenticated_user_id,upload_event_id,storage_key);").unwrap();
+            let add = |scope: &str, ev: &str, key: &str, state: &str| {
+                c.execute("INSERT INTO mobile_upload_inbox VALUES(?1,'b','u',?2,?3)", rusqlite::params![scope, ev, state]).unwrap();
+                c.execute("INSERT INTO mobile_upload_image VALUES(?1,'b','u',?2,?3)", rusqlite::params![scope, ev, key]).unwrap();
+            };
+            let dead = stage("t", "aaaaaaaaaa"); add("t", "e1", &dead, "conflict"); add("t", "e2", &dead, "quarantined");
+            let live = stage("t", "bbbbbbbbbb"); add("t", "e3", &live, "ready");
+            let _young = stage("t", "cccccccccc"); // no ref → dead, but young
+            drop(c);
+            let now: u64 = 2_000_000_000;
+            let young_abs = sroot.join("t").join("cc").join("cccccccccc.jpg");
+            std::fs::File::options().write(true).open(&young_abs).unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(now - 10)).unwrap();
+            match mode {
+                "dry" => {
+                    let p = lataif_lib::e2e_support::staging_gc_analyze_blobs(work, &server, 3600, now).expect("analyze blobs");
+                    println!("GC_BLOB_DRYRUN deletable={} retained={} bytes={}", p.deletable_count, p.retained_count, p.deletable_bytes);
+                }
+                "apply" => {
+                    let r = lataif_lib::e2e_support::staging_gc_apply_blobs(work, &server, 3600, now).expect("apply blobs");
+                    let dead_gone = !sroot.join("t").join("aa").join("aaaaaaaaaa.jpg").exists();
+                    let survivors = sroot.join("t").join("bb").join("bbbbbbbbbb.jpg").exists() && young_abs.exists();
+                    let r2 = lataif_lib::e2e_support::staging_gc_apply_blobs(work, &server, 3600, now).expect("apply2");
+                    println!("GC_BLOB_APPLY deleted={} deadGone={} survivors={} second={}", r.deleted, dead_gone as u8, survivors as u8, r2.deleted);
+                }
+                other => { eprintln!("unknown gc-blob mode: {}", other); std::process::exit(2); }
+            }
+        }
         _ => {
-            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup|restore|validate|gc> <db_path|salt|appDataDir|backupDir|workDir>");
+            eprintln!("usage: e2e_scope_seed <seed|seed-primary|verify|jpeg|backup|restore|validate|gc|gc-blob> <db_path|salt|appDataDir|backupDir|workDir>");
             std::process::exit(2);
         }
     }

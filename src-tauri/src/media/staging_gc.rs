@@ -28,6 +28,63 @@ use super::MediaError;
 pub const DEFAULT_GRACE_SECS: u64 = 3600;
 const BACKUP_WS_PREFIX: &str = "backup-ws-";
 const INGEST_JOURNAL_DIR: &str = ".ingest-journal";
+const MOBILE_STAGING_DIR: &str = "mobile-upload-staging";
+
+/// The server-DB liveness verdict for one content-addressed mobile-staging blob.
+enum BlobRef {
+    /// At least one inbox row is `accepted`/`processing`/`ready` → keep.
+    Live,
+    /// The server DB could not be opened/queried → FAIL-CLOSED, keep.
+    DbUnavailable,
+    /// No live-state reference across ALL inbox rows (only conflict/quarantined, or none) → orphan candidate.
+    Dead,
+}
+
+/// Open the server DB READ-ONLY (never creating it). None on any error → the caller retains every blob.
+fn open_server_ro(path: &Path) -> Option<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
+}
+
+/// Content-addressed liveness for a staging blob: reuses the authoritative server-DB query
+/// `sync::mobile_upload::blob_still_referenced` (ref-count>0 in accepted|processing|ready). Any read/query
+/// failure → `DbUnavailable` (fail-closed retain), so a missing/corrupt/locked server DB never deletes.
+fn blob_referenced(conn: Option<&rusqlite::Connection>, scope: &str, storage_key: &str) -> BlobRef {
+    match conn {
+        None => BlobRef::DbUnavailable,
+        Some(c) => match crate::sync::mobile_upload::blob_still_referenced(c, scope, storage_key) {
+            Ok(true) => BlobRef::Live,
+            Ok(false) => BlobRef::Dead,
+            Err(_) => BlobRef::DbUnavailable,
+        },
+    }
+}
+
+/// Collect regular files under a staging tree, skipping ALL dot-prefixed entries (`.tmp`/`.creating`/…) and
+/// never following/descending a symlink (a symlinked entry is yielded so the caller RETAINS it).
+fn walk_blob_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let p = e.path();
+            if is_symlink(&p) {
+                out.push(p); // yielded → retained as `symlink`, never followed
+                continue;
+            }
+            if p.is_dir() {
+                walk_blob_files(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,51 +204,121 @@ fn journal_entry_for_tmp(tmp_name: &str) -> Option<String> {
     Some(format!("{base}.json"))
 }
 
-/// DRY-RUN: analyse the allowlisted staging roots and decide which temporary files are SAFELY deletable.
-/// Never deletes. Production entry point.
-pub fn analyze(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcPlan, MediaError> {
-    let root_canon = fs::canonicalize(app_data_dir).map_err(io("app root"))?;
-    let op = operation_in_progress(app_data_dir);
-    let mut deletable: Vec<GcEntry> = Vec::new();
-    let mut retained: Vec<GcRetained> = Vec::new();
+/// Scan the two TEMPORARY targets (backup-ws + ingest-journal tmp) into the given buffers.
+fn scan_temp_targets(
+    app_data_dir: &Path,
+    root_canon: &Path,
+    op: bool,
+    grace_secs: u64,
+    now: u64,
+    deletable: &mut Vec<GcEntry>,
+    retained: &mut Vec<GcRetained>,
+) {
     let mut consider = |rel_key: String, abs: PathBuf, referenced: bool| {
-        match classify(&root_canon, &abs, op, referenced, grace_secs, now) {
+        match classify(root_canon, &abs, op, referenced, grace_secs, now) {
             Some(reason) => retained.push(GcRetained { rel_key, reason: reason.into() }),
             None => deletable.push(GcEntry { byte_size: entry_size(&abs), rel_key }),
         }
     };
-
-    // ── Target 1: backups/backup-ws-* (crashed snapshot workspaces) ──
+    // Target 1: backups/backup-ws-* (crashed snapshot workspaces). Published `<id>/` NEVER enumerated.
     let backups = app_data_dir.join("backups");
     if let Ok(rd) = fs::read_dir(&backups) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if !name.starts_with(BACKUP_WS_PREFIX) {
-                continue; // published `<id>/` dirs are NEVER enumerated → hard-excluded
+                continue;
             }
-            // a pending backup intent implies op_in_progress=true (whole-run retain), so its live ws is
-            // covered by the guard; `referenced=false` here is only reached when no operation is pending.
             consider(format!("backups/{name}"), e.path(), false);
         }
     }
-
-    // ── Target 2: media/.ingest-journal/*.tmp with no surviving journal entry ──
+    // Target 2: media/.ingest-journal/*.tmp with no surviving journal entry.
     let journal_dir = app_data_dir.join("media").join(INGEST_JOURNAL_DIR);
     if let Ok(rd) = fs::read_dir(&journal_dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if !name.ends_with(".tmp") {
-                continue; // journal `.json` entries + anything else are NEVER enumerated
+                continue;
             }
-            // referenced iff its journal entry still exists (recover() will re-drive it).
             let referenced = match journal_entry_for_tmp(&name) {
                 Some(entry) => journal_dir.join(&entry).exists(),
-                None => true, // unpar.seable temp name → conservatively retain
+                None => true,
             };
             consider(format!("media/{INGEST_JOURNAL_DIR}/{name}"), e.path(), referenced);
         }
     }
+}
 
+/// Scan `mobile-upload-staging/{scope}/…` content-addressed blobs. A blob is deletable ONLY when its
+/// server-DB inbox ref-count in accepted|processing|ready is ZERO (existing refs are all conflict/
+/// quarantined, or none), it is old enough, inside the staging root, no symlink, no operation pending, and
+/// the server DB was fully readable. This scan NEVER touches the media root, media_*, the frontend DB, or
+/// `.ingest-journal`.
+fn scan_mobile_blobs(
+    app_data_dir: &Path,
+    server_conn: Option<&rusqlite::Connection>,
+    op: bool,
+    grace_secs: u64,
+    now: u64,
+    deletable: &mut Vec<GcEntry>,
+    retained: &mut Vec<GcRetained>,
+) {
+    let staging = app_data_dir.join(MOBILE_STAGING_DIR);
+    let staging_canon = match fs::canonicalize(&staging) {
+        Ok(c) => c,
+        Err(_) => return, // no staging dir → nothing to scan
+    };
+    let mut files = Vec::new();
+    walk_blob_files(&staging, &mut files);
+    for abs in files {
+        let rel = match abs.strip_prefix(&staging) {
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        if rel.is_empty() {
+            continue;
+        }
+        let scope = rel.split('/').next().unwrap_or("");
+        let rel_key = format!("{MOBILE_STAGING_DIR}/{rel}");
+        let reason: Option<&str> = if op {
+            Some("operation_in_progress")
+        } else if is_symlink(&abs) {
+            Some("symlink")
+        } else if !fs::canonicalize(&abs).map(|c| c.starts_with(&staging_canon)).unwrap_or(false) {
+            Some("outside_staging_root")
+        } else {
+            match blob_referenced(server_conn, scope, &rel) {
+                BlobRef::Live => Some("referenced_by_inbox"),
+                BlobRef::DbUnavailable => Some("server_db_unavailable"),
+                BlobRef::Dead => match age_secs(&abs, now) {
+                    Some(a) if a >= grace_secs => None, // proven-dead orphan
+                    _ => Some("within_grace_period"),
+                },
+            }
+        };
+        match reason {
+            Some(r) => retained.push(GcRetained { rel_key, reason: r.into() }),
+            None => deletable.push(GcEntry { byte_size: entry_size(&abs), rel_key }),
+        }
+    }
+}
+
+fn analyze_impl(
+    app_data_dir: &Path,
+    server_db: Option<&Path>,
+    grace_secs: u64,
+    now: u64,
+    include_blobs: bool,
+) -> Result<GcPlan, MediaError> {
+    let root_canon = fs::canonicalize(app_data_dir).map_err(io("app root"))?;
+    let op = operation_in_progress(app_data_dir);
+    let mut deletable: Vec<GcEntry> = Vec::new();
+    let mut retained: Vec<GcRetained> = Vec::new();
+    scan_temp_targets(app_data_dir, &root_canon, op, grace_secs, now, &mut deletable, &mut retained);
+    if include_blobs {
+        // Fail-closed: if the server DB can't be opened, every blob is retained (server_db_unavailable).
+        let conn = server_db.and_then(open_server_ro);
+        scan_mobile_blobs(app_data_dir, conn.as_ref(), op, grace_secs, now, &mut deletable, &mut retained);
+    }
     let deletable_bytes = deletable.iter().map(|d| d.byte_size).sum();
     Ok(GcPlan {
         deletable_count: deletable.len(),
@@ -202,20 +329,67 @@ pub fn analyze(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcPlan,
     })
 }
 
-/// Re-analyse ONE staged file immediately before deletion (TOCTOU): re-reads the operation guard, symlink
-/// state, containment, the journal SSOT and the age. Returns true only if it is STILL a proven orphan.
-fn still_deletable(app_data_dir: &Path, root_canon: &Path, rel_key: &str, grace_secs: u64, now: u64) -> bool {
+/// DRY-RUN of the TEMPORARY targets only (backup-ws + ingest-journal tmp). Never deletes. This is the
+/// production boot analysis — it does NOT touch mobile-staging blobs.
+pub fn analyze(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcPlan, MediaError> {
+    analyze_impl(app_data_dir, None, grace_secs, now, false)
+}
+
+/// DRY-RUN including mobile-staging blob liveness (server-DB read-only). Read-only: never deletes. Used by
+/// the owner-gated dry-run command + the e2e apply. No absolute path in the plan.
+pub fn analyze_with_blobs(
+    app_data_dir: &Path,
+    server_db: &Path,
+    grace_secs: u64,
+    now: u64,
+) -> Result<GcPlan, MediaError> {
+    analyze_impl(app_data_dir, Some(server_db), grace_secs, now, true)
+}
+
+/// Re-analyse ONE staged file immediately before deletion (TOCTOU). Handles both a TEMP rel_key (journal
+/// SSOT) and a mobile-staging blob rel_key (fresh server-DB liveness). Returns true only if it is STILL a
+/// proven orphan.
+fn still_deletable(
+    app_data_dir: &Path,
+    root_canon: &Path,
+    server_db: Option<&Path>,
+    rel_key: &str,
+    grace_secs: u64,
+    now: u64,
+) -> bool {
     let abs = app_data_dir.join(rel_key);
     let op = operation_in_progress(app_data_dir);
-    let referenced = if let Some(name) = rel_key.strip_prefix(&format!("media/{INGEST_JOURNAL_DIR}/")) {
-        match journal_entry_for_tmp(name) {
-            Some(entry) => app_data_dir.join("media").join(INGEST_JOURNAL_DIR).join(entry).exists(),
-            None => true,
+    if let Some(rel) = rel_key.strip_prefix(&format!("{MOBILE_STAGING_DIR}/")) {
+        // mobile-staging blob: re-check guards + fresh server-DB liveness.
+        let staging = app_data_dir.join(MOBILE_STAGING_DIR);
+        let staging_canon = match fs::canonicalize(&staging) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        if op || is_symlink(&abs) {
+            return false;
+        }
+        if !fs::canonicalize(&abs).map(|c| c.starts_with(&staging_canon)).unwrap_or(false) {
+            return false;
+        }
+        let scope = rel.split('/').next().unwrap_or("");
+        let conn = server_db.and_then(open_server_ro);
+        match blob_referenced(conn.as_ref(), scope, rel) {
+            BlobRef::Dead => matches!(age_secs(&abs, now), Some(a) if a >= grace_secs),
+            _ => false, // live or db-unavailable → keep
         }
     } else {
-        false
-    };
-    classify(root_canon, &abs, op, referenced, grace_secs, now).is_none()
+        // temporary target: journal SSOT + classify.
+        let referenced = if let Some(name) = rel_key.strip_prefix(&format!("media/{INGEST_JOURNAL_DIR}/")) {
+            match journal_entry_for_tmp(name) {
+                Some(entry) => app_data_dir.join("media").join(INGEST_JOURNAL_DIR).join(entry).exists(),
+                None => true,
+            }
+        } else {
+            false
+        };
+        classify(root_canon, &abs, op, referenced, grace_secs, now).is_none()
+    }
 }
 
 fn delete_path(abs: &Path) -> Result<bool, MediaError> {
@@ -236,13 +410,19 @@ fn delete_path(abs: &Path) -> Result<bool, MediaError> {
 /// referenced / young / unsafe between the dry-run and now is skipped. A missing file counts as skipped
 /// (idempotent, crash-repeatable). A per-file delete error is isolated to that file — it never aborts the
 /// run or drives a following deletion. NEVER deletes a protected/enumerated-out path (allowlist + classify).
-fn run_apply(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcApplyResult, MediaError> {
-    let plan = analyze(app_data_dir, grace_secs, now)?;
+fn run_apply(
+    app_data_dir: &Path,
+    server_db: Option<&Path>,
+    grace_secs: u64,
+    now: u64,
+    include_blobs: bool,
+) -> Result<GcApplyResult, MediaError> {
+    let plan = analyze_impl(app_data_dir, server_db, grace_secs, now, include_blobs)?;
     let root_canon = fs::canonicalize(app_data_dir).map_err(io("app root"))?;
     let mut deleted = 0usize;
     let mut skipped = 0usize;
     for d in &plan.deletable {
-        if !still_deletable(app_data_dir, &root_canon, &d.rel_key, grace_secs, now) {
+        if !still_deletable(app_data_dir, &root_canon, server_db, &d.rel_key, grace_secs, now) {
             skipped += 1;
             continue; // TOCTOU: no longer a proven orphan
         }
@@ -257,17 +437,28 @@ fn run_apply(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcApplyRe
 
 /// PRODUCTION boot entry. Reached ONLY internally from `lib.rs setup()` — after recover + pending
 /// restore + pending backup, and before any DB/server start — never via a Tauri command or frontend API.
-/// Uses the conservative default grace and the real wall clock; a production caller can therefore never
-/// pick an aggressive grace/now. Best-effort cleanup: it only ever removes proven orphans.
+/// TEMPORARY targets ONLY (backup-ws + ingest-journal tmp); it does NOT delete mobile-staging blobs
+/// (that remains apply-only/test-e2e until its own production activation). Conservative grace + real clock.
 pub fn execute_boot_gc(app_data_dir: &Path) -> Result<GcApplyResult, MediaError> {
-    run_apply(app_data_dir, DEFAULT_GRACE_SECS, now_secs())
+    run_apply(app_data_dir, None, DEFAULT_GRACE_SECS, now_secs(), false)
 }
 
-/// APPLY with caller-chosen grace/now — test/e2e ONLY (the isolated GC smoke + cargo tests). Production
-/// deletion goes exclusively through `execute_boot_gc`, which hardcodes the conservative grace.
+/// APPLY the TEMPORARY targets with caller-chosen grace/now — test/e2e ONLY.
 #[cfg(any(test, feature = "e2e"))]
 pub fn apply(app_data_dir: &Path, grace_secs: u64, now: u64) -> Result<GcApplyResult, MediaError> {
-    run_apply(app_data_dir, grace_secs, now)
+    run_apply(app_data_dir, None, grace_secs, now, false)
+}
+
+/// APPLY including mobile-staging blob deletion (server-DB liveness) — test/e2e ONLY. There is NO
+/// production caller: staging-blob deletion is proven here but not yet wired into any production path.
+#[cfg(any(test, feature = "e2e"))]
+pub fn apply_with_blobs(
+    app_data_dir: &Path,
+    server_db: &Path,
+    grace_secs: u64,
+    now: u64,
+) -> Result<GcApplyResult, MediaError> {
+    run_apply(app_data_dir, Some(server_db), grace_secs, now, true)
 }
 
 #[cfg(test)]

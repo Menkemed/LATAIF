@@ -31,7 +31,10 @@ pub mod e2e_support {
     pub use crate::media::restore_recovery::recover as boot_recover;
     // MOBILE-04B2A14-I1 — safe temporary staging GC: dry-run analysis (also production) + the test/e2e-only
     // real deletion, exposed for the isolated GC smoke.
-    pub use crate::media::staging_gc::{analyze as staging_gc_analyze, apply as staging_gc_apply};
+    pub use crate::media::staging_gc::{
+        analyze as staging_gc_analyze, analyze_with_blobs as staging_gc_analyze_blobs,
+        apply as staging_gc_apply, apply_with_blobs as staging_gc_apply_blobs,
+    };
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2174,8 +2177,14 @@ fn staging_gc_dry_run(
             .map_err(|code| code.to_string())?;
     }
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
-    media::staging_gc::analyze(&app_dir, media::staging_gc::DEFAULT_GRACE_SECS, media::staging_gc::now_secs())
-        .map_err(|code| code.code().to_string())
+    // Read-only: includes mobile-staging blob liveness via the server DB (read-only). Never deletes.
+    media::staging_gc::analyze_with_blobs(
+        &app_dir,
+        &state.server.db_path,
+        media::staging_gc::DEFAULT_GRACE_SECS,
+        media::staging_gc::now_secs(),
+    )
+    .map_err(|code| code.code().to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
