@@ -14,13 +14,14 @@ import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
 import { useAuthStore } from '@/stores/authStore';
-import { query } from '@/core/db/helpers';
+import { query, currentBranchId } from '@/core/db/helpers';
+import { resolvePrimaryImageForExport } from '@/core/media/product-image-export';
+import { buildCollectionWorkbookBuffer } from '@/core/media/collection-workbook';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { decideProductCreateUi } from '@/core/media/product-media-create';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { getStockAggregates, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
-import ExcelJS from 'exceljs';
 import type { Product, TaxScheme, StockStatus, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
@@ -50,133 +51,22 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
   // (statt single product.purchase_price).
   const lotAgg = getStockAggregates(items.map(p => p.id));
 
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'LATAIF';
-  wb.created = new Date();
-  const ws = wb.addWorksheet('Collection');
+  // MEDIA-CONSUMERS-EXPORT — authorised media scope for the canonical resolver
+  // (media-pipeline products keep images='[]'). Derived once; missing scope falls
+  // back to the legacy column only (no cross-scope read).
+  let mediaScope: { tenantId: string | undefined; branchId: string | undefined } = { tenantId: undefined, branchId: undefined };
+  try {
+    const b = currentBranchId();
+    const rows = b ? query('SELECT tenant_id FROM branches WHERE id = ?', [b]) : [];
+    mediaScope = { branchId: b || undefined, tenantId: rows.length > 0 ? ((rows[0].tenant_id as string | null) || undefined) : undefined };
+  } catch { /* no scope → legacy-only export */ }
 
-  ws.columns = [
-    { header: 'Image',                    key: 'image',    width: 12 },
-    { header: 'SKU',                      key: 'sku',      width: 14 },
-    { header: 'Brand',                    key: 'brand',    width: 16 },
-    { header: 'Name',                     key: 'name',     width: 26 },
-    { header: 'Category',                 key: 'category', width: 14 },
-    { header: 'Quantity',                 key: 'qty',      width: 9,  style: { numFmt: '#,##0' } },
-    { header: 'Condition',                key: 'cond',     width: 12 },
-    { header: 'Purchase Price (BHD)',     key: 'pp',       width: 16, style: { numFmt: '#,##0.000' } },
-    { header: 'Cost Range (BHD)',         key: 'ppRange',  width: 18 },
-    { header: 'Stock Value (BHD)',        key: 'stockVal', width: 16, style: { numFmt: '#,##0.000' } },
-    { header: 'Lots',                     key: 'lots',     width: 8,  style: { numFmt: '#,##0' } },
-    { header: 'Planned Sale Price (BHD)', key: 'spp',      width: 18, style: { numFmt: '#,##0.000' } },
-    { header: 'Min Sale (BHD)',           key: 'min',      width: 14, style: { numFmt: '#,##0.000' } },
-    { header: 'Max Sale (BHD)',           key: 'max',      width: 14, style: { numFmt: '#,##0.000' } },
-    { header: 'Expected Margin (BHD)',    key: 'margin',   width: 16, style: { numFmt: '#,##0.000' } },
-    { header: 'Tax Scheme',               key: 'tax',      width: 14 },
-    { header: 'Stock Status',             key: 'status',   width: 14 },
-    { header: 'Source Type',              key: 'source',   width: 12 },
-    { header: 'Storage Location',         key: 'storage',  width: 16 },
-    { header: 'Supplier',                 key: 'supplier', width: 16 },
-    { header: 'Purchase Source',          key: 'psource',  width: 16 },
-    { header: 'Paid From',                key: 'paid',     width: 10 },
-    { header: 'Purchase Date',            key: 'pdate',    width: 14 },
-    { header: 'Days in Stock',            key: 'days',     width: 10 },
-    { header: 'Notes',                    key: 'notes',    width: 26 },
-  ];
-
-  // Header-Row Styling.
-  const header = ws.getRow(1);
-  header.font = { bold: true, size: 11, color: { argb: 'FF0F0F10' } };
-  header.alignment = { vertical: 'middle', horizontal: 'left' };
-  header.height = 22;
-  header.eachCell(cell => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F7FA' } };
-    cell.border = { bottom: { style: 'thin', color: { argb: 'FFC6A36D' } } };
+  const buffer = await buildCollectionWorkbookBuffer(items, {
+    lotAgg,
+    categoryName: cat,
+    resolveImage: resolvePrimaryImageForExport,
+    scope: mediaScope,
   });
-
-  // Data-Rows + Image-Embedding.
-  for (let i = 0; i < items.length; i++) {
-    const p = items[i];
-    const a = lotAgg.get(p.id);
-    const fmt3 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    const row = ws.addRow({
-      image:    '', // Platzhalter — Bild wird via addImage über die Zelle gelegt.
-      sku:      p.sku || '',
-      brand:    p.brand,
-      name:     p.name,
-      category: cat(p.categoryId),
-      qty:      a ? a.totalQty : (p.quantity || 1),
-      cond:     p.condition || '',
-      pp:       a ? a.weightedAvg : p.purchasePrice,
-      ppRange:  a && a.lotCount > 1 ? `${fmt3(a.minCost)}–${fmt3(a.maxCost)}` : '',
-      stockVal: a ? a.totalValue : p.purchasePrice * (p.quantity || 1),
-      lots:     a ? a.lotCount : 1,
-      spp:      p.plannedSalePrice ?? '',
-      min:      p.minSalePrice ?? '',
-      max:      p.maxSalePrice ?? '',
-      margin:   p.expectedMargin ?? '',
-      tax:      p.taxScheme === 'MARGIN' ? 'Margin Scheme' : p.taxScheme === 'VAT_10' ? 'VAT 10%' : 'Zero',
-      status:   p.stockStatus,
-      source:   p.sourceType,
-      storage:  p.storageLocation || '',
-      supplier: p.supplierName || '',
-      psource:  p.purchaseSource || '',
-      paid:     p.paidFrom || '',
-      pdate:    p.purchaseDate || '',
-      days:     p.daysInStock ?? '',
-      notes:    p.notes || '',
-    });
-    row.height = 60; // ~80 px — passt zu 75x75 Bild.
-    row.alignment = { vertical: 'middle' };
-
-    // Erstes Bild aus images[] als data-URL einlesen, decodieren, einbetten.
-    const src = p.images?.[0] || '';
-    const m = src.match(/^data:image\/(png|jpe?g);base64,(.+)$/i);
-    if (m) {
-      const ext = m[1].toLowerCase().startsWith('jp') ? 'jpeg' : 'png';
-      try {
-        const bin = atob(m[2]);
-        const buf = new Uint8Array(bin.length);
-        for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
-        const imgId = wb.addImage({ buffer: buf as unknown as ArrayBuffer, extension: ext });
-        // tl/br positioning: Spalte 0 = Image, Datenzeile = i+1 (Header ist row 0).
-        // Wir setzen tl + ext (size in pixel) statt br, damit die Zelle nicht streckt.
-        ws.addImage(imgId, {
-          tl: { col: 0.1, row: i + 1.1 },
-          ext: { width: 70, height: 70 },
-          editAs: 'oneCell',
-        });
-      } catch (err) {
-        console.warn('[Excel-Export] image decode failed for', p.id, err);
-      }
-    }
-  }
-
-  // Totals-Row (nur OWN, in_stock). Stock Value kommt aus stock_lots wenn vorhanden.
-  const ownInStock = items.filter(p =>
-    (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
-  );
-  let totalQty = 0, totalEK = 0;
-  for (const p of ownInStock) {
-    const a = lotAgg.get(p.id);
-    if (a) { totalQty += a.totalQty; totalEK += a.totalValue; }
-    else   { totalQty += p.quantity || 1; totalEK += p.purchasePrice * (p.quantity || 1); }
-  }
-  const totalVK = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * (p.quantity || 1), 0);
-
-  const totalRow = ws.addRow({
-    image: '', sku: '', brand: '', name: 'TOTAL (OWN · In Stock)', category: '',
-    qty: totalQty, cond: '', pp: '', ppRange: '', stockVal: totalEK, lots: '', spp: totalVK,
-  });
-  totalRow.height = 22;
-  totalRow.eachCell(cell => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F0F10' } };
-    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  });
-
-  // Kopfzeile fixieren beim Scrollen.
-  ws.views = [{ state: 'frozen', ySplit: 1 }];
-
-  const buffer = await wb.xlsx.writeBuffer();
   await exportFile(
     `LATAIF_Collection_${today}.xlsx`,
     new Uint8Array(buffer),
