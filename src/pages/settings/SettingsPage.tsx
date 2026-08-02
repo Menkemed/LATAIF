@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { RuntimeScopeDialog } from './RuntimeScopeDialog';
 import { OwnerProvisionDialog } from './OwnerProvisionDialog';
+import { PrimaryAdoptDialog } from './PrimaryAdoptDialog';
 import { BackupRestorePanel } from './BackupRestorePanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
@@ -1842,6 +1843,7 @@ function SyncTab() {
   const [ownerSetupRequired, setOwnerSetupRequired] = useState(false);
   const [showScopeDialog, setShowScopeDialog] = useState(false); // MOBILE-04B2A5
   const [showOwnerModal, setShowOwnerModal] = useState(false); // HOTFIX-v0.8.25-OWNER
+  const [showAdoptModal, setShowAdoptModal] = useState(false); // HOTFIX-v0.8.26-PRIMARY
 
   async function refreshServer() {
     const { getServerStatus } = await import('@/core/sync/sync-server');
@@ -1957,19 +1959,16 @@ function SyncTab() {
 
   // M6-B2A2: Einmalige Bestaetigung einer erkannten Legacy-Serverrolle. Sichtbar nur,
   // solange `primary_status.state === 'legacy_adoption_required'` — danach nie wieder.
-  async function handleAdoptLegacy() {
+  //
+  // HOTFIX-v0.8.26-PRIMARY — adoption now runs through <PrimaryAdoptDialog>, an in-app React
+  // modal. The old native window.confirm + window.prompt×2 chain was silently broken in the
+  // production Tauri/WebView2 build (window.confirm never showed and returned falsy → the
+  // `primary_adopt_legacy` invoke was never reached). This handler only runs the post-adoption
+  // side effects (start server + refresh); all confirm/collection/invoke lives inside the modal.
+  async function onLegacyAdopted() {
     const lan = await import('@/core/sync/auto-lan');
     const { startSyncServer } = await import('@/core/sync/sync-server');
-    if (!window.confirm(
-      'This device was a sync server before the update. Adopting it makes THIS installation the primary.\n\n' +
-      'Only do this if this is the real host. A copied server database must not be adopted here.'
-    )) return;
-    const email = window.prompt('Owner email (required to adopt the legacy server role):');
-    if (!email) return;
-    const password = window.prompt('Owner password:');
-    if (!password) return;
     try {
-      await lan.adoptLegacyPrimary(email, password);
       await startSyncServer();
       lan.setLanMode('server');
       setLanModeUi('server');
@@ -2083,7 +2082,7 @@ function SyncTab() {
                   <strong>{' '}this installation{' '}</strong>
                   is the real host — a copied server database must not be adopted here.
                 </p>
-                <Button variant="primary" onClick={handleAdoptLegacy}>Adopt this device as sync primary</Button>
+                <Button variant="primary" data-testid="open-adopt-modal" onClick={() => setShowAdoptModal(true)}>Adopt this device as sync primary</Button>
               </div>
             )}
             {primaryState === 'read_only' && (
@@ -2197,6 +2196,13 @@ function SyncTab() {
         open={showOwnerModal}
         onClose={() => setShowOwnerModal(false)}
         onProvisioned={onOwnerProvisioned}
+      />
+
+      {/* HOTFIX-v0.8.26-PRIMARY — in-app sync-primary adoption (replaces native confirm/prompt). */}
+      <PrimaryAdoptDialog
+        open={showAdoptModal}
+        onClose={() => setShowAdoptModal(false)}
+        onAdopted={onLegacyAdopted}
       />
     </div>
   );
