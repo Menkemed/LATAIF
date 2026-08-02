@@ -36,6 +36,32 @@ export interface LanStartupOps {
   currentSyncUrl(): string;
   setSync(url: string, token: string): void;
   startSync(): void;
+  /**
+   * POST-RELEASE-SERVER — optional. Called at most ONCE per boot when a persisted primary could
+   * not auto-start its server after the bounded retry. The `code` is a stable token (see
+   * `SERVER_ADDR_IN_USE_CODE`), never an OS-locale string. Lets the caller surface a visible
+   * "auto-start failed" state instead of a silent CLIENT ONLY. Absent in headless tests.
+   */
+  reportAutostartFailure?(code: string): void;
+  /** POST-RELEASE-SERVER — injectable delay (real setTimeout in prod, no-op in tests). */
+  sleep?(ms: number): Promise<void>;
+}
+
+// POST-RELEASE-SERVER — the ONLY transient we retry: the outgoing instance has not yet released
+// port 3001 after a relaunch. Structured Rust code (src-tauri/src/sync/mod.rs), not a heuristic.
+export const SERVER_ADDR_IN_USE_CODE = 'SYNC_SERVER_ADDR_IN_USE';
+/** At most 3 auto-start attempts per boot (1 initial + up to 2 retries). */
+export const AUTOSTART_MAX_ATTEMPTS = 3;
+/** Named backoff before each retry (ms). One entry per retry gap; last value reused if fewer. */
+export const AUTOSTART_BACKOFF_MS = [400, 900];
+
+function isTransientBindConflict(err: unknown): boolean {
+  const msg = (err as { message?: string })?.message ?? String(err ?? '');
+  return msg.includes(SERVER_ADDR_IN_USE_CODE);
+}
+
+function autostartErrorCode(err: unknown): string {
+  return isTransientBindConflict(err) ? SERVER_ADDR_IN_USE_CODE : 'SYNC_SERVER_START_FAILED';
 }
 
 /**
@@ -56,16 +82,37 @@ export async function runLanStartup(
 ): Promise<PrimaryState> {
   switch (state) {
     case 'primary': {
-      try {
-        await ops.startServer();
-        const s = await ops.serverStatus();
-        if (s && s.url && s.selfToken) {
-          ops.setSync(s.url, s.selfToken);
-          ops.startSync();
+      // POST-RELEASE-SERVER — a persisted primary auto-starts its server on EVERY boot (this
+      // branch), including after a backup-triggered relaunch. The one transient we saw in
+      // production is the outgoing instance not having released port 3001 yet → `AddrInUse`.
+      // We retry that specific, structured failure a bounded number of times (single cycle per
+      // boot, sequential — never a parallel startServer). Any OTHER failure is permanent and is
+      // NOT blindly retried. A first success ends the cycle immediately. On ultimate failure the
+      // role stays 'primary' and we SURFACE it (no silent CLIENT ONLY).
+      const sleep = ops.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < AUTOSTART_MAX_ATTEMPTS; attempt++) {
+        try {
+          await ops.startServer();
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          const isLast = attempt === AUTOSTART_MAX_ATTEMPTS - 1;
+          if (!isTransientBindConflict(err) || isLast) break;
+          await sleep(AUTOSTART_BACKOFF_MS[attempt] ?? AUTOSTART_BACKOFF_MS[AUTOSTART_BACKOFF_MS.length - 1]);
         }
-      } catch (err) {
-        // Port belegt, DB-Fehler o.ae. → Problem melden, aber NICHT die Rolle aendern.
-        console.warn('[LAN] primary server could not start:', err);
+      }
+      if (lastErr) {
+        // Rolle bleibt primary (kein stilles Demoten) — aber der Fehler wird SICHTBAR gemacht.
+        console.warn('[LAN] primary server could not start:', lastErr);
+        ops.reportAutostartFailure?.(autostartErrorCode(lastErr));
+        return 'primary';
+      }
+      const s = await ops.serverStatus();
+      if (s && s.url && s.selfToken) {
+        ops.setSync(s.url, s.selfToken);
+        ops.startSync();
       }
       return 'primary';
     }

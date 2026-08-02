@@ -98,6 +98,13 @@ const MDNS_SERVICE: &str = "_lataif-sync._tcp.local.";
 // HTTPS-Port fuer die Mobile-Seite (Live-Kamera am Handy braucht secure context).
 const HTTPS_PORT: u16 = 3443;
 
+// POST-RELEASE-SERVER — structured start-failure codes. The JS autostart classifies a TRANSIENT
+// bind conflict (an outgoing instance has not yet released the port after a relaunch → retry)
+// apart from a PERMANENT bind failure (surface, do not retry) via these stable tokens, never via
+// an OS-locale-dependent error string. `AddrInUse` is the only transient we retry.
+pub const ERR_SERVER_ADDR_IN_USE: &str = "SYNC_SERVER_ADDR_IN_USE";
+pub const ERR_SERVER_BIND_FAILED: &str = "SYNC_SERVER_BIND_FAILED";
+
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     pub jwt_secret: String,
@@ -260,9 +267,19 @@ impl SyncServer {
         let https_app = app.clone();
 
         let addr = format!("0.0.0.0:{}", self.port);
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| format!("Bind failed: {e}"))?;
+        // POST-RELEASE-SERVER — classify the bind failure so the JS autostart can distinguish a
+        // transient port-still-held (retry) from a permanent failure (surface). We do NOT set
+        // SO_REUSEADDR: on Windows it would let a SECOND process bind the SAME port alongside a
+        // live server (listener hijack / two writable servers), which is exactly what the
+        // single-primary contract forbids. Waiting for the old socket to be released (retry) is
+        // the correct recovery; if another instance still holds it, we must NOT steal it.
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(ERR_SERVER_ADDR_IN_USE.to_string());
+            }
+            Err(e) => return Err(format!("{ERR_SERVER_BIND_FAILED}: {e}")),
+        };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -410,4 +427,22 @@ pub async fn discover_lan_servers(timeout_secs: u64) -> Vec<String> {
 
     let _ = mdns.shutdown();
     results
+}
+
+#[cfg(test)]
+mod bind_tests {
+    // POST-RELEASE-SERVER — proves the OS error KIND for a second bind on an already-occupied
+    // port is `AddrInUse` — the exact transient the JS autostart retries. std::net binds the same
+    // OS socket tokio uses, so the ErrorKind is identical. This also demonstrates WHY we do not
+    // set SO_REUSEADDR: while the first socket is alive, a second bind MUST fail (no hijack).
+    use std::net::TcpListener;
+
+    #[test]
+    fn second_bind_on_occupied_port_is_addr_in_use() {
+        let first = TcpListener::bind("127.0.0.1:0").expect("bind first");
+        let port = first.local_addr().unwrap().port();
+        let err = TcpListener::bind(("127.0.0.1", port)).expect_err("second bind must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        drop(first);
+    }
 }

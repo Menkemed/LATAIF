@@ -35,6 +35,14 @@ export interface PrimaryStatus {
   instanceMatches: boolean | null;
 }
 
+// POST-RELEASE-SERVER — module-level record of a failed primary auto-start at boot, so the Sync
+// settings UI can show a visible "auto-start failed" state instead of a silent CLIENT ONLY. Set
+// by autoLanSetup (via runLanStartup's reportAutostartFailure), cleared once the server is up
+// (e.g. after a successful manual "Start as Server"). It is UI signal only — never a role source.
+let autostartFailureCode: string | null = null;
+export function getAutostartFailure(): string | null { return autostartFailureCode; }
+export function clearAutostartFailure(): void { autostartFailureCode = null; }
+
 export function getLanMode(): LanMode {
   return (localStorage.getItem(LAN_MODE_KEY) as LanMode) || 'off';
 }
@@ -107,6 +115,7 @@ export async function autoLanSetup(): Promise<PrimaryState> {
   const status = await getPrimaryStatus();
   if (!status) return 'unconfigured';   // kein Tauri (Browser-Dev) → kein LAN-Sync
 
+  autostartFailureCode = null;   // fresh boot: clear any stale signal before the attempt
   return runLanStartup(status.state, {
     startServer: () => startSyncServer(),
     serverStatus: () => getServerStatus(),
@@ -114,6 +123,8 @@ export async function autoLanSetup(): Promise<PrimaryState> {
     currentSyncUrl: () => getSyncUrl(),
     setSync: (url, token) => setSyncConfig(url, token),
     startSync: () => startAutoSync(),
+    // POST-RELEASE-SERVER — record a failed primary auto-start so the Sync UI can surface it.
+    reportAutostartFailure: (code) => { autostartFailureCode = code; },
   });
 }
 

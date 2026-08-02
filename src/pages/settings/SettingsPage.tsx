@@ -1844,12 +1844,16 @@ function SyncTab() {
   const [showScopeDialog, setShowScopeDialog] = useState(false); // MOBILE-04B2A5
   const [showOwnerModal, setShowOwnerModal] = useState(false); // HOTFIX-v0.8.25-OWNER
   const [showAdoptModal, setShowAdoptModal] = useState(false); // HOTFIX-v0.8.26-PRIMARY
+  const [autostartFailed, setAutostartFailed] = useState(false); // POST-RELEASE-SERVER
 
   async function refreshServer() {
     const { getServerStatus } = await import('@/core/sync/sync-server');
     const s = await getServerStatus();
     setServerStatus(s);
     const lan = await import('@/core/sync/auto-lan');
+    // POST-RELEASE-SERVER — a boot auto-start failure is only meaningful while the server is
+    // still down; once it is running (e.g. after a manual start) the signal is stale.
+    setAutostartFailed(!s?.running && !!lan.getAutostartFailure());
     const st = await lan.getPrimaryStatus();
     setPrimaryState(st?.state ?? '');
     const { getServerOwnerStatus } = await import('@/core/sync/server-owner');
@@ -1950,6 +1954,7 @@ function SyncTab() {
         await startSyncServer();                                      // … dann der Start
         lan.setLanMode('server');
         setLanModeUi('server');
+        lan.clearAutostartFailure();   // POST-RELEASE-SERVER — manual start recovered it
       }
       await refreshServer();
     } catch (err) {
@@ -2047,6 +2052,19 @@ function SyncTab() {
                 <code style={{ color: '#0F0F10', background: '#F2F7FA', padding: '2px 8px', borderRadius: 4, fontSize: 12 }}>{serverStatus.url}</code>
               )}
             </p>
+            {/* POST-RELEASE-SERVER — a persisted primary whose server auto-start failed at boot
+                (e.g. the port was still held after a relaunch). Role stays primary; make it
+                VISIBLE instead of a silent "CLIENT ONLY", and keep manual start available. */}
+            {primaryState === 'primary' && !serverStatus.running && autostartFailed && (
+              <div data-testid="autostart-failed" style={{ marginBottom: 12, padding: '10px 12px', background: '#FEF3F2', borderRadius: 6, border: '1px solid #FCA5A5' }}>
+                <p style={{ fontSize: 12, color: '#991B1B', lineHeight: 1.6 }}>
+                  <strong>Auto-Start fehlgeschlagen.</strong>{' '}
+                  This device is the sync primary, but the LAN server could not start automatically
+                  (the port may still have been in use right after a restart). Your role is unchanged —
+                  click <strong>Start as Server</strong> below to start it now.
+                </p>
+              </div>
+            )}
             {/* M6-B2A4: ohne Owner-Passwort geht gar nichts — zuerst anzeigen. */}
             {ownerSetupRequired && (
               <div style={{ marginBottom: 12, padding: '10px 12px', background: '#EFF6FF', borderRadius: 6, border: '1px solid #93C5FD' }}>
