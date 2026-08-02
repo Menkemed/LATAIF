@@ -12,6 +12,7 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { RuntimeScopeDialog } from './RuntimeScopeDialog';
+import { OwnerProvisionDialog } from './OwnerProvisionDialog';
 import { BackupRestorePanel } from './BackupRestorePanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
@@ -1840,6 +1841,7 @@ function SyncTab() {
   // gar nichts moeglich — kein Login, kein Serverstart, keine Owner-Aktion.
   const [ownerSetupRequired, setOwnerSetupRequired] = useState(false);
   const [showScopeDialog, setShowScopeDialog] = useState(false); // MOBILE-04B2A5
+  const [showOwnerModal, setShowOwnerModal] = useState(false); // HOTFIX-v0.8.25-OWNER
 
   async function refreshServer() {
     const { getServerStatus } = await import('@/core/sync/sync-server');
@@ -1863,30 +1865,14 @@ function SyncTab() {
   //
   // Diese Seite ist KEINE Sicherheitsgrenze: sie sammelt nur ein. Rust prueft Phrase,
   // Laenge und Bestaetigung und lehnt eine zweite Provisionierung ab.
-  async function handleProvisionOwner() {
-    const { provisionServerOwner, getServerOwnerStatus } = await import('@/core/sync/server-owner');
-    const status = await getServerOwnerStatus();
-    if (!status) return;
-
-    const password = window.prompt(
-      `Choose a password for this machine's sync server owner (min ${status.minPasswordLength} characters).\n\n` +
-      `This replaces the old shared default. Other devices will use it to sync to this machine.`
-    );
-    if (!password) return;
-    const confirm = window.prompt('Repeat the password:');
-    if (!confirm) return;
-    if (!window.confirm(
-      'Set this machine as the sync server owner?\n\n' +
-      'Keep this password safe — it is the only way to change the sync role later.'
-    )) return;
-
-    try {
-      await provisionServerOwner(password, confirm, status.confirmationPhrase);
-      await refreshServer();
-      setResult('Server owner password set. You can now start the LAN sync server.');
-    } catch (err) {
-      setResult(explain(String(err)));
-    }
+  // HOTFIX-v0.8.25-OWNER — provisioning now runs through <OwnerProvisionDialog>, an
+  // in-app React modal. The old native window.prompt×2 + window.confirm chain was
+  // silently broken in the production Tauri/WebView2 build (window.confirm never
+  // showed and returned falsy → the invoke was never reached). This handler only
+  // opens the modal; all collection/validation/invoke lives inside it.
+  async function onOwnerProvisioned() {
+    await refreshServer();
+    setResult('Server owner password set. You can now start the LAN sync server.');
   }
 
   async function handleChangeOwnerPassword() {
@@ -2071,7 +2057,7 @@ function SyncTab() {
                   shared default; it has been disabled. Set your own password before starting
                   the LAN server.
                 </p>
-                <Button variant="primary" onClick={handleProvisionOwner}>Set server owner password</Button>
+                <Button variant="primary" data-testid="open-owner-modal" onClick={() => setShowOwnerModal(true)}>Set server owner password</Button>
               </div>
             )}
             {!ownerSetupRequired && (
@@ -2204,6 +2190,13 @@ function SyncTab() {
         // newly bound scope (or replaces the old timer on a rebind). Without this a later configuration
         // would not start the poller until the next login.
         onConfigured={() => { void import('@/core/media/mobile-upload-wiring').then((w) => w.armMobileDrainPoller()).catch(() => {}); }}
+      />
+
+      {/* HOTFIX-v0.8.25-OWNER — in-app owner provisioning (replaces native prompt/confirm). */}
+      <OwnerProvisionDialog
+        open={showOwnerModal}
+        onClose={() => setShowOwnerModal(false)}
+        onProvisioned={onOwnerProvisioned}
       />
     </div>
   );
