@@ -63,6 +63,7 @@ import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
+import { isRelaunchApproved } from '@/core/lifecycle/relaunch-coordinator';
 import { prepareAndReloadApplication, createSingleFlight as createReloadSingleFlight, type ReloadStatus } from '@/core/lifecycle/reload-orchestration';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
@@ -195,6 +196,12 @@ export default function App() {
         if (cancelled) return;
         const win = mod.getCurrentWindow();
         unlisten = await win.onCloseRequested(async (event) => {
+          // POST-RELEASE-SHUTDOWN: an APPROVED coordinated relaunch already flushed durably and stopped
+          // the LAN server; the request_restart CloseRequested must pass STRAIGHT THROUGH (no
+          // preventDefault, no second controlled shutdown) so the process reaches RuntimeRunEvent::Exit
+          // and the single-instance mutex is released before the replacement spawns. Checked
+          // SYNCHRONOUSLY (static import) because preventDefault must run before any await.
+          if (isRelaunchApproved()) return; // let the window close + process restart proceed
           event.preventDefault(); // wir kontrollieren den Close selbst
           try {
             await runClose();

@@ -1294,6 +1294,44 @@ async fn finalize_application_shutdown(
     Ok(())
 }
 
+// POST-RELEASE-SHUTDOWN — stop the LAN server and CONFIRM the listener is actually released before a
+// coordinated relaunch spawns the replacement. `SyncServer::stop` aborts the serve task, but the OS may
+// hold the socket briefly; we prove the port is free by re-binding it (then dropping the probe). Without
+// this, the replacement's auto-start could still hit AddrInUse. Bounded: returns an error on timeout so
+// the coordinator ABORTS the relaunch (no replacement) rather than spawning into a still-bound port.
+#[tauri::command]
+async fn stop_server_and_confirm_free(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<(), String> {
+    let server = state.server.clone();
+    let port = server.port;
+    server.stop().await?;
+    // Poll a re-bind of 0.0.0.0:port until it succeeds (listener freed) or we time out.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+            Ok(l) => {
+                drop(l); // immediately release the probe so the replacement can bind
+                return Ok(());
+            }
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            Err(e) => return Err(format!("listener still bound on port {port}: {e}")),
+        }
+    }
+}
+
+// POST-RELEASE-SHUTDOWN — rollback for an aborted coordinated relaunch: remove a just-written backup
+// intent so an aborted relaunch never leaves a pending backup that a later boot would consume. Only
+// deletes a not-yet-run pending intent (reversible/fail-safe: at worst the scheduled backup is
+// cancelled). Called by the coordinator during abort; no DB/media mutation.
+#[tauri::command]
+fn clear_pending_backup_intent(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    media::backup::clear_backup_intent(&app_dir).map_err(|code| code.code().to_string())
+}
+
 // MOBILE-04B2A6-I1 — the runtime gate is now EVIDENCE-DRIVEN. It reads the fresh active binding for the
 // install and opens ONLY on an exact (tenant, branch, binding_revision) match; missing / unconfigured /
 // stale / mismatched all fail closed. `fence_runtime_scope` reads only `mobile_runtime_scope`, so a
@@ -2190,6 +2228,18 @@ fn staging_gc_dry_run(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // POST-RELEASE-SHUTDOWN — single-instance guard MUST be the first plugin. A second manually
+        // launched instance runs this callback in the EXISTING instance (focus + surface the main
+        // window) and then exits ITSELF before it can initialise any DB, autosave, mobile drain,
+        // backup or LAN server — the only defence against two concurrent writers to the same
+        // lataif.db / lataif_sync_server.db. argv/cwd are NEVER logged (may carry paths/secrets).
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -2338,6 +2388,8 @@ pub fn run() {
             list_restore_snapshots,
             schedule_restore_snapshot,
             schedule_backup_snapshot,
+            stop_server_and_confirm_free,
+            clear_pending_backup_intent,
             staging_gc_dry_run,
             finalize_application_shutdown
         ])

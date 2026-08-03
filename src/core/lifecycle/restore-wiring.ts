@@ -172,28 +172,40 @@ export async function scheduleBackupSnapshotWith(
   await prepareAndScheduleBackup(buildBackupOrchestrationOps(owner, deps));
 }
 
-/** Schedule a boot-time backup using the shipping modules (Tauri only). */
+/**
+ * Schedule a boot-time backup using the shipping modules (Tauri only).
+ *
+ * POST-RELEASE-SHUTDOWN — driven by the coordinated-relaunch state machine so the whole shutdown is
+ * atomic and single-instance-safe: block writes → bounded await idle → durable flush → stop LAN server
+ * + CONFIRM listener freed → persist the backup intent exactly-once → approve → relaunch. A failure or
+ * timeout before approval aborts cleanly (no relaunch, no second process, the just-written intent is
+ * removed, writes resume only when writers are terminal). The approved relaunch's CloseRequested passes
+ * through App.tsx's handler (isRelaunchApproved) so the process reaches Exit → the single-instance mutex
+ * is released → the replacement starts and binds the freed port.
+ */
 export async function scheduleBackupSnapshot(
   owner: { email: string; password: string },
   setStatus?: (status: RestoreStatus | null) => void,
 ): Promise<void> {
-  const [core, sync, db, wiring, proc] = await Promise.all([
+  const [core, sync, db, wiring, proc, coord] = await Promise.all([
     import('@tauri-apps/api/core'),
     import('@/core/sync/sync-service'),
     import('@/core/db/database'),
     import('@/core/media/mobile-upload-wiring'),
     import('@tauri-apps/plugin-process'),
+    import('@/core/lifecycle/relaunch-coordinator'),
   ]);
-  await scheduleBackupSnapshotWith(owner, {
-    invoke: (cmd, args) => core.invoke(cmd, args ?? {}),
-    pauseAutoSync: () => sync.pauseAutoSync(),
-    resumeAutoSync: () => sync.resumeAutoSync(),
-    stopMobileDrainPoller: () => wiring.stopMobileDrainPoller(),
-    armMobileDrainPoller: () => wiring.armMobileDrainPoller(),
-    waitForSyncIdle: () => sync.waitForSyncIdle(),
-    saveDatabaseDurably: () => db.saveDatabaseDurably(),
+  await coord.coordinatedRelaunch({
+    blockWrites: () => { sync.pauseAutoSync(); wiring.stopMobileDrainPoller(); },
+    awaitWritersIdle: () => sync.waitForSyncIdle(),
+    flushDurably: () => db.saveDatabaseDurably(),
+    stopServerConfirmFree: () => core.invoke('stop_server_and_confirm_free'),
+    restartServer: async () => { await core.invoke('sync_server_start'); },
+    persistIntent: async () => { await core.invoke('schedule_backup_snapshot', { email: owner.email, password: owner.password }); return true; },
+    clearIntent: () => core.invoke('clear_pending_backup_intent'),
+    resumeWrites: () => { sync.resumeAutoSync(); wiring.armMobileDrainPoller(); },
     relaunch: () => proc.relaunch(),
-    setStatus,
+    setPhase: setStatus ? (p) => setStatus(p === 'failed' ? { kind: 'error', message: 'Backup konnte nicht vorbereitet werden.' } : { kind: 'scheduling' }) : undefined,
   });
 }
 

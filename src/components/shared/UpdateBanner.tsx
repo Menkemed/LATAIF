@@ -90,10 +90,32 @@ export function UpdateBanner() {
             setState({ kind: 'installing' });
           }
         }),
-      // 3. Nur nach erfolgreicher Installation: App neustarten.
+      // 3. Nur nach erfolgreicher Installation: App neustarten — durch DENSELBEN coordinated
+      // relaunch wie das Backup (kein bloßes approve): block writes → bounded await idle → durable
+      // flush → stop LAN server + CONFIRM listener freed → approve → relaunch. So erreicht der
+      // Updater-Prozess RuntimeRunEvent::Exit sauber (kein Re-Entry-Hang), gibt die
+      // single-instance-Mutex + den Port frei, bevor die Ersatzinstanz startet, und es gibt keinen
+      // ungeflushten Exit. Kein Boot-Intent (nur der Backup-Pfad schreibt einen).
       relaunch: async () => {
-        const { relaunch } = await import('@tauri-apps/plugin-process');
-        await relaunch();
+        const [{ invoke }, sync, db, wiring, proc, coord] = await Promise.all([
+          import('@tauri-apps/api/core'),
+          import('@/core/sync/sync-service'),
+          import('@/core/db/database'),
+          import('@/core/media/mobile-upload-wiring'),
+          import('@tauri-apps/plugin-process'),
+          import('@/core/lifecycle/relaunch-coordinator'),
+        ]);
+        await coord.coordinatedRelaunch({
+          blockWrites: () => { sync.pauseAutoSync(); wiring.stopMobileDrainPoller(); },
+          awaitWritersIdle: () => sync.waitForSyncIdle(),
+          flushDurably: () => db.saveDatabaseDurably(),
+          stopServerConfirmFree: () => invoke('stop_server_and_confirm_free'),
+          restartServer: async () => { await invoke('sync_server_start'); },
+          persistIntent: async () => false,   // updater relaunch has no boot intent
+          clearIntent: async () => {},
+          resumeWrites: () => { sync.resumeAutoSync(); wiring.armMobileDrainPoller(); },
+          relaunch: () => proc.relaunch(),
+        });
       },
       onPhase: (phase) => {
         if (phase.kind === 'saving') setState({ kind: 'saving' });
