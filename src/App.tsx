@@ -63,7 +63,7 @@ import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
-import { isRelaunchApproved } from '@/core/lifecycle/relaunch-coordinator';
+import { isRelaunchApproved, withTimeout, SYNC_IDLE_TIMEOUT_MS, FLUSH_TIMEOUT_MS } from '@/core/lifecycle/relaunch-coordinator';
 import { prepareAndReloadApplication, createSingleFlight as createReloadSingleFlight, type ReloadStatus } from '@/core/lifecycle/reload-orchestration';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
@@ -176,10 +176,14 @@ export default function App() {
           stopBackgroundWrites: () => sync.pauseAutoSync(),
           // Auf einen BEREITS laufenden syncNow() warten, damit dessen DB-Writes im finalen Flush
           // landen (er schliesst alle Writes + Store-Reloads vor der Promise-Aufloesung ab).
-          waitForPendingOperations: () => sync.waitForSyncIdle(),
-          // Persistenzbarriere: schliesst alle angeforderten Writes ab und WIRFT bei Fehler
-          // (kein Schlucken mehr wie im alten 1,5s-Best-Effort-Pfad).
-          flushPendingDatabaseWrites: () => flushDatabase(),
+          // SHUTDOWN-FINAL — BOUNDED: ein gegen einen toten/haengenden Server steckengebliebener Sync darf
+          // den X-Close nicht mehr unbegrenzt haengen lassen. Timeout → sichtbarer Abbruch (Overlay 'error'),
+          // App bleibt offen, KEIN Hard-Exit, KEINE zweite PID (der Close spawnt nie einen Prozess).
+          waitForPendingOperations: () =>
+            withTimeout(sync.waitForSyncIdle(), SYNC_IDLE_TIMEOUT_MS, 'flushing'),
+          // Persistenzbarriere: schliesst alle angeforderten Writes ab und WIRFT bei Fehler (kein Schlucken).
+          // Ebenfalls bounded, damit ein haengender Flush den Close nicht blockiert.
+          flushPendingDatabaseWrites: () => withTimeout(flushDatabase(), FLUSH_TIMEOUT_MS, 'flushing'),
           // M4-D: finaler Abschluss vollstaendig nativ. Rust stoppt den Sync-Server und beendet den
           // Prozess via AppHandle::exit(0) — KEIN win.destroy(), KEIN Webview-setTimeout(proc.exit).
           // Im Erfolgsfall stirbt der Prozess → dieser invoke loest nie auf (normaler Exit-Pfad, KEIN
@@ -249,7 +253,9 @@ export default function App() {
         // — rAF feuert bei verstecktem Fenster nicht).
         yieldToRender: () => new Promise<void>((r) => setTimeout(r, 0)),
         pauseBackgroundWrites: () => sync.pauseAutoSync(),         // M4-A1: neue Sync-Laeufe pausieren
-        waitForPendingOperations: () => sync.waitForSyncIdle(),    // laufenden Sync abwarten
+        // SHUTDOWN-FINAL — BOUNDED wie Close/Restore: ein haengender Sync darf den Reload nicht blockieren.
+        waitForPendingOperations: () =>
+          withTimeout(sync.waitForSyncIdle(), SYNC_IDLE_TIMEOUT_MS, 'flushing'),  // laufenden Sync abwarten (bounded)
         durableSave: saveDatabaseDurably,                          // M2: frischer db.export + persist, wirft bei Fehler/aktiver Tx
         reloadApplication: () => window.location.reload(),         // nur nach bestaetigter Persistenz
         resumeBackgroundWrites: () => sync.resumeAutoSync(),       // bei Fehler: Sync wieder freigeben

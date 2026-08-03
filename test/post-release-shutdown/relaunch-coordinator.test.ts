@@ -6,7 +6,7 @@
 // Run: node test/post-release-shutdown/relaunch-coordinator.test.ts
 import {
   coordinatedRelaunch, withTimeout, isRelaunchApproved, approveRelaunch, relaunchPhase,
-  RelaunchTimeoutError, __resetRelaunchCoordinatorForTest as reset,
+  RelaunchTimeoutError, stopServerThenApproveRelaunch, __resetRelaunchCoordinatorForTest as reset,
   type CoordinatedRelaunchOps,
 } from '../../src/core/lifecycle/relaunch-coordinator.ts';
 
@@ -96,6 +96,39 @@ function ops(over: Partial<CoordinatedRelaunchOps> = {}) {
     const app = readFileSync(fileURLToPath(new URL('../../src/App.tsx', import.meta.url)), 'utf8');
     check(/if\s*\(isRelaunchApproved\(\)\)\s*return;/.test(app), '18: onCloseRequested returns early when a relaunch is approved');
     check(app.indexOf('isRelaunchApproved()') < app.indexOf('event.preventDefault()'), '19: the approved-check precedes preventDefault (checked synchronously)');
+  }
+
+  // 9) SHUTDOWN-FINAL — stopServerThenApproveRelaunch (the RESTORE/coordinated terminal tail)
+  function stops(over: Partial<{ stop: () => Promise<void>; restart: () => Promise<void>; relaunch: () => Promise<void> }> = {}) {
+    const s = { stopped: 0, restarted: 0, relaunched: 0, approved: 0 };
+    const o = {
+      stopServerConfirmFree: over.stop ?? (async () => { s.stopped++; }),
+      restartServer: over.restart ?? (async () => { s.restarted++; }),
+      relaunch: over.relaunch ?? (async () => { s.relaunched++; }),
+      approve: () => { s.approved++; },
+    };
+    return { o, s };
+  }
+  // 9a) happy path → stop, approve, relaunch (no restart)
+  { const { o, s } = stops();
+    await stopServerThenApproveRelaunch(o);
+    check(s.stopped===1 && s.approved===1 && s.relaunched===1 && s.restarted===0, '20: stop→approve→relaunch on the happy path');
+  }
+  // 9b) server-stop FAILS → restart server, NO approve, NO relaunch, rethrow (fail-closed, no 2nd process)
+  { const { o, s } = stops({ stop: async () => { throw new Error('listener still bound'); } });
+    let threw = false; try { await stopServerThenApproveRelaunch(o); } catch { threw = true; }
+    check(threw && s.relaunched===0 && s.approved===0, '21: server-stop failure → NO approve, NO relaunch (no second process)');
+    check(s.restarted===1, '22: server-stop failure restarts the server (never left server-down)');
+  }
+  // 9c) server-stop TIMES OUT (withTimeout) → same fail-closed shape
+  { const { o, s } = stops({ stop: () => new Promise<void>(() => {}) });  // never resolves
+    let e: unknown = null; try { await stopServerThenApproveRelaunch(o); } catch (x) { e = x; }
+    check(e instanceof RelaunchTimeoutError && s.relaunched===0 && s.restarted===1, '23: a hanging server-stop times out → restart + fail-closed, never relaunches');
+  }
+  // 9d) uses approveRelaunch by default (real bypass flag) when no approve injected
+  { reset(); const s = { relaunched: 0 };
+    await stopServerThenApproveRelaunch({ stopServerConfirmFree: async () => {}, restartServer: async () => {}, relaunch: async () => { s.relaunched++; } });
+    check(isRelaunchApproved() && s.relaunched===1, '24: default approve sets the real one-way bypass flag before relaunch');
   }
 
   if (fail.length) { console.error('POST-RELEASE-SHUTDOWN: FAILURES:'); for (const f of fail) console.error('  x ' + f); process.exit(1); }

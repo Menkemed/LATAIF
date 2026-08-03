@@ -211,15 +211,48 @@ export async function scheduleBackupSnapshot(
 
 /**
  * Drive an owner-authenticated restore in the safe order: quiesce the runtime, durably schedule the
- * restore (no live mutation), then relaunch — the BOOT path applies the swap while the DBs are closed. On
- * ANY failure the writers/worker stay blocked, no relaunch happens, and the error propagates (fail-closed).
+ * restore (no live mutation), then relaunch — the BOOT path applies the swap while the DBs are closed.
+ *
+ * SHUTDOWN-FINAL — the relaunch is now COORDINATED exactly like the backup path (this was the bug found live
+ * during a v0.8.29 restore: a direct `proc.relaunch()` left the LAN server socket on port 3001 in CloseWait
+ * so the replacement could not bind → server down after restore). The quiescence waits are BOUNDED so a
+ * stuck sync can never hang the restore, and the relaunch stops+confirms the port free, marks the relaunch
+ * approved (so App.tsx's CloseRequested passes through — no re-entrant controlled close → no hang), and only
+ * then relaunches. A pre-schedule failure resumes writers; a post-schedule failure is fail-closed (the
+ * restore applies at the next manual boot). The server-stop-confirm failure path restarts the server and
+ * never spawns a second process.
  */
 export async function startRestore(
   params: RestoreParams,
   setStatus?: (status: RestoreStatus | null) => void,
 ): Promise<void> {
-  const deps = await buildDefaultRestoreDeps(setStatus);
-  const ops = buildRestoreOrchestrationOps(params, deps);
+  const [deps, core, coord, proc] = await Promise.all([
+    buildDefaultRestoreDeps(setStatus),
+    import('@tauri-apps/api/core'),
+    import('@/core/lifecycle/relaunch-coordinator'),
+    import('@tauri-apps/plugin-process'),
+  ]);
+  const bounded: RestoreRuntimeDeps = {
+    ...deps,
+    // Bounded quiescence: a stuck writer/flush can no longer hang the restore (visible abort instead).
+    waitForSyncIdle: () => coord.withTimeout(deps.waitForSyncIdle(), coord.SYNC_IDLE_TIMEOUT_MS, 'flushing'),
+    flushAndCloseFrontendDb: () =>
+      coord.withTimeout(deps.flushAndCloseFrontendDb(), coord.FLUSH_TIMEOUT_MS, 'flushing'),
+    // Coordinated relaunch tail: stop server + confirm port free → approve (CloseRequested bypass) → relaunch.
+    relaunch: () =>
+      coord.stopServerThenApproveRelaunch({
+        stopServerConfirmFree: () => core.invoke('stop_server_and_confirm_free') as Promise<void>,
+        restartServer: async () => { await core.invoke('sync_server_start'); },
+        relaunch: () => proc.relaunch(),
+      }),
+  };
+  const ops = buildRestoreOrchestrationOps(params, bounded);
+  // ROLLBACK on a post-schedule, pre-relaunch failure: drop the pending restore intent (no silent restore
+  // next boot) and bring the LAN server back (idempotent — a no-op if it was never stopped or already up).
+  ops.rollbackScheduledRestore = async () => {
+    await core.invoke('clear_pending_restore_intent');
+    try { await core.invoke('sync_server_start'); } catch { /* already running / best-effort */ }
+  };
   await prepareAndScheduleRestore(ops);
 }
 

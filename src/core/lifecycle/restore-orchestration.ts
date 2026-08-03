@@ -35,6 +35,10 @@ export interface RestoreOrchestrationOps {
   restartApplication: () => Promise<void>;
   /** Undo `blockWrites` when a PRE-schedule step fails (nothing was scheduled → safe to resume). */
   resumeWrites: () => void;
+  /** SHUTDOWN-FINAL — ROLLBACK a durably-scheduled restore when a phase-2 step fails BEFORE the relaunch is
+   *  committed: remove the pending restore intent so the next boot does NOT silently restore, and (if the
+   *  LAN server was stopped) bring it back. Reached only on a post-schedule, pre-relaunch failure. */
+  rollbackScheduledRestore?: () => Promise<void>;
 }
 
 function messageOf(err: unknown): string {
@@ -61,12 +65,19 @@ export async function prepareAndScheduleRestore(ops: RestoreOrchestrationOps): P
     throw err;
   }
 
-  // ── Phase 2: fail-closed (the restore is durably scheduled and WILL apply at next boot) ──
+  // ── Phase 2: flush+close → coordinated relaunch. A failure here is BEFORE the relaunch commits (the
+  //    relaunch approves ONLY after the server is stopped + the port confirmed free), so it ROLLS BACK the
+  //    scheduled restore: clear the pending intent (no silent restore at the next boot) and restart the LAN
+  //    server if it was stopped. Writes are NOT resumed (the frontend DB is closed) — the app shows the
+  //    error and the user restarts into the CURRENT (un-restored) data. Once approved, the relaunch commits
+  //    and the boot path applies the restore. ──
   try {
     await ops.flushAndCloseFrontendDb();
     await ops.restartApplication();
   } catch (err) {
-    // Do NOT resume: the intent is durable. Leave the app blocked; the boot path applies the restore.
+    if (ops.rollbackScheduledRestore) {
+      try { await ops.rollbackScheduledRestore(); } catch { /* leave for boot reconcile */ }
+    }
     ops.setStatus({ kind: 'error', message: messageOf(err) });
     throw err;
   }

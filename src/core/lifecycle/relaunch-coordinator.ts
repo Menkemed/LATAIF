@@ -157,5 +157,40 @@ export async function coordinatedRelaunch(ops: CoordinatedRelaunchOps): Promise<
  */
 export function approveRelaunch(): void { phase = 'restart-approved'; }
 
+export interface ServerStopRelaunchOps {
+  /** Stop the LAN server and CONFIRM the listener is released (Rust). Bounded. */
+  stopServerConfirmFree: () => Promise<void>;
+  /** Bring the LAN server back if the stop/confirm fails, so a primary is never left server-down. */
+  restartServer: () => Promise<void>;
+  /** The actual Tauri process relaunch. Called ONLY after the server is confirmed free + approved. */
+  relaunch: () => Promise<void>;
+  /** Injection seam for tests; defaults to `approveRelaunch`. */
+  approve?: () => void;
+}
+
+/**
+ * Coordinated terminal relaunch for a caller that has ALREADY durably scheduled its boot work (the RESTORE
+ * path: the owner is authorized and the restore intent is written before this runs). Steps:
+ *   1. stop the LAN server and CONFIRM the port is free (bounded) — a relaunch while the old listener still
+ *      lingers is exactly what left port 3001 in CloseWait and made the replacement fail to bind,
+ *   2. mark the relaunch APPROVED so the request_restart-triggered CloseRequested passes straight through
+ *      App.tsx (no re-entrant controlled close → no hang → the process reaches RuntimeRunEvent::Exit → the
+ *      single-instance mutex is released → the replacement binds the freed port),
+ *   3. relaunch.
+ * If the port cannot be confirmed free, DO NOT relaunch (a lingering socket would race the replacement):
+ * restart the server so the primary is never left server-down, then rethrow so the caller stays fail-closed
+ * (its durable intent applies on the next manual boot). NO second process is ever spawned on this path.
+ */
+export async function stopServerThenApproveRelaunch(ops: ServerStopRelaunchOps): Promise<void> {
+  try {
+    await withTimeout(ops.stopServerConfirmFree(), SERVER_STOP_CONFIRM_TIMEOUT_MS, 'stopping-server');
+  } catch (err) {
+    try { await ops.restartServer(); } catch { /* best-effort; user can Start as Server */ }
+    throw err; // fail-closed: no approve, no relaunch, no second process
+  }
+  (ops.approve ?? approveRelaunch)();
+  await ops.relaunch();
+}
+
 /** Test-only: reset the module state between headless cases. */
 export function __resetRelaunchCoordinatorForTest(): void { phase = 'idle'; inFlight = false; }

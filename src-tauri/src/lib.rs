@@ -1332,6 +1332,16 @@ fn clear_pending_backup_intent(app_handle: tauri::AppHandle) -> Result<(), Strin
     media::backup::clear_backup_intent(&app_dir).map_err(|code| code.code().to_string())
 }
 
+// SHUTDOWN-FINAL — rollback for an aborted coordinated RESTORE: remove a just-scheduled restore intent so a
+// shutdown that could not complete the relaunch never leaves a pending restore that the next boot would
+// silently apply. Only deletes the not-yet-applied pending intent (reversible: the restore is cancelled and
+// the app reopens the CURRENT data). No DB/media mutation.
+#[tauri::command]
+fn clear_pending_restore_intent(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    media::restore_recovery::clear_intent(&app_dir).map_err(|code| code.code().to_string())
+}
+
 // MOBILE-04B2A6-I1 — the runtime gate is now EVIDENCE-DRIVEN. It reads the fresh active binding for the
 // install and opens ONLY on an exact (tenant, branch, binding_revision) match; missing / unconfigured /
 // stale / mismatched all fail closed. `fence_runtime_scope` reads only `mobile_runtime_scope`, so a
@@ -2489,6 +2499,7 @@ pub fn run() {
             open_backup_location,
             stop_server_and_confirm_free,
             clear_pending_backup_intent,
+            clear_pending_restore_intent,
             staging_gc_dry_run,
             finalize_application_shutdown
         ])

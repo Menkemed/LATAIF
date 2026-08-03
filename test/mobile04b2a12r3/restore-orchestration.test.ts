@@ -26,6 +26,7 @@ function recorder(overrides: Partial<Record<keyof RestoreOrchestrationOps, () =>
     flushAndCloseFrontendDb: step('flushAndCloseFrontendDb'),
     restartApplication: step('restartApplication'),
     resumeWrites: () => { order.push('resumeWrites'); },
+    rollbackScheduledRestore: step('rollbackScheduledRestore'),
   };
   return { ops, order };
 }
@@ -66,6 +67,23 @@ await (async () => {
   ok(order.includes('scheduleRestore') && !order.includes('resumeWrites'), 'once scheduled, writers are NOT resumed (fail-closed) — the intent applies at next boot');
   ok(!order.includes('restartApplication'), 'no relaunch on a post-schedule failure');
   ok(order[order.length - 1] === 'status:error', 'error status surfaced (no auto-continue)');
+})();
+
+// ── §4b SHUTDOWN-FINAL — a post-schedule, PRE-relaunch failure ROLLS BACK the scheduled restore ──
+await (async () => {
+  const { ops, order } = recorder({ flushAndCloseFrontendDb: () => { throw new Error('flush failed') } });
+  let threw = false; try { await prepareAndScheduleRestore(ops); } catch { threw = true; }
+  ok(threw && order.includes('scheduleRestore'), 'a pre-relaunch phase-2 failure rejects after scheduling');
+  ok(order.includes('rollbackScheduledRestore'), 'ROLLBACK: the pending restore intent is cleared (no silent restore next boot)');
+  ok(order.indexOf('rollbackScheduledRestore') > order.indexOf('scheduleRestore'), 'rollback runs after the schedule that wrote the intent');
+  ok(!order.includes('resumeWrites') && !order.includes('restartApplication'), 'no resume, no relaunch on the rolled-back path');
+})();
+
+// ── §4c the relaunch-tail failure (server-stop cannot confirm the port free) also rolls back ──
+await (async () => {
+  const { ops, order } = recorder({ restartApplication: () => { throw new Error('listener still bound') } });
+  let threw = false; try { await prepareAndScheduleRestore(ops); } catch { threw = true; }
+  ok(threw && order.includes('rollbackScheduledRestore'), 'a relaunch-tail (stop-server) failure also rolls the restore back');
 })();
 
 console.log(`\nMEDIA-04B2A12-R3/U2 restore-orchestration: ${PASS} passed, ${FAIL} failed`);
