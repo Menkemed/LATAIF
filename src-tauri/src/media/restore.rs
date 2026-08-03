@@ -332,7 +332,7 @@ pub fn resolve_snapshot_id(app_data_dir: &Path, snapshot_id: &str) -> Result<Pat
     if is_unsafe_segment(snapshot_id) {
         return Err(MediaError::PathOutsideRoot);
     }
-    let root = app_data_dir.join("backups");
+    let root = super::backup_location::resolve_root(app_data_dir);
     let dir = root.join(snapshot_id);
     if is_symlink(&dir) {
         return Err(MediaError::PathReparsePointForbidden);
@@ -349,7 +349,7 @@ pub fn resolve_snapshot_id(app_data_dir: &Path, snapshot_id: &str) -> Result<Pat
 /// fails the full pre-check (incomplete, foreign schema, tampered, symlink, unexpected file, unsafe name)
 /// is silently skipped — never surfaced. Returns opaque ids + sanitised totals only; no path leaves Rust.
 pub fn list_snapshots(app_data_dir: &Path) -> Result<Vec<SnapshotSummary>, MediaError> {
-    let root = app_data_dir.join("backups");
+    let root = super::backup_location::resolve_root(app_data_dir);
     let mut out: Vec<SnapshotSummary> = Vec::new();
     let entries = match fs::read_dir(&root) {
         Ok(e) => e,

@@ -20,6 +20,14 @@ import {
   type SnapshotSummary,
 } from '@/core/lifecycle/restore-wiring';
 import {
+  getBackupLocation,
+  pickBackupFolder,
+  setBackupLocation,
+  resetBackupLocation,
+  openBackupLocation,
+  type BackupLocationInfo,
+} from '@/core/lifecycle/backup-location';
+import {
   sanitizeBackupError,
   formatBytes,
   formatCreatedAt,
@@ -43,9 +51,43 @@ export function BackupRestorePanel() {
   const [confirmPw, setConfirmPw] = useState('');
   const [backupOpen, setBackupOpen] = useState(false);
   const [backupPw, setBackupPw] = useState('');
+  const [loc, setLoc] = useState<BackupLocationInfo | null>(null);
+  const [locMsg, setLocMsg] = useState<string | null>(null);
 
   // Secret hygiene: never leave a password in memory when the panel unmounts.
   useEffect(() => () => { setPassword(''); setConfirmPw(''); setBackupPw(''); }, []);
+
+  // Load the current backup location for display (read-only, no owner gate).
+  useEffect(() => { getBackupLocation().then(setLoc).catch(() => setLoc(null)); }, []);
+
+  // OWNER-gated: pick a folder (native dialog) → validate+persist in Rust. Requires the owner password
+  // typed in the fields above. A disconnected/read-only drive fails VISIBLY (no silent fallback).
+  const doChangeLocation = async () => {
+    if (!canRunOwnerAction(email, password, busy)) { setLocMsg('Enter the owner email and password above first.'); return; }
+    const folder = await pickBackupFolder(loc?.path);
+    if (!folder) return; // user cancelled the dialog
+    setBusy(true); setError(null); setLocMsg(null);
+    try {
+      const next = await setBackupLocation({ email: email.trim(), password, path: folder });
+      setLoc(next); setLocMsg('Backup folder saved.'); setPassword('');
+    } catch (e) { setError(sanitizeBackupError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const doResetLocation = async () => {
+    if (!canRunOwnerAction(email, password, busy)) { setLocMsg('Enter the owner email and password above first.'); return; }
+    setBusy(true); setError(null); setLocMsg(null);
+    try {
+      const next = await resetBackupLocation({ email: email.trim(), password });
+      setLoc(next); setLocMsg('Reset to the default location.'); setPassword('');
+    } catch (e) { setError(sanitizeBackupError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const doOpenLocation = async () => {
+    setError(null);
+    try { await openBackupLocation(); } catch (e) { setError(sanitizeBackupError(e)); }
+  };
 
   const cancelBackup = () => { setBackupOpen(false); setBackupPw(''); };
 
@@ -111,6 +153,32 @@ export function BackupRestorePanel() {
       </div>
 
       {error && <div data-testid="brp-error" style={{ color: '#B42318', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+      {/* BACKUP-LOCATION — owner-configurable backup folder. Snapshots + restore use this exact location. */}
+      <div data-testid="brp-loc" style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: 12, marginBottom: 16, maxWidth: 640 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: '#0F0F10', marginBottom: 6 }}>Backup location</div>
+        <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
+          Where full snapshots are stored and restored from. Choose any writable folder (e.g. an external
+          drive). Existing snapshots in the previous folder are left where they are.
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <code data-testid="brp-loc-path" style={{ flex: 1, fontSize: 12, color: '#0F0F10', background: '#F6F7F9', border: '1px solid #EEF0F3', borderRadius: 6, padding: '6px 8px', wordBreak: 'break-all' }}>
+            {loc ? loc.path : '…'}
+          </code>
+          <span data-testid="brp-loc-default" style={{ fontSize: 11, color: loc?.isDefault ? '#059669' : '#9CA3AF', whiteSpace: 'nowrap' }}>
+            {loc ? (loc.isDefault ? 'default' : 'custom') : ''}
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button data-testid="brp-loc-change" onClick={doChangeLocation} disabled={busy} style={ghostBtn}>Change folder…</button>
+          <button data-testid="brp-loc-reset" onClick={doResetLocation} disabled={busy || !!loc?.isDefault} style={ghostBtn}>Reset to default</button>
+          <button data-testid="brp-loc-open" onClick={doOpenLocation} disabled={busy} style={ghostBtn}>Open backup folder</button>
+        </div>
+        <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 8 }}>
+          Changing or resetting requires the owner password entered above.
+        </div>
+        {locMsg && <div data-testid="brp-loc-msg" style={{ color: '#059669', fontSize: 12, marginTop: 8 }}>{locMsg}</div>}
+      </div>
 
       <Modal open={backupOpen} onClose={cancelBackup} title="Create backup" width={520}>
         <div data-testid="brp-backup-modal" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

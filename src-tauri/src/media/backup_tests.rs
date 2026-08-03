@@ -227,6 +227,86 @@ fn scheduled_backup_runs_at_boot_and_never_repeats() {
     assert_eq!(execute_pending_backup(&app).unwrap(), None, "no pending backup on the next boot");
 }
 
+// ── BACKUP-LOCATION — the boot snapshot + the restore listing both use the CONFIGURED root ──
+#[test]
+fn boot_backup_and_list_use_the_configured_backup_root() {
+    let app = tmp();
+    build_app(&app, b"MASTER-CFG", b"THUMB-CFG");
+    // Configure a backup root OUTSIDE the default `<app>/backups` (v0016 row in the config DB).
+    let chosen = app.join("external").join("bk");
+    {
+        let conn = rusqlite::Connection::open(app.join("lataif_sync_server.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS backup_location_config (tenant_id TEXT PRIMARY KEY, \
+             backup_root_path TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT);",
+        ).unwrap();
+        crate::media::backup_location::set_configured(&conn, &chosen.to_string_lossy(), "owner", "t0").unwrap();
+    }
+    // Sanity: the resolver now points at the chosen root.
+    assert_eq!(crate::media::backup_location::resolve_root(&app), chosen);
+
+    write_backup_intent(&app, &intent("snap-cfg-1")).unwrap();
+    assert_eq!(execute_pending_backup(&app).unwrap().as_deref(), Some("snap-cfg-1"));
+
+    // The snapshot landed in the CONFIGURED root, NOT the default one.
+    assert_eq!(validate(&chosen.join("snap-cfg-1")), "complete", "snapshot published in the chosen root");
+    assert!(!app.join("backups").join("snap-cfg-1").exists(), "nothing written to the default root");
+
+    // The restore listing reads the configured root too.
+    let list = crate::media::restore::list_snapshots(&app).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].snapshot_id, "snap-cfg-1");
+
+    // Reset to default → listing now reads the (empty) default root, and the snapshot in the old
+    // configured root is left untouched (never moved/deleted).
+    {
+        let conn = rusqlite::Connection::open(app.join("lataif_sync_server.db")).unwrap();
+        crate::media::backup_location::clear_configured(&conn).unwrap();
+    }
+    assert_eq!(crate::media::backup_location::resolve_root(&app), app.join("backups"));
+    assert_eq!(crate::media::restore::list_snapshots(&app).unwrap().len(), 0, "default root is empty after reset");
+    assert_eq!(validate(&chosen.join("snap-cfg-1")), "complete", "reset leaves existing snapshots untouched");
+}
+
+// ── BACKUP-LOCATION — configured target unreachable at boot: fail-closed, intent kept, no loop/duplicate ──
+#[test]
+fn boot_backup_missing_configured_target_is_safe_and_retries() {
+    let app = tmp();
+    build_app(&app, b"MASTER-MISS", b"THUMB-MISS");
+    // Configure a root that cannot be created (a drive that is unplugged between schedule and boot).
+    let bogus = if cfg!(windows) { "Z:\\lataif\\gone\\bk".to_string() } else { "/proc/gone/bk".to_string() };
+    let conf = |pth: &str| {
+        let conn = rusqlite::Connection::open(app.join("lataif_sync_server.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS backup_location_config (tenant_id TEXT PRIMARY KEY, \
+             backup_root_path TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT);",
+        ).unwrap();
+        crate::media::backup_location::set_configured(&conn, pth, "owner", "t").unwrap();
+    };
+    conf(&bogus);
+    write_backup_intent(&app, &intent("snap-miss-1")).unwrap();
+
+    // Boot backup ERRORS (target unreachable) — the setup() caller treats this as NON-fatal. It must NOT
+    // fall back to the default root and must NOT clear the intent.
+    assert!(execute_pending_backup(&app).is_err(), "unreachable target → error, no silent default fallback");
+    assert_eq!(read_backup_intent(&app).map(|i| i.id), Some("snap-miss-1".into()), "intent KEPT for a later boot");
+    assert!(
+        !app.join("backups").exists() || std::fs::read_dir(app.join("backups")).unwrap().next().is_none(),
+        "nothing written to the default root (no fallback)"
+    );
+    // A second boot with the target still gone behaves identically — no loop corruption, no duplicate intent.
+    assert!(execute_pending_backup(&app).is_err());
+    assert_eq!(read_backup_intent(&app).map(|i| i.id), Some("snap-miss-1".into()), "still exactly one pending intent");
+
+    // Once the target is reachable again, the SAME intent completes exactly once — no double backup.
+    let good = app.join("reachable-bk");
+    conf(&good.to_string_lossy());
+    assert_eq!(execute_pending_backup(&app).unwrap().as_deref(), Some("snap-miss-1"));
+    assert_eq!(validate(&good.join("snap-miss-1")), "complete");
+    assert!(!app.join(BACKUP_INTENT).exists(), "intent consumed on eventual success");
+    std::fs::remove_dir_all(&app).ok();
+}
+
 #[test]
 fn crash_after_complete_before_intent_clear_consumes_without_double_backup() {
     let app = tmp();

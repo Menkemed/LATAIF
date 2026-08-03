@@ -88,6 +88,9 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
     "legacy_device_inventory",
     "legacy_inventory_attestations",
     "sync_cutover_state",
+    // BACKUP-LOCATION (v0016) — owner-chosen backup folder path. Purely local device configuration; a
+    // pushed path could redirect a restore/backup to an attacker-chosen location, so it never syncs.
+    "backup_location_config",
 ];
 
 /// `users` and `user_branches` deserve a word, because at first glance they look like data.
@@ -520,6 +523,8 @@ mod tests {
             ("legacy_device_inventory", ControlPlaneForbidden),
             ("legacy_inventory_attestations", ControlPlaneForbidden),
             ("sync_cutover_state", ControlPlaneForbidden),
+            // v0016 owner-configurable backup folder path (BACKUP-LOCATION).
+            ("backup_location_config", ControlPlaneForbidden),
         ];
 
         let conn = Connection::open_in_memory().unwrap();

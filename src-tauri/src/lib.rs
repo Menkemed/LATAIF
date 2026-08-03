@@ -2225,6 +2225,96 @@ fn staging_gc_dry_run(
     .map_err(|code| code.code().to_string())
 }
 
+// ── BACKUP-LOCATION — owner-configurable backup root ────────────────────────────────────────────────
+// Snapshot creation and restore both resolve through `media::backup_location::resolve_root`, which reads
+// the path persisted here. The renderer only ever passes a directory chosen via the native folder dialog
+// (never a free text path); `set` validates + write-tests it before persisting (fail-closed).
+
+/// Read-only display of the current backup root (no owner gate: a directory path is not a secret and the
+/// Settings panel must render it without prompting). Returns the effective path, whether it is the
+/// built-in default, and the default path (for the "reset to default" affordance).
+#[tauri::command]
+fn get_backup_location(
+    app_handle: tauri::AppHandle,
+) -> Result<media::backup_location::BackupLocationInfo, String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(media::backup_location::current(&app_dir))
+}
+
+/// OWNER-gated: choose a new backup root. Verifies the owner (bcrypt, server DB), then validates the path
+/// is absolute, creates it if missing, and write-tests it — a disconnected/read-only drive is rejected
+/// with a distinct code and NOTHING is persisted (no silent fallback). Only on success is the path stored
+/// in the config DB. Existing snapshots in the previous location are left untouched. Returns the new
+/// current location.
+#[tauri::command]
+fn set_backup_location(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    path: String,
+) -> Result<media::backup_location::BackupLocationInfo, String> {
+    let owner_id = {
+        let (conn, _id) = open_config_db(&state.server)?;
+        let owner = sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+        owner.user_id().to_string()
+    };
+    // validate + create + write-test + overlap-guard BEFORE persisting (fail-closed).
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let stored = media::backup_location::validate_and_prepare(&app_dir, &path)
+        .map_err(|code| code.code().to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    // writable connection; init_database runs migrations so the v0016 table exists.
+    let (conn, _id) = open_config_db(&state.server)?;
+    media::backup_location::set_configured(&conn, &stored, &owner_id, &now)
+        .map_err(|code| code.code().to_string())?;
+    drop(conn);
+    Ok(media::backup_location::current(&app_dir))
+}
+
+/// OWNER-gated reset to the built-in default (deletes the configured row). Existing snapshots in any
+/// custom location are left untouched.
+#[tauri::command]
+fn reset_backup_location(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<media::backup_location::BackupLocationInfo, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let (conn, _id) = open_config_db(&state.server)?;
+    media::backup_location::clear_configured(&conn).map_err(|code| code.code().to_string())?;
+    drop(conn);
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(media::backup_location::current(&app_dir))
+}
+
+/// Open the effective backup root in the OS file manager (best-effort). No owner gate (opens a folder the
+/// owner already configured). Creates the folder if missing so "open" always lands somewhere sensible.
+#[tauri::command]
+fn open_backup_location(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let root = media::backup_location::resolve_root(&app_dir);
+    let _ = std::fs::create_dir_all(&root);
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(&root)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &root; // no OS file-manager launch on non-Windows dev builds
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2269,10 +2359,15 @@ pub fn run() {
             // MOBILE-04B2A12-U2-R1 — apply a SCHEDULED backup now, still before any DB/media open (all DBs
             // closed → maximally consistent). Publishes the `complete` snapshot atomically and clears the
             // intent exactly once. Fail-closed: any error aborts startup.
+            // BACKUP-LOCATION — a scheduled backup is best-effort at boot: it writes a NEW snapshot dir and
+            // never mutates the live DBs/media, so a failure must NOT brick startup (e.g. an owner-chosen
+            // external drive that is disconnected right now). The intent is KEPT on failure (never cleared
+            // except on durable success), so the backup retries on a later boot once the target is reachable;
+            // the error is surfaced in the logs. A RESTORE, by contrast, stays fail-closed above.
             match media::backup::execute_pending_backup(&app_dir) {
                 Ok(Some(_)) => { /* a pending backup was published + the intent consumed */ }
                 Ok(None) => { /* nothing scheduled */ }
-                Err(e) => return Err(format!("scheduled backup failed: {}", e.code()).into()),
+                Err(e) => eprintln!("scheduled backup deferred (kept intent): {}", e.code()),
             }
             // MOBILE-04B2A14-I3/BLOB-I3 — safe staging GC. Runs AFTER recovery/restore/backup (so their
             // intents/journals are consumed) and BEFORE any DB/server start (the server DB is quiescent +
@@ -2388,6 +2483,10 @@ pub fn run() {
             list_restore_snapshots,
             schedule_restore_snapshot,
             schedule_backup_snapshot,
+            get_backup_location,
+            set_backup_location,
+            reset_backup_location,
+            open_backup_location,
             stop_server_and_confirm_free,
             clear_pending_backup_intent,
             staging_gc_dry_run,

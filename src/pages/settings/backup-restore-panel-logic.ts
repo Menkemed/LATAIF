@@ -10,6 +10,13 @@
 export function sanitizeBackupError(raw: unknown): string {
   const msg = String((raw as Error)?.message ?? raw);
   if (/OWNER|CREDENTIAL|PASSWORD|AUTH/i.test(msg)) return 'Owner authorization failed.';
+  // BACKUP-LOCATION — a chosen folder that cannot be written (disconnected/read-only drive) or is not a
+  // valid absolute folder. Visible + actionable, never a path.
+  if (/BACKUP_LOCATION_NOT_WRITABLE/i.test(msg))
+    return 'The selected folder is not writable — check the drive is connected and not read-only.';
+  if (/BACKUP_LOCATION_NOT_ABSOLUTE/i.test(msg)) return 'Please choose a valid folder.';
+  if (/BACKUP_LOCATION_OVERLAPS_APPDATA/i.test(msg))
+    return 'Choose a folder outside the app data — it cannot be the data/media folder or contain it.';
   if (/OUTSIDE_ROOT|REPARSE|MISSING|HASH|VERSION|INCOMPLETE|UNEXPECTED/i.test(msg))
     return 'The selected backup could not be verified.';
   return 'Operation failed.';

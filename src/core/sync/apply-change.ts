@@ -114,6 +114,8 @@ const CONTROL_PLANE_TABLES: readonly string[] = [
   'legacy_device_inventory',
   'legacy_inventory_attestations',
   'sync_cutover_state',
+  // v0016 owner-configurable backup folder path (BACKUP-LOCATION) — never synced.
+  'backup_location_config',
 ];
 // @sync-policy:control-plane:end
 // @sync-policy:internal:begin

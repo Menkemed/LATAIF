@@ -360,7 +360,10 @@ pub fn execute_pending_backup(app_data_dir: &Path) -> Result<Option<String>, Med
         Some(i) => i,
         None => return Ok(None),
     };
-    let backups = app_data_dir.join("backups");
+    // BACKUP-LOCATION — resolve the (possibly owner-configured) backups root. A configured path is used
+    // verbatim; if it is on a currently-absent drive, create_dir_all below fails VISIBLY (fail-closed) —
+    // it never silently falls back to the default location.
+    let backups = super::backup_location::resolve_root(app_data_dir);
     let out_dir = backups.join(&intent.id);
     if out_dir.exists() {
         // A target already exists. Consume the intent ONLY if it is a genuinely complete, fully-valid

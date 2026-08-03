@@ -13,6 +13,7 @@
 // U1: the restore path (validate + list + restore) reuses its manifest types and selection query. The
 // snapshot CREATION host is compiled but not yet exposed by any command (no backup-creation UI yet).
 pub mod backup;
+pub mod backup_location;
 // MEDIA-04B2A12-R1/U1 — real atomic DB+media restore (pre-check → atomic swap → rollback). PRODUCTION
 // since U1 (validate_snapshot / list_snapshots / restore_by_id feed the owner-gated restore command); the
 // crash-injection surface (`restore_crashing`/`CrashAt`) stays `cfg(test, e2e)` and is never exposed.
@@ -70,6 +71,15 @@ pub enum MediaError {
     RestoreIncompleteBackup,
     /// MEDIA-04B2A12-R1 — restore: the backup dir carries a file the manifest does not list.
     RestoreUnexpectedFile,
+    /// BACKUP-LOCATION — a chosen backup root is not an absolute path (rejected before any write).
+    BackupLocationNotAbsolute,
+    /// BACKUP-LOCATION — a chosen backup root does not exist and cannot be created, or a write-test
+    /// against it failed (e.g. a disconnected/read-only drive). Fail-closed: never silently falls back.
+    BackupLocationNotWritable,
+    /// BACKUP-LOCATION — a chosen backup root overlaps the live app-data tree (equal to, inside, or a
+    /// parent of the app data dir / DB / media / staging). Rejected to prevent a backup snapshotting the
+    /// live databases in place or nesting backups recursively.
+    BackupLocationOverlapsAppData,
     /// Filesystem error (kind only, never a path).
     Io(String),
 }
@@ -91,6 +101,9 @@ impl MediaError {
             MediaError::RestoreUnknownVersion => "MEDIA_RESTORE_UNKNOWN_VERSION",
             MediaError::RestoreIncompleteBackup => "MEDIA_RESTORE_INCOMPLETE_BACKUP",
             MediaError::RestoreUnexpectedFile => "MEDIA_RESTORE_UNEXPECTED_FILE",
+            MediaError::BackupLocationNotAbsolute => "MEDIA_BACKUP_LOCATION_NOT_ABSOLUTE",
+            MediaError::BackupLocationNotWritable => "MEDIA_BACKUP_LOCATION_NOT_WRITABLE",
+            MediaError::BackupLocationOverlapsAppData => "MEDIA_BACKUP_LOCATION_OVERLAPS_APPDATA",
             MediaError::Io(_) => "MEDIA_IO_ERROR",
         }
     }

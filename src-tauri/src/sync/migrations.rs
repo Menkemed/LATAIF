@@ -57,6 +57,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0013_MOBILE_UPLOAD_CLAIM,
     V0014_MOBILE_RUNTIME_SCOPE,
     V0015_MOBILE_RUNTIME_SCOPE_AUDIT,
+    V0016_BACKUP_LOCATION_CONFIG,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -464,6 +465,25 @@ CREATE TABLE IF NOT EXISTS mobile_runtime_scope_audit (
     result              TEXT    NOT NULL,
     created_at          TEXT    NOT NULL,
     CHECK (result IN ('configured','rebound'))
+);
+"#;
+
+/// BACKUP-LOCATION — owner-configurable backup root. A single row per tenant holds the chosen absolute
+/// path; NO row means "use the default `<app_data_dir>/backups`". Reset-to-default deletes the row. Lives
+/// in the CONFIG DB (control-plane) so it is never synced and is readable by the boot path (read-only)
+/// before any server starts. `up_sql == reference_sql` (only a CREATE).
+pub const V0016_BACKUP_LOCATION_CONFIG: Migration = Migration {
+    version: 16,
+    name: "backup_location_config",
+    up_sql: V0016_SQL,
+    reference_sql: V0016_SQL,
+};
+const V0016_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS backup_location_config (
+    tenant_id        TEXT NOT NULL PRIMARY KEY,
+    backup_root_path TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    updated_by       TEXT
 );
 "#;
 
@@ -1352,7 +1372,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         assert!(report.already_current.is_empty());
         // MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014).
         assert!(table_exists(&conn, "mobile_runtime_scope"));
@@ -1388,7 +1408,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=15).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=16).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1401,7 +1421,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1602,6 +1622,17 @@ mod tests {
         assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
     }
 
+    // ── BACKUP-LOCATION — v0016 declares its structure exactly as it applies it ─
+    #[test]
+    fn v0016_reference_equals_up_and_only_creates() {
+        assert_eq!(V0016_BACKUP_LOCATION_CONFIG.up_sql, V0016_BACKUP_LOCATION_CONFIG.reference_sql);
+        let up = V0016_SQL.to_uppercase();
+        assert!(up.contains("CREATE TABLE IF NOT EXISTS BACKUP_LOCATION_CONFIG"));
+        assert!(!up.contains("ALTER TABLE"));
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
     #[test]
     fn migration_is_idempotent() {
@@ -1609,7 +1640,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());
