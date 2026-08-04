@@ -2,7 +2,8 @@
 //
 // Pure, injectable logic (no globals of its own beyond the single export) so it is node-testable with an
 // in-memory store + a fake fetch. Included verbatim into MOBILE_HTML via concat!(include_str!). The mobile
-// page wires the real IndexedDB store + fetch + a Math.random uuid; here we only define behaviour:
+// page wires the real IndexedDB store + fetch + a CSPRNG uuid (crypto.randomUUID / getRandomValues, never
+// Math.random); here we only define behaviour:
 //   * an upload is persisted (uploadEventId + entityId + metadata + image bytes) BEFORE the first request,
 //     so a reload/restart resumes the SAME upload with the SAME ids — never a second event.
 //   * exactly one send per entry (single-flight); a stale `sending` (crash mid-send) recovers to retryable.

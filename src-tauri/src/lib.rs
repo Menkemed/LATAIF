@@ -55,6 +55,18 @@ struct AppHandleState {
 
 const SYNC_PORT: u16 = 3001;
 
+// The embedded LAN server always binds 3001 in production. ONLY the e2e build honours an override, so an
+// isolated end-to-end test can run its own server on a spare port while a real production instance keeps
+// 3001 (and the production DB) completely untouched. The production binary has no such env path at all.
+#[cfg(feature = "e2e")]
+fn resolve_sync_port() -> u16 {
+    std::env::var("LATAIF_E2E_SYNC_PORT").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(SYNC_PORT)
+}
+#[cfg(not(feature = "e2e"))]
+fn resolve_sync_port() -> u16 {
+    SYNC_PORT
+}
+
 #[tauri::command]
 async fn sync_server_start(state: tauri::State<'_, AppHandleState>) -> Result<String, String> {
     state.server.start().await
@@ -2433,7 +2445,7 @@ pub fn run() {
             }
             let db_path = app_dir.join("lataif_sync_server.db");
 
-            let server = Arc::new(sync::SyncServer::new(db_path, SYNC_PORT));
+            let server = Arc::new(sync::SyncServer::new(db_path, resolve_sync_port()));
             // MEDIA-04A-2A-R2 — build the ingest service exactly once, at app
             // setup, and share it via Tauri-managed state. Building one per
             // command handler (the previous shape) gave each handler its own

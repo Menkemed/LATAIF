@@ -299,12 +299,26 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   // Foto-State pro Modus.
   const photos = { collection: null, repair: null, purchase: null };
 
+  // Secure UUID v4 for upload/entity ids. crypto.randomUUID exists on secure origins (HTTPS, and localhost);
+  // on a plain-HTTP LAN origin (phone → http://<ip>:3001/mobile) it is undefined, so we fall back to
+  // crypto.getRandomValues, which is available in EVERY context. We NEVER fall back to Math.random — an
+  // upload id must not come from a weak, predictable source, so this fails closed if no CSPRNG exists.
   function uuid() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-      const r = Math.random() * 16 | 0;
-      const v = c === 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
+    const c = (typeof crypto !== 'undefined' && crypto) || (typeof self !== 'undefined' && self.crypto) || null;
+    if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+    if (c && typeof c.getRandomValues === 'function') {
+      const b = new Uint8Array(16);
+      c.getRandomValues(b);
+      b[6] = (b[6] & 0x0f) | 0x40; // version 4
+      b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+      let s = '';
+      for (let i = 0; i < 16; i++) {
+        if (i === 4 || i === 6 || i === 8 || i === 10) s += '-';
+        s += (b[i] + 0x100).toString(16).slice(1);
+      }
+      return s;
+    }
+    throw new Error('No secure random source available for upload id');
   }
 
   // ── MOBILE-04B2A9 — durable collection upload queue (IndexedDB; image bytes NEVER in localStorage) ──
