@@ -27,6 +27,7 @@ import {
   openBackupLocation,
   type BackupLocationInfo,
 } from '@/core/lifecycle/backup-location';
+import { getBackupRetention, setBackupRetention, type RetentionInfo } from '@/core/lifecycle/backup-retention';
 import {
   sanitizeBackupError,
   formatBytes,
@@ -53,12 +54,34 @@ export function BackupRestorePanel() {
   const [backupPw, setBackupPw] = useState('');
   const [loc, setLoc] = useState<BackupLocationInfo | null>(null);
   const [locMsg, setLocMsg] = useState<string | null>(null);
+  const [ret, setRet] = useState<RetentionInfo | null>(null);
+  const [retCount, setRetCount] = useState<string>('10');
+  const [retMsg, setRetMsg] = useState<string | null>(null);
 
   // Secret hygiene: never leave a password in memory when the panel unmounts.
   useEffect(() => () => { setPassword(''); setConfirmPw(''); setBackupPw(''); }, []);
 
   // Load the current backup location for display (read-only, no owner gate).
   useEffect(() => { getBackupLocation().then(setLoc).catch(() => setLoc(null)); }, []);
+
+  // Load the current retention config for display.
+  useEffect(() => {
+    getBackupRetention().then((r) => { setRet(r); setRetCount(String(r.keepCount)); }).catch(() => setRet(null));
+  }, []);
+
+  // OWNER-gated: save retention (enable/disable + keep count). Does NOT prune existing snapshots — the
+  // prune runs after the next successful backup.
+  const saveRetention = async (enabled: boolean) => {
+    if (!canRunOwnerAction(email, password, busy)) { setRetMsg('Enter the owner email and password above first.'); return; }
+    const n = Math.max(1, Math.min(1000, parseInt(retCount, 10) || 0));
+    setBusy(true); setError(null); setRetMsg(null);
+    try {
+      const next = await setBackupRetention({ email: email.trim(), password, enabled, keepCount: n });
+      setRet(next); setRetCount(String(next.keepCount)); setPassword('');
+      setRetMsg(enabled ? `Retention on — keeping the newest ${next.keepCount} snapshots.` : 'Retention off — no snapshots are auto-deleted.');
+    } catch (e) { setError(sanitizeBackupError(e)); }
+    finally { setBusy(false); }
+  };
 
   // OWNER-gated: pick a folder (native dialog) → validate+persist in Rust. Requires the owner password
   // typed in the fields above. A disconnected/read-only drive fails VISIBLY (no silent fallback).
@@ -178,6 +201,36 @@ export function BackupRestorePanel() {
           Changing or resetting requires the owner password entered above.
         </div>
         {locMsg && <div data-testid="brp-loc-msg" style={{ color: '#059669', fontSize: 12, marginTop: 8 }}>{locMsg}</div>}
+      </div>
+
+      {/* BACKUP-RETENTION — owner-configurable "keep last N snapshots". Prune runs after the NEXT backup. */}
+      <div data-testid="brp-ret" style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: 12, marginBottom: 16, maxWidth: 640 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: '#0F0F10', marginBottom: 6 }}>Snapshot retention</div>
+        <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
+          Automatically keep only the newest N complete snapshots. Existing snapshots are never deleted when
+          you change this — old ones are pruned only after your next successful backup, and the newest is
+          always kept.
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span data-testid="brp-ret-state" style={{ fontSize: 12, fontWeight: 500, color: ret?.enabled ? '#059669' : '#9CA3AF' }}>
+            {ret ? (ret.enabled ? `On · keep ${ret.keepCount}` : 'Off') : '…'}
+          </span>
+          <label style={{ fontSize: 12, color: '#4B5563', display: 'flex', alignItems: 'center', gap: 6 }}>
+            Keep last
+            <input data-testid="brp-ret-count" type="number" min={1} max={1000} value={retCount}
+              onChange={(e) => setRetCount(e.target.value)}
+              style={{ width: 70, padding: '4px 6px', fontSize: 12, borderRadius: 6, border: '1px solid #D5D9DE' }} />
+            snapshots
+          </label>
+          <button data-testid="brp-ret-enable" onClick={() => saveRetention(true)} disabled={busy} style={primaryBtn}>
+            {ret?.enabled ? 'Update' : 'Enable'}
+          </button>
+          {ret?.enabled && (
+            <button data-testid="brp-ret-disable" onClick={() => saveRetention(false)} disabled={busy} style={ghostBtn}>Disable</button>
+          )}
+        </div>
+        <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 8 }}>Changing retention requires the owner password entered above.</div>
+        {retMsg && <div data-testid="brp-ret-msg" style={{ color: '#059669', fontSize: 12, marginTop: 8 }}>{retMsg}</div>}
       </div>
 
       <Modal open={backupOpen} onClose={cancelBackup} title="Create backup" width={520}>

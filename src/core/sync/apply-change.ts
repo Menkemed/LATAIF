@@ -116,6 +116,8 @@ const CONTROL_PLANE_TABLES: readonly string[] = [
   'sync_cutover_state',
   // v0016 owner-configurable backup folder path (BACKUP-LOCATION) — never synced.
   'backup_location_config',
+  // v0017 owner-configurable snapshot retention (BACKUP-RETENTION) — never synced.
+  'backup_retention_config',
 ];
 // @sync-policy:control-plane:end
 // @sync-policy:internal:begin

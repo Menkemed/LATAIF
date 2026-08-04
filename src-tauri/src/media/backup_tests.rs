@@ -307,6 +307,199 @@ fn boot_backup_missing_configured_target_is_safe_and_retries() {
     std::fs::remove_dir_all(&app).ok();
 }
 
+// ── BACKUP-RETENTION — prune after publish over real complete snapshots ──────────────────────────────
+fn set_retention(app: &std::path::Path, enabled: bool, keep: i64) {
+    let conn = rusqlite::Connection::open(app.join("lataif_sync_server.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS backup_retention_config (tenant_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, \
+         keep_count INTEGER NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT);",
+    ).unwrap();
+    crate::media::backup_retention::set_configured(&conn, enabled, keep, "owner", "t").unwrap();
+}
+fn make_snapshot(app: &std::path::Path, n: u32) {
+    write_backup_intent(app, &BackupIntent {
+        id: format!("snap-{}", n),
+        created_at: format!("2026-07-30T00:00:{:02}Z", n),  // ascending so newest = highest n
+        app_version: "0.8.31".into(),
+    }).unwrap();
+    execute_pending_backup(app).unwrap();
+}
+
+#[test]
+fn retention_prunes_to_keep_last_n_and_never_the_newest() {
+    let app = tmp();
+    build_app(&app, b"M-RET", b"T-RET");
+    set_retention(&app, true, 2);
+    for n in 1..=4 { make_snapshot(&app, n); }
+    let snaps = crate::media::restore::list_snapshots(&app).unwrap();
+    assert_eq!(snaps.len(), 2, "keeps exactly N=2");
+    assert_eq!(snaps[0].snapshot_id, "snap-4", "newest retained");
+    assert_eq!(snaps[1].snapshot_id, "snap-3");
+    assert!(!app.join("backups").join("snap-1").exists());
+    assert!(!app.join("backups").join("snap-2").exists());
+    std::fs::remove_dir_all(&app).ok();
+}
+
+#[test]
+fn retention_disabled_keeps_everything() {
+    let app = tmp();
+    build_app(&app, b"M-OFF", b"T-OFF");
+    set_retention(&app, false, 1); // configured but OFF
+    for n in 1..=3 { make_snapshot(&app, n); }
+    assert_eq!(crate::media::restore::list_snapshots(&app).unwrap().len(), 3, "nothing pruned while disabled");
+    std::fs::remove_dir_all(&app).ok();
+}
+
+#[test]
+fn retention_n1_keeps_only_the_newest() {
+    let app = tmp();
+    build_app(&app, b"M-1", b"T-1");
+    set_retention(&app, true, 1);
+    for n in 1..=3 { make_snapshot(&app, n); }
+    let snaps = crate::media::restore::list_snapshots(&app).unwrap();
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].snapshot_id, "snap-3");
+    std::fs::remove_dir_all(&app).ok();
+}
+
+#[test]
+fn retention_never_deletes_incomplete_or_foreign_dirs() {
+    let app = tmp();
+    build_app(&app, b"M-F", b"T-F");
+    set_retention(&app, true, 1);
+    make_snapshot(&app, 1);
+    // a foreign / incomplete directory sits in the backups root — must survive a prune untouched
+    let foreign = app.join("backups").join("not-a-snapshot");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join("random.txt"), b"hello").unwrap();
+    let incomplete = app.join("backups").join("snap-broken");
+    std::fs::create_dir_all(&incomplete).unwrap(); // no manifest.json → not a valid snapshot
+    make_snapshot(&app, 2); // triggers prune (keep=1 → snap-1 removed)
+    assert!(!app.join("backups").join("snap-1").exists(), "old complete snapshot pruned");
+    assert!(foreign.exists(), "foreign dir NEVER deleted by prune");
+    assert!(incomplete.exists(), "incomplete dir NEVER deleted by prune");
+    assert_eq!(crate::media::restore::list_snapshots(&app).unwrap().len(), 1, "only complete snapshots listed");
+    std::fs::remove_dir_all(&app).ok();
+}
+
+#[test]
+fn retention_skips_while_a_restore_intent_is_pending() {
+    let app = tmp();
+    build_app(&app, b"M-R", b"T-R");
+    set_retention(&app, true, 1);
+    make_snapshot(&app, 1);
+    make_snapshot(&app, 2); // now 1 remains (snap-2), snap-1 pruned
+    // simulate a pending restore, then a manual prune → it must SKIP (no overlap with restore)
+    crate::media::restore_recovery::write_intent(&app, "snap-2").unwrap();
+    // add two more complete snapshots WITHOUT triggering the auto-prune's list (write via execute but the
+    // pending intent makes prune skip): create snap-3, snap-4
+    std::fs::remove_file(app.join(crate::media::restore_recovery::INTENT)).ok(); // allow creation first
+    make_snapshot(&app, 3);
+    make_snapshot(&app, 4);
+    // re-arm the restore intent, then call prune directly
+    crate::media::restore_recovery::write_intent(&app, "snap-4").unwrap();
+    let before = crate::media::restore::list_snapshots(&app).unwrap().len();
+    let r = crate::media::backup_retention::prune(&app);
+    assert!(r.enabled && r.skipped_restore_pending, "prune SKIPS while a restore intent is pending");
+    assert_eq!(crate::media::restore::list_snapshots(&app).unwrap().len(), before, "nothing deleted during a pending restore");
+    std::fs::remove_dir_all(&app).ok();
+}
+
+// A snapshot that cannot be removed (an open handle inside it) must be COUNTED as failed, left in place
+// (visible), while the other allowed deletions still happen and the newest backup stays valid — never a
+// rollback. Windows-only: an open read handle blocks deletion there; POSIX unlink would still succeed.
+#[cfg(windows)]
+#[test]
+fn retention_delete_failure_is_counted_and_never_rolls_back() {
+    let app = tmp();
+    build_app(&app, b"M-DF", b"T-DF");
+    set_retention(&app, false, 1); // build 3 complete snapshots without auto-pruning
+    for n in 1..=3 { make_snapshot(&app, n); }
+    // hold a handle inside the OLDEST snapshot with FILE_SHARE_READ ONLY (no FILE_SHARE_DELETE): validate's
+    // read still succeeds, but remove_dir_all cannot delete the file → the prune of snap-1 fails.
+    use std::os::windows::fs::OpenOptionsExt;
+    let held = std::fs::OpenOptions::new().read(true).share_mode(1)
+        .open(app.join("backups").join("snap-1").join("manifest.json")).unwrap();
+    set_retention(&app, true, 1); // config only (no prune here)
+    let r = crate::media::backup_retention::prune(&app);
+    assert!(r.enabled);
+    assert_eq!(r.failed, 1, "the locked snapshot's delete failure is COUNTED, not swallowed");
+    assert_eq!(r.deleted, 1, "the other surplus snapshot was still pruned");
+    assert!(app.join("backups").join("snap-1").exists(), "un-deletable snapshot left in place (visible)");
+    assert!(!app.join("backups").join("snap-2").exists(), "deletable surplus removed");
+    assert_eq!(validate(&app.join("backups").join("snap-3")), "complete", "newest backup stays valid (no rollback)");
+    drop(held);
+    std::fs::remove_dir_all(&app).ok();
+}
+
+// A snapshot-named JUNCTION pointing OUT of the backups root must NEVER be followed/deleted — `is_symlink`
+// misses junctions, so the explicit reparse-point guard has to catch it. The external sentinel must survive.
+#[cfg(windows)]
+#[test]
+fn retention_never_follows_a_junction_snapshot_to_an_external_sentinel() {
+    let app = tmp();
+    build_app(&app, b"M-JT", b"T-JT");
+    let sentinel = tmp();
+    std::fs::write(sentinel.join("keep.txt"), b"SENTINEL").unwrap();
+    set_retention(&app, false, 1);
+    make_snapshot(&app, 9); // a real, newest complete snapshot (kept)
+    let junc = app.join("backups").join("snap-1");
+    let st = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&junc).arg(&sentinel).status().unwrap();
+    assert!(st.success(), "mklink /J must create the junction");
+    set_retention(&app, true, 1);
+    let _ = crate::media::backup_retention::prune(&app);
+    assert!(sentinel.join("keep.txt").exists(), "external sentinel reached via a junction snapshot MUST survive prune");
+    assert!(sentinel.exists(), "sentinel dir itself untouched");
+    assert_eq!(validate(&app.join("backups").join("snap-9")), "complete", "the real newest snapshot is intact");
+    let _ = std::process::Command::new("cmd").args(["/C", "rmdir"]).arg(&junc).status(); // unlink junction, don't recurse
+    std::fs::remove_dir_all(&app).ok(); std::fs::remove_dir_all(&sentinel).ok();
+}
+
+// A NESTED junction inside a snapshot that is being pruned must never be descended into (validate rejects
+// the tampered snapshot, and remove_dir_all does not follow reparse points anyway). Sentinel must survive.
+#[cfg(windows)]
+#[test]
+fn retention_prune_never_descends_a_nested_junction() {
+    let app = tmp();
+    build_app(&app, b"M-JN", b"T-JN");
+    let sentinel = tmp();
+    std::fs::write(sentinel.join("keep.txt"), b"SENTINEL").unwrap();
+    set_retention(&app, false, 1);
+    make_snapshot(&app, 1); // surplus (prune target)
+    make_snapshot(&app, 2); // newest (kept)
+    let nested = app.join("backups").join("snap-1").join("evil-link");
+    let st = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&nested).arg(&sentinel).status().unwrap();
+    assert!(st.success(), "mklink /J nested");
+    set_retention(&app, true, 1);
+    let _ = crate::media::backup_retention::prune(&app);
+    assert!(sentinel.join("keep.txt").exists(), "external sentinel reached via a NESTED junction MUST survive prune");
+    let _ = std::process::Command::new("cmd").args(["/C", "rmdir"]).arg(&nested).status();
+    std::fs::remove_dir_all(&app).ok(); std::fs::remove_dir_all(&sentinel).ok();
+}
+
+#[test]
+fn retention_prunes_in_a_custom_backup_root() {
+    let app = tmp();
+    build_app(&app, b"M-C", b"T-C");
+    let custom = app.join("external-bk");
+    {
+        let conn = rusqlite::Connection::open(app.join("lataif_sync_server.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS backup_location_config (tenant_id TEXT PRIMARY KEY, backup_root_path TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by TEXT);",
+        ).unwrap();
+        crate::media::backup_location::set_configured(&conn, &custom.to_string_lossy(), "o", "t").unwrap();
+    }
+    set_retention(&app, true, 1);
+    for n in 1..=3 { make_snapshot(&app, n); }
+    // snapshots + prune both operate on the CUSTOM root, not the default
+    assert!(!app.join("backups").exists() || std::fs::read_dir(app.join("backups")).unwrap().next().is_none());
+    let snaps = crate::media::restore::list_snapshots(&app).unwrap();
+    assert_eq!(snaps.len(), 1);
+    assert_eq!(snaps[0].snapshot_id, "snap-3");
+    assert!(custom.join("snap-3").exists() && !custom.join("snap-1").exists());
+    std::fs::remove_dir_all(&app).ok();
+}
+
 #[test]
 fn crash_after_complete_before_intent_clear_consumes_without_double_backup() {
     let app = tmp();

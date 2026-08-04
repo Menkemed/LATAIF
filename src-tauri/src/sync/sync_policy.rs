@@ -91,6 +91,9 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
     // BACKUP-LOCATION (v0016) — owner-chosen backup folder path. Purely local device configuration; a
     // pushed path could redirect a restore/backup to an attacker-chosen location, so it never syncs.
     "backup_location_config",
+    // BACKUP-RETENTION (v0017) — owner-chosen "keep last N snapshots". Local-only; a pushed value could
+    // make a device prune snapshots, so it never syncs.
+    "backup_retention_config",
 ];
 
 /// `users` and `user_branches` deserve a word, because at first glance they look like data.
@@ -525,6 +528,8 @@ mod tests {
             ("sync_cutover_state", ControlPlaneForbidden),
             // v0016 owner-configurable backup folder path (BACKUP-LOCATION).
             ("backup_location_config", ControlPlaneForbidden),
+            // v0017 owner-configurable snapshot retention (BACKUP-RETENTION).
+            ("backup_retention_config", ControlPlaneForbidden),
         ];
 
         let conn = Connection::open_in_memory().unwrap();

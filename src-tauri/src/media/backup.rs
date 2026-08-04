@@ -372,6 +372,7 @@ pub fn execute_pending_backup(app_data_dir: &Path) -> Result<Option<String>, Med
         // keep the intent (never a false success, never a blind consume).
         published_is_complete(&out_dir)?;
         clear_backup_intent(app_data_dir)?;
+        prune_after_publish(app_data_dir);
         return Ok(Some(intent.id));
     }
     fs::create_dir_all(&backups).map_err(|e| MediaError::Io(format!("mkbackups: {}", e)))?;
@@ -396,7 +397,21 @@ pub fn execute_pending_backup(app_data_dir: &Path) -> Result<Option<String>, Med
     };
     snapshot(&input)?; // cleans a stale temp ws (same created_at) + publishes `complete` atomically
     clear_backup_intent(app_data_dir)?;
+    prune_after_publish(app_data_dir);
     Ok(Some(intent.id))
+}
+
+// BACKUP-RETENTION — prune AFTER a fully successful, published snapshot (never before). Best-effort: a
+// prune failure is surfaced in the log but NEVER undoes the just-created backup, and it deletes only valid
+// complete snapshots beyond the owner-configured "keep last N" (retention is off unless the owner enabled it).
+fn prune_after_publish(app_data_dir: &Path) {
+    let r = super::backup_retention::prune(app_data_dir);
+    if r.enabled {
+        eprintln!(
+            "backup retention: kept={} deleted={} failed={} skipped_restore_pending={}",
+            r.kept, r.deleted, r.failed, r.skipped_restore_pending
+        );
+    }
 }
 
 #[cfg(test)]

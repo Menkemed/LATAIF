@@ -2325,6 +2325,47 @@ fn open_backup_location(app_handle: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ── BACKUP-RETENTION — owner-configurable "keep last N complete snapshots" ──────────────────────────────
+// Retention is OFF until the owner enables it; enabling does NOT prune existing snapshots — prune runs at
+// boot AFTER the next fully-successful backup (media::backup::execute_pending_backup), never the newest and
+// never an incomplete/foreign folder.
+
+/// Read-only display of the current retention config (no owner gate: a keep-count is not a secret).
+#[tauri::command]
+fn get_backup_retention(
+    app_handle: tauri::AppHandle,
+) -> Result<media::backup_retention::RetentionInfo, String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(media::backup_retention::current(&app_dir))
+}
+
+/// OWNER-gated: enable/disable retention and set the keep count (clamped to [1, 1000]). Persists the config
+/// only; the actual pruning happens after the next successful backup. Existing snapshots are never deleted
+/// by this call.
+#[tauri::command]
+fn set_backup_retention(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    enabled: bool,
+    keep_count: i64,
+) -> Result<media::backup_retention::RetentionInfo, String> {
+    let owner_id = {
+        let (conn, _id) = open_config_db(&state.server)?;
+        let owner = sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+        owner.user_id().to_string()
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let (conn, _id) = open_config_db(&state.server)?; // writable; migrations ensure the v0017 table exists
+    media::backup_retention::set_configured(&conn, enabled, keep_count, &owner_id, &now)
+        .map_err(|code| code.code().to_string())?;
+    drop(conn);
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(media::backup_retention::current(&app_dir))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2497,6 +2538,8 @@ pub fn run() {
             set_backup_location,
             reset_backup_location,
             open_backup_location,
+            get_backup_retention,
+            set_backup_retention,
             stop_server_and_confirm_free,
             clear_pending_backup_intent,
             clear_pending_restore_intent,

@@ -58,6 +58,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0014_MOBILE_RUNTIME_SCOPE,
     V0015_MOBILE_RUNTIME_SCOPE_AUDIT,
     V0016_BACKUP_LOCATION_CONFIG,
+    V0017_BACKUP_RETENTION_CONFIG,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -484,6 +485,25 @@ CREATE TABLE IF NOT EXISTS backup_location_config (
     backup_root_path TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
     updated_by       TEXT
+);
+"#;
+
+/// BACKUP-RETENTION — owner-configurable "keep last N complete snapshots". One row per tenant; NO row means
+/// retention is DISABLED (nothing is ever auto-deleted before explicit activation). Control-plane, never
+/// synced. `up_sql == reference_sql` (only a CREATE).
+pub const V0017_BACKUP_RETENTION_CONFIG: Migration = Migration {
+    version: 17,
+    name: "backup_retention_config",
+    up_sql: V0017_SQL,
+    reference_sql: V0017_SQL,
+};
+const V0017_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS backup_retention_config (
+    tenant_id  TEXT NOT NULL PRIMARY KEY,
+    enabled    INTEGER NOT NULL,
+    keep_count INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
 );
 "#;
 
@@ -1372,7 +1392,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
         assert!(report.already_current.is_empty());
         // MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014).
         assert!(table_exists(&conn, "mobile_runtime_scope"));
@@ -1408,7 +1428,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=16).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=17).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1421,7 +1441,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1633,6 +1653,17 @@ mod tests {
         assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
     }
 
+    // ── BACKUP-RETENTION — v0017 declares its structure exactly as it applies it ─
+    #[test]
+    fn v0017_reference_equals_up_and_only_creates() {
+        assert_eq!(V0017_BACKUP_RETENTION_CONFIG.up_sql, V0017_BACKUP_RETENTION_CONFIG.reference_sql);
+        let up = V0017_SQL.to_uppercase();
+        assert!(up.contains("CREATE TABLE IF NOT EXISTS BACKUP_RETENTION_CONFIG"));
+        assert!(!up.contains("ALTER TABLE"));
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
     #[test]
     fn migration_is_idempotent() {
@@ -1640,7 +1671,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());
