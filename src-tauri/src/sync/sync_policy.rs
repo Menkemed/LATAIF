@@ -94,6 +94,7 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
     // BACKUP-RETENTION (v0017) — owner-chosen "keep last N snapshots". Local-only; a pushed value could
     // make a device prune snapshots, so it never syncs.
     "backup_retention_config",
+    "media_gc_runs",
 ];
 
 /// `users` and `user_branches` deserve a word, because at first glance they look like data.
@@ -530,6 +531,7 @@ mod tests {
             ("backup_location_config", ControlPlaneForbidden),
             // v0017 owner-configurable snapshot retention (BACKUP-RETENTION).
             ("backup_retention_config", ControlPlaneForbidden),
+            ("media_gc_runs", ControlPlaneForbidden),
         ];
 
         let conn = Connection::open_in_memory().unwrap();

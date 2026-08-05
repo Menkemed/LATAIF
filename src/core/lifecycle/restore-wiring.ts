@@ -210,6 +210,39 @@ export async function scheduleBackupSnapshot(
 }
 
 /**
+ * MEDIA-ROOT-GC — schedule a boot-time media cleanup (owner-gated) and relaunch, EXACTLY like the backup
+ * schedule: quiesce writers → durably flush the frontend DB (so the boot reference set reads a current
+ * lataif.db) → persist the GC intent → controlled relaunch. The boot path then moves orphans into the
+ * retained quarantine while all writers are idle. A pre-schedule failure (wrong owner / no snapshot) resumes
+ * writers and keeps the app usable; the intent-clear undoes a partially-scheduled run.
+ */
+export async function scheduleMediaGc(
+  owner: { email: string; password: string },
+  setStatus?: (status: RestoreStatus | null) => void,
+): Promise<void> {
+  const [core, sync, db, wiring, proc, coord] = await Promise.all([
+    import('@tauri-apps/api/core'),
+    import('@/core/sync/sync-service'),
+    import('@/core/db/database'),
+    import('@/core/media/mobile-upload-wiring'),
+    import('@tauri-apps/plugin-process'),
+    import('@/core/lifecycle/relaunch-coordinator'),
+  ]);
+  await coord.coordinatedRelaunch({
+    blockWrites: () => { sync.pauseAutoSync(); wiring.stopMobileDrainPoller(); },
+    awaitWritersIdle: () => sync.waitForSyncIdle(),
+    flushDurably: () => db.saveDatabaseDurably(),
+    stopServerConfirmFree: () => core.invoke('stop_server_and_confirm_free'),
+    restartServer: async () => { await core.invoke('sync_server_start'); },
+    persistIntent: async () => { await core.invoke('schedule_media_gc', { email: owner.email, password: owner.password }); return true; },
+    clearIntent: () => core.invoke('clear_pending_gc_intent'),
+    resumeWrites: () => { sync.resumeAutoSync(); wiring.armMobileDrainPoller(); },
+    relaunch: () => proc.relaunch(),
+    setPhase: setStatus ? (p) => setStatus(p === 'failed' ? { kind: 'error', message: 'Cleanup konnte nicht vorbereitet werden.' } : { kind: 'scheduling' }) : undefined,
+  });
+}
+
+/**
  * Drive an owner-authenticated restore in the safe order: quiesce the runtime, durably schedule the
  * restore (no live mutation), then relaunch — the BOOT path applies the swap while the DBs are closed.
  *

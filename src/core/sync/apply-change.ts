@@ -118,6 +118,7 @@ const CONTROL_PLANE_TABLES: readonly string[] = [
   'backup_location_config',
   // v0017 owner-configurable snapshot retention (BACKUP-RETENTION) — never synced.
   'backup_retention_config',
+  'media_gc_runs',
 ];
 // @sync-policy:control-plane:end
 // @sync-policy:internal:begin

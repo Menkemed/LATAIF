@@ -28,6 +28,7 @@ import {
   type BackupLocationInfo,
 } from '@/core/lifecycle/backup-location';
 import { getBackupRetention, setBackupRetention, type RetentionInfo } from '@/core/lifecycle/backup-retention';
+import { scanUnusedMedia, scheduleUnusedMediaGc, finalizeUnusedMediaGc, type GcReport } from '@/core/lifecycle/media-gc';
 import {
   sanitizeBackupError,
   formatBytes,
@@ -57,9 +58,12 @@ export function BackupRestorePanel() {
   const [ret, setRet] = useState<RetentionInfo | null>(null);
   const [retCount, setRetCount] = useState<string>('10');
   const [retMsg, setRetMsg] = useState<string | null>(null);
+  const [gc, setGc] = useState<GcReport | null>(null);
+  const [gcPw, setGcPw] = useState('');
+  const [gcMsg, setGcMsg] = useState<string | null>(null);
 
   // Secret hygiene: never leave a password in memory when the panel unmounts.
-  useEffect(() => () => { setPassword(''); setConfirmPw(''); setBackupPw(''); }, []);
+  useEffect(() => () => { setPassword(''); setConfirmPw(''); setBackupPw(''); setGcPw(''); }, []);
 
   // Load the current backup location for display (read-only, no owner gate).
   useEffect(() => { getBackupLocation().then(setLoc).catch(() => setLoc(null)); }, []);
@@ -79,6 +83,48 @@ export function BackupRestorePanel() {
       const next = await setBackupRetention({ email: email.trim(), password, enabled, keepCount: n });
       setRet(next); setRetCount(String(next.keepCount)); setPassword('');
       setRetMsg(enabled ? `Retention on — keeping the newest ${next.keepCount} snapshots.` : 'Retention off — no snapshots are auto-deleted.');
+    } catch (e) { setError(sanitizeBackupError(e)); }
+    finally { setBusy(false); }
+  };
+
+  // OWNER-gated dry-run: scan the media root for orphaned files. Mutates nothing.
+  const doScanUnused = async () => {
+    if (!canRunOwnerAction(email, password, busy)) { setGcMsg('Enter the owner email and password above first.'); return; }
+    setBusy(true); setError(null); setGcMsg(null);
+    try {
+      const r = await scanUnusedMedia({ email: email.trim(), password });
+      setGc(r);
+      const q = r.quarantinedCount > 0 ? ` ${r.quarantinedCount} file(s) (${formatBytes(r.quarantinedBytes)}) are quarantined, awaiting final deletion.` : '';
+      setGcMsg((r.orphanCount === 0
+        ? `No new unused media. ${r.referencedCount} referenced file(s) kept.`
+        : `${r.orphanCount} unused file(s) — ${formatBytes(r.orphanBytes)}. ${r.referencedCount} referenced kept.`
+          + (r.missingReferencedCount > 0 ? ` ${r.missingReferencedCount} referenced file(s) missing (finding).` : '')) + q);
+    } catch (e) { setError(sanitizeBackupError(e)); }
+    finally { setBusy(false); }
+  };
+
+  // OWNER-gated SCHEDULE: relaunches; the move to a retained quarantine runs at boot (writers idle). A
+  // current backup must already exist (create one above). Nothing is deleted now — the owner finalizes later.
+  const doScheduleGc = async () => {
+    if (!gc || gc.orphanCount === 0) return;
+    if (!email.trim() || !gcPw || busy) { setGcMsg('Re-enter the owner password to schedule the cleanup.'); return; }
+    setBusy(true); setError(null); setGcMsg(null);
+    try {
+      await scheduleUnusedMediaGc({ email: email.trim(), password: gcPw }); // relaunches on success
+      setGcPw('');
+    } catch (e) { setError(sanitizeBackupError(e)); setBusy(false); }
+  };
+
+  // OWNER-gated FINALIZE: permanently purge the retained quarantine (re-checks references + moves back any
+  // now-referenced file first). This is the only permanent deletion.
+  const doFinalizeGc = async () => {
+    if (!gc || gc.quarantinedCount === 0) return;
+    if (!email.trim() || !gcPw || busy) { setGcMsg('Re-enter the owner password to delete the quarantined files.'); return; }
+    setBusy(true); setError(null); setGcMsg(null);
+    try {
+      const res = await finalizeUnusedMediaGc({ email: email.trim(), password: gcPw });
+      setGcPw(''); setGc(null);
+      setGcMsg(`Permanently removed ${res.purged} file(s)${res.movedBack ? `, restored ${res.movedBack} now-referenced` : ''}${res.failed ? `, ${res.failed} failed` : ''}.`);
     } catch (e) { setError(sanitizeBackupError(e)); }
     finally { setBusy(false); }
   };
@@ -231,6 +277,48 @@ export function BackupRestorePanel() {
         </div>
         <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 8 }}>Changing retention requires the owner password entered above.</div>
         {retMsg && <div data-testid="brp-ret-msg" style={{ color: '#059669', fontSize: 12, marginTop: 8 }}>{retMsg}</div>}
+      </div>
+
+      {/* MEDIA-ROOT-GC — owner-triggered cleanup of unreferenced media-root files (dry-run → apply). */}
+      <div data-testid="brp-gc" style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: 12, marginBottom: 16, maxWidth: 640 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: '#0F0F10', marginBottom: 6 }}>Unused media cleanup</div>
+        <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
+          Scan the media folder for files that no active product or thumbnail references any more. This is a
+          dry-run first — nothing referenced is ever deleted, and a current backup is required before removing.
+        </div>
+        <button data-testid="brp-gc-scan" onClick={doScanUnused} disabled={busy} style={ghostBtn}>Scan unused media</button>
+        {gc && gc.orphanCount > 0 && (
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div data-testid="brp-gc-summary" style={{ fontSize: 12, color: '#4B5563' }}>
+              {gc.orphanCount} unused · {formatBytes(gc.orphanBytes)} · {gc.referencedCount} referenced kept
+              {gc.missingReferencedCount > 0 ? ` · ${gc.missingReferencedCount} referenced missing (finding)` : ''}
+            </div>
+            <div style={{ color: '#B42318', fontSize: 12 }}>
+              Scheduling restarts the app; the {gc.orphanCount} unused file(s) are moved to a quarantine at boot. Nothing is
+              deleted until you finalize. A recent backup is required (create one above).
+            </div>
+            <input data-testid="brp-gc-pw" type="password" placeholder="Re-enter owner password" value={gcPw}
+              onChange={(e) => setGcPw(e.target.value)}
+              style={{ width: 240, padding: '6px 8px', fontSize: 12, borderRadius: 6, border: '1px solid #D5D9DE' }} />
+            <button data-testid="brp-gc-schedule" onClick={doScheduleGc} disabled={busy} style={dangerBtn}>
+              Schedule cleanup &amp; restart ({gc.orphanCount})
+            </button>
+          </div>
+        )}
+        {gc && gc.quarantinedCount > 0 && (
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div data-testid="brp-gc-quarantined" style={{ fontSize: 12, color: '#4B5563' }}>
+              {gc.quarantinedCount} quarantined file(s) · {formatBytes(gc.quarantinedBytes)} awaiting permanent deletion.
+            </div>
+            <input data-testid="brp-gc-fin-pw" type="password" placeholder="Re-enter owner password" value={gcPw}
+              onChange={(e) => setGcPw(e.target.value)}
+              style={{ width: 240, padding: '6px 8px', fontSize: 12, borderRadius: 6, border: '1px solid #D5D9DE' }} />
+            <button data-testid="brp-gc-finalize" onClick={doFinalizeGc} disabled={busy} style={dangerBtn}>
+              Delete quarantined files permanently ({gc.quarantinedCount})
+            </button>
+          </div>
+        )}
+        {gcMsg && <div data-testid="brp-gc-msg" style={{ color: '#059669', fontSize: 12, marginTop: 8 }}>{gcMsg}</div>}
       </div>
 
       <Modal open={backupOpen} onClose={cancelBackup} title="Create backup" width={520}>

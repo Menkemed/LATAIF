@@ -59,6 +59,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0015_MOBILE_RUNTIME_SCOPE_AUDIT,
     V0016_BACKUP_LOCATION_CONFIG,
     V0017_BACKUP_RETENTION_CONFIG,
+    V0018_MEDIA_GC_RUNS,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -504,6 +505,30 @@ CREATE TABLE IF NOT EXISTS backup_retention_config (
     keep_count INTEGER NOT NULL,
     updated_at TEXT NOT NULL,
     updated_by TEXT
+);
+"#;
+
+// MEDIA-ROOT-GC — audit trail for owner-triggered media-root garbage-collection runs (control-plane; local
+// host state, never synced). Filesystem quarantine is the source of truth for recovery; this is the audit log.
+pub const V0018_MEDIA_GC_RUNS: Migration = Migration {
+    version: 18,
+    name: "media_gc_runs",
+    up_sql: V0018_SQL,
+    reference_sql: V0018_SQL,
+};
+const V0018_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS media_gc_runs (
+    run_id      TEXT NOT NULL PRIMARY KEY,
+    state       TEXT NOT NULL,
+    quarantined INTEGER NOT NULL DEFAULT 0,
+    purged      INTEGER NOT NULL DEFAULT 0,
+    moved_back  INTEGER NOT NULL DEFAULT 0,
+    retained    INTEGER NOT NULL DEFAULT 0,
+    failed      INTEGER NOT NULL DEFAULT 0,
+    error_code  TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    CHECK (state IN ('planned','quarantined','completed','partial','failed'))
 );
 "#;
 
@@ -1392,7 +1417,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
         assert!(report.already_current.is_empty());
         // MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014).
         assert!(table_exists(&conn, "mobile_runtime_scope"));
@@ -1428,7 +1453,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=17).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=18).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1441,7 +1466,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1664,6 +1689,17 @@ mod tests {
         assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
     }
 
+    // ── MEDIA-ROOT-GC — v0018 declares its structure exactly as it applies it ─
+    #[test]
+    fn v0018_reference_equals_up_and_only_creates() {
+        assert_eq!(V0018_MEDIA_GC_RUNS.up_sql, V0018_MEDIA_GC_RUNS.reference_sql);
+        let up = V0018_SQL.to_uppercase();
+        assert!(up.contains("CREATE TABLE IF NOT EXISTS MEDIA_GC_RUNS"));
+        assert!(!up.contains("ALTER TABLE"));
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
     #[test]
     fn migration_is_idempotent() {
@@ -1671,7 +1707,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

@@ -2378,6 +2378,81 @@ fn set_backup_retention(
     Ok(media::backup_retention::current(&app_dir))
 }
 
+// ── MEDIA-ROOT-GC — owner-gated media-root cleanup (dry-run scan + quarantine apply) ────────────────────
+// Both commands require the owner password. The scan is a pure dry-run (no FS/DB change). Apply refuses
+// while a restore/backup is pending and requires a complete backup snapshot to already exist; it removes
+// orphans via a quarantine (crash-safe) and never touches referenced media.
+
+/// OWNER-gated dry-run: count/size of orphaned media-root files + referenced-but-missing findings. Mutates
+/// nothing. Returns only relative paths + counts (no absolute local paths, no secrets).
+#[tauri::command]
+fn scan_unused_media(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<media::media_gc::GcReport, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    media::media_gc::plan(&app_dir).map_err(|e| e.code().to_string())
+}
+
+/// OWNER-gated SCHEDULE: durably request a media-root GC. The move runs at the NEXT boot (write barrier —
+/// no ingest/drain/writer active), so the caller must relaunch after this returns. Refuses while a
+/// restore/backup is pending and requires a complete backup snapshot to already exist. Deletes NOTHING now.
+#[tauri::command]
+fn schedule_media_gc(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let (conn, _id) = open_config_db(&state.server)?; // v0018 media_gc_runs exists after migrations
+    media::media_gc::schedule(&app_dir, &conn, &run_id, &now).map_err(|e| e.code().to_string())
+}
+
+/// Clear a pending GC intent — the coordinated-relaunch rollback path calls this if scheduling fails after
+/// the intent was written, so a cancelled schedule never triggers a boot move. Not owner-gated (it only
+/// REMOVES a scheduled destructive action; it can never delete media).
+#[tauri::command]
+fn clear_pending_gc_intent(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    media::media_gc::clear_intent(&app_dir);
+    Ok(())
+}
+
+/// OWNER-gated FINALIZE: the ONLY permanent deletion. Re-checks the reference set, moves back anything now
+/// referenced, then purges the retained quarantine. Nothing referenced is ever deleted.
+#[tauri::command]
+fn finalize_media_gc(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<media::media_gc::GcApplyReport, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let (conn, _id) = open_config_db(&state.server)?;
+    media::media_gc::finalize(&app_dir, &conn, &now).map_err(|e| e.code().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2442,6 +2517,21 @@ pub fn run() {
             match media::staging_gc::execute_boot_gc(&app_dir) {
                 Ok(r) => eprintln!("staging gc: deleted={} skipped={}", r.deleted, r.skipped),
                 Err(e) => eprintln!("staging gc skipped: {}", e.code()),
+            }
+            // MEDIA-ROOT-GC — the write barrier is HERE: this runs before the LAN server starts and before
+            // the frontend loads, so no ingest / mobile-drain / media writer is active. First apply a
+            // SCHEDULED gc (move orphans into the retained quarantine — never purge); then RECONCILE any
+            // retained quarantine (move back anything that became referenced again, retain the rest). The
+            // permanent purge only ever happens via an explicit owner finalize, never at boot. Best-effort:
+            // fail-closed (no move / retain-all on any error) and boot continues.
+            match media::media_gc::execute_pending_gc(&app_dir) {
+                Ok(Some(r)) => eprintln!("media gc: quarantined={} skipped={} failed={}", r.quarantined, r.skipped, r.failed),
+                Ok(None) => {}
+                Err(e) => eprintln!("media gc deferred (no move): {}", e.code()),
+            }
+            match media::media_gc::reconcile_quarantine(&app_dir) {
+                Ok(r) => { if r.moved_back > 0 || r.retained > 0 { eprintln!("media gc reconcile: movedBack={} retained={} failed={}", r.moved_back, r.retained, r.failed); } }
+                Err(e) => eprintln!("media gc reconcile skipped: {}", e.code()),
             }
             let db_path = app_dir.join("lataif_sync_server.db");
 
@@ -2552,6 +2642,10 @@ pub fn run() {
             open_backup_location,
             get_backup_retention,
             set_backup_retention,
+            scan_unused_media,
+            schedule_media_gc,
+            clear_pending_gc_intent,
+            finalize_media_gc,
             stop_server_and_confirm_free,
             clear_pending_backup_intent,
             clear_pending_restore_intent,
