@@ -1,0 +1,380 @@
+{
+  "schema": 2,
+  "note": "Performance baselines SEPARATED BY MEASUREMENT CLASS (see test/perf/baseline.mjs). Values of different classes are never combined into a shared p50. Hardware-/environment-specific — only same-machine relative regression is meaningful. Regenerate: node test/perf/run.mjs baseline (+ scenarios-app.mjs / scenarios-ui.mjs on the release e2e build).",
+  "reference": {
+    "commit": "a177779",
+    "cpu": "Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz",
+    "cpuCount": 12,
+    "ramGB": 15.877,
+    "os": "win32 10.0.26200",
+    "node": "v24.15.0",
+    "note": "Reference environment for all classes. Machine-specific; only same-machine relative regression is meaningful."
+  },
+  "classes": {
+    "release_e2e_app": {
+      "buildProfile": "release",
+      "features": [
+        "e2e"
+      ],
+      "binarySha256": "af92603b834f5f15f351db965f4a2032c5df6acfe5c6ee0816a8afd1843e727e",
+      "commit": "a177779",
+      "sampleCount": null,
+      "note": "startup.cold reps=3, startup.warm reps=7; app.gc.dry_run + app.mobile.ingress reps=7.",
+      "scenarios": {
+        "startup.cold": {
+          "p50": 1857.849,
+          "p95": null,
+          "min": 1821.401,
+          "max": 3937.931,
+          "stddev": 1211.594,
+          "mad": 36.449,
+          "sampleCount": 3
+        },
+        "startup.warm": {
+          "p50": 1809.644,
+          "p95": 1818.089,
+          "min": 1782.671,
+          "max": 1818.815,
+          "stddev": 12.23,
+          "mad": 6.751,
+          "sampleCount": 7
+        },
+        "app.gc.dry_run": {
+          "p50": 458.317,
+          "p95": 459.086,
+          "min": 457.283,
+          "max": 459.314,
+          "stddev": 0.682,
+          "mad": 0.352,
+          "sampleCount": 7
+        },
+        "app.mobile.ingress": {
+          "p50": 6.377,
+          "p95": 6.695,
+          "min": 6.073,
+          "max": 6.72,
+          "stddev": 0.247,
+          "mad": 0.217,
+          "sampleCount": 7
+        }
+      }
+    },
+    "release_e2e_ui": {
+      "buildProfile": "release",
+      "features": [
+        "e2e"
+      ],
+      "binarySha256": "af92603b834f5f15f351db965f4a2032c5df6acfe5c6ee0816a8afd1843e727e",
+      "commit": "a177779",
+      "fixtureSize": "medium",
+      "fixtureCounts": {
+        "products": 3000,
+        "customers": 800,
+        "invoices": 2400,
+        "invoice_lines": 5992,
+        "payments": 1600,
+        "media_generations": 1980,
+        "media_files": 1980
+      },
+      "sampleCount": 7,
+      "scenarios": {
+        "ui.inventory.list": {
+          "p50": 20.202,
+          "p95": 27.52,
+          "min": 17.589,
+          "max": 28.945,
+          "stddev": 3.852,
+          "mad": 1.572,
+          "sampleCount": 7
+        },
+        "ui.customers.list": {
+          "p50": 2288.502,
+          "p95": 11881.112,
+          "min": 147.938,
+          "max": 15458.455,
+          "stddev": 5170.054,
+          "mad": 1062.237,
+          "sampleCount": 7
+        },
+        "ui.invoices.list": {
+          "p50": 7568.615,
+          "p95": 8053.613,
+          "min": 4554.391,
+          "max": 8226.233,
+          "stddev": 1499.139,
+          "mad": 131.372,
+          "sampleCount": 7
+        },
+        "ui.dashboard": {
+          "p50": 59.116,
+          "p95": 6436.656,
+          "min": 18.305,
+          "max": 9145.206,
+          "stddev": 3438.017,
+          "mad": 40.807,
+          "sampleCount": 7
+        },
+        "ui.product.detail": {
+          "p50": 21.4,
+          "p95": 6973.316,
+          "min": 18.963,
+          "max": 9937.553,
+          "stddev": 3746.038,
+          "mad": 2.405,
+          "sampleCount": 7
+        },
+        "ui.invoice.open": {
+          "p50": 27.988,
+          "p95": 4441.153,
+          "min": 16.833,
+          "max": 6248.993,
+          "stddev": 2334.78,
+          "mad": 11.156,
+          "sampleCount": 7
+        },
+        "ui.inventory.search.sku": {
+          "p50": 4161.568,
+          "p95": 4312.303,
+          "min": 4011.13,
+          "max": 4374.738,
+          "stddev": 125.006,
+          "mad": 117.059,
+          "sampleCount": 7
+        },
+        "ui.invoice.create": {
+          "p50": 8432.479,
+          "p95": null,
+          "min": 8377.152,
+          "max": 8657.24,
+          "stddev": 148.34,
+          "mad": 55.327,
+          "sampleCount": 3
+        }
+      }
+    },
+    "production_binary_startup": {
+      "measured": false,
+      "reason": "The production binary (no e2e feature) has no test-port override — running it would bind port 3001 and open the production DB, violating isolation. It is validated as a separate build gate only; UI/startup numbers come from the release e2e reference binary (identical product/query/render code + release profile).",
+      "buildProfile": "release",
+      "features": [],
+      "binarySha256": "3c0ad4526c195f5bdd9259b154a845ec1e3fc04a9665683e736eee87034cff03",
+      "binaryBytes": 32399872,
+      "commit": "a177779"
+    },
+    "node_sqlite_microbenchmark": {
+      "buildProfile": "node-harness",
+      "runtime": "node:sqlite (native SQLite, FK OFF/WAL) — NOT the app sql.js runtime",
+      "fixtureSize": "medium",
+      "fixtureCounts": {
+        "products": 3000,
+        "customers": 800,
+        "invoices": 2400,
+        "invoice_lines": 5992,
+        "payments": 1600,
+        "media_generations": 1980,
+        "media_files": 1980
+      },
+      "sampleCount": 9,
+      "scenarios": {
+        "inventory.list.page1": {
+          "p50": 4.095,
+          "p95": 6.453,
+          "min": 3.705,
+          "max": 6.548,
+          "stddev": 1.178,
+          "mad": 0.39,
+          "sampleCount": 9
+        },
+        "inventory.count": {
+          "p50": 0.21,
+          "p95": 0.244,
+          "min": 0.202,
+          "max": 0.251,
+          "stddev": 0.016,
+          "mad": 0.005,
+          "sampleCount": 9
+        },
+        "search.sku.exact": {
+          "p50": 0.438,
+          "p95": 0.455,
+          "min": 0.433,
+          "max": 0.461,
+          "stddev": 0.009,
+          "mad": 0.005,
+          "sampleCount": 9
+        },
+        "search.brand.like": {
+          "p50": 0.787,
+          "p95": 0.801,
+          "min": 0.781,
+          "max": 0.803,
+          "stddev": 0.008,
+          "mad": 0.006,
+          "sampleCount": 9
+        },
+        "search.name.contains": {
+          "p50": 0.998,
+          "p95": 1.323,
+          "min": 0.984,
+          "max": 1.517,
+          "stddev": 0.173,
+          "mad": 0.008,
+          "sampleCount": 9
+        },
+        "search.no_hit": {
+          "p50": 0.417,
+          "p95": 0.565,
+          "min": 0.413,
+          "max": 0.649,
+          "stddev": 0.077,
+          "mad": 0.004,
+          "sampleCount": 9
+        },
+        "filter.stock_status": {
+          "p50": 1.079,
+          "p95": 1.427,
+          "min": 1.044,
+          "max": 1.645,
+          "stddev": 0.191,
+          "mad": 0.018,
+          "sampleCount": 9
+        },
+        "sort.price.desc": {
+          "p50": 0.714,
+          "p95": 0.777,
+          "min": 0.71,
+          "max": 0.807,
+          "stddev": 0.031,
+          "mad": 0.003,
+          "sampleCount": 9
+        },
+        "product.detail": {
+          "p50": 0.394,
+          "p95": 0.415,
+          "min": 0.384,
+          "max": 0.418,
+          "stddev": 0.012,
+          "mad": 0.008,
+          "sampleCount": 9
+        },
+        "customer.search": {
+          "p50": 0.901,
+          "p95": 1.251,
+          "min": 0.858,
+          "max": 1.439,
+          "stddev": 0.182,
+          "mad": 0.021,
+          "sampleCount": 9
+        },
+        "invoice.list.page1": {
+          "p50": 4.093,
+          "p95": 4.191,
+          "min": 4.042,
+          "max": 4.228,
+          "stddev": 0.056,
+          "mad": 0.029,
+          "sampleCount": 9
+        },
+        "invoice.open": {
+          "p50": 0.784,
+          "p95": 0.829,
+          "min": 0.763,
+          "max": 0.829,
+          "stddev": 0.028,
+          "mad": 0.021,
+          "sampleCount": 9
+        },
+        "invoice.totals.validate": {
+          "p50": 0.73,
+          "p95": 0.741,
+          "min": 0.714,
+          "max": 0.743,
+          "stddev": 0.008,
+          "mad": 0.005,
+          "sampleCount": 9
+        },
+        "dashboard.finance.by_status": {
+          "p50": 1.303,
+          "p95": 2.271,
+          "min": 1.287,
+          "max": 2.502,
+          "stddev": 0.428,
+          "mad": 0.007,
+          "sampleCount": 9
+        },
+        "lines.join.aggregate": {
+          "p50": 6.312,
+          "p95": 6.935,
+          "min": 6.118,
+          "max": 7.315,
+          "stddev": 0.364,
+          "mad": 0.055,
+          "sampleCount": 9
+        },
+        "inventory.list.page1.cold": {
+          "p50": 10.364,
+          "p95": 10.529,
+          "min": 9.831,
+          "max": 10.548,
+          "stddev": 0.335,
+          "mad": 0.184,
+          "sampleCount": 5
+        },
+        "invoice.list.page1.cold": {
+          "p50": 8.372,
+          "p95": 8.528,
+          "min": 8.141,
+          "max": 8.565,
+          "stddev": 0.161,
+          "mad": 0.136,
+          "sampleCount": 5
+        },
+        "gc.reference_build": {
+          "p50": 3.174,
+          "p95": 5.062,
+          "min": 2.832,
+          "max": 5.9,
+          "stddev": 0.956,
+          "mad": 0.33,
+          "sampleCount": 9
+        },
+        "gc.fs_scan": {
+          "p50": 52.018,
+          "p95": 56.032,
+          "min": 49.021,
+          "max": 56.596,
+          "stddev": 2.51,
+          "mad": 1.739,
+          "sampleCount": 9
+        },
+        "gc.dry_run.full": {
+          "p50": 60.456,
+          "p95": 64.53,
+          "min": 55.379,
+          "max": 66.36,
+          "stddev": 3.138,
+          "mad": 1.329,
+          "sampleCount": 9
+        },
+        "backup.media_selection": {
+          "p50": 1.93,
+          "p95": 2.465,
+          "min": 1.907,
+          "max": 2.808,
+          "stddev": 0.294,
+          "mad": 0.013,
+          "sampleCount": 9
+        },
+        "backup.db_size_bytes": {
+          "p50": 0.06,
+          "p95": 0.106,
+          "min": 0.05,
+          "max": 0.117,
+          "stddev": 0.022,
+          "mad": 0.007,
+          "sampleCount": 9
+        }
+      }
+    }
+  }
+}

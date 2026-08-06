@@ -41,3 +41,6 @@ src.backup-*/
 
 # QA-Pruefberichte (bewusst lokal, nie committen)
 QA-Pruefbericht-*.md
+
+# Performance suite results (machine-specific, regenerate locally)
+test/perf/artifacts/
