@@ -39,6 +39,13 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   .photo-area .hint { color: #6B6B73; font-size: 13px; }
   .photo-area .icon { font-size: 36px; }
   .hidden { display: none; }
+  /* MOBILE-FIELDS — dynamic per-category fields */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { width: auto; flex: 0 0 auto; background: #08080A; border: 1px solid #2A2A32; color: #A1A1AA; padding: 9px 13px; border-radius: 999px; font-size: 14px; font-weight: 500; }
+  .chip.on { background: rgba(198,163,109,0.16); border-color: #C6A36D; color: #EAEAEA; }
+  .req { color: #C6A36D; }
+  .fielderr { color: #AA6E6E; font-size: 12px; margin-top: 6px; }
+  #cAttrs .row:first-child { margin-top: 14px; }
   .logout { display: block; text-align: center; color: #6B6B73; font-size: 12px; margin-top: 20px; text-decoration: none; }
   .logout:hover { color: #AA6E6E; }
   .header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
@@ -129,39 +136,31 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   <div class="card">
     <div class="row">
       <label>Category *</label>
-      <select id="cCategory">
-        <option value="cat-watch">Watch</option>
-        <option value="cat-gold-jewelry">Gold Jewelry</option>
-        <option value="cat-branded-gold-jewelry">Branded Gold Jewelry</option>
-        <option value="cat-original-gold-jewelry">Original Gold Jewelry</option>
-        <option value="cat-accessory">Accessory</option>
-        <option value="cat-spare-part">Spare Part</option>
-      </select>
+      <select id="cCategory"></select>
     </div>
-    <div class="row">
-      <label>Brand</label>
-      <input id="cBrand" type="text" placeholder="e.g. Rolex (optional)" />
+    <div class="row" id="cBrandRow">
+      <label id="cBrandLabel">Brand</label>
+      <input id="cBrand" type="text" placeholder="e.g. Rolex" />
     </div>
-    <div class="row">
-      <label>Model / Name</label>
-      <input id="cName" type="text" placeholder="e.g. Submariner Date (optional)" />
+    <div class="row" id="cNameRow">
+      <label id="cNameLabel">Model / Name</label>
+      <input id="cName" type="text" placeholder="e.g. Submariner Date" />
     </div>
     <div class="row">
       <label>SKU / Reference</label>
       <input id="cSku" type="text" placeholder="optional" />
     </div>
-    <div class="row">
-      <label>Purchase Price (BHD)</label>
-      <input id="cPurchasePrice" type="number" inputmode="decimal" step="0.01" placeholder="0.00" />
+    <div class="row" id="cConditionRow">
+      <label>Condition</label>
+      <select id="cCondition"></select>
     </div>
-    <div class="row">
-      <label>Asking Price (BHD)</label>
-      <input id="cSalePrice" type="number" inputmode="decimal" step="0.01" placeholder="0.00" />
+    <!-- MOBILE-FIELDS — category-specific fields rendered here from the desktop SSOT schema. -->
+    <div id="cAttrs"></div>
+    <div class="row hidden" id="cScopeRow">
+      <label>Included</label>
+      <div id="cScope" class="chips"></div>
     </div>
-    <div class="row">
-      <label>Notes</label>
-      <textarea id="cNotes" rows="3" placeholder="Condition, supplier, etc."></textarea>
-    </div>
+    <p style="font-size:11px;color:#4D4D55;margin-top:6px;">Pricing is completed by the owner on the desktop.</p>
   </div>
 
   <button id="cSaveBtn">Save Product</button>
@@ -282,6 +281,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 </div>
 
 <script>
+window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), r##";
 "##, include_str!("mobile_upload_queue.js"), r##"
 (function () {
   const TOKEN_KEY = 'lataif_mobile_token';
@@ -718,46 +718,146 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
     userId: localStorage.getItem(USER_KEY) || null,
   });
 
-  // ── Collection — New Item (MOBILE-04B2A9: durable queue → /api/mobile/upload) ──
+  // ── Collection — New Item (MOBILE-FIELDS: full desktop-parity fields from the SSOT schema; durable queue
+  //    → POST /api/mobile/upload, same as MOBILE-04B2A9) ──
+  const SCHEMA = (window.__MOBILE_FIELD_SCHEMA__ && Array.isArray(window.__MOBILE_FIELD_SCHEMA__.categories))
+    ? window.__MOBILE_FIELD_SCHEMA__ : { version: 0, categories: [] };
+  const catById = (id) => SCHEMA.categories.find((c) => c.id === id) || null;
+  const scopeState = new Set(); // selected Included values for the CURRENT category (reset on switch)
+
+  // Category picker options come from the schema (SSOT) — never a hardcoded list.
+  (function initCategoryOptions() {
+    const sel = $('cCategory'); sel.innerHTML = '';
+    for (const c of SCHEMA.categories) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; sel.appendChild(o); }
+  })();
+
+  function el(tag, attrs, text) {
+    const e = document.createElement(tag);
+    if (attrs) for (const k in attrs) { if (k === 'class') e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
+    if (text != null) e.textContent = text; return e;
+  }
+  function dependsSatisfied(attr) {
+    if (!attr.dependsOn) return true;
+    const dep = $('attr_' + attr.dependsOn.key);
+    return dep ? attr.dependsOn.valueIncludes.indexOf(dep.value) !== -1 : false;
+  }
+  function applyDependencies(cat) {
+    for (const a of cat.attributes) { if (!a.dependsOn) continue; const row = $('row_' + a.key); if (row) row.classList.toggle('hidden', !dependsSatisfied(a)); }
+  }
+  function makeControl(a) {
+    if (a.type === 'select') {
+      const s = el('select', { id: 'attr_' + a.key }); s.appendChild(el('option', { value: '' }, '— Select —'));
+      for (const o of (a.options || [])) s.appendChild(el('option', { value: o }, o)); return s;
+    }
+    if (a.type === 'multiselect' || a.type === 'boolean') {
+      const wrap = el('div', { id: 'attr_' + a.key, class: 'chips' }); wrap.dataset.kind = a.type;
+      const opts = a.type === 'boolean' ? ['Yes', 'No'] : (a.options || []);
+      for (const o of opts) {
+        const b = el('button', { type: 'button', class: 'chip' }, o);
+        if (a.type === 'boolean') b.dataset.val = (o === 'Yes') ? 'true' : 'false';
+        b.onclick = () => { if (a.type === 'boolean') { for (const c of wrap.children) c.classList.remove('on'); b.classList.add('on'); } else { b.classList.toggle('on'); } };
+        wrap.appendChild(b);
+      }
+      return wrap;
+    }
+    const inp = el('input', { id: 'attr_' + a.key, type: a.type === 'number' ? 'number' : 'text' });
+    if (a.type === 'number') { inp.setAttribute('inputmode', 'decimal'); inp.setAttribute('step', 'any'); inp.setAttribute('min', '0'); }
+    return inp;
+  }
+  function renderCollectionFields(catId) {
+    const cat = catById(catId); scopeState.clear();
+    const brandReq = cat ? !!cat.brandRequired : false;
+    $('cBrandLabel').innerHTML = 'Brand' + (brandReq ? ' <span class="req">*</span>' : '');
+    $('cNameLabel').innerHTML = 'Model / Name' + (brandReq ? ' <span class="req">*</span>' : '');
+    const cs = $('cCondition'); cs.innerHTML = ''; cs.appendChild(el('option', { value: '' }, '— Select —'));
+    for (const o of (cat ? cat.conditionOptions : [])) cs.appendChild(el('option', { value: o }, o));
+    const host = $('cAttrs'); host.innerHTML = '';
+    if (cat) for (const a of cat.attributes) {
+      const row = el('div', { class: 'row', id: 'row_' + a.key });
+      const lbl = el('label'); lbl.innerHTML = a.label + (a.unit ? ' (' + a.unit + ')' : '') + (a.required ? ' <span class="req">*</span>' : '');
+      row.appendChild(lbl); row.appendChild(makeControl(a)); host.appendChild(row);
+    }
+    if (cat) for (const a of cat.attributes) {
+      if (a.dependsOn) { const dep = $('attr_' + a.dependsOn.key); if (dep && dep.tagName === 'SELECT') dep.addEventListener('change', () => applyDependencies(cat)); }
+    }
+    applyDependencies(cat || { attributes: [] });
+    const scopeRow = $('cScopeRow'), scopeHost = $('cScope'); scopeHost.innerHTML = '';
+    if (cat && cat.scopeOptions.length) {
+      scopeRow.classList.remove('hidden');
+      for (const o of cat.scopeOptions) { const b = el('button', { type: 'button', class: 'chip' }, o); b.onclick = () => { if (scopeState.has(o)) { scopeState.delete(o); b.classList.remove('on'); } else { scopeState.add(o); b.classList.add('on'); } }; scopeHost.appendChild(b); }
+    } else { scopeRow.classList.add('hidden'); }
+  }
+  $('cCategory').addEventListener('change', () => { $('cCondition').value = ''; renderCollectionFields($('cCategory').value); });
+
+  // Controlled decimal normalisation: accept "1.25" or "1,25"; reject anything else / negatives → NaN.
+  function normNumber(raw) {
+    const s = String(raw == null ? '' : raw).trim().replace(',', '.');
+    if (s === '') return null;
+    if (!/^[0-9]+(\.[0-9]+)?$/.test(s)) return NaN;
+    const n = Number(s); return Number.isFinite(n) ? n : NaN;
+  }
+  function readAttr(a) {
+    const e = $('attr_' + a.key); if (!e) return undefined;
+    if (a.type === 'multiselect') { const out = []; for (const c of e.children) if (c.classList.contains('on')) out.push(c.textContent); return out; }
+    if (a.type === 'boolean') { for (const c of e.children) if (c.classList.contains('on')) return c.dataset.val === 'true'; return undefined; }
+    if (a.type === 'number') return normNumber(e.value);
+    return e.value.trim();
+  }
+  function buildCollectionMetadata() {
+    const categoryId = $('cCategory').value, cat = catById(categoryId);
+    const brand = $('cBrand').value.trim(), name = $('cName').value.trim(), sku = $('cSku').value.trim();
+    const condition = $('cCondition').value || '';
+    const attributes = {}, errors = [];
+    if (cat) {
+      if (cat.brandRequired) { if (!brand) errors.push('Brand is required.'); if (!name) errors.push('Model / Name is required.'); }
+      for (const a of cat.attributes) {
+        if (!dependsSatisfied(a)) continue; // never send hidden fields, and never other categories' fields
+        const v = readAttr(a);
+        if (a.type === 'number' && Number.isNaN(v)) { errors.push(a.label + ' must be a valid number ≥ 0.'); continue; }
+        const empty = v === undefined || v === '' || v === null || (Array.isArray(v) && v.length === 0);
+        if (empty) { if (a.required) errors.push(a.label + ' is required.'); continue; }
+        attributes[a.key] = v;
+      }
+    }
+    const scopeOfDelivery = Array.from(scopeState);
+    const metadata = { categoryId, brand, name, sku: sku || null, attributes };
+    if (condition) metadata.condition = condition;
+    if (scopeOfDelivery.length) metadata.scopeOfDelivery = scopeOfDelivery;
+    return { metadata, errors, label: (brand + ' ' + name).trim() || sku || 'Item' };
+  }
+
   function clearCollectionForm() {
     $('cBrand').value = ''; $('cName').value = ''; $('cSku').value = '';
-    $('cPurchasePrice').value = ''; $('cSalePrice').value = ''; $('cNotes').value = '';
+    renderCollectionFields($('cCategory').value); // resets condition/attributes/scope for the current category
     clearPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', EMPTY_C);
   }
   $('cRetryPending').onclick = drainPending;
   $('cSaveBtn').onclick = async () => {
     setText('cError', ''); setText('cSuccess', '');
-    const brand = $('cBrand').value.trim();
-    const name = $('cName').value.trim();
-    const sku = $('cSku').value.trim();
     if (!photos.collection) return setText('cError', 'A photo is required for a mobile upload.');
-    if (!brand && !name && !sku) return setText('cError', 'Add at least one detail (brand, name or SKU).');
+    const { metadata, errors, label } = buildCollectionMetadata();
+    if (errors.length) return setText('cError', errors[0]);
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) { init(); return setText('cError', 'Please sign in again.'); }
     // Disable synchronously so a rapid double-click cannot enqueue a second event for the same capture.
     $('cSaveBtn').disabled = true;
     try {
-      // Validated metadata only (the desktop worker builds the product from these fields); the pricing is
-      // completed by the owner on the desktop. No tenant/branch/user here — those come from the JWT server-side.
-      const metadata = { brand, name, categoryId: $('cCategory').value || 'cat-watch', sku: sku || null };
-      // Persist the durable entry (uploadEventId + bytes) BEFORE the first request, then send it ONCE.
-      const entry = await uploadQueue.enqueue({ metadata, images: [photos.collection] });
+      // Full desktop-parity metadata (brand/name/sku/condition/Included/attributes). Pricing stays owner-side.
+      // The durable entry (uploadEventId + bytes + FULL metadata) is persisted BEFORE the first request, so an
+      // offline retry resends the exact same fields under the same id. Scope comes from the JWT server-side.
+      const entry = await uploadQueue.enqueue({ metadata, images: [photos.collection], protocolVersion: 2 });
       const r = await uploadQueue.drainEntry(entry.uploadEventId, token);
-      const label = (brand + ' ' + name).trim() || sku || 'Item';
       if (r.outcome === 'done') {
         setText('cSuccess', label + ' uploaded. It appears on the desktop once the owner enables mobile uploads.');
         clearCollectionForm(); window.scrollTo({ top: 0, behavior: 'smooth' });
       } else if (r.outcome === 'conflict') {
-        setText('cError', 'This exact upload was already received — no duplicate was created.');
-        clearCollectionForm();
+        setText('cError', 'This exact upload was already received — no duplicate was created.'); clearCollectionForm();
       } else if (r.outcome === 'rejected') {
-        setText('cError', 'Upload rejected (' + r.status + '). Retake the photo or reduce its size, then try again.');
+        setText('cError', 'Upload rejected (' + r.status + '). Check the fields or retake the photo, then try again.');
       } else if (r.outcome === 'reauth') {
         localStorage.removeItem(TOKEN_KEY); init(); setText('loginError', 'Session expired. Please sign in again.');
       } else {
-        // retryable / network: the durable entry keeps the photo + ids; it resumes on the next Retry trigger.
-        setText('cSuccess', label + ' queued — it will resume automatically. Use "Retry pending" to send now.');
-        clearCollectionForm();
+        setText('cSuccess', label + ' queued — it will resume automatically. Use "Retry pending" to send now.'); clearCollectionForm();
       }
       await updatePending();
     } catch (e) {
@@ -765,6 +865,8 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
     }
     $('cSaveBtn').disabled = false;
   };
+  // Initial render for the default (first) category.
+  renderCollectionFields($('cCategory').value);
 
   // ── Repair — New Intake ──
   $('rSaveBtn').onclick = async () => {

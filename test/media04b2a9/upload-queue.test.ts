@@ -50,6 +50,9 @@ const NOW = () => '2026-07-29T00:00:00Z';
   ok(req.protocol_version === 1 && req.mode === 'collection' && req.upload_event_id === 'ev' && req.entity_id === 'ent', 'buildRequest maps protocol/mode/ids');
   ok(req.images.length === 1 && req.images[0].mime === 'image/jpeg' && req.images[0].data_base64 === 'ZZ', 'buildRequest strips the data-url in images');
   ok(req.metadata.brand === 'Rolex', 'buildRequest carries the validated metadata object');
+  // CONTRACT-V2: a bare entry (no stored version) defaults to legacy v1; an entry that carries protocolVersion
+  // sends exactly that version (retry never downgrades).
+  ok(Q.buildRequest({ uploadEventId: 'e', entityId: 'x', protocolVersion: 2, metadata: {}, images: [] }).protocol_version === 2, 'buildRequest sends the entry protocolVersion (v2)');
 }
 
 // ── §2 enqueue persists BEFORE any send, with distinct minted ids ────────────

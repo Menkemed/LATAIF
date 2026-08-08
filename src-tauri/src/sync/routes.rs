@@ -662,6 +662,23 @@ async fn mobile_upload_ingress(
     if !req.metadata.is_object() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // CONTRACT-V2 — an unknown protocol version is rejected up front (no staging/inbox). Supported: 1 (legacy)
+    // and 2 (full-field). accept_upload re-checks this authoritatively before any staging.
+    if !super::mobile_upload::MOBILE_UPLOAD_SUPPORTED_PROTOCOLS.contains(&req.protocol_version) {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "state": "rejected", "code": super::mobile_upload::ERR_UNSUPPORTED_PROTOCOL })),
+        ));
+    }
+    // MOBILE-FIELDS — validate product-field metadata against the desktop SSOT BEFORE decoding/staging any
+    // bytes, so an invalid request leaves NO inbox row and NO staged blob. v1 = validity only (old minimal
+    // payloads stay valid); v2 = full field contract (required + dependsOn, same as the desktop create flow).
+    if let Err(e) = super::mobile_field_schema::validate_metadata(&req.metadata, req.protocol_version) {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "state": "rejected", "code": e.code, "field": e.field, "message": e.message })),
+        ));
+    }
     // Cheap pre-checks before decoding bytes (accept_upload re-validates authoritatively): at least one
     // image, never more than the hard cap.
     if req.images.is_empty() || req.images.len() > super::mobile_upload::MAX_UPLOAD_IMAGES {

@@ -34,6 +34,11 @@ use serde_json::Value;
 use crate::media::{inspect_image_bytes, normalize_stock_image, resolve_within_root, sha256_hex, ContentKind, Limits};
 
 pub const MOBILE_UPLOAD_PROTOCOL_VERSION: i64 = 1;
+// CONTRACT-V2 — the server accepts the legacy contract (1) and the full-field contract (2). v2 payloads are
+// additionally validated against the desktop field SSOT (required + dependsOn) at the HTTP boundary before any
+// staging. Any other version is rejected. Idempotency stays keyed on uploadEventId; the version is part of the
+// payload identity (see request_hash), so a v1→v2 reuse of one id is a Conflict, never a silent replay.
+pub const MOBILE_UPLOAD_SUPPORTED_PROTOCOLS: &[i64] = &[1, 2];
 pub const MAX_UPLOAD_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_UPLOAD_IMAGE_DIM: u32 = 8192;
 pub const MAX_UPLOAD_IMAGE_PIXELS: u64 = 24 * 1024 * 1024;
@@ -238,7 +243,10 @@ fn payload_hash(trusted: &TrustedUploadContext, sub: &UploadSubmission, images: 
     let imgs: Vec<Value> = images.iter().map(|v|
         manifest_entry(v.slot as i64, v.primary, v.mime, v.width as i64, v.height as i64, v.byte_size as i64, &v.content_hash)
     ).collect();
-    Ok(request_hash(MOBILE_UPLOAD_PROTOCOL_VERSION, trusted, &sub.upload_event_id, &sub.entity_id, &sub.mode, &meta, &imgs))
+    // CONTRACT-V2 — bind the ACTUAL protocol version into the payload identity (not the constant), so the live
+    // hash matches the stored recompute (which already reads the stored version) AND the same uploadEventId with
+    // a different version (v1 then v2) resolves to a Conflict rather than a spurious replay.
+    Ok(request_hash(sub.protocol_version, trusted, &sub.upload_event_id, &sub.entity_id, &sub.mode, &meta, &imgs))
 }
 
 /// Rebuild the payload hash from the DURABLE store (inbox scope/descriptors + ordered image rows).
@@ -532,7 +540,7 @@ pub fn accept_upload(
         return Err(reject(ERR_SCOPE_REQUIRED));
     }
     if sub.upload_event_id.is_empty() { return Err(reject(ERR_NO_EVENT_ID)); }
-    if sub.protocol_version != MOBILE_UPLOAD_PROTOCOL_VERSION { return Err(reject(ERR_UNSUPPORTED_PROTOCOL)); }
+    if !MOBILE_UPLOAD_SUPPORTED_PROTOCOLS.contains(&sub.protocol_version) { return Err(reject(ERR_UNSUPPORTED_PROTOCOL)); }
     if sub.mode != "collection" { return Err(reject(ERR_UNSUPPORTED_MODE)); } // repair/purchase_inbox
 
     let validated = validate_batch(&sub.images)?;

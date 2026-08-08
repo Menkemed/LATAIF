@@ -177,7 +177,7 @@ const existsE = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const visibleE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return !!e && !e.classList.contains('hidden') && e.offsetParent!==null;`);
 async function waitE(c, sel, t = 20000) { const end = Date.now() + t; while (Date.now() < end) { if (await existsE(c, sel)) return true; await sleep(200); } throw new Error('waitE ' + sel); }
 async function waitVisE(c, sel, t = 20000) { const end = Date.now() + t; while (Date.now() < end) { if (await visibleE(c, sel)) return true; await sleep(200); } throw new Error('waitVisE ' + sel); }
-const setValE = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; const p=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+const setValE = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; const p=e.tagName==='SELECT'?HTMLSelectElement.prototype:(e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype); Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
 const clickE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; e.click(); return 'OK';`);
 async function setFile(c, sel, path) {
   const r = await c.send('Runtime.evaluate', { expression: `document.querySelector(${S(sel)})`, returnByValue: false });
@@ -194,6 +194,10 @@ async function submitCollection(c, jpgPath, brand, doubleClick = false) {
   await setFile(c, '#cPhotoInput', jpgPath);
   await waitVisE(c, '#cPhotoStatus', 10000); // FileReader done → photo captured
   await setValE(c, '#cBrand', brand); await setValE(c, '#cName', 'Live Submariner');
+  // MOBILE-FIELDS — the schema-driven form now enforces the Watch required attributes client-side; fill them
+  // so the real-page submit proceeds. (Old minimal-payload backward-compat is proven at the contract level by
+  // the direct-POST case in mobile-fields.e2e.mjs.)
+  await setValE(c, '#attr_case_diameter_mm', '40'); await setValE(c, '#attr_dial', 'Black'); await setValE(c, '#attr_material', 'Steel');
   // a rapid double-click must enqueue only ONE event: the handler disables the button synchronously.
   if (doubleClick) await c.ev(`const b=document.querySelector('#cSaveBtn'); b.click(); b.click(); return 'OK';`);
   else await clickE(c, '#cSaveBtn');

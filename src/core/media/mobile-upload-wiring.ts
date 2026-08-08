@@ -14,6 +14,7 @@ import { query, currentBranchId } from '@/core/db/helpers';
 import { armDrainPoller, stopDrainPoller, type DrainPollerDeps } from './mobile-drain-poller';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf } from './runtime-scope-evidence';
 import type { Product } from '@/core/models/types';
+import { buildMobileFieldSchema, filterAttributesToSchema, type MobileAttrValue } from '@/core/mobile/mobile-field-schema';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { ProductMediaResolver } from '@/core/media/product-media-resolver';
 import { useProductStore } from '@/stores/productStore';
@@ -123,16 +124,30 @@ async function preparePreparedMedia(grant: ClaimGrant, sc: DrainScope): Promise<
   return out;
 }
 
+// MOBILE-FIELDS — the desktop field SSOT (built once) used to allow-list mobile attribute keys on the drain.
+const MOBILE_FIELD_SCHEMA = buildMobileFieldSchema();
+
 function collectionDataFromGrant(grant: ClaimGrant): Partial<Product> {
   let meta: Record<string, unknown> = {};
   try { meta = JSON.parse(grant.metadataJson) as Record<string, unknown>; } catch { meta = {}; }
   const str = (k: string) => (typeof meta[k] === 'string' ? (meta[k] as string) : undefined);
+  const categoryId = str('categoryId') ?? '';
+  // MOBILE-FIELDS — the server already allow-listed the metadata against the SSOT; we re-filter attributes to
+  // the category's known keys as defense-in-depth (drop anything not in the field schema), and carry the full
+  // desktop-parity set (condition + Included/scopeOfDelivery + attributes) through to the product.
+  const rawAttrs = (meta.attributes && typeof meta.attributes === 'object' && !Array.isArray(meta.attributes))
+    ? (meta.attributes as Record<string, MobileAttrValue>) : {};
+  const attributes = filterAttributesToSchema(categoryId, rawAttrs, MOBILE_FIELD_SCHEMA);
+  const scope = Array.isArray(meta.scopeOfDelivery)
+    ? (meta.scopeOfDelivery as unknown[]).filter((s): s is string => typeof s === 'string') : undefined;
   return {
-    categoryId: str('categoryId') ?? '',
+    categoryId,
     brand: str('brand') ?? '',
     name: str('name') ?? '',
     sku: str('sku'),
-    attributes: (meta.attributes && typeof meta.attributes === 'object') ? (meta.attributes as Record<string, unknown>) : {},
+    ...(str('condition') !== undefined ? { condition: str('condition') } : {}),
+    ...(scope !== undefined ? { scopeOfDelivery: scope } : {}),
+    attributes: attributes as Record<string, unknown>,
     images: [], // prepared mode: media flows via prepared descriptors, never data URLs
   } as Partial<Product>;
 }

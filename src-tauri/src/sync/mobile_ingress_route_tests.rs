@@ -137,14 +137,19 @@ async fn valid_upload_creates_one_claimable_job() {
     assert_eq!(staged_files(&stg.0), 1, "exactly one staged file → a verifiable claimable job");
 }
 
-// Trust boundary: a tenant/branch inside metadata is INERT — the job is scoped from the JWT only.
+// Trust boundary (MOBILE-FIELDS hardening): scope/control-plane keys in metadata are BLOCKED outright — the
+// body can never carry tenant/branch. A clean upload is scoped from the JWT only.
 #[tokio::test]
 async fn scope_comes_from_jwt_not_body() {
     let stg = Stg::new();
     let st = state(&stg);
-    let meta_evil = r#"{"tenant_id":"EVIL","branch_id":"EVIL","brand":"X"}"#;
-    let (code, _b) = send(&st, upload_req(Some(&token("tenant-1", "branch-main", "clerk")), CT, body_with("ev-e", vec![jpeg_b64()], 1, "collection", meta_evil))).await;
-    assert_eq!(code, StatusCode::CREATED);
+    let meta_evil = r#"{"tenant_id":"EVIL","branch_id":"EVIL","brand":"X","categoryId":"cat-watch"}"#;
+    let (code, b) = send(&st, upload_req(Some(&token("tenant-1", "branch-main", "clerk")), CT, body_with("ev-e", vec![jpeg_b64()], 1, "collection", meta_evil))).await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY, "scope keys in the body are rejected, never silently accepted");
+    assert!(b.contains("\"code\":\"UNKNOWN_FIELD\""), "the offending control-plane field is named: {b}");
+    // and a clean, valid upload IS scoped from the JWT.
+    let (code2, _) = send(&st, upload_req(Some(&token("tenant-1", "branch-main", "clerk")), CT, body_with("ev-e2", vec![jpeg_b64()], 1, "collection", META))).await;
+    assert_eq!(code2, StatusCode::CREATED);
     assert_eq!(inbox_scope(&st).await.0, "tenant-1", "scope from JWT, never from metadata");
 }
 
@@ -169,7 +174,7 @@ async fn same_event_different_content_conflicts() {
     let st = state(&stg);
     let (c1, _) = send(&st, upload_req(Some(&token("tenant-1", "branch-main", "clerk")), CT, body_with("ev-c", vec![jpeg_b64()], 1, "collection", META))).await;
     assert_eq!(c1, StatusCode::CREATED);
-    let (c2, b2) = send(&st, upload_req(Some(&token("tenant-1", "branch-main", "clerk")), CT, body_with("ev-c", vec![jpeg_b64()], 1, "collection", r#"{"brand":"Other"}"#))).await;
+    let (c2, b2) = send(&st, upload_req(Some(&token("tenant-1", "branch-main", "clerk")), CT, body_with("ev-c", vec![jpeg_b64()], 1, "collection", r#"{"brand":"Other","categoryId":"cat-watch","name":"Sub"}"#))).await;
     assert_eq!(c2, StatusCode::CONFLICT);
     assert!(b2.contains("conflict"));
     assert_eq!(inbox_count(&st).await, 1, "conflict is a no-op");

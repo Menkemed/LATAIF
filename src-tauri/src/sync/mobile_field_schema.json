@@ -1,0 +1,510 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "cat-watch",
+      "name": "Watch",
+      "brandRequired": true,
+      "conditionOptions": [
+        "Unworn",
+        "Pre-Owned",
+        "Vintage"
+      ],
+      "scopeOptions": [
+        "Box",
+        "Papers",
+        "Warranty Card",
+        "Extra Links",
+        "Pouch"
+      ],
+      "attributes": [
+        {
+          "key": "reference_number",
+          "label": "Reference Number",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "case_diameter_mm",
+          "label": "Case Diameter",
+          "type": "number",
+          "required": true,
+          "unit": "mm"
+        },
+        {
+          "key": "serial_number",
+          "label": "Serial Number",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "dial",
+          "label": "Dial",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "bezel",
+          "label": "Bezel",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "material",
+          "label": "Material",
+          "type": "select",
+          "options": [
+            "Steel",
+            "Solid Gold",
+            "Two-Tone Steel/Gold",
+            "Platinum",
+            "Titanium",
+            "Ceramic",
+            "Bronze",
+            "Carbon",
+            "DLC Steel",
+            "Plated",
+            "Ceramic & Steel",
+            "Ceramic & Gold",
+            "Titanium & Gold",
+            "Titanium & Ceramic"
+          ],
+          "required": true
+        },
+        {
+          "key": "karat_color",
+          "label": "Karat & Color",
+          "type": "select",
+          "options": [
+            "18K Yellow",
+            "18K Rose",
+            "18K White",
+            "14K Yellow",
+            "14K Rose",
+            "14K White",
+            "9K Yellow",
+            "9K Rose"
+          ],
+          "required": true,
+          "dependsOn": {
+            "key": "material",
+            "valueIncludes": [
+              "Solid Gold",
+              "Two-Tone Steel/Gold",
+              "Ceramic & Gold",
+              "Titanium & Gold"
+            ]
+          }
+        },
+        {
+          "key": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "strap_type",
+          "label": "Strap Type",
+          "type": "select",
+          "options": [
+            "Leather",
+            "Rubber"
+          ],
+          "required": false
+        },
+        {
+          "key": "year",
+          "label": "Year",
+          "type": "number",
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "cat-gold-jewelry",
+      "name": "Gold-Diamond Jewellery",
+      "brandRequired": false,
+      "conditionOptions": [
+        "New",
+        "Pre-Owned",
+        "Vintage"
+      ],
+      "scopeOptions": [
+        "Box",
+        "Certificate",
+        "Pouch"
+      ],
+      "attributes": [
+        {
+          "key": "weight",
+          "label": "Weight",
+          "type": "number",
+          "required": true,
+          "unit": "g"
+        },
+        {
+          "key": "diamond_weight",
+          "label": "Diamond Weight",
+          "type": "number",
+          "required": false,
+          "unit": "ct"
+        },
+        {
+          "key": "item_type",
+          "label": "Item Type",
+          "type": "select",
+          "options": [
+            "Ring",
+            "Bangle",
+            "Bracelet",
+            "Necklace",
+            "Pendant",
+            "Earrings",
+            "Brooch",
+            "Bar",
+            "Coin"
+          ],
+          "required": true
+        },
+        {
+          "key": "karat",
+          "label": "Karat & Color",
+          "type": "select",
+          "options": [
+            "24K Yellow",
+            "22K Yellow",
+            "21K Yellow",
+            "18K Yellow",
+            "18K Rose",
+            "18K White",
+            "18K Mix",
+            "14K Yellow",
+            "14K Rose",
+            "14K White",
+            "14K Mix",
+            "Silver"
+          ],
+          "required": true
+        },
+        {
+          "key": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "cat-branded-gold-jewelry",
+      "name": "Branded Gold Jewelry",
+      "brandRequired": true,
+      "conditionOptions": [
+        "New",
+        "Pre-Owned",
+        "Vintage"
+      ],
+      "scopeOptions": [],
+      "attributes": [
+        {
+          "key": "item_type",
+          "label": "Item Type",
+          "type": "select",
+          "options": [
+            "Ring",
+            "Bangle",
+            "Bracelet",
+            "Necklace",
+            "Pendant",
+            "Earrings",
+            "Brooch"
+          ],
+          "required": true
+        },
+        {
+          "key": "size",
+          "label": "Size",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "karat",
+          "label": "Karat & Color",
+          "type": "select",
+          "options": [
+            "24K Yellow",
+            "22K Yellow",
+            "21K Yellow",
+            "18K Yellow",
+            "18K Rose",
+            "18K White",
+            "18K Mix",
+            "14K Yellow",
+            "14K Rose",
+            "14K White",
+            "14K Mix",
+            "Silver"
+          ],
+          "required": true
+        },
+        {
+          "key": "weight",
+          "label": "Weight",
+          "type": "number",
+          "required": false,
+          "unit": "g"
+        },
+        {
+          "key": "diamond_weight",
+          "label": "Diamond Weight",
+          "type": "number",
+          "required": false,
+          "unit": "ct"
+        },
+        {
+          "key": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "cat-original-gold-jewelry",
+      "name": "Original Gold Jewelry",
+      "brandRequired": true,
+      "conditionOptions": [
+        "New",
+        "Pre-Owned",
+        "Vintage",
+        "Antique"
+      ],
+      "scopeOptions": [
+        "Box",
+        "Certificate"
+      ],
+      "attributes": [
+        {
+          "key": "item_type",
+          "label": "Item Type",
+          "type": "select",
+          "options": [
+            "Ring",
+            "Bangle",
+            "Bracelet",
+            "Necklace",
+            "Pendant",
+            "Earrings",
+            "Brooch"
+          ],
+          "required": true
+        },
+        {
+          "key": "size",
+          "label": "Size",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "karat",
+          "label": "Karat & Color",
+          "type": "select",
+          "options": [
+            "24K Yellow",
+            "22K Yellow",
+            "21K Yellow",
+            "18K Yellow",
+            "18K Rose",
+            "18K White",
+            "18K Mix",
+            "14K Yellow",
+            "14K Rose",
+            "14K White",
+            "14K Mix",
+            "Silver"
+          ],
+          "required": true
+        },
+        {
+          "key": "weight",
+          "label": "Weight",
+          "type": "number",
+          "required": false,
+          "unit": "g"
+        },
+        {
+          "key": "diamond_weight",
+          "label": "Diamond Weight",
+          "type": "number",
+          "required": false,
+          "unit": "ct"
+        },
+        {
+          "key": "model_number",
+          "label": "Model Number",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "serial_number",
+          "label": "Serial Number",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "year",
+          "label": "Year",
+          "type": "number",
+          "required": false
+        },
+        {
+          "key": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "cat-accessory",
+      "name": "Accessory",
+      "brandRequired": false,
+      "conditionOptions": [
+        "New",
+        "Pre-Owned"
+      ],
+      "scopeOptions": [
+        "Box",
+        "Dust Bag",
+        "Pouch",
+        "Papers"
+      ],
+      "attributes": [
+        {
+          "key": "item_type",
+          "label": "Item Type",
+          "type": "select",
+          "options": [
+            "Handbag",
+            "Eyeglass",
+            "Wallet",
+            "Lighter",
+            "Cufflinks",
+            "Prayer Beads",
+            "Walking Stick",
+            "Pen",
+            "Key Holder",
+            "Other"
+          ],
+          "required": true
+        },
+        {
+          "key": "color",
+          "label": "Color",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "material",
+          "label": "Material",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "description",
+          "label": "Description",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "model_number",
+          "label": "Model No",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "serial_number",
+          "label": "Serial No",
+          "type": "text",
+          "required": false
+        },
+        {
+          "key": "year",
+          "label": "Year",
+          "type": "number",
+          "required": false
+        }
+      ]
+    },
+    {
+      "id": "cat-spare-part",
+      "name": "Spare Part",
+      "brandRequired": true,
+      "conditionOptions": [
+        "New",
+        "Pre-Owned",
+        "Refurbished"
+      ],
+      "scopeOptions": [
+        "Packaging"
+      ],
+      "attributes": [
+        {
+          "key": "part_type",
+          "label": "Part Type",
+          "type": "select",
+          "options": [
+            "Dial",
+            "Bezel",
+            "Links",
+            "Crown",
+            "Strap",
+            "Buckle",
+            "Caseback",
+            "Movement",
+            "Crystal",
+            "Box",
+            "Other"
+          ],
+          "required": true
+        },
+        {
+          "key": "material",
+          "label": "Material",
+          "type": "select",
+          "options": [
+            "Steel",
+            "18K YG",
+            "18K RG",
+            "18K WG",
+            "14K YG",
+            "14K RG",
+            "14K WG",
+            "Steel/18K YG",
+            "Steel/18K RG",
+            "Steel/18K WG",
+            "Steel/14K YG",
+            "Steel/14K RG",
+            "Steel/14K WG"
+          ],
+          "required": true
+        },
+        {
+          "key": "original_or_copy",
+          "label": "Original or Copy",
+          "type": "select",
+          "options": [
+            "Original",
+            "Copy"
+          ],
+          "required": true
+        },
+        {
+          "key": "description",
+          "label": "Description",
+          "type": "text",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

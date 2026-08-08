@@ -45,6 +45,7 @@ pub mod db;
 pub mod install_id;
 /// M6-B1 — additive, inactive protocol migrations for the embedded server DB.
 pub mod migrations;
+pub mod mobile_field_schema;
 pub mod mobile_page;
 pub mod models;
 /// M6-B2A — explicit static primary: role resolution, legacy migration, write gate.

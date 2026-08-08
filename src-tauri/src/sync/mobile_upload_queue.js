@@ -36,7 +36,9 @@
   // Build the exact /api/mobile/upload request body from a durable entry.
   function buildRequest(entry) {
     return {
-      protocol_version: 1,
+      // CONTRACT-V2 — the durable entry carries its protocol version; retry NEVER downgrades it. Entries with
+      // no stored version (pre-v2 legacy queue rows) default to the legacy v1 contract.
+      protocol_version: entry.protocolVersion || 1,
       upload_event_id: entry.uploadEventId,
       entity_id: entry.entityId,
       mode: 'collection',
@@ -56,6 +58,7 @@
       var entry = {
         uploadEventId: genId(),
         entityId: genId(),
+        protocolVersion: input.protocolVersion || 1, // CONTRACT-V2 — persisted so retry sends the same version
         metadata: input.metadata,
         images: input.images || [],
         state: 'queued',
