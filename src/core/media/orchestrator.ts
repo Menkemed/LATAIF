@@ -51,6 +51,7 @@ import type {
   EditPlanEnvelope,
   EditBaselineLink,
   EditApplyResult,
+  ProductEditIntent,
 } from './coordinator.ts';
 import { MediaDbCoordinator } from './coordinator.ts';
 
@@ -491,6 +492,38 @@ export class StockMediaOrchestrator {
       try {
         const coordinator = this.coordinatorFactory(lease.db, this.gateway);
         const result = await coordinator.applyEditBatch(env);
+        try {
+          await lease.saveDurably();
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+        return result;
+      } finally {
+        lease.release();
+      }
+    });
+  }
+
+  /**
+   * MEDIA-EDIT-PRESERVE — apply a PRODUCT-TEXT-ONLY edit durably: one atomic tx
+   * that updates the product columns + one sync row + one audit row, and touches
+   * NO `media_links`. Same lease + ops-lock + single durable checkpoint as every
+   * other media mutation, so the text edit is durable and never races a swap.
+   *
+   * No pre-publication checkpoint is needed (nothing is staged in Rust), and the
+   * tx is all-or-nothing. A save failure leaves the on-disk product at its
+   * pre-edit state and is safely retried; a replay is a no-op via the
+   * deterministic audit id. The gallery is never read or written here.
+   */
+  async applyProductTextEditDurably(input: {
+    tenantId: string; branchId: string | null; entityId: string; batchId: string;
+    productEdit: ProductEditIntent;
+  }): Promise<{ status: 'edited' | 'noop_already_applied' }> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+        const result = coordinator.applyProductTextEditDurably(input);
         try {
           await lease.saveDurably();
         } catch (e) {

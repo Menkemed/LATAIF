@@ -34,6 +34,14 @@ const ALLOWED_TOP_KEYS: &[&str] = &[
     "attributes",
 ];
 
+// MOBILE-PRICING — the three canonical product prices. Part of the transport surface ONLY under v2; under
+// v1 they are rejected like any other unknown key (legacy surface unchanged). Mirror ALLOWED_PRICING_KEYS
+// in src/core/mobile/mobile-field-schema.ts. Cost-accounting/margin/VAT/derived fields are NOT here.
+const PRICING_KEYS: &[&str] = &["purchasePrice", "plannedSalePrice", "minSalePrice"];
+// NO business ceiling: the desktop SSOT (plain REAL columns, no bound in the create/edit UIs) enforces
+// none, so mobile must not invent a second, diverging rule. Only technical validity is enforced below
+// (finite, non-negative), mirroring src/core/mobile/mobile-field-schema.ts.
+
 #[derive(Debug, Deserialize)]
 struct SchemaFile {
     #[allow(dead_code)]
@@ -101,9 +109,12 @@ pub fn validate_metadata(meta: &Value, version: i64) -> Result<(), MetadataError
         .as_object()
         .ok_or_else(|| MetadataError::new("META_NOT_OBJECT", "metadata", "metadata must be an object"))?;
 
-    // 1) allow-list every top-level key (mass-assignment safe).
+    // 1) allow-list every top-level key (mass-assignment safe). Pricing keys are allowed ONLY on v2, so a
+    //    v1 client that sends a price is rejected exactly like any other unknown field.
+    let pricing_allowed = version >= 2;
     for k in obj.keys() {
-        if !ALLOWED_TOP_KEYS.contains(&k.as_str()) {
+        let ok = ALLOWED_TOP_KEYS.contains(&k.as_str()) || (pricing_allowed && PRICING_KEYS.contains(&k.as_str()));
+        if !ok {
             return Err(MetadataError::new("UNKNOWN_FIELD", k.clone(), format!("field \"{k}\" is not allowed")));
         }
     }
@@ -162,6 +173,22 @@ pub fn validate_metadata(meta: &Value, version: i64) -> Result<(), MetadataError
         };
         if val.is_null() || matches!(val, Value::String(s) if s.is_empty()) { continue; } // empty optional skipped
         validate_attr_value(def, val)?;
+    }
+
+    // 7) MOBILE-PRICING (v2 only) — each present price must be a finite, non-negative number. Optional:
+    //    absent/null is fine. No upper bound and no relation rule (min≤sale) — the desktop enforces
+    //    neither, and mobile must not add a rule the SSOT does not have. Values pass through unrounded.
+    if pricing_allowed {
+        for key in PRICING_KEYS {
+            match obj.get(*key) {
+                None | Some(Value::Null) => {}
+                Some(v) => match v.as_f64().filter(|f| f.is_finite()) {
+                    Some(f) if f < 0.0 => return Err(MetadataError::new("BAD_NUMBER", (*key).to_string(), format!("{key} must not be negative"))),
+                    Some(_) => {}
+                    None => return Err(MetadataError::new("BAD_NUMBER", (*key).to_string(), format!("{key} must be a finite number"))),
+                },
+            }
+        }
     }
 
     // ── CONTRACT-V2 — full field contract: enforce the SAME requiredness the desktop create flow enforces, with
@@ -373,6 +400,60 @@ mod tests {
         let good = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S",
             "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Solid Gold", "karat_color": "18K Yellow" } });
         assert_eq!(validate_metadata(&good, 2), Ok(()));
+    }
+
+    // ── MOBILE-PRICING — the three canonical prices, v2 only, validity + mass-assignment ──
+    #[test]
+    fn v2_accepts_valid_optional_prices_including_decimals() {
+        let base = |extra: Value| {
+            let mut m = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Steel" } });
+            for (k, v) in extra.as_object().unwrap() { m[k] = v.clone(); }
+            m
+        };
+        assert_eq!(validate_metadata(&base(json!({ "purchasePrice": 1.25, "plannedSalePrice": 2.5, "minSalePrice": 2.0 })), 2), Ok(()));
+        assert_eq!(validate_metadata(&base(json!({ "purchasePrice": 0 })), 2), Ok(()), "zero purchase price allowed (desktop default)");
+        assert_eq!(validate_metadata(&base(json!({ "plannedSalePrice": null })), 2), Ok(()), "null price is optional");
+        // No relation enforced: min > sale is accepted (desktop enforces no product-save relation).
+        assert_eq!(validate_metadata(&base(json!({ "plannedSalePrice": 1, "minSalePrice": 999 })), 2), Ok(()));
+    }
+
+    #[test]
+    fn v1_rejects_pricing_keys_legacy_surface_unchanged() {
+        // A v1 client that sends a price is rejected exactly like any other unknown field.
+        let e = validate_metadata(&json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "purchasePrice": 10 }), 1).unwrap_err();
+        assert_eq!(e.code, "UNKNOWN_FIELD");
+        assert_eq!(e.field, "purchasePrice");
+    }
+
+    #[test]
+    fn v2_rejects_bad_price_values() {
+        let base = |k: &str, v: Value| {
+            let mut m = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Steel" } });
+            m[k] = v; m
+        };
+        assert_eq!(validate_metadata(&base("purchasePrice", json!(-1)), 2).unwrap_err().code, "BAD_NUMBER");
+        assert_eq!(validate_metadata(&base("plannedSalePrice", json!("100")), 2).unwrap_err().code, "BAD_NUMBER"); // string not number
+        assert_eq!(validate_metadata(&base("minSalePrice", json!(true)), 2).unwrap_err().code, "BAD_NUMBER");
+        assert_eq!(validate_metadata(&base("purchasePrice", json!([1])), 2).unwrap_err().code, "BAD_NUMBER");
+        assert_eq!(validate_metadata(&base("purchasePrice", json!({ "x": 1 })), 2).unwrap_err().code, "BAD_NUMBER");
+        // No invented ceiling: any finite non-negative number is a valid price, exactly like the desktop
+        // REAL column (1.5e2 == 150, and a huge-but-finite value is still a number the DB can store).
+        assert_eq!(validate_metadata(&base("purchasePrice", json!(1.5e2)), 2), Ok(()));
+        assert_eq!(validate_metadata(&base("plannedSalePrice", json!(2_000_000_000.0)), 2), Ok(()));
+        assert_eq!(validate_metadata(&base("purchasePrice", json!(1.5e300)), 2), Ok(()));
+        // An overflow exponent (1e400) is not representable as an f64 → serde rejects it at JSON parse
+        // time (before validation), i.e. the DTO deserialization is the first line of defence.
+        assert!(serde_json::from_str::<Value>("{\"purchasePrice\":1e400}").is_err(), "overflow exponent rejected at parse");
+    }
+
+    #[test]
+    fn v2_pricing_mass_assignment_still_blocked() {
+        // A derived/system field disguised near pricing is still rejected (allow-list unchanged otherwise).
+        for bad in ["expectedMargin", "expected_margin", "maxSalePrice", "vat_amount", "profit", "cost", "purchase_price"] {
+            let mut m = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Steel" } });
+            m[bad] = json!(5);
+            assert_eq!(validate_metadata(&m, 2).unwrap_err().code, "UNKNOWN_FIELD", "field {bad} must be rejected");
+        }
     }
 
     #[test]

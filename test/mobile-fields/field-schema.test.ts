@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { DEFAULT_CATEGORIES } from '../../src/core/models/default-categories.ts';
 import {
   buildMobileFieldSchema, validateMobileMetadata, filterAttributesToSchema,
-  isBrandRequired, SCHEMA_VERSION, ALLOWED_TOP_KEYS,
+  isBrandRequired, SCHEMA_VERSION, ALLOWED_TOP_KEYS, ALLOWED_PRICING_KEYS,
 } from '../../src/core/mobile/mobile-field-schema.ts';
 
 let PASS = 0, FAIL = 0; const fails: string[] = [];
@@ -85,6 +85,33 @@ const schema = buildMobileFieldSchema();
 // ── 6) allow-list is exactly the intended transport surface ──
 {
   ok(JSON.stringify([...ALLOWED_TOP_KEYS].sort()) === JSON.stringify(['attributes', 'brand', 'categoryId', 'condition', 'name', 'scopeOfDelivery', 'sku']), 'allow-list top keys are exactly the parity set');
+}
+
+// ── 7) MOBILE-PRICING — the three canonical prices, v2-only transport surface ──
+{
+  const V2 = { protocolVersion: 2 } as const;
+  const wm = (extra: Record<string, unknown>) => ({ categoryId: 'cat-watch', brand: 'R', name: 'S', ...extra });
+  // v2 accepts optional, finite, non-negative prices incl. decimals + zero + null.
+  ok(validateMobileMetadata(wm({ purchasePrice: 1.25, plannedSalePrice: 2.5, minSalePrice: 2 }), schema, V2).length === 0, 'v2: valid decimal prices accepted');
+  ok(validateMobileMetadata(wm({ purchasePrice: 0 }), schema, V2).length === 0, 'v2: zero purchase price accepted (desktop default)');
+  ok(validateMobileMetadata(wm({ plannedSalePrice: null }), schema, V2).length === 0, 'v2: null price is optional');
+  // No relation rule (min>sale accepted — desktop enforces none at product save).
+  ok(validateMobileMetadata(wm({ plannedSalePrice: 1, minSalePrice: 999 }), schema, V2).length === 0, 'v2: no min<=sale relation enforced');
+  // v1 (default) rejects pricing keys → legacy surface unchanged.
+  ok(validateMobileMetadata(wm({ purchasePrice: 10 }), schema).some((e) => e.code === 'UNKNOWN_FIELD' && e.field === 'purchasePrice'), 'v1: pricing key rejected (legacy surface unchanged)');
+  // Bad values under v2.
+  ok(validateMobileMetadata(wm({ purchasePrice: -1 }), schema, V2).some((e) => e.code === 'BAD_NUMBER'), 'v2: negative price rejected');
+  ok(validateMobileMetadata(wm({ plannedSalePrice: '100' as unknown as number }), schema, V2).some((e) => e.code === 'BAD_NUMBER'), 'v2: string price rejected');
+  ok(validateMobileMetadata(wm({ minSalePrice: true as unknown as number }), schema, V2).some((e) => e.code === 'BAD_NUMBER'), 'v2: bool price rejected');
+  ok(validateMobileMetadata(wm({ purchasePrice: Infinity as unknown as number }), schema, V2).some((e) => e.code === 'BAD_NUMBER'), 'v2: non-finite price rejected');
+  // NO invented ceiling: the desktop SSOT has none, so any finite non-negative number is a valid price.
+  ok(validateMobileMetadata(wm({ purchasePrice: 2_000_000_000 }), schema, V2).length === 0, 'v2: a very large finite price is accepted (no mobile-only cap — SSOT parity)');
+  ok(validateMobileMetadata(wm({ purchasePrice: 1.5e300 }), schema, V2).length === 0, 'v2: huge-but-finite price accepted (matches the plain REAL column)');
+  // Mass-assignment: derived/system fields still rejected even on v2.
+  for (const bad of ['expectedMargin', 'maxSalePrice', 'vat_amount', 'profit', 'purchase_price']) {
+    ok(validateMobileMetadata(wm({ [bad]: 5 }), schema, V2).some((e) => e.code === 'UNKNOWN_FIELD'), `v2: mass-assignment field ${bad} rejected`);
+  }
+  ok(JSON.stringify([...ALLOWED_PRICING_KEYS]) === JSON.stringify(['purchasePrice', 'plannedSalePrice', 'minSalePrice']), 'pricing keys are exactly the canonical product price properties');
 }
 
 console.log(`\nMOBILE-FIELDS unit: ${PASS} passed, ${FAIL} failed`);

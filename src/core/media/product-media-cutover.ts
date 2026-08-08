@@ -23,6 +23,7 @@
 import type { FinalizeResult } from './coordinator.ts';
 import type { IngestAndFinalizeInput } from './orchestrator.ts';
 import { parseLegacyImages } from './product-media-resolver.ts';
+import { toIngestRequestId } from './ingest-request-id.ts';
 
 // ── error contract ──────────────────────────────────────────────────────────
 
@@ -467,11 +468,25 @@ export class ProductMediaCutoverService {
 //
 // One stable id per (product, role, slot) so a resumed cutover re-finalizes the
 // SAME request (idempotent no-op) instead of creating a duplicate link.
+//
+// Every id here is emitted through `toIngestRequestId`, because this id is also
+// the Rust ingest journal's filename component and the media core accepts ONLY
+// 8..=80 chars of [A-Za-z0-9_-]. The previous `op:tenant:branch:...` form
+// contained ':' and was rejected with MEDIA_INGEST_INVALID_REQUEST on every
+// prepare — the readable operation/scope head is kept, the separators are
+// normalised, and a signature over the full composed string keeps distinct
+// scopes distinct even after the length bound.
+
+function composedRequestId(
+  op: string, tenantId: string, branchId: string, productId: string, role: string, slot: number,
+): string {
+  return toIngestRequestId(`${op}:${tenantId}:${branchId}:${productId}:${role}:${slot}`);
+}
 
 export function cutoverRequestId(
   tenantId: string, branchId: string, productId: string, role: string, slot: number,
 ): string {
-  return `cutover:${tenantId}:${branchId}:${productId}:${role}:${slot}`;
+  return composedRequestId('cutover', tenantId, branchId, productId, role, slot);
 }
 
 /** Stable id per (tenant, branch, product, role, slot) for the create/add-image
@@ -482,7 +497,7 @@ export function cutoverRequestId(
 export function appendRequestId(
   tenantId: string, branchId: string, productId: string, role: string, slot: number,
 ): string {
-  return `append:${tenantId}:${branchId}:${productId}:${role}:${slot}`;
+  return composedRequestId('append', tenantId, branchId, productId, role, slot);
 }
 
 /** Stable id per (tenant, branch, product, role, slot) for the new-product
@@ -492,7 +507,7 @@ export function appendRequestId(
 export function createRequestId(
   tenantId: string, branchId: string, productId: string, role: string, slot: number,
 ): string {
-  return `create:${tenantId}:${branchId}:${productId}:${role}:${slot}`;
+  return composedRequestId('create', tenantId, branchId, productId, role, slot);
 }
 
 // ── default legacy decoder: data: URL only ──────────────────────────────────

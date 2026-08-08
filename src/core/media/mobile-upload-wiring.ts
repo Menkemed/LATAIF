@@ -131,6 +131,13 @@ function collectionDataFromGrant(grant: ClaimGrant): Partial<Product> {
   let meta: Record<string, unknown> = {};
   try { meta = JSON.parse(grant.metadataJson) as Record<string, unknown>; } catch { meta = {}; }
   const str = (k: string) => (typeof meta[k] === 'string' ? (meta[k] as string) : undefined);
+  // MOBILE-PRICING — a defensive read of an optional price (the server already validated it on v2). Only a
+  // finite, non-negative number survives; anything else becomes undefined (→ desktop null/default), so a
+  // bypassed gate can never write a bad price. No upper bound (the desktop SSOT has none) and no rounding.
+  const price = (k: string): number | undefined => {
+    const v = meta[k];
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
+  };
   const categoryId = str('categoryId') ?? '';
   // MOBILE-FIELDS — the server already allow-listed the metadata against the SSOT; we re-filter attributes to
   // the category's known keys as defense-in-depth (drop anything not in the field schema), and carry the full
@@ -147,6 +154,11 @@ function collectionDataFromGrant(grant: ClaimGrant): Partial<Product> {
     sku: str('sku'),
     ...(str('condition') !== undefined ? { condition: str('condition') } : {}),
     ...(scope !== undefined ? { scopeOfDelivery: scope } : {}),
+    // MOBILE-PRICING — carry the three canonical prices through to createProductWithMedia, which already
+    // persists purchase_price/planned_sale_price/min_sale_price (and derives expected_margin) on insert.
+    ...(price('purchasePrice') !== undefined ? { purchasePrice: price('purchasePrice') } : {}),
+    ...(price('plannedSalePrice') !== undefined ? { plannedSalePrice: price('plannedSalePrice') } : {}),
+    ...(price('minSalePrice') !== undefined ? { minSalePrice: price('minSalePrice') } : {}),
     attributes: attributes as Record<string, unknown>,
     images: [], // prepared mode: media flows via prepared descriptors, never data URLs
   } as Partial<Product>;

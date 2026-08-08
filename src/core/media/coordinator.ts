@@ -1215,31 +1215,77 @@ export class MediaDbCoordinator {
 
   /** Apply the product text fields + exactly one sync changelog + one audit row.
    *  Column names come from a fixed whitelist (validated at parse time), so the
-   *  interpolation is injection-safe. */
-  private applyProductEditInTx(plan: EditPlan, pe: ProductEditIntent, now: string): void {
+   *  interpolation is injection-safe.
+   *
+   *  `ctx` is the minimal identity the write needs — an `EditPlan` satisfies it
+   *  structurally (the media edit path), and the product-text-only path
+   *  (`applyProductTextEditDurably`) hands in the same three fields directly. */
+  private applyProductEditInTx(ctx: { entityId: string; branchId: string | null; batchId: string }, pe: ProductEditIntent, now: string): void {
     const parts: string[] = pe.set.map(([c]) => `${c} = ?`);
     const vals: unknown[] = pe.set.map(([, v]) => v);
     if (pe.invalidateImageDerived) parts.push('image_hash = NULL', 'image_description = NULL', 'image_embedding = NULL');
     parts.push('updated_at = ?'); vals.push(now);
-    vals.push(plan.entityId);
+    vals.push(ctx.entityId);
     // `parts` always contains updated_at, so the SET clause is never empty even
     // for a gallery-only edit (set = []).
     this.db.run(`UPDATE products SET ${parts.join(', ')} WHERE id = ?`, vals);
     if (pe.withSync) {
       // Echo the full row (sync replicates the whole record, like trackChange).
-      const full = firstRow(this.db, `SELECT * FROM products WHERE id = $id`, { $id: plan.entityId }) ?? {};
+      const full = firstRow(this.db, `SELECT * FROM products WHERE id = $id`, { $id: ctx.entityId }) ?? {};
       this.db.run(
         `INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at)
          VALUES ('products', ?, ?, 'update', ?, 0, ?)`,
-        [plan.entityId, plan.branchId, JSON.stringify(full), now] as unknown[],
+        [ctx.entityId, ctx.branchId, JSON.stringify(full), now] as unknown[],
       );
     }
     // Deterministic audit id per batch → a save-loss retry never doubles it.
     this.db.run(
       `INSERT INTO audit_log (id, branch_id, module, entity_type, entity_id, action_type, field_name, old_value, new_value, changed_by, changed_at)
        VALUES (?, ?, ?, 'products', ?, 'UPDATE', NULL, NULL, ?, ?, ?)`,
-      [`audit-edit-${plan.batchId}`, plan.branchId, pe.audit.module, plan.entityId, pe.audit.newValueJson, pe.audit.changedBy, now] as unknown[],
+      [`audit-edit-${ctx.batchId}`, ctx.branchId, pe.audit.module, ctx.entityId, pe.audit.newValueJson, pe.audit.changedBy, now] as unknown[],
     );
+  }
+
+  /**
+   * MEDIA-EDIT-PRESERVE — apply a PRODUCT-TEXT-ONLY edit durably, in ONE tx, and
+   * NEVER read, retire, reshuffle or otherwise touch `media_links`.
+   *
+   * This is the write behind a ProductDetail save where the user did not change
+   * any image (media not dirty). The old edit path always reconciled the gallery
+   * from the UI's `srcs` list — for a mobile product that list is empty
+   * (`products.images = '[]'`, gallery lives only in `media_links`), so a pure
+   * text save reconciled the gallery to EMPTY and soft-deleted the photo. Here
+   * there is no gallery step at all, so the gallery is provably preserved
+   * regardless of its state (loading / error / missing-primary / concurrently
+   * changed by another path). The contract: no media intent → no reconciliation.
+   *
+   * Idempotent: the deterministic `audit-edit-<batchId>` row makes a replay a
+   * no-op. Baseline-guarded: if the product moved off both the frozen baseline
+   * and the target under us, the edit is refused (MEDIA_EDIT_BASELINE_CHANGED)
+   * rather than forcing a stale write.
+   */
+  applyProductTextEditDurably(input: {
+    tenantId: string; branchId: string | null; entityId: string; batchId: string;
+    productEdit: ProductEditIntent;
+  }): { status: 'edited' | 'noop_already_applied' } {
+    return this.withTx(() => {
+      const replay = firstRow(this.db, `SELECT 1 AS hit FROM audit_log WHERE id = $id`, { $id: `audit-edit-${input.batchId}` });
+      if (replay) return { status: 'noop_already_applied' as const };
+      const pe = input.productEdit;
+      // Conflict guard (mirrors productEditState): the product must be at the
+      // frozen baseline, or already at the target (a converged replay). Anything
+      // else changed under us → refuse, never force a stale text write.
+      const cols = pe.set.map(([c]) => c);
+      if (cols.length > 0) {
+        const row = firstRow(this.db, `SELECT ${cols.join(', ')} FROM products WHERE id = $id`, { $id: input.entityId });
+        const cur = cols.map((c) => (row ? (row[c] ?? null) : null));
+        const atBaseline = valuesEqual(cur, pe.baseline);
+        const atTarget = valuesEqual(cur, pe.set.map(([, v]) => v));
+        if (!atBaseline && !atTarget) throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_BASELINE_CHANGED');
+      }
+      this.applyProductEditInTx({ entityId: input.entityId, branchId: input.branchId, batchId: input.batchId }, pe, timestamp());
+      return { status: 'edited' as const };
+    });
   }
 
   /** The current gallery as an edit-plan baseline (scope-exact). Read under the

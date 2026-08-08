@@ -43,8 +43,14 @@ const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP
 function dbQ(file, sql) { let db; try { db = new DatabaseSync(file); return db.prepare(sql).all(); } catch { return []; } finally { try { db?.close(); } catch {} } }
 const inboxCount = () => { const r = dbQ(SERVER_DB, 'SELECT COUNT(*) c FROM mobile_upload_inbox'); return r.length ? r[0].c : -1; };
 const readyCount = () => { const r = dbQ(SERVER_DB, "SELECT COUNT(*) c FROM mobile_upload_inbox WHERE state='ready'"); return r.length ? r[0].c : -1; };
-const productRow = (id) => { const r = dbQ(BIZ_DB, `SELECT id,category_id,brand,name,condition,scope_of_delivery,attributes FROM products WHERE id='${id}'`); return r.length ? r[0] : null; };
+const productRow = (id) => { const r = dbQ(BIZ_DB, `SELECT id,category_id,brand,name,condition,scope_of_delivery,attributes,purchase_price,planned_sale_price,min_sale_price,expected_margin FROM products WHERE id='${id}'`); return r.length ? r[0] : null; };
 const productCount = () => { const r = dbQ(BIZ_DB, 'SELECT COUNT(*) c FROM products'); return r.length ? r[0].c : -1; };
+// MEDIA-EDIT-PRESERVE — the active gallery of a product (deleted_at IS NULL), and
+// global blob-generation count, to prove a pure text edit neither retires a link
+// nor creates a new one/blob.
+const activeLinks = (id) => dbQ(BIZ_DB, `SELECT media_id, is_primary FROM media_links WHERE entity_id='${id}' AND deleted_at IS NULL ORDER BY sort_order`);
+const linkTotal = (id) => { const r = dbQ(BIZ_DB, `SELECT COUNT(*) c FROM media_links WHERE entity_id='${id}'`); return r.length ? r[0].c : -1; };
+const blobGenTotal = () => { const r = dbQ(BIZ_DB, 'SELECT COUNT(*) c FROM media_blob_generations'); return r.length ? r[0].c : -1; };
 const stagedFiles = (root) => { let n = 0; const walk = (p) => { if (!existsSync(p)) return; for (const e of readdirSync(p, { withFileTypes: true })) { const q = join(p, e.name); if (e.isDirectory()) walk(q); else if (!e.name.endsWith('.tmp')) n++; } }; walk(root); return n; };
 
 class CDP {
@@ -112,6 +118,23 @@ async function editProductName(c, entity, oldName, newName) {
   return await openDetailText(c, entity);
 }
 
+// MOBILE-PRICING — desktop edit of a single price field (by its Input label prefix), then reopen. Used to
+// prove a price edit persists AND does not disturb the media gallery (text-only durable path).
+async function editProductField(c, entity, labelPrefix, newVal) {
+  await openDetailText(c, entity);
+  await c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='Edit'); if(b) b.click(); return !!b;`);
+  const end = Date.now() + 8000; let ready = false;
+  while (Date.now() < end) { ready = await c.ev(`return [...document.querySelectorAll('label')].some(l=>l.textContent.trim().startsWith(${S(labelPrefix)}));`); if (ready) break; await sleep(300); }
+  if (!ready) return 'NOEDIT';
+  const set = await c.ev(`const lab=[...document.querySelectorAll('label')].find(l=>l.textContent.trim().startsWith(${S(labelPrefix)})); if(!lab) return 'NOLABEL'; const inp=lab.parentElement.querySelector('input'); if(!inp) return 'NOINPUT'; const p=HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p,'value').set.call(inp, ${S(newVal)}); inp.dispatchEvent(new Event('input',{bubbles:true})); inp.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+  if (set !== 'OK') return set;
+  await c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='Save'); if(b) b.click(); return !!b;`);
+  await sleep(1800);
+  await c.ev(`history.pushState({},'', '/collection'); window.dispatchEvent(new PopStateEvent('popstate'));`).catch(() => {});
+  await sleep(600);
+  return 'OK';
+}
+
 // ── server login + direct POST ──
 async function serverLogin() { const r = await fetch(`${BASE}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: OWNER_EMAIL, password: OWNER_PW }) }); return (await r.json()).token; }
 async function post(token, event, entity, meta, imgB64, version = 2, includeMeta = true) {
@@ -172,6 +195,19 @@ const CATS = [
     visible: ['part_type', 'original_or_copy'], absent: ['case_diameter_mm', 'color'] },
 ];
 
+// MOBILE-PRICING — the three canonical prices per category. `raw` is what the user types into the
+// /mobile inputs (watch uses a decimal COMMA to exercise client normalisation → dot); `exp` is the
+// numeric value expected in the payload + DB. All categories carry pricing (product-level, all six).
+const PRICES = {
+  'cat-watch':                { raw: { purchasePrice: '1,25', plannedSalePrice: '2.5', minSalePrice: '2' },       exp: { purchase_price: 1.25, planned_sale_price: 2.5,  min_sale_price: 2 } },
+  'cat-gold-jewelry':         { raw: { purchasePrice: '100',  plannedSalePrice: '150.75', minSalePrice: '120' },  exp: { purchase_price: 100,  planned_sale_price: 150.75, min_sale_price: 120 } },
+  'cat-branded-gold-jewelry': { raw: { purchasePrice: '250.5', plannedSalePrice: '400', minSalePrice: '300' },    exp: { purchase_price: 250.5, planned_sale_price: 400, min_sale_price: 300 } },
+  'cat-original-gold-jewelry':{ raw: { purchasePrice: '80',   plannedSalePrice: '95.25', minSalePrice: '85' },    exp: { purchase_price: 80,   planned_sale_price: 95.25, min_sale_price: 85 } },
+  'cat-accessory':            { raw: { purchasePrice: '30',   plannedSalePrice: '45', minSalePrice: '' },         exp: { purchase_price: 30,   planned_sale_price: 45, min_sale_price: null } },
+  'cat-spare-part':           { raw: { purchasePrice: '', plannedSalePrice: '', minSalePrice: '' },               exp: { purchase_price: 0,    planned_sale_price: null, min_sale_price: null } },
+};
+const expPayloadPrices = (catId) => { const e = PRICES[catId].exp; const o = {}; if (e.purchase_price) o.purchasePrice = e.purchase_price; if (e.planned_sale_price != null) o.plannedSalePrice = e.planned_sale_price; if (e.min_sale_price != null) o.minSalePrice = e.min_sale_price; return o; };
+
 async function fillAndSubmit(edge, cat, jpg, i, doubleClick = false) {
   await setValE(edge, '#cCategory', cat.id); await sleep(500);
   for (const k of cat.visible) ok(await existsE(edge, '#attr_' + k), `${cat.label}: field ${k} visible`);
@@ -181,6 +217,9 @@ async function fillAndSubmit(edge, cat, jpg, i, doubleClick = false) {
   await setValE(edge, '#cCondition', cat.cond);
   for (const s of cat.scope) await clickChip(edge, '#cScope', s);
   for (const [k, [v]] of Object.entries(cat.attrs)) await setValE(edge, '#attr_' + k, v);
+  // MOBILE-PRICING — fill the three price inputs (empty string leaves the field blank → optional/null).
+  const pr = PRICES[cat.id].raw;
+  await setValE(edge, '#cPurchasePrice', pr.purchasePrice); await setValE(edge, '#cSalePrice', pr.plannedSalePrice); await setValE(edge, '#cMinSalePrice', pr.minSalePrice);
   await sleep(200);
   if (doubleClick) await edge.ev(`const b=document.querySelector('#cSaveBtn'); b.click(); b.click(); return 'OK';`);
   else await clickE(edge, '#cSaveBtn');
@@ -232,6 +271,12 @@ async function main() {
     ok(u.metadata.condition === cat.cond, `${cat.label}: condition in payload`);
     ok(JSON.stringify(u.metadata.scopeOfDelivery || []) === JSON.stringify(cat.scope), `${cat.label}: Included/scope in payload`);
     ok(!cat.absent.some((k) => k in (u.metadata.attributes || {})), `${cat.label}: no foreign attrs in payload`);
+    // MOBILE-PRICING — the v2 payload carries EXACTLY the entered prices (empty → omitted; comma → dot).
+    const expP = expPayloadPrices(cat.id);
+    let pricesOk = true;
+    for (const [k, v] of Object.entries(expP)) if (u.metadata[k] !== v) { pricesOk = false; console.log(`  ${cat.label} payload price ${k}=${JSON.stringify(u.metadata[k])} exp ${v}`); }
+    for (const k of ['purchasePrice', 'plannedSalePrice', 'minSalePrice']) if (!(k in expP) && (k in u.metadata)) { pricesOk = false; console.log(`  ${cat.label} unexpected payload price ${k}=${JSON.stringify(u.metadata[k])}`); }
+    ok(pricesOk, `${cat.label}: v2 payload carries the exact prices (optional omitted, comma normalised)`);
     entities[cat.id] = u.entity_id;
     await waitVisE(edge, '#cSuccess', 10000).catch(() => {});
   }
@@ -255,6 +300,18 @@ async function main() {
     ['null required', { categoryId: 'cat-gold-jewelry', attributes: { weight: null, item_type: 'Ring', karat: '18K Yellow' } }, 2, true],
     ['control-plane key', { categoryId: 'cat-watch', brand: 'X', name: 'Y', tenant_id: 'EVIL', attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
     ['oversized string', { categoryId: 'cat-accessory', attributes: { item_type: 'Handbag', color: 'B', material: 'L', description: 'x'.repeat(3000) } }, 2, true],
+    // ── MOBILE-PRICING negative matrix (v2) — reject before staging ──
+    ['negative purchase price', { categoryId: 'cat-watch', brand: 'X', name: 'Y', purchasePrice: -1, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['negative sale price', { categoryId: 'cat-watch', brand: 'X', name: 'Y', plannedSalePrice: -0.5, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['negative min price', { categoryId: 'cat-watch', brand: 'X', name: 'Y', minSalePrice: -100, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['string price', { categoryId: 'cat-watch', brand: 'X', name: 'Y', purchasePrice: '100', attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['bool price', { categoryId: 'cat-watch', brand: 'X', name: 'Y', plannedSalePrice: true, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['array price', { categoryId: 'cat-watch', brand: 'X', name: 'Y', purchasePrice: [1], attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['object price', { categoryId: 'cat-watch', brand: 'X', name: 'Y', purchasePrice: { v: 1 }, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['non-finite price (JSON string form)', { categoryId: 'cat-watch', brand: 'X', name: 'Y', purchasePrice: 'Infinity', attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['unknown pricing key', { categoryId: 'cat-watch', brand: 'X', name: 'Y', maxSalePrice: 5, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['margin mass-assignment', { categoryId: 'cat-watch', brand: 'X', name: 'Y', expectedMargin: 999, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
+    ['pricing on v1 (legacy surface)', { categoryId: 'cat-watch', brand: 'X', name: 'Y', purchasePrice: 10 }, 1, true],
   ];
   let allRej = true;
   for (let i = 0; i < neg.length; i++) { const [name, meta, ver, inc] = neg[i]; const r = await post(token, `neg-${i}`, `prod-neg-${i}`, meta, imgB64, ver, inc); if (r.status !== 422) { allRej = false; console.log('  neg not 422:', name, r.status, JSON.stringify(r.body)); } }
@@ -281,7 +338,7 @@ async function main() {
   if (!(await pollReady(8, 70000))) { await app.ev(`window.location.reload();`).catch(() => {}); await sleep(3000); }
   ok(await pollReady(8, 40000), 'app drain created all 8 products (6 v2 + 2 legacy) → ready');
 
-  let sixReadback = true, sixEdit = true;
+  let sixReadback = true, sixEdit = true, sixMedia = true, sixPrice = true;
   for (const cat of CATS) {
     const id = entities[cat.id]; const row = productRow(id);
     if (!row) { sixReadback = false; console.log('  no product row for ' + cat.label); continue; }
@@ -291,17 +348,54 @@ async function main() {
     for (const [k, [, exp]] of Object.entries(cat.attrs)) if (a[k] !== exp) { good = false; console.log(`  ${cat.label} DB attr ${k}=${JSON.stringify(a[k])} exp ${JSON.stringify(exp)}`); }
     ok(good, `${cat.label}: business DB has ALL fields (attributes+condition+scope, typed)`);
     if (!good) sixReadback = false;
+    // MOBILE-PRICING — the three prices persisted EXACTLY (optional → null). Values are binary-exact.
+    const expP = PRICES[cat.id].exp;
+    const priceReadOk = row.purchase_price === expP.purchase_price && row.planned_sale_price === expP.planned_sale_price && row.min_sale_price === expP.min_sale_price;
+    if (!priceReadOk) { sixPrice = false; console.log(`  ${cat.label} DB prices: ${JSON.stringify({ p: row.purchase_price, s: row.planned_sale_price, m: row.min_sale_price })} exp ${JSON.stringify(expP)}`); }
+    ok(priceReadOk, `${cat.label}: purchase/sale/min prices persisted EXACTLY to the business DB`);
     // UI readback: detail renders a representative value.
     const detail = await openDetailText(app, id);
     const sample = Object.values(cat.attrs)[0][1];
     ok(detail.includes(String(sample)) && detail.includes('NM-' + cat.label), `${cat.label}: desktop product detail renders the mobile values`);
-    // desktop edit → save → reopen.
+    // MEDIA-EDIT-PRESERVE — snapshot the mobile photo's gallery BEFORE a pure
+    // text edit (name only). The uploaded product has exactly one active link.
+    const linksBefore = activeLinks(id); const totalBefore = linkTotal(id); const gensBefore = blobGenTotal();
+    ok(linksBefore.length === 1, `${cat.label}: uploaded product has exactly 1 active media link before edit`);
+    const mediaIdBefore = linksBefore[0]?.media_id;
+    const pricesBefore = { p: row.purchase_price, s: row.planned_sale_price, m: row.min_sale_price };
+    // desktop edit → save → reopen. This changes ONLY the name → text-only path.
     const reopened = await editProductName(app, id, 'NM-' + cat.label, 'NM-' + cat.label + ' EDITED');
     if (!reopened.includes('NM-' + cat.label + ' EDITED')) { sixEdit = false; console.log('  edit failed for ' + cat.label); }
     ok(reopened.includes('NM-' + cat.label + ' EDITED'), `${cat.label}: desktop edit → save → reopen persists`);
+    // THE FIX: the mobile photo must survive a text-only edit — same active
+    // link, same media identity, nothing retired, no new link, no new blob.
+    const linksAfter = activeLinks(id);
+    const mediaSurvived = linksAfter.length === 1 && linksAfter[0]?.media_id === mediaIdBefore
+      && linkTotal(id) === totalBefore && blobGenTotal() === gensBefore;
+    if (!mediaSurvived) { sixMedia = false; console.log(`  MEDIA LOST for ${cat.label}: before=${mediaIdBefore} after=${JSON.stringify(linksAfter)} total ${totalBefore}->${linkTotal(id)} gens ${gensBefore}->${blobGenTotal()}`); }
+    ok(mediaSurvived, `${cat.label}: mobile photo SURVIVES a text-only desktop edit (link+identity+blob preserved)`);
+    // A pure text edit must NOT change any price.
+    const afterName = productRow(id);
+    const pricesUnchanged = afterName.purchase_price === pricesBefore.p && afterName.planned_sale_price === pricesBefore.s && afterName.min_sale_price === pricesBefore.m;
+    if (!pricesUnchanged) { sixPrice = false; console.log(`  ${cat.label} prices changed by a text edit`); }
+    ok(pricesUnchanged, `${cat.label}: a text-only edit leaves all prices unchanged`);
+    // The desktop detail still renders an image (blob object URL), not the empty state.
+    const afterImg = await app.ev(`return document.querySelectorAll('img').length;`);
+    ok(afterImg > 0, `${cat.label}: product detail still shows an image after the text edit`);
+    // MOBILE-PRICING — now edit a PRICE (sale price) on the desktop → persists, media still preserved.
+    const newSale = (Number(expP.planned_sale_price) || 0) + 7.5;
+    const pe = await editProductField(app, id, 'SALE PRICE (BHD)', String(newSale));
+    const afterPrice = productRow(id);
+    const priceEditOk = pe === 'OK' && afterPrice.planned_sale_price === newSale;
+    const mediaStillOk = activeLinks(id).length === 1 && activeLinks(id)[0]?.media_id === mediaIdBefore && blobGenTotal() === gensBefore;
+    if (!(priceEditOk && mediaStillOk)) { sixPrice = false; console.log(`  ${cat.label} price-edit: outcome=${pe} sale=${afterPrice.planned_sale_price} exp ${newSale} media=${JSON.stringify(activeLinks(id))}`); }
+    ok(priceEditOk, `${cat.label}: desktop SALE PRICE edit → save → reopen persists the new price`);
+    ok(mediaStillOk, `${cat.label}: media still preserved after a price edit (text-only durable path)`);
   }
   ok(sixReadback, 'six-category desktop readback: 6/6');
   ok(sixEdit, 'six-category desktop edit/save/reopen: 6/6');
+  ok(sixMedia, 'six-category media SURVIVES text-only edit: 6/6 (regression guard for the photo-deletion bug)');
+  ok(sixPrice, 'six-category pricing: mobile→DB readback + text-edit-preserves + price-edit-persists 6/6');
   ok(!!productRow('prod-v1') && !!productRow('prod-ver'), 'legacy v1 products persisted (backward compat end-to-end)');
 
   // ── restart: no re-drain (persisted inbox drains exactly once) ──
@@ -318,7 +412,7 @@ async function main() {
   ok(leaked === 0, 'owner secret not persisted anywhere in the isolated tree');
   ok((existsSync(PROD_DB) ? statSync(PROD_DB).mtimeMs : 0) === prodBefore, 'production DB (3001 install) untouched');
 
-  console.log(`\nMOBILE-FIELDS-CONTRACT-V2-I1 e2e: ${PASS} passed, ${FAIL} failed  (readback ${sixReadback ? '6/6' : 'FAIL'}, edit ${sixEdit ? '6/6' : 'FAIL'})`);
+  console.log(`\nMOBILE-FIELDS-CONTRACT-V2-I1 e2e: ${PASS} passed, ${FAIL} failed  (readback ${sixReadback ? '6/6' : 'FAIL'}, edit ${sixEdit ? '6/6' : 'FAIL'}, media-survives-edit ${sixMedia ? '6/6' : 'FAIL'}, pricing ${sixPrice ? '6/6' : 'FAIL'})`);
 }
 main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(() => {
   try { killEdge(); } catch {} try { killAllApp(); } catch {}

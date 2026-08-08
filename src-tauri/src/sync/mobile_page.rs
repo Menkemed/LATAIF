@@ -160,7 +160,20 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
       <label>Included</label>
       <div id="cScope" class="chips"></div>
     </div>
-    <p style="font-size:11px;color:#4D4D55;margin-top:6px;">Pricing is completed by the owner on the desktop.</p>
+    <!-- MOBILE-PRICING — the three canonical product prices (all optional, all categories). Text +
+         inputmode=decimal so we own comma/dot normalisation; the server (v2) is the authority. -->
+    <div class="row">
+      <label>Purchase Price (BHD)</label>
+      <input id="cPurchasePrice" type="text" inputmode="decimal" placeholder="optional" />
+    </div>
+    <div class="row">
+      <label>Sale Price (BHD)</label>
+      <input id="cSalePrice" type="text" inputmode="decimal" placeholder="optional" />
+    </div>
+    <div class="row">
+      <label>Min Sale Price (BHD)</label>
+      <input id="cMinSalePrice" type="text" inputmode="decimal" placeholder="optional" />
+    </div>
   </div>
 
   <button id="cSaveBtn">Save Product</button>
@@ -803,6 +816,18 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (a.type === 'number') return normNumber(e.value);
     return e.value.trim();
   }
+  // MOBILE-PRICING — read one BHD price input. Normalises a decimal comma to a dot (locale keypads),
+  // rejects anything non-numeric or negative (NaN), and maps an empty field to null (optional). No
+  // silent float rounding — the value is passed through as-is. Mirrors the desktop optional-pricing
+  // contract; the server (v2) validates independently.
+  function readPrice(id) {
+    const e = $(id); if (!e) return null;
+    let s = (e.value || '').trim().replace(',', '.');
+    if (s === '') return null;
+    if (!/^[0-9]+(\.[0-9]+)?$/.test(s)) return NaN;   // no sign, no exponent, no NaN/Infinity text
+    const n = Number(s);
+    return (Number.isFinite(n) && n >= 0) ? n : NaN;
+  }
   function buildCollectionMetadata() {
     const categoryId = $('cCategory').value, cat = catById(categoryId);
     const brand = $('cBrand').value.trim(), name = $('cName').value.trim(), sku = $('cSku').value.trim();
@@ -823,11 +848,21 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const metadata = { categoryId, brand, name, sku: sku || null, attributes };
     if (condition) metadata.condition = condition;
     if (scopeOfDelivery.length) metadata.scopeOfDelivery = scopeOfDelivery;
+    // MOBILE-PRICING — the three canonical prices (optional). A malformed entry is a hard error; an
+    // empty one is simply omitted (→ desktop null/default). No relation rule (min≤sale) is enforced —
+    // the desktop does not enforce one at product save, so neither do we.
+    const prices = [['purchasePrice', 'cPurchasePrice', 'Purchase Price'], ['plannedSalePrice', 'cSalePrice', 'Sale Price'], ['minSalePrice', 'cMinSalePrice', 'Min Sale Price']];
+    for (const [key, id, lbl] of prices) {
+      const v = readPrice(id);
+      if (Number.isNaN(v)) { errors.push(lbl + ' must be a valid number ≥ 0.'); continue; }
+      if (v !== null) metadata[key] = v;
+    }
     return { metadata, errors, label: (brand + ' ' + name).trim() || sku || 'Item' };
   }
 
   function clearCollectionForm() {
     $('cBrand').value = ''; $('cName').value = ''; $('cSku').value = '';
+    $('cPurchasePrice').value = ''; $('cSalePrice').value = ''; $('cMinSalePrice').value = '';
     renderCollectionFields($('cCategory').value); // resets condition/attributes/scope for the current category
     clearPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', EMPTY_C);
   }
@@ -842,7 +877,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // Disable synchronously so a rapid double-click cannot enqueue a second event for the same capture.
     $('cSaveBtn').disabled = true;
     try {
-      // Full desktop-parity metadata (brand/name/sku/condition/Included/attributes). Pricing stays owner-side.
+      // Full desktop-parity metadata (brand/name/sku/condition/Included/attributes + the three optional prices).
       // The durable entry (uploadEventId + bytes + FULL metadata) is persisted BEFORE the first request, so an
       // offline retry resends the exact same fields under the same id. Scope comes from the JWT server-side.
       const entry = await uploadQueue.enqueue({ metadata, images: [photos.collection], protocolVersion: 2 });

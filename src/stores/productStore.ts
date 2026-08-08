@@ -84,6 +84,38 @@ export type EditProductResult =
   | { status: 'cutover_reload' };
 
 /**
+ * The whitelisted product columns a ProductDetail edit may change, mapped to
+ * their `{ col, baseline, target }` diff shape. Shared by BOTH the media edit
+ * path (editProductWithMedia) and the text-only path (editProductTextDurably)
+ * so the two diff identically. `images` is deliberately NOT here — the gallery
+ * is owned by the durable media system, never by a product-column write.
+ */
+function buildProductEditColumns(
+  cur: Record<string, unknown> | undefined,
+  data: Partial<Product>,
+): Array<{ col: string; baseline: string | number | null; target: string | number | null }> {
+  const cols: Array<{ col: string; baseline: string | number | null; target: string | number | null }> = [];
+  const map: Record<string, string> = {
+    categoryId: 'category_id', brand: 'brand', name: 'name', sku: 'sku', quantity: 'quantity', condition: 'condition',
+    storageLocation: 'storage_location', purchaseDate: 'purchase_date', purchasePrice: 'purchase_price',
+    plannedSalePrice: 'planned_sale_price', minSalePrice: 'min_sale_price', maxSalePrice: 'max_sale_price',
+    stockStatus: 'stock_status', taxScheme: 'tax_scheme', expectedMargin: 'expected_margin',
+    supplierName: 'supplier_name', purchaseSource: 'purchase_source', paidFrom: 'paid_from', sourceType: 'source_type', notes: 'notes',
+  };
+  const dd = data as Record<string, unknown>;
+  for (const [k, c] of Object.entries(map)) {
+    if (!(k in dd)) continue;
+    const target = (dd[k] ?? null) as string | number | null;
+    cols.push({ col: c, baseline: (cur?.[c] ?? null) as string | number | null, target });
+  }
+  if (data.scopeOfDelivery !== undefined) cols.push({ col: 'scope_of_delivery', baseline: (cur?.scope_of_delivery ?? null) as string, target: JSON.stringify(data.scopeOfDelivery || []) });
+  if (data.attributes !== undefined) cols.push({ col: 'attributes', baseline: (cur?.attributes ?? null) as string, target: JSON.stringify(data.attributes || {}) });
+  const aiCorr = (dd.aiCorrections ?? undefined) as string | undefined;
+  if (aiCorr !== undefined) cols.push({ col: 'ai_corrections', baseline: (cur?.ai_corrections ?? null) as string, target: aiCorr });
+  return cols;
+}
+
+/**
  * MEDIA-04A-3B2B-R3 — trigger startup media recovery (idempotent, once per DB
  * epoch). Called fire-and-forget after DB init / reload. Any create-batch left
  * half-published is completed here; products that thereby become complete are
@@ -317,6 +349,16 @@ interface ProductStore {
     editImages: { srcs: string[]; resolved: Array<{ url: string; mediaId: string }>; status: ResolverStatus },
     retryEditId?: string,
   ) => Promise<EditProductResult>;
+  /**
+   * MEDIA-EDIT-PRESERVE — durable PRODUCT-TEXT-ONLY edit that NEVER touches the
+   * media gallery. Used by a ProductDetail save where the user changed no image
+   * (media not dirty). It updates only the whitelisted product columns + sync +
+   * audit in one atomic tx; `media_links` is never read or written, so a mobile
+   * product's photo (which lives only in the gallery, `products.images='[]'`)
+   * cannot be lost by a pure text save. The gallery reconciliation lives ONLY in
+   * editProductWithMedia and runs ONLY when the user actually edited images.
+   */
+  editProductTextDurably: (id: string, data: Partial<Product>) => Promise<EditProductResult>;
   updateProduct: (id: string, data: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
@@ -930,35 +972,26 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       return { status: 'cutover_reload' };
     }
 
+    // The edit BATCH id is resolved FIRST because it is also the identity namespace for freshly added
+    // images: a retryable attempt keeps its frozen id (same batch → same new-image ids → convergent
+    // retry), while a brand-new attempt mints a fresh one so a later "add a photo" on the SAME product
+    // can never reuse an ingest request id that is already bound to different bytes in the Rust journal
+    // (MEDIA_INGEST_REQUEST_CONFLICT). It is registered in `retryEditBatches` only once we know the edit
+    // is really going ahead (below), so a no-op save never freezes a batch.
+    const batchId = retryEditId ?? retryEditBatches.get(id) ?? `edit:${tenantId}:${branchId}:${id}:${role}:${uuid()}`;
+
     // Build stable draft items from the flat srcs + the resolved (url→mediaId).
-    const draftRes = draftFromSrcs(editImages.srcs, editImages.resolved);
+    const draftRes = draftFromSrcs(editImages.srcs, editImages.resolved, batchId);
     if (!draftRes.ok) return { status: 'blocked', errorCode: draftRes.error };
     const baselineMediaIds = editImages.resolved.map((r) => r.mediaId);
     const imgRes = buildImageEditInputs(draftRes.value, baselineMediaIds);
     if (!imgRes.ok) return { status: 'blocked', errorCode: imgRes.error };
     const { newImages, galleryChanged } = imgRes.value;
 
-    // Product text diff (only changed whitelisted columns).
+    // Product text diff (only changed whitelisted columns). Same column map as
+    // the text-only path (editProductTextDurably) → both diff identically.
     const cur = query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown> | undefined;
-    const cols: Array<{ col: string; baseline: string | number | null; target: string | number | null }> = [];
-    const map: Record<string, string> = {
-      categoryId: 'category_id', brand: 'brand', name: 'name', sku: 'sku', quantity: 'quantity', condition: 'condition',
-      storageLocation: 'storage_location', purchaseDate: 'purchase_date', purchasePrice: 'purchase_price',
-      plannedSalePrice: 'planned_sale_price', minSalePrice: 'min_sale_price', maxSalePrice: 'max_sale_price',
-      stockStatus: 'stock_status', taxScheme: 'tax_scheme', expectedMargin: 'expected_margin',
-      supplierName: 'supplier_name', purchaseSource: 'purchase_source', paidFrom: 'paid_from', sourceType: 'source_type', notes: 'notes',
-    };
-    const dd = data as Record<string, unknown>;
-    for (const [k, c] of Object.entries(map)) {
-      if (!(k in dd)) continue;
-      const target = (dd[k] ?? null) as string | number | null;
-      cols.push({ col: c, baseline: (cur?.[c] ?? null) as string | number | null, target });
-    }
-    if (data.scopeOfDelivery !== undefined) cols.push({ col: 'scope_of_delivery', baseline: (cur?.scope_of_delivery ?? null) as string, target: JSON.stringify(data.scopeOfDelivery || []) });
-    if (data.attributes !== undefined) cols.push({ col: 'attributes', baseline: (cur?.attributes ?? null) as string, target: JSON.stringify(data.attributes || {}) });
-    const aiCorr = (dd.aiCorrections ?? undefined) as string | undefined;
-    if (aiCorr !== undefined) cols.push({ col: 'ai_corrections', baseline: (cur?.ai_corrections ?? null) as string, target: aiCorr });
-    const textDiff = diffProductText(cols);
+    const textDiff = diffProductText(buildProductEditColumns(cur, data));
 
     if (!editHasChanges(textDiff.set, galleryChanged)) return { status: 'edited', batchId: '' };
 
@@ -969,8 +1002,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify(Object.fromEntries(textDiff.set)) },
     };
 
-    // Decode new images → prepare inputs (requestId = clientId, content hash).
-    const batchId = retryEditId ?? retryEditBatches.get(id) ?? `edit:${tenantId}:${branchId}:${id}:${role}:${uuid()}`;
+    // Decode new images → prepare inputs (requestId = clientId, content hash). Freeze the batch now: a
+    // failed attempt is retried under the SAME id (and therefore the same new-image identities).
     retryEditBatches.set(id, batchId);
     let newItems: EditNewImageInput[];
     try {
@@ -1005,6 +1038,48 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     }
 
     retryEditBatches.delete(id);
+    eventBus.emit('product.updated', 'product', id, data);
+    get().loadProducts();
+    return { status: 'edited', batchId };
+  },
+
+  editProductTextDurably: async (id, data) => {
+    // MEDIA-EDIT-PRESERVE — the save path when the user changed NO image. It
+    // diffs only the whitelisted product columns and applies them through the
+    // durable coordinator WITHOUT any gallery reconciliation, so a mobile
+    // product's photo (living only in media_links) is provably preserved. `id`
+    // is captured; the caller (ProductDetail) applies the stale-save guard.
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = ''; }
+    const tRows = branchId ? query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]) : [];
+    const tenantId = tRows.length > 0 ? (tRows[0].tenant_id as string | null) : null;
+    if (!branchId || !tenantId) return { status: 'blocked', errorCode: 'MEDIA_EDIT_SCOPE_REQUIRED' };
+
+    const cur = query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown> | undefined;
+    const textDiff = diffProductText(buildProductEditColumns(cur, data));
+    // Nothing changed → a durable no-op (the editor still closes cleanly).
+    if (textDiff.set.length === 0) return { status: 'edited', batchId: '' };
+
+    const productEdit = {
+      set: textDiff.set, baseline: textDiff.baseline,
+      // A pure text edit does NOT change the gallery, so the derived image
+      // fields (hash/description/embedding) stay valid — never invalidated here.
+      invalidateImageDerived: false,
+      withSync: isSyncConfigured(),
+      audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify(Object.fromEntries(textDiff.set)) },
+    };
+    // A fresh batch id per save: a text edit stages nothing in Rust, so there is
+    // no frozen retry to reuse; the coordinator's deterministic audit id still
+    // makes an in-flight replay a no-op.
+    const batchId = `edit-text:${tenantId}:${branchId}:${id}:${uuid()}`;
+    try {
+      const orchestrator = await getStockMediaOrchestrator();
+      await orchestrator.applyProductTextEditDurably({ tenantId, branchId, entityId: id, batchId, productEdit });
+    } catch (e) {
+      const msg = (e as { message?: string })?.message ?? String(e);
+      if (/BASELINE_CHANGED|CONFLICT/.test(msg)) return { status: 'edit_conflict', errorCode: msg };
+      return { status: 'edit_incomplete', errorCode: msg, batchId };
+    }
     eventBus.emit('product.updated', 'product', id, data);
     get().loadProducts();
     return { status: 'edited', batchId };

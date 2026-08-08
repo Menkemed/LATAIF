@@ -17,6 +17,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import type { EditDesiredSlot } from './product-media-edit.ts';
+import { toIngestRequestId } from './ingest-request-id.ts';
 
 /** One image row in the editor, with a STABLE identity independent of its URL. */
 export type ImageDraftItem =
@@ -84,7 +85,23 @@ export function editSaveFailsClosed(s: PresentationStatusLike): boolean {
  */
 export type DraftFromSrcs = { ok: true; value: ImageDraftItem[] } | { ok: false; error: string };
 
-export function draftFromSrcs(srcs: string[], resolved: Array<{ url: string; mediaId: string }>): DraftFromSrcs {
+export function draftFromSrcs(
+  srcs: string[],
+  resolved: Array<{ url: string; mediaId: string }>,
+  /**
+   * Identity namespace for freshly added images — production passes the EDIT BATCH id.
+   *
+   * A new image's client id IS the ingest request id handed to the Rust media core, and that id must be
+   *   • stable within one edit attempt (a retry of the same frozen batch must reproduce it exactly), and
+   *   • unique across edit attempts and across products (a request id is bound to its content hash in
+   *     the Rust journal, so reusing one for different bytes is a hard MEDIA_INGEST_REQUEST_CONFLICT).
+   * The batch id satisfies both: it is frozen for the lifetime of a retryable attempt and carries the
+   * tenant/branch/product plus a fresh uuid per new attempt. A position-only id (the previous `new:${i}`)
+   * satisfied only the first and made "add a photo" fail on the SECOND edit of a product — and across two
+   * products entirely.
+   */
+  idNamespace = '',
+): DraftFromSrcs {
   const byUrl = new Map(resolved.map((r) => [r.url, r.mediaId]));
   const out: ImageDraftItem[] = [];
   for (let i = 0; i < srcs.length; i++) {
@@ -92,7 +109,10 @@ export function draftFromSrcs(srcs: string[], resolved: Array<{ url: string; med
     const mediaId = byUrl.get(src);
     if (mediaId) { out.push({ kind: 'existing', mediaId, displaySrc: src }); continue; }
     if (isObjectUrl(src)) return { ok: false, error: 'MEDIA_EDIT_UNKNOWN_OBJECT_URL' };
-    if (src.startsWith('data:')) { out.push({ kind: 'new', clientId: `new:${i}`, dataUrl: src }); continue; }
+    // `toIngestRequestId` keeps the id inside the media core's accepted id space (8..=80 chars of
+    // [A-Za-z0-9_-]); the raw `new:${i}` form was both too short and ':'-separated, so it was refused
+    // with MEDIA_INGEST_INVALID_REQUEST on every prepare.
+    if (src.startsWith('data:')) { out.push({ kind: 'new', clientId: toIngestRequestId(`${idNamespace}:new:${i}`), dataUrl: src }); continue; }
     return { ok: false, error: 'MEDIA_EDIT_UNEXPECTED_SRC' };
   }
   return { ok: true, value: out };

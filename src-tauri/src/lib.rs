@@ -2558,6 +2558,19 @@ pub fn run() {
                 }
             }
 
+            // MEDIA-EDIT-PRESERVE-I2E — automation marker, compiled out of every production build.
+            // ONLY the `e2e` binary stamps this flag, and the ONLY thing the frontend does with it is
+            // honour an automation-set `window.__e2eHoldGallerySeed`, which DELAYS the existing gallery
+            // seed so the pre-seed UI contract can be observed deterministically. No product data, no
+            // gallery content and no persisted state is involved, and a release build never sets the
+            // flag — so that branch can never engage for a real user.
+            #[cfg(feature = "e2e")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval("window.__LATAIF_E2E__ = true;");
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

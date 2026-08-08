@@ -12,7 +12,7 @@ import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
-import { useProductStore } from '@/stores/productStore';
+import { useProductStore, type EditProductResult } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '@/stores/repairStore';
@@ -22,7 +22,7 @@ import { usePermission } from '@/hooks/usePermission';
 import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
 import { presentationSrcs, isResolvingMedia } from '@/core/media/presentation';
-import { presentationToResolverStatus, type ResolverStatus } from '@/core/media/product-edit-draft';
+import { presentationToResolverStatus, editSaveFailsClosed, type ResolverStatus } from '@/core/media/product-edit-draft';
 import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -37,7 +37,7 @@ export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/collection');
-  const { products, categories, loadProducts, loadCategories, updateProduct, editProductWithMedia, deleteProduct, nextAvailableSku, isSkuTaken, getProductLinks } = useProductStore();
+  const { products, categories, loadProducts, loadCategories, updateProduct, editProductWithMedia, editProductTextDurably, deleteProduct, nextAvailableSku, isSkuTaken, getProductLinks } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
@@ -54,6 +54,24 @@ export function ProductDetail() {
   const aiReqRef = useRef(0);
   const aiImgRef = useRef<string | undefined>(undefined);
   const [form, setForm] = useState<Partial<Product>>({});
+  // MEDIA-EDIT-PRESERVE — did the user actually change any image in THIS edit
+  // session? Only a true media edit may reconcile (and possibly remove) the
+  // durable gallery. A pure text/attribute save with `imagesDirty === false`
+  // goes through editProductTextDurably, which never touches media_links — so a
+  // mobile product's photo (which lives only in the gallery, products.images is
+  // '[]') can never be soft-deleted by editing year/condition/price/etc.
+  const [imagesDirty, setImagesDirty] = useState(false);
+  // MEDIA-EDIT-PRESERVE-R2 — the second half of the media-edit contract: an image edit may only be
+  // reconciled against the durable gallery when the draft PROVABLY came from the final (authoritative)
+  // gallery. `draftSeeded` is that proof — it is set only by the seed effect below, which runs only
+  // once the resolver has concluded. Until then the image controls stay disabled, so `imagesDirty`
+  // cannot even become true; and the save additionally fails closed (belt and braces). Without this,
+  // touching images while the gallery was still resolving produced a draft that did not contain the
+  // existing images, and the reconcile retired them — the same loss class as the original live P1.
+  const [draftSeeded, setDraftSeeded] = useState(false);
+  // Re-entry trigger for the E2E-only seed hold below (inert in production: the hold branch is
+  // unreachable there, so this counter never changes).
+  const [e2eSeedTick, setE2eSeedTick] = useState(0);
   aiImgRef.current = form.images?.[0]; // R1: mirror current picked image for the stale guard
   const [formAttrs, setFormAttrs] = useState<Record<string, string | number | boolean | string[]>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -112,6 +130,39 @@ export function ProductDetail() {
   // product.images (kein transienter Legacy-Flash); integrity_error/conflict →
   // leer, niemals Legacy. product.images bleibt ausschliesslich der Edit-Pfad.
   const galleryImages = useMemo(() => presentationSrcs(media), [media]);
+  // Is the gallery AUTHORITATIVE (the resolver concluded)? Same rule the durable save uses, so the UI
+  // gate and the save gate can never disagree: media/legacy/empty are final, idle/loading/pending/error
+  // are not. No array-length heuristic — an empty gallery is a fact here, not a guess.
+  const mediaAuthoritative = !editSaveFailsClosed(media.status);
+  // MEDIA-EDIT-PRESERVE-R2 — seed the editor's image list from the FINAL gallery, exactly once per edit
+  // session, and only while the user has not touched the images. Setting `draftSeeded` together with the
+  // seed is what makes "the draft is based on the real gallery" provable: if a mutation ever slipped in
+  // before this ran, the flag stays false and the save refuses to reconcile instead of retiring links.
+  useEffect(() => {
+    if (!editing || !mediaAuthoritative || imagesDirty) return;
+    // E2E-ONLY hold (MEDIA-EDIT-PRESERVE-I2E). `__LATAIF_E2E__` is stamped onto the webview by the
+    // `e2e` Rust build ONLY; a production binary never sets it, so this branch cannot engage for a
+    // real user and adds no delay to the normal flow. It exclusively postpones the seed below — no
+    // gallery data is faked, `draftSeeded` is never set from outside, and releasing the hold re-enters
+    // exactly this code path. The natural pre-seed window is a few milliseconds and therefore not
+    // observable by automation, which is the only reason this exists.
+    const w = window as unknown as { __LATAIF_E2E__?: boolean; __e2eHoldGallerySeed?: boolean; __e2eResumeGallerySeed?: () => void };
+    if (w.__LATAIF_E2E__ && w.__e2eHoldGallerySeed) {
+      w.__e2eResumeGallerySeed = () => setE2eSeedTick(n => n + 1);
+      return;
+    }
+    if (media.status === 'media') {
+      const next = media.srcs;
+      setForm(f => {
+        const cur = f.images || [];
+        if (cur.length === next.length && cur.every((s, i) => s === next[i])) return f;
+        return { ...f, images: next };
+      });
+    }
+    // 'empty'/'legacy' need no seed: form.images already mirrors products.images ('[]' after a cutover,
+    // the legacy data URLs before one — and a legacy product cuts over first on save).
+    if (!draftSeeded) setDraftSeeded(true);
+  }, [editing, imagesDirty, media, mediaAuthoritative, draftSeeded, e2eSeedTick]);
   const hasAuthorisedKey = !!id && !!tenantId && !!sessionBranchId;
   // Skeleton statt „kein Bild"-Platzhalter solange ein autorisierter Resolve
   // wirklich läuft.
@@ -471,16 +522,37 @@ export function ProductDetail() {
       ...(updatedCorrections ? { aiCorrections: updatedCorrections } as Partial<Product> : {}),
     };
 
-    // MEDIA-04A-3B2C2-R1: EVERY ProductDetail edit save goes through the durable
-    // C2 path — text-only, media, legacy (cutover first) alike. The old
-    // updateProduct image path is unreachable here, so no base64/object URL can
-    // ever be written to products.images. A non-final gallery (loading/pending/
-    // conflict/integrity_error) maps to a non-editable status → fail closed.
-    const status: ResolverStatus = presentationToResolverStatus(media.status);
-    const resolved = media.status === 'media' ? media.items.map(i => ({ url: i.url, mediaId: i.mediaId })) : [];
+    // MEDIA-04A-3B2C2-R1 / MEDIA-EDIT-PRESERVE: every ProductDetail edit save is
+    // durable and never writes base64/object URLs to products.images (images are
+    // dropped from the payload below). The gallery is reconciled ONLY when the
+    // user actually changed an image in this session (`imagesDirty`). A pure
+    // text/attribute save takes editProductTextDurably, which touches no
+    // media_links — so a mobile product's photo (gallery-only, products.images
+    // '[]') can never be lost by editing year/condition/price/etc. This is the
+    // fix for the confirmed bug where a text-only save soft-deleted the photo.
     const { images: _dropImages, ...textPayload } = payload;
     const startId = id;
-    const res = await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status });
+    let res: EditProductResult;
+    if (imagesDirty) {
+      // MEDIA-EDIT-PRESERVE-R2 fail-closed guard: an image edit may ONLY be reconciled when the draft
+      // provably came from the final gallery. The image controls are disabled until then, so this is
+      // unreachable from the UI — it exists so no future path can reconcile a draft that never saw the
+      // existing images (which would retire them). The editor stays open with the draft intact, so no
+      // text/price input is lost; the user simply saves again once the gallery has loaded.
+      if (!draftSeeded) {
+        setErrors(e => ({ ...e, _media: 'MEDIA_EDIT_GALLERY_NOT_READY' }));
+        return;
+      }
+      // Real image edit → reconcile the durable gallery. A non-final gallery
+      // (loading/pending/conflict/integrity_error) maps to a non-editable status
+      // → editProductWithMedia fails closed and the editor stays open.
+      const status: ResolverStatus = presentationToResolverStatus(media.status);
+      const resolved = media.status === 'media' ? media.items.map(i => ({ url: i.url, mediaId: i.mediaId })) : [];
+      res = await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status });
+    } else {
+      // No image touched → product-text-only durable edit, gallery untouched.
+      res = await editProductTextDurably(id, textPayload);
+    }
     // Stale-save guard: the user navigated to another product or the view
     // unmounted while the durable save ran — never apply this result onto a
     // different/gone product (no stale state, no foreign gallery).
@@ -489,6 +561,8 @@ export function ProductDetail() {
       // Durable save done → force a resolver re-resolve: the new gallery loads
       // and the old Object-URLs are revoked exactly once. Then leave edit mode.
       setMediaReloadNonce(n => n + 1);
+      setImagesDirty(false);
+      setDraftSeeded(false);
       setEditing(false);
       return;
     }
@@ -553,7 +627,7 @@ export function ProductDetail() {
           <div className="flex gap-2">
             {editing ? (
               <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...product }); setFormAttrs({ ...product.attributes }); setErrors({}); }}>Cancel</Button>
+                <Button variant="ghost" onClick={() => { setEditing(false); setImagesDirty(false); setDraftSeeded(false); setForm({ ...product }); setFormAttrs({ ...product.attributes }); setErrors({}); }}>Cancel</Button>
                 <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
               </>
             ) : (
@@ -570,11 +644,12 @@ export function ProductDetail() {
                   setAiLoading(false);
                 }} disabled={aiLoading}><Sparkles size={14} /> {aiLoading ? 'Analyzing...' : 'AI Price'}</Button>
                 {perm.canEditProducts && <Button variant="secondary" onClick={() => {
-                  // On a migrated product, seed the edit image list from the
-                  // RESOLVED gallery (display object URLs) so the ImageUpload
-                  // shows the existing images; their identity (mediaId) is kept
-                  // via media.items and matched back on save.
-                  if (media.status === 'media') setForm(f => ({ ...f, images: media.srcs }));
+                  // Enter edit with a CLEAN slate: media is not dirty and the draft is not yet seeded.
+                  // Until the user touches an image the save is text-only and never reconciles the
+                  // gallery; the image controls stay disabled until the seed effect has run against the
+                  // FINAL gallery, so an image edit can never be based on a half-loaded baseline.
+                  setImagesDirty(false);
+                  setDraftSeeded(false);
                   setEditing(true);
                 }}><Edit3 size={14} /> Edit</Button>}
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
@@ -636,8 +711,18 @@ export function ProductDetail() {
             {editing ? (
               <div style={{ padding: 20 }}>
                 <span className="text-overline" style={{ marginBottom: 12 }}>PHOTOS</span>
+                {/* MEDIA-EDIT-PRESERVE-R2: photo editing is LOCKED until the draft has been seeded from
+                    the final gallery. Adding/removing against a half-loaded baseline would reconcile the
+                    gallery to a set that never contained the existing images. Text/price/attribute edits
+                    stay fully available meanwhile (they take the gallery-safe text-only save path). */}
+                {!draftSeeded && (
+                  <div id="media-loading-notice" style={{ marginTop: 10, padding: '8px 10px', borderRadius: 6, background: 'rgba(15,15,16,0.04)', border: '1px solid #E5E9EE', fontSize: 12, color: '#6B7280' }}>
+                    Images loading… photo editing unlocks once the gallery is loaded. Other fields can be edited and saved now.
+                  </div>
+                )}
                 <div style={{ marginTop: 12 }}>
-                  <ImageUpload images={form.images || []} onChange={imgs => setForm({ ...form, images: imgs })} maxImages={8} />
+                  <ImageUpload images={form.images || []} disabled={!draftSeeded}
+                    onChange={imgs => { setForm({ ...form, images: imgs }); setImagesDirty(true); }} maxImages={8} />
                 </div>
                 {/* Plan §Product §4: AI-Identify auch im Edit-Mode (z.B. für mobile-erfasste Produkte ohne KI). */}
                 <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>

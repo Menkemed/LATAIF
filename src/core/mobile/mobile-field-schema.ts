@@ -22,9 +22,20 @@ export const SCHEMA_VERSION = 1;
 export const MAX = { brand: 120, name: 160, sku: 80, text: 2000, condition: 60, scopeItem: 60 } as const;
 
 // The ONLY metadata keys a mobile client may send. Everything else (tenant/branch/id/storage/state/audit/
-// timestamps/prices/stockStatus/taxScheme/…) is rejected server-side — an allow-list is inherently
+// timestamps/stockStatus/taxScheme/margin/VAT/…) is rejected server-side — an allow-list is inherently
 // mass-assignment safe (no field outside this set can reach the product).
 export const ALLOWED_TOP_KEYS = ['categoryId', 'brand', 'name', 'sku', 'condition', 'scopeOfDelivery', 'attributes'] as const;
+
+// MOBILE-PRICING — the three canonical PRODUCT prices (top-level, all categories). Added to the transport
+// surface ONLY under protocol_version 2; v1's key surface is unchanged. These are the exact desktop
+// properties (Product.purchasePrice / .plannedSalePrice / .minSalePrice) — labels ("Sale Price", "Minimum
+// Sale Price") are UI only. Cost-accounting/margin/VAT/derived fields are deliberately NOT here.
+export const ALLOWED_PRICING_KEYS = ['purchasePrice', 'plannedSalePrice', 'minSalePrice'] as const;
+// NO business ceiling on a price. The desktop SSOT (products.purchase_price/planned_sale_price/
+// min_sale_price are plain REAL columns) and the create/edit UIs enforce no upper bound, so mobile must
+// not invent one — a mobile-only limit would be a second, diverging business rule. Only the technically
+// necessary validity gate applies: a finite, non-negative JSON number (a non-finite value cannot be
+// stored, and a negative price is not a price).
 
 export interface MobileFieldAttr {
   key: string;
@@ -100,16 +111,28 @@ export interface FieldValidationError { code: string; field?: string; message: s
 export function validateMobileMetadata(
   meta: unknown,
   schema: MobileFieldSchema,
-  opts: { enforceRequired?: boolean } = {},
+  opts: { enforceRequired?: boolean; protocolVersion?: number } = {},
 ): FieldValidationError[] {
   const errs: FieldValidationError[] = [];
   if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) {
     return [{ code: 'META_NOT_OBJECT', message: 'metadata must be an object' }];
   }
   const m = meta as Record<string, unknown>;
+  // MOBILE-PRICING — pricing keys are part of the transport surface ONLY for v2. Under v1 they are
+  // rejected like any other unknown field, so the legacy contract is unchanged.
+  const pricingAllowed = (opts.protocolVersion ?? 1) >= 2;
+  const allowedTop = pricingAllowed ? [...ALLOWED_TOP_KEYS, ...ALLOWED_PRICING_KEYS] : ALLOWED_TOP_KEYS;
   for (const k of Object.keys(m)) {
-    if (!(ALLOWED_TOP_KEYS as readonly string[]).includes(k)) {
+    if (!(allowedTop as readonly string[]).includes(k)) {
       errs.push({ code: 'UNKNOWN_FIELD', field: k, message: `field "${k}" is not allowed` });
+    }
+  }
+  if (pricingAllowed) {
+    for (const key of ALLOWED_PRICING_KEYS) {
+      const v = m[key];
+      if (v === undefined || v === null) continue; // optional
+      if (typeof v !== 'number' || !Number.isFinite(v)) { errs.push({ code: 'BAD_NUMBER', field: key, message: `${key} must be a finite number` }); continue; }
+      if (v < 0) errs.push({ code: 'BAD_NUMBER', field: key, message: `${key} must not be negative` });
     }
   }
   const cat = schema.categories.find((c) => c.id === m.categoryId);
