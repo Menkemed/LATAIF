@@ -17,6 +17,7 @@ import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/Dupl
 import { useProductStore } from '@/stores/productStore';
 import type { Product, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
+import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
 
 export interface NewProductModalProps {
   open: boolean;
@@ -100,40 +101,13 @@ export function NewProductModal({
   }
 
   function validateForm(): string[] {
-    // Strikte Validierung — Pflichtfelder müssen ausgefüllt sein, sonst muss
-    // der User später nochmal im Edit ran (User-Feedback 2026-05-17).
-    const missing: string[] = [];
-    if (!form.categoryId) missing.push('Category');
-    // v0.6.8 — Brand/Name nur bei branded-Kategorien Pflicht. Bei unbranded
-    // Gold-Schmuck reicht ein freier Bezeichner (Attribute beschreiben das Stueck).
-    // v0.7.16 — unbranded Kategorien (Brand+Name optional): cat-gold-jewelry
-    // (handgemachtes Diamant-Schmuck) + cat-accessory (gemischtes Sortiment
-    // mit vielen no-name Stuecken). Rest = branded (Watch, Original Gold,
-    // Branded Gold, Spare Part) -> Brand+Name Pflicht.
-    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
-    if (brandedRequired) {
-      if (!form.brand?.trim()) missing.push('Brand');
-      if (!form.name?.trim()) missing.push('Name');
-    }
-    // Condition ist optional (2026-05-17) — kein Required-Check mehr.
-    if (selectedCat) {
-      for (const attr of selectedCat.attributes) {
-        if (!attr.required) continue;
-        if (attr.dependsOn) {
-          const dep = form.attributes?.[attr.dependsOn.key];
-          if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) continue;
-        }
-        const v = form.attributes?.[attr.key];
-        if (attr.type === 'number') {
-          if (typeof v !== 'number' || isNaN(v) || v === 0) missing.push(attr.label);
-        } else if (attr.type === 'boolean') {
-          if (v === undefined || v === null) missing.push(attr.label);
-        } else {
-          if (!String(v ?? '').trim()) missing.push(attr.label);
-        }
-      }
-    }
-    return missing;
+    // DESKTOP-CONTRACT: one shared validation for create, edit and the mobile v2 gate
+    // (`core/products/field-contract`) — requiredness comes from the category SSOT and is
+    // computed dependsOn-aware, so a hidden attribute is never demanded here either.
+    // Condition stays optional (2026-05-17); pricing has no rule on any surface.
+    return blockingIssues(validateProductFields(selectedCat, {
+      categoryId: form.categoryId, brand: form.brand, name: form.name, attributes: form.attributes,
+    })).map(i => i.label);
   }
 
   function handleSubmit() {
@@ -152,12 +126,18 @@ export function NewProductModal({
       setDuplicateMatches(possible);
       return;
     }
-    onSubmit(form);
+    onSubmit(submitPayload());
+  }
+
+  /** DESKTOP-CONTRACT: never hand out an attribute whose dependsOn is unsatisfied — the
+   *  same strip the edit path and the mobile v2 gate apply, so no stale value is created. */
+  function submitPayload(): Partial<Product> {
+    return { ...form, attributes: stripStaleAttributes(selectedCat, form.attributes) as Product['attributes'] };
   }
 
   function confirmCreateAnyway() {
     setDuplicateMatches([]);
-    onSubmit(form);
+    onSubmit(submitPayload());
   }
 
   return (
@@ -203,7 +183,7 @@ export function NewProductModal({
     // (handgemachtes Diamant-Schmuck) + cat-accessory (gemischtes Sortiment
     // mit vielen no-name Stuecken). Rest = branded (Watch, Original Gold,
     // Branded Gold, Spare Part) -> Brand+Name Pflicht.
-    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
+    const brandedRequired = isBrandRequired(selectedCat?.id || '');
           return (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <Input required={brandedRequired} label={brandedRequired ? 'BRAND' : 'BRAND (OPTIONAL)'}
@@ -233,12 +213,9 @@ export function NewProductModal({
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
-              {selectedCat.attributes.map(attr => {
-                // Conditional Visibility (dependsOn) — gleiche Logik wie WatchList.
-                if (attr.dependsOn) {
-                  const dep = form.attributes?.[attr.dependsOn.key];
-                  if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) return null;
-                }
+              {/* DESKTOP-CONTRACT: visibility comes from the shared contract (dependsOn-aware),
+                  identical to ProductDetail and the mobile form — no second copy of the rule. */}
+              {visibleAttributes(selectedCat, form.attributes).map(attr => {
                 const isWide = attr.type === 'select' && (attr.options?.length || 0) >= 8;
                 if (attr.type === 'select' && attr.options) {
                   return (

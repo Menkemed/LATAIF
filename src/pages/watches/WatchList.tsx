@@ -13,6 +13,7 @@ import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/Dupl
 import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
+import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { useAuthStore } from '@/stores/authStore';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { resolvePrimaryImageForExport } from '@/core/media/product-image-export';
@@ -301,37 +302,14 @@ export function WatchList() {
   }
 
   function validateForm(): Record<string, string> {
-    // Strikte Validierung — alle mit `*` markierten Felder müssen ausgefüllt sein,
-    // sonst muss der User später nochmal im Edit ran. Foto bleibt optional.
+    // DESKTOP-CONTRACT: requiredness + dependsOn come from the ONE shared contract
+    // (`core/products/field-contract`), identical to ProductDetail, NewProductModal and the
+    // mobile v2 server gate. Condition stays optional; there is no pricing rule anywhere.
     const errs: Record<string, string> = {};
-    if (!form.categoryId) errs.categoryId = 'Required';
-    // v0.7.16 — Brand/Name nur bei branded-Kategorien Pflicht (analog NewProductModal
-    // v0.6.8). Gold-Diamond Jewellery + Original Gold sind handgemacht ohne Brand.
-    // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
-    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
-    if (brandedRequired) {
-      if (!form.brand?.trim()) errs.brand = 'Required';
-      if (!form.name?.trim()) errs.name = 'Required';
-    }
-    // Condition ist optional (2026-05-17) — kein Required-Check mehr.
-    if (selectedCat) {
-      for (const attr of selectedCat.attributes) {
-        if (!attr.required) continue;
-        // Conditional Attribute übersprungen, wenn Abhängigkeit nicht erfüllt.
-        if (attr.dependsOn) {
-          const dep = form.attributes?.[attr.dependsOn.key];
-          if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) continue;
-        }
-        const v = form.attributes?.[attr.key];
-        const errKey = `attr_${attr.key}`;
-        if (attr.type === 'number') {
-          if (typeof v !== 'number' || isNaN(v) || v === 0) errs[errKey] = 'Required';
-        } else if (attr.type === 'boolean') {
-          if (v === undefined || v === null) errs[errKey] = 'Required';
-        } else {
-          if (!String(v ?? '').trim()) errs[errKey] = 'Required';
-        }
-      }
+    for (const i of blockingIssues(validateProductFields(selectedCat ?? undefined, {
+      categoryId: form.categoryId, brand: form.brand, name: form.name, attributes: form.attributes,
+    }))) {
+      errs[selectedCat?.attributes.some(a => a.key === i.field) ? `attr_${i.field}` : i.field] = 'Required';
     }
     return errs;
   }
@@ -373,7 +351,10 @@ export function WatchList() {
     if (createBusy) return;
     setCreateBusy(true);
     try {
-      const result = await createProductWithMedia(form, retryProductId ?? undefined);
+      // DESKTOP-CONTRACT: an attribute whose dependsOn is unsatisfied must never be persisted
+      // (a Steel watch keeps no karat_color) — same strip as the edit path and the mobile gate.
+      const payload = { ...form, attributes: stripStaleAttributes(selectedCat ?? undefined, form.attributes) as typeof form.attributes };
+      const result = await createProductWithMedia(payload, retryProductId ?? undefined);
       const ui = decideProductCreateUi(result);
       setErrors({});
       if (ui.closeModal) {
@@ -700,7 +681,7 @@ export function WatchList() {
           {/* Universal Fields — v0.7.16: branded-Pflicht analog NewProductModal */}
           {(() => {
             // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
-    const brandedRequired = !(selectedCat?.id === 'cat-gold-jewelry' || selectedCat?.id === 'cat-accessory');
+    const brandedRequired = isBrandRequired(selectedCat?.id || '');
             return (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
                 <div id="new-field-brand">
@@ -731,13 +712,9 @@ export function WatchList() {
             <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
               <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
-                {selectedCat.attributes.map(attr => {
-                  // Conditional Visibility (dependsOn): nur rendern, wenn die
-                  // Abhängigkeit erfüllt ist. Erlaubt z.B. Karat-Feld nur bei Gold-Material.
-                  if (attr.dependsOn) {
-                    const dep = form.attributes?.[attr.dependsOn.key];
-                    if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) return null;
-                  }
+                {/* DESKTOP-CONTRACT: visibility from the shared contract (dependsOn-aware) —
+                    one rule for create, edit and mobile. */}
+                {visibleAttributes(selectedCat, form.attributes).map(attr => {
                   const errKey = `attr_${attr.key}`;
                   const hasErr = !!errors[errKey];
                   // Selects mit vielen Chips (≥8) bekommen volle Grid-Breite,
@@ -965,7 +942,7 @@ export function WatchList() {
             <span className="text-overline" style={{ marginBottom: 12 }}>PRICING</span>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
               <div id="new-field-purchasePrice">
-                <Input required label="PURCHASE PRICE (BHD)" type="number" placeholder="0" value={form.purchasePrice || ''} error={errors.purchasePrice}
+                <Input label="PURCHASE PRICE (BHD)" type="number" placeholder="0 = unknown" value={form.purchasePrice || ''} error={errors.purchasePrice}
                   onChange={e => { setForm({ ...form, purchasePrice: Number(e.target.value) || 0 }); if (errors.purchasePrice) setErrors({ ...errors, purchasePrice: '' }); }} />
               </div>
               <Input label="SALE PRICE (BHD)" type="number" placeholder="Listing / target price" value={form.plannedSalePrice || ''} onChange={e => setForm({ ...form, plannedSalePrice: Number(e.target.value) || undefined })} />

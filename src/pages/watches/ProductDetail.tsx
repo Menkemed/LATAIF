@@ -23,6 +23,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
 import { presentationSrcs, isResolvingMedia } from '@/core/media/presentation';
 import { presentationToResolverStatus, editSaveFailsClosed, type ResolverStatus } from '@/core/media/product-edit-draft';
+import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -439,43 +440,46 @@ export function ProductDetail() {
     purchasePrice: 'Purchase Price',
   };
 
+  /**
+   * DESKTOP-CONTRACT: the edit dialog validates through the SAME contract as the
+   * create dialog and the mobile v2 server (`core/products/field-contract`), so
+   * the three can no longer disagree. Two live bugs came from the old local copy:
+   * it ignored `dependsOn` (a Steel watch was asked for "Karat & Color", which the
+   * contract hides, and the value was then persisted), and it demanded
+   * `purchasePrice > 0` — a rule that exists in no schema, no other surface and no
+   * real data (6 of 23 live products legitimately carry 0).
+   *
+   * Every finding here is BLOCKING; the save refuses while any remain, exactly
+   * like the create dialog. There is no "error shown but saved anyway" state.
+   */
   function validate(): Record<string, string> {
+    const issues = validateProductFields(category ?? undefined, {
+      categoryId: form.categoryId, brand: form.brand, name: form.name, attributes: formAttrs,
+    });
     const e: Record<string, string> = {};
-    // v0.7.16 — Brand/Name nur bei branded-Kategorien Pflicht (analog NewProductModal).
-    // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
-    const brandedRequired = !(form.categoryId === 'cat-gold-jewelry' || form.categoryId === 'cat-accessory');
-    if (brandedRequired) {
-      if (!form.brand?.trim()) e.brand = 'Required';
-      if (!form.name?.trim()) e.name = 'Required';
-    }
-    if (!form.categoryId) e.categoryId = 'Pick a category';
-    if (!form.condition?.trim()) e.condition = 'Required';
-    if (form.purchasePrice == null || isNaN(form.purchasePrice) || form.purchasePrice <= 0) {
-      e.purchasePrice = 'Must be > 0';
-    }
-    if (category) {
-      for (const attr of category.attributes) {
-        if (!attr.required) continue;
-        const v = formAttrs[attr.key];
-        const empty = v == null || v === '' || (Array.isArray(v) && v.length === 0);
-        if (empty) e[`attr_${attr.key}`] = 'Required';
-      }
+    for (const i of blockingIssues(issues)) {
+      // attribute findings keep the `attr_` prefix the field anchors/labels use
+      e[category?.attributes.some(a => a.key === i.field) ? `attr_${i.field}` : i.field] = 'Required';
     }
     return e;
   }
 
   async function handleSave() {
     if (!id) return;
-    // Plan §Quick-Capture (User-Spec): kein blockierendes Required, auch
-    // nicht im Edit-Mode. validate() läuft nur noch für visuelle Inline-Hints —
-    // Save geht immer durch. Vom Handy soll man jederzeit teil-speichern können,
-    // Details kommen wenn sie kommen.
-    // EINZIGE Ausnahme: SKU-Duplikate werden hart geblockt (Datenintegrität).
+    // DESKTOP-CONTRACT severity rule: what the UI presents as an ERROR must actually
+    // stop the save — the previous behaviour (show "Required"/"Must be > 0" and save
+    // regardless) is exactly the contradiction the live test hit. The required set is
+    // the SSOT's, computed dependsOn-aware, so a hidden field can never block.
     if (form.sku && isSkuTaken(form.sku, id)) {
       setErrors({ ...validate(), sku: 'Diese SKU / Reference ist bereits vergeben.' });
       return;
     }
-    setErrors(validate());
+    const blocking = validate();
+    setErrors(blocking);
+    if (Object.keys(blocking).length > 0) return;
+    // A dependency that is no longer satisfied must not survive into the DB (a
+    // Steel watch keeps no karat_color) — the same rule the mobile v2 gate enforces.
+    const cleanAttrs = stripStaleAttributes(category ?? undefined, formAttrs) as typeof formAttrs;
     const margin = form.plannedSalePrice ? form.plannedSalePrice - (form.purchasePrice || 0) : undefined;
 
     // 2026-05-18 AI-Learning: Wenn dieses Produkt einen AI-Snapshot hat
@@ -517,7 +521,7 @@ export function ProductDetail() {
 
     const payload: Partial<Product> = {
       ...form,
-      attributes: formAttrs,
+      attributes: cleanAttrs,
       expectedMargin: margin,
       ...(updatedCorrections ? { aiCorrections: updatedCorrections } as Partial<Product> : {}),
     };
@@ -901,7 +905,7 @@ export function ProductDetail() {
                 {(() => {
                   // v0.7.16 — Brand/Name optional bei unbranded Gold-Schmuck.
                   // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
-    const brandedRequired = !(form.categoryId === 'cat-gold-jewelry' || form.categoryId === 'cat-accessory');
+    const brandedRequired = isBrandRequired(form.categoryId || '');
                   return (
                     <>
                       <div id="field-brand">
@@ -1004,7 +1008,9 @@ export function ProductDetail() {
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <div id="field-purchasePrice">
-                    <Input label="PURCHASE PRICE (BHD) *" type="number" value={form.purchasePrice || ''} error={errors.purchasePrice}
+                    {/* DESKTOP-CONTRACT: no surface enforces a purchase price and 0 is a legitimate
+                        stored value (unknown cost) — so no required marker, and no error. */}
+                    <Input label="PURCHASE PRICE (BHD)" type="number" value={form.purchasePrice || ''} error={errors.purchasePrice}
                       onChange={e => { setForm({ ...form, purchasePrice: Number(e.target.value) }); if (errors.purchasePrice) setErrors({ ...errors, purchasePrice: '' }); }} />
                   </div>
                   <Input label="SALE PRICE (BHD)" type="number" value={form.plannedSalePrice || ''} onChange={e => setForm({ ...form, plannedSalePrice: Number(e.target.value) || undefined })} />
@@ -1437,7 +1443,10 @@ export function ProductDetail() {
             <Card>
               <span className="text-overline" style={{ marginBottom: 16 }}>SPECIFICATIONS</span>
               <div style={{ marginTop: 16 }}>
-                {category.attributes.map(attr => {
+                {/* DESKTOP-CONTRACT: render exactly the attributes the contract declares VISIBLE for
+                    the current values (dependsOn-aware, same as the create dialog and the mobile
+                    form). A hidden attribute is neither shown nor required nor persisted. */}
+                {visibleAttributes(category, editing ? formAttrs : product.attributes).map(attr => {
                   const val = editing ? formAttrs[attr.key] : product.attributes[attr.key];
 
                   if (editing) {
