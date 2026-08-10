@@ -11,7 +11,9 @@ const WATCH_ATTRIBUTES: CategoryAttribute[] = [
   // haben keine. Bezel ebenfalls optional.
   { key: 'reference_number', label: 'Reference Number', type: 'text', required: false, showInList: true },
   // 'model' attribute entfernt (2026-05-17) — Duplikat zum Universal-Feld "Name / Model".
-  { key: 'case_diameter_mm', label: 'Case Diameter', type: 'number', unit: 'mm', required: true, showInList: true },
+  // 2026-08-10: optional — real stock includes watches whose case size nobody measured, and the
+  // dialog refused to save them at all. The field still exists and is still shown first.
+  { key: 'case_diameter_mm', label: 'Case Diameter', type: 'number', unit: 'mm', required: false, showInList: true },
   { key: 'serial_number', label: 'Serial Number', type: 'text', required: false, showInList: true },
   { key: 'dial', label: 'Dial', type: 'text', required: true, showInList: false },
   { key: 'bezel', label: 'Bezel', type: 'text', required: false, showInList: false },
@@ -76,7 +78,9 @@ const BRANDED_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'item_type', label: 'Item Type', type: 'select',
     options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch'],
     required: true, showInList: true },
-  { key: 'size', label: 'Size', type: 'text', required: true, showInList: true },
+  // 2026-08-10: optional — a branded piece is often catalogued before it is sized (matches the
+  // Original Gold Jewelry contract, where size has always been optional).
+  { key: 'size', label: 'Size', type: 'text', required: false, showInList: true },
   { key: 'karat', label: 'Karat & Color', type: 'select',
     options: [
       '24K Yellow', '22K Yellow', '21K Yellow',
@@ -121,7 +125,9 @@ const ACCESSORY_ATTRIBUTES: CategoryAttribute[] = [
     required: true, showInList: true },
   { key: 'color', label: 'Color', type: 'text', required: true, showInList: true },
   { key: 'material', label: 'Material', type: 'text', required: true, showInList: true },
-  { key: 'description', label: 'Description', type: 'text', required: true, showInList: false },
+  // 2026-08-10: optional — an accessory is identified by type/color/material; forcing prose before
+  // a save is what made quick intake impossible.
+  { key: 'description', label: 'Description', type: 'text', required: false, showInList: false },
   { key: 'model_number', label: 'Model No', type: 'text', required: false, showInList: false },
   { key: 'serial_number', label: 'Serial No', type: 'text', required: false, showInList: false },
   // 2026-06-04: Year ergänzt (für das Tag — Papers/Year).

@@ -25,6 +25,8 @@ import { presentationSrcs, isResolvingMedia } from '@/core/media/presentation';
 import { presentationToResolverStatus, editSaveFailsClosed, type ResolverStatus } from '@/core/media/product-edit-draft';
 import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
+import { buildAiAttributePatch, buildAiFormPatch, type FormLike } from '@/core/ai/edit-merge';
+import { applyChoiceSelection } from '@/core/products/choice-value';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
@@ -413,11 +415,19 @@ export function ProductDetail() {
   }, [product, categories, editing, form.categoryId]);
 
   useEffect(() => {
-    if (product) {
-      setForm({ ...product });
-      setFormAttrs({ ...product.attributes });
-    }
-  }, [product]);
+    if (!product) return;
+    // AI-IDENTIFY-EDIT §17 — this effect re-syncs the form whenever the store hands back a new
+    // `product` object, which happens on ANY reload (an AI identify, a background drain, another
+    // page's save). While EDITING that must not touch the image draft: the draft was seeded from the
+    // REAL gallery, whereas `product.images` is `[]` for a gallery-backed product — so the reset
+    // emptied the draft and the next save reconciled the gallery to nothing, which is exactly the
+    // "the photo disappeared" report. Every other field keeps its previous behaviour.
+    // The preservation is deliberately narrow: ONLY a draft that has actually been seeded from the
+    // final gallery is protected. Before the seed the form legitimately mirrors `product.images`, and
+    // the locked-state contract (photo editing disabled until `draftSeeded`) depends on that.
+    setForm((f) => (editing && draftSeeded ? { ...product, images: f.images } : { ...product }));
+    setFormAttrs({ ...product.attributes });
+  }, [product, editing, draftSeeded]);
 
   if (!product) {
     return (
@@ -775,33 +785,13 @@ export function ProductDetail() {
                           // unmounted, the product switched, a newer AI request
                           // superseded this one, or the picked image changed.
                           if (!mountedRef.current || idRef.current !== startId || aiReqRef.current !== myReq || aiImgRef.current !== frozenImg) return;
-                          setForm(f => {
-                            const updated = { ...f };
-                            if (result.brand) updated.brand = result.brand;
-                            if (result.name) updated.name = result.name;
-                            if (result.sku && !f.sku) updated.sku = nextAvailableSku(result.sku);
-                            if (result.condition) updated.condition = result.condition;
-                            if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
-                            if (result.estimatedValue && !f.plannedSalePrice) updated.plannedSalePrice = result.estimatedValue;
-                            if (result.purchasePriceEstimate && !f.purchasePrice) updated.purchasePrice = result.purchasePriceEstimate;
-                            if (result.minSalePrice && !f.minSalePrice) updated.minSalePrice = result.minSalePrice;
-                            if (result.maxSalePrice && !f.maxSalePrice) updated.maxSalePrice = result.maxSalePrice;
-                            if (result.taxScheme && !f.taxScheme) updated.taxScheme = result.taxScheme;
-                            if (result.storageLocation && !f.storageLocation) updated.storageLocation = result.storageLocation;
-                            if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0 && (!f.scopeOfDelivery || f.scopeOfDelivery.length === 0)) {
-                              updated.scopeOfDelivery = result.scopeOfDelivery;
-                            }
-                            return updated;
-                          });
-                          // Kategorie-Attribute in formAttrs mergen (separater state in ProductDetail)
-                          setFormAttrs(a => {
-                            const next = { ...a };
-                            for (const [k, v] of Object.entries(result.attributes || {})) {
-                              if (v === null || v === undefined || v === '') continue;
-                              next[k] = v as string | number | boolean | string[];
-                            }
-                            return next;
-                          });
+                          // AI-IDENTIFY-EDIT §16-§25 — ONE merge contract, applied as a PATCH onto the
+                          // CURRENT state. No price is ever written in edit mode (the old chain tested
+                          // `!f.purchasePrice`, and 0 is a legitimate purchase price, so identifying a
+                          // product silently overwrote its real cost). Nothing media-related is touched,
+                          // and a field the model did not recognise leaves the existing value alone.
+                          setForm(f => ({ ...f, ...buildAiFormPatch(result, f as FormLike, { mode: 'edit', nextAvailableSku }) } as typeof f));
+                          setFormAttrs(a => ({ ...a, ...buildAiAttributePatch(result, (category?.attributes ?? []).map(x => x.key)) }));
                         } catch (e) { alert(String(e)); }
                         finally { setAiBusy(false); }
                       }}
@@ -1460,7 +1450,7 @@ export function ProductDetail() {
                           <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>{attr.label}{reqMark}</span>
                           <div className="flex flex-wrap gap-1">
                             {attr.options.map(opt => (
-                              <button key={opt} onClick={() => { setFormAttrs({ ...formAttrs, [attr.key]: opt }); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
+                              <button key={opt} onClick={() => { setFormAttrs(a => applyChoiceSelection(a, attr.key, opt) as typeof a); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                                 className="cursor-pointer" style={{
                                   padding: '3px 8px', fontSize: 11, borderRadius: 4, border: 'none',
                                   background: formAttrs[attr.key] === opt ? 'rgba(15,15,16,0.1)' : 'transparent',
@@ -1480,7 +1470,7 @@ export function ProductDetail() {
                           <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>{attr.label}{reqMark}</span>
                           <div className="flex gap-2">
                             {[true, false].map(opt => (
-                              <button key={String(opt)} type="button" onClick={() => { setFormAttrs({ ...formAttrs, [attr.key]: opt }); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
+                              <button key={String(opt)} type="button" onClick={() => { setFormAttrs(a => applyChoiceSelection(a, attr.key, opt) as typeof a); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                                 className="cursor-pointer"
                                 style={{
                                   padding: '3px 10px', fontSize: 11, borderRadius: 4, border: 'none',
@@ -1532,7 +1522,7 @@ export function ProductDetail() {
                       <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Condition *</span>
                       <div className="flex flex-wrap gap-1">
                         {category.conditionOptions.map(c => (
-                          <button key={c} onClick={() => { setForm({ ...form, condition: c }); if (errors.condition) setErrors({ ...errors, condition: '' }); }}
+                          <button key={c} onClick={() => { setForm(f => ({ ...f, condition: f.condition === c ? '' : c })); if (errors.condition) setErrors({ ...errors, condition: '' }); }}
                             className="cursor-pointer" style={{
                               padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
                               background: form.condition === c ? 'rgba(15,15,16,0.1)' : 'transparent',

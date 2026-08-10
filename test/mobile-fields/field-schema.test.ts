@@ -61,7 +61,11 @@ const schema = buildMobileFieldSchema();
 // ── 4) enforceRequired (client-side UX rule) incl. dependsOn ──
 {
   const req = validateMobileMetadata({ categoryId: 'cat-watch', attributes: {} }, schema, { enforceRequired: true });
-  ok(req.some((e) => e.code === 'REQUIRED' && e.field === 'case_diameter_mm'), 'required attr flagged when enforcing');
+  ok(req.some((e) => e.code === 'REQUIRED' && e.field === 'dial'), 'required attr flagged when enforcing');
+  // REQUIRED-CONTRACT 2026-08-10 — case_diameter_mm is OPTIONAL now, so the mobile gate must not
+  // demand it either. The desktop SSOT is the only place that decides this; if it ever flips back,
+  // this line fails rather than the phone quietly rejecting a save the desktop accepts.
+  ok(!req.some((e) => e.field === 'case_diameter_mm'), 'case_diameter_mm is no longer required');
   ok(req.some((e) => e.code === 'REQUIRED' && e.field === 'brand'), 'brand required flagged for branded category');
   // karat_color is required ONLY when material is a gold variant (dependsOn) → not flagged for Steel.
   const steel = validateMobileMetadata({ categoryId: 'cat-watch', brand: 'R', name: 'S', attributes: { case_diameter_mm: 41, dial: 'B', material: 'Steel' } }, schema, { enforceRequired: true });

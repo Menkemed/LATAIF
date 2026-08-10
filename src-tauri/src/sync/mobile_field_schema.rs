@@ -38,6 +38,14 @@ const ALLOWED_TOP_KEYS: &[&str] = &[
 // v1 they are rejected like any other unknown key (legacy surface unchanged). Mirror ALLOWED_PRICING_KEYS
 // in src/core/mobile/mobile-field-schema.ts. Cost-accounting/margin/VAT/derived fields are NOT here.
 const PRICING_KEYS: &[&str] = &["purchasePrice", "plannedSalePrice", "minSalePrice"];
+// MOBILE-QUANTITY — the EXISTING canonical product column (`products.quantity`), carried on the same
+// v2-only surface as pricing so a v1 payload's key set is unchanged. Mirrors ALLOWED_QUANTITY_KEYS /
+// isValidQuantity in src/core/mobile/mobile-field-schema.ts. The desktop clamps with Math.max(1, …)
+// and declares no upper bound, so the only rule here is "a whole count of at least one"; the ceiling
+// is purely technical (a value JS cannot represent exactly is not a count).
+const QUANTITY_KEY: &str = "quantity";
+const MIN_QUANTITY: i64 = 1;
+const MAX_QUANTITY: i64 = 9_007_199_254_740_991; // Number.MAX_SAFE_INTEGER
 // NO business ceiling: the desktop SSOT (plain REAL columns, no bound in the create/edit UIs) enforces
 // none, so mobile must not invent a second, diverging rule. Only technical validity is enforced below
 // (finite, non-negative), mirroring src/core/mobile/mobile-field-schema.ts.
@@ -113,7 +121,9 @@ pub fn validate_metadata(meta: &Value, version: i64) -> Result<(), MetadataError
     //    v1 client that sends a price is rejected exactly like any other unknown field.
     let pricing_allowed = version >= 2;
     for k in obj.keys() {
-        let ok = ALLOWED_TOP_KEYS.contains(&k.as_str()) || (pricing_allowed && PRICING_KEYS.contains(&k.as_str()));
+        let ok = ALLOWED_TOP_KEYS.contains(&k.as_str())
+            || (pricing_allowed && PRICING_KEYS.contains(&k.as_str()))
+            || (pricing_allowed && k.as_str() == QUANTITY_KEY);
         if !ok {
             return Err(MetadataError::new("UNKNOWN_FIELD", k.clone(), format!("field \"{k}\" is not allowed")));
         }
@@ -188,6 +198,23 @@ pub fn validate_metadata(meta: &Value, version: i64) -> Result<(), MetadataError
                     None => return Err(MetadataError::new("BAD_NUMBER", (*key).to_string(), format!("{key} must be a finite number"))),
                 },
             }
+        }
+
+        // MOBILE-QUANTITY — optional. Absent means the desktop default of 1, so a payload written
+        // before this field existed stays valid. Present must be a whole count of at least one:
+        // `as_i64` already refuses a fraction and a non-number, and nothing is rounded into shape.
+        match obj.get(QUANTITY_KEY) {
+            None | Some(Value::Null) => {}
+            Some(v) => match v.as_i64() {
+                Some(n) if (MIN_QUANTITY..=MAX_QUANTITY).contains(&n) => {}
+                _ => {
+                    return Err(MetadataError::new(
+                        "BAD_NUMBER",
+                        QUANTITY_KEY.to_string(),
+                        "quantity must be a whole number of at least 1",
+                    ))
+                }
+            },
         }
     }
 
@@ -402,6 +429,16 @@ mod tests {
         assert_eq!(validate_metadata(&good, 2), Ok(()));
     }
 
+    /// A minimally-valid v2 watch payload with `extra` merged in — the shape every optional-field
+    /// test needs, so each one asserts only its own rule.
+    fn base(extra: Value) -> Value {
+        let mut m = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "dial": "B", "material": "Steel" } });
+        if let Some(o) = extra.as_object() {
+            for (k, v) in o { m[k] = v.clone(); }
+        }
+        m
+    }
+
     // ── MOBILE-PRICING — the three canonical prices, v2 only, validity + mass-assignment ──
     #[test]
     fn v2_accepts_valid_optional_prices_including_decimals() {
@@ -452,6 +489,51 @@ mod tests {
         for bad in ["expectedMargin", "expected_margin", "maxSalePrice", "vat_amount", "profit", "cost", "purchase_price"] {
             let mut m = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Steel" } });
             m[bad] = json!(5);
+            assert_eq!(validate_metadata(&m, 2).unwrap_err().code, "UNKNOWN_FIELD", "field {bad} must be rejected");
+        }
+    }
+
+    // ── MOBILE-QUANTITY — the piece count is validated by the SERVER, not just by `min=1` in HTML ──
+    #[test]
+    fn v2_quantity_accepts_a_whole_count_and_defaults_when_absent() {
+        // Absent is the normal case and must stay valid: every payload written before this field
+        // existed has no key, and those captures are exactly one piece.
+        assert_eq!(validate_metadata(&base(json!({})), 2), Ok(()), "absent quantity is valid (desktop default 1)");
+        assert_eq!(validate_metadata(&base(json!({ "quantity": Value::Null })), 2), Ok(()), "explicit null is valid");
+        for good in [1i64, 2, 3, 25, 1000, 9_007_199_254_740_991] {
+            assert_eq!(validate_metadata(&base(json!({ "quantity": good })), 2), Ok(()), "quantity {good} must be accepted");
+        }
+    }
+
+    #[test]
+    fn v2_quantity_rejects_anything_that_is_not_a_whole_count() {
+        // 0 and negatives are not counts; a fraction is not a piece; strings/arrays/objects and the
+        // JSON spellings of NaN/Infinity are not numbers. None of them is rounded into shape.
+        for bad in [json!(0), json!(-1), json!(-5), json!(1.5), json!(0.9), json!("2"), json!("1e3"), json!(true), json!([1]), json!({"n": 1})] {
+            let e = validate_metadata(&base(json!({ "quantity": bad.clone() })), 2)
+                .expect_err(&format!("quantity {bad} must be rejected"));
+            assert_eq!(e.code, "BAD_NUMBER", "quantity {bad}");
+            assert_eq!(e.field, "quantity");
+        }
+        // Beyond exact integer representation is not a count either.
+        assert_eq!(validate_metadata(&base(json!({ "quantity": 9_007_199_254_740_992i64 })), 2).unwrap_err().code, "BAD_NUMBER");
+    }
+
+    #[test]
+    fn v1_rejects_quantity_legacy_surface_unchanged() {
+        // Like pricing, quantity joins the transport surface only at v2 — a v1 client that sends it is
+        // refused exactly like any other unknown key, so the legacy contract is untouched.
+        let e = validate_metadata(&json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "quantity": 2 }), 1).unwrap_err();
+        assert_eq!(e.code, "UNKNOWN_FIELD");
+        assert_eq!(e.field, "quantity");
+    }
+
+    #[test]
+    fn v2_quantity_does_not_open_the_allow_list() {
+        // A count-shaped neighbour is still mass-assignment rejected.
+        for bad in ["qty", "Quantity", "stockQuantity", "quantity_on_hand", "count", "pieces"] {
+            let mut m = base(json!({}));
+            m[bad] = json!(2);
             assert_eq!(validate_metadata(&m, 2).unwrap_err().code, "UNKNOWN_FIELD", "field {bad} must be rejected");
         }
     }

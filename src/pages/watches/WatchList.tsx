@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { applyChoiceSelection } from '@/core/products/choice-value';
 import { useNavigate } from 'react-router-dom';
 import { Package, Trash2, X, Check, Link2, Tag } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -378,6 +379,12 @@ export function WatchList() {
     setForm({ ...form, attributes: { ...(form.attributes || {}), [key]: value } });
   }
 
+  // CLEARABLE CHOICES — a click on the ALREADY selected option removes the value entirely (the key is
+  // deleted, not blanked). Same helper in create, quick-add and edit, so the three cannot drift.
+  function toggleAttr(key: string, value: string | number | boolean) {
+    setForm(f => ({ ...f, attributes: applyChoiceSelection(f.attributes as Record<string, unknown>, key, value) as typeof f.attributes }));
+  }
+
   return (
     <PageLayout
       title="Collection"
@@ -729,7 +736,7 @@ export function WatchList() {
                         </span>
                         <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
                           {attr.options.map(opt => (
-                            <button key={opt} onClick={() => { updateAttr(attr.key, opt); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
+                            <button key={opt} onClick={() => { toggleAttr(attr.key, opt); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 999,
@@ -754,7 +761,7 @@ export function WatchList() {
                         </span>
                         <div className="flex gap-2" style={{ marginTop: 6 }}>
                           {[true, false].map(opt => (
-                            <button key={String(opt)} type="button" onClick={() => { updateAttr(attr.key, opt); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
+                            <button key={String(opt)} type="button" onClick={() => { toggleAttr(attr.key, opt); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                               className="cursor-pointer rounded"
                               style={{
                                 padding: '4px 14px', fontSize: 11, borderRadius: 999,

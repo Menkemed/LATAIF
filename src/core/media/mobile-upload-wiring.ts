@@ -14,7 +14,7 @@ import { query, currentBranchId } from '@/core/db/helpers';
 import { armDrainPoller, stopDrainPoller, type DrainPollerDeps } from './mobile-drain-poller';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf } from './runtime-scope-evidence';
 import type { Product } from '@/core/models/types';
-import { buildMobileFieldSchema, filterAttributesToSchema, type MobileAttrValue } from '@/core/mobile/mobile-field-schema';
+import { buildMobileFieldSchema, filterAttributesToSchema, isValidQuantity, type MobileAttrValue } from '@/core/mobile/mobile-field-schema';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { ProductMediaResolver } from '@/core/media/product-media-resolver';
 import { useProductStore } from '@/stores/productStore';
@@ -138,6 +138,11 @@ function collectionDataFromGrant(grant: ClaimGrant): Partial<Product> {
     const v = meta[k];
     return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
   };
+  // MOBILE-QUANTITY — a defensive read of the optional piece count (the server already validated it
+  // on v2). Only a whole number ≥ 1 survives; anything else becomes undefined, which the create path
+  // turns into the canonical default of 1. Absent is normal: every payload written before this field
+  // existed simply has no key, and those items are exactly one piece.
+  const quantity = isValidQuantity(meta.quantity) ? (meta.quantity as number) : undefined;
   const categoryId = str('categoryId') ?? '';
   // MOBILE-FIELDS — the server already allow-listed the metadata against the SSOT; we re-filter attributes to
   // the category's known keys as defense-in-depth (drop anything not in the field schema), and carry the full
@@ -159,6 +164,9 @@ function collectionDataFromGrant(grant: ClaimGrant): Partial<Product> {
     ...(price('purchasePrice') !== undefined ? { purchasePrice: price('purchasePrice') } : {}),
     ...(price('plannedSalePrice') !== undefined ? { plannedSalePrice: price('plannedSalePrice') } : {}),
     ...(price('minSalePrice') !== undefined ? { minSalePrice: price('minSalePrice') } : {}),
+    // MOBILE-QUANTITY — carry the piece count to createProductWithMedia, which already writes
+    // `products.quantity` (clamped to ≥1). Omitted when absent so the existing default applies.
+    ...(quantity !== undefined ? { quantity } : {}),
     attributes: attributes as Record<string, unknown>,
     images: [], // prepared mode: media flows via prepared descriptors, never data URLs
   } as Partial<Product>;

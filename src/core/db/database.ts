@@ -197,6 +197,24 @@ function healSyncStringNulls(database: Database): void {
   }
 }
 
+/**
+ * SSOT-DUPLICATION FIX (2026-08-10) — one derivation of a category's attribute spec.
+ *
+ * Five start-up migrations used to carry a FROZEN JSON COPY of these attribute lists and force them
+ * onto `categories.attributes` on every launch. That silently reverted the source of truth: making
+ * `case_diameter_mm` optional in `default-categories.ts` changed the model, the mobile schema and the
+ * validators — and then the app overwrote the stored category with the old copy on the next start, so
+ * the create dialog still demanded it. These migrations are still needed (they also drop attributes
+ * that were removed from the model), but they must READ the SSOT rather than restate it.
+ */
+function categoryAttributesSql(categoryId: string): string {
+  const cat = DEFAULT_CATEGORIES.find((c) => c.id === categoryId);
+  if (!cat) throw new Error(`[DB] unknown category in a migration: ${categoryId}`);
+  // SQLite string literal: the only character needing an escape is the single quote.
+  const json = JSON.stringify(cat.attributes).replace(/'/g, "''");
+  return `UPDATE categories SET attributes = '${json}' WHERE id = '${categoryId}'`;
+}
+
 function runMigrations(database: Database): void {
   // Each migration wrapped: ignore "duplicate column" errors on re-run.
   const migrations: string[] = [
@@ -397,26 +415,9 @@ function runMigrations(database: Database): void {
       WHERE category_id = 'cat-gold-jewelry'
         AND json_extract(attributes, '$.color_type') IS NOT NULL`,
     // BRANDED_GOLD_JEWELRY — 2026-05-17: karat + color_type kombiniert.
-    `UPDATE categories SET attributes = '[
-      {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch"],"required":true,"showInList":true},
-      {"key":"size","label":"Size","type":"text","required":true,"showInList":true},
-      {"key":"karat","label":"Karat & Color","type":"select","options":["24K Yellow","22K Yellow","21K Yellow","18K Yellow","18K Rose","18K White","18K Mix","14K Yellow","14K Rose","14K White","14K Mix","Silver"],"required":true,"showInList":true},
-      {"key":"weight","label":"Weight","type":"number","unit":"g","required":false,"showInList":true},
-      {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
-      {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
-    ]' WHERE id = 'cat-branded-gold-jewelry'`,
+    categoryAttributesSql('cat-branded-gold-jewelry'),
     // ORIGINAL_GOLD_JEWELRY — 2026-05-17: karat + color_type kombiniert.
-    `UPDATE categories SET attributes = '[
-      {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch"],"required":true,"showInList":true},
-      {"key":"size","label":"Size","type":"text","required":false,"showInList":true},
-      {"key":"karat","label":"Karat & Color","type":"select","options":["24K Yellow","22K Yellow","21K Yellow","18K Yellow","18K Rose","18K White","18K Mix","14K Yellow","14K Rose","14K White","14K Mix","Silver"],"required":true,"showInList":true},
-      {"key":"weight","label":"Weight","type":"number","unit":"g","required":false,"showInList":true},
-      {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
-      {"key":"model_number","label":"Model Number","type":"text","required":false,"showInList":false},
-      {"key":"serial_number","label":"Serial Number","type":"text","required":false,"showInList":false},
-      {"key":"year","label":"Year","type":"number","required":false,"showInList":false},
-      {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
-    ]' WHERE id = 'cat-original-gold-jewelry'`,
+    categoryAttributesSql('cat-original-gold-jewelry'),
     // 2026-05-17: 9K aus Branded + Original entfernt — bestehende 9K-Produkte
     // auf 14K (gleiche Farbe) hochmigrieren, damit der Wert wieder in den Optionen liegt.
     `UPDATE products SET attributes = json_set(attributes, '$.karat',
@@ -459,15 +460,7 @@ function runMigrations(database: Database): void {
     // ORIGINAL_GOLD_JEWELRY — Included-Auswahl ohne Appraisal/Pouch.
     `UPDATE categories SET scope_options = '["Box","Certificate"]' WHERE id = 'cat-original-gold-jewelry'`,
     // ACCESSORY — Box/Papers raus aus Attributen (sind im Included-Multi-Select).
-    `UPDATE categories SET attributes = '[
-      {"key":"item_type","label":"Item Type","type":"select","options":["Handbag","Eyeglass","Wallet","Lighter","Cufflinks","Prayer Beads","Walking Stick","Pen","Key Holder","Other"],"required":true,"showInList":true},
-      {"key":"color","label":"Color","type":"text","required":true,"showInList":true},
-      {"key":"material","label":"Material","type":"text","required":true,"showInList":true},
-      {"key":"description","label":"Description","type":"text","required":true,"showInList":false},
-      {"key":"model_number","label":"Model No","type":"text","required":false,"showInList":false},
-      {"key":"serial_number","label":"Serial No","type":"text","required":false,"showInList":false},
-      {"key":"year","label":"Year","type":"number","required":false,"showInList":false}
-    ]' WHERE id = 'cat-accessory'`,
+    categoryAttributesSql('cat-accessory'),
     // WATCH — 2026-05-17: "New" aus Condition entfernt (Unworn ist die korrekte Bezeichnung).
     `UPDATE categories SET condition_options = '["Unworn","Pre-Owned","Vintage"]' WHERE id = 'cat-watch'`,
     // Bestehende Watch-Produkte mit condition="New" auf "Unworn" umstellen.
@@ -475,18 +468,7 @@ function runMigrations(database: Database): void {
     // WATCH — 2026-05-17: material erweitert + Diamonds/Description sortiert + Ref/Serial/Bezel optional.
     // 2026-06-03: 'diamonds' (Boolean) + 'movement' (Caliber) entfernt — laeuft bei jedem Start,
     //   setzt die Watch-Attribute idempotent neu, daher fallen die zwei Felder auch in bestehenden DBs weg.
-    `UPDATE categories SET attributes = '[
-      {"key":"reference_number","label":"Reference Number","type":"text","required":false,"showInList":true},
-      {"key":"case_diameter_mm","label":"Case Diameter","type":"number","unit":"mm","required":true,"showInList":true},
-      {"key":"serial_number","label":"Serial Number","type":"text","required":false,"showInList":true},
-      {"key":"dial","label":"Dial","type":"text","required":true,"showInList":false},
-      {"key":"bezel","label":"Bezel","type":"text","required":false,"showInList":false},
-      {"key":"material","label":"Material","type":"select","options":["Steel","Solid Gold","Two-Tone Steel/Gold","Platinum","Titanium","Ceramic","Bronze","Carbon","DLC Steel","Plated","Ceramic & Steel","Ceramic & Gold","Titanium & Gold","Titanium & Ceramic"],"required":true,"showInList":true},
-      {"key":"karat_color","label":"Karat & Color","type":"select","options":["18K Yellow","18K Rose","18K White","14K Yellow","14K Rose","14K White","9K Yellow","9K Rose"],"required":true,"showInList":true,"dependsOn":{"key":"material","valueIncludes":["Solid Gold","Two-Tone Steel/Gold","Ceramic & Gold","Titanium & Gold"]}},
-      {"key":"description","label":"Description","type":"text","required":false,"showInList":false},
-      {"key":"strap_type","label":"Strap Type","type":"select","options":["Leather","Rubber"],"required":false,"showInList":false},
-      {"key":"year","label":"Year","type":"number","required":false,"showInList":false}
-    ]' WHERE id = 'cat-watch'`,
+    categoryAttributesSql('cat-watch'),
     // Remap altes Material auf neue Optionen (idempotent):
     // alt "Gold"      → "Solid Gold"
     // alt "Rose Gold" → "Solid Gold" + karat_color "18K Rose"
@@ -535,12 +517,7 @@ function runMigrations(database: Database): void {
         AND json_extract(attributes, '$.model') != ''`,
     // SPARE_PART — 2026-05-17: Box ergänzt; Material nach Karat+Color differenziert
     // plus Steel/Gold-Bicolor-Varianten.
-    `UPDATE categories SET attributes = '[
-      {"key":"part_type","label":"Part Type","type":"select","options":["Dial","Bezel","Links","Crown","Strap","Buckle","Caseback","Movement","Crystal","Box","Other"],"required":true,"showInList":true},
-      {"key":"material","label":"Material","type":"select","options":["Steel","18K YG","18K RG","18K WG","14K YG","14K RG","14K WG","Steel/18K YG","Steel/18K RG","Steel/18K WG","Steel/14K YG","Steel/14K RG","Steel/14K WG"],"required":true,"showInList":true},
-      {"key":"original_or_copy","label":"Original or Copy","type":"select","options":["Original","Copy"],"required":true,"showInList":true},
-      {"key":"description","label":"Description","type":"text","required":true,"showInList":false}
-    ]' WHERE id = 'cat-spare-part'`,
+    categoryAttributesSql('cat-spare-part'),
     // Backfill alter material-Werte → neue Options. 18K/14K → YG (Yellow als Default);
     // Two-Tone → Steel/18K YG; 9K wird auf 14K YG mapped.
     `UPDATE products SET attributes = json_set(attributes, '$.material', '18K YG')

@@ -6,6 +6,7 @@
 //
 // Layout: Kategorie-Chips → Brand/Name/SKU → dyn. Attribute → Condition →
 // Scope → AI Identify → Photos → Tax-Scheme + Storage → Notes → Save/Cancel.
+import { applyChoiceSelection } from '@/core/products/choice-value';
 import { useEffect, useRef, useState } from 'react';
 import { Save } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
@@ -98,6 +99,12 @@ export function NewProductModal({
 
   function updateAttr(key: string, value: string | number | boolean) {
     setForm(p => ({ ...p, attributes: { ...(p.attributes || {}), [key]: value } }));
+  }
+
+  // CLEARABLE CHOICES — a click on the ALREADY selected option removes the value entirely (the key is
+  // deleted, not blanked). Same helper in create, quick-add and edit, so the three cannot drift.
+  function toggleAttr(key: string, value: string | number | boolean) {
+    setForm(p => ({ ...p, attributes: applyChoiceSelection(p.attributes as Record<string, unknown>, key, value) as typeof p.attributes }));
   }
 
   function validateForm(): string[] {
@@ -226,7 +233,7 @@ export function NewProductModal({
                       </span>
                       <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
                         {attr.options.map(opt => (
-                          <button key={opt} onClick={() => updateAttr(attr.key, opt)}
+                          <button key={opt} onClick={() => toggleAttr(attr.key, opt)}
                             className="cursor-pointer transition-all duration-200"
                             style={{
                               padding: '4px 10px', fontSize: 11, borderRadius: 999,
@@ -252,7 +259,7 @@ export function NewProductModal({
                       </span>
                       <div className="flex gap-2" style={{ marginTop: 6 }}>
                         {[true, false].map(opt => (
-                          <button key={String(opt)} type="button" onClick={() => updateAttr(attr.key, opt)}
+                          <button key={String(opt)} type="button" onClick={() => toggleAttr(attr.key, opt)}
                             className="cursor-pointer rounded"
                             style={{
                               padding: '4px 14px', fontSize: 11, borderRadius: 999,

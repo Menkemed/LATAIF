@@ -37,6 +37,23 @@ export const ALLOWED_PRICING_KEYS = ['purchasePrice', 'plannedSalePrice', 'minSa
 // necessary validity gate applies: a finite, non-negative JSON number (a non-finite value cannot be
 // stored, and a negative price is not a price).
 
+// MOBILE-QUANTITY — `quantity` is the EXISTING canonical product column (`products.quantity INTEGER
+// DEFAULT 1`), not a mobile invention. Like pricing it joins the transport surface only under
+// protocol v2, so the v1 key surface is unchanged and an older payload without it still validates.
+export const ALLOWED_QUANTITY_KEYS = ['quantity'] as const;
+// The desktop create dialog clamps with `Math.max(1, …)` and declares no upper bound, so mobile
+// enforces exactly that and no more: a whole number of at least one. The only ceiling is technical —
+// a value SQLite/JS cannot represent exactly is not a count. Inventing a small business limit here
+// would be a second rule the desktop does not have.
+export const MIN_QUANTITY = 1;
+export const MAX_QUANTITY = Number.MAX_SAFE_INTEGER;
+
+/** Is this a usable piece count? Whole, ≥1, exactly representable. Shared by every layer. */
+export function isValidQuantity(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v)
+    && v >= MIN_QUANTITY && v <= MAX_QUANTITY;
+}
+
 export interface MobileFieldAttr {
   key: string;
   label: string;
@@ -121,7 +138,9 @@ export function validateMobileMetadata(
   // MOBILE-PRICING — pricing keys are part of the transport surface ONLY for v2. Under v1 they are
   // rejected like any other unknown field, so the legacy contract is unchanged.
   const pricingAllowed = (opts.protocolVersion ?? 1) >= 2;
-  const allowedTop = pricingAllowed ? [...ALLOWED_TOP_KEYS, ...ALLOWED_PRICING_KEYS] : ALLOWED_TOP_KEYS;
+  const allowedTop = pricingAllowed
+    ? [...ALLOWED_TOP_KEYS, ...ALLOWED_PRICING_KEYS, ...ALLOWED_QUANTITY_KEYS]
+    : ALLOWED_TOP_KEYS;
   for (const k of Object.keys(m)) {
     if (!(allowedTop as readonly string[]).includes(k)) {
       errs.push({ code: 'UNKNOWN_FIELD', field: k, message: `field "${k}" is not allowed` });
@@ -133,6 +152,13 @@ export function validateMobileMetadata(
       if (v === undefined || v === null) continue; // optional
       if (typeof v !== 'number' || !Number.isFinite(v)) { errs.push({ code: 'BAD_NUMBER', field: key, message: `${key} must be a finite number` }); continue; }
       if (v < 0) errs.push({ code: 'BAD_NUMBER', field: key, message: `${key} must not be negative` });
+    }
+    // MOBILE-QUANTITY — optional; absent means the desktop default of 1 (a payload written before
+    // this field existed must keep working). Present means a whole count of at least one: 0, a
+    // negative, a fraction and any non-number are all refused, and nothing is silently rounded.
+    const q = m.quantity;
+    if (q !== undefined && q !== null && !isValidQuantity(q)) {
+      errs.push({ code: 'BAD_NUMBER', field: 'quantity', message: 'quantity must be a whole number of at least 1' });
     }
   }
   const cat = schema.categories.find((c) => c.id === m.categoryId);

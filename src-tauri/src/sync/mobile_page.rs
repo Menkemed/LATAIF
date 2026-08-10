@@ -150,6 +150,13 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
       <label>SKU / Reference</label>
       <input id="cSku" type="text" placeholder="optional" />
     </div>
+    <!-- MOBILE-QUANTITY — how many identical pieces this capture represents. Defaults to 1, which is
+         what nearly every capture is, so the normal user never touches it. `inputmode=numeric` gives a
+         digits-only keypad; the value is validated here AND independently by the server. -->
+    <div class="row">
+      <label>Quantity</label>
+      <input id="cQuantity" type="number" inputmode="numeric" min="1" step="1" value="1" />
+    </div>
     <div class="row" id="cConditionRow">
       <label>Condition</label>
       <select id="cCondition"></select>
@@ -828,6 +835,18 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const n = Number(s);
     return (Number.isFinite(n) && n >= 0) ? n : NaN;
   }
+  // MOBILE-QUANTITY — read the piece count. Empty → null (the desktop default of 1 applies and the
+  // key is simply omitted). Anything that is not a whole number ≥ 1 is NaN → a hard, named error;
+  // nothing is rounded or clamped into shape here, because a silent correction of a count is how you
+  // end up with the wrong stock.
+  function readQuantity() {
+    const e = $('cQuantity'); if (!e) return null;
+    const s = (e.value || '').trim();
+    if (s === '') return null;
+    if (!/^[0-9]+$/.test(s)) return NaN;
+    const n = Number(s);
+    return (Number.isSafeInteger(n) && n >= 1) ? n : NaN;
+  }
   function buildCollectionMetadata() {
     const categoryId = $('cCategory').value, cat = catById(categoryId);
     const brand = $('cBrand').value.trim(), name = $('cName').value.trim(), sku = $('cSku').value.trim();
@@ -857,12 +876,16 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       if (Number.isNaN(v)) { errors.push(lbl + ' must be a valid number ≥ 0.'); continue; }
       if (v !== null) metadata[key] = v;
     }
+    const qty = readQuantity();
+    if (Number.isNaN(qty)) errors.push('Quantity must be a whole number of at least 1.');
+    else if (qty !== null) metadata.quantity = qty;
     return { metadata, errors, label: (brand + ' ' + name).trim() || sku || 'Item' };
   }
 
   function clearCollectionForm() {
     $('cBrand').value = ''; $('cName').value = ''; $('cSku').value = '';
     $('cPurchasePrice').value = ''; $('cSalePrice').value = ''; $('cMinSalePrice').value = '';
+    $('cQuantity').value = '1';   // back to the overwhelmingly common case, never to empty
     renderCollectionFields($('cCategory').value); // resets condition/attributes/scope for the current category
     clearPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', EMPTY_C);
   }

@@ -28,7 +28,7 @@
           "key": "case_diameter_mm",
           "label": "Case Diameter",
           "type": "number",
-          "required": true,
+          "required": false,
           "unit": "mm"
         },
         {
@@ -224,7 +224,7 @@
           "key": "size",
           "label": "Size",
           "type": "text",
-          "required": true
+          "required": false
         },
         {
           "key": "karat",
@@ -413,7 +413,7 @@
           "key": "description",
           "label": "Description",
           "type": "text",
-          "required": true
+          "required": false
         },
         {
           "key": "model_number",

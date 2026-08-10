@@ -44,7 +44,7 @@ const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP
 function dbQ(file, sql) { let db; try { db = new DatabaseSync(file); return db.prepare(sql).all(); } catch { return []; } finally { try { db?.close(); } catch {} } }
 const inboxCount = () => { const r = dbQ(SERVER_DB, 'SELECT COUNT(*) c FROM mobile_upload_inbox'); return r.length ? r[0].c : -1; };
 const readyCount = () => { const r = dbQ(SERVER_DB, "SELECT COUNT(*) c FROM mobile_upload_inbox WHERE state='ready'"); return r.length ? r[0].c : -1; };
-const productRow = (id) => { const r = dbQ(BIZ_DB, `SELECT id,category_id,brand,name,condition,scope_of_delivery,attributes,purchase_price,planned_sale_price,min_sale_price,expected_margin FROM products WHERE id='${id}'`); return r.length ? r[0] : null; };
+const productRow = (id) => { const r = dbQ(BIZ_DB, `SELECT id,category_id,brand,name,condition,scope_of_delivery,attributes,quantity,purchase_price,planned_sale_price,min_sale_price,expected_margin FROM products WHERE id='${id}'`); return r.length ? r[0] : null; };
 const productCount = () => { const r = dbQ(BIZ_DB, 'SELECT COUNT(*) c FROM products'); return r.length ? r[0].c : -1; };
 // MEDIA-EDIT-PRESERVE — the active gallery of a product (deleted_at IS NULL), and
 // global blob-generation count, to prove a pure text edit neither retires a link
@@ -212,6 +212,17 @@ const PRICES = {
   'cat-accessory':            { raw: { purchasePrice: '30',   plannedSalePrice: '45', minSalePrice: '' },         exp: { purchase_price: 30,   planned_sale_price: 45, min_sale_price: null } },
   'cat-spare-part':           { raw: { purchasePrice: '', plannedSalePrice: '', minSalePrice: '' },               exp: { purchase_price: 0,    planned_sale_price: null, min_sale_price: null } },
 };
+// MOBILE-QUANTITY — what the user types per category, and what must end up in the product row.
+// An empty box means "the default": the key is omitted from the payload and the DB keeps 1, which is
+// also exactly what every payload written before this field existed looks like (§5 backward compat).
+const QUANTITIES = {
+  'cat-watch':                 { raw: '2',  payload: 2,    db: 2 },   // i=0 → double-clicked: replay must NOT double it
+  'cat-gold-jewelry':          { raw: '',   payload: null, db: 1 },   // empty → omitted → default
+  'cat-branded-gold-jewelry':  { raw: '1',  payload: 1,    db: 1 },   // explicit 1
+  'cat-original-gold-jewelry': { raw: '25', payload: 25,   db: 25 },  // a larger valid count
+  'cat-accessory':             { raw: '3',  payload: 3,    db: 3 },
+  'cat-spare-part':            { raw: '',   payload: null, db: 1 },
+};
 const expPayloadPrices = (catId) => { const e = PRICES[catId].exp; const o = {}; if (e.purchase_price) o.purchasePrice = e.purchase_price; if (e.planned_sale_price != null) o.plannedSalePrice = e.planned_sale_price; if (e.min_sale_price != null) o.minSalePrice = e.min_sale_price; return o; };
 
 async function fillAndSubmit(edge, cat, jpg, i, doubleClick = false) {
@@ -226,6 +237,8 @@ async function fillAndSubmit(edge, cat, jpg, i, doubleClick = false) {
   // MOBILE-PRICING — fill the three price inputs (empty string leaves the field blank → optional/null).
   const pr = PRICES[cat.id].raw;
   await setValE(edge, '#cPurchasePrice', pr.purchasePrice); await setValE(edge, '#cSalePrice', pr.plannedSalePrice); await setValE(edge, '#cMinSalePrice', pr.minSalePrice);
+  // MOBILE-QUANTITY — an empty box means "leave the default"; the field itself starts at 1.
+  await setValE(edge, '#cQuantity', QUANTITIES[cat.id].raw);
   await sleep(200);
   if (doubleClick) await edge.ev(`const b=document.querySelector('#cSaveBtn'); b.click(); b.click(); return 'OK';`);
   else await clickE(edge, '#cSaveBtn');
@@ -283,6 +296,10 @@ async function main() {
     for (const [k, v] of Object.entries(expP)) if (u.metadata[k] !== v) { pricesOk = false; console.log(`  ${cat.label} payload price ${k}=${JSON.stringify(u.metadata[k])} exp ${v}`); }
     for (const k of ['purchasePrice', 'plannedSalePrice', 'minSalePrice']) if (!(k in expP) && (k in u.metadata)) { pricesOk = false; console.log(`  ${cat.label} unexpected payload price ${k}=${JSON.stringify(u.metadata[k])}`); }
     ok(pricesOk, `${cat.label}: v2 payload carries the exact prices (optional omitted, comma normalised)`);
+    // MOBILE-QUANTITY — the payload carries exactly what was typed, or nothing at all when empty.
+    const expQ = QUANTITIES[cat.id].payload;
+    ok(expQ === null ? !('quantity' in u.metadata) : u.metadata.quantity === expQ,
+      `${cat.label}: v2 payload quantity is ${expQ === null ? 'omitted (default)' : expQ} (got ${JSON.stringify(u.metadata.quantity)})`);
     entities[cat.id] = u.entity_id;
     await waitVisE(edge, '#cSuccess', 10000).catch(() => {});
   }
@@ -318,6 +335,15 @@ async function main() {
     ['unknown pricing key', { categoryId: 'cat-watch', brand: 'X', name: 'Y', maxSalePrice: 5, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
     ['margin mass-assignment', { categoryId: 'cat-watch', brand: 'X', name: 'Y', expectedMargin: 999, attributes: { case_diameter_mm: 40, dial: 'B', material: 'Steel' } }, 2, true],
     ['pricing on v1 (legacy surface)', { categoryId: 'cat-watch', brand: 'X', name: 'Y', purchasePrice: 10 }, 1, true],
+    // ── MOBILE-QUANTITY negative matrix (v2) — the server validates, not just the HTML min=1 ──
+    ['quantity 0', { categoryId: 'cat-watch', brand: 'X', name: 'Y', quantity: 0, attributes: { dial: 'B', material: 'Steel' } }, 2, true],
+    ['negative quantity', { categoryId: 'cat-watch', brand: 'X', name: 'Y', quantity: -3, attributes: { dial: 'B', material: 'Steel' } }, 2, true],
+    ['decimal quantity', { categoryId: 'cat-watch', brand: 'X', name: 'Y', quantity: 1.5, attributes: { dial: 'B', material: 'Steel' } }, 2, true],
+    ['string quantity', { categoryId: 'cat-watch', brand: 'X', name: 'Y', quantity: '2', attributes: { dial: 'B', material: 'Steel' } }, 2, true],
+    ['bool quantity', { categoryId: 'cat-watch', brand: 'X', name: 'Y', quantity: true, attributes: { dial: 'B', material: 'Steel' } }, 2, true],
+    ['array quantity', { categoryId: 'cat-watch', brand: 'X', name: 'Y', quantity: [2], attributes: { dial: 'B', material: 'Steel' } }, 2, true],
+    ['quantity-shaped mass assignment', { categoryId: 'cat-watch', brand: 'X', name: 'Y', stockQuantity: 5, attributes: { dial: 'B', material: 'Steel' } }, 2, true],
+    ['quantity on v1 (legacy surface)', { categoryId: 'cat-watch', brand: 'X', name: 'Y', quantity: 2 }, 1, true],
   ];
   let allRej = true;
   for (let i = 0; i < neg.length; i++) { const [name, meta, ver, inc] = neg[i]; const r = await post(token, `neg-${i}`, `prod-neg-${i}`, meta, imgB64, ver, inc); if (r.status !== 422) { allRej = false; console.log('  neg not 422:', name, r.status, JSON.stringify(r.body)); } }
@@ -359,6 +385,11 @@ async function main() {
     const priceReadOk = row.purchase_price === expP.purchase_price && row.planned_sale_price === expP.planned_sale_price && row.min_sale_price === expP.min_sale_price;
     if (!priceReadOk) { sixPrice = false; console.log(`  ${cat.label} DB prices: ${JSON.stringify({ p: row.purchase_price, s: row.planned_sale_price, m: row.min_sale_price })} exp ${JSON.stringify(expP)}`); }
     ok(priceReadOk, `${cat.label}: purchase/sale/min prices persisted EXACTLY to the business DB`);
+    // MOBILE-QUANTITY — the real imported product carries the count the phone sent. The watch row is
+    // the one that was double-clicked, so this is also the replay proof: exactly-once, quantity 2 —
+    // not one product with 4 pieces and not two products.
+    const expQty = QUANTITIES[cat.id].db;
+    ok(Number(row.quantity) === expQty, `${cat.label}: imported product quantity is ${expQty} (got ${row.quantity})`);
     // UI readback: detail renders a representative value.
     const detail = await openDetailText(app, id);
     const sample = Object.values(cat.attrs)[0][1];
