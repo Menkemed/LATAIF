@@ -34,7 +34,10 @@ function ok(cond: unknown, msg: string): void {
 }
 
 /** Every price/cost column the product form really carries — read from the type, not from memory. */
-const PRICE_FIELDS = ['purchasePrice', 'plannedSalePrice', 'minSalePrice', 'maxSalePrice', 'purchaseCurrency', 'expectedMargin'];
+const PRICE_FIELDS = [
+  'purchasePrice', 'plannedSalePrice', 'minSalePrice', 'maxSalePrice',
+  'lastOfferPrice', 'lastSalePrice', 'purchaseCurrency', 'expectedMargin',
+];
 
 const FULL_AI: AiProductIdentification = {
   brand: 'Rolex', name: 'Submariner Date',
@@ -43,6 +46,20 @@ const FULL_AI: AiProductIdentification = {
   scopeOfDelivery: ['Box', 'Papers'], taxScheme: 'VAT_10', storageLocation: 'Safe A',
   attributes: { dial: 'Black', material: 'Steel', case_diameter_mm: 41 },
 };
+
+// ════════════════════════════════════════════════════════════════════════════
+// §11 — the price list is derived from the REAL Product type, not from memory
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const types = readFileSync(join(REPO, 'src/core/models/types.ts'), 'utf8');
+  const start = types.indexOf('export interface Product ');
+  const product = types.slice(start, types.indexOf('\n}', start));
+  const declared = [...product.matchAll(/^\s*([a-zA-Z]*(?:Price|Currency|Margin))\??:/gm)].map((m) => m[1]);
+  ok(declared.length >= 6, `§11 the Product type declares money fields (${declared.join(', ')})`);
+  for (const f of declared) {
+    ok(isAiForbiddenEditField(f), `§11 ${f} — a real money field of Product — is on the forbidden list`);
+  }
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // §18/§27 — prices are never written in edit mode

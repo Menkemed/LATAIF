@@ -200,14 +200,26 @@ function healSyncStringNulls(database: Database): void {
 /**
  * SSOT-DUPLICATION FIX (2026-08-10) — one derivation of a category's attribute spec.
  *
- * Five start-up migrations used to carry a FROZEN JSON COPY of these attribute lists and force them
+ * Five start-up statements used to carry a FROZEN JSON COPY of these attribute lists and force them
  * onto `categories.attributes` on every launch. That silently reverted the source of truth: making
  * `case_diameter_mm` optional in `default-categories.ts` changed the model, the mobile schema and the
  * validators — and then the app overwrote the stored category with the old copy on the next start, so
- * the create dialog still demanded it. These migrations are still needed (they also drop attributes
- * that were removed from the model), but they must READ the SSOT rather than restate it.
+ * the create dialog still demanded it.
+ *
+ * ## Why deriving from the SSOT is correct here, and not a rewrite of history
+ *
+ * These are NOT one-time historical migrations. `runMigrations` has no version table and no applied
+ * bookkeeping: the whole array is re-executed on EVERY boot of EVERY existing install (see the
+ * `if (saved)` path in `initDatabase`, which runs SCHEMA + runMigrations and never seeds). Each
+ * statement is an unconditional, idempotent reconciliation of the CURRENT category definition, and
+ * every release simply shipped its own literal — so an upgraded install has only ever seen the newest
+ * one. Reading the SSOT therefore changes no historical semantics; it removes a second copy that had
+ * to be edited by hand and, when it was not, silently won.
+ *
+ * `seedCleanDatabase` performs the same SSOT-derived reconciliation, but only on a FRESH install —
+ * which is exactly why the stale literals were invisible until an existing database was upgraded.
  */
-function categoryAttributesSql(categoryId: string): string {
+export function categoryAttributesSql(categoryId: string): string {
   const cat = DEFAULT_CATEGORIES.find((c) => c.id === categoryId);
   if (!cat) throw new Error(`[DB] unknown category in a migration: ${categoryId}`);
   // SQLite string literal: the only character needing an escape is the single quote.

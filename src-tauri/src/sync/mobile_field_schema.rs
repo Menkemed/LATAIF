@@ -520,6 +520,21 @@ mod tests {
     }
 
     #[test]
+    fn v1_without_quantity_is_still_valid_no_contract_contradiction() {
+        // The precise contract, because "quantity is v2-only" and "old payloads stay valid" sound
+        // like they disagree and do not: `quantity` is a NEW key, so no payload that was valid before
+        // ever contained it. A v1 payload without it is accepted exactly as before, and a v2 payload
+        // without it is accepted and means one piece. Only a v1 payload that ADDS the new key is
+        // refused — the v1 key surface is deliberately frozen, just as it is for pricing.
+        assert_eq!(
+            validate_metadata(&json!({ "categoryId": "cat-watch", "brand": "R", "name": "S" }), 1),
+            Ok(()),
+            "a legacy v1 payload without quantity must remain valid"
+        );
+        assert_eq!(validate_metadata(&base(json!({})), 2), Ok(()), "a v2 payload without quantity is valid too");
+    }
+
+    #[test]
     fn v1_rejects_quantity_legacy_surface_unchanged() {
         // Like pricing, quantity joins the transport surface only at v2 — a v1 client that sends it is
         // refused exactly like any other unknown key, so the legacy contract is untouched.

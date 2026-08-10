@@ -48,6 +48,8 @@ export const AI_EDIT_FORBIDDEN_FIELDS: Readonly<Record<string, string>> = Object
   plannedSalePrice: 'the price the business decided to sell at, not a model estimate',
   minSalePrice: 'a negotiation floor; a wrong one loses money silently',
   maxSalePrice: 'a business ceiling, not a recognition result',
+  lastOfferPrice: 'the last price actually offered to a customer — a recorded event, not an estimate',
+  lastSalePrice: 'the price this item last sold for — history, and never something to guess',
   purchaseCurrency: 'the accounting scope of every figure on the item; not a recognition result',
   expectedMargin: 'derived from the prices, so writing it would contradict them',
   quantity: 'inventory truth; recognition cannot count stock',
