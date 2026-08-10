@@ -13,6 +13,7 @@
 //
 // Run (from desktop/): MSEDGEDRIVER unused; node test/e2e/runtime-scope-provisioning.e2e.mjs
 import { spawn, execFileSync } from 'node:child_process';
+import { e2ePreflight } from './_e2e-preflight.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -45,10 +46,20 @@ const ok = (c, m) => { if (c) { PASS++; } else { FAIL++; fails.push(m); console.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const seed = (mode) => execFileSync(SEED, [mode, SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' }).trim();
 const verify = () => Object.fromEntries(seed('verify').replace('VERIFY ', '').split(' ').map((kv) => kv.split('=')));
-const isoEnv = () => ({ ...process.env, TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
+// SINGLE-PC-STORAGE-I2 §19/§20 — the isolated sync port belongs here too. This suite drives the app
+// purely over CDP and never speaks HTTP itself, which is exactly why the omission was invisible: the
+// app it launches still starts its embedded server, and without this it BOUND the production port
+// 3001 — colliding with a running production instance, or occupying that port when none was running.
+const PORT = 3011;
+const isoEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
 
 let appProc;
 async function startApp() {
+  // SINGLE-PC-STORAGE-I2A §4/§5 — HARD STOP before the process exists. Proves the artefact at
+  // `APP` really is the isolated E2E build (a plain `cargo build` silently overwrites it with a
+  // production-identity binary) and that this suite's AppData root and sync port are the isolated
+  // ones. Never a warning: a suite that cannot prove what it is launching does not launch it.
+  e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: isoEnv() });
   appProc = spawn(APP, [], { env: isoEnv(), stdio: 'ignore' });
   const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {

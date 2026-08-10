@@ -18,6 +18,7 @@
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
+import { serializeAuditValue } from './audit-value';
 
 export type AuditActionType =
   | 'CREATE'
@@ -51,11 +52,13 @@ export interface LogAuditInput {
   newValue?: unknown;
 }
 
+// STORAGE-PERF-I1 §13 — the ONE serialisation choke point for audit values, and
+// therefore the one place the blob-free rule is enforced. Every writer
+// (logAudit, logAuditOrThrow, logUpdateDiff, and trackInsert/trackUpdate above
+// them) funnels through here, so an inline base64 image can never reach
+// `audit_log` from any path. Semantics are unchanged for every non-image value.
 function toStr(v: unknown): string | null {
-  if (v === undefined || v === null) return null;
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  try { return JSON.stringify(v); } catch { return String(v); }
+  return serializeAuditValue(v);
 }
 
 // Schreibt EINEN audit_log-Eintrag. Wirft bei Fehler (Roh-Variante).

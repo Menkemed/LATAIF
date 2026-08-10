@@ -44,3 +44,4 @@ QA-Pruefbericht-*.md
 
 # Performance suite results (machine-specific, regenerate locally)
 test/perf/artifacts/
+test/storage-perf/.artifacts/

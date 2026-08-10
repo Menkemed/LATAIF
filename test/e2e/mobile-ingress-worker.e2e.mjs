@@ -8,9 +8,11 @@
 // visible; a real restart persists it. Every scope aligns on tenant-1/branch-main (the server init seeds
 // it AND the frontend seedCleanDatabase seeds admin@lataif.com/admin there), so no scope hacks are needed.
 //
-// Isolated: distinct e2e identifier, ephemeral owner secret (never printed), full cleanup, production
-// (com.lataif.app) never touched. Pure Node CDP + fetch; no npm deps.
+// Isolated: distinct e2e identifier, ephemeral owner secret (never printed), full cleanup, and the
+// production install is never touched — isolated identifier, isolated AppData AND isolated sync
+// port 3011. Pure Node CDP + fetch; no npm deps.
 import { spawn, execFileSync } from 'node:child_process';
+import { e2ePreflight } from './_e2e-preflight.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -20,7 +22,12 @@ const APP = join(REPO, 'src-tauri/target/debug/lataif.exe');
 const SEED = join(REPO, 'src-tauri/target/debug/examples/e2e_scope_seed.exe');
 const IDENT = 'com.lataif.app.e2e';
 const CDP_PORT = 9223;
-const HTTP = 'http://127.0.0.1:3001';
+// STORAGE-PERF-I1 §25 — prod isolation. This suite used to hardcode 3001 and never set
+// LATAIF_E2E_SYNC_PORT, so its app bound the PRODUCTION port: with production running the
+// harness logged in against the real server (401 with the ephemeral e2e owner password), and
+// with production stopped it occupied 3001 itself. Same isolated port as every sibling suite.
+const PORT = 3011;
+const HTTP = `http://127.0.0.1:${PORT}`;
 const OWNER_EMAIL = 'admin@lataif.com';
 const OWNER_PW = 'e2e-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2); // server owner secret, ephemeral
 const FE_PW = 'admin'; // the frontend seedCleanDatabase password for admin@lataif.com (local session)
@@ -43,11 +50,16 @@ const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log(
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const seed = (mode, arg) => execFileSync(SEED, [mode, arg ?? SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' }).trim();
 const verify = () => Object.fromEntries(seed('verify').replace('VERIFY ', '').split(' ').map((kv) => kv.split('=')));
-const isoEnv = () => ({ ...process.env, TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
+const isoEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
 const stagedFiles = (root) => { let n = 0; const walk = (p) => { if (!existsSync(p)) return; for (const e of readdirSync(p, { withFileTypes: true })) { const q = join(p, e.name); if (e.isDirectory()) walk(q); else if (!e.name.endsWith('.tmp')) n++; } }; walk(root); return n; };
 
 let appProc;
 async function startApp() {
+  // SINGLE-PC-STORAGE-I2A §4/§5 — HARD STOP before the process exists. Proves the artefact at
+  // `APP` really is the isolated E2E build (a plain `cargo build` silently overwrites it with a
+  // production-identity binary) and that this suite's AppData root and sync port are the isolated
+  // ones. Never a warning: a suite that cannot prove what it is launching does not launch it.
+  e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: isoEnv() });
   appProc = spawn(APP, [], { env: isoEnv(), stdio: 'ignore' });
   const deadline = Date.now() + 60000;
   let page = null;
@@ -69,7 +81,7 @@ async function waitHttpHealthy() {
     try { const r = await fetch(`${HTTP}/api/health`, { signal: AbortSignal.timeout(2500) }); if (r.ok) return true; } catch { /* not up */ }
     await sleep(500);
   }
-  throw new Error('embedded HTTP server never became healthy on 3001');
+  throw new Error(`embedded HTTP server never became healthy on ${PORT}`);
 }
 async function login() {
   const r = await fetch(`${HTTP}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: OWNER_EMAIL, password: OWNER_PW }) });
@@ -166,7 +178,7 @@ async function main() {
   let c = new CDP(ws);
   await waitInvoke(c);
   await waitHttpHealthy();
-  ok(true, 'embedded HTTP server is live on 3001 (Primary serves a real socket)');
+  ok(true, `embedded HTTP server is live on ${PORT} (Primary serves a real socket)`);
 
   // ── live authenticated ingress over the real socket ──
   const token = await login();

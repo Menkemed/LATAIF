@@ -8,6 +8,17 @@ mod sync;
 // MOBILE-04B2A5-H1 — test-only surface for the isolated E2E seed/verify tool. Compiled out entirely
 // unless the `e2e` feature is enabled (only the e2e example/harness turns it on); production builds
 // never expose these internals.
+// SINGLE-PC-STORAGE-I2A §4 — a build marker the E2E harness can find in the BINARY.
+//
+// The confirmed hazard: a plain `cargo build` overwrites `target/debug/lataif.exe` with a
+// PRODUCTION-identity binary, and every suite would then launch an app that opens the production
+// AppData. Reading the suite's source cannot catch that — the source is fine, the artefact is not.
+// So the harness inspects the artefact, and this is the one string that exists if and only if the
+// `e2e` feature was on. `#[used]` keeps the linker from dropping a static nothing references.
+#[cfg(feature = "e2e")]
+#[used]
+static E2E_BUILD_MARKER: [u8; 26] = *b"LATAIF_E2E_BUILD_MARKER_V1";
+
 #[cfg(feature = "e2e")]
 pub mod e2e_support {
     pub use crate::sync::credentials::{provision_owner, PROVISION_CONFIRMATION};
@@ -1783,6 +1794,76 @@ fn media_prepare_stock_image(
     .map_err(|e| e.code().to_string())
 }
 
+// ── SINGLE-PC-STORAGE-I2 §14 A — free space on the volume that holds the database ────────────
+//
+// Compaction writes the compacted copy to a temp file NEXT TO the database and renames it into
+// place, so both files exist at the moment of the rename. Without this the operator only learns the
+// volume is full after a multi-minute VACUUM, from an error that names a temp path rather than the
+// cause. The persist path protects the data either way (temp → verify → rename); this only makes
+// the refusal early and legible.
+//
+// SINGLE-PC-STORAGE-I2A §1 — this probe is FAIL-CLOSED. An unanswerable probe returns an error, not
+// a shrug: "we could not determine free space, so we ran the operation that needs it anyway" is the
+// reasoning that turns a full disk into a failed write. The write path is still hardened separately
+// (temp → verify → rename), but the two are independent lines, not substitutes for each other.
+#[cfg(windows)]
+fn volume_free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut free_to_caller: u64 = 0;
+    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer that outlives the call, and the out-pointer
+    // refers to a live local. The other two out-params are genuinely optional in this API.
+    let r = unsafe {
+        windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            Some(&mut free_to_caller),
+            None,
+            None,
+        )
+    };
+    r.ok().map(|_| free_to_caller)
+}
+
+#[cfg(not(windows))]
+fn volume_free_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// The stable code the frontend maps to a refusal. One string, so the UI text and the gate agree.
+const ERR_FREE_SPACE_UNAVAILABLE: &str = "STORAGE_FREE_SPACE_UNAVAILABLE";
+
+/// SINGLE-PC-STORAGE-I2A §3 — verify owner credentials, and nothing else.
+///
+/// The compaction gate previously borrowed `list_restore_snapshots` for its owner check. That call
+/// really does verify the owner (it runs the same `authorize_owner` primitive), but the verification
+/// was a side effect of listing backups — a future change to what listing requires would silently
+/// change what compaction requires. This exposes the primitive directly so the auth contract is the
+/// contract, not a by-product. It returns nothing on success: no role, no id, no listing.
+#[tauri::command]
+fn verify_owner_credentials(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+        .map(|_| ())
+        .map_err(|code| code.to_string())
+}
+
+#[tauri::command]
+fn storage_free_bytes(state: tauri::State<'_, AppHandleState>) -> Result<u64, String> {
+    // The mobile staging root is `<app_data_dir>/mobile-upload-staging`, so its parent is the app
+    // data directory — which is where `lataif.db` and its temp file live. Free space is a property
+    // of the volume, so any real path under it gives the same answer.
+    let dir = state
+        .mobile_staging_root
+        .parent()
+        .unwrap_or(state.mobile_staging_root.as_path());
+    volume_free_bytes(dir).ok_or_else(|| ERR_FREE_SPACE_UNAVAILABLE.to_string())
+}
+
 #[tauri::command]
 fn media_commit_stock_image(
     state: tauri::State<'_, AppHandleState>,
@@ -2621,6 +2702,8 @@ pub fn run() {
             print_raw_zpl,
             // MEDIA-04A-2A — guarded media command bridge (registered; no UI caller yet).
             media_prepare_stock_image,
+            storage_free_bytes,
+            verify_owner_credentials,
             media_commit_stock_image,
             media_abort_stock_image,
             media_read_verified,

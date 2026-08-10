@@ -15,6 +15,7 @@ import { RuntimeScopeDialog } from './RuntimeScopeDialog';
 import { OwnerProvisionDialog } from './OwnerProvisionDialog';
 import { PrimaryAdoptDialog } from './PrimaryAdoptDialog';
 import { BackupRestorePanel } from './BackupRestorePanel';
+import { StorageMaintenancePanel } from './StorageMaintenancePanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { exportFile } from '@/core/utils/export-file';
@@ -3179,6 +3180,8 @@ function DangerZoneTab() {
         </div>
         {/* MOBILE-04B2A12-U2 — full DB+media snapshot create + owner-gated boot-scheduled restore. */}
         <BackupRestorePanel />
+        {/* STORAGE-PERF-I1 §9 — owner-gated legacy media migration (dry-run first). */}
+        <StorageMaintenancePanel />
       </Card>
 
       <div style={{ marginTop: 24 }} />

@@ -12,6 +12,7 @@
 // Everything is derived from the SSOT (default-categories.ts) — no hand-maintained expected lists.
 // Isolated e2e identifier + AppData + sync port (3011); production (3001) is never touched.
 import { spawn, execFileSync } from 'node:child_process';
+import { e2ePreflight } from './_e2e-preflight.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -94,6 +95,11 @@ const attrsOf = (id) => { const r = dbQ(BIZ_DB, `SELECT attributes FROM products
 
 let appProc;
 async function startApp() {
+  // SINGLE-PC-STORAGE-I2A §4/§5 — HARD STOP before the process exists. Proves the artefact at
+  // `APP` really is the isolated E2E build (a plain `cargo build` silently overwrites it with a
+  // production-identity binary) and that this suite's AppData root and sync port are the isolated
+  // ones. Never a warning: a suite that cannot prove what it is launching does not launch it.
+  e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() });
   appProc = spawn(APP, [], { env: appEnv(), stdio: 'ignore' });
   const end = Date.now() + 60000; let page = null;
   while (Date.now() < end) { try { const l = await (await fetch(`http://127.0.0.1:${APP_CDP}/json/list`)).json(); page = l.find((t) => t.type === 'page' && /tauri\.localhost/.test(t.url) && t.webSocketDebuggerUrl); if (page) break; } catch {} await sleep(400); }

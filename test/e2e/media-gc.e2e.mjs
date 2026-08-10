@@ -19,6 +19,7 @@
 // production instance on 3001 and its DB are never touched, an ephemeral owner secret (never printed),
 // full cleanup. Pure Node CDP + fetch; no npm deps. Drives the production com.lataif.app.e2e binary.
 import { spawn, execFileSync } from 'node:child_process';
+import { e2ePreflight } from './_e2e-preflight.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -92,6 +93,11 @@ const S = (v) => JSON.stringify(v);
 // ── app (WebView2) helpers ───────────────────────────────────────────────────────────────────────
 let appProc;
 async function startApp() {
+  // SINGLE-PC-STORAGE-I2A §4/§5 — HARD STOP before the process exists. Proves the artefact at
+  // `APP` really is the isolated E2E build (a plain `cargo build` silently overwrites it with a
+  // production-identity binary) and that this suite's AppData root and sync port are the isolated
+  // ones. Never a warning: a suite that cannot prove what it is launching does not launch it.
+  e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() });
   appProc = spawn(APP, [], { env: appEnv(), stdio: 'ignore' });
   const end = Date.now() + 60000; let page = null;
   while (Date.now() < end) {
