@@ -152,16 +152,22 @@ function seedBusinessDb() {
 
   const linkCols = db.prepare(`SELECT COUNT(*) c FROM pragma_table_info('media_links')`).get().c;
   if (!linkCols) throw new Error('media tables missing from the business DB');
+
+  // MOBILE-I1E §4 — the order the PRODUCTION coordinator uses, and the only order the schema
+  // permits: the generation is inserted 'available' FIRST, and only then may a blob point at it.
+  // `trg_mb_pointer_available_ins` refuses a pointer to a generation that does not yet exist as
+  // available (MEDIA_POINTER_NOT_AVAILABLE) — the invariant that caught the first draft of this
+  // fixture. Nothing here weakens it; the fixture was simply wrong.
+  db.prepare(`INSERT OR REPLACE INTO media_blob_generations (tenant_id, blob_id, generation_no, storage_key, stored_blob_hash,
+                byte_size, content_kind, mime_type, extension, is_encrypted, dek_version, gen_status, created_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(TENANT, 'blob-e2e', 1, key, hash, JPEG.length, 'raster_image', 'image/jpeg', 'jpg', 0, null, 'available', now);
   db.prepare(`INSERT OR REPLACE INTO media_blobs (tenant_id, blob_id, dedup_token, current_generation_no, blob_status, created_at, updated_at)
               VALUES (?,?,?,?,?,?,?)`).run(TENANT, 'blob-e2e', hash, 1, 'present', now, now);
-  db.prepare(`INSERT OR REPLACE INTO media_blob_generations (tenant_id, blob_id, generation_no, storage_key, stored_blob_hash,
-                byte_size, content_kind, mime_type, extension, gen_status, created_at)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(TENANT, 'blob-e2e', 1, key, hash, JPEG.length, 'raster_image', 'image/jpeg', 'jpg', 'available', now);
   db.prepare(`INSERT OR REPLACE INTO media_objects (tenant_id, media_id, origin_branch_id, master_blob_id, master_kind,
-                source_type, ingest_status, created_at, updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(TENANT, 'media-e2e', branchId, 'blob-e2e', 'normalized', 'upload_desktop', 'ready', now, now);
+                source_type, security_class, retention_class, ingest_status, created_at, updated_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(TENANT, 'media-e2e', branchId, 'blob-e2e', 'normalized', 'upload_desktop', 'internal', 'standard', 'ready', now, now);
   db.prepare(`INSERT OR REPLACE INTO media_links (tenant_id, link_id, scope_kind, branch_id, entity_type, entity_id,
                 media_id, media_role, sort_order, is_primary, created_at)
               VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
@@ -181,7 +187,9 @@ function productSnapshot() {
 }
 function stockCheckRows() {
   const db = new DatabaseSync(SERVER_DB);
-  try { return db.prepare(`SELECT check_id, status, notes, checked_at, source, checked_by_name FROM stock_checks WHERE product_id=? ORDER BY checked_at DESC, check_id DESC`).all(); }
+  // Bound parameter, not a bare placeholder: the first draft called .all() with no argument, which
+  // threw into the catch and silently reported "no rows" for a table that had them.
+  try { return db.prepare(`SELECT check_id, status, notes, checked_at, source, checked_by_name FROM stock_checks WHERE product_id=? ORDER BY checked_at DESC, check_id DESC`).all(PRODUCT_ID); }
   catch { return []; } finally { try { db.close(); } catch {} }
 }
 
@@ -222,6 +230,29 @@ async function main() {
   ok(existsSync(BIZ_DB), 'the isolated app created its own business database');
   const fixture = seedBusinessDb();
   ok(existsSync(fixture.file), 'gallery blob written to the isolated media root');
+
+  // ══ §5 — prove the fixture is a REAL gallery-only product before trusting any assertion ══
+  {
+    const db = new DatabaseSync(BIZ_DB);
+    const one = (sql) => db.prepare(sql).get();
+    const blob = one(`SELECT blob_status, current_generation_no FROM media_blobs WHERE blob_id='blob-e2e'`);
+    const gen = one(`SELECT gen_status, storage_key FROM media_blob_generations WHERE blob_id='blob-e2e' AND generation_no=1`);
+    const obj = one(`SELECT ingest_status, master_blob_id FROM media_objects WHERE media_id='media-e2e'`);
+    const link = one(`SELECT is_primary, deleted_at FROM media_links WHERE link_id='link-e2e'`);
+    const prod = one(`SELECT images, quantity FROM products WHERE id='${PRODUCT_ID}'`);
+    const integrity = one(`PRAGMA integrity_check`);
+    const fk = db.prepare(`PRAGMA foreign_key_check`).all();
+    db.close();
+    ok(blob?.blob_status === 'present' && Number(blob?.current_generation_no) === 1, 'fixture: blob present and pointing at gen 1');
+    ok(gen?.gen_status === 'available', 'fixture: generation is available');
+    ok(gen?.storage_key === fixture.key, 'fixture: generation carries the storage key of the written file');
+    ok(obj?.ingest_status === 'ready' && obj?.master_blob_id === 'blob-e2e', 'fixture: media object is ready and linkable');
+    ok(Number(link?.is_primary) === 1 && link?.deleted_at == null, 'fixture: an ACTIVE primary link exists');
+    ok(prod?.images === '[]', 'fixture: the product is gallery-only (images is empty)');
+    ok(Number(prod?.quantity) === 3, 'fixture: quantity is 3');
+    ok(Object.values(integrity)[0] === 'ok', 'fixture: business DB integrity_check=ok');
+    ok(fk.length === 0, 'fixture: no foreign-key violations');
+  }
 
   // ── restart against the seeded data ───────────────────────────────────────
   ws = await startApp();

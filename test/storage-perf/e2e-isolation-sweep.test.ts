@@ -49,7 +49,7 @@ interface Verdict {
 }
 
 const suites = readdirSync(E2E_DIR).filter((f) => f.endsWith('.e2e.mjs')).sort();
-ok(suites.length >= 8, `the sweep found the E2E suites (${suites.length})`);
+ok(suites.length >= 9, `the sweep found the E2E suites (${suites.length})`);
 
 const verdicts: Verdict[] = [];
 
