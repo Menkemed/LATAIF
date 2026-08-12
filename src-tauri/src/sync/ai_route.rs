@@ -20,6 +20,27 @@ use serde::{Deserialize, Serialize};
 
 /// The only endpoint this module talks to. A constant, so no request body can redirect it.
 const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
+
+/// Resolve the upstream endpoint.
+///
+/// In a production build this function has ONE branch and returns the constant above: the
+/// environment lookup below is compiled out entirely, so there is no variable, no flag and no
+/// configuration a remote client or a hostile environment could use to redirect an identification
+/// request. The override exists only in the `e2e` build, which is a different binary with a
+/// different bundle identifier, and even there it comes from THIS process's environment - never
+/// from a request body, a header or a query parameter.
+fn upstream_url() -> String {
+    #[cfg(feature = "e2e")]
+    {
+        if let Ok(u) = std::env::var("LATAIF_E2E_AI_UPSTREAM") {
+            let u = u.trim().to_string();
+            if !u.is_empty() {
+                return u;
+            }
+        }
+    }
+    OPENAI_URL.to_string()
+}
 const DEFAULT_MODEL: &str = "gpt-4o";
 
 /// Same ceiling the ingest path uses for one image (25 MiB of raw bytes). Applied to the DECODED
@@ -303,7 +324,7 @@ pub async fn identify(
         .build()
         .map_err(|_| AiError::UpstreamFailed)?;
     let res = client
-        .post(OPENAI_URL)
+        .post(upstream_url())
         .bearer_auth(&key)
         .json(&payload)
         .send()

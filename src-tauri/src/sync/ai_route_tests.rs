@@ -264,3 +264,36 @@ fn a_fenced_json_completion_is_parsed() {
     });
     assert_eq!(parse_completion(&body).unwrap()["brand"], serde_json::json!("Rolex"));
 }
+
+// ── MOBILE-I1F §3 — the upstream endpoint cannot be redirected in production ──
+//
+// The override is compiled out of the production binary, so this pair of tests reads differently in
+// each build and that is the point: with `e2e` absent the environment is ignored entirely.
+#[test]
+fn the_upstream_endpoint_is_a_constant_in_a_production_build() {
+    // Set the variable regardless; a production build must not even look at it.
+    std::env::set_var("LATAIF_E2E_AI_UPSTREAM", "http://127.0.0.1:1/hijack");
+    let resolved = upstream_url();
+    #[cfg(not(feature = "e2e"))]
+    assert_eq!(resolved, OPENAI_URL, "a production build must ignore any upstream override");
+    #[cfg(feature = "e2e")]
+    assert_eq!(resolved, "http://127.0.0.1:1/hijack", "the e2e build honours its own environment");
+    std::env::remove_var("LATAIF_E2E_AI_UPSTREAM");
+    assert_eq!(upstream_url(), OPENAI_URL, "with no override the constant endpoint is used");
+}
+
+/// The request shape carries no endpoint field at all — a client cannot name a destination even if
+/// a future build did read one.
+#[test]
+fn the_request_contract_has_no_endpoint_field() {
+    let parsed: Result<AiIdentifyRequest, _> = serde_json::from_str(
+        r#"{"category_id":"cat-watch","image":"data:image/jpeg;base64,AAAA","base_url":"http://evil.example","endpoint":"http://evil.example"}"#,
+    );
+    let req = parsed.expect("unknown keys are ignored, not adopted");
+    assert_eq!(req.category_id, "cat-watch");
+    // Nothing on the struct can hold a destination.
+    let json = serde_json::to_string(&serde_json::json!({
+        "category_id": req.category_id, "image": req.image, "hints": req.hints
+    })).unwrap();
+    assert!(!json.contains("evil.example"), "no client-supplied endpoint survives parsing");
+}
