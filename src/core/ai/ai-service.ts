@@ -3,6 +3,8 @@
 // Product recognition, text generation, price suggestions
 // ═══════════════════════════════════════════════════════════
 
+import { buildSystemPrompt, buildUserPrompt, categorySpec, AI_MODEL_PARAMS } from './identify-prompt.ts';
+
 const STORAGE_KEY = 'lataif_openai_key';
 const MODEL_KEY = 'lataif_openai_model';
 
@@ -321,79 +323,11 @@ export interface AiProductIdentification {
   identificationConfidence?: 'high' | 'medium' | 'low';
 }
 
-// Plan §Product §4 — category spec for AI prompt generation
-const CATEGORY_SPECS: Record<AiCategoryId, {
-  name: string;
-  required: string[];
-  optional: string[];
-  conditionOptions: string[];
-  scopeOptions: string[];
-  notes: string;
-}> = {
-  'cat-watch': {
-    name: 'WATCH',
-    // 'model' attribute removed 2026-05-17 — Duplikat zum Universal-Feld name.
-    // karat_color hängt von material ab (Gold-Anteil) — vom Caller per dependsOn gefiltert.
-    // 2026-05-17: reference_number, serial_number, bezel optional (Vintage/Custom).
-    required: ['case_diameter_mm', 'dial', 'material', 'karat_color', 'strap_type'],
-    optional: ['reference_number', 'serial_number', 'bezel', 'year', 'description'],
-    conditionOptions: ['Unworn', 'Pre-Owned', 'Vintage'],
-    scopeOptions: ['Box', 'Papers', 'Warranty Card', 'Extra Links', 'Pouch'],
-    notes: [
-      'reference_number = the EXACT factory reference (Rolex 4-7 chars like "126610LN", "16610", "126710BLRO"; Patek "5711/1A-010"; AP "15500ST.OO.1220ST.01"; Omega "310.30.42.50.01.001"). NEVER return brand-name or family-name as reference. Read crown engraving / between-lugs / caseback if visible.',
-      // Model gehört in den Universal-`name`-Feld, nicht in attributes.
-      'NB: the full collector name (with nickname, e.g. "Submariner Date \'Hulk\'", "GMT-Master II \'Pepsi\'", "Daytona \'Paul Newman\'", "Royal Oak Jumbo", "Nautilus 5711") goes into the top-level "name" field, NOT into attributes.',
-      'case_diameter_mm = case width in millimetres (number only, e.g. 36, 40, 41, 42). Estimate from proportions vs crown/lugs if not stated. Common sizes: Submariner 40-41, Datejust 36/41, Daytona 40, GMT 40, Nautilus 40, Royal Oak 39-41, AP Offshore 42-44, Speedmaster 42. NEVER guess wider than 50.',
-      'material ∈ {Steel, Solid Gold, Two-Tone Steel/Gold, Platinum, Titanium, Ceramic, Bronze, Carbon, DLC Steel, Plated, Ceramic & Steel, Ceramic & Gold, Titanium & Gold, Titanium & Ceramic}. karat_color ∈ {18K Yellow, 18K Rose, 18K White, 14K Yellow, 14K Rose, 14K White, 9K Yellow, 9K Rose} — ONLY return this when material has a gold component (Solid Gold, Two-Tone Steel/Gold, Ceramic & Gold, Titanium & Gold); otherwise null. strap_type ∈ {Leather, Rubber}. year = approximate production year (number).',
-      'KEEP SPEC FIELDS SHORT - they print on a physical hangtag at ~16 characters per line, longer values get cut off. dial = max ~16 chars, essentials only (colour + key feature), e.g. "Black", "Blue Sunburst", "Silver Roman", "Black Diamond" (include the word "Diamond" only when the dial is diamond-set) - never a sentence. bezel = max ~14 chars, the type only, e.g. "Diamond", "Fluted", "Ceramic", "Tachymetre", "Smooth", "Rotating". Put any longer prose or extra detail into the description field (which is NOT printed on the tag), never into dial/bezel.',
-    ].join(' '),
-  },
-  'cat-gold-jewelry': {
-    name: 'GOLD_DIAMOND_JEWELRY',
-    // 2026-05-17: color_type integriert in karat (z.B. "18K Rose", "14K Mix"). Silver + Bar + Coin hinzu.
-    required: ['weight', 'karat', 'item_type'],
-    optional: ['diamond_weight', 'description'],
-    conditionOptions: ['Pre-Owned', 'Vintage'],
-    scopeOptions: ['Box', 'Certificate', 'Pouch'],
-    notes: 'weight in grams (number). karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color into a single value (24K/22K/21K only exist in Yellow). Mix = Two-Tone. Silver for non-gold silver items. item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch, Bar, Coin} (Bar/Coin for investment-grade pieces). diamond_weight in carats. description = keep it SHORT (max ~17 chars, only the essentials like "SOLITAIRE" or "TENNIS BRACELET") — it prints on a physical tag and longer text gets cut off.',
-  },
-  'cat-branded-gold-jewelry': {
-    name: 'BRANDED_GOLD_JEWELRY',
-    // 2026-05-17: color_type integriert in karat (z.B. "18K Rose", "14K Mix").
-    required: ['item_type', 'size', 'karat'],
-    optional: ['weight', 'diamond_weight', 'model_number', 'serial_number', 'certificate', 'box', 'description'],
-    conditionOptions: ['New', 'Pre-Owned', 'Vintage'],
-    scopeOptions: ['Box', 'Certificate', 'Papers', 'Pouch', 'Receipt'],
-    notes: 'karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color (Mix = Two-Tone; 24K/22K/21K only Yellow; Silver for non-gold). item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. weight in grams (optional). certificate and box are booleans. size can be ring-size or "Small"/"Medium" etc. description = keep it SHORT (max ~17 chars, only the essentials) — it prints on a physical tag and longer text gets cut off.',
-  },
-  'cat-original-gold-jewelry': {
-    name: 'ORIGINAL_GOLD_JEWELRY',
-    // 2026-05-17: color_type integriert in karat.
-    required: ['item_type', 'size', 'karat'],
-    optional: ['weight', 'diamond_weight', 'description'],
-    conditionOptions: ['New', 'Pre-Owned', 'Vintage', 'Antique'],
-    scopeOptions: ['Box', 'Certificate', 'Appraisal', 'Pouch'],
-    notes: 'karat ∈ {24K Yellow, 22K Yellow, 21K Yellow, 18K Yellow, 18K Rose, 18K White, 18K Mix, 14K Yellow, 14K Rose, 14K White, 14K Mix, Silver} — combine karat + color (Mix = Two-Tone; 24K/22K/21K only Yellow; Silver for non-gold). item_type ∈ {Ring, Bangle, Bracelet, Necklace, Pendant, Earrings, Brooch}. weight in grams (optional). For antique/heritage include provenance in description.',
-  },
-  'cat-accessory': {
-    name: 'ACCESSORY',
-    required: ['item_type', 'color', 'material', 'description'],
-    optional: ['model_number', 'serial_number', 'year', 'box', 'papers'],
-    conditionOptions: ['New', 'Pre-Owned'],
-    scopeOptions: ['Box', 'Dust Bag', 'Pouch', 'Papers'],
-    notes: 'item_type ∈ {Handbag, Eyeglass, Wallet, Lighter, Cufflinks, Prayer Beads, Walking Stick, Pen, Key Holder, Other}. material e.g. "Leather", "Canvas", "Metal". color free text. box and papers are booleans. year = production or purchase year if known (number).',
-  },
-  'cat-spare-part': {
-    name: 'SPARE_PART',
-    // 'model' attribute removed 2026-05-17 — gehört in den Universal-`name`-Feld.
-    // 'karat' integriert in `material` als Select.
-    required: ['part_type', 'material', 'original_or_copy', 'description'],
-    optional: [],
-    conditionOptions: ['New', 'Pre-Owned', 'Refurbished'],
-    scopeOptions: ['Packaging'],
-    notes: 'The compatible model/family (e.g. "Rolex Submariner Dial", "AP Royal Oak Strap") goes into the top-level "name" field. part_type ∈ {Dial, Bezel, Links, Crown, Strap, Buckle, Caseback, Movement, Crystal, Box, Other}. material ∈ {Steel, 18K YG, 18K RG, 18K WG, 14K YG, 14K RG, 14K WG, Steel/18K YG, Steel/18K RG, Steel/18K WG, Steel/14K YG, Steel/14K RG, Steel/14K WG} — YG/RG/WG = Yellow/Rose/White Gold; Steel/<gold> = Bicolor (e.g. Rolesor links). original_or_copy ∈ {Original, Copy}. description = keep it SHORT (max ~17 chars, only the essentials) — it prints on a physical tag and longer text gets cut off.',
-  },
-};
+// MOBILE-I1B §1 — the category specs and the prompt now live in `identify-contract.json`, the ONE
+// contract the embedded Rust server reads for `/api/ai/identify` as well. Extracted from the shipped
+// v0.8.37 text character for character; `test/ai/identify-contract-parity.test.ts` rebuilds the
+// prompt from commit ff038ad and fails if a single character differs, so the live-validated desktop
+// behaviour cannot drift while the two surfaces share one source.
 
 export async function identifyProduct(params: {
   categoryId: AiCategoryId;
@@ -410,158 +344,20 @@ export async function identifyProduct(params: {
    *  Aufbau via getRecentCorrectionsAsPrompt(brand, categoryId). */
   recentCorrections?: string;
 }): Promise<AiProductIdentification> {
-  const spec = CATEGORY_SPECS[params.categoryId];
+  const spec = categorySpec(params.categoryId);
   if (!spec) throw new Error(`Unknown category: ${params.categoryId}`);
 
   const hintsText = params.hints
     ? Object.entries(params.hints).filter(([, v]) => !!v).map(([k, v]) => `${k}: ${v}`).join('\n')
     : '';
 
-  const systemPrompt = `You are a world-class luxury goods appraiser and authentication expert with 30 years of experience at Christie's, Sotheby's, and Phillips.
-Specialize in watches, fine jewelry, designer bags, accessories, and spare parts.
+  // MOBILE-I1B §1 — both prompts come from the shared contract. The watch-only suffix and the
+  // hints/no-hints wording are part of that contract too, so the mobile route sends the identical
+  // instruction rather than a lookalike written twice.
+  const systemPrompt = buildSystemPrompt(params.categoryId);
+  const userText = buildUserPrompt(params.categoryId, hintsText);
 
-Your task: identify this ${spec.name} item with EXTREME specificity and research-grade accuracy.
-
-**Category**: ${spec.name}
-**Required attributes to fill**: ${spec.required.join(', ')}
-**Optional attributes**: ${spec.optional.join(', ')}
-**Condition options**: ${spec.conditionOptions.join(' | ')}
-**Scope-of-delivery options** (multi-select): ${spec.scopeOptions.join(' | ')}
-**Format notes**: ${spec.notes}
-
-**JEWELER MINDSET — DIFFERENTIAL DIAGNOSIS (MANDATORY before any final answer)**:
-Think like a watchmaker examining a piece on the bench. Do NOT jump to the first plausible reference.
-Process:
-1. **Survey** — note ALL visible details: dial color, dial markers (Roman/baton/diamond/Arabic), bezel (smooth/fluted/diamond-set/ceramic), bracelet (Oyster/Jubilee/President/leather/integrated), case material (steel/two-tone/yellow gold/white gold/Everose), lugs (sharp/rounded/integrated), crown guard (yes/no), date window (with/without cyclops), complications (chronograph/GMT/moonphase), hand style.
-2. **List 3 plausible candidates** with the canonical references for each. Example: a stainless Datejust with silver dial could be 126200 (smooth bezel, oyster), 126234 (fluted bezel, jubilee), 116200 (older 36mm). For each candidate, state ONE strongest VISUAL discriminator that supports OR refutes it.
-3. **Discrimination cues to apply** (specific to common families):
-   - **Rolex Datejust 36 vs 41**: 41mm has wider dial-to-bezel ratio + proportionally smaller crown; 36mm has crown taking ~12% of case diameter, classic chest proportions, smaller lugs.
-   - **Datejust New (super-case 2010+) vs Old**: New = bolder lugs, "maxi" indices, wider bracelet end-links, crown guard impression even on DJ; Old (pre-2009) = thinner lugs, smaller indices, slimmer overall.
-   - **Datejust special editions**: Wimbledon (slate dial + Roman numerals in green/silver), Palm (green palm-leaf pattern dial), Fluted Motif (engraved dial pattern), Mother-of-Pearl (iridescent), Diamond dial (markers replaced by diamonds), Big-Diamond bezel (5-stone or pave) — note all explicitly.
-   - **Submariner Hulk (116610LV)** vs **Kermit (16610LV)** vs **Starbucks (126610LV new 41mm)**: Hulk = green dial+green bezel, 40mm, 2010-2020. Kermit = black dial+green bezel, 40mm, 2003-2010. Starbucks = black dial+green bezel modern, 41mm wider case, ceramic bezel, post-2020.
-   - **GMT Pepsi vs Coke vs Batman vs Sprite**: red/blue, red/black, black/blue, black/green. Bracelet: Jubilee (126710BLRO/BLNR) or Oyster (126710BLNR/BLRO oyster also exists for some).
-   - **Daytona 116500LN vs 116520**: 116500 = ceramic bezel post-2016. 116520 = aluminum bezel 2000-2016 (collectible "APH" dial variants).
-   - **Patek Nautilus 5711/1A**: -010 = blue dial, -014 = white dial Tiffany not, -018 = Tiffany-Blue dial (rare), Tiffany & Co cobranded = signature on dial.
-   - **AP Royal Oak Jumbo** (15202): 39mm extra-thin tonneau case, integrated bracelet, "Petite Tapisserie" dial; vs **Royal Oak 15500** = 41mm modern, "Grande Tapisserie".
-4. **Confidence Self-Rating** — output an extra top-level field "identificationConfidence": one of "high" | "medium" | "low". HIGH = visible reference engraving or all-clear DD-cues match exactly. MEDIUM = strong visual identification but no engraving + 1-2 small features ambiguous. LOW = best-guess from visible features but uncertain on variant. If LOW or worse, prefer null in reference_number and explain in notes.
-5. **Output** — in notes field, write a 1-line "DD trail": "Considered: A, B, C. Chose B because: [cue]. Ruled out A because: [cue]. Ruled out C because: [cue]."
-
-**Rules**:
-- Identify brand + exact model/reference/collection name — include nicknames where applicable (e.g. "Submariner 'Hulk'", "6062 'Dark Star'", "Cartier Love", "Bulgari Serpenti", "Van Cleef Alhambra")
-- **WATCHES (CRITICAL — these three together identify the watch)**:
-  1. **reference_number**: the EXACT manufacturer reference. Two valid sources:
-     (i) **READ** from visible markings — dial bottom text, caseback engraving, between lugs (Rolex), or papers in the photo.
-     (ii) **INFER FROM MODEL** — once you've identified the specific variant visually (dial color, bezel material, generation, complications, hand type), apply your model knowledge to fill the canonical factory reference. This is the COMMON case for casual photos where engraving isn't visible.
-     Examples of inferring:
-       - Rolex Submariner with green bezel + green dial → 116610LV ("Hulk")
-       - Rolex Submariner Date stainless black bezel modern → 126610LN
-       - Rolex GMT-Master II with red/blue bezel jubilee bracelet → 126710BLRO ("Pepsi")
-       - Patek Nautilus 40mm steel blue dial → 5711/1A-010 (or /1A-018 if Tiffany-blue dial)
-       - AP Royal Oak Jumbo Extra-Thin steel blue dial → 15202ST.OO.1240ST
-       - Cartier Tank Must Large quartz silver dial steel → WSTA0041 family
-       - Datejust 36mm fluted bezel jubilee silver dial → 126234 family; with smooth bezel oyster bracelet → 126200
-     NEVER substitute family-name (e.g. "Submariner") for a reference. Format examples by brand:
-     - Rolex: 4-6 digits vintage ("1601", "6062") or modern alphanumeric ("126610LN", "126710BLRO", "116500LN")
-     - Patek Philippe: with slashes ("5711/1A-010", "5990/1A", "5167A-001")
-     - Audemars Piguet: long codes ("15500ST.OO.1220ST.01", "26331ST.OO.1220ST.01")
-     - Omega: dotted numerics ("310.30.42.50.01.001", "311.30.42.30.01.005")
-     - Cartier: "WSSA0030", "W31044M7", "WGNM0017"
-     - Vacheron / Lange / IWC / JLC: 4-7 digit numerics often with letters ("4500V/110A-B128", "IW371417", "Q1378420")
-     **Only return null** if you genuinely cannot identify even the model+variant — i.e. the watch is so obscured/unknown that you can't put a specific name in the name field either. If you can identify the variant, ALWAYS attempt the canonical reference. State your inference path in notes (example: "ref inferred from green bezel + green dial + jubilee bracelet → 116610LV Hulk").
-  2. **name** (top-level, NOT in attributes — the exact collector name): include the family AND the nickname/variant (e.g. "Submariner Date 'Hulk'", "GMT-Master II 'Pepsi'", "Daytona 'Panda'", "Royal Oak Jumbo Extra-Thin", "Nautilus 5711/1A 'Tiffany'"). NEVER just "Submariner" — always specify the variant.
-  3. **case_diameter_mm**: case width in mm — DETERMINED, NEVER GUESSED. Priority order:
-     **(a) REFERENCE-DRIVEN** — if you read a reference number, the size is FIXED by that reference. Apply this lookup table strictly:
-        Rolex: 116610LN/126610LN=40/41, 124060=41, 126613=41, 116710/126710=40, 116500/126500=40, 116500/126500=40, 116519=40, 126200=36, 126233/126234=36, 126331/126333/126334=41, 126710BLRO=40, 126281=36, 126331=41, 126301=41, 116200/116234=36, 178200/178240=31, 116000=36, 6541=36 (vintage), 6062=36 (vintage), 1601/1603=36, 1675=40, 5512/5513=40, 5500=34, 1500=34, 1700=36, GMT-Master II 126710=40, Day-Date 36mm=128238/118238/118208, Day-Date 40mm=228238/228239, Datejust 31=178274/178240/178344, Datejust 36=126200/126234/126233/116200/116234/116231, Datejust 41=126300/126301/126331/126333/126334/116300/116333/116334
-        Patek: 5711/1A=40, 5712/1A=40.5, 5990/1A=40.5, 5980/1A=40.5, 5167A=40, 5168G=42.2, 5740/1G=40, 6300=44.8, 5212A=40, 5170=39.4, 5524G=42, 5230=38.5
-        AP: 15500ST=41, 15400ST=41, 15300ST=39, 15202ST (Jumbo Extra-Thin)=39, 15703ST=42, 26331ST (Chrono)=41, 26240ST=41, 26715ST=37, 26579CE=42, 26420SR=41, Offshore 26170=42, Offshore 26470=42
-        Omega: Speedmaster Pro 311.30.42.30=42, Seamaster Diver 300m 210.30.42=42, Seamaster Aqua Terra 220.10.41=41 / 220.10.38=38 / 220.10.34=34, Constellation 131.10.39=39 / 131.10.36=36 / 131.10.29=29
-        Cartier: Tank Must Large=33.7x25.5, Tank Must Medium=31x27, Tank Must Small=28x22, Tank Solo Medium=31x27, Santos Medium=35.1x41.9, Santos Large=39.8x47.5, Panthere Medium=27, Panthere Large=27, Ballon Bleu 36=36 / 33=33 / 28=28, Roadster=37 (Medium)
-        IWC: Portugieser 7-Day=42.3 (IW500107), Portofino 40=40 (IW356501), Big Pilot 43=43 (IW501001/IW329301), Aquatimer 42=42, Mark XX=40
-        JLC: Reverso Tribute Small Seconds=45.6x27.4, Reverso Classic Medium=40x24.4, Master Ultra Thin Small Seconds 39=39 / 36=36 / 34=34, Polaris Date=42
-        Lange: Lange 1=38.5, Lange 1 Small=36.8, Saxonia Thin 37=37 / 39=39, Datograph=39 / 41=41, Odysseus=40.5
-        Vacheron: Patrimony 36=36 / 40=40 / 42=42, Overseas 41=41 / 35=35, Traditionnelle=38 / 39 / 40 / 41 / 42 / 44 (per ref)
-        Tudor: BB Pro=39, BB58=39, BB GMT=41, BB36=36, BB41=41, BB54=37, Pelagos=42, Pelagos 39=39, Royal=28/34/38/41 per ref
-     **(b) VISUAL PROPORTION** — if reference is NOT readable, measure from the photo: lug-to-lug span vs. wrist or strap width gives you ratio. Crown size, dial vs case ratio. State your visual evidence in the notes field. Confidence range ±1mm acceptable.
-     **(c) NEVER DO**: do NOT default to 40, do NOT round to "40-41", do NOT skip the field. If you cannot decide, return null AND state in notes "case_diameter_mm: unclear — needs caliper measurement".
-     **(d) RELATIVE GEOMETRY — MANDATORY** (measure these from the image, write the ratios as decimals in notes field):
-        - bezel_dial_ratio = bezel-outer-diameter / dial-opening-diameter. Sport models (Sub/GMT/Daytona) ~1.18-1.22; dress (Datejust 36) ~1.10-1.14; Datejust 41 ~1.12-1.15.
-        - crown_case_ratio = crown-diameter / case-diameter. 36mm DJ ~0.115-0.125 (visually prominent crown); 41mm DJ ~0.095-0.105 (smaller-looking crown); Submariner 40 ~0.095; AP Royal Oak ~0.085.
-        - lug_case_ratio = lug-tip-to-tip / case-diameter. Modern Rolex sport ~1.18-1.20; modern DJ ~1.20; Patek Nautilus 5711 ~1.20 (flat ears); AP Royal Oak ~1.27 (integrated bracelet); IWC Portugieser ~1.20.
-        - date_window_ratio = date-window-width / dial-radius. Rolex cyclops 3-o'clock ~0.18-0.22 (large magnified); Patek/AP unmagnified ~0.10-0.12.
-        Use these ratios as PRIMARY size-discriminator: if measured crown_case_ratio >= 0.115 → likely 36mm DJ, if <= 0.105 → likely 41mm DJ.
-     **(e1) LUGS — MANDATORY EXAMINATION** (specific lug profile distinguishes generations):
-        - **Lug-tip-to-tip span**: state in mm (e.g. "lugs ~48mm tip-to-tip on a 41mm case = lug ratio 1.17"). Use this AS PRIMARY scale anchor when wrist not visible.
-        - **Lug shape**: sharp-edged vs polished-rounded vs integrated. Rolex pre-2010 = thinner/sharper lugs; "super-case" 2010+ = thicker/wider lugs with polished bevels. Patek Nautilus = horizontal "ears" (flat-topped, integrated). AP Royal Oak = no separate lugs, case extends into bracelet (octagonal bezel screws). IWC Portugieser = thin straight lugs, no bevel.
-        - **Lug width (where the strap attaches)**: critical for reference identification — Rolex DJ36 = 20mm strap, DJ41 = 21mm strap, Sub 40 = 20mm, Sub 41 (126610) = 21mm, AP Jumbo = 21mm integrated, Patek Nautilus = 21mm integrated, Speedmaster Pro = 20mm. Measure strap-width-vs-case visually and use as cross-check.
-     **(e2) CROWN / WINDER — MANDATORY EXAMINATION**:
-        - **Crown shape + signing**: Rolex modern = fluted edges with raised coronet (crown emblem) on top — count the small dots below the coronet: 3 dots = Triplock (sport models / dive watches), 1 dot = Twinlock (dress / Datejust). Omega = "Ω" symbol on crown. Cartier = blue spinel cabochon (Tank, Santos). IWC = polished disc. Patek = engraved Calatrava-cross.
-        - **Crown guard**: Submariner / GMT / Daytona / DeepSea = pronounced crown shoulders flanking the crown. Datejust / Day-Date / Explorer = NO crown guard. If you see crown guard → never Datejust. If no crown guard → never Sub/GMT.
-        - **Screw-down vs Push-pull**: water-resistant sport models have screw-down crowns (visible thread pattern when partially unscrewed); dress watches have push-pull.
-     **(e3) SWISS-MADE SIGNATURE — MANDATORY at 6 o'clock**:
-        - Rolex modern: "SWISS MADE" with a tiny coronet (crown ♛ symbol) BETWEEN "SWISS" and "MADE" — this is the genuine maker's mark since ~2008. If you see this, it's a real modern Rolex.
-        - Rolex vintage: just "SWISS" alone (pre-1971 with tritium dots) or "T SWISS T" (tritium, 1971-1998) or "SWISS — T < 25" (post-1971).
-        - Patek Philippe: "PATEK PHILIPPE" + "GENEVE" on dial, "SWISS" small at 6, sometimes "PP" hallmark on caseback.
-        - AP: "SWISS MADE" at 6 in same script as Royal Oak applied logo.
-        - Omega: "SWISS MADE" without symbol; case has "Ω" hallmark.
-        - Cartier: "SWISS MADE" stamped at bottom + secret signature near 7 (anti-counterfeit) on Roman numeral VII.
-        State EXPLICITLY in notes which Swiss-Made signature you observed and what brand it confirms. If the signature contradicts the brand you concluded, lower confidence to "low" and reconsider.
-     **(e) WRIST + STRAP CONTEXT — calibration anchors** (if visible, use as scale):
-        - On-wrist photo: average male wrist width = 17cm, female = 15cm. Measure watch case width as fraction of wrist width visible. E.g. case spans 45% of a 17cm wrist → ~38mm. Cross-check with model defaults.
-        - Strap-only / flat photo: standard lug widths by case size — 36mm case→ 20mm strap (Rolex DJ36 = 20mm), 40-41mm case → 20-21mm (Sub/GMT = 20mm, DJ41 = 21mm), Royal Oak Jumbo 39 = 21mm integrated. Measure strap width relative to case to derive case mm.
-        - Camera distance / perspective: if image is shot top-down (orthographic) the ratios above are reliable; if angled, dial appears compressed — account for foreshortening and prefer reference-derived size.
-        Write your chosen calibration anchor in notes ("scale anchor: 17cm wrist" or "scale anchor: 20mm strap").
-     **(f) DISTINCTIVE 41 vs 36 GUIDE** (Datejust pain point, summary): apply (d) + (e). 36mm DJ has visually prominent crown (crown_case_ratio ~0.12, classic dial-marker-to-edge gap), 41mm DJ has more-square dial-vs-bezel proportion (bezel_dial_ratio ~1.13) with proportionally smaller crown. Count 5-minute markers vs dial edge gap as tie-breaker.
-  4. Plus: year range, complications (chronograph, GMT, moonphase, day-date, perpetual calendar), dial color + indices, bezel material, strap type.
-- For branded jewelry: maker, collection, variant, metal, stones
-- For unbranded gold: weight (estimate from image), karat (estimate), craft style
-- For accessories: maker, collection, leather/material, hardware, edition
-- For spare parts: put the compatible model/family into the top-level "name" field; include generation, original vs aftermarket
-- Research current market value in BHD (1 BHD ≈ 2.65 USD). Provide realistic mid-market price for Bahrain/GCC.
-- Purchase price estimate: what a dealer might pay (usually 60-75% of market value)
-- Min/Max sale price: reasonable floor/ceiling for our resale
-- Scope-of-delivery: infer from image (visible box, papers, etc.) and return only items from the provided list
-- Description: professional 2-4 sentence catalog copy highlighting key features, market positioning, target audience
-- Notes: anything noteworthy for internal tracking (condition details, provenance hints, authenticity flags)
-
-**SKU suggestion**: propose a short uppercase SKU pattern: 3-letter brand-code + 3-letter model/type-code + 3-digit running number "001" — e.g. Rolex Submariner → "RLX-SUB-001", Cartier Love → "CAR-LOV-001", Hermes Birkin → "HER-BIR-001", generic gold necklace → "GLD-NCK-001", Paul Newman dial spare part → "RLX-DIA-001". Never reuse an obvious fake/serial — this is an internal reference, not the real serial.
-
-**Tax scheme suggestion**: MARGIN for pre-owned/vintage/second-hand (most luxury resale), VAT_10 for brand-new retail items, ZERO for exempt (rare — exported goods etc). Default to MARGIN when unsure.
-
-**Storage location suggestion**: short hint based on item — "Safe" for high-value watches/jewelry, "Display Case A" for accessories, "Parts Drawer" for spare parts.
-
-Respond with JSON ONLY, no markdown. Structure:
-{
-  "brand": "",
-  "name": "",
-  "sku": "",
-  "condition": "",
-  "description": "",
-  "estimatedValue": 0,
-  "purchasePriceEstimate": 0,
-  "minSalePrice": 0,
-  "maxSalePrice": 0,
-  "scopeOfDelivery": [],
-  "taxScheme": "MARGIN",
-  "storageLocation": "",
-  "notes": "",
-  "referenceSource": "",
-  "marketComparables": "",
-  "identificationConfidence": "medium",
-  "attributes": { ${spec.required.map(k => `"${k}": null`).concat(spec.optional.map(k => `"${k}": null`)).join(', ')} }
-}
-
-Set fields to null/empty ONLY if truly indeterminable. Never guess serial numbers. For numeric fields (weight, karat numerical like "18K"→18, caseSize, year, price) return numbers, not strings. For booleans (box, papers, certificate) return true/false. For selects return the exact string from the allowed options.`;
-
-  const watchExtra = params.categoryId === 'cat-watch'
-    ? '\n\nFor this WATCH, the three CRITICAL fields are reference_number (exact factory ref like "126610LN", not "Submariner"), the top-level "name" field (full collector name including nickname like "Submariner Date \'Hulk\'" — NOT inside attributes), and case_diameter_mm (numeric mm of the case). Look carefully at: dial bottom text, caseback engravings, between-lugs marking, crown engraving, papers/box if visible. If you cannot read the reference, infer it from dial config + bezel + case + hands combination. Never return a family name as the reference.'
-    : '';
-
-  const userContent: any[] = [];
-  if (hintsText) {
-    userContent.push({ type: 'text', text: `User-provided hints:\n${hintsText}\n\nIdentify the item and fill out ALL category fields for "${spec.name}".${watchExtra}` });
-  } else {
-    userContent.push({ type: 'text', text: `Identify this ${spec.name} item and fill out ALL category fields. Use every visual detail you can extract.${watchExtra}` });
-  }
+  const userContent: any[] = [{ type: 'text', text: userText }];
   if (params.imageBase64) {
     userContent.push({ type: 'image_url', image_url: { url: params.imageBase64 } });
   }
@@ -575,8 +371,8 @@ Set fields to null/empty ONLY if truly indeterminable. Never guess serial number
       { role: 'system', content: fullSystemPrompt },
       { role: 'user', content: userContent.length > 1 ? userContent : userContent[0].text },
     ],
-    1200,
-    0.2
+    AI_MODEL_PARAMS.maxTokens,
+    AI_MODEL_PARAMS.temperature,
   );
 
   try {

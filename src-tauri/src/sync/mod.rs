@@ -33,6 +33,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tower_http::cors::{Any, CorsLayer};
 
+/// MOBILE-I1B §1 — the shared AI-identify contract, Rust side. Reads the SAME
+/// `identify-contract.json` the desktop client imports; a fingerprint test fails the build if the
+/// two prompt assemblies ever differ.
+pub mod ai_identify;
 pub mod auth;
 /// M6-B2C — authority certificates and host transfer. INACTIVE: no route consults them.
 pub mod authority;
