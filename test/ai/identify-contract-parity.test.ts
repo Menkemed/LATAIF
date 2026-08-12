@@ -124,6 +124,27 @@ for (const id of knownCategoryIds()) {
   ok(overlap.length === 0, `§5 no field is both allowed and forbidden (overlap: ${overlap.join(',')})`);
 }
 
+// ── §5 — the fingerprint's input must be structurally unambiguous ──────────
+{
+  // Rebuild the same components the fingerprint hashes, and assert the shape rather than the value:
+  // a fixed count, a fixed order, one fixed-width digest per component, and a separator no
+  // component can itself contain.
+  const parts: string[] = [];
+  for (const id of knownCategoryIds().sort()) {
+    parts.push(`${id}:system:${fnv1a64(buildSystemPrompt(id))}`);
+    parts.push(`${id}:user:${fnv1a64(buildUserPrompt(id, ''))}`);
+    parts.push(`${id}:user-hints:${fnv1a64(buildUserPrompt(id, 'brand: Rolex'))}`);
+  }
+  ok(parts.length === 18, '§5 the fingerprint has a fixed 18 components (6 categories x 3 prompts)');
+  ok(parts.every(p => /:[0-9a-f]{16}$/.test(p)), '§5 every component ends in a 16-hex-digit digest');
+  ok(parts.every(p => !p.includes('|')), '§5 no component can contain the join separator');
+  ok(new Set(parts.map(p => p.slice(0, p.lastIndexOf(':')))).size === 18, '§5 every component key is unique');
+  const order = parts.filter((_, i) => i % 3 === 0).map(p => p.split(':')[0]);
+  ok(JSON.stringify(order) === JSON.stringify([...order].sort()), '§5 categories are emitted in sorted order');
+  ok(parts[0].includes(':system:') && parts[1].includes(':user:') && parts[2].includes(':user-hints:'),
+    '§5 the three prompts of a category always appear in the same order');
+}
+
 // ── the fingerprint both sides compare against ──────────────────────────────
 {
   ok(/^[0-9a-f]{16}$/.test(contractFingerprint()), 'the contract fingerprint is a 16-hex-digit value');

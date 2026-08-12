@@ -34,6 +34,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/media", get(media_blob))
         // MOBILE-I1 — stock checking. Same core, same table as the desktop Tauri command.
         .route("/stock-checks", post(stock_check_create).get(stock_check_list))
+        // MOBILE-I1C — server-side AI identify. The phone sends image BYTES; the key is read here
+        // and never travels. Same JWT layer and body limit as every other /api route.
+        .route("/ai/identify", post(ai_identify_route))
         // MOBILE-04B2A8-I1 — authenticated mobile upload ingress. Separate route; `/sync/push` above is
         // untouched. Same JWT auth layer + the same 50 MB body limit (build_api_router) as every /api route.
         .route("/mobile/upload", post(mobile_upload_ingress))
@@ -1124,6 +1127,41 @@ async fn stock_check_list(
     Ok(Json(serde_json::json!({ "checks": checks, "latest": latest })))
 }
 
+/// MOBILE-I1C §1–§3 — identify a photo for the mobile capture form.
+///
+/// Scope comes from the token; the body may only carry a category and image bytes. The answer is
+/// filtered to the shared allow-list before it is returned, so a price or quantity the model
+/// volunteered never reaches the phone at all — not merely "is ignored by the form".
+async fn ai_identify_route(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    if claims.role.trim().is_empty() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if !is_json_content_type(&headers) {
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let raw = std::str::from_utf8(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let req: super::ai_route::AiIdentifyRequest =
+        serde_json::from_str(raw).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let app_dir = state
+        .frontend_db_path
+        .parent()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match super::ai_route::identify(app_dir, &req).await {
+        Ok(result) => Ok((StatusCode::OK, Json(serde_json::json!({ "result": result })))),
+        Err(e) => {
+            let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST);
+            Ok((status, Json(serde_json::json!({ "error": e.code() }))))
+        }
+    }
+}
+
 /// Best-effort display name for the person who recorded a check. Absent is fine — the check is
 /// still valid and still attributed by `checked_by`; only the label is missing.
 fn user_display_name(db: &rusqlite::Connection, user_id: &str) -> Option<String> {
@@ -1332,6 +1370,11 @@ mod legacy_push_tests {
                 "/sync/push", "/sync/pull", "/me",
                 "/products/by-sku/{sku}", "/products/by-id/{id}", "/products/search",
                 "/media", "/stock-checks",
+                // MOBILE-I1C — /ai/identify: a WRITE-shaped POST that writes nothing. It reads the
+                // OpenAI key on this machine, calls one compile-time-constant endpoint and returns a
+                // filtered patch; it touches no database and no file. The client may send image
+                // bytes, never a path or a URL, so it cannot be turned into a fetch primitive.
+                "/ai/identify",
                 "/mobile/upload", "/auth/login", "/health",
             ],
             "Routenmenge geaendert — Modusmatrix und Gate neu bewerten"

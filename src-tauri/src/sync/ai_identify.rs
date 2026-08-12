@@ -136,7 +136,24 @@ pub fn contract_fingerprint() -> String {
             fnv1a64(&build_user_prompt(id, "brand: Rolex").unwrap_or_default())
         ));
     }
+    debug_assert_eq!(lines.len(), contract().categories.len() * 3);
     fnv1a64(&lines.join("|"))
+}
+
+/// The fingerprint's INPUT lines, exposed so a gate can assert its structure rather than only its
+/// value: a fixed count, a fixed order, and one fixed-width digest per component. Without that, an
+/// ambiguous concatenation could produce a matching hash for two different contracts.
+pub fn fingerprint_components() -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for id in contract().categories.keys() {
+        lines.push(format!("{id}:system:{}", fnv1a64(&build_system_prompt(id).unwrap_or_default())));
+        lines.push(format!("{id}:user:{}", fnv1a64(&build_user_prompt(id, "").unwrap_or_default())));
+        lines.push(format!(
+            "{id}:user-hints:{}",
+            fnv1a64(&build_user_prompt(id, "brand: Rolex").unwrap_or_default())
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]

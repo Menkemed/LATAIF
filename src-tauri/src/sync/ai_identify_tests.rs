@@ -106,3 +106,38 @@ fn money_quantity_and_system_fields_are_denied_for_mobile() {
         assert!(!c.mobile_forbidden_fields.contains(a), "{a} cannot be both allowed and forbidden");
     }
 }
+
+/// MOBILE-I1C §5 — the fingerprint may stay separator-free only while its input is unambiguous:
+/// a fixed number of components, a fixed order, and each component ending in a fixed-width digest.
+#[test]
+fn the_fingerprint_input_is_structurally_unambiguous() {
+    let parts = fingerprint_components();
+    assert_eq!(parts.len(), 18, "6 categories x 3 prompts - a fixed count, not a variable list");
+    assert_eq!(parts.len(), contract().categories.len() * 3);
+
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, line) in parts.iter().enumerate() {
+        let (head, digest) = line.rsplit_once(':').expect("every component ends in :<digest>");
+        assert_eq!(digest.len(), 16, "component {i} digest must be fixed width: {line}");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()), "component {i} must end in hex");
+        assert!(seen.insert(head.to_string()), "component key {head} appears twice");
+        let kind = head.rsplit(':').next().unwrap();
+        assert!(matches!(kind, "system" | "user" | "user-hints"), "unexpected kind {kind}");
+    }
+
+    // Fixed order: sorted category ids, and within a category always system, user, user-hints.
+    let ids: Vec<&str> = parts.iter().step_by(3).map(|l| l.split(':').next().unwrap()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted, "categories must be emitted in sorted order");
+    for chunk in parts.chunks(3) {
+        assert!(chunk[0].contains(":system:"));
+        assert!(chunk[1].contains(":user:"));
+        assert!(chunk[2].contains(":user-hints:"));
+    }
+
+    // A separator can never be produced BY a component, so the join stays unambiguous.
+    for line in &parts {
+        assert!(!line.contains('|'), "a component must not contain the join separator: {line}");
+    }
+}

@@ -131,6 +131,11 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
       <div class="hint">or choose from gallery</div>
     </label>
     <input id="cPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" />
+    <!-- MOBILE-I1C §4 — identification is a SUGGESTION step. It fills empty fields from the photo
+         and is only offered once a photo exists; the photo, the quantity and anything already typed
+         are never touched by it. -->
+    <button id="cAiBtn" class="ghost hidden" style="margin-top:12px;">✨&nbsp; AI Identify</button>
+    <div id="cAiMsg" style="font-size:12px; margin-top:8px;"></div>
   </div>
 
   <div class="card">
@@ -951,6 +956,104 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   const EMPTY_R = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">photograph the item at intake</div>';
   const EMPTY_B = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">snap the item you bought</div>';
   bindPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', 'cError', EMPTY_C);
+
+  // ── MOBILE-I1C §4 — AI Identify on the capture form ────────────────────────
+  //
+  // A SUGGESTION, applied field by field onto the CURRENT form. The rules, in order of how much
+  // they matter:
+  //   • the photo is never touched — identification reads it, nothing writes it;
+  //   • the quantity is never touched — how many pieces are on the counter is a human's count,
+  //     and the model has no way to know it;
+  //   • a field the operator already filled is never overwritten — only gaps are filled;
+  //   • a field the model did not recognise leaves the existing value alone.
+  // The server already stripped every price and system field (shared allow-list), so nothing here
+  // has to remember to avoid them — but the merge below only ever touches named identity fields
+  // anyway, which is the second line of the same defence.
+  function aiApplyToForm(result) {
+    let filled = 0;
+    const setIfEmpty = (id, value) => {
+      const el = $(id);
+      if (!el || value == null || value === '') return;
+      if (String(el.value || '').trim() !== '') return;   // an operator decision always wins
+      el.value = value;
+      filled++;
+    };
+    setIfEmpty('cBrand', result.brand);
+    setIfEmpty('cName', result.name);
+
+    // Condition is a select: adopt only when the value is actually one of the offered options.
+    const cond = $('cCondition');
+    if (cond && result.condition && !String(cond.value || '').trim()) {
+      const match = Array.from(cond.options).find(o => o.value && o.value.toLowerCase() === String(result.condition).toLowerCase());
+      if (match) { cond.value = match.value; filled++; }
+    }
+
+    // Category attributes, keyed exactly as renderCollectionFields created them.
+    const attrs = result.attributes || {};
+    for (const key of Object.keys(attrs)) {
+      const el = $('attr_' + key);
+      if (!el) continue;                        // not a field of the chosen category → dropped
+      if (el.tagName === 'SELECT') {
+        if (String(el.value || '').trim() !== '') continue;
+        const opt = Array.from(el.options).find(o => o.value && o.value.toLowerCase() === String(attrs[key]).toLowerCase());
+        if (opt) { el.value = opt.value; filled++; }
+      } else if (el.tagName === 'INPUT') {
+        if (String(el.value || '').trim() !== '') continue;
+        el.value = attrs[key];
+        filled++;
+      }
+    }
+    return filled;
+  }
+
+  let aiBusy = false;
+  function showAiButton() {
+    const btn = $('cAiBtn');
+    if (!btn) return;
+    if (photos.collection) btn.classList.remove('hidden'); else btn.classList.add('hidden');
+  }
+  // The capture flow sets photos.collection; poll cheaply rather than reaching into bindPhoto.
+  setInterval(showAiButton, 400);
+
+  if ($('cAiBtn')) $('cAiBtn').onclick = async () => {
+    if (aiBusy) return;
+    const msg = $('cAiMsg');
+    if (!photos.collection) { if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'Take a photo first.'; } return; }
+    aiBusy = true;
+    $('cAiBtn').textContent = 'Identifying…';
+    if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Reading the photo…'; }
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch('/api/ai/identify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({
+          category_id: $('cCategory').value,
+          image: photos.collection,
+          hints: [$('cBrand').value, $('cName').value].filter(Boolean).join(' ').trim() || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        // §4 — a failure changes NOTHING. The photo, the quantity and every typed value stay put,
+        // and the operator can simply fill the form in by hand and upload as before.
+        if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = data.error ? String(data.error) : ('Identify failed (' + res.status + ').'); }
+      } else {
+        const filled = aiApplyToForm(data.result || {});
+        if (msg) {
+          msg.style.color = filled ? '#7FA87F' : '#6B6B73';
+          msg.textContent = filled
+            ? ('Filled ' + filled + ' empty field' + (filled === 1 ? '' : 's') + ' — please check before saving.')
+            : 'Nothing new recognised — your entries are unchanged.';
+        }
+      }
+    } catch (e) {
+      if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'Identify unavailable — you can still fill the form and upload.'; }
+    } finally {
+      aiBusy = false;
+      $('cAiBtn').textContent = '✨  AI Identify';
+    }
+  };
   bindPhoto('repair', 'rPhotoArea', 'rPhotoInput', 'rPhotoStatus', 'rError', EMPTY_R);
   bindPhoto('purchase', 'bPhotoArea', 'bPhotoInput', 'bPhotoStatus', 'bError', EMPTY_B);
 

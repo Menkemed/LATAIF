@@ -37,6 +37,10 @@ use tower_http::cors::{Any, CorsLayer};
 /// `identify-contract.json` the desktop client imports; a fingerprint test fails the build if the
 /// two prompt assemblies ever differ.
 pub mod ai_identify;
+/// MOBILE-I1C §1-§3 — server-side execution of that contract for `/api/ai/identify`. Reads the
+/// OpenAI key on THIS machine, never returns or logs it, and filters the answer down to the shared
+/// allow-list so no price or quantity can reach the mobile form.
+pub mod ai_route;
 pub mod auth;
 /// M6-B2C — authority certificates and host transfer. INACTIVE: no route consults them.
 pub mod authority;

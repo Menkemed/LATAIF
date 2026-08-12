@@ -67,6 +67,12 @@ base64 = "0.22"
 hmac = "0.12"
 hkdf = "0.12"
 
+# MOBILE-I1C §1 — the mobile AI route calls OpenAI from the PRIMARY, so the API key never leaves this
+# machine. reqwest 0.13 with rustls is already in Cargo.lock (resolved transitively), and the TLS
+# stack is the same `rustls` the mobile HTTPS listener uses — so this adds a direct dependency edge,
+# not a new crate, a second TLS implementation or a lockfile change.
+reqwest = { version = "0.13", features = ["json"] }
+
 # M5-B — native WebView2-Reload-Bruecke (F5/Ctrl+R). Nur Windows. Bewusst auf die von wry
 # bereits transitiv genutzten Versionen unifiziert (Cargo.lock pinnt webview2-com 0.38.2 /
 # windows 0.61.3), damit der ICoreWebView2Controller-Typ von PlatformWebview::controller()
