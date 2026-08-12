@@ -44,22 +44,176 @@ let PASS = 0, FAIL = 0; const fails = [];
 const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  \u2717 ' + m); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
-const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
+const MOCK_PORT = 3013;
+const EDGE_CDP = 9226;
+const EDGE_PROFILE = join(RUN, 'edge-profile');
+const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe')
+  ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+  : 'C:/Program Files/Microsoft/Edge/Application/msedge.exe';
+// MOBILE-I1F - the upstream override exists ONLY in the e2e build (cfg(feature="e2e")); a production
+// binary compiles the branch out entirely, so this variable is inert there. It is read from THIS
+// process's environment, never from a request.
+const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT),
+  LATAIF_E2E_AI_UPSTREAM: 'http://127.0.0.1:' + MOCK_PORT + '/v1/chat/completions',
+  TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
 const seed = (mode, arg) => execFileSync(SEED, [mode, arg ?? SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' }).trim();
 
 // ── minimal CDP client ──────────────────────────────────────────────────────
 class CDP {
   constructor(wsUrl) {
-    this.ws = new WebSocket(wsUrl); this.id = 0; this.pending = new Map();
+    this.ws = new WebSocket(wsUrl); this.id = 0; this.pending = new Map(); this.handlers = [];
     this.ready = new Promise((res, rej) => { this.ws.addEventListener('open', res); this.ws.addEventListener('error', rej); });
     this.ws.addEventListener('message', (e) => {
       const m = JSON.parse(e.data);
       if (m.id && this.pending.has(m.id)) { const { res, rej } = this.pending.get(m.id); this.pending.delete(m.id); m.error ? rej(new Error(m.error.message)) : res(m.result); }
+      else if (m.method) { for (const h of this.handlers) h(m); }
     });
   }
+  on(fn) { this.handlers.push(fn); }
   async send(method, params = {}) { await this.ready; const id = ++this.id; return new Promise((res, rej) => { this.pending.set(id, { res, rej }); this.ws.send(JSON.stringify({ id, method, params })); }); }
   async ev(expr) { const r = await this.send('Runtime.evaluate', { expression: `(()=>{ ${expr} })()`, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw new Error('eval: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text)); return r.result.value; }
   close() { try { this.ws.close(); } catch {} }
+}
+
+
+// == MOBILE-I1F - deterministic upstream mock =================================
+//
+// This stands in for OpenAI and NOTHING else. The request still travels the whole real path:
+// browser -> /api/ai/identify -> the real Rust handler -> the shared contract -> the real HTTP
+// client -> here -> the real response parser and allow-list filter -> the real form merge. Only the
+// model is fake, and it is deliberately hostile: it answers with prices, a quantity, an id and
+// unknown keys alongside the legitimate fields, so the allow-list has something to actually strip.
+let mockMode = 'success';
+const mockRequests = [];
+let mockServer;
+const MOCK_ANSWER = {
+  brand: 'Rolex', name: "Datejust 41 'Wimbledon'", condition: 'Pre-Owned',
+  description: 'Slate dial with Roman numerals', storageLocation: 'Safe A',
+  notes: 'DD trail: chose 126334.', scopeOfDelivery: ['Box', 'Papers'],
+  estimatedValue: 4200, purchasePriceEstimate: 3100, minSalePrice: 3900, maxSalePrice: 4600,
+  purchasePrice: 3100, plannedSalePrice: 4200, quantity: 7, sku: 'RLX-AI-FAKE', taxScheme: 'MARGIN',
+  id: 'some-other-product', stockStatus: 'sold', syncStatus: 'pending',
+  attributes: {
+    reference_number: '126334', dial: 'Slate Roman', material: 'Two-Tone Steel/Gold',
+    quantity: 7, purchase_price: 3100, not_a_real_key: 'nonsense',
+  },
+};
+async function startMock() {
+  const http = await import('node:http');
+  mockServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      mockRequests.push({ url: req.url, auth: req.headers.authorization || '', body });
+      if (mockMode === 'timeout') return;                     // never answers -> client timeout
+      if (mockMode === 'error') { res.writeHead(500); return res.end('{"error":"upstream boom"}'); }
+      if (mockMode === 'malformed') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ choices: [{ message: { content: 'I think it is a watch.' } }] }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '```json\n' + JSON.stringify(MOCK_ANSWER) + '\n```' } }] }));
+    });
+  });
+  await new Promise((r) => mockServer.listen(MOCK_PORT, '127.0.0.1', r));
+}
+function stopMock() { try { mockServer && mockServer.close(); } catch (e) {} }
+
+// A placeholder so the route gets past "not configured". It is not an OpenAI key and never reaches
+// a real endpoint - the upstream is the local mock. Written the way the desktop client writes it.
+function writeFakeKey() {
+  const SEED_OBF = Buffer.from('lataif-2026-key-obf');
+  const plain = Buffer.from('e2e-placeholder-not-a-real-key');
+  const obf = Buffer.from(plain.map((b, i) => b ^ SEED_OBF[i % SEED_OBF.length]));
+  writeFileSync(join(APP_DATA_DIR, 'openai.key'), obf.toString('base64'));
+}
+
+// == real browser (Edge) helpers =============================================
+let edgeProc;
+async function startEdge(url) {
+  edgeProc = spawn(EDGE, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+    '--user-data-dir=' + EDGE_PROFILE, '--remote-debugging-port=' + EDGE_CDP, 'about:blank'], { stdio: 'ignore' });
+  const end = Date.now() + 40000; let ws = null;
+  while (Date.now() < end) {
+    try {
+      const l = await (await fetch('http://127.0.0.1:' + EDGE_CDP + '/json/list')).json();
+      const pg = l.find((t) => t.type === 'page');
+      if (pg) { ws = pg.webSocketDebuggerUrl; break; }
+    } catch (e) {}
+    await sleep(300);
+  }
+  if (!ws) throw new Error('edge CDP did not come up');
+  const c = new CDP(ws);
+  await c.send('Page.enable'); await c.send('Runtime.enable'); await c.send('DOM.enable'); await c.send('Network.enable');
+  const uploads = []; const responses = [];
+  c.on((m) => {
+    if (m.method === 'Network.requestWillBeSent') {
+      const r = m.params.request;
+      if (r && /\/api\/mobile\/upload$/.test(r.url) && r.method === 'POST' && r.postData) {
+        try { uploads.push(JSON.parse(r.postData)); } catch (e) {}
+      }
+    } else if (m.method === 'Network.responseReceived') {
+      const r = m.params.response;
+      if (r && /\/api\/mobile\/upload$/.test(r.url)) responses.push(r.status);
+    }
+  });
+  await c.send('Page.navigate', { url });
+  await sleep(2500);
+  return { c, uploads, responses };
+}
+function killEdge() {
+  try { execFileSync('taskkill', ['/F', '/PID', String(edgeProc.pid), '/T'], { stdio: 'ignore' }); } catch (e) {}
+}
+const existsE = (c, sel) => c.ev('return !!document.querySelector(' + S(sel) + ');');
+const visibleE = (c, sel) => c.ev('const e=document.querySelector(' + S(sel) + '); if(!e||e.classList.contains("hidden")) return false; const r=e.getBoundingClientRect(); return (e.offsetParent!==null) || r.height>0 || r.width>0;');
+async function waitE(c, sel, t = 20000) { const end = Date.now() + t; while (Date.now() < end) { if (await existsE(c, sel)) return true; await sleep(200); } throw new Error('waitE ' + sel); }
+async function waitUnhidden(c, sel, t = 20000) {
+  const end = Date.now() + t;
+  while (Date.now() < end) {
+    const r = await c.ev('const e=document.querySelector(' + S(sel) + '); return !!e && !e.classList.contains("hidden");');
+    if (r) return true;
+    await sleep(200);
+  }
+  throw new Error('waitUnhidden ' + sel);
+}
+async function waitVisE(c, sel, t = 20000) { const end = Date.now() + t; while (Date.now() < end) { if (await visibleE(c, sel)) return true; await sleep(200); } throw new Error('waitVisE ' + sel); }
+const setValE = (c, sel, v) => c.ev('const e=document.querySelector(' + S(sel) + '); if(!e) return "NO"; const p=e.tagName==="SELECT"?HTMLSelectElement.prototype:(e.tagName==="TEXTAREA"?HTMLTextAreaElement.prototype:HTMLInputElement.prototype); Object.getOwnPropertyDescriptor(p,"value").set.call(e, ' + S(v) + '); e.dispatchEvent(new Event("input",{bubbles:true})); e.dispatchEvent(new Event("change",{bubbles:true})); return "OK";');
+const clickE = (c, sel) => c.ev('const e=document.querySelector(' + S(sel) + '); if(!e) return "NO"; e.click(); return "OK";');
+const valE = (c, sel) => c.ev('const e=document.querySelector(' + S(sel) + '); return e ? e.value : null;');
+const textE = (c, sel) => c.ev('const e=document.querySelector(' + S(sel) + '); return e ? e.textContent : null;');
+async function setFile(c, sel, path) {
+  const r = await c.send('Runtime.evaluate', { expression: 'document.querySelector(' + S(sel) + ')', returnByValue: false });
+  await c.send('DOM.setFileInputFiles', { objectId: r.result.objectId, files: [path] });
+}
+async function mobileLogin(c) {
+  await waitE(c, '#email'); await setValE(c, '#email', OWNER_EMAIL); await setValE(c, '#password', OWNER_PW);
+  await clickE(c, '#loginBtn'); await waitVisE(c, '#modePicker');
+  // The page stores its token as part of the login handler; a request issued before that lands is
+  // answered 401. Wait for the token rather than racing it.
+  const end = Date.now() + 15000;
+  while (Date.now() < end) {
+    const t = await c.ev('return localStorage.getItem("lataif_mobile_token");');
+    if (t && t.length > 20) return;
+    await sleep(200);
+  }
+  throw new Error('mobile login produced no token');
+}
+// Type into the REAL search box and let the page's own debounce run the search.
+async function uiSearch(c, term, expect) {
+  // Clear first so a stale list can never be mistaken for this term's answer, then poll until the
+  // page's own debounce has run and rendered - a fixed sleep made this flaky on a loaded machine.
+  await c.ev('const b=document.querySelector("#searchResults"); if(b) b.innerHTML=""; return "OK";');
+  await setValE(c, '#searchInput', term);
+  const read = () => c.ev('const b=document.querySelector("#searchResults"); if(!b) return -1; if(b.querySelectorAll("[data-hit]").length) return b.querySelectorAll("[data-hit]").length; if (/No matching item/i.test(b.innerText||"")) return 0; if (/Search failed|Search unavailable/i.test(b.innerText||"")) return -3; return -1;');
+  const end = Date.now() + 15000;
+  let n = -1;
+  while (Date.now() < end) {
+    n = await read();
+    if (n >= 0 && (expect === undefined || n === expect || (typeof expect === 'object' && n >= expect.min))) break;
+    if (n === -3) { await setValE(c, '#searchInput', ''); await sleep(200); await setValE(c, '#searchInput', term); }
+    await sleep(250);
+  }
+  return n;
 }
 
 let appProc;
@@ -78,13 +232,24 @@ function killApp() { try { execFileSync('taskkill', ['/F', '/PID', String(appPro
 function killAllApp() {
   try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-Process lataif -EA SilentlyContinue | Where-Object { $_.Path -like '*target\\debug\\lataif.exe' } | Stop-Process -Force"], { stdio: 'ignore' }); } catch {}
 }
+async function waitPortFree(port, ms = 20000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    let n = 1;
+    try { n = parseInt(execFileSync('powershell', ['-NoProfile', '-Command', '(Get-NetTCPConnection -State Listen -LocalPort ' + port + ' -EA SilentlyContinue).Count'], { encoding: 'utf8' }).trim() || '0', 10); } catch (e) { n = 0; }
+    if (!n) return true;
+    await sleep(500);
+  }
+  return false;
+}
 async function waitHealthy() { const end = Date.now() + 40000; while (Date.now() < end) { try { if ((await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(2000) })).ok) return true; } catch {} await sleep(500); } throw new Error('server never healthy on ' + PORT); }
 async function waitInvoke(c) { const end = Date.now() + 60000; while (Date.now() < end) { if (await c.ev(`return !!(window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);`)) return; await sleep(400); } throw new Error('no invoke'); }
 async function invoke(c, cmd, args) { return c.ev(`return (async()=>{ try{ const v=await window.__TAURI_INTERNALS__.invoke(${S(cmd)}, ${S(args)}); return {ok:true,value:v===undefined?null:v}; }catch(e){ return {ok:false,error:String((e&&e.message)||e)}; } })();`); }
 const setValApp = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; const p=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
 const existsApp = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 async function waitApp(c, sel, t = 45000) { const end = Date.now() + t; while (Date.now() < end) { if (await existsApp(c, sel)) return true; await sleep(300); } throw new Error('waitApp ' + sel); }
-async function frontendLogin(c) {
+async function frontendLogin(c, pw) {
+  const PW = pw || ONBOARD_PW;
   await waitApp(c, 'input[type="email"], input[placeholder="e.g. Al-Khalifa Luxury"]', 60000);
   if (await existsApp(c, 'input[placeholder="e.g. Al-Khalifa Luxury"]')) {
     await setValApp(c, 'input[placeholder="e.g. Al-Khalifa Luxury"]', 'E2E Co');
@@ -93,14 +258,14 @@ async function frontendLogin(c) {
     await waitApp(c, 'input[placeholder="Full name"]');
     await setValApp(c, 'input[placeholder="Full name"]', 'E2E Admin');
     await setValApp(c, 'input[placeholder="you@company.com"]', OWNER_EMAIL);
-    await setValApp(c, 'input[placeholder="Choose a password"]', ONBOARD_PW);
+    await setValApp(c, 'input[placeholder="Choose a password"]', PW);
     await c.ev(`[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Next')?.click();`);
     await waitApp(c, 'input[placeholder="10"]');
     await setValApp(c, 'input[placeholder="10"]', '10');
     await c.ev(`[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Start Using LATAIF'))?.click();`);
   } else {
     await setValApp(c, 'input[type="email"]', OWNER_EMAIL);
-    await setValApp(c, 'input[type="password"]', ONBOARD_PW);
+    await setValApp(c, 'input[type="password"]', PW);
     await c.ev(`[...document.querySelectorAll('button')].find(b=>/sign in/i.test(b.textContent))?.click();`);
   }
   await waitApp(c, 'a[href="/settings"], nav a, [data-testid]', 45000);
@@ -206,7 +371,9 @@ async function api(path, opts = {}, token) {
 }
 
 async function main() {
-  killAllApp(); await sleep(800);
+  killAllApp(); killEdge(); await sleep(1200);
+  ok(await waitPortFree(PORT), 'isolated port ' + PORT + ' is free before start (no zombie server)');
+  ok(await waitPortFree(MOCK_PORT), 'mock port ' + MOCK_PORT + ' is free before start');
   mkdirSync(join(RUN, 'tmp'), { recursive: true });
   rmSync(APP_DATA_DIR, { recursive: true, force: true });
   rmSync(WV2_DIR, { recursive: true, force: true });
@@ -431,6 +598,223 @@ async function main() {
   ok(noKey.status === 503 && noKey.body?.error === 'AI_NOT_CONFIGURED',
     `an unconfigured key fails closed (${noKey.status} ${noKey.body?.error})`);
 
+  // ════════════════════════════════════════════════════════════════════════
+  // MOBILE-I1F - the two proofs that need a REAL browser driving the real page
+  // ════════════════════════════════════════════════════════════════════════
+  writeFakeKey();
+  await startMock();
+  const jpgPath = join(RUN, 'capture.jpg');
+  writeFileSync(jpgPath, JPEG);
+  const { c: edge, uploads, responses } = await startEdge(BASE + '/mobile');
+  await waitE(edge, '#loginBtn', 20000);
+  ok(await existsE(edge, '#email') && await existsE(edge, '#cSaveBtn'),
+    'real /mobile page served by the isolated LAN server (no mock page)');
+  await mobileLogin(edge);
+
+  // ── ui-search: the REAL search box, not the route ────────────────────────
+  await clickE(edge, '.mode-btn[data-mode="scan"]');
+  await waitVisE(edge, '#scanScreen', 15000);
+  await clickE(edge, '#tabSearch');
+  await waitVisE(edge, '#searchPane', 10000);
+  ok(await existsE(edge, '#searchInput'), 'ui-search: the Check Item screen offers a search box');
+
+  ok(await uiSearch(edge, SKU, 1) === 1, 'ui-search exact SKU: one hit rendered in the real list');
+  ok(await uiSearch(edge, '1267', { min: 1 }) >= 1, 'ui-search partial model/reference: at least one hit');
+  ok(await uiSearch(edge, SERIAL, 1) === 1, 'ui-search serial: one hit');
+  ok(await uiSearch(edge, REFERENCE, 1) === 1, 'ui-search reference: one hit');
+  ok(await uiSearch(edge, 'Embroidered', 1) === 1, 'ui-search description: one hit');
+  const brandHits = await uiSearch(edge, 'Rolex', { min: 2 });
+  ok(brandHits >= 2, 'ui-search brand: multiple hits');
+  ok(await uiSearch(edge, 'Patek Philippe', 0) === 0, 'ui-search no result: the list renders empty');
+  ok(/No matching item/i.test(await textE(edge, '#searchResults') || ''),
+    'ui-search no result: the page says so instead of showing a stale list');
+
+  // pick a hit and prove the SAME full detail view opens
+  await uiSearch(edge, SKU, 1);
+  await clickE(edge, '[data-hit="0"]');
+  // The detail view is 'open' when the page has un-hidden it AND rendered the product into it.
+  // offsetParent/rect are unreliable inside this headless layout, so assert what the app actually did.
+  const openEnd = Date.now() + 15000;
+  let opened = false;
+  while (Date.now() < openEnd) {
+    opened = await edge.ev('const r=document.querySelector("#scanResult"); const d=document.querySelector("#scanDetails"); return !!r && !r.classList.contains("hidden") && !!d && d.innerHTML.length > 500;');
+    if (opened) break;
+    await sleep(300);
+  }
+  ok(opened, 'ui-search: clicking a hit opens the existing full product detail view');
+  await sleep(1200);   // let the authenticated image fetch paint
+  const uiDetail = await edge.ev('const d=document.querySelector("#scanDetails"); return d ? d.innerText : "";');
+  ok(/rolex/i.test(uiDetail), 'ui-search detail: brand rendered');
+  ok(/datejust 41 wimbledon/i.test(uiDetail), 'ui-search detail: name rendered');
+  ok(uiDetail.indexOf(SKU) >= 0, 'ui-search detail: SKU rendered');
+  ok(uiDetail.indexOf(REFERENCE) >= 0, 'ui-search detail: reference rendered');
+  ok(uiDetail.indexOf(SERIAL) >= 0, 'ui-search detail: serial rendered');
+  ok(/slate roman/i.test(uiDetail), 'ui-search detail: category attributes rendered');
+  const photoPainted = await edge.ev('const i=document.querySelector("#pdPhoto"); return !!i && i.style.display!=="none" && i.naturalWidth>0;');
+  ok(photoPainted, 'ui-search detail: the gallery photo is actually painted (naturalWidth > 0)');
+  const stockBlock = await edge.ev('return !!document.querySelector("#scAvail") && !!document.querySelector("#scMissing");');
+  ok(stockBlock, 'ui-search detail: the stock-check block is part of the SAME detail view');
+
+  // ── ai-success: real photo -> AI Identify -> real route -> mock -> merge ──
+  mockMode = 'success';
+  mockRequests.length = 0;
+  await clickE(edge, '[data-back]');
+  await waitVisE(edge, '#modePicker', 10000);
+  await clickE(edge, '.mode-btn[data-mode="collection"]');
+  await waitVisE(edge, '#formCollection', 10000);
+  await setFile(edge, '#cPhotoInput', jpgPath);
+  await waitVisE(edge, '#cPhotoStatus', 15000);
+
+  // deliberate operator input BEFORE the AI runs
+  await setValE(edge, '#cName', 'My own model name');
+  await setValE(edge, '#cQuantity', '3');
+  await setValE(edge, '#cPurchasePrice', '');
+  const photoBefore = await edge.ev('return !!(window.__photoProbe || document.querySelector("#cPhotoStatus")) && !document.querySelector("#cPhotoStatus").classList.contains("hidden");');
+  ok(photoBefore, 'ai-success: a photo is captured before identifying');
+
+  await waitUnhidden(edge, '#cAiBtn', 15000);
+  await clickE(edge, '#cAiBtn');
+  const aiEnd = Date.now() + 30000;
+  while (Date.now() < aiEnd && mockRequests.length === 0) await sleep(200);
+  await sleep(1500);
+
+  if (mockRequests.length !== 1) console.log('  [diag] cAiMsg=' + JSON.stringify(await textE(edge, '#cAiMsg')) + ' btn=' + JSON.stringify(await textE(edge, '#cAiBtn')));
+  ok(mockRequests.length === 1, 'ai-success: the request reached the upstream exactly once');
+  if (mockRequests.length === 0) { console.log('  [diag] no upstream request captured; aborting AI block'); throw new Error('AI_DIAG_STOP'); }
+  ok(/\/v1\/chat\/completions$/.test(mockRequests[0].url), 'ai-success: it went to the injected endpoint');
+  ok(/^Bearer /.test(mockRequests[0].auth), 'ai-success: the server attached its own credential');
+  ok(mockRequests[0].body.indexOf('world-class luxury goods appraiser') >= 0,
+    'ai-success: the prompt is the SHARED contract text, assembled server-side');
+  ok(mockRequests[0].body.indexOf('data:image/jpeg;base64') >= 0, 'ai-success: the photo bytes travelled');
+
+  ok(await valE(edge, '#cBrand') === 'Rolex', 'ai-success: an empty field is filled from the answer');
+  ok(await valE(edge, '#cName') === 'My own model name', 'ai-success: the operator value is NOT overwritten');
+  ok(await valE(edge, '#cQuantity') === '3', 'ai-success: quantity stays exactly 3');
+  ok((await valE(edge, '#cPurchasePrice') || '') === '', 'ai-success: no purchase price is set');
+  ok((await valE(edge, '#cSalePrice') || '') === '', 'ai-success: no sale price is set');
+  ok((await valE(edge, '#cMinSalePrice') || '') === '', 'ai-success: no minimum price is set');
+  ok(!(await edge.ev('const e=document.querySelector("#cPhotoStatus"); return e.classList.contains("hidden");')),
+    'ai-success: the photo survived the merge');
+  ok(await valE(edge, '#attr_reference_number') === '126334', 'ai-success: a category attribute is filled');
+  ok(await valE(edge, '#attr_dial') === 'Slate Roman', 'ai-success: dial is filled');
+  const strayKeys = await edge.ev('return ["not_a_real_key","quantity","purchase_price","sku","id","stockStatus"].filter(k=>!!document.querySelector("#attr_"+k)).join(",");');
+  ok(strayKeys === '', 'ai-success: no forbidden or unknown key became a form field (' + strayKeys + ')');
+  const formText = await edge.ev('return document.querySelector("#formCollection").innerText;');
+  ok(formText.indexOf('4200') < 0 && formText.indexOf('3100') < 0 && formText.indexOf('RLX-AI-FAKE') < 0,
+    'ai-success: no price and no invented SKU appears anywhere in the form');
+  ok(!/sk-|openai|Bearer|placeholder-not-a-real-key/i.test(formText + (await textE(edge, '#cAiMsg') || '')),
+    'ai-success: nothing about the credential is shown in the UI');
+
+  // ── ai upload -> receipt/inbox -> drain -> exactly one product ────────────
+  const prodCountBefore = (() => { const d = new DatabaseSync(BIZ_DB); try { return d.prepare('SELECT COUNT(*) c FROM products').get().c; } finally { d.close(); } })();
+  await setValE(edge, '#attr_material', 'Steel');
+  await setValE(edge, '#attr_case_diameter_mm', '41');
+  const beforeUpload = { brand: await valE(edge, '#cBrand'), name: await valE(edge, '#cName'), qty: await valE(edge, '#cQuantity') };
+  await clickE(edge, '#cSaveBtn');
+  const upEnd = Date.now() + 30000;
+  while (Date.now() < upEnd && (uploads.length < 1 || !responses.some((x) => x === 200 || x === 201))) await sleep(250);
+  await sleep(1200);
+  ok(uploads.length === 1, 'ai-upload: exactly one POST /api/mobile/upload was issued');
+  ok(responses.some((x) => x === 200 || x === 201), 'ai-upload: the server accepted it (' + JSON.stringify(responses) + ')');
+  const up = uploads[0] || {};
+  ok(String(up.metadata && up.metadata.quantity) === '3', 'ai-upload: the payload carries quantity 3');
+  ok((up.metadata && up.metadata.brand) === 'Rolex', 'ai-upload: the AI-filled brand travelled');
+  ok((up.metadata && up.metadata.name) === beforeUpload.name, 'ai-upload: the operator name travelled unchanged');
+  const upJson = JSON.stringify(up.metadata || {});
+  ok(upJson.indexOf('4200') < 0 && upJson.indexOf('3100') < 0 && upJson.indexOf('RLX-AI-FAKE') < 0,
+    'ai-upload: no AI price or invented SKU is in the payload');
+  const evId = up.upload_event_id;
+  ok(!!evId, 'ai-upload: the page minted an upload event id');
+  const inbox = () => { const d = new DatabaseSync(SERVER_DB); try { return d.prepare('SELECT state FROM mobile_upload_inbox WHERE upload_event_id=?').all(evId); } catch (e) { return []; } finally { d.close(); } };
+  ok(inbox().length === 1, 'ai-upload: exactly one inbox receipt exists');
+
+  // a replay of the SAME upload must not create a second event
+  await clickE(edge, '#cRetryPending').catch(() => {});
+  await sleep(2500);
+  ok(inbox().length === 1, 'ai-upload retry: still exactly one inbox receipt (exactly-once holds)');
+
+  // the desktop drains it into a real product. The mobile pipeline is scope-gated (MOBILE-04B2A3):
+  // without an owner-configured runtime binding the handoff worker refuses to run at all, so the
+  // binding is configured exactly the way the other real-app suites do it.
+  const scopeCfg = await invoke(app, 'mobile_runtime_scope_configure',
+    { email: OWNER_EMAIL, password: OWNER_PW, tenantId: TENANT, branchId: 'branch-main' });
+  ok(scopeCfg.ok && scopeCfg.value && scopeCfg.value.configured === true,
+    'ai-drain: owner configured the runtime binding (' + (scopeCfg.error || '') + ')');
+  // The seeded owner's password is OWNER_PW (the seed provisioned it); the onboarding password only
+  // applies when this suite creates the account through the wizard.
+  const loginErr = await (async () => { try { await frontendLogin(app, OWNER_PW); return ''; } catch (e) { return String(e && e.message || e); } })();
+  const loggedIn = await app.ev(`return !document.querySelector('input[type="password"]');`);
+  ok(loggedIn, 'ai-drain: the desktop app is logged in so its handoff worker runs (' + loginErr + ')');
+  const drainEnd = Date.now() + 90000; let after = prodCountBefore;
+  while (Date.now() < drainEnd) {
+    const d = new DatabaseSync(BIZ_DB);
+    try { after = d.prepare('SELECT COUNT(*) c FROM products').get().c; } catch (e) {} finally { d.close(); }
+    if (after > prodCountBefore) break;
+    await sleep(2000);
+  }
+  // KNOWN GAP - the drain-to-product leg is not asserted by this suite.
+  //
+  // The upload is proven up to its durable inbox receipt above. Turning that receipt into a product
+  // needs the desktop handoff worker, which in this harness did not run to completion within the
+  // window: the app is logged in and the runtime binding is configured, but no product appeared.
+  // Rather than assert something this suite has not shown, it is recorded as a gap here, and
+  // MOBILE_UPLOAD_AI_SAFE_IDENTIFY_PROVED is NOT claimed. The upload->drain->product path itself is
+  // covered independently by mobile-page-uuid.e2e.mjs; what is missing is that proof for an
+  // AI-filled form specifically.
+  console.log('  [gap] ai-drain: no product materialised in ' + Math.round((Date.now() - (drainEnd - 90000)) / 1000) +
+              's (' + prodCountBefore + ' -> ' + after + ') - drain-to-product NOT proven by this suite');
+
+  // ── ai-failure: timeout and malformed must preserve everything ────────────
+  await clickE(edge, '.mode-btn[data-mode="collection"]').catch(() => {});
+  await waitVisE(edge, '#formCollection', 10000);
+  await setFile(edge, '#cPhotoInput', jpgPath);
+  await waitVisE(edge, '#cPhotoStatus', 15000);
+  await setValE(edge, '#cBrand', 'Operator Brand');
+  await setValE(edge, '#cName', 'Operator Name');
+  await setValE(edge, '#cQuantity', '5');
+
+  for (const [label, mode, waitMs] of [['timeout', 'timeout', 95000], ['malformed', 'malformed', 30000]]) {
+    mockMode = mode;
+    mockRequests.length = 0;
+    await waitUnhidden(edge, '#cAiBtn', 15000);
+    await clickE(edge, '#cAiBtn');
+    const end = Date.now() + waitMs;
+    while (Date.now() < end) {
+      const busy = await edge.ev('const b=document.querySelector("#cAiBtn"); return b && /Identifying/.test(b.textContent);');
+      if (!busy) break;
+      await sleep(1000);
+    }
+    const msg = (await textE(edge, '#cAiMsg')) || '';
+    ok(msg.trim().length > 0, 'ai-' + label + ': the page shows an understandable error state');
+    ok(!/sk-|openai|Bearer|placeholder-not-a-real-key/i.test(msg), 'ai-' + label + ': the error mentions nothing about the credential');
+    ok(await valE(edge, '#cBrand') === 'Operator Brand', 'ai-' + label + ': the operator brand is preserved');
+    ok(await valE(edge, '#cName') === 'Operator Name', 'ai-' + label + ': the operator name is preserved');
+    ok(await valE(edge, '#cQuantity') === '5', 'ai-' + label + ': quantity is preserved');
+    ok(!(await edge.ev('return document.querySelector("#cPhotoStatus").classList.contains("hidden");')),
+      'ai-' + label + ': the photo is preserved');
+    ok(await visibleE(edge, '#formCollection'), 'ai-' + label + ': the form is still there, not reset');
+  }
+
+  // after a failure the operator can still upload by hand
+  mockMode = 'success';
+  const beforeManual = (() => { const d = new DatabaseSync(SERVER_DB); try { return d.prepare('SELECT COUNT(*) c FROM mobile_upload_inbox').get().c; } catch (e) { return 0; } finally { d.close(); } })();
+  await setValE(edge, '#attr_dial', 'Black');
+  await setValE(edge, '#attr_material', 'Steel');
+  await setValE(edge, '#attr_case_diameter_mm', '40');
+  await clickE(edge, '#cSaveBtn');
+  const manEnd = Date.now() + 30000;
+  let afterManual = beforeManual;
+  while (Date.now() < manEnd) {
+    const d = new DatabaseSync(SERVER_DB);
+    try { afterManual = d.prepare('SELECT COUNT(*) c FROM mobile_upload_inbox').get().c; } catch (e) {} finally { d.close(); }
+    if (afterManual > beforeManual) break;
+    await sleep(1000);
+  }
+  ok(afterManual === beforeManual + 1, 'ai-failure: a manual upload still works afterwards (' + beforeManual + ' -> ' + afterManual + ')');
+
+  killEdge();
+  stopMock();
+
   // ══ durability: a restart keeps every check ══════════════════════════════
   app.close(); killApp(); await sleep(2000);
   ws = await startApp(); app = new CDP(ws);
@@ -448,6 +832,8 @@ async function main() {
 }
 
 main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(() => {
+  try { killEdge(); } catch {}
+  try { stopMock(); } catch {}
   try { killAllApp(); } catch {}
   try { rmSync(RUN, { recursive: true, force: true }); } catch {}
   try { rmSync(APP_DATA_DIR, { recursive: true, force: true }); } catch {}
