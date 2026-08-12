@@ -949,6 +949,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (statusId) $(statusId).classList.remove('hidden');
       } catch (err) {
         setText(errId, 'Photo could not be loaded');
+      } finally {
+        // MOBILE-I1H — capture, selection and replacement all end here, so this is the one place a
+        // new photo becomes visible to the rest of the form. In `finally` on purpose: a failed
+        // decode must leave the button agreeing with whatever `photos` actually holds.
+        syncAiButtonState();
       }
     };
   }
@@ -1007,13 +1012,21 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   }
 
   let aiBusy = false;
-  function showAiButton() {
+
+  // MOBILE-I1H — the AI button is DERIVED from the one canonical photo state, never polled.
+  //
+  // `photos.collection` is written in exactly two places - the capture handler in `bindPhoto` and
+  // `clearPhoto` (which the post-upload reset also runs through) - and both call this. The previous
+  // version re-read the same state on a 400 ms timer, which meant the button could lag a capture by
+  // up to a frame budget's worth of scheduling and made the e2e wait for it flaky under load.
+  //
+  // UI state only: nothing here reads or writes AI, upload, media or quantity.
+  function syncAiButtonState() {
     const btn = $('cAiBtn');
     if (!btn) return;
     if (photos.collection) btn.classList.remove('hidden'); else btn.classList.add('hidden');
   }
-  // The capture flow sets photos.collection; poll cheaply rather than reaching into bindPhoto.
-  setInterval(showAiButton, 400);
+  syncAiButtonState();   // initial: no photo yet, so the button starts hidden
 
   if ($('cAiBtn')) $('cAiBtn').onclick = async () => {
     if (aiBusy) return;
@@ -1064,6 +1077,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     area.classList.remove('has-image');
     area.innerHTML = emptyHtml;
     if (statusId) $(statusId).classList.add('hidden');
+    // MOBILE-I1H — removal and the post-upload form reset both run through here.
+    syncAiButtonState();
   }
 
   // Gemeinsamer Sync-Push. Wirft bei 401 (Session) + Fehlern.

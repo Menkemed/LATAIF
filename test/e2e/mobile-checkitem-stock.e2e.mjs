@@ -198,6 +198,10 @@ async function mobileLogin(c) {
   }
   throw new Error('mobile login produced no token');
 }
+// MOBILE-I1H - the AI button is derived from the photo state, not polled, so it is already correct
+// when the capture handler returns. No sleep and no poll-cycle tolerance: read it directly.
+const aiBtnHidden = (c) => c.ev('const b=document.querySelector("#cAiBtn"); return b ? b.classList.contains("hidden") : null;');
+
 // Type into the REAL search box and let the page's own debounce run the search.
 async function uiSearch(c, term, expect) {
   // Clear first so a stale list can never be mistaken for this term's answer, then poll until the
@@ -611,6 +615,41 @@ async function main() {
     'real /mobile page served by the isolated LAN server (no mock page)');
   await mobileLogin(edge);
 
+  // ── MOBILE-I1H - the AI button follows the photo state, with no timer ────
+  //
+  // Each assertion reads the button immediately after the transition that should have changed it.
+  // Nothing here sleeps or tolerates a poll cycle; with the old 400 ms timer these would be racy.
+  // Removing a photo has exactly one path in this UI - the form reset after a successful upload -
+  // so cases C and F are the same transition and are asserted together at the upload, below.
+  await clickE(edge, '.mode-btn[data-mode="collection"]');
+  await waitVisE(edge, '#formCollection', 10000);
+  ok(await aiBtnHidden(edge) === true, 'ai-button A: with no photo the button is not offered');
+
+  const shotA = join(RUN, 'btn-a.jpg');
+  writeFileSync(shotA, JPEG);
+  await setFile(edge, '#cPhotoInput', shotA);
+  // The capture handler decodes and resizes asynchronously; wait for THAT, not for a timer.
+  await waitUnhidden(edge, '#cPhotoStatus', 15000);
+  ok(await aiBtnHidden(edge) === false,
+    'ai-button B: available as soon as the capture handler completes, with no poll wait');
+
+  const shotB = join(RUN, 'btn-b.jpg');
+  writeFileSync(shotB, Buffer.concat([JPEG, Buffer.from([0x01])]));
+  await setFile(edge, '#cPhotoInput', shotB);
+  await waitUnhidden(edge, '#cPhotoStatus', 15000);
+  ok(await aiBtnHidden(edge) === false, 'ai-button D/E: replacing the photo keeps it available');
+
+  // Prove it is not a timer at all: the state is right on the very next event-loop turn.
+  const immediate = await edge.ev(
+    'return (async () => { const b=document.querySelector("#cAiBtn");' +
+    ' const before = b.classList.contains("hidden");' +
+    ' await Promise.resolve();' +
+    ' return JSON.stringify({ before, after: b.classList.contains("hidden") }); })();');
+  ok(immediate === '{"before":false,"after":false}',
+    'ai-button: the state is stable across a microtask, not reconciled by a timer (' + immediate + ')');
+  const timers = await edge.ev('return typeof window.__aiBtnPoll;');
+  ok(timers === 'undefined', 'ai-button: no polling handle is exposed');
+
   // ── ui-search: the REAL search box, not the route ────────────────────────
   await clickE(edge, '.mode-btn[data-mode="scan"]');
   await waitVisE(edge, '#scanScreen', 15000);
@@ -727,6 +766,11 @@ async function main() {
   ok(!!evId, 'ai-upload: the page minted an upload event id');
   const inbox = () => { const d = new DatabaseSync(SERVER_DB); try { return d.prepare('SELECT state FROM mobile_upload_inbox WHERE upload_event_id=?').all(evId); } catch (e) { return []; } finally { d.close(); } };
   ok(inbox().length === 1, 'ai-upload: exactly one inbox receipt exists');
+
+  // MOBILE-I1H C/F - the successful upload runs clearCollectionForm -> clearPhoto, the one removal
+  // path this UI has. The button must be gone again without any timer having to notice.
+  ok(await aiBtnHidden(edge) === true,
+    'ai-button C/F: the post-upload form reset hides the button again, immediately');
 
   // a replay of the SAME upload must not create a second event
   await clickE(edge, '#cRetryPending').catch(() => {});
