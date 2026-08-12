@@ -119,6 +119,8 @@ const CONTROL_PLANE_TABLES: readonly string[] = [
   // v0017 owner-configurable snapshot retention (BACKUP-RETENTION) — never synced.
   'backup_retention_config',
   'media_gc_runs',
+  // v0019 physical stock checks (MOBILE-I1) — an observation made on THIS installation; never synced.
+  'stock_checks',
 ];
 // @sync-policy:control-plane:end
 // @sync-policy:internal:begin

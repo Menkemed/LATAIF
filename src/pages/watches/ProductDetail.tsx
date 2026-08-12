@@ -29,6 +29,7 @@ import { buildAiAttributePatch, buildAiFormPatch, type FormLike } from '@/core/a
 import { applyChoiceSelection } from '@/core/products/choice-value';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
+import { StockCheckPanel } from '@/components/products/StockCheckPanel';
 import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 
@@ -1697,6 +1698,11 @@ export function ProductDetail() {
           </div>
         )}
       </div>
+
+      {/* MOBILE-I1 §16/§26 — ADDED below the existing detail, never replacing any of it. Reads and
+          writes the same stock_checks rows the /mobile surface uses, so a check recorded on the
+          phone shows up here and vice versa. It cannot alter the product. */}
+      {!editing && <StockCheckPanel productId={product.id} />}
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Item" width={420}>
         {deleteLinks.length > 0 ? (

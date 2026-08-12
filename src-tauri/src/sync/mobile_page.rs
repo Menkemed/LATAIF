@@ -286,18 +286,41 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
     <p>Check Item</p>
   </div>
   <div id="scanMsg" class="error hidden"></div>
-  <div class="card" style="padding: 0; overflow: hidden; position: relative;">
-    <video id="scanVideo" playsinline muted style="width:100%; display:block; background:#000; aspect-ratio:3/4; object-fit:cover;"></video>
-    <div class="scan-frame"><div class="scan-line"></div></div>
+
+  <!-- MOBILE-I1 §11 — two ways to reach the SAME product view. The scanner is unchanged; search is
+       simply a second way in, for the items whose tag is missing, unreadable or still in the safe. -->
+  <div id="findTabs" style="display:flex; gap:8px; margin-bottom:12px;">
+    <button id="tabScan" class="ghost" style="flex:1;">Scan tag</button>
+    <button id="tabSearch" class="ghost" style="flex:1;">Search</button>
   </div>
+
+  <div id="searchPane" class="hidden">
+    <div class="card" style="padding:12px;">
+      <input id="searchInput" type="search" inputmode="search" autocomplete="off"
+             placeholder="SKU, serial, reference, brand or name"
+             style="width:100%; box-sizing:border-box;" />
+      <div id="searchHint" style="color:#6B6B73; font-size:12px; margin-top:8px;">
+        Type at least two characters. Partial numbers work.
+      </div>
+    </div>
+    <div id="searchResults"></div>
+  </div>
+
+  <div id="scanPane">
+    <div class="card" style="padding: 0; overflow: hidden; position: relative;">
+      <video id="scanVideo" playsinline muted style="width:100%; display:block; background:#000; aspect-ratio:3/4; object-fit:cover;"></video>
+      <div class="scan-frame"><div class="scan-line"></div></div>
+    </div>
+    <p style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">
+      Hold a printed tag in front of the rear camera. Camera access needs HTTPS or localhost.
+    </p>
+  </div>
+
   <div id="scanResult" class="card hidden">
     <div id="scanValue" style="font-size:12px; color:#6B6B73; font-family:monospace; text-align:center; margin-bottom:10px; word-break:break-all;"></div>
     <div id="scanDetails"></div>
     <button id="scanAgainBtn" class="ghost" style="margin-top:16px;">Scan again</button>
   </div>
-  <p style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">
-    Hold a printed tag in front of the rear camera. Camera access needs HTTPS or localhost.
-  </p>
 </div>
 
 <script>
@@ -438,7 +461,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       if (mode === 'collection') screen('formCollection');
       else if (mode === 'repair') screen('formRepair');
       else if (mode === 'purchase') screen('formPurchase');
-      else if (mode === 'scan') { screen('scanScreen'); startScan(); }
+      else if (mode === 'scan') { screen('scanScreen'); findMode('scan'); }
     };
   });
   document.querySelectorAll('[data-back]').forEach(btn => {
@@ -532,10 +555,28 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       const res = await fetch('/api/products/by-sku/' + encodeURIComponent(sku), { headers: { Authorization: 'Bearer ' + token } });
       if (res.status === 404) { $('scanDetails').innerHTML = '<div style="color:#AA6E6E; text-align:center;">No product found for this SKU.</div>'; return; }
       if (!res.ok) { $('scanDetails').textContent = 'Lookup failed (' + res.status + ').'; return; }
-      $('scanDetails').innerHTML = renderProduct(await res.json());
+      // §32 — the scanner renders through the SAME showProduct the search hits use.
+      showProduct(await res.json());
     } catch (e) {
       $('scanDetails').textContent = 'Lookup error: ' + (e && e.message ? e.message : e);
     }
+  }
+
+  // MOBILE-I1 §11 — switch between the two ways of finding an item. The camera is stopped whenever
+  // it is not visible: leaving it running behind a search pane drains the battery and keeps the
+  // recording indicator on for no reason.
+  function findMode(mode) {
+    const searching = mode === 'search';
+    if (searching) stopScan();
+    hide('scanResult');
+    releaseMedia();
+    if (searching) { show('searchPane'); hide('scanPane'); } else { hide('searchPane'); show('scanPane'); }
+    const on = { background: '#C6A36D', color: '#141418', borderColor: '#C6A36D' };
+    const off = { background: 'transparent', color: '#EAEAEA', borderColor: '#2A2A32' };
+    Object.assign($('tabScan').style, searching ? off : on);
+    Object.assign($('tabSearch').style, searching ? on : off);
+    setText('scanMsg', '');
+    if (searching) { const i = $('searchInput'); if (i) i.focus(); } else { startScan(); }
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
   function fmtPrice(v) { const n = Number(v); return (v != null && v !== '' && Number.isFinite(n)) ? 'BD ' + n.toLocaleString('en-US') : ''; }
@@ -546,17 +587,42 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   const ATTR_ORDER = ['reference_number','serial_number','model_number','item_type','part_type','dial','bezel','material','case_material','karat','karat_color','case_diameter_mm','case_size','size','weight','diamond_weight','original_or_copy','certificate','strap_type','color','box','papers','year','included','description'];
   const ATTR_LABEL = { reference_number:'Ref', serial_number:'Serial', model_number:'Model', case_diameter_mm:'Case Size', karat_color:'Karat Color', diamond_weight:'Diamond Ct', original_or_copy:'Original/Copy', item_type:'Item Type' };
   function prettyAttr(k) { return ATTR_LABEL[k] || k.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()); }
+  // MOBILE-I1 — load a gallery image through the authenticated media route.
+  //
+  // `<img src>` cannot carry an Authorization header, and putting the token in the URL would leak
+  // it into logs and history. So the bytes are fetched with the header and handed to the element as
+  // an object URL. Since the v0.8.37 media migration this is the ONLY way a product photo can be
+  // shown at all: `products.images` is `[]` for every product now, the bytes live in the media store.
+  const mediaUrls = [];
+  async function paintMedia(el, key) {
+    if (!el || !key) return;
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch('/api/media?key=' + encodeURIComponent(key), { headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) return;
+      const url = URL.createObjectURL(await res.blob());
+      mediaUrls.push(url);
+      el.src = url;
+      el.style.display = 'block';
+    } catch (_) { /* a missing photo must never break the details */ }
+  }
+  function releaseMedia() {
+    while (mediaUrls.length) { try { URL.revokeObjectURL(mediaUrls.pop()); } catch (_) {} }
+  }
+
   function renderProduct(p) {
     let attrs = {};
     try { attrs = typeof p.attributes === 'string' ? JSON.parse(p.attributes) : (p.attributes || {}); } catch (_) {}
     const rows = [];
     const add = (label, val) => { if (val !== undefined && val !== null && val !== '') rows.push('<div style="display:flex; justify-content:space-between; gap:14px; padding:7px 0; border-top:1px solid #1A1A1F;"><span style="color:#6B6B73;">' + esc(label) + '</span><span style="text-align:right; color:#EAEAEA;">' + esc(val) + '</span></div>'); };
     let html = '';
-    // 1) Foto ganz oben
+    // 1) Foto ganz oben — Galerie (media store) zuerst, Legacy-Inline als Fallback fuer alte Daten.
     let imgs = [];
     try { imgs = typeof p.images === 'string' ? JSON.parse(p.images) : (p.images || []); } catch (_) {}
     const img0 = (imgs && imgs.length) ? String(imgs[0] || '') : '';
-    if (/^(data:|https?:)/.test(img0)) {
+    if (p.image_key) {
+      html += '<img id="pdPhoto" alt="" style="width:100%; border-radius:8px; margin-bottom:14px; display:none;" />';
+    } else if (/^(data:|https?:)/.test(img0)) {
       html += '<img src="' + esc(img0) + '" onerror="this.style.display=\'none\'" style="width:100%; border-radius:8px; margin-bottom:14px;" />';
     }
     // 2) Marke + Name
@@ -582,7 +648,175 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (keys.indexOf('description') !== -1) ordered.push('description');
     ordered.forEach(k => { let v = attrs[k]; if (typeof v === 'boolean') v = v ? 'Yes' : 'No'; add(prettyAttr(k), v); });
     html += rows.join('');
+
+    // MOBILE-I1 §16 — the stock-check block is ADDED to the existing details, never replaces them.
+    // It is only offered when the product has an id (i.e. it came from the business database, which
+    // is the only source that can be checked against).
+    if (p.id) {
+      html += ''
+        + '<div style="margin-top:18px; padding-top:14px; border-top:1px solid #2A2A32;">'
+        + '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px;">Stock check</div>'
+        + '<div id="scLatest" style="font-size:13px; color:#6B6B73; margin-bottom:10px;">Loading…</div>'
+        + '<div style="display:flex; gap:8px; margin-bottom:8px;">'
+        +   '<button id="scAvail" class="ghost" style="flex:1;">Available</button>'
+        +   '<button id="scMissing" class="ghost" style="flex:1;">Not available</button>'
+        + '</div>'
+        + '<input id="scNotes" type="text" maxlength="500" placeholder="Notes (optional) — e.g. in safe, with customer" style="width:100%; box-sizing:border-box;" />'
+        + '<div id="scMsg" style="font-size:12px; margin-top:8px;"></div>'
+        + '<div id="scHistory" style="margin-top:12px;"></div>'
+        + '</div>';
+    }
     return html;
+  }
+
+  // ── MOBILE-I1 — ONE product view, reached from the scanner and from search alike (§10/§32) ──
+  //
+  // Both callers land here, so a searched product cannot drift into a different, thinner rendering
+  // than a scanned one. Everything below only ADDS behaviour to the markup renderProduct produced.
+  let currentProduct = null;
+  function showProduct(p) {
+    releaseMedia();
+    currentProduct = p;
+    $('scanDetails').innerHTML = renderProduct(p);
+    show('scanResult');
+    window.scrollTo({ top: 0 });
+    if (p.image_key) paintMedia($('pdPhoto'), p.image_key);
+    if (p.id) wireStockCheck(p.id);
+  }
+
+  function fmtWhen(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+  }
+  function statusLabel(s) { return s === 'available' ? 'Available' : (s === 'not_available' ? 'Not available' : String(s || '')); }
+  function statusColour(s) { return s === 'available' ? '#7FA87F' : '#AA6E6E'; }
+
+  function renderChecks(checks) {
+    const latest = $('scLatest');
+    if (!checks || !checks.length) {
+      if (latest) latest.textContent = 'Never checked.';
+      $('scHistory').innerHTML = '';
+      return;
+    }
+    const c = checks[0];
+    if (latest) {
+      latest.innerHTML = '<span style="color:' + statusColour(c.status) + '; font-weight:600;">' + esc(statusLabel(c.status)) + '</span>'
+        + ' &middot; ' + esc(fmtWhen(c.checked_at))
+        + (c.checked_by_name ? ' &middot; ' + esc(c.checked_by_name) : '')
+        + (c.notes ? '<div style="color:#EAEAEA; margin-top:4px;">' + esc(c.notes) + '</div>' : '');
+    }
+    // §20/§22 — earlier checks stay visible; a later verdict never erases the one before it.
+    const older = checks.slice(1);
+    $('scHistory').innerHTML = older.length
+      ? '<div style="font-size:11px; color:#6B6B73; letter-spacing:.06em; text-transform:uppercase; margin-bottom:6px;">Earlier checks</div>'
+        + older.map(function (o) {
+            return '<div style="font-size:12px; color:#6B6B73; padding:5px 0; border-top:1px solid #1A1A1F;">'
+              + '<span style="color:' + statusColour(o.status) + ';">' + esc(statusLabel(o.status)) + '</span>'
+              + ' &middot; ' + esc(fmtWhen(o.checked_at))
+              + (o.checked_by_name ? ' &middot; ' + esc(o.checked_by_name) : '')
+              + (o.notes ? ' &middot; ' + esc(o.notes) : '')
+              + '</div>';
+          }).join('')
+      : '';
+  }
+
+  async function loadChecks(productId) {
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch('/api/stock-checks?product_id=' + encodeURIComponent(productId) + '&limit=20',
+        { headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) { const l = $('scLatest'); if (l) l.textContent = 'Check history unavailable.'; return; }
+      const data = await res.json();
+      renderChecks(data.checks || []);
+    } catch (_) {
+      const l = $('scLatest');
+      if (l) l.textContent = 'Check history unavailable.';
+    }
+  }
+
+  function wireStockCheck(productId) {
+    loadChecks(productId);
+    let busy = false;
+    const save = async (status) => {
+      if (busy) return;
+      busy = true;
+      const msg = $('scMsg');
+      if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
+      try {
+        const token = localStorage.getItem(TOKEN_KEY);
+        // §35 — one request identity per tap. A retry of THIS request is the same observation;
+        // a deliberate second check is a new tap and therefore a new id.
+        const res = await fetch('/api/stock-checks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+          body: JSON.stringify({
+            product_id: productId,
+            status: status,
+            notes: ($('scNotes') && $('scNotes').value) || null,
+            request_id: uuid(),
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+          if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = data.error ? String(data.error) : ('Could not save (' + res.status + ').'); }
+        } else {
+          if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
+          if ($('scNotes')) $('scNotes').value = '';
+          await loadChecks(productId);
+        }
+      } catch (e) {
+        if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'Could not save — no connection.'; }
+      } finally { busy = false; }
+    };
+    if ($('scAvail')) $('scAvail').onclick = () => save('available');
+    if ($('scMissing')) $('scMissing').onclick = () => save('not_available');
+  }
+
+  // ── MOBILE-I1 §11-§15 — Check Item search ──────────────────────────────────
+  let searchSeq = 0;
+  function renderHits(hits) {
+    const box = $('searchResults');
+    if (!hits.length) {
+      box.innerHTML = '<div class="card" style="color:#6B6B73; text-align:center;">No matching item.</div>';
+      return;
+    }
+    box.innerHTML = hits.map(function (h, i) {
+      let attrs = {};
+      try { attrs = typeof h.attributes === 'string' ? JSON.parse(h.attributes) : (h.attributes || {}); } catch (_) {}
+      const ident = [h.sku, attrs.reference_number, attrs.serial_number].filter(Boolean).map(esc).join(' &middot; ');
+      return '<div class="card hit" data-hit="' + i + '" style="display:flex; gap:12px; align-items:center; cursor:pointer; padding:10px;">'
+        + '<img id="hitImg' + i + '" alt="" style="width:52px; height:52px; border-radius:6px; object-fit:cover; background:#1A1A1F; display:none; flex:0 0 auto;" />'
+        + '<div style="min-width:0;">'
+        +   (h.brand ? '<div style="font-size:11px; color:#6B6B73; text-transform:uppercase; letter-spacing:.06em;">' + esc(h.brand) + '</div>' : '')
+        +   '<div style="color:#EAEAEA; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(h.name || '—') + '</div>'
+        +   (ident ? '<div style="font-size:12px; color:#6B6B73; font-family:monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + ident + '</div>' : '')
+        + '</div></div>';
+    }).join('');
+    hits.forEach(function (h, i) {
+      const card = box.querySelector('[data-hit="' + i + '"]');
+      // §15 — picking a hit opens the SAME full product view the scanner opens.
+      if (card) card.onclick = () => showProduct(h);
+      if (h.thumb_key || h.image_key) paintMedia(document.getElementById('hitImg' + i), h.thumb_key || h.image_key);
+    });
+  }
+
+  async function runSearch(term) {
+    const seq = ++searchSeq;
+    const box = $('searchResults');
+    if (term.trim().length < 2) { box.innerHTML = ''; return; }
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch('/api/products/search?q=' + encodeURIComponent(term) + '&limit=20',
+        { headers: { Authorization: 'Bearer ' + token } });
+      // A slower earlier request must never overwrite a newer answer.
+      if (seq !== searchSeq) return;
+      if (!res.ok) { box.innerHTML = '<div class="card" style="color:#AA6E6E;">Search failed (' + res.status + ').</div>'; return; }
+      const data = await res.json();
+      renderHits(data.results || []);
+    } catch (e) {
+      if (seq === searchSeq) box.innerHTML = '<div class="card" style="color:#AA6E6E;">Search unavailable.</div>';
+    }
   }
   function stopScan() {
     scanRunning = false;
@@ -590,7 +824,23 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
   }
   const scanAgainBtn = $('scanAgainBtn');
-  if (scanAgainBtn) scanAgainBtn.onclick = () => { hide('scanResult'); stopScan(); startScan(); };
+  if (scanAgainBtn) scanAgainBtn.onclick = () => { hide('scanResult'); releaseMedia(); stopScan(); startScan(); };
+
+  // MOBILE-I1 — tab wiring plus a debounced search. The debounce is what keeps a per-keystroke
+  // LIKE scan from running on every character while somebody types a serial number.
+  if ($('tabScan')) $('tabScan').onclick = () => findMode('scan');
+  if ($('tabSearch')) $('tabSearch').onclick = () => findMode('search');
+  if ($('searchInput')) {
+    let debounce = null;
+    $('searchInput').addEventListener('input', (e) => {
+      const term = e.target.value;
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => runSearch(term), 250);
+    });
+    $('searchInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); if (debounce) clearTimeout(debounce); runSearch(e.target.value); }
+    });
+  }
 
   // ── Perceptual Hash (pHash) — selbe Logik wie desktop/src/core/utils/image-hash.ts.
   // Wird beim Collection-Save mitgeschickt, damit der Desktop-SyncDuplicateGuard

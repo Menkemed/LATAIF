@@ -95,6 +95,11 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
     // make a device prune snapshots, so it never syncs.
     "backup_retention_config",
     "media_gc_runs",
+    // MOBILE-I1 (v0019) — physical stock checks. Local-only: a check records what a person saw on
+    // THIS installation's shelf, and both surfaces already write the one table directly. Accepting
+    // pushed checks would also mean deciding how two simultaneous verdicts merge — a rule nobody has
+    // made — so the wire stays closed.
+    "stock_checks",
 ];
 
 /// `users` and `user_branches` deserve a word, because at first glance they look like data.
@@ -532,6 +537,12 @@ mod tests {
             // v0017 owner-configurable snapshot retention (BACKUP-RETENTION).
             ("backup_retention_config", ControlPlaneForbidden),
             ("media_gc_runs", ControlPlaneForbidden),
+            // v0019 physical stock checks (MOBILE-I1). Forbidden on the wire on purpose: a check is
+            // an observation made on THIS installation by a person standing in front of the shelf.
+            // Both surfaces already read and write the one local table directly, so there is nothing
+            // to replicate — and replicating it later would need a merge rule for two people checking
+            // the same item at once, which no one has decided.
+            ("stock_checks", ControlPlaneForbidden),
         ];
 
         let conn = Connection::open_in_memory().unwrap();

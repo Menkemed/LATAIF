@@ -53,9 +53,16 @@ pub mod primary;
 /// M6-B2B — encrypted tenant-root recovery bundle (Argon2id + AES-256-GCM). INACTIVE.
 pub mod recovery;
 /// M6-B2BC1 §1 — audit of the recovery entry path. Tests only; no production code.
+/// MOBILE-I1 — read-only product lookup, relevance search and media-key resolution against the
+/// business database. The single place a product JSON is built, so scan and search cannot drift.
+pub mod product_query;
 pub mod recovery_entry;
 pub mod routes;
 pub mod secret;
+/// MOBILE-I1 — the one stock-check contract. Mobile (`/api/stock-checks`) and Desktop (Tauri
+/// command) both write through this module into the same `stock_checks` table; nothing here can
+/// reach `products`, which is opened read-only and only to prove scope.
+pub mod stock_check;
 /// M6-B2DE1 §3 — the single source of truth for which tables the business sync may touch.
 pub mod sync_policy;
 /// M6-B3A §3 — the canonical business-schema allowlist (tables + per-table fields), read from the

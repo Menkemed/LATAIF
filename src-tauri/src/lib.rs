@@ -2418,6 +2418,110 @@ fn open_backup_location(app_handle: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ── MOBILE-I1 — STOCK CHECKING from the desktop ─────────────────────────────────────────────────────────
+//
+// These commands are the desktop half of ONE contract. They call `sync::stock_check` — the same
+// module `/api/stock-checks` calls — against the same `stock_checks` table in the server database.
+// There is no desktop-specific table, no copy step and no reconciliation: a verdict entered on the
+// phone and one entered here are rows in the same history, which is why each surface sees the
+// other's checks without any sync code existing.
+//
+// Scope is NOT taken from the renderer. `tenant-1` / `branch-main` are the single-PC constants every
+// other owner-gated command already uses; the caller may only say which product and what was seen.
+// `checked_by` is verified against `users` before it is stored, so an unknown id is recorded as an
+// unattributed check rather than as a name nobody can trace.
+
+/// Record one stock check from the desktop. Returns the stored check — the new one, or the existing
+/// one when `request_id` was already used (a double-click is not a second observation).
+#[tauri::command]
+async fn create_stock_check(
+    state: tauri::State<'_, AppHandleState>,
+    product_id: String,
+    status: String,
+    notes: Option<String>,
+    user_id: Option<String>,
+    request_id: Option<String>,
+) -> Result<sync::stock_check::StockCheck, String> {
+    let Some(parsed) = sync::stock_check::StockStatus::parse(status.trim()) else {
+        return Err(sync::stock_check::StockCheckError::InvalidStatus.code().to_string());
+    };
+    let (conn, _id) = open_config_db(&state.server)?;
+
+    // Attribution is verified, never trusted: an id that is not a real user becomes None.
+    let verified_user: Option<String> = user_id.as_deref().filter(|u| !u.trim().is_empty()).and_then(|u| {
+        conn.query_row(
+            "SELECT id FROM users WHERE id = ?1 AND active = 1",
+            rusqlite::params![u],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    });
+    let display_name: Option<String> = verified_user.as_deref().and_then(|u| {
+        conn.query_row("SELECT name FROM users WHERE id = ?1", rusqlite::params![u], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+    });
+
+    let check = sync::stock_check::record(
+        &conn,
+        &state.server.db_path.parent().ok_or("no app data dir")?.join("lataif.db"),
+        sync::stock_check::NewStockCheck {
+            tenant_id: "tenant-1",
+            branch_id: "branch-main",
+            product_id: product_id.trim(),
+            status: parsed,
+            notes: notes.as_deref(),
+            checked_by: verified_user.as_deref(),
+            checked_by_name: display_name.as_deref(),
+            source: sync::stock_check::StockCheckSource::Desktop,
+            request_id: request_id.as_deref(),
+        },
+        uuid::Uuid::new_v4().to_string(),
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .map_err(|e| e.code().to_string())?;
+    Ok(check)
+}
+
+/// Full history for one product, newest first. The desktop detail view shows `[0]` as "last check";
+/// `latest` is always derived from this list, never stored, so the two cannot disagree.
+#[tauri::command]
+async fn list_stock_checks(
+    state: tauri::State<'_, AppHandleState>,
+    product_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<sync::stock_check::StockCheck>, String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    sync::stock_check::history(
+        &conn,
+        "tenant-1",
+        "branch-main",
+        product_id.trim(),
+        limit.unwrap_or(20).clamp(1, 100),
+    )
+    .map_err(|e| e.code().to_string())
+}
+
+/// The newest check for each of the given products, as `{ product_id: check }`.
+///
+/// One call for a whole list, because the alternative — a command per row — is what turns a 200-item
+/// overview into 200 database opens.
+#[tauri::command]
+async fn latest_stock_checks(
+    state: tauri::State<'_, AppHandleState>,
+    product_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, sync::stock_check::StockCheck>, String> {
+    let (conn, _id) = open_config_db(&state.server)?;
+    let mut out = std::collections::HashMap::new();
+    for id in product_ids.iter().take(1000) {
+        if let Ok(Some(c)) = sync::stock_check::latest(&conn, "tenant-1", "branch-main", id.trim()) {
+            out.insert(id.clone(), c);
+        }
+    }
+    Ok(out)
+}
+
 // ── BACKUP-RETENTION — owner-configurable "keep last N complete snapshots" ──────────────────────────────
 // Retention is OFF until the owner enables it; enabling does NOT prune existing snapshots — prune runs at
 // boot AFTER the next fully-successful backup (media::backup::execute_pending_backup), never the newest and
@@ -2704,6 +2808,11 @@ pub fn run() {
             media_prepare_stock_image,
             storage_free_bytes,
             verify_owner_credentials,
+            // MOBILE-I1 — the desktop half of the shared stock-check contract. Same module and
+            // same table as /api/stock-checks, so neither surface needs to know the other exists.
+            create_stock_check,
+            list_stock_checks,
+            latest_stock_checks,
             media_commit_stock_image,
             media_abort_stock_image,
             media_read_verified,

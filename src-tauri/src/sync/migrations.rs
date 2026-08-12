@@ -60,6 +60,7 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0016_BACKUP_LOCATION_CONFIG,
     V0017_BACKUP_RETENTION_CONFIG,
     V0018_MEDIA_GC_RUNS,
+    V0019_STOCK_CHECKS,
 ];
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
@@ -530,6 +531,68 @@ CREATE TABLE IF NOT EXISTS media_gc_runs (
     updated_at  TEXT NOT NULL,
     CHECK (state IN ('planned','quarantined','completed','partial','failed'))
 );
+"#;
+
+// MOBILE-I1 — the ONE stock-check contract, shared by every surface.
+//
+// ## Why it lives in the server database
+//
+// The business database (`lataif.db`) is owned by sql.js in the renderer, which persists by
+// exporting its whole in-memory image over the file. Any row Rust wrote there would be erased by
+// the next renderer save — silently, and only sometimes. So a table both surfaces can WRITE cannot
+// live there. It lives here, and Mobile (`/api/stock-checks`) and Desktop (Tauri command) reach it
+// through the same Rust core: one table, no copying, no drain, no reconciliation.
+//
+// ## Why every check is a row
+//
+// A stock check is an EVENT — "at this moment, a human looked for this item and found it (or did
+// not)". Overwriting the previous verdict would destroy exactly the fact an inventory needs: that
+// it was missing at 10:00 and present at 15:00. `latest` is therefore a QUERY over this history,
+// never a mutable column.
+//
+// ## What this table deliberately cannot do
+//
+// It holds no quantity, no price, no stock status and no reference to a lot or a movement. A check
+// records an observation; correcting inventory is a separate, deliberate ERP action. Nothing here
+// can be joined into a balance by accident.
+//
+// `request_id` exists so a double tap or an offline retry re-sends the SAME check instead of
+// inventing a second one; a genuinely new check simply carries a new id. NULL is allowed and, per
+// SQLite's UNIQUE semantics, never collides — an un-keyed check is always a new event.
+//
+// `up_sql == reference_sql` (only CREATEs).
+pub const V0019_STOCK_CHECKS: Migration = Migration {
+    version: 19,
+    name: "stock_checks",
+    up_sql: V0019_SQL,
+    reference_sql: V0019_SQL,
+};
+const V0019_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS stock_checks (
+    check_id        TEXT NOT NULL PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    branch_id       TEXT NOT NULL,
+    product_id      TEXT NOT NULL,
+
+    status          TEXT NOT NULL,
+    notes           TEXT,
+
+    checked_at      TEXT NOT NULL,
+    checked_by      TEXT,
+    checked_by_name TEXT,
+    source          TEXT NOT NULL,
+
+    request_id      TEXT,
+    created_at      TEXT NOT NULL,
+
+    CHECK (status IN ('available','not_available')),
+    CHECK (source IN ('mobile','desktop')),
+    CHECK (notes IS NULL OR LENGTH(notes) <= 500)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_checks_request
+    ON stock_checks (tenant_id, request_id);
+CREATE INDEX IF NOT EXISTS idx_stock_checks_product
+    ON stock_checks (tenant_id, branch_id, product_id, checked_at DESC);
 "#;
 
 const V0011_SQL: &str = r#"
@@ -1417,7 +1480,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
         assert!(report.already_current.is_empty());
         // MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014).
         assert!(table_exists(&conn, "mobile_runtime_scope"));
@@ -1453,7 +1516,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=18).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=19).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1466,7 +1529,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1700,6 +1763,64 @@ mod tests {
         assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
     }
 
+    // ── MOBILE-I1 — v0019 declares its structure exactly as it applies it ────
+    #[test]
+    fn v0019_reference_equals_up_and_only_creates() {
+        assert_eq!(V0019_STOCK_CHECKS.up_sql, V0019_STOCK_CHECKS.reference_sql);
+        let up = V0019_SQL.to_uppercase();
+        assert!(up.contains("CREATE TABLE IF NOT EXISTS STOCK_CHECKS"));
+        assert!(!up.contains("ALTER TABLE"));
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
+    /// The stock-check contract is only worth anything if the database itself refuses the states
+    /// the UI must never produce. Asserted here rather than in the handler, because a handler can
+    /// be bypassed by a second caller and the table cannot.
+    #[test]
+    fn v0019_rejects_unknown_status_source_and_oversized_notes() {
+        let conn = base_db();
+        run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
+        let insert = |status: &str, source: &str, notes: Option<String>| {
+            conn.execute(
+                "INSERT INTO stock_checks
+                   (check_id, tenant_id, branch_id, product_id, status, notes,
+                    checked_at, checked_by, checked_by_name, source, request_id, created_at)
+                 VALUES ('c-1','t','b','p',?1,?2,'2026-01-01T00:00:00Z',NULL,NULL,?3,NULL,'2026-01-01T00:00:00Z')",
+                rusqlite::params![status, notes, source],
+            )
+        };
+        assert!(insert("gone", "mobile", None).is_err(), "unknown status must be refused");
+        assert!(insert("available", "watch", None).is_err(), "unknown source must be refused");
+        assert!(
+            insert("available", "mobile", Some("x".repeat(501))).is_err(),
+            "notes beyond the 500-character limit must be refused"
+        );
+        assert!(insert("available", "mobile", Some("In safe".into())).is_ok());
+    }
+
+    /// A retry of the SAME request must not become a second observation, while a deliberate new
+    /// check always can — including a second un-keyed one, since NULL never collides in UNIQUE.
+    #[test]
+    fn v0019_request_id_is_idempotent_but_null_is_always_a_new_event() {
+        let conn = base_db();
+        run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
+        let insert = |id: &str, req: Option<&str>| {
+            conn.execute(
+                "INSERT INTO stock_checks
+                   (check_id, tenant_id, branch_id, product_id, status, notes,
+                    checked_at, checked_by, checked_by_name, source, request_id, created_at)
+                 VALUES (?1,'t','b','p','available',NULL,'2026-01-01T00:00:00Z',NULL,NULL,'mobile',?2,'2026-01-01T00:00:00Z')",
+                rusqlite::params![id, req],
+            )
+        };
+        assert!(insert("c-1", Some("r-1")).is_ok());
+        assert!(insert("c-2", Some("r-1")).is_err(), "same request_id must not create a second row");
+        assert!(insert("c-3", Some("r-2")).is_ok(), "a new request is a new check");
+        assert!(insert("c-4", None).is_ok());
+        assert!(insert("c-5", None).is_ok(), "un-keyed checks never collide");
+    }
+
     // ── 2. Idempotent: second run is a verified no-op ────────────────────────
     #[test]
     fn migration_is_idempotent() {
@@ -1707,7 +1828,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

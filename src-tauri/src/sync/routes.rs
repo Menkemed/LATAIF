@@ -23,6 +23,17 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/sync/pull", get(sync_pull))
         .route("/me", get(get_me))
         .route("/products/by-sku/{sku}", get(product_by_sku))
+        // MOBILE-I1 — the second way to find an item. `by-id` exists so a hit picked from the search
+        // list, or a detail view reopened after a stock check, reloads through the SAME product JSON
+        // the scanner renders (§32) instead of a second, thinner shape.
+        .route("/products/by-id/{id}", get(product_by_id))
+        .route("/products/search", get(products_search))
+        // MOBILE-I1 — gallery bytes. Since the v0.8.37 media migration `products.images` is `[]` for
+        // every product, so a photo can only be reached through the media store; without this route
+        // the scan result and the search list have no picture at all.
+        .route("/media", get(media_blob))
+        // MOBILE-I1 — stock checking. Same core, same table as the desktop Tauri command.
+        .route("/stock-checks", post(stock_check_create).get(stock_check_list))
         // MOBILE-04B2A8-I1 — authenticated mobile upload ingress. Separate route; `/sync/push` above is
         // untouched. Same JWT auth layer + the same 50 MB body limit (build_api_router) as every /api route.
         .route("/mobile/upload", post(mobile_upload_ingress))
@@ -840,7 +851,17 @@ async fn product_by_sku(
     Path(sku): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // 1) Direkt aus lataif.db (read-only). Liefert immer das aktuelle Bild.
-    if let Some(p) = product_from_frontend_db(&state.frontend_db_path, &sku) {
+    //
+    // MOBILE-I1 — now SCOPED to the caller's tenant/branch (§27) and routed through the shared
+    // `product_query`, so a scan returns exactly the object the search returns, gallery photo
+    // included. The previous lookup matched a SKU anywhere in the file and could not see the media
+    // store at all.
+    if let Some(p) = super::product_query::by_sku(
+        &state.frontend_db_path,
+        &claims.tenant_id,
+        &claims.branch_id,
+        &sku,
+    ) {
         return Ok(Json(p));
     }
     // 2) Fallback: bisheriger Changelog-Lookup in der Sync-Server-DB.
@@ -905,19 +926,215 @@ async fn product_by_sku(
     Ok(Json(product))
 }
 
-// Zahlen-Spalte tolerant lesen: Real/Integer → Zahl, numerischer Text → geparst,
-// alles andere (NULL, leerer Text, der String "null" aus Alt-Daten) → None.
-// Verhindert, dass query_row an einem als TEXT gespeicherten Preisfeld scheitert.
-fn col_num(r: &rusqlite::Row, idx: usize) -> Option<f64> {
-    use rusqlite::types::ValueRef;
-    match r.get_ref(idx) {
-        Ok(ValueRef::Real(f)) => Some(f),
-        Ok(ValueRef::Integer(i)) => Some(i as f64),
-        Ok(ValueRef::Text(t)) => std::str::from_utf8(t)
-            .ok()
-            .and_then(|s| s.trim().parse::<f64>().ok()),
-        _ => None,
+// MOBILE-I1 — the tolerant numeric-column reader moved to `product_query`, next to the only
+// queries that use it, so the product JSON has exactly one place that decides how a price-shaped
+// column becomes a number.
+
+// ════════════════════════════════════════════════════════════════════════════
+// MOBILE-I1 — Check Item search, gallery media, and stock checking.
+//
+// Scope on every one of these comes from the VERIFIED JWT (`claims.tenant_id` / `claims.branch_id`),
+// never from the request. A client cannot name another tenant's product, because the id it sends is
+// only ever used inside a query already bound to its own scope.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Reload one product by id — the same JSON shape `by-sku` returns (§32).
+async fn product_by_id(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    super::product_query::by_id(&state.frontend_db_path, &claims.tenant_id, &claims.branch_id, &id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+#[derive(Deserialize)]
+struct SearchParams {
+    q: Option<String>,
+    limit: Option<u32>,
+}
+
+/// Relevance-ordered search over SKU, serial, reference, model, brand, name, description and notes.
+///
+/// An empty or blank term returns an empty list rather than the whole branch: "show me everything"
+/// is not what a person typing into a search box on a phone means, and it is the one query that
+/// would make this route expensive.
+async fn products_search(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let term = params.q.unwrap_or_default();
+    let limit = params.limit.unwrap_or(20);
+    let hits = super::product_query::search(
+        &state.frontend_db_path,
+        &claims.tenant_id,
+        &claims.branch_id,
+        &term,
+        limit,
+    );
+    Ok(Json(serde_json::json!({ "results": hits, "count": hits.len() })))
+}
+
+#[derive(Deserialize)]
+struct MediaParams {
+    key: String,
+}
+
+/// Serve ONE stored image by its storage key.
+///
+/// Two independent gates, because this route hands out file bytes over the LAN:
+///   1. the key must be structurally a storage key (`<scope>/<2 hex>/<64 hex>.<ext>`), which makes
+///      traversal unrepresentable rather than filtered, and
+///   2. the key must exist in `media_blob_generations` as an available generation for the caller's
+///      tenant — so even a well-formed key for a file that is not a known blob is refused.
+async fn media_blob(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<MediaParams>,
+) -> Result<axum::response::Response, StatusCode> {
+    use axum::response::IntoResponse;
+
+    if !super::product_query::media_key_is_known(&state.frontend_db_path, &claims.tenant_id, &params.key) {
+        return Err(StatusCode::NOT_FOUND);
     }
+    let media_root = state
+        .frontend_db_path
+        .parent()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        .join("media");
+    let path = super::product_query::media_path_for_key(&media_root, &params.key)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let bytes = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    let ct = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        _ => "image/jpeg",
+    };
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, ct),
+            // The bytes are content-addressed: a given key never changes contents, so it may be
+            // cached hard. This is what keeps a hit list of thumbnails cheap on a phone.
+            (axum::http::header::CACHE_CONTROL, "private, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct StockCheckRequest {
+    product_id: String,
+    status: String,
+    notes: Option<String>,
+    request_id: Option<String>,
+}
+
+/// Record one stock check from the mobile surface.
+///
+/// Everything identifying comes from the token: tenant, branch and the user id. The body may only
+/// say WHICH product and WHAT was observed.
+async fn stock_check_create(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    if !state.primary_state.may_write_sync() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if !is_json_content_type(&headers) {
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let raw = std::str::from_utf8(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let req: StockCheckRequest = serde_json::from_str(raw).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let Some(status) = super::stock_check::StockStatus::parse(req.status.trim()) else {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": super::stock_check::StockCheckError::InvalidStatus.code()
+            })),
+        ));
+    };
+
+    let db = state.db.lock().await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let check_id = uuid::Uuid::new_v4().to_string();
+    let name = user_display_name(&db, &claims.sub);
+
+    let result = super::stock_check::record(
+        &db,
+        &state.frontend_db_path,
+        super::stock_check::NewStockCheck {
+            tenant_id: &claims.tenant_id,
+            branch_id: &claims.branch_id,
+            product_id: req.product_id.trim(),
+            status,
+            notes: req.notes.as_deref(),
+            checked_by: Some(&claims.sub),
+            checked_by_name: name.as_deref(),
+            source: super::stock_check::StockCheckSource::Mobile,
+            request_id: req.request_id.as_deref(),
+        },
+        check_id,
+        &now,
+    );
+
+    match result {
+        Ok(check) => Ok((StatusCode::OK, Json(serde_json::json!({ "check": check })))),
+        Err(e) => {
+            let code = match e {
+                super::stock_check::StockCheckError::ProductNotFound => StatusCode::NOT_FOUND,
+                super::stock_check::StockCheckError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::UNPROCESSABLE_ENTITY,
+            };
+            Ok((code, Json(serde_json::json!({ "error": e.code() }))))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct StockCheckListParams {
+    product_id: String,
+    limit: Option<u32>,
+}
+
+/// History for one product, newest first, plus the derived latest verdict.
+async fn stock_check_list(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Query(params): Query<StockCheckListParams>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.lock().await;
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let checks = super::stock_check::history(
+        &db,
+        &claims.tenant_id,
+        &claims.branch_id,
+        params.product_id.trim(),
+        limit,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let latest = checks.first().cloned();
+    Ok(Json(serde_json::json!({ "checks": checks, "latest": latest })))
+}
+
+/// Best-effort display name for the person who recorded a check. Absent is fine — the check is
+/// still valid and still attributed by `checked_by`; only the label is missing.
+fn user_display_name(db: &rusqlite::Connection, user_id: &str) -> Option<String> {
+    db.query_row(
+        "SELECT name FROM users WHERE id = ?1",
+        rusqlite::params![user_id],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
@@ -1099,7 +1316,24 @@ mod legacy_push_tests {
             // MOBILE-04B2A8-I1 — `/mobile/upload` added: same protected group as /sync/push (JWT auth
             // route_layer + the 50 MB body limit), plus a fail-closed primary-write gate and role check
             // in the handler. Additive; the mode matrix / gate for every other route is unchanged.
-            vec!["/sync/push", "/sync/pull", "/me", "/products/by-sku/{sku}", "/mobile/upload", "/auth/login", "/health"],
+            //
+            // MOBILE-I1 — five more, all inside the same JWT-protected group:
+            //   • /products/by-id/{id}, /products/search, /media  — READ ONLY. They open the business
+            //     database with SQLITE_OPEN_READ_ONLY (product_query), so they cannot write even by
+            //     mistake, and their scope comes from the verified claims, not the request.
+            //   • /stock-checks GET  — read only, server DB.
+            //   • /stock-checks POST — the ONE new write surface. It does NOT touch business data:
+            //     it appends to `stock_checks`, a local control-plane table that sync_policy denies
+            //     (never pushed, never pulled). It is gated the same way /mobile/upload is
+            //     (`may_write_sync()` + JWT), and the INSERT itself lives in `stock_check::record`,
+            //     which proves the product exists in the caller's scope before writing and has no
+            //     code path to `products`. See the writer scan below: nothing in THIS file writes.
+            vec![
+                "/sync/push", "/sync/pull", "/me",
+                "/products/by-sku/{sku}", "/products/by-id/{id}", "/products/search",
+                "/media", "/stock-checks",
+                "/mobile/upload", "/auth/login", "/health",
+            ],
             "Routenmenge geaendert — Modusmatrix und Gate neu bewerten"
         );
 
@@ -1124,8 +1358,24 @@ mod legacy_push_tests {
     // ── W5: Lesepfade veraendern die DB nicht ────────────────────────────────
     #[test]
     fn w5_read_routes_do_not_write() {
-        let src = include_str!("routes.rs");
-        for handler in ["async fn sync_pull", "async fn get_me", "async fn product_by_sku", "async fn health"] {
+        // Production code only — the same cut W4 makes. Without it the window for the LAST
+        // production handler runs on until the next top-level `fn` anywhere in the file, which is
+        // inside this test module, and the scan then measures test fixtures instead of the handler.
+        let full = include_str!("routes.rs");
+        let src = &full[..full.find("#[cfg(test)]").unwrap_or(full.len())];
+        // MOBILE-I1 — the four new read handlers are held to the same standard. `media_blob` reads
+        // file bytes, `products_search` / `product_by_id` read the business DB read-only, and
+        // `stock_check_list` only queries history.
+        for handler in [
+            "async fn sync_pull",
+            "async fn get_me",
+            "async fn product_by_sku",
+            "async fn product_by_id",
+            "async fn products_search",
+            "async fn media_blob",
+            "async fn stock_check_list",
+            "async fn health",
+        ] {
             let start = src.find(handler).unwrap_or_else(|| panic!("{handler} nicht gefunden"));
             // Bis zur NAECHSTEN Top-Level-Funktion, nicht ueber ein festes Zeichenfenster —
             // sonst laeuft der Scan in den Nachbarcode und misst das Falsche.
@@ -1317,7 +1567,8 @@ mod legacy_push_tests {
         let forbidden = all_forbidden_tables();
         assert_eq!(
             forbidden.len(),
-            33,
+            // MOBILE-I1 — +1: v0019 `stock_checks`, local-only like the rest of this list.
+            34,
             "control-plane + internal forbidden tables (incl. sync_change_quarantine, the v0010 CAS \
              tables, the v0011 operation-protocol changelog/audit sinks, the v0012/v0013 mobile-upload \
              inbox + claim tables, the v0014 mobile_runtime_scope binding, the v0015 \
@@ -2699,63 +2950,6 @@ mod legacy_push_tests {
     }
 }
 
-// Produkt direkt aus der Frontend-DB (lataif.db) `products`-Tabelle lesen — read-only,
-// damit der laufende sql.js-Schreiber nicht blockiert wird. Liefert das Produkt-JSON in
-// genau der Form, die die Mobile-Seite (renderProduct) erwartet: images/attributes/
-// scope_of_delivery bleiben JSON-Strings, Preise als Zahl. None => Caller nutzt Fallback.
-fn product_from_frontend_db(db_path: &std::path::Path, sku: &str) -> Option<serde_json::Value> {
-    use rusqlite::OpenFlags;
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-
-    let mut product = conn
-        .prepare(
-            "SELECT brand, name, sku, condition, scope_of_delivery, storage_location,
-                    purchase_price, planned_sale_price, min_sale_price, max_sale_price,
-                    stock_status, images, attributes, category_id
-             FROM products WHERE sku = ?1 LIMIT 1",
-        )
-        .ok()?
-        .query_row(rusqlite::params![sku], |r| {
-            Ok(serde_json::json!({
-                "brand":             r.get::<_, Option<String>>(0)?,
-                "name":              r.get::<_, Option<String>>(1)?,
-                "sku":               r.get::<_, Option<String>>(2)?,
-                "condition":         r.get::<_, Option<String>>(3)?,
-                "scope_of_delivery": r.get::<_, Option<String>>(4)?,
-                "storage_location":  r.get::<_, Option<String>>(5)?,
-                "purchase_price":    col_num(r, 6),
-                "planned_sale_price": col_num(r, 7),
-                "min_sale_price":    col_num(r, 8),
-                "max_sale_price":    col_num(r, 9),
-                "stock_status":      r.get::<_, Option<String>>(10)?,
-                "images":            r.get::<_, Option<String>>(11)?,
-                "attributes":        r.get::<_, Option<String>>(12)?,
-                "category_id":       r.get::<_, Option<String>>(13)?,
-            }))
-        })
-        .ok()?;
-
-    // Kategorie-Name aufloesen (fuer die Anzeige) — fehlt sie, bleibt category_id.
-    if let Some(cat_id) = product
-        .get("category_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-    {
-        if let Ok(name) = conn.query_row(
-            "SELECT name FROM categories WHERE id = ?1",
-            rusqlite::params![cat_id],
-            |r| r.get::<_, String>(0),
-        ) {
-            product["category_name"] = serde_json::Value::String(name);
-        }
-    }
-
-    Some(product)
-}
 
 #[cfg(test)]
 #[path = "mobile_ingress_route_tests.rs"]
