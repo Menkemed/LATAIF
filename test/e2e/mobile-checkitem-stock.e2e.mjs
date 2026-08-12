@@ -12,7 +12,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -733,42 +733,125 @@ async function main() {
   await sleep(2500);
   ok(inbox().length === 1, 'ai-upload retry: still exactly one inbox receipt (exactly-once holds)');
 
-  // the desktop drains it into a real product. The mobile pipeline is scope-gated (MOBILE-04B2A3):
-  // without an owner-configured runtime binding the handoff worker refuses to run at all, so the
-  // binding is configured exactly the way the other real-app suites do it.
+  // ── the REAL drain: the app's own post-auth handoff worker ───────────────
+  //
+  // The worker is not a timer - it runs when the frontend authenticates, and only when the runtime
+  // binding already exists (MOBILE-04B2A3 gates every wrapper on it). The earlier version of this
+  // block waited 91s next to an app that had logged in long before the binding was configured, so
+  // nothing could ever fire. The fix is the canonical trigger the ingress-worker suite uses:
+  // configure the binding, then make the app authenticate again.
+  const inboxState = () => {
+    const d = new DatabaseSync(SERVER_DB);
+    try { const r = d.prepare('SELECT state FROM mobile_upload_inbox WHERE upload_event_id=?').get(evId); return r ? r.state : null; }
+    catch (e) { return null; } finally { d.close(); }
+  };
+  const stateBefore = inboxState();
+  ok(stateBefore === 'accepted',
+    'ai-drain: before the worker runs the receipt sits at ACCEPTED (got ' + stateBefore + ')');
+
   const scopeCfg = await invoke(app, 'mobile_runtime_scope_configure',
     { email: OWNER_EMAIL, password: OWNER_PW, tenantId: TENANT, branchId: 'branch-main' });
   ok(scopeCfg.ok && scopeCfg.value && scopeCfg.value.configured === true,
     'ai-drain: owner configured the runtime binding (' + (scopeCfg.error || '') + ')');
-  // The seeded owner's password is OWNER_PW (the seed provisioned it); the onboarding password only
-  // applies when this suite creates the account through the wizard.
-  const loginErr = await (async () => { try { await frontendLogin(app, OWNER_PW); return ''; } catch (e) { return String(e && e.message || e); } })();
-  const loggedIn = await app.ev(`return !document.querySelector('input[type="password"]');`);
-  ok(loggedIn, 'ai-drain: the desktop app is logged in so its handoff worker runs (' + loginErr + ')');
-  const drainEnd = Date.now() + 90000; let after = prodCountBefore;
-  while (Date.now() < drainEnd) {
-    const d = new DatabaseSync(BIZ_DB);
-    try { after = d.prepare('SELECT COUNT(*) c FROM products').get().c; } catch (e) {} finally { d.close(); }
-    if (after > prodCountBefore) break;
-    await sleep(2000);
+
+  // Wait for a BUSINESS terminal state, never for a duration.
+  async function pollInbox(want, ms) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { if (inboxState() === want) return true; await sleep(1000); }
+    return false;
   }
-  // KNOWN GAP - the drain-to-product leg is not asserted by this suite.
-  //
-  // The upload is proven up to its durable inbox receipt above. Turning that receipt into a product
-  // needs the desktop handoff worker, which in this harness did not run to completion within the
-  // window: the app is logged in and the runtime binding is configured, but no product appeared.
-  // Rather than assert something this suite has not shown, it is recorded as a gap here, and
-  // MOBILE_UPLOAD_AI_SAFE_IDENTIFY_PROVED is NOT claimed. The upload->drain->product path itself is
-  // covered independently by mobile-page-uuid.e2e.mjs; what is missing is that proof for an
-  // AI-filled form specifically.
-  console.log('  [gap] ai-drain: no product materialised in ' + Math.round((Date.now() - (drainEnd - 90000)) / 1000) +
-              's (' + prodCountBefore + ' -> ' + after + ') - drain-to-product NOT proven by this suite');
+  async function reloadAndAuth() {
+    await app.ev('window.location.reload();').catch(() => {});
+    await sleep(3000);
+    try { app.close(); } catch (e) {}
+    const list = await (await fetch('http://127.0.0.1:' + APP_CDP + '/json/list')).json();
+    const pg = list.find((t) => t.type === 'page' && /tauri\.localhost/.test(t.url));
+    if (!pg) throw new Error('app page vanished after reload');
+    app = new CDP(pg.webSocketDebuggerUrl);
+    await app.send('Runtime.enable');
+    await waitInvoke(app);
+    await frontendLogin(app, OWNER_PW).catch(() => {});
+  }
+
+  await reloadAndAuth();
+  let drained = await pollInbox('ready', 60000);
+  if (!drained) { await reloadAndAuth(); drained = await pollInbox('ready', 60000); }
+  ok(drained, 'ai-drain: the real post-auth worker drained the receipt to READY (state=' + inboxState() + ')');
+
+  // ── §6 — the product the AI-filled upload produced ───────────────────────
+  const newProducts = () => {
+    const d = new DatabaseSync(BIZ_DB);
+    try {
+      return d.prepare('SELECT id, brand, name, quantity, purchase_price, planned_sale_price, min_sale_price, sku, images, attributes FROM products WHERE id NOT IN (?,?)')
+        .all(PRODUCT_ID, 'p-e2e-sub');
+    } catch (e) { return []; } finally { d.close(); }
+  };
+  let made = newProducts();
+  ok(made.length === 1, 'ai-drain: exactly ONE new product exists (' + made.length + ')');
+  if (made.length === 1) {
+    const row = made[0];
+    ok(Number(row.quantity) === 3, 'ai-drain: quantity is 3, the number the operator typed');
+    ok(row.brand === 'Rolex', 'ai-drain: the AI-filled brand survived the drain');
+    ok(row.name === beforeUpload.name, 'ai-drain: the operator name survived unchanged');
+    ok(!Number(row.purchase_price), 'ai-drain: no AI purchase price landed on the product');
+    ok(!Number(row.planned_sale_price), 'ai-drain: no AI sale price landed on the product');
+    ok(!Number(row.min_sale_price), 'ai-drain: no AI minimum price landed on the product');
+    ok((row.sku || '') !== 'RLX-AI-FAKE', 'ai-drain: the invented SKU never became the product SKU');
+    ok(row.images === '[]', 'ai-drain: the photo is gallery-backed, not inline (current media contract)');
+    const attrs = JSON.parse(row.attributes || '{}');
+    ok(attrs.reference_number === '126334', 'ai-drain: the AI attribute survived the drain');
+    ok(attrs.dial === 'Slate Roman', 'ai-drain: the AI dial survived the drain');
+    ok(attrs.quantity === undefined && attrs.purchase_price === undefined && attrs.not_a_real_key === undefined,
+      'ai-drain: no forbidden or unknown key leaked into attributes');
+
+    // the whole media chain, not just a link row
+    const d = new DatabaseSync(BIZ_DB);
+    let chain, filePath;
+    try {
+      chain = d.prepare(
+        "SELECT l.link_id, o.ingest_status, b.blob_status, g.gen_status, g.storage_key" +
+        "  FROM media_links l" +
+        "  JOIN media_objects o ON o.tenant_id=l.tenant_id AND o.media_id=l.media_id" +
+        "  JOIN media_blobs b ON b.tenant_id=o.tenant_id AND b.blob_id=o.master_blob_id" +
+        "  JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id AND g.generation_no=b.current_generation_no" +
+        " WHERE l.entity_id=? AND l.deleted_at IS NULL").all(row.id);
+    } finally { d.close(); }
+    ok(chain.length === 1, 'ai-drain: exactly one active gallery link (' + chain.length + ')');
+    if (chain.length === 1) {
+      ok(chain[0].ingest_status === 'ready', 'ai-drain: the media object is ready');
+      ok(chain[0].blob_status === 'present', 'ai-drain: the blob is present');
+      ok(chain[0].gen_status === 'available', 'ai-drain: the generation is available');
+      filePath = join(MEDIA_ROOT, chain[0].storage_key.replace(/\//g, sep));
+      ok(existsSync(filePath), 'ai-drain: the image file exists on disk');
+    }
+
+    // ── §7 — replay the SAME receipt and drain again ───────────────────────
+    const replay = await api('/api/mobile/upload', {
+      method: 'POST', body: JSON.stringify(up),
+    }, await (async () => { const t = await edge.ev('return localStorage.getItem("lataif_mobile_token");'); return t; })());
+    ok(replay.status === 200 || replay.status === 201 || replay.status === 409,
+      'ai-replay: re-sending the same upload is answered without creating a new event (' + replay.status + ')');
+    const receipts = (() => { const d2 = new DatabaseSync(SERVER_DB); try { return d2.prepare('SELECT COUNT(*) c FROM mobile_upload_inbox WHERE upload_event_id=?').get(evId).c; } catch (e) { return -1; } finally { d2.close(); } })();
+    ok(receipts === 1, 'ai-replay: still exactly one inbox receipt (' + receipts + ')');
+
+    await reloadAndAuth();
+    await sleep(6000);   // give a second worker pass every chance to double-create
+    made = newProducts();
+    ok(made.length === 1, 'ai-replay: still exactly ONE product after a second drain pass (' + made.length + ')');
+    ok(Number(made[0] && made[0].quantity) === 3, 'ai-replay: quantity is still 3, never doubled');
+    const d3 = new DatabaseSync(BIZ_DB);
+    let links2;
+    try { links2 = d3.prepare('SELECT COUNT(*) c FROM media_links WHERE entity_id=? AND deleted_at IS NULL').get(row.id).c; } finally { d3.close(); }
+    ok(links2 === 1, 'ai-replay: still exactly one active media link, no second attachment (' + links2 + ')');
+  }
 
   // ── ai-failure: timeout and malformed must preserve everything ────────────
   await clickE(edge, '.mode-btn[data-mode="collection"]').catch(() => {});
   await waitVisE(edge, '#formCollection', 10000);
-  await setFile(edge, '#cPhotoInput', jpgPath);
-  await waitVisE(edge, '#cPhotoStatus', 15000);
+  const jpgPath2 = join(RUN, 'capture2.jpg');
+  writeFileSync(jpgPath2, Buffer.concat([JPEG, Buffer.from([0x00])]));
+  await setFile(edge, '#cPhotoInput', jpgPath2);
+  await waitUnhidden(edge, '#cPhotoStatus', 20000);
   await setValE(edge, '#cBrand', 'Operator Brand');
   await setValE(edge, '#cName', 'Operator Name');
   await setValE(edge, '#cQuantity', '5');
