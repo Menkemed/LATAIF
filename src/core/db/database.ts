@@ -14,6 +14,7 @@ import SCHEMA from './schema.sql?raw';
 import { applyMediaSchema } from './media-schema';
 import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
+import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
 import {
   atomicWrite,
   createSaveCoalescer,
@@ -621,6 +622,12 @@ function runMigrations(database: Database): void {
       ('OFF',  'OFF',  1, 1, 6, datetime('now')),
       ('TRF',  'TRF',  1, 1, 6, datetime('now'))
     `,
+
+    // SKU-ALLOC §A4 — one counter per SKU stem, the same shape and for the same reason as
+    // `document_sequences` above: a number that has been handed out is never handed out again,
+    // and because the counter does not live in `products`, deleting a product cannot lower it.
+    // No seed rows — a stem's counter is created on first use and initialised from history.
+    SKU_SEQUENCES_DDL,
 
     // Audit log table (Plan §History/Audit §4)
     `CREATE TABLE IF NOT EXISTS audit_log (

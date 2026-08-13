@@ -17,6 +17,7 @@ import type { ProductCreateResult } from './product-media-create';
 import type { MobileUploadReceiptIntent } from '../../stores/productStore';
 import type { PrepareResult } from './gateway';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
+import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
 
 /** One image prepared out-of-band (Rust staged + rendered it) for the durable create batch — an
  *  opaque descriptor, no bytes. */
@@ -130,6 +131,11 @@ export interface MobileDrainDeps {
   readScopeEvidence?: () => Promise<RuntimeScopeEvidence | null>;
   /** The current authenticated desktop scope, or null when not authenticated. */
   currentScope: () => { tenantId: string; branchId: string } | null;
+  /** SKU-ALLOC §A3 — claim the next SKU for a generated seed. Authoritative and side-effecting:
+   *  the number is taken from the durable per-stem counter, so a second caller cannot be handed the
+   *  same one and a later deletion cannot release it. Optional: without it an upload without a SKU
+   *  stays without one, which is the behaviour before this existed. */
+  allocateSku?: (seed: string) => string;
   /** The durable sql.js source-binding for this upload. Keyed by the FULL identity incl. user. */
   readReceipt: (tenantId: string, branchId: string, authenticatedUserId: string, uploadEventId: string) => DurableReceipt | null;
   productExists: (productId: string) => boolean;
@@ -227,6 +233,33 @@ export function projectionFieldsFromMetadata(metadataJson: string): ProductProje
   let m: Record<string, unknown> = {};
   try { m = JSON.parse(metadataJson) as Record<string, unknown>; } catch { m = {}; }
   return { brand: m.brand, name: m.name, categoryId: m.categoryId, sku: m.sku, attributes: m.attributes };
+}
+
+/**
+ * SKU-ALLOC — return the grant with a SKU filled in, or unchanged.
+ *
+ * Unchanged when: the wiring supplies no allocator (then this stays exactly the pre-allocation
+ * behaviour), the metadata is unparseable, the operator already typed a SKU on the phone, or the
+ * allocator produced nothing. Never overwrites a SKU that came from the upload.
+ *
+ * The seed always carries an explicit `-001`, so a model number that ends the brand/category code
+ * can never be mistaken for the sequence.
+ */
+export function withAllocatedSku(grant: ClaimGrant, deps: MobileDrainDeps): ClaimGrant {
+  if (!deps.allocateSku) return grant;
+  let m: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(grant.metadataJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return grant;
+    m = parsed as Record<string, unknown>;
+  } catch {
+    return grant;
+  }
+  if (!skuIsEmpty(m.sku)) return grant;
+  const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+  const sku = deps.allocateSku(buildSkuSeed(str(m.brand), str(m.categoryId)));
+  if (!sku) return grant;
+  return { ...grant, metadataJson: JSON.stringify({ ...m, sku }) };
 }
 
 /** A prepared image's identity — the SERVER-derived prepareRequestId (which itself binds
@@ -362,9 +395,15 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
     await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
     return { code: 'deferred', detail: 'scope_fenced' };
   }
-  const metadataHash = await canonicalProductMetadataHash(projectionFieldsFromMetadata(grant.metadataJson));
+  // SKU-ALLOC — a phone upload normally carries no SKU, so the number is allocated HERE, at the
+  // moment the product is written, and never on the phone: only the desktop sees every SKU in use,
+  // and "next free" is only true at insert time. It is folded into the metadata BEFORE the hash, so
+  // the receipt binds exactly what the row will contain — hash it after the fact and the pre-ready
+  // projection check would find a SKU that was never bound and quarantine the job.
+  const created = withAllocatedSku(grant, deps);
+  const metadataHash = await canonicalProductMetadataHash(projectionFieldsFromMetadata(created.metadataJson));
   const manifestHash = await preparedManifestHash(grant.images, identitiesFromPrepared(prepared));
-  const result = await deps.createProduct(grant, prepared, {
+  const result = await deps.createProduct(created, prepared, {
     uploadEventId: grant.uploadEventId,
     payloadHash: grant.payloadHash,
     authenticatedUserId: grant.authenticatedUserId,

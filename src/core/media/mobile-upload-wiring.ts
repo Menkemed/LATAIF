@@ -10,6 +10,7 @@
 // bytes/data-URLs cross into JS.
 
 import { getDatabase, currentDbEpoch } from '@/core/db/database';
+import { allocateSku, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { armDrainPoller, stopDrainPoller, type DrainPollerDeps } from './mobile-drain-poller';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf } from './runtime-scope-evidence';
@@ -209,6 +210,10 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
     currentScope,
     readReceipt,
     productExists: (id) => query('SELECT 1 FROM products WHERE id = ?', [id]).length > 0,
+    // SKU-ALLOC §A3 — the DURABLE allocator, not a scan of the current products: a scan would
+    // re-issue the number of any product that has since been deleted. The counter is incremented
+    // before it is read, so two drains in the same tick cannot claim the same number.
+    allocateSku: (seed) => allocateSku(getDatabase() as unknown as SkuSequenceDb, seed),
     readProductMetadataHash,
     readBoundBatch,
     readGalleryManifest,

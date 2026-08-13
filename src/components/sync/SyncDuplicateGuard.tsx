@@ -23,6 +23,7 @@ import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { trackUpdate } from '@/core/sync/track';
 import { frozenSyncTarget, shouldApplySyncAutoIdentify } from '@/core/media/ai-image-source';
+import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import type { Product } from '@/core/models/types';
 
 // Per-product supersession registry for sync auto-identify: a newer run for the
@@ -34,24 +35,8 @@ interface PendingReview {
   matches: Array<{ product: Product; score: number; reasons: string[] }>;
 }
 
-/** Wenn die AI keinen SKU-Vorschlag liefert, bauen wir einen aus Brand-3-Letter
- *  + Kategorie-3-Letter. Garantiert dass das Feld NIE leer bleibt nach
- *  Mobile-Upload-Auto-Identify. nextAvailableSku haengt die Sequenz an. */
-function buildFallbackSkuSeed(brand?: string, categoryId?: string): string {
-  const brandCode = (brand || 'ITM').replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X');
-  const catCode = (() => {
-    switch (categoryId) {
-      case 'cat-watch': return 'WCH';
-      case 'cat-gold-jewelry': return 'GLD';
-      case 'cat-branded-gold-jewelry': return 'BGJ';
-      case 'cat-original-gold-jewelry': return 'OGJ';
-      case 'cat-accessory': return 'ACC';
-      case 'cat-spare-part': return 'PRT';
-      default: return 'GEN';
-    }
-  })();
-  return `${brandCode}-${catCode}-001`;
-}
+// SKU-ALLOC — the seed builder moved to `core/products/sku-allocation` so the drain, the store
+// and this guard cannot drift; `buildSkuSeed` is the same brand-3 + category-3 rule as before.
 
 const VALID_AI_CATEGORIES = new Set<string>([
   'cat-watch', 'cat-gold-jewelry', 'cat-branded-gold-jewelry',
@@ -113,11 +98,10 @@ async function runAutoIdentify(productId: string): Promise<void> {
     const patch: Partial<Product> = {};
     if (result.brand) patch.brand = result.brand;
     if (result.name) patch.name = result.name;
-    // SKU MANDATORY: empty / 'null' / 'undefined' / whitespace → fill.
-    const currentSkuRaw = String(current.sku ?? '').trim().toLowerCase();
-    const skuIsEmpty = !currentSkuRaw || currentSkuRaw === 'null' || currentSkuRaw === 'undefined';
-    if (skuIsEmpty) {
-      const seed = result.sku || buildFallbackSkuSeed(result.brand || current.brand, current.categoryId);
+    // SKU MANDATORY: empty / 'null' / 'undefined' / whitespace → fill. The emptiness rule is
+    // shared with the drain, so both surfaces agree on what "has no SKU" means.
+    if (skuIsEmpty(current.sku)) {
+      const seed = result.sku || buildSkuSeed(result.brand || current.brand, current.categoryId);
       patch.sku = store.nextAvailableSku(seed);
     }
     if (result.condition) patch.condition = result.condition;
@@ -436,7 +420,7 @@ export function SyncDuplicateGuard() {
       delete finalAttrs.serialNo;
 
       const store = useProductStore.getState();
-      const skuSeed = existing.sku || buildFallbackSkuSeed(existing.brand, existing.categoryId);
+      const skuSeed = existing.sku || buildSkuSeed(existing.brand, existing.categoryId);
       const nextSku = store.nextAvailableSku(skuSeed);
 
       store.updateProduct(incoming.id, {

@@ -4,6 +4,7 @@ import type { Product, Category, StockStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
+import { nextSkuFrom } from '@/core/products/sku-allocation';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // pHash entfernt 2026-05-18 — Duplicate-Detection laeuft jetzt nur ueber
@@ -1339,50 +1340,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   // "CA/0007", "CA.0007", "ABC123", oder "ABC" (ohne Ziffern → "ABC-001").
   // Sucht über alle bestehenden SKUs mit demselben Stamm und schlägt
   // max(stem-num) + 1 vor (padded auf Original-Breite).
-  nextAvailableSku: (prefix) => {
-    const clean = (prefix || '').trim().toUpperCase();
-    if (!clean) return '';
-    // Match: alles vor trailing-digits + trailing-digits
-    const m = clean.match(/^(.*?)(\d+)$/);
-    let stem: string;
-    let width: number;
-    let startNum: number;
-    if (m) {
-      stem = m[1];           // z.B. "WATCH-", "CA/", "CA.", "ABC"
-      startNum = parseInt(m[2], 10);
-      width = m[2].length;
-    } else {
-      stem = clean + '-';    // "ABC" → "ABC-001"
-      startNum = 0;
-      width = 3;
-    }
-    // Sammle alle existierenden SKUs + finde max num mit diesem Stamm.
-    const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp('^' + escaped + '(\\d+)$');
-    const existing = new Set<string>();
-    let maxNum = startNum;
-    for (const p of get().products) {
-      const s = (p.sku || '').trim().toUpperCase();
-      if (!s) continue;
-      existing.add(s);
-      const mm = s.match(pattern);
-      if (mm) {
-        const n = parseInt(mm[1], 10);
-        if (!isNaN(n) && n > maxNum) maxNum = n;
-      }
-    }
-    // Suggest maxNum + 1; falls Pad-Width überlaufen würde, dynamisch erweitern.
-    let next = maxNum + 1;
-    let candidate = stem + String(next).padStart(width, '0');
-    // Safety: bei Kollision (z.B. Race) iterieren bis frei.
-    let safety = 0;
-    while (existing.has(candidate.toUpperCase()) && safety < 10000) {
-      next++;
-      candidate = stem + String(next).padStart(width, '0');
-      safety++;
-    }
-    return candidate;
-  },
+  // SKU-ALLOC — the RULE lives in `core/products/sku-allocation`; this only supplies the
+  // store's view of the SKUs in use. The mobile drain runs the identical rule against a fresh
+  // DB read, so a phone-created product and a desktop-created one can never number differently.
+  nextAvailableSku: (prefix) => nextSkuFrom(prefix, get().products.map(p => p.sku || '')),
 
   // Duplicate Detection (Plan §Product §QuickCapture):
   // Score-System — vergleicht ein Kandidaten-Produkt mit allen existierenden
