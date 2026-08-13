@@ -3,6 +3,7 @@ import { applyChoiceSelection } from '@/core/products/choice-value';
 import { useNavigate } from 'react-router-dom';
 import { Package, Trash2, X, Check, Link2, Tag } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
+import { StockCheckInventoryModal } from '@/components/products/StockCheckInventoryModal';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -181,6 +182,7 @@ export function WatchList() {
   // v0.7.28 — ZPL-Tag-Druck: eigener Auswahl-Modus (alle Produkte wählbar, KEINE
   // Link-Sperre wie beim Löschen). Markierte Produkte → Batch-Druck (gerade Anzahl).
   const [printMode, setPrintMode] = useState(false);
+  const [inventoryOpen, setInventoryOpen] = useState(false);
   const [printSelectedIds, setPrintSelectedIds] = useState<Set<string>>(new Set());
   const [showBulkPrint, setShowBulkPrint] = useState(false);
   const [bulkPrinter, setBulkPrinter] = useState(getTagPrinterName());
@@ -430,6 +432,11 @@ export function WatchList() {
             <>
               <Button variant="ghost" disabled={filtered.length === 0} onClick={() => { setPrintSelectedIds(new Set()); setPrintMode(true); }}>
                 <Tag size={14} /> Print Tags
+              </Button>
+              {/* POST-V0838 §C1 — the inventory modal takes the CURRENT working set: whatever the
+                  search and the filters above have narrowed the page down to, never the whole stock. */}
+              <Button variant="ghost" data-testid="open-inventory" disabled={filtered.length === 0} onClick={() => setInventoryOpen(true)}>
+                Stock Check ({filtered.length})
               </Button>
               <Button variant="ghost" onClick={() => exportProductsToExcel(filtered, categories)}>
                 Export Excel ({filtered.length})
@@ -1079,6 +1086,13 @@ export function WatchList() {
       {/* v0.7.20 — Bestaetigung Bulk-Delete. Listet die ausgewaehlten (sauberen)
           Produkte; nur diese werden geloescht. Verknuepfte sind gar nicht erst
           selektierbar. */}
+      <StockCheckInventoryModal
+        open={inventoryOpen}
+        onClose={() => setInventoryOpen(false)}
+        products={filtered}
+        categories={categories}
+      />
+
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete items?" width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div style={{
