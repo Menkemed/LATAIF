@@ -9,7 +9,7 @@
 // and neither can reach `products`.
 // ════════════════════════════════════════════════════════════════════════════
 
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { useAuthStore } from '@/stores/authStore';
 import {
@@ -103,11 +103,9 @@ export function StockCheckPanel({ productId }: { productId: string }) {
         )}
       </div>
 
-      <div className="flex gap-2 mb-2">
-        <Button variant="ghost" disabled={busy} onClick={() => void save('available')}>Available</Button>
-        <Button variant="ghost" disabled={busy} onClick={() => void save('not_available')}>Not available</Button>
-      </div>
-
+      {/* MOBILE-I1 §D1 — the note comes BEFORE the buttons. The buttons SAVE, so with the field
+          underneath them the reading order invited a click first and the note second; live that
+          produced nine checks with no note at all before the tenth carried one. */}
       <input
         type="text"
         value={notes}
@@ -117,20 +115,34 @@ export function StockCheckPanel({ productId }: { productId: string }) {
         className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
       />
 
+      <div className="flex gap-2 mt-2">
+        <Button variant="ghost" disabled={busy} onClick={() => void save('available')}>Available</Button>
+        <Button variant="ghost" disabled={busy} onClick={() => void save('not_available')}>Not available</Button>
+      </div>
+
       {msg && <div className={`text-xs mt-2 ${msg.bad ? 'text-red-400' : 'text-emerald-400'}`}>{msg.text}</div>}
 
       {earlier.length > 0 && (
         <div className="mt-4">
           <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-1">Earlier checks</div>
-          {earlier.map(c => (
-            <div key={c.check_id} className="text-xs text-gray-500 py-1 border-t border-white/5">
-              <span className={tone(c.status)}>{stockCheckLabel(c.status)}</span>
-              <span> · {when(c.checked_at)}</span>
-              {c.checked_by_name && <span> · {c.checked_by_name}</span>}
-              <span className="text-gray-600"> · {c.source}</span>
-              {c.notes && <span> · {c.notes}</span>}
-            </div>
-          ))}
+          {/* §D2 — columns, not a `·`-joined sentence: at ten entries the single-line form was
+              unreadable. Plain CSS grid; no data-grid dependency for five columns. */}
+          <div className="grid text-xs" style={{ gridTemplateColumns: 'auto 1fr auto auto auto', columnGap: 12 }}>
+            <div className="text-gray-600 pb-1">Status</div>
+            <div className="text-gray-600 pb-1">Notes</div>
+            <div className="text-gray-600 pb-1">Checked at</div>
+            <div className="text-gray-600 pb-1">Source</div>
+            <div className="text-gray-600 pb-1">By</div>
+            {earlier.map(c => (
+              <Fragment key={c.check_id}>
+                <div className={`py-1 border-t border-white/5 ${tone(c.status)}`}>{stockCheckLabel(c.status)}</div>
+                <div className="py-1 border-t border-white/5 text-gray-300">{c.notes || <span className="text-gray-600">—</span>}</div>
+                <div className="py-1 border-t border-white/5 text-gray-500 whitespace-nowrap">{when(c.checked_at)}</div>
+                <div className="py-1 border-t border-white/5 text-gray-500">{c.source}</div>
+                <div className="py-1 border-t border-white/5 text-gray-500 whitespace-nowrap">{c.checked_by_name || '—'}</div>
+              </Fragment>
+            ))}
+          </div>
         </div>
       )}
     </div>

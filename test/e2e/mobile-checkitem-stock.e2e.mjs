@@ -841,6 +841,18 @@ async function main() {
     ok(!Number(row.planned_sale_price), 'ai-drain: no AI sale price landed on the product');
     ok(!Number(row.min_sale_price), 'ai-drain: no AI minimum price landed on the product');
     ok((row.sku || '') !== 'RLX-AI-FAKE', 'ai-drain: the invented SKU never became the product SKU');
+    // SKU-ALLOC — the phone sends no SKU, so the drain allocates one at insert time. The shape is
+    // the generated brand-3 + category-3 + sequence; an AI-invented string would not match it.
+    ok(/^[A-Z]{3}-[A-Z]{3}-\d{3,}$/.test(String(row.sku || '')),
+      'ai-drain: the drain allocated a generated SKU (' + row.sku + ')');
+    const skuDupes = (() => {
+      const d = new DatabaseSync(BIZ_DB);
+      try {
+        return d.prepare("SELECT COUNT(*) c FROM (SELECT UPPER(TRIM(sku)) s, COUNT(*) n FROM products" +
+          " WHERE sku IS NOT NULL AND TRIM(sku) <> '' GROUP BY 1 HAVING n > 1)").get().c;
+      } catch (e) { return -1; } finally { d.close(); }
+    })();
+    ok(skuDupes === 0, 'ai-drain: no two products share a SKU (' + skuDupes + ' duplicated)');
     ok(row.images === '[]', 'ai-drain: the photo is gallery-backed, not inline (current media contract)');
     const attrs = JSON.parse(row.attributes || '{}');
     ok(attrs.reference_number === '126334', 'ai-drain: the AI attribute survived the drain');
