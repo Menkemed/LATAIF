@@ -722,8 +722,14 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const input = $('searchInput');
     if (input) input.value = state.query;
     renderHits(state.hits);
-    // After the DOM has the list back, not before — otherwise there is nothing to scroll through.
-    requestAnimationFrame(function () { window.scrollTo({ top: state.scrollY }); });
+    // Restore in the SAME task, not on an animation frame. `renderHits` puts the rows in the DOM
+    // synchronously, and reading `scrollHeight` forces the pending style/layout to be computed
+    // right here — so by the next statement the document already has its full height and the
+    // offset is reachable. The previous version waited for one frame, which a browser that treats
+    // the window as occluded may delay or coalesce; the restore then silently never happened and
+    // the operator landed back at the top of a list they had scrolled far down.
+    void document.documentElement.scrollHeight;
+    window.scrollTo(0, state.scrollY);
   }
 
   function fmtWhen(iso) {
