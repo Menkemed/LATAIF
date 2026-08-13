@@ -560,7 +560,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       const res = await fetch('/api/products/by-sku/' + encodeURIComponent(sku), { headers: { Authorization: 'Bearer ' + token } });
       if (res.status === 404) { $('scanDetails').innerHTML = '<div style="color:#AA6E6E; text-align:center;">No product found for this SKU.</div>'; return; }
       if (!res.ok) { $('scanDetails').textContent = 'Lookup failed (' + res.status + ').'; return; }
-      // §32 — the scanner renders through the SAME showProduct the search hits use.
+      // §32 — the scanner renders through the SAME showProduct the search hits use. No origin:
+      // a scan is not a search, so it gets no back control and leaves any search state alone.
       showProduct(await res.json());
     } catch (e) {
       $('scanDetails').textContent = 'Lookup error: ' + (e && e.message ? e.message : e);
@@ -572,6 +573,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // recording indicator on for no reason.
   function findMode(mode) {
     const searching = mode === 'search';
+    searchReturn = null;   // §B3 — a tab switch is not "back"; never leave a stale target behind
     if (searching) stopScan();
     hide('scanResult');
     releaseMedia();
@@ -679,14 +681,49 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // Both callers land here, so a searched product cannot drift into a different, thinner rendering
   // than a scanned one. Everything below only ADDS behaviour to the markup renderProduct produced.
   let currentProduct = null;
-  function showProduct(p) {
+  // POST-V0838 §B — where the open came from. A search hit remembers enough to put the operator
+  // back exactly where they were; a QR scan deliberately remembers nothing, so scanning never
+  // fabricates a search history to go "back" to.
+  let searchReturn = null;
+  let lastHits = [];
+  function showProduct(p, origin) {
     releaseMedia();
     currentProduct = p;
-    $('scanDetails').innerHTML = renderProduct(p);
+    const back = origin === 'search'
+      ? '<button id="pdBack" class="ghost" style="margin-bottom:12px; padding:8px 12px;">&larr; Back to search</button>'
+      : '';
+    $('scanDetails').innerHTML = back + renderProduct(p);
     show('scanResult');
     window.scrollTo({ top: 0 });
+    const b = $('pdBack');
+    if (b) b.onclick = backToSearch;
     if (p.image_key) paintMedia($('pdPhoto'), p.image_key);
     if (p.id) wireStockCheck(p.id);
+  }
+
+  // §B1/§B2 — with hundreds of hits, leaving the list under the detail makes the page unusable.
+  // Opening a hit hides the whole search pane, so the detail is the only thing on screen.
+  function openHit(h) {
+    const input = $('searchInput');
+    searchReturn = { query: input ? input.value : '', hits: lastHits, scrollY: window.scrollY || 0 };
+    hide('searchPane');
+    showProduct(h, 'search');
+  }
+
+  // §B3 — back restores the query, the SAME results (no second round trip, so no reordering and no
+  // flash of "searching") and the scroll offset the operator left at.
+  function backToSearch() {
+    if (!searchReturn) return;
+    const state = searchReturn;
+    searchReturn = null;
+    releaseMedia();
+    hide('scanResult');
+    show('searchPane');
+    const input = $('searchInput');
+    if (input) input.value = state.query;
+    renderHits(state.hits);
+    // After the DOM has the list back, not before — otherwise there is nothing to scroll through.
+    requestAnimationFrame(function () { window.scrollTo({ top: state.scrollY }); });
   }
 
   function fmtWhen(iso) {
@@ -716,11 +753,15 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     $('scHistory').innerHTML = older.length
       ? '<div style="font-size:11px; color:#6B6B73; letter-spacing:.06em; text-transform:uppercase; margin-bottom:6px;">Earlier checks</div>'
         + older.map(function (o) {
-            return '<div style="font-size:12px; color:#6B6B73; padding:5px 0; border-top:1px solid #1A1A1F;">'
-              + '<span style="color:' + statusColour(o.status) + ';">' + esc(statusLabel(o.status)) + '</span>'
-              + ' &middot; ' + esc(fmtWhen(o.checked_at))
-              + (o.checked_by_name ? ' &middot; ' + esc(o.checked_by_name) : '')
-              + (o.notes ? ' &middot; ' + esc(o.notes) : '')
+            // §D3 — one line per fact instead of a `&middot;`-joined sentence. On a phone the old
+            // form wrapped into an unreadable block as soon as a note was longer than a word.
+            return '<div style="font-size:12px; padding:6px 0; border-top:1px solid #1A1A1F;">'
+              + '<div style="display:flex; justify-content:space-between; gap:8px;">'
+              +   '<span style="color:' + statusColour(o.status) + '; font-weight:600;">' + esc(statusLabel(o.status)) + '</span>'
+              +   '<span style="color:#6B6B73; white-space:nowrap;">' + esc(fmtWhen(o.checked_at)) + '</span>'
+              + '</div>'
+              + (o.notes ? '<div style="color:#EAEAEA; margin-top:2px;">' + esc(o.notes) + '</div>' : '')
+              + '<div style="color:#6B6B73; margin-top:2px;">' + esc(o.source || '') + (o.checked_by_name ? ' &middot; ' + esc(o.checked_by_name) : '') + '</div>'
               + '</div>';
           }).join('')
       : '';
@@ -781,6 +822,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // ── MOBILE-I1 §11-§15 — Check Item search ──────────────────────────────────
   let searchSeq = 0;
   function renderHits(hits) {
+    lastHits = hits || [];
     const box = $('searchResults');
     if (!hits.length) {
       box.innerHTML = '<div class="card" style="color:#6B6B73; text-align:center;">No matching item.</div>';
@@ -801,7 +843,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     hits.forEach(function (h, i) {
       const card = box.querySelector('[data-hit="' + i + '"]');
       // §15 — picking a hit opens the SAME full product view the scanner opens.
-      if (card) card.onclick = () => showProduct(h);
+      if (card) card.onclick = () => openHit(h);
       if (h.thumb_key || h.image_key) paintMedia(document.getElementById('hitImg' + i), h.thumb_key || h.image_key);
     });
   }
