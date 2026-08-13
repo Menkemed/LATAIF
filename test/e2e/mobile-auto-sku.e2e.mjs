@@ -215,6 +215,28 @@ async function drainUntilReady(app, evId, rounds = 3) {
   return { app, ok: inboxState(evId) === 'ready' };
 }
 
+// -- the real Collection delete flow (Select -> card -> Delete (n) -> confirm modal) --
+const clickByText = (c, reSrc) => c.ev("const b=[...document.querySelectorAll('button')].find(x=>new RegExp(" + S(reSrc) + ").test((x.textContent||'').trim())); if(!b||b.disabled) return 'NO'; b.click(); return 'OK';");
+async function gotoCollection(c) {
+  // Same route the operator takes: the sidebar. The INVENTORY group is collapsed until clicked, so
+  // the link only exists after expanding it. Never location.href - a hard load drops the session.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const direct = await c.ev("const a=document.querySelector('a[href=\"/collection\"]'); if(!a) return 'NONE'; a.click(); return 'OK';");
+    if (direct === 'OK') { await sleep(1500); return 'OK'; }
+    await c.ev("const g=[...document.querySelectorAll('div,button,span')].find(e=>e.children.length===0 && /^\s*INVENTORY\s*$/i.test(e.textContent||'')); if(g){ (g.closest('button')||g).click(); return 'EXPANDED'; } return 'NOGROUP';");
+    await sleep(700);
+  }
+  return 'FAILED';
+}
+/** Clicks the product card that shows this SKU. */
+const clickCardBySku = (c, sku) => c.ev(
+  "const hit=[...document.querySelectorAll('*')].filter(e=>e.children.length===0 && (e.textContent||'').trim()===" + S(sku) + ");" +
+  "if(!hit.length) return 'NO_SKU';" +
+  "let n=hit[0];" +
+  "for(let i=0;i<12 && n.parentElement && n.parentElement.tagName!=='BODY';i++){ if(n.className && /transition-all/.test(String(n.className))) break; n=n.parentElement; }" +
+  "if(!(n.className && /transition-all/.test(String(n.className)))) return 'NO_CARD';" +
+  "n.click(); return 'OK';");
+
 async function main() {
   console.log('POST-V0838 §G1 — mobile auto-SKU real path e2e');
   killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
@@ -313,6 +335,118 @@ async function main() {
         '§6 the number after a replay is the NEXT one, not one skipped by the replay (got ' + added[0].sku + ')');
       made.push({ evId, entityId, id: added[0].id, sku: added[0].sku });
     }
+  }
+
+  // -- SS3 -- two uploads back to back, as tight as the real route allows -----
+  {
+    const before = products().map(p => p.id);
+    const seqBefore = sequenceRow(STEM);
+    const a = { ev: 'g1-race-a-' + Date.now(), eid: crypto.randomUUID() };
+    const b = { ev: 'g1-race-b-' + Date.now(), eid: crypto.randomUUID() };
+    // both in flight at once against the real HTTP route -- no synthetic parallel SQL
+    const [ra, rb] = await Promise.all([
+      upload(token, a.ev, a.eid, JPEG_B64, BRAND, 'Race A'),
+      upload(token, b.ev, b.eid, JPEG_B64, BRAND, 'Race B'),
+    ]);
+    ok([200, 201].includes(ra.status) && [200, 201].includes(rb.status),
+      'S3 both concurrent uploads were accepted (' + ra.status + '/' + rb.status + ')');
+    ok(receipts(a.ev).length === 1 && receipts(b.ev).length === 1, 'S3 two distinct receipts exist');
+    let r = await drainUntilReady(app, a.ev); app = r.app;
+    const okA = r.ok;
+    r = await drainUntilReady(app, b.ev); app = r.app;
+    ok(okA && r.ok, 'S3 both receipts were drained (' + inboxState(a.ev) + '/' + inboxState(b.ev) + ')');
+    const added = products().filter(p => !before.includes(p.id));
+    ok(added.length === 2, 'S3 both products exist - no upload was lost (' + added.length + ')');
+    const skus = added.map(p => p.sku).sort();
+    ok(new Set(skus).size === 2, 'S3 the two SKUs are distinct (' + skus.join(',') + ')');
+    ok(skus.join(',') === 'ZEP-WCH-005,ZEP-WCH-006',
+      'S3 and they are the next two in sequence, none skipped (' + skus.join(',') + ')');
+    const dupes = dbQ(BIZ_DB, "SELECT sku FROM products WHERE sku IS NOT NULL AND sku<>'' GROUP BY sku HAVING COUNT(*)>1");
+    ok(dupes.length === 0, 'S3 no SKU is held by two products (' + dupes.length + ')');
+    ok(dbQ(SERVER_DB, "SELECT upload_event_id FROM mobile_upload_inbox WHERE state='quarantined'").length === 0,
+      'S3 nothing was quarantined');
+    const seqAfter = sequenceRow(STEM);
+    ok(seqBefore && seqAfter && seqAfter.next_number === seqBefore.next_number + 2,
+      'S3 the counter advanced by exactly two (' + (seqBefore && seqBefore.next_number) + ' -> ' + (seqAfter && seqAfter.next_number) + ')');
+  }
+
+  // -- SS2 -- delete through the REAL Collection flow, then no reuse ---------
+  {
+    const victim = made.find(m => m.sku === 'ZEP-WCH-003');
+    ok(!!victim, 'S2 the item to delete exists (' + (victim && victim.sku) + ')');
+    const hw = sequenceRow(STEM);
+    const where = await gotoCollection(app);
+    ok(where === 'OK', 'S2 the Collection page is reachable from the sidebar (' + where + ')');
+    try { await waitFor(app, '[data-testid="open-inventory"]', 30000); } catch (e) {}
+    ok(await clickByText(app, '^Select$') === 'OK', 'S2 the real Select control entered select mode');
+    await sleep(700);
+    const hit = victim ? await clickCardBySku(app, victim.sku) : 'NO';
+    ok(hit === 'OK', 'S2 the product card was selected on screen (' + hit + ')');
+    await sleep(500);
+    ok(await clickByText(app, '^Delete \\(\\d+\\)$') === 'OK', 'S2 the real Delete (n) button was enabled and clicked');
+    await sleep(800);
+    const modal = await app.ev("return [...document.querySelectorAll('*')].some(e=>/Delete items\\?/.test(e.textContent||'') && e.children.length<4);");
+    ok(modal === true, 'S2 the real confirmation modal opened');
+    ok(await clickByText(app, '^Delete \\d+ items?$') === 'OK', 'S2 the modal confirm ran performDelete -> deleteProducts');
+    await sleep(2500);
+    const gone = victim ? dbQ(BIZ_DB, 'SELECT id FROM products WHERE id=?', [victim.id]).length === 0 : false;
+    ok(gone, 'S2 the product is gone per the real delete contract');
+    const hwAfter = sequenceRow(STEM);
+    ok(hw && hwAfter && hwAfter.next_number === hw.next_number,
+      'S2 the high-water mark did NOT drop when the product was deleted (' + (hw && hw.next_number) + ' -> ' + (hwAfter && hwAfter.next_number) + ')');
+
+    const evId = 'g1-after-delete-' + Date.now();
+    const eid = crypto.randomUUID();
+    const beforeIds = products().map(p => p.id);
+    const up = await upload(token, evId, eid, JPEG_B64, BRAND, 'After Delete');
+    ok(up.status === 200 || up.status === 201, 'S2 a new upload after the delete is accepted (' + up.status + ')');
+    const r = await drainUntilReady(app, evId); app = r.app;
+    ok(r.ok, 'S2 and is drained (' + inboxState(evId) + ')');
+    const added = products().filter(p => !beforeIds.includes(p.id));
+    ok(added.length === 1, 'S2 it created exactly one product');
+    if (added.length === 1) {
+      ok(added[0].sku === 'ZEP-WCH-007',
+        'S2 the deleted number is NOT recycled and no gap is filled (got ' + added[0].sku + ')');
+      ok(added[0].sku !== 'ZEP-WCH-003' && added[0].sku !== 'ZEP-WCH-006',
+        'S2 explicitly neither the deleted -003 nor a repeat of -006');
+    }
+  }
+
+  // -- SS4 -- the replay gate again, after delete and race -------------------
+  {
+    const t = made[0];
+    const seqBefore = sequenceRow(STEM);
+    const rBefore = receiptRows(t.evId)[0] || null;
+    const count = products().length;
+    const qtyBefore = dbQ(BIZ_DB, 'SELECT quantity FROM products WHERE id=?', [t.id])[0];
+    const rep = await upload(token, t.evId, t.entityId, JPEG_B64, BRAND, 'Sequence Item 1');
+    ok([200, 201, 409].includes(rep.status), 'S4 the replay is answered without a new event (' + rep.status + ')');
+    const rr = await drainUntilReady(app, t.evId, 1); app = rr.app;
+    await sleep(1500);
+    const rAfter = receiptRows(t.evId)[0] || null;
+    const qtyAfter = dbQ(BIZ_DB, 'SELECT quantity FROM products WHERE id=?', [t.id])[0];
+    ok(receipts(t.evId).length === 1, 'S4 still exactly one receipt');
+    ok(products().length === count, 'S4 nothing was created by the replay');
+    ok(skuOf(t.id) === t.sku, 'S4 same product id, same SKU (' + skuOf(t.id) + ')');
+    ok(qtyBefore && qtyAfter && qtyBefore.quantity === qtyAfter.quantity, 'S4 same quantity');
+    ok(activeLinks(t.id).length === 1, 'S4 still exactly one active media link');
+    ok(rBefore && rAfter && rBefore.canonical_product_metadata_hash === rAfter.canonical_product_metadata_hash,
+      'S4 the canonical metadata hash is unchanged');
+    const seqAfter = sequenceRow(STEM);
+    ok(seqBefore && seqAfter && seqBefore.next_number === seqAfter.next_number,
+      'S4 the replay consumed no number (' + (seqBefore && seqBefore.next_number) + ' -> ' + (seqAfter && seqAfter.next_number) + ')');
+    ok(dbQ(SERVER_DB, "SELECT upload_event_id FROM mobile_upload_inbox WHERE state='quarantined'").length === 0,
+      'S4 nothing was quarantined');
+
+    const evId = 'g1-final-' + Date.now();
+    const eid = crypto.randomUUID();
+    const beforeIds = products().map(p => p.id);
+    const up = await upload(token, evId, eid, JPEG_B64, BRAND, 'Final');
+    const r2 = await drainUntilReady(app, evId); app = r2.app;
+    const added = products().filter(p => !beforeIds.includes(p.id));
+    ok(up.status === 200 || up.status === 201, 'S4 a real new upload after the replay is accepted');
+    ok(added.length === 1 && added[0].sku === 'ZEP-WCH-008',
+      'S4 and it gets exactly the next number (' + (added[0] && added[0].sku) + ')');
   }
 
   const prodAfter = existsSync(PROD_BIZ_DB) ? dbQ(PROD_BIZ_DB, 'SELECT COUNT(*) c FROM products') : [];
