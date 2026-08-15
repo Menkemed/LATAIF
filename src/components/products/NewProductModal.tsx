@@ -45,7 +45,7 @@ export interface NewProductModalProps {
 export function NewProductModal({
   open, onClose, onSubmit, initial, title, submitLabel, hint, hideFields,
 }: NewProductModalProps) {
-  const { products, categories, loadCategories, nextAvailableSku, isSkuTaken, findPossibleDuplicates } = useProductStore();
+  const { products, categories, loadCategories, isSkuTaken, findPossibleDuplicates } = useProductStore();
   const [form, setForm] = useState<Partial<Product>>({});
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
@@ -389,7 +389,9 @@ export function NewProductModal({
                       const updated = { ...f };
                       if (result.brand) updated.brand = result.brand;
                       if (result.name) updated.name = result.name;
-                      if (result.sku && !f.sku) updated.sku = nextAvailableSku(result.sku);
+                      // SKU-UNIFY — the AI does NOT decide a SKU. This form feeds purchase / order /
+                      // production creates, which persist exactly what was typed; leaving the field
+                      // alone keeps a suggested number from being written as if it had been claimed.
                       if (result.condition) updated.condition = result.condition;
                       if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
                       if (result.estimatedValue && !f.plannedSalePrice) updated.plannedSalePrice = result.estimatedValue;
@@ -423,7 +425,7 @@ export function NewProductModal({
                       categoryId: form.categoryId,
                       brand: result.brand || form.brand,
                       name: result.name || form.name,
-                      sku: form.sku || (result.sku ? nextAvailableSku(result.sku) : undefined),
+                      sku: form.sku || undefined,
                       attributes: { ...(form.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
                       images: form.images,
                     };

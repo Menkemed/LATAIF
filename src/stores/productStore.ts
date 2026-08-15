@@ -5,6 +5,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { nextSkuFrom } from '@/core/products/sku-allocation';
+import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // pHash entfernt 2026-05-18 — Duplicate-Detection laeuft jetzt nur ueber
@@ -369,6 +370,18 @@ interface ProductStore {
   // Plan §Product: SKU-Kollisions-Check. Nimmt einen Prefix ("RLX-SUB") und findet nächste freie Nummer.
   // Gibt vollen SKU zurück, z.B. "RLX-SUB-042". Vermeidet Duplikate über alle Produkte (auch sold).
   nextAvailableSku: (prefix: string) => string;
+  /**
+   * SKU-UNIFY — the number a create WOULD get, for showing in a form. Read-only: looking at it
+   * costs nothing, and cancelling the dialog leaves the counter untouched. It can go stale, so it
+   * must never be the value that gets persisted — see `allocateSkuOnCreate`.
+   */
+  peekSku: (seed: string) => string;
+  /**
+   * SKU-UNIFY — the number a create actually PERSISTS. Claims durably from the same counter the
+   * mobile drain uses, so the two surfaces share one sequence. A SKU the operator typed is
+   * returned untouched and claims nothing.
+   */
+  allocateSkuOnCreate: (current: unknown, brand?: string, categoryId?: string) => string;
   skuExists: (sku: string) => boolean;
   /** True wenn sku bereits in einem anderen Produkt (ungleich excludeId) existiert. Case-insensitiv, getrimmt. */
   isSkuTaken: (sku: string, excludeProductId?: string) => boolean;
@@ -1343,7 +1356,17 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   // SKU-ALLOC — the RULE lives in `core/products/sku-allocation`; this only supplies the
   // store's view of the SKUs in use. The mobile drain runs the identical rule against a fresh
   // DB read, so a phone-created product and a desktop-created one can never number differently.
+  // LEGACY PARSER ONLY: "what is the next number that looks like this one?" over the in-memory
+  // list. It is fine for walking a hand-typed `ABC123` to `ABC124`, and it is NOT the authority —
+  // a number drops out of this list the moment its product is deleted, so it would hand a retired
+  // number to the next item. Everything durable goes through the two functions below.
   nextAvailableSku: (prefix) => nextSkuFrom(prefix, get().products.map(p => p.sku || '')),
+
+  peekSku: (seed) => {
+    try { return peekNextSku(getDatabase() as unknown as SkuSequenceDb, seed); } catch { return ''; }
+  },
+  allocateSkuOnCreate: (current, brand, categoryId) =>
+    resolveSkuDurable(getDatabase() as unknown as SkuSequenceDb, current, brand, categoryId),
 
   // Duplicate Detection (Plan §Product §QuickCapture):
   // Score-System — vergleicht ein Kandidaten-Produkt mit allen existierenden

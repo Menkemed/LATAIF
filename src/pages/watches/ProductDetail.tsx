@@ -41,7 +41,7 @@ export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/collection');
-  const { products, categories, loadProducts, loadCategories, updateProduct, editProductWithMedia, editProductTextDurably, deleteProduct, nextAvailableSku, isSkuTaken, getProductLinks } = useProductStore();
+  const { products, categories, loadProducts, loadCategories, updateProduct, editProductWithMedia, editProductTextDurably, deleteProduct, isSkuTaken, getProductLinks } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
@@ -791,7 +791,7 @@ export function ProductDetail() {
                           // `!f.purchasePrice`, and 0 is a legitimate purchase price, so identifying a
                           // product silently overwrote its real cost). Nothing media-related is touched,
                           // and a field the model did not recognise leaves the existing value alone.
-                          setForm(f => ({ ...f, ...buildAiFormPatch(result, f as FormLike, { mode: 'edit', nextAvailableSku }) } as typeof f));
+                          setForm(f => ({ ...f, ...buildAiFormPatch(result, f as FormLike, { mode: 'edit' }) } as typeof f));
                           setFormAttrs(a => ({ ...a, ...buildAiAttributePatch(result, (category?.attributes ?? []).map(x => x.key)) }));
                         } catch (e) { alert(String(e)); }
                         finally { setAiBusy(false); }

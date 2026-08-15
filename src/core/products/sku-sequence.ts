@@ -23,7 +23,7 @@
 // for anything older the guarantee is "as far back as the surviving history reaches".
 // ════════════════════════════════════════════════════════════════════════════
 
-import { splitSku, padSequence, type SkuParts } from './sku-allocation.ts';
+import { splitSku, padSequence, buildSkuSeed, skuIsEmpty, type SkuParts } from './sku-allocation.ts';
 
 /** Table DDL — applied idempotently by the normal schema pass, like every other table here. */
 export const SKU_SEQUENCES_DDL = `CREATE TABLE IF NOT EXISTS sku_sequences (
@@ -128,4 +128,53 @@ export function allocateSku(db: SkuSequenceDb, seed: string): string {
     if (!skuInUse(db, candidate)) return candidate;
   }
   return '';
+}
+
+/**
+ * What `allocateSku` WOULD return, without claiming anything.
+ *
+ * This exists so a form can show the operator the number they are about to get. It is an
+ * ANSWER, not a reservation: nothing is written, so opening a dialog, looking at the number and
+ * pressing Cancel leaves the counter exactly where it was — and two people looking at the same
+ * moment see the same number, because neither of them has taken it yet.
+ *
+ * The consequence is deliberate and is the whole reason the two functions are separate: a preview
+ * can go stale. Whoever creates first gets the number; the other one must go through
+ * `allocateSku` at commit and will be handed the next one. A caller that persists a peeked value
+ * instead of allocating has re-introduced exactly the TOCTOU this split removes.
+ */
+export function peekNextSku(db: SkuSequenceDb, seed: string): string {
+  const parts: SkuParts | null = splitSku(seed);
+  if (!parts) return '';
+  const { stem, width } = parts;
+
+  // An existing counter is the authority; without one the answer is what the seed step would
+  // write — the same expression, so peek and allocate cannot disagree on a stem's first number.
+  const r = rows(db, `SELECT next_number, padding FROM sku_sequences WHERE stem = ?`, [stem]);
+  let n = r.length > 0 ? Number(r[0][0]) : Math.max(historicalHighWater(db, stem) + 1, parts.number);
+  const padding = (r.length > 0 ? Number(r[0][1]) : width) || width;
+
+  // Mirror of the allocation walk: a number a manually-typed SKU already occupies is skipped.
+  for (let probe = 0; probe < MAX_PROBE; probe++, n++) {
+    const candidate = stem + padSequence(n, padding);
+    if (!skuInUse(db, candidate)) return candidate;
+  }
+  return '';
+}
+
+/**
+ * The SKU a create should PERSIST: what the operator typed, or a freshly claimed number.
+ *
+ * The durable twin of `resolveSku`, and the single rule both surfaces run on — the mobile drain
+ * claims `allocateSku(buildSkuSeed(brand, category))` and so does every desktop create. A SKU the
+ * operator entered is never replaced, which is why the emptiness test is the shared one.
+ */
+export function resolveSkuDurable(
+  db: SkuSequenceDb,
+  current: unknown,
+  brand?: string,
+  categoryId?: string,
+): string {
+  if (!skuIsEmpty(current)) return String(current).trim();
+  return allocateSku(db, buildSkuSeed(brand, categoryId));
 }

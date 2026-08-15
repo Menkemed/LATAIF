@@ -23,7 +23,7 @@ import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { trackUpdate } from '@/core/sync/track';
 import { frozenSyncTarget, shouldApplySyncAutoIdentify } from '@/core/media/ai-image-source';
-import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
+import { skuIsEmpty } from '@/core/products/sku-allocation';
 import type { Product } from '@/core/models/types';
 
 // Per-product supersession registry for sync auto-identify: a newer run for the
@@ -101,8 +101,11 @@ async function runAutoIdentify(productId: string): Promise<void> {
     // SKU MANDATORY: empty / 'null' / 'undefined' / whitespace → fill. The emptiness rule is
     // shared with the drain, so both surfaces agree on what "has no SKU" means.
     if (skuIsEmpty(current.sku)) {
-      const seed = result.sku || buildSkuSeed(result.brand || current.brand, current.categoryId);
-      patch.sku = store.nextAvailableSku(seed);
+      // SKU-UNIFY — this patch is persisted immediately, so it is a real ALLOCATION and must claim
+      // from the shared durable counter. The list-based suggestion it used before forgot a number
+      // as soon as its product was deleted, and handed that retired number to the next item. The
+      // AI does not decide the SKU either: the stem is brand + category, exactly as on mobile.
+      patch.sku = store.allocateSkuOnCreate(undefined, result.brand || current.brand, current.categoryId);
     }
     if (result.condition) patch.condition = result.condition;
     if (result.description) {
@@ -420,8 +423,9 @@ export function SyncDuplicateGuard() {
       delete finalAttrs.serialNo;
 
       const store = useProductStore.getState();
-      const skuSeed = existing.sku || buildSkuSeed(existing.brand, existing.categoryId);
-      const nextSku = store.nextAvailableSku(skuSeed);
+      // SKU-UNIFY — written straight into the product below, so it claims durably like every
+      // other create rather than reading the next number off the in-memory list.
+      const nextSku = store.allocateSkuOnCreate(undefined, existing.brand, existing.categoryId);
 
       store.updateProduct(incoming.id, {
         brand: existing.brand,

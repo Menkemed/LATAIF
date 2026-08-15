@@ -22,6 +22,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { buildSkuSeed } from '@/core/products/sku-allocation';
 import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
@@ -46,7 +47,7 @@ export function ConsignmentList() {
     recordSale, markPaidOut, markReturned,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts, categories, loadCategories, createProduct, nextAvailableSku, isSkuTaken, findPossibleDuplicates } = useProductStore();
+  const { products, loadProducts, categories, loadCategories, createProduct, allocateSkuOnCreate, isSkuTaken, findPossibleDuplicates } = useProductStore();
   const { loadEmployees } = useEmployeeStore();
   const [searchParams] = useSearchParams();
   const staffFilter = searchParams.get('staff') || '';
@@ -370,6 +371,9 @@ export function ConsignmentList() {
       try {
         const newProduct = createProduct({
           ...snapshot.product,
+          // SKU-UNIFY — claimed at the create from the shared durable counter, never carried over
+          // from whatever the form was previewing.
+          sku: allocateSkuOnCreate(snapshot.product.sku, snapshot.product.brand, snapshot.product.categoryId),
           purchasePrice: 0,
           stockStatus: 'consignment',
           sourceType: 'CONSIGNMENT',
@@ -819,7 +823,8 @@ export function ConsignmentList() {
             })()}
             <div style={{ marginTop: 16 }}>
               <SkuInput value={productForm.sku || ''}
-                onChange={v => setProductForm(p => ({ ...p, sku: v }))} />
+                onChange={v => setProductForm(p => ({ ...p, sku: v }))}
+                previewSeed={buildSkuSeed(productForm.brand, productForm.categoryId)} />
             </div>
 
             {/* Dynamische Kategorie-Attribute */}
@@ -994,7 +999,7 @@ export function ConsignmentList() {
                           const updated = { ...f };
                           if (result.brand) updated.brand = result.brand;
                           if (result.name) updated.name = result.name;
-                          if (result.sku && !f.sku) updated.sku = nextAvailableSku(result.sku);
+                          // SKU-UNIFY — the AI does not decide a SKU; the create claims one.
                           if (result.condition) updated.condition = result.condition;
                           if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
                           if (result.taxScheme && !f.taxScheme) updated.taxScheme = result.taxScheme;
@@ -1019,7 +1024,7 @@ export function ConsignmentList() {
                           categoryId: productForm.categoryId,
                           brand: result.brand || productForm.brand,
                           name: result.name || productForm.name,
-                          sku: productForm.sku || (result.sku ? nextAvailableSku(result.sku) : undefined),
+                          sku: productForm.sku || undefined,
                           attributes: { ...(productForm.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
                           images: productForm.images,
                         };

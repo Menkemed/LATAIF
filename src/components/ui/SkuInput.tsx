@@ -7,7 +7,7 @@
 // - „Use XXX"-Button füllt das Feld automatisch aus.
 // - excludeProductId überspringt das aktuelle Produkt (Edit-Modus, sonst meldet das
 //   eigene SKU sich selbst als Duplikat).
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Input } from './Input';
 import { useProductStore } from '@/stores/productStore';
 
@@ -17,6 +17,16 @@ export interface SkuInputProps {
   excludeProductId?: string;
   label?: string;
   placeholder?: string;
+  /**
+   * SKU-UNIFY — a full example SKU (`ROL-WCH-001`) for the stem this product will be numbered
+   * under. Given one, an EMPTY field shows the number the create is about to claim.
+   *
+   * Showing it costs nothing: the peek is read-only, so a form that is opened, looked at and
+   * cancelled leaves the counter where it was. It is therefore only informational — the create
+   * claims its own number, and if someone else took this one meanwhile the saved product simply
+   * gets the next. Omit the prop where no automatic number is assigned (the edit dialog).
+   */
+  previewSeed?: string;
 }
 
 export function SkuInput({
@@ -25,8 +35,9 @@ export function SkuInput({
   excludeProductId,
   label = 'SKU / REFERENCE',
   placeholder = 'Internal reference',
+  previewSeed,
 }: SkuInputProps) {
-  const { products, nextAvailableSku } = useProductStore();
+  const { products, peekSku } = useProductStore();
 
   const taken = useMemo(() => {
     const t = (value || '').trim();
@@ -38,10 +49,23 @@ export function SkuInput({
     );
   }, [value, products, excludeProductId]);
 
-  const suggestion = useMemo(() => {
-    if (!taken) return '';
-    return nextAvailableSku(value);
-  }, [taken, value, nextAvailableSku]);
+  // The number offered when the typed SKU is already gone. It comes from the durable counter, not
+  // from the product list: the list forgets a number as soon as its product is deleted, and
+  // offering the operator a retired number is the failure this whole split exists to stop.
+  const suggestion = useMemo(() => (taken ? peekSku(value) : ''), [taken, value, peekSku]);
+
+  /**
+   * The number an empty field is about to be given. Debounced because the seed changes with every
+   * keystroke in Brand, and the first peek for a stem nobody has used yet reads the whole surviving
+   * history to find out where to start — worth it once, not once per letter.
+   */
+  const [preview, setPreview] = useState('');
+  const empty = !(value || '').trim();
+  useEffect(() => {
+    if (!previewSeed || !empty) { setPreview(''); return; }
+    const t = setTimeout(() => setPreview(peekSku(previewSeed)), 200);
+    return () => clearTimeout(t);
+  }, [previewSeed, empty, peekSku, products]);
 
   return (
     <div>
@@ -52,6 +76,13 @@ export function SkuInput({
         onChange={e => onChange(e.target.value)}
         error={taken ? 'Diese SKU / Reference ist bereits vergeben.' : undefined}
       />
+      {!taken && preview && (
+        <div data-sku-preview={preview} style={{ marginTop: 6, fontSize: 12, color: '#6B7280' }}>
+          Will be assigned:{' '}
+          <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}>{preview}</span>
+          <span> — leave empty to use it.</span>
+        </div>
+      )}
       {taken && suggestion && (
         <div style={{ marginTop: 6, fontSize: 12, color: '#6B7280', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
           <span>

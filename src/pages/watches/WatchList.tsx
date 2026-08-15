@@ -16,6 +16,7 @@ import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
 import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
+import { buildSkuSeed } from '@/core/products/sku-allocation';
 import { useAuthStore } from '@/stores/authStore';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { resolvePrimaryImageForExport } from '@/core/media/product-image-export';
@@ -126,7 +127,7 @@ export function WatchList() {
   const {
     products, categories, loadProducts, loadCategories, createProductWithMedia,
     searchQuery, setSearchQuery, filterCategory, setFilterCategory,
-    filterStatus, setFilterStatus, getStockValue, nextAvailableSku,
+    filterStatus, setFilterStatus, getStockValue, allocateSkuOnCreate,
     isSkuTaken, findPossibleDuplicates, getProductLinks, deleteProducts,
   } = useProductStore();
   // MOBILE-04B2A10 — authorised media scope for the collection thumbnails,
@@ -145,6 +146,11 @@ export function WatchList() {
   const [createBusy, setCreateBusy] = useState(false);
   const [createWarning, setCreateWarning] = useState<string | null>(null);
   const [retryProductId, setRetryProductId] = useState<string | null>(null);
+  /** SKU-UNIFY — the number this create already CLAIMED. Held across an image retry so the second
+   *  attempt reuses it instead of burning a second number on the same product. */
+  const [retrySku, setRetrySku] = useState<string>('');
+  /** Synchronous double-submit guard — see `runCreate`. */
+  const createInFlight = useRef(false);
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -301,6 +307,7 @@ export function WatchList() {
     // Fresh create session → drop any prior partial-create state.
     setCreateWarning(null);
     setRetryProductId(null);
+    setRetrySku('');
     setShowNew(true);
   }
 
@@ -351,18 +358,31 @@ export function WatchList() {
   // shows a clear warning, and a re-submit reuses the SAME product id (no
   // second product, no duplicate media links). Only a full success closes.
   async function runCreate() {
-    if (createBusy) return;
+    // `createBusy` is React state: three clicks inside ONE tick all read the value from the render
+    // they were dispatched in, which is still false, and all three run — three products, three
+    // consumed SKUs. A ref changes on assignment, so it is the only thing that can close a window
+    // this short. The state stays for what it is good at: the button label and the disabled look.
+    if (createInFlight.current) return;
+    createInFlight.current = true;
     setCreateBusy(true);
     try {
       // DESKTOP-CONTRACT: an attribute whose dependsOn is unsatisfied must never be persisted
       // (a Steel watch keeps no karat_color) — same strip as the edit path and the mobile gate.
-      const payload = { ...form, attributes: stripStaleAttributes(selectedCat ?? undefined, form.attributes) as typeof form.attributes };
+      // SKU-UNIFY — the number is CLAIMED here, at the create, never taken from the preview the
+      // form was showing: between opening the dialog and pressing Save another surface may have
+      // taken it. A retry reuses the SKU it already claimed, so one successful create consumes
+      // exactly one number no matter how often the images had to be retried.
+      const sku = form.sku || retrySku
+        || allocateSkuOnCreate(form.sku, form.brand, form.categoryId);
+      if (!form.sku && sku !== retrySku) setRetrySku(sku);
+      const payload = { ...form, sku, attributes: stripStaleAttributes(selectedCat ?? undefined, form.attributes) as typeof form.attributes };
       const result = await createProductWithMedia(payload, retryProductId ?? undefined);
       const ui = decideProductCreateUi(result);
       setErrors({});
       if (ui.closeModal) {
         setCreateWarning(null);
         setRetryProductId(null);
+        setRetrySku('');
         setShowNew(false);
       } else {
         setRetryProductId(ui.retainProductId);
@@ -373,6 +393,7 @@ export function WatchList() {
         );
       }
     } finally {
+      createInFlight.current = false;
       setCreateBusy(false);
     }
   }
@@ -716,7 +737,8 @@ export function WatchList() {
             );
           })()}
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20 }}>
-            <SkuInput value={form.sku || ''} onChange={v => setForm({ ...form, sku: v })} />
+            <SkuInput value={form.sku || ''} onChange={v => setForm({ ...form, sku: v })}
+              previewSeed={buildSkuSeed(form.brand, form.categoryId)} />
             <Input label="QUANTITY" type="number" placeholder="1" value={form.quantity || 1}
               onChange={e => setForm({ ...form, quantity: Math.max(1, Number(e.target.value) || 1) })} />
           </div>
@@ -897,7 +919,8 @@ export function WatchList() {
                         const updated = { ...f };
                         if (result.brand) updated.brand = result.brand;
                         if (result.name) updated.name = result.name;
-                        if (result.sku && !f.sku) updated.sku = nextAvailableSku(result.sku);
+                        // SKU-UNIFY — the AI does NOT decide a SKU (the mobile contract, now shared):
+                        // the durable allocator assigns one at the create, from brand + category.
                         if (result.condition) updated.condition = result.condition;
                         if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
                         if (result.estimatedValue && !f.plannedSalePrice) updated.plannedSalePrice = result.estimatedValue;
@@ -926,7 +949,7 @@ export function WatchList() {
                         categoryId: form.categoryId,
                         brand: result.brand || form.brand,
                         name: result.name || form.name,
-                        sku: form.sku || (result.sku ? nextAvailableSku(result.sku) : undefined),
+                        sku: form.sku || undefined,
                         attributes: { ...(form.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
                         images: form.images,
                       };
