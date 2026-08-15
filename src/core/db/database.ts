@@ -15,6 +15,7 @@ import { applyMediaSchema } from './media-schema';
 import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
 import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
+import { INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL } from '../stock/inventory-session';
 import {
   atomicWrite,
   createSaveCoalescer,
@@ -628,6 +629,12 @@ function runMigrations(database: Database): void {
     // and because the counter does not live in `products`, deleting a product cannot lower it.
     // No seed rows — a stem's counter is created on first use and initialised from history.
     SKU_SEQUENCES_DDL,
+
+    // INVENTORY-SESSION — the worksheet of a stock-check run, so an inventory survives Save, closing
+    // the window and restarting the app. Deliberately separate from `stock_checks`: that table is the
+    // append-only record of what was observed, this one is the run in progress.
+    INVENTORY_SESSION_DDL,
+    INVENTORY_SESSION_ITEMS_DDL,
 
     // Audit log table (Plan §History/Audit §4)
     `CREATE TABLE IF NOT EXISTS audit_log (

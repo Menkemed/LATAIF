@@ -54,6 +54,14 @@ function dbQ(file, sql, params = []) {
   finally { try { db?.close(); } catch {} }
 }
 const checks = () => dbQ(SERVER_DB, 'SELECT check_id, product_id, status, notes, checked_at, checked_by, checked_by_name, source, request_id FROM stock_checks ORDER BY checked_at');
+/** INVENTORY-SESSION — the worksheet lives in the BUSINESS db, next to the products it describes. */
+const sessions = () => dbQ(BIZ_DB, 'SELECT session_id, branch_id, status, started_at, closed_at FROM inventory_sessions ORDER BY started_at');
+const sessionItems = () => dbQ(BIZ_DB, 'SELECT session_id, product_id, status, notes FROM inventory_session_items ORDER BY product_id');
+/** Mutate the business db while the app is NOT running — the house fixture pattern. */
+function atRest(fn) {
+  const db = new DatabaseSync(BIZ_DB);
+  try { return fn(db); } finally { try { db.close(); } catch {} }
+}
 /** Every column of every product — the only honest way to claim "nothing was mutated". */
 function productRows() {
   const cols = dbQ(BIZ_DB, "SELECT name FROM pragma_table_info('products')").map(r => r.name);
@@ -192,11 +200,49 @@ const FIXTURES = [
 const colIds = (c, kind) => c.ev(`const col=document.querySelector('[data-inv-col=${S(kind)}]'); if(!col) return null; return [...col.querySelectorAll('[data-inv-row]')].map(e=>e.getAttribute('data-inv-row'));`);
 const clickAttr = (c, attr, id) => c.ev(`const e=document.querySelector('[data-inv-${attr}=${S(id)}]'); if(!e) return 'NO'; e.click(); return 'OK';`);
 const progressText = (c) => c.ev(`const e=document.querySelector('[data-inv-progress]'); return e ? e.innerText.replace(/\\s+/g,' ').trim() : null;`);
+const noteVal = (c, id) => c.ev(`const e=document.querySelector('[data-inv-note=${S(id)}]'); return e ? e.value : null;`);
+/**
+ * Hover a card the way a mouse does.
+ *
+ * React does NOT listen for `mouseenter`: it derives onMouseEnter from `mouseover`, so a dispatched
+ * `mouseenter` reaches the DOM node and no React handler at all. `relatedTarget: null` reads as the
+ * pointer entering the window, which makes React fire enter along the whole path to the row.
+ */
+const hoverRow = (c, id) => c.ev(`
+  const r=document.querySelector('[data-inv-row=${S(id)}]'); if(!r) return 'NO';
+  const b=r.getBoundingClientRect();
+  const at={bubbles:true, cancelable:true, clientX:Math.round(b.x+8), clientY:Math.round(b.y+8), relatedTarget:null};
+  r.dispatchEvent(new MouseEvent('mouseover', at));
+  r.dispatchEvent(new MouseEvent('mousemove', at));
+  return 'OK';`);
+/**
+ * The preview's own layer. Both the dialog and the preview are portalled to <body>, so they share the
+ * root stacking context and comparing their z-indexes is the real comparison the browser makes. On a
+ * miss the probe reports every body child it saw, so a failure says WHY rather than just "not found".
+ */
+const hoverProbe = (c, needle) => c.ev(`
+  const kids=[...document.body.children];
+  const fixed=(e)=>getComputedStyle(e).position==='fixed';
+  const dialog=kids.find(e=>e.querySelector('[data-inv-col]'));
+  const host=kids.find(e=>e!==dialog && fixed(e) && new RegExp(${S(needle)}).test(e.innerText||''));
+  const z=(e)=>parseInt(getComputedStyle(e).zIndex||'0',10)||0;
+  if(!host||!dialog) return { host: !!host, dialog: !!dialog,
+    seen: kids.map(e=>e.tagName+'/'+(fixed(e)?'fixed':'static')+'/'+String(e.innerText||'').replace(/\\s+/g,' ').slice(0,40)) };
+  return { host:true, dialog:true,
+    text:String(host.innerText||'').replace(/\\s+/g,' ').trim().slice(0,90),
+    direct: host.parentElement===document.body, hostZ:z(host), dialogZ:z(dialog),
+    blurred: !!host.closest('[style*="backdrop-filter"]'), inDialog: dialog.contains(host) };`);
+const sortedCol = async (c, kind) => ((await colIds(c, kind)) || []).slice().sort().join();
 
 async function openModal(c) {
   await waitFor(c, '[data-testid="open-inventory"]', 20000);
   await clickSel(c, '[data-testid="open-inventory"]');
   await waitFor(c, '[data-inv-col="pending"]', 20000);
+}
+async function waitModalClosed(c, t = 20000) {
+  const end = Date.now() + t;
+  while (Date.now() < end) { if (!(await exists(c, '[data-inv-col="pending"]'))) return true; await sleep(300); }
+  return false;
 }
 
 async function main() {
@@ -265,10 +311,11 @@ async function main() {
   ok((await progressText(app) || '').startsWith('0 / 3'), '§G3.1 progress counts the working set, not the whole stock');
 
   // ── §G3.2 — the shared hover card ─────────────────────────────────────────
-  await app.ev(`const r=document.querySelector('[data-inv-row="inv-a"]'); if(!r) return 'NO'; const b=r.getBoundingClientRect(); r.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true,clientX:b.x+5,clientY:b.y+5})); return 'OK';`);
+  await hoverRow(app, 'inv-a');
   await sleep(500);
-  const hoverText = await app.ev(`const els=[...document.querySelectorAll('div')].filter(e=>/ZenTest Alpha/.test(e.innerText||'')); const top=els[els.length-1]; return top?top.innerText.replace(/\\s+/g,' ').trim().slice(0,300):null;`);
-  ok(!!hoverText && /Zenith/.test(hoverText), '§G3.2 the hover preview shows the product (' + String(hoverText).slice(0, 60) + ')');
+  const hov = await hoverProbe(app, 'ZenTest Alpha');
+  ok(hov && hov.host === true, '§G3.2 the hover preview really renders, in its own layer (' + S(hov) + ')');
+  ok(hov && /Zenith/.test(hov.text || ''), '§G3.2 and it shows the product it belongs to (' + (hov || {}).text + ')');
 
   // ── §G3.3 — every move is a draft; nothing is written ─────────────────────
   const before = productRows();
@@ -412,6 +459,188 @@ async function main() {
     ok(both.length === 2, '§G3.9 one shared history holds both surfaces (' + both.length + ')');
     ok(new Set(both.map(r => r.source)).size === 2, '§G3.9 and the two rows name different sources');
   }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // INVENTORY-SESSION — an inventory is a RUN, not a document that dies with the dialog.
+  //
+  // Everything below is about the worksheet: the three columns as the operator left them. It has to
+  // survive Save, closing the dialog, and killing the process; only an explicit finish clears it; and
+  // it must never be confused with the stock-check HISTORY, which is append-only and is not touched
+  // by any of this. Counts are relative to whatever the sections above produced, so a skipped
+  // cross-surface block cannot silently turn these into false passes.
+  // ══════════════════════════════════════════════════════════════════════════
+  const base = checks().length;
+  const setFilter = async (term) => {
+    await waitFor(app, searchSel, 15000);
+    await setVal(app, searchSel, term);
+    await sleep(900);
+  };
+  /** Kill the app, optionally change the world while it is down, bring it back to the Collection. */
+  const reopenApp = async (mutate) => {
+    try { app.close(); } catch {}
+    killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
+    if (mutate) atRest(mutate);
+    app = await startApp();
+    await waitInvoke(app);
+    await ensureSignedIn(app);
+    const nav = await gotoCollection();
+    await sleep(1500);
+    await waitFor(app, '[data-testid="open-inventory"]', 30000);
+    return nav;
+  };
+
+  // ── §G3.10 — reopening after Save restores the columns, not a blank sheet ──
+  // The whole reason this exists: the operator saved yesterday and came back to three empty columns.
+  await openModal(app);
+  ok(await sortedCol(app, 'available') === 'inv-b,inv-c', '§G3.10 both saved "available" items came back (' + (await colIds(app, 'available') || []).join() + ')');
+  ok(await sortedCol(app, 'not_available') === 'inv-a', '§G3.10 the saved "not available" item came back too');
+  ok((await colIds(app, 'pending') || []).length === 0, '§G3.10 nothing fell back into "to check"');
+  ok((await progressText(app) || '').startsWith('3 / 3'), '§G3.10 progress reflects the restored run (' + await progressText(app) + ')');
+  ok(await noteVal(app, 'inv-a') === 'in safe', '§G3.10 the note came back with the card');
+  ok(await noteVal(app, 'inv-c') === 'ok now', '§G3.10 and so did the note that was corrected before saving');
+  ok(sessions().filter(s => s.status === 'open').length === 1, '§G3.10 exactly one open worksheet exists (' + sessions().length + ' total)');
+  ok(sessionItems().length === 3, '§G3.10 the worksheet holds one row per decided product (' + sessionItems().length + ')');
+
+  // ── §G3.11 — Save with nothing changed writes NOTHING ──────────────────────
+  // Restoring a run must not re-report it: the columns are already-observed facts, not new sightings.
+  await clickSel(app, '[data-testid="inv-save"]');
+  await sleep(1500);
+  ok(checks().length === base, '§G3.11 a Save with no change added no history at all (' + (checks().length - base) + ' new)');
+  ok(await waitModalClosed(app), '§G3.11 and the dialog closed rather than pretending to work');
+  ok(sessionItems().length === 3, '§G3.11 the worksheet is unchanged as well');
+
+  // ── §G3.12 — a corrected verdict writes exactly ONE new observation ────────
+  // The history is append-only: re-deciding is a NEW sighting, and the old one must stay readable.
+  await openModal(app);
+  await clickAttr(app, 'flip', 'inv-c');                 // available → not available
+  await sleep(300);
+  await clickSel(app, '[data-testid="inv-save"]');
+  const e12 = Date.now() + 20000;
+  while (Date.now() < e12 && checks().length < base + 1) await sleep(400);
+  ok(checks().length === base + 1, '§G3.12 the changed status wrote exactly one new event (' + (checks().length - base) + ')');
+  const cRows = checks().filter(r => r.product_id === 'inv-c');
+  ok(cRows.length === 2, '§G3.12 the product now has two observations, not an overwritten one (' + cRows.length + ')');
+  ok(cRows.some(r => r.status === 'not_available'), '§G3.12 the corrected verdict is on record');
+  ok(cRows.some(r => r.status === 'available'), '§G3.12 and the earlier one still says what was seen then');
+  ok(new Set(cRows.map(r => r.request_id)).size === 2, '§G3.12 under a fresh request id, so it is not deduped away');
+
+  // ── §G3.13 — a changed NOTE alone is also exactly one new observation ──────
+  await openModal(app);
+  await setVal(app, '[data-inv-note="inv-b"]', 'shelf 9');
+  await sleep(300);
+  await clickSel(app, '[data-testid="inv-save"]');
+  const e13 = Date.now() + 20000;
+  while (Date.now() < e13 && checks().length < base + 2) await sleep(400);
+  ok(checks().length === base + 2, '§G3.13 editing only the note wrote exactly one new event (' + (checks().length - base - 1) + ')');
+  const bRows = checks().filter(r => r.product_id === 'inv-b');
+  ok(bRows.some(r => r.notes === 'shelf 9'), '§G3.13 with the new note');
+  ok(bRows.some(r => r.notes === 'shelf 2'), '§G3.13 and the previous note is still on record');
+  ok(bRows.every(r => r.status === 'available'), '§G3.13 the verdict itself was not touched');
+
+  // ── §G3.14 — narrowing the filter must not delete what it hides ────────────
+  // The worksheet mirrors the screen, so "decided but no longer shown" would be indistinguishable
+  // from "put back to to-check" unless removal is restricted to rows the operator could actually see.
+  await setFilter('ZenTest Alpha');
+  await openModal(app);
+  const narrowAll = [...(await colIds(app, 'pending') || []), ...(await colIds(app, 'available') || []), ...(await colIds(app, 'not_available') || [])];
+  ok(narrowAll.length === 1 && narrowAll[0] === 'inv-a', '§G3.14 the narrowed modal shows only the matching product (' + narrowAll.join() + ')');
+  await clickAttr(app, 'undo', 'inv-a');                 // the only VISIBLE decision is taken back
+  await sleep(300);
+  await clickSel(app, '[data-testid="inv-save"]');
+  ok(await waitModalClosed(app), '§G3.14 taking a decision back saves and closes');
+  ok(checks().length === base + 2, '§G3.14 un-deciding wrote no history — it was never an observation');
+  const afterNarrow = sessionItems().map(r => r.product_id).sort().join();
+  ok(afterNarrow === 'inv-b,inv-c', '§G3.14 the hidden items survived while the visible one was removed (' + afterNarrow + ')');
+
+  await setFilter('ZenTest');
+  await openModal(app);
+  ok(await sortedCol(app, 'available') === 'inv-b', '§G3.14 widening the filter brings the hidden decision back (' + (await colIds(app, 'available') || []).join() + ')');
+  ok(await sortedCol(app, 'not_available') === 'inv-c', '§G3.14 with its corrected verdict intact');
+  ok((await colIds(app, 'pending') || []).join() === 'inv-a', '§G3.14 and the un-decided product is back in "to check"');
+  await clickText(app, 'Cancel');
+  await sleep(400);
+
+  // ── §G3.15 — the worksheet survives the process being KILLED ───────────────
+  // Not a graceful shutdown: the run has to be on disk the moment it was saved, not at exit.
+  await reopenApp(null);
+  await setFilter('ZenTest');
+  await openModal(app);
+  ok(await sortedCol(app, 'available') === 'inv-b', '§G3.15 after a restart the available column is restored (' + (await colIds(app, 'available') || []).join() + ')');
+  ok(await sortedCol(app, 'not_available') === 'inv-c', '§G3.15 and the not-available column too');
+  ok((await colIds(app, 'pending') || []).join() === 'inv-a', '§G3.15 with the undecided product still undecided');
+  ok(await noteVal(app, 'inv-b') === 'shelf 9', '§G3.15 notes survived the restart as well');
+  ok(checks().length === base + 2, '§G3.15 and the restart itself wrote no history');
+
+  // ── §G3.16 / §G3.17 — a sold product, and another branch's run ─────────────
+  // Staged at rest: inv-c leaves the stock entirely, and a SECOND branch gets an open worksheet whose
+  // newer timestamp would win any query that forgot to filter by branch.
+  const ourBranch = String((sessions().find(s => s.status === 'open') || {}).branch_id || '');
+  ok(!!ourBranch, '§G3.17 the open worksheet is bound to a branch (' + ourBranch + ')');
+  await reopenApp((db) => {
+    db.prepare('DELETE FROM products WHERE id = ?').run('inv-c');
+    const t = new Date(Date.now() + 60000).toISOString();
+    db.prepare(`INSERT INTO inventory_sessions (session_id, branch_id, status, started_at, closed_at, updated_at)
+                VALUES (?,?,'open',?,NULL,?)`).run('sess-foreign', 'branch-e2e-other', t, t);
+    db.prepare(`INSERT INTO inventory_session_items (session_id, product_id, status, notes, updated_at)
+                VALUES (?,?,?,?,?)`).run('sess-foreign', 'inv-a', 'available', 'foreign branch', t);
+  });
+  await setFilter('ZenTest');
+  await openModal(app);
+  ok(await sortedCol(app, 'available') === 'inv-b', '§G3.16 the sold product is simply gone from the columns (' + (await colIds(app, 'available') || []).join() + ')');
+  ok(await sortedCol(app, 'not_available') === '', '§G3.16 its column is empty rather than showing a dangling card');
+  ok((await progressText(app) || '').startsWith('1 / 2'), '§G3.16 progress counts what exists, not what the worksheet remembers (' + await progressText(app) + ')');
+  ok(checks().filter(r => r.product_id === 'inv-c').length === 2, '§G3.16 and deleting the product left its history untouched');
+
+  ok((await colIds(app, 'pending') || []).join() === 'inv-a', '§G3.17 the other branch\'s decision did NOT leak into this run');
+  ok(await sortedCol(app, 'available') !== 'inv-a,inv-b', '§G3.17 inv-a stayed undecided despite the newer foreign worksheet');
+
+  // ── §G3.18 — the hover preview sits above the dialog's blurred backdrop ────
+  // Both the dialog and the preview are children of <body>, so they share the root stacking context
+  // and the z-index comparison is the real one. A preview rendered inside the page tree instead would
+  // be trapped below the backdrop no matter what z-index it carried.
+  await hoverRow(app, 'inv-b');
+  await sleep(500);
+  const layer = await hoverProbe(app, 'ZenTest Beta');
+  ok(layer && layer.host === true, '§G3.18 the hover preview is rendered (' + S(layer) + ')');
+  ok(layer && layer.direct === true, '§G3.18 as a direct child of <body>, in the dialog\'s own layer');
+  ok(layer && layer.inDialog === false, '§G3.18 and not nested inside the dialog panel');
+  ok(layer && layer.hostZ > layer.dialogZ, '§G3.18 above the dialog (' + (layer || {}).hostZ + ' > ' + (layer || {}).dialogZ + ')');
+  ok(layer && layer.blurred === false, '§G3.18 and outside anything that paints the backdrop blur');
+
+  // ── §G3.19 — Finish puts the WORKSHEET away and nothing else ───────────────
+  const beforeFinish = checks().length;
+  await clickSel(app, '[data-testid="inv-finish"]');
+  await waitFor(app, '[data-testid="inv-finish-confirm"]', 10000);
+  ok(sessionItems().some(r => r.session_id !== 'sess-foreign'), '§G3.19 the worksheet is still there while the question is open');
+  await clickSel(app, '[data-testid="inv-finish-confirm"]');
+  const e19 = Date.now() + 20000;
+  while (Date.now() < e19 && sessions().some(s => s.session_id !== 'sess-foreign' && s.status === 'open')) await sleep(400);
+
+  ok((await colIds(app, 'available') || []).length === 0, '§G3.19 the columns are empty immediately after finishing');
+  ok((await colIds(app, 'not_available') || []).length === 0, '§G3.19 both of them');
+  ok((await colIds(app, 'pending') || []).sort().join() === 'inv-a,inv-b', '§G3.19 everything is back in "to check"');
+
+  const ours = sessions().filter(s => s.session_id !== 'sess-foreign');
+  ok(ours.length > 0 && ours.every(s => s.status === 'closed'), '§G3.19 this branch\'s worksheet is closed (' + ours.map(s => s.status).join() + ')');
+  ok(ours.every(s => !!s.closed_at), '§G3.19 with the moment it was put away recorded');
+  ok(sessionItems().every(r => r.session_id === 'sess-foreign'), '§G3.19 and its item rows are gone');
+
+  ok(checks().length === beforeFinish, '§G3.19 finishing deleted NOTHING from the history (' + beforeFinish + ' → ' + checks().length + ')');
+  ok(checks().filter(r => r.product_id === 'inv-c').length === 2, '§G3.19 including the history of a product that no longer exists');
+  ok(checks().filter(r => r.product_id === 'inv-b').length >= 2, '§G3.19 and every observation of the finished run');
+
+  const foreign = sessions().find(s => s.session_id === 'sess-foreign');
+  ok(!!foreign && foreign.status === 'open', '§G3.19 the other branch\'s run was NOT closed along with it');
+  ok(sessionItems().filter(r => r.session_id === 'sess-foreign').length === 1, '§G3.19 and its worksheet still holds its item');
+
+  // and it stays finished — reopening starts a clean sheet
+  await clickText(app, 'Cancel');
+  await sleep(500);
+  await openModal(app);
+  ok((await colIds(app, 'pending') || []).sort().join() === 'inv-a,inv-b', '§G3.19 reopening starts empty — the run does not come back');
+  ok((await progressText(app) || '').startsWith('0 / 2'), '§G3.19 with the progress reset (' + await progressText(app) + ')');
+  await clickText(app, 'Cancel');
+  await sleep(400);
 
   // ── production untouched ──────────────────────────────────────────────────
   const prodBizAfter = existsSync(PROD_BIZ_DB) ? dbQ(PROD_BIZ_DB, 'SELECT COUNT(*) c FROM products') : [];

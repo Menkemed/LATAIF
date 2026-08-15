@@ -14,10 +14,17 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { useAuthStore } from '@/stores/authStore';
+import { getDatabase, saveDatabase } from '@/core/db/database';
+import { currentBranchId } from '@/core/db/helpers';
+import {
+  loadOpenSession, ensureOpenSession, persistSessionItems, closeSession, itemsNeedingHistory,
+  type InventorySessionDb, type SessionItem,
+} from '@/core/stock/inventory-session';
 import {
   latestStockChecks,
   recordStockCheck,
@@ -46,9 +53,14 @@ function when(iso: string): string {
 
 export function StockCheckInventoryModal({ open, onClose, products, categories }: StockCheckInventoryModalProps) {
   const userId = useAuthStore(s => s.session?.userId);
+  const branchId = currentBranchId();
   const [draft, setDraft] = useState<Map<string, DraftEntry>>(new Map());
   const [latest, setLatest] = useState<Record<string, StockCheck>>({});
   const [saving, setSaving] = useState(false);
+  // What the worksheet last recorded, per product. This is the SAVED state, and it is what makes a
+  // second Save write nothing while a corrected verdict still writes a new observation.
+  const [persisted, setPersisted] = useState<Map<string, SessionItem>>(new Map());
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [saved, setSaved] = useState<Set<string>>(new Set());
   const [failed, setFailed] = useState<Set<string>>(new Set());
   const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
@@ -61,8 +73,25 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   // Fresh draft every time the modal opens: a stocktake is a session, not a stored document.
   useEffect(() => {
     if (!open) return;
-    setDraft(new Map());
-    setSaved(new Set());
+    // INVENTORY-SESSION — reopen where the operator stopped, even days later. The worksheet is the
+    // truth about the RUN; the columns are rebuilt from it instead of starting blank.
+    const restored = new Map<string, DraftEntry>();
+    const before = new Map<string, SessionItem>();
+    let sid: string | null = null;
+    try {
+      const s = loadOpenSession(getDatabase() as unknown as InventorySessionDb, branchId);
+      if (s) {
+        sid = s.sessionId;
+        for (const it of s.items) {
+          restored.set(it.productId, { status: it.status, notes: it.notes });
+          before.set(it.productId, it);
+        }
+      }
+    } catch { /* no worksheet readable — start blank rather than block the run */ }
+    setSessionId(sid);
+    setPersisted(before);
+    setDraft(restored);
+    setSaved(new Set(before.keys()));
     setFailed(new Set());
     setMsg(null);
     setConfirmDiscard(false);
@@ -104,12 +133,27 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   );
   const availables = useMemo(() => inColumn('available'), [inColumn]);
   const notAvailables = useMemo(() => inColumn('not_available'), [inColumn]);
-  const unsaved = draft.size > saved.size;
+  /** The worksheet as the screen currently shows it. */
+  const draftItems = useMemo<SessionItem[]>(
+    () => [...draft.entries()].map(([productId, e]) => ({ productId, status: e.status as SessionItem['status'], notes: e.notes })),
+    [draft],
+  );
+  /** Only what the worksheet has not already recorded — a second Save with no change writes nothing,
+   *  and a corrected verdict writes a NEW observation because the history is append-only. */
+  const dirty = useMemo(() => itemsNeedingHistory(draftItems, [...persisted.values()]), [draftItems, persisted]);
+  /** Recorded AND untouched since — the greyed-out state. Editing a card takes it out of this set
+   *  again, because from that moment it is a decision the history does not know about yet. */
+  const dirtyIds = useMemo(() => new Set(dirty.map(d => d.productId)), [dirty]);
+  const removed = useMemo(
+    () => [...persisted.keys()].filter(id => !draft.has(id) && products.some(p => p.id === id)),
+    [persisted, draft, products],
+  );
+  const unsaved = dirty.length > 0 || removed.length > 0;
 
   const save = async () => {
     if (saving) return;                                   // §F — a second click never starts a second run
-    const entries = [...draft.entries()].filter(([id]) => !saved.has(id));
-    if (entries.length === 0) { onClose(); return; }
+    const entries: Array<[string, DraftEntry]> = dirty.map(d => [d.productId, { status: d.status, notes: d.notes }]);
+    if (entries.length === 0 && removed.length === 0) { onClose(); return; }
     // Refuse the whole save on a note the backend would reject, rather than saving the rest and
     // silently dropping one note.
     for (const [id, e] of entries) {
@@ -139,6 +183,20 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
         bad.add(id);
       }
     }
+    // INVENTORY-SESSION — the worksheet is written for everything that actually landed, so reopening
+    // shows the same three columns. A failed item stays OUT of it: its verdict was never observed.
+    try {
+      const db = getDatabase() as unknown as InventorySessionDb;
+      const nowIso = new Date().toISOString();
+      const sid = sessionId ?? ensureOpenSession(db, branchId, nowIso, () => crypto.randomUUID());
+      const keep = draftItems.filter(d => !bad.has(d.productId));
+      persistSessionItems(db, sid, keep, products.map(p => p.id), nowIso);
+      await saveDatabase();
+      setSessionId(sid);
+      setPersisted(new Map(keep.map(i => [i.productId, i])));
+    } catch {
+      setMsg({ text: 'Saved to the history, but the worksheet could not be stored — reopening may start blank.', bad: true });
+    }
     setSaved(ok);
     setFailed(bad);
     setSaving(false);
@@ -154,6 +212,30 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
     });
   };
 
+  /** INVENTORY-SESSION — put the worksheet away deliberately. Nothing else clears it: no date rolls
+   *  over, nothing expires. The history is NOT touched; only the run in progress ends. */
+  const [confirmFinish, setConfirmFinish] = useState(false);
+  const finishInventory = async () => {
+    if (saving) return;
+    try {
+      if (sessionId) {
+        closeSession(getDatabase() as unknown as InventorySessionDb, sessionId, new Date().toISOString());
+        await saveDatabase();
+      }
+    } catch {
+      setMsg({ text: 'The inventory could not be closed — please try again.', bad: true });
+      setConfirmFinish(false);
+      return;
+    }
+    setSessionId(null);
+    setPersisted(new Map());
+    setDraft(new Map());
+    setSaved(new Set());
+    requestIds.current = new Map();
+    setConfirmFinish(false);
+    setMsg({ text: 'Inventory finished — the columns start empty next time. The history is unchanged.', bad: false });
+  };
+
   const attemptClose = () => {
     if (unsaved && !saving) { setConfirmDiscard(true); return; }   // §C6 — never lose a draft silently
     onClose();
@@ -162,7 +244,9 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   const row = (p: Product, column: 'pending' | StockCheckStatus) => {
     const entry = draft.get(p.id);
     const last = latest[p.id];
-    const isSaved = saved.has(p.id);
+    // "Already in the history, unchanged since" — a look, never a lock. A run picked up days later
+    // arrives entirely in this state, and an operator who cannot correct it has no inventory at all.
+    const isSaved = saved.has(p.id) && !dirtyIds.has(p.id);
     const isFailed = failed.has(p.id);
     return (
       <div
@@ -204,21 +288,22 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
               </>
             ) : (
               <>
-                <button data-inv-flip={p.id} disabled={saving || isSaved}
+                <button data-inv-flip={p.id} disabled={saving}
                   title={column === 'available' ? 'Move to Not available' : 'Move to Available'}
                   onClick={() => assign(p.id, column === 'available' ? 'not_available' : 'available')}
                   className="px-2 py-1 rounded" style={{ border: '1px solid #2A2A32', color: '#8A8A93' }}>
                   {column === 'available' ? '✗' : '✓'}
                 </button>
-                <button data-inv-undo={p.id} title="Back to unchecked" disabled={saving || isSaved}
+                <button data-inv-undo={p.id} title="Back to unchecked" disabled={saving}
                   onClick={() => unassign(p.id)}
                   className="px-2 py-1 rounded" style={{ border: '1px solid #2A2A32', color: '#8A8A93' }}>↩</button>
               </>
             )}
           </div>
         </div>
-        {/* §C7 — the note sits WITH the decision it belongs to, and is editable until Save. */}
-        {entry && !isSaved && (
+        {/* §C7 — the note sits WITH the decision it belongs to, and stays editable: correcting the
+            note of an item saved yesterday is the ordinary case, not an exception. */}
+        {entry && (
           <input
             data-inv-note={p.id}
             type="text"
@@ -257,7 +342,9 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
             <strong>{draft.size}</strong> / {products.length} checked
             <span className="text-gray-500"> · {pending.length} remaining · {availables.length} available · {notAvailables.length} not available</span>
           </div>
-          <div className="text-xs text-gray-500">Nothing is saved until you press Save.</div>
+          <div className="text-xs text-gray-500">
+            Nothing is saved until you press Save · this inventory stays open until you finish it
+          </div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, height: '58vh' }}>
@@ -268,27 +355,48 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
 
         {msg && <div className={`text-xs mt-3 ${msg.bad ? 'text-red-400' : 'text-emerald-400'}`}>{msg.text}</div>}
 
-        <div className="flex items-center justify-end gap-2 mt-4">
+        <div className="flex items-center justify-between gap-2 mt-4">
+          <Button variant="ghost" data-testid="inv-finish" disabled={saving || (draft.size === 0 && !sessionId)}
+            onClick={() => setConfirmFinish(true)}>
+            Finish inventory
+          </Button>
+          <div className="flex items-center gap-2">
           <Button variant="ghost" onClick={attemptClose} disabled={saving}>Cancel</Button>
           <Button data-testid="inv-save" onClick={() => void save()} disabled={saving || draft.size === 0}>
-            {saving ? 'Saving…' : `Save stock check (${draft.size - saved.size})`}
+            {saving ? 'Saving…' : `Save stock check (${dirty.length})`}
           </Button>
+          </div>
         </div>
       </Modal>
 
       {/* §C3 — the SAME hover card the pickers use, so the preview cannot drift from theirs. */}
-      {open && hovered && !confirmDiscard && (
+      {/* The preview MUST live in the same top-level layer as the dialog. The Modal portals itself to
+          document.body, and its backdrop paints a blur; a preview rendered here in the page tree sits
+          in a lower stacking context, so any z-index it carries is meaningless against the portal and
+          it appears behind the blur. Portalling it to the same parent is what actually puts it on top. */}
+      {open && hovered && !confirmDiscard && createPortal(
         <div style={{
           position: 'fixed',
           left: Math.min(hover!.x + 18, window.innerWidth - 340),
           top: Math.min(hover!.y + 12, window.innerHeight - 320),
-          // above the modal's own 9999 — a preview that renders behind the dialog is no preview
           zIndex: 10050,
           pointerEvents: 'none',
         }}>
           <ProductHoverCard product={hovered} categories={categories} />
-        </div>
+        </div>,
+        document.body,
       )}
+
+      <Modal open={confirmFinish} onClose={() => setConfirmFinish(false)} title="Finish inventory?" width={460}>
+        <div className="text-sm mb-4">
+          This ends the current inventory. The three columns start empty next time you open it.
+          Everything you already saved stays in the stock-check history — nothing is deleted there.
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setConfirmFinish(false)}>Keep working</Button>
+          <Button data-testid="inv-finish-confirm" onClick={() => { void finishInventory(); }}>Finish inventory</Button>
+        </div>
+      </Modal>
 
       <Modal open={confirmDiscard} onClose={() => setConfirmDiscard(false)} title="Unsaved stock check" width={460}>
         <div className="text-sm mb-4">
