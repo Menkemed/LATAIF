@@ -56,7 +56,7 @@ function dbQ(file, sql, params = []) {
 const checks = () => dbQ(SERVER_DB, 'SELECT check_id, product_id, status, notes, checked_at, checked_by, checked_by_name, source, request_id FROM stock_checks ORDER BY checked_at');
 /** INVENTORY-SESSION — the worksheet lives in the BUSINESS db, next to the products it describes. */
 const sessions = () => dbQ(BIZ_DB, 'SELECT session_id, branch_id, status, started_at, closed_at FROM inventory_sessions ORDER BY started_at');
-const sessionItems = () => dbQ(BIZ_DB, 'SELECT session_id, product_id, status, notes FROM inventory_session_items ORDER BY product_id');
+const sessionItems = () => dbQ(BIZ_DB, 'SELECT session_id, product_id, status, notes, updated_at, applied_check_id FROM inventory_session_items ORDER BY product_id');
 /** Mutate the business db while the app is NOT running — the house fixture pattern. */
 function atRest(fn) {
   const db = new DatabaseSync(BIZ_DB);
@@ -238,6 +238,14 @@ async function openModal(c) {
   await waitFor(c, '[data-testid="open-inventory"]', 20000);
   await clickSel(c, '[data-testid="open-inventory"]');
   await waitFor(c, '[data-inv-col="pending"]', 20000);
+  // The columns paint from the worksheet immediately; checks made on another surface are folded in
+  // when the history read comes back. Reading the columns before that is reading a half-open dialog.
+  const end = Date.now() + 20000;
+  while (Date.now() < end) {
+    const tag = await c.ev(`const e=document.querySelector('[data-inv-merged]'); return e ? e.getAttribute('data-inv-merged') : null;`);
+    if (tag) return;
+    await sleep(200);
+  }
 }
 async function waitModalClosed(c, t = 20000) {
   const end = Date.now() + t;
@@ -448,16 +456,8 @@ async function main() {
       ok(!!mine.checked_at && !!mine.checked_by_name, '§G3.9 timestamp and actor came across too');
     }
 
-    // and the other direction: a mobile check appears in the desktop history
-    const post = await fetch(`${BASE}/api/stock-checks`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify({ product_id: 'inv-a', status: 'available', notes: 'seen on the phone', request_id: 'e2e-mobile-' + Date.now() }),
-    });
-    ok(post.ok, '§G3.9 the phone can record a check on the same product (' + post.status + ')');
-    const both = checks().filter(r => r.product_id === 'inv-a');
-    ok(both.length === 2, '§G3.9 one shared history holds both surfaces (' + both.length + ')');
-    ok(new Set(both.map(r => r.source)).size === 2, '§G3.9 and the two rows name different sources');
+    // The other direction — a phone check landing in the same history — is proven in the
+    // cross-surface section below, where it also has to move the card, not just add a row.
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -549,7 +549,7 @@ async function main() {
   await clickSel(app, '[data-testid="inv-save"]');
   ok(await waitModalClosed(app), '§G3.14 taking a decision back saves and closes');
   ok(checks().length === base + 2, '§G3.14 un-deciding wrote no history — it was never an observation');
-  const afterNarrow = sessionItems().map(r => r.product_id).sort().join();
+  const afterNarrow = sessionItems().filter(r => r.status !== 'to_check').map(r => r.product_id).sort().join();
   ok(afterNarrow === 'inv-b,inv-c', '§G3.14 the hidden items survived while the visible one was removed (' + afterNarrow + ')');
 
   await setFilter('ZenTest');
@@ -642,7 +642,163 @@ async function main() {
   await clickText(app, 'Cancel');
   await sleep(400);
 
-  // ── production untouched ──────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
+  // CROSS-SURFACE — a phone check has to move the card, not just add a line to the history.
+  //
+  // The operator walks the shelf with the phone while the desktop inventory is open. What they
+  // record there is an observation of the same run, so when the desktop comes back it must find
+  // those items already in the right column, with their notes, and everything else still waiting.
+  // ══════════════════════════════════════════════════════════════════════════
+  const beforeCross = productRows();
+  const ourSession = () => sessions().find(s => s.session_id !== 'sess-foreign' && s.status === 'open');
+  const itemOf = (pid) => sessionItems().find(r => r.product_id === pid && r.session_id !== 'sess-foreign');
+  /** The SAME endpoint the phone posts to — no shortcut through the desktop core. */
+  async function phoneCheck(productId, status, notes) {
+    const rid = 'e2e-phone-' + productId + '-' + Date.now();
+    const res = await fetch(`${BASE}/api/stock-checks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify({ product_id: productId, status, notes, request_id: rid }),
+    });
+    return { ok: res.ok, status: res.status, rid };
+  }
+
+  if (!token) {
+    ok(false, 'CROSS-SURFACE: no mobile token — the merge could not be proven');
+  } else {
+    ok(!!ourSession(), 'G3.20 opening the dialog started a run (' + S(ourSession() || null) + ')');
+    const runStart = ourSession().started_at;
+    const histBefore = checks().length;
+
+    // -- G3.20 — the phone fills a column ------------------------------------
+    const p1 = await phoneCheck('inv-a', 'available', 'phone shelf');
+    ok(p1.ok, 'G3.20 the phone recorded a check (' + p1.status + ')');
+    ok(checks().length === histBefore + 1, 'G3.20 which is one history event (' + (checks().length - histBefore) + ')');
+
+    await openModal(app);
+    ok(await sortedCol(app, 'available') === 'inv-a', 'G3.20 the desktop opens with it already in Available (' + (await colIds(app, 'available') || []).join() + ')');
+    ok(await noteVal(app, 'inv-a') === 'phone shelf', 'G3.20 carrying the note the phone wrote (' + await noteVal(app, 'inv-a') + ')');
+    ok((await colIds(app, 'pending') || []).join() === 'inv-b', 'G3.20 and everything unchecked is still waiting');
+    ok((await progressText(app) || '').startsWith('1 / 2'), 'G3.20 progress counts it (' + await progressText(app) + ')');
+    ok(checks().length === histBefore + 1, 'G3.20 folding it in wrote NO second observation');
+    const mergedRow = itemOf('inv-a');
+    ok(!!mergedRow && mergedRow.status === 'available', 'G3.20 the worksheet holds it (' + S(mergedRow) + ')');
+    ok(!!mergedRow && !!mergedRow.applied_check_id, 'G3.20 tagged with the observation it came from');
+    const foldTag = await app.ev(`const e=document.querySelector('[data-inv-merged]'); return e ? (e.getAttribute('data-inv-merged') + '|hist=' + e.getAttribute('data-inv-history') + '|run=' + e.getAttribute('data-inv-run')) : null;`);
+    ok(String(foldTag).startsWith('1|'), 'G3.20 the fold-in reports exactly one card taken from the phone (' + foldTag + ' vs db start ' + runStart + ', check at ' + (checks().find(c => c.product_id === 'inv-a') || {}).checked_at + ')');
+
+    // a Save with nothing else changed must stay silent — the item is already on record
+    await clickSel(app, '[data-testid="inv-save"]');
+    await sleep(1500);
+    ok(checks().length === histBefore + 1, 'G3.20 and pressing Save does not re-report it (' + (checks().length - histBefore) + ')');
+    await waitModalClosed(app);
+
+    // -- G3.21 — the newer observation wins, both stay on record --------------
+    // Counted as a delta: this product was already checked in the earlier sections, so an absolute
+    // number here would only be asserting how long the suite is.
+    const bBefore = checks().filter(r => r.product_id === 'inv-b').length;
+    await openModal(app);
+    await clickAttr(app, 'yes', 'inv-b');
+    await sleep(300);
+    await setVal(app, '[data-inv-note="inv-b"]', 'desk says here');
+    await sleep(300);
+    await clickSel(app, '[data-testid="inv-save"]');
+    const e21 = Date.now() + 20000;
+    while (Date.now() < e21 && checks().length < histBefore + 2) await sleep(400);
+    ok(checks().length === histBefore + 2, 'G3.21 the desktop recorded its own verdict (' + (checks().length - histBefore) + ')');
+    await waitModalClosed(app);
+
+    await sleep(1100);                       // the phone disagrees, a moment later
+    const p2 = await phoneCheck('inv-b', 'not_available', 'not on the shelf');
+    ok(p2.ok, 'G3.21 the phone overrules it (' + p2.status + ')');
+
+    await openModal(app);
+    ok(await sortedCol(app, 'not_available') === 'inv-b', 'G3.21 the desktop reopens with the phone verdict (' + (await colIds(app, 'not_available') || []).join() + ')');
+    ok(await noteVal(app, 'inv-b') === 'not on the shelf', 'G3.21 and the phone note replaced the desktop one');
+    const bHist = checks().filter(r => r.product_id === 'inv-b');
+    ok(bHist.some(r => r.status === 'available' && r.notes === 'desk says here'), 'G3.21 the desktop observation is still on record');
+    ok(bHist.some(r => r.status === 'not_available'), 'G3.21 next to the phone one — nothing was overwritten');
+    ok(new Set(bHist.map(r => r.source)).size === 2, 'G3.21 one shared history holds both surfaces (' + bHist.map(r => r.source).join(',') + ')');
+
+    // the operator corrects it back: a NEW event, not an edit of an old row
+    const histBeforeFix = checks().length;
+    await clickAttr(app, 'flip', 'inv-b');
+    await sleep(300);
+    await clickSel(app, '[data-testid="inv-save"]');
+    const e21b = Date.now() + 20000;
+    while (Date.now() < e21b && checks().length < histBeforeFix + 1) await sleep(400);
+    ok(checks().length === histBeforeFix + 1, 'G3.21 correcting it writes exactly one more event');
+    ok(checks().filter(r => r.product_id === 'inv-b').length === bBefore + 3, 'G3.21 so all three new sightings survive next to the older ones (' + bBefore + ' -> ' + checks().filter(r => r.product_id === 'inv-b').length + ')');
+    await waitModalClosed(app);
+
+    // -- G3.22 — a card taken back stays back --------------------------------
+    // The phone check for inv-a is still the newest observation for it. Taking the card back must
+    // not be quietly undone by folding that same observation in again on the next open.
+    await openModal(app);
+    await clickAttr(app, 'undo', 'inv-a');
+    await sleep(300);
+    const histBeforeUndo = checks().length;
+    await clickSel(app, '[data-testid="inv-save"]');
+    await waitModalClosed(app);
+    ok(checks().length === histBeforeUndo, 'G3.22 taking a card back writes no history');
+    await openModal(app);
+    ok((await colIds(app, 'pending') || []).includes('inv-a'), 'G3.22 and it is still in To check after reopening (' + (await colIds(app, 'pending') || []).join() + ')');
+    ok(itemOf('inv-a') && itemOf('inv-a').status === 'to_check', 'G3.22 recorded as taken back rather than deleted (' + S(itemOf('inv-a')) + ')');
+    await clickText(app, 'Cancel');
+    await sleep(500);
+
+    // -- G3.23 — Finish is a real boundary -----------------------------------
+    const histAtFinish = checks().length;
+    await openModal(app);
+    await clickSel(app, '[data-testid="inv-finish"]');
+    await waitFor(app, '[data-testid="inv-finish-confirm"]', 10000);
+    await clickSel(app, '[data-testid="inv-finish-confirm"]');
+    await sleep(1500);
+    await clickText(app, 'Cancel');
+    await sleep(600);
+
+    await openModal(app);
+    ok((await colIds(app, 'pending') || []).sort().join() === 'inv-a,inv-b', 'G3.23 a new run starts with everything in To check (' + (await colIds(app, 'pending') || []).join() + ')');
+    ok((await colIds(app, 'available') || []).length === 0, 'G3.23 no column inherited the old verdicts');
+    ok((await colIds(app, 'not_available') || []).length === 0, 'G3.23 neither of them');
+    ok(checks().length === histAtFinish, 'G3.23 and every historical observation is still there (' + histAtFinish + ' -> ' + checks().length + ')');
+    const freshRun = ourSession();
+    ok(!!freshRun && freshRun.started_at > runStart, 'G3.23 under a genuinely new run (' + (freshRun || {}).started_at + ' > ' + runStart + ')');
+
+    // a phone check AFTER the new run started does count again
+    await clickText(app, 'Cancel');
+    await sleep(500);
+    const p3 = await phoneCheck('inv-b', 'available', 'new run');
+    ok(p3.ok, 'G3.23 the phone records into the new run (' + p3.status + ')');
+    await openModal(app);
+    ok(await sortedCol(app, 'available') === 'inv-b', 'G3.23 and that one DOES fill a column (' + (await colIds(app, 'available') || []).join() + ')');
+    ok((await colIds(app, 'pending') || []).join() === 'inv-a', 'G3.23 while the old verdicts stay history');
+    await clickText(app, 'Cancel');
+    await sleep(500);
+
+    // -- G3.24 — the other branch was never touched --------------------------
+    const foreignItems = sessionItems().filter(r => r.session_id === 'sess-foreign');
+    ok(foreignItems.length === 1, 'G3.24 the other branch still holds exactly its own item (' + foreignItems.length + ')');
+    ok(foreignItems[0] && foreignItems[0].notes === 'foreign branch', 'G3.24 unchanged by any of this');
+    const foreignSess = sessions().find(s => s.session_id === 'sess-foreign');
+    ok(!!foreignSess && foreignSess.status === 'open', 'G3.24 and its run is still open');
+    ok(!sessionItems().some(r => r.session_id === 'sess-foreign' && r.product_id === 'inv-b'), 'G3.24 no phone check leaked into it');
+
+    // -- G3.25 — none of it touched a product --------------------------------
+    const afterCross = productRows();
+    const moved = [];
+    for (const [id, row] of beforeCross.byId) {
+      const now = afterCross.byId.get(id);
+      if (!now) { moved.push(id + ':missing'); continue; }
+      for (const col of beforeCross.cols) {
+        if (String(row[col] ?? '') !== String(now[col] ?? '')) moved.push(id + '.' + col);
+      }
+    }
+    ok(moved.length === 0, 'G3.25 not one product column moved through the whole cross-surface run (' + moved.slice(0, 6).join(', ') + ')');
+    ok(afterCross.byId.size === beforeCross.byId.size, 'G3.25 and no product appeared or vanished');
+  }
+
+  // -- production untouched ---------------------------------------------------
   const prodBizAfter = existsSync(PROD_BIZ_DB) ? dbQ(PROD_BIZ_DB, 'SELECT COUNT(*) c FROM products') : [];
   const prodSrvAfter = existsSync(PROD_SRV_DB) ? dbQ(PROD_SRV_DB, 'SELECT COUNT(*) c FROM stock_checks') : [];
   ok(JSON.stringify(prodBizBefore) === JSON.stringify(prodBizAfter), 'isolation: the production business DB is untouched');

@@ -2,6 +2,7 @@
 //
 // What matters is that an interrupted inventory comes back intact: same columns, same notes, days
 // later, and that finishing it clears the run WITHOUT touching the observation history.
+import { isDecided } from '../../src/core/stock/inventory-session.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -56,7 +57,7 @@ test('the worksheet survives being put down and picked up again', () => {
     assert.equal(byId.get('p1')?.notes, 'shop');
     assert.equal(byId.get('p2')?.status, 'not_available');
     assert.equal(byId.get('p2')?.notes, 'sold??');
-    assert.equal(back.items.length, 2, 'nothing else drifted in');
+    assert.equal(back.items.filter(i => isDecided(i.status)).length, 2, 'nothing else drifted in');
   } finally { d.close(); }
 });
 
@@ -69,7 +70,10 @@ test('reopening returns the SAME session — a second open never starts a parall
   } finally { d.close(); }
 });
 
-test('an item moved back to "To check" leaves the worksheet', () => {
+// CROSS-SURFACE: an item taken back is PARKED, not deleted. The stored `to_check` row is what a
+// later merge compares an incoming phone check against — without it, the observation the operator
+// just rejected would look brand new and come straight back.
+test('an item moved back to "To check" is parked, not forgotten', () => {
   const d = db();
   try {
     seedProducts(d);
@@ -77,7 +81,11 @@ test('an item moved back to "To check" leaves the worksheet', () => {
     persistSessionItems(d, sid, [item('p1', 'available'), item('p2', 'available')], ids, '2026-08-15T10:05:00Z');
     persistSessionItems(d, sid, [item('p1', 'available')], ids, '2026-08-15T10:06:00Z');
     const back = loadOpenSession(d, 'branch-main');
-    assert.deepEqual(back?.items.map(i => i.productId), ['p1']);
+    const byId = new Map(back!.items.map(i => [i.productId, i]));
+    assert.deepEqual(back!.items.filter(i => isDecided(i.status)).map(i => i.productId), ['p1'],
+      'only p1 still holds a decision');
+    assert.equal(byId.get('p2')?.status, 'to_check', 'p2 is recorded as taken back');
+    assert.equal(byId.get('p2')?.updatedAt, '2026-08-15T10:06:00Z', 'with the moment it happened');
   } finally { d.close(); }
 });
 
@@ -104,7 +112,8 @@ test('an item whose product is gone drops out instead of breaking the view', () 
     persistSessionItems(d, sid, [item('p1', 'available'), item('p2', 'available')], ids, '2026-08-15T10:05:00Z');
     d.run(`DELETE FROM products WHERE id = ?`, ['p2']);
     const back = loadOpenSession(d, 'branch-main');
-    assert.deepEqual(back?.items.map(i => i.productId), ['p1']);
+    assert.deepEqual(back!.items.filter(i => isDecided(i.status)).map(i => i.productId), ['p1']);
+    assert.ok(!back!.items.some(i => i.productId === 'p2'), 'the gone product is not in the worksheet at all');
   } finally { d.close(); }
 });
 
@@ -130,8 +139,8 @@ test('branches keep separate worksheets', () => {
     const a = ensureOpenSession(d, 'branch-a', '2026-08-15T10:00:00Z', () => 'sess-a');
     ensureOpenSession(d, 'branch-b', '2026-08-15T10:00:00Z', () => 'sess-b');
     persistSessionItems(d, a, [item('p1', 'available')], ids, '2026-08-15T10:05:00Z');
-    assert.equal(loadOpenSession(d, 'branch-a')?.items.length, 1);
-    assert.equal(loadOpenSession(d, 'branch-b')?.items.length, 0);
+    assert.equal(loadOpenSession(d, 'branch-a')!.items.filter(i => isDecided(i.status)).length, 1);
+    assert.equal(loadOpenSession(d, 'branch-b')!.items.filter(i => isDecided(i.status)).length, 0);
   } finally { d.close(); }
 });
 
