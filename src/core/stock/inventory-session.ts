@@ -9,9 +9,14 @@
 // So the run gets its own state, next to the history and never instead of it:
 //
 //   • one OPEN session per branch — the inventory currently being worked through,
-//   • one row per already-decided product, holding the column it sits in and its note,
+//   • one row per product the operator has ruled on, holding the column it sits in and its note,
+//     including the ones deliberately put BACK: `to_check` is a decision with a time on it, not the
+//     absence of one,
 //   • it survives Save, closing the window, and restarting the app: reopening restores exactly the
 //     three columns as they were,
+//   • checks recorded elsewhere during the run — the phone walking the same shelf — are folded into
+//     it on open, bounded below by `runFloor` so neither a finished run nor a history older than
+//     this feature can leak into it,
 //   • only an explicit finish clears it. Nothing expires on its own, and no date rolls it over.
 //
 // Closing a session does NOT touch a single history row — the observations stay, the worksheet is
@@ -230,10 +235,13 @@ export function ensureOpenSession(
 /**
  * Write the worksheet as it currently stands.
  *
- * `items` is the COMPLETE set of decided products for this session, so a product the operator moved
- * back to "To check" disappears here too — the worksheet mirrors the screen. Products outside the
- * caller's current filter are NOT part of `items` and must survive, which is why `keepProductIds`
- * exists: only rows the caller could actually see are eligible for removal.
+ * `items` is the COMPLETE set of decided products for this session. A product the operator moved
+ * back to "To check" is therefore absent from it, and is recorded as `to_check` rather than deleted
+ * — the row is what a later merge compares an incoming observation against, and without it the
+ * check that was just rejected would look brand new.
+ *
+ * Only `visibleProductIds` can be parked that way: a decision made under a different filter is not
+ * on screen, so its absence from `items` says nothing about it and it must survive untouched.
  */
 export function persistSessionItems(
   db: InventorySessionDb,
