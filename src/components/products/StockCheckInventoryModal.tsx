@@ -23,6 +23,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId } from '@/core/db/helpers';
 import {
   loadOpenSession, ensureOpenSession, persistSessionItems, closeSession, itemsNeedingHistory,
+  mergeExternalChecks, isDecided,
   type InventorySessionDb, type SessionItem,
 } from '@/core/stock/inventory-session';
 import {
@@ -69,41 +70,98 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   /** One request id per product per save ATTEMPT — a retry of the same decision reuses it, so a
    *  double click or a re-save after a partial failure cannot produce a second history row. */
   const requestIds = useRef<Map<string, string>>(new Map());
+  /** Set as soon as the operator moves a card. A background fold-in must not overwrite live work. */
+  const touched = useRef(false);
+  /** How many cards the phone filled in for this open — shown to the operator, and the one
+   *  honest signal that the cross-surface fold-in ran at all. */
+  const [foldedIn, setFoldedIn] = useState<string>('');
+  /** When the run in progress was started — shown to the operator so an inventory left open for
+   *  days is obvious rather than a surprise. */
+  const [runStartedAt, setRunStartedAt] = useState<string>('');
 
   // Fresh draft every time the modal opens: a stocktake is a session, not a stored document.
   useEffect(() => {
     if (!open) return;
     // INVENTORY-SESSION — reopen where the operator stopped, even days later. The worksheet is the
     // truth about the RUN; the columns are rebuilt from it instead of starting blank.
+    //
+    // Opening the dialog is what STARTS an inventory. That is the deliberate act the merge boundary
+    // needs: without a start there is no window, and a phone check would either be ignored forever
+    // or drag the whole history into a fresh run. Only "Finish inventory" ends it.
     const restored = new Map<string, DraftEntry>();
     const before = new Map<string, SessionItem>();
     let sid: string | null = null;
+    let startedAt = '';
     try {
-      const s = loadOpenSession(getDatabase() as unknown as InventorySessionDb, branchId);
+      const db = getDatabase() as unknown as InventorySessionDb;
+      const nowIso = new Date().toISOString();
+      // Starting a run is a durable act: without the flush the row lives only in memory, so a
+      // restart would lose the boundary and the next open would start a second run.
+      const started = loadOpenSession(db, branchId);
+      sid = started ? started.sessionId : ensureOpenSession(db, branchId, nowIso, () => crypto.randomUUID());
+      if (!started) void saveDatabase();
+      const s = started ?? loadOpenSession(db, branchId);
       if (s) {
-        sid = s.sessionId;
+        startedAt = s.startedAt;
         for (const it of s.items) {
-          restored.set(it.productId, { status: it.status, notes: it.notes });
+          if (isDecided(it.status)) restored.set(it.productId, { status: it.status as StockCheckStatus, notes: it.notes });
           before.set(it.productId, it);
         }
       }
     } catch { /* no worksheet readable — start blank rather than block the run */ }
     setSessionId(sid);
+    setRunStartedAt(startedAt);
     setPersisted(before);
     setDraft(restored);
-    setSaved(new Set(before.keys()));
+    setSaved(new Set([...before.values()].filter(i => isDecided(i.status)).map(i => i.productId)));
     setFailed(new Set());
     setMsg(null);
     setConfirmDiscard(false);
     requestIds.current = new Map();
+    touched.current = false;
+    setLatest({});
+    setFoldedIn('');
     let cancelled = false;
     void latestStockChecks(products.map(p => p.id))
-      .then(r => { if (!cancelled) setLatest(r); })
-      .catch(() => { if (!cancelled) setLatest({}); });
+      .then(async r => {
+        if (cancelled) return;
+        setLatest(r);
+        // CROSS-SURFACE — a verdict recorded on the phone during THIS run belongs in these columns,
+        // not only in the history strip. Skipped once the operator has started clicking: their live
+        // work outranks a background fold-in, and the next open will pick it up anyway.
+        if (!sid || !startedAt) { setFoldedIn('no-run'); return; }
+        if (touched.current) { setFoldedIn('busy'); return; }
+        const merged = mergeExternalChecks([...before.values()], Object.values(r), startedAt);
+        if (merged.changed.length === 0) { setFoldedIn('0'); return; }
+        const next = new Map(merged.items.map(i => [i.productId, i]));
+        // Store BEFORE reporting it: a fold-in the operator can see but that never reached the disk
+        // would be re-applied on the next open, which is harmless but dishonest to show as done.
+        try {
+          const db = getDatabase() as unknown as InventorySessionDb;
+          persistSessionItems(db, sid, merged.items.filter(i => isDecided(i.status)), [], new Date().toISOString());
+          await saveDatabase();
+        } catch { /* the columns still show it; the next open folds it in again */ }
+        if (cancelled) return;
+        setPersisted(next);
+        setDraft(new Map([...next.values()].filter(i => isDecided(i.status))
+          .map(i => [i.productId, { status: i.status as StockCheckStatus, notes: i.notes }])));
+        setSaved(new Set([...next.values()].filter(i => isDecided(i.status)).map(i => i.productId)));
+        setMsg({ text: `${merged.changed.length} item${merged.changed.length === 1 ? '' : 's'} checked on the phone were added to this inventory.`, bad: false });
+        setFoldedIn(String(merged.changed.length));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLatest({});
+        setFoldedIn('error');
+        // Swallowing this would show three plausible columns built on nothing — the operator has to
+        // know the history could not be read before they trust what they are looking at.
+        setMsg({ text: 'The stock-check history could not be read, so checks made on the phone are not shown here yet.', bad: true });
+      });
     return () => { cancelled = true; };
-  }, [open, products]);
+  }, [open, products, branchId]);
 
   const assign = useCallback((id: string, status: StockCheckStatus) => {
+    touched.current = true;
     setDraft(prev => {
       const next = new Map(prev);
       const cur = next.get(id);
@@ -114,10 +172,12 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   }, []);
 
   const unassign = useCallback((id: string) => {
+    touched.current = true;
     setDraft(prev => { const next = new Map(prev); next.delete(id); return next; });
   }, []);
 
   const setNotes = useCallback((id: string, notes: string) => {
+    touched.current = true;
     setDraft(prev => {
       const next = new Map(prev);
       const cur = next.get(id);
@@ -140,19 +200,28 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   );
   /** Only what the worksheet has not already recorded — a second Save with no change writes nothing,
    *  and a corrected verdict writes a NEW observation because the history is append-only. */
-  const dirty = useMemo(() => itemsNeedingHistory(draftItems, [...persisted.values()]), [draftItems, persisted]);
+  const dirty = useMemo(
+    () => itemsNeedingHistory(draftItems, [...persisted.values()].filter(i => isDecided(i.status))),
+    [draftItems, persisted],
+  );
   /** Recorded AND untouched since — the greyed-out state. Editing a card takes it out of this set
    *  again, because from that moment it is a decision the history does not know about yet. */
   const dirtyIds = useMemo(() => new Set(dirty.map(d => d.productId)), [dirty]);
+  // A row already parked in `to_check` is not something the save has to remove again.
   const removed = useMemo(
-    () => [...persisted.keys()].filter(id => !draft.has(id) && products.some(p => p.id === id)),
+    () => [...persisted.values()].filter(i => isDecided(i.status) && !draft.has(i.productId)
+      && products.some(p => p.id === i.productId)).map(i => i.productId),
     [persisted, draft, products],
   );
   const unsaved = dirty.length > 0 || removed.length > 0;
 
   const save = async () => {
     if (saving) return;                                   // §F — a second click never starts a second run
-    const entries: Array<[string, DraftEntry]> = dirty.map(d => [d.productId, { status: d.status, notes: d.notes }]);
+    // `dirty` is derived from the draft, which only ever holds decided cards — the narrowing is
+    // what tells the type system that, since SessionItemStatus also covers the parked state.
+    const entries: Array<[string, DraftEntry]> = dirty
+      .filter(d => isDecided(d.status))
+      .map(d => [d.productId, { status: d.status as StockCheckStatus, notes: d.notes }]);
     if (entries.length === 0 && removed.length === 0) { onClose(); return; }
     // Refuse the whole save on a note the backend would reject, rather than saving the rest and
     // silently dropping one note.
@@ -167,17 +236,21 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
     setMsg(null);
     const ok = new Set(saved);
     const bad = new Set<string>();
+    /** The check id this run produced per product — the worksheet records it so the merge never
+     *  folds the desktop's own observation back in as if it had come from somewhere else. */
+    const wrote = new Map<string, string>();
     for (const [id, e] of entries) {
       let rid = requestIds.current.get(id);
       if (!rid) { rid = crypto.randomUUID(); requestIds.current.set(id, rid); }
       try {
-        await recordStockCheck({
+        const written = await recordStockCheck({
           productId: id,
           status: e.status,
           notes: prepareNotes(e.notes).ok ? (prepareNotes(e.notes) as { value: string | null }).value : null,
           userId,
           requestId: rid,
         });
+        if (written && written.check_id) wrote.set(id, written.check_id);
         ok.add(id);
       } catch {
         bad.add(id);
@@ -189,11 +262,26 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
       const db = getDatabase() as unknown as InventorySessionDb;
       const nowIso = new Date().toISOString();
       const sid = sessionId ?? ensureOpenSession(db, branchId, nowIso, () => crypto.randomUUID());
-      const keep = draftItems.filter(d => !bad.has(d.productId));
+      // Carry the observation identity: a row this save wrote points at its own check, an
+      // untouched row keeps the one it was already accounting for.
+      const keep = draftItems.filter(d => !bad.has(d.productId)).map(d => ({
+        ...d,
+        appliedCheckId: wrote.get(d.productId) ?? persisted.get(d.productId)?.appliedCheckId ?? null,
+      }));
       persistSessionItems(db, sid, keep, products.map(p => p.id), nowIso);
       await saveDatabase();
       setSessionId(sid);
-      setPersisted(new Map(keep.map(i => [i.productId, i])));
+      setPersisted(prev => {
+        const next = new Map(prev);
+        for (const id of products.map(p => p.id)) {
+          if (!keep.some(k => k.productId === id)) {
+            // Parked, not forgotten — the stored `to_check` is what a later merge compares against.
+            if (next.has(id)) next.set(id, { productId: id, status: 'to_check', notes: '', updatedAt: nowIso, appliedCheckId: null });
+          }
+        }
+        for (const k of keep) next.set(k.productId, { ...k, updatedAt: nowIso });
+        return next;
+      });
     } catch {
       setMsg({ text: 'Saved to the history, but the worksheet could not be stored — reopening may start blank.', bad: true });
     }
@@ -338,12 +426,14 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
     <>
       <Modal open={open} onClose={attemptClose} title="Stock check" width={1180}>
         <div className="flex items-center justify-between mb-3">
-          <div className="text-sm" data-inv-progress>
+          <div className="text-sm" data-inv-progress data-inv-merged={foldedIn} data-inv-history={String(Object.keys(latest).length)}
+            data-inv-run={runStartedAt || 'none'}>
             <strong>{draft.size}</strong> / {products.length} checked
             <span className="text-gray-500"> · {pending.length} remaining · {availables.length} available · {notAvailables.length} not available</span>
           </div>
           <div className="text-xs text-gray-500">
             Nothing is saved until you press Save · this inventory stays open until you finish it
+            {runStartedAt && <> · running since {when(runStartedAt)}</>}
           </div>
         </div>
 
