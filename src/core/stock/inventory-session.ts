@@ -122,6 +122,47 @@ export function loadOpenSession(db: InventorySessionDb, branchId: string): OpenS
   return { sessionId, startedAt, items };
 }
 
+/**
+ * When this branch last finished an inventory, or null if it never has.
+ *
+ * Everything at or before that moment was walked in a run that has been put away, so it is history
+ * and nothing else. It is the only thing standing between "pick up what the phone did" and "import
+ * every verdict ever recorded", which is why a finish writes it and nothing else clears it.
+ */
+export function lastFinishedAt(db: InventorySessionDb, branchId: string): string | null {
+  const r = rows(
+    db,
+    `SELECT closed_at FROM inventory_sessions
+      WHERE branch_id = ? AND status = 'closed' AND closed_at IS NOT NULL
+      ORDER BY closed_at DESC LIMIT 1`,
+    [branchId],
+  );
+  return r.length === 0 ? null : String(r[0][0]);
+}
+
+/**
+ * When a run that nobody has opened yet should be considered to have STARTED.
+ *
+ * The workflow this exists for is "walk the shelf with the phone, sit down at the desktop
+ * afterwards". Starting the run at the moment the dialog opens would put every one of those checks
+ * before the boundary and show the operator a hundred untouched cards — the observations happened,
+ * and the run they belong to is the one about to be opened.
+ *
+ * So the earliest observation that no finished run has accounted for is what opens it. Returns null
+ * when there is nothing to pick up, and the caller starts the run at the present moment instead.
+ */
+export function startForNewRun(
+  checks: readonly ExternalCheck[],
+  lastFinished: string | null,
+): string | null {
+  let earliest: string | null = null;
+  for (const c of checks) {
+    if (lastFinished && !isAfter(c.checked_at, lastFinished)) continue;
+    if (earliest === null || isAfter(earliest, c.checked_at)) earliest = c.checked_at;
+  }
+  return earliest;
+}
+
 /** The open session for this branch, creating one when the operator decides their first item. */
 export function ensureOpenSession(
   db: InventorySessionDb,
@@ -249,6 +290,12 @@ export interface MergeResult {
  * to. Parsing gives a real order; the string comparison is only the fallback for a value that is not
  * a date at all.
  */
+export function isAfter(a: string, b: string): boolean {
+  const ta = Date.parse(a), tb = Date.parse(b);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta > tb;
+  return a > b;
+}
+
 export function atOrAfter(a: string, b: string): boolean {
   const ta = Date.parse(a), tb = Date.parse(b);
   if (Number.isFinite(ta) && Number.isFinite(tb)) return ta >= tb;

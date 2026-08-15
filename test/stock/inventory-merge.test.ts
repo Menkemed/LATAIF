@@ -17,6 +17,7 @@
 
 import {
   mergeExternalChecks,
+  startForNewRun,
   isDecided,
   itemsNeedingHistory,
   type SessionItem,
@@ -170,6 +171,47 @@ const notesOf = (r: { items: SessionItem[] }, p: string) => r.items.find(i => i.
   const fresh = mergeExternalChecks([], history, at('13:00'));
   eq(fresh.items, [], 'a run started after all of it opens with every card in To check');
   eq(fresh.changed, [], 'and has nothing to write');
+}
+
+
+// ── who gets to open a run ─────────────────────────────────────────────────
+// The workflow this is for: the shelf is walked with the phone, and the desktop is opened
+// afterwards. Starting the run at the moment the dialog opens would put every one of those checks
+// on the wrong side of the boundary and greet the operator with a hundred untouched cards.
+{
+  const checks = [
+    check('b', 'not_available', at('11:05')),
+    check('a', 'available', at('11:00')),
+    check('c', 'available', at('11:30')),
+  ];
+  eq(startForNewRun(checks, null), at('11:00'), 'the earliest unaccounted observation opens the run');
+
+  const r = mergeExternalChecks([], checks, startForNewRun(checks, null)!);
+  eq(r.changed.sort(), ['a', 'b', 'c'], 'and starting there lets every one of them in');
+  eq(statusOf(r, 'a'), 'available', 'each with its own verdict');
+  eq(statusOf(r, 'b'), 'not_available', 'including the negative one');
+}
+
+// ── a finished run is a floor that nothing gets under ──────────────────────
+{
+  const old = [check('a', 'available', at('09:00')), check('b', 'available', at('09:30'))];
+  eq(startForNewRun(old, at('10:00')), null, 'checks from before the last finish open nothing');
+
+  const mixed = [...old, check('c', 'not_available', at('11:00'))];
+  eq(startForNewRun(mixed, at('10:00')), at('11:00'), 'only what came after it counts');
+  const r = mergeExternalChecks([], mixed, startForNewRun(mixed, at('10:00'))!);
+  eq(r.changed, ['c'], 'so the finished run is not walked again');
+  eq(statusOf(r, 'a'), null, 'its items stay in To check');
+
+  // A check at the exact moment of the finish belongs to the run that was finished.
+  eq(startForNewRun([check('a', 'available', at('10:00'))], at('10:00')), null,
+    'an observation at the instant of the finish belongs to the finished run');
+}
+
+// ── nothing to pick up ─────────────────────────────────────────────────────
+{
+  eq(startForNewRun([], null), null, 'no history at all opens nothing — the caller starts at now');
+  eq(startForNewRun([], at('10:00')), null, 'and neither does an empty list after a finish');
 }
 
 console.log(`\ninventory-merge: ${PASS} passed, ${FAIL} failed`);

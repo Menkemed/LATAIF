@@ -23,7 +23,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId } from '@/core/db/helpers';
 import {
   loadOpenSession, ensureOpenSession, persistSessionItems, closeSession, itemsNeedingHistory,
-  mergeExternalChecks, isDecided,
+  mergeExternalChecks, isDecided, lastFinishedAt, startForNewRun,
   type InventorySessionDb, type SessionItem,
 } from '@/core/stock/inventory-session';
 import {
@@ -94,13 +94,11 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
     let startedAt = '';
     try {
       const db = getDatabase() as unknown as InventorySessionDb;
-      const nowIso = new Date().toISOString();
-      // Starting a run is a durable act: without the flush the row lives only in memory, so a
-      // restart would lose the boundary and the next open would start a second run.
-      const started = loadOpenSession(db, branchId);
-      sid = started ? started.sessionId : ensureOpenSession(db, branchId, nowIso, () => crypto.randomUUID());
-      if (!started) void saveDatabase();
-      const s = started ?? loadOpenSession(db, branchId);
+      // A run that is already open is picked up as it stands. One that is NOT open yet is left
+      // uncreated for now: where it should start depends on what the phone has already recorded,
+      // and that answer only arrives with the history read below.
+      const s = loadOpenSession(db, branchId);
+      sid = s ? s.sessionId : null;
       if (s) {
         startedAt = s.startedAt;
         for (const it of s.items) {
@@ -129,9 +127,26 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
         // CROSS-SURFACE — a verdict recorded on the phone during THIS run belongs in these columns,
         // not only in the history strip. Skipped once the operator has started clicking: their live
         // work outranks a background fold-in, and the next open will pick it up anyway.
-        if (!sid || !startedAt) { setFoldedIn('no-run'); return; }
         if (touched.current) { setFoldedIn('busy'); return; }
-        const merged = mergeExternalChecks([...before.values()], Object.values(r), startedAt);
+        const external = Object.values(r);
+        if (!sid) {
+          // OPENING A RUN THAT THE PHONE ALREADY BEGAN — the operator walked the shelf with the
+          // phone and is only now sitting down. Those checks belong to the run about to open, so it
+          // starts at the earliest of them rather than at this moment, which would leave every one
+          // of them on the wrong side of the boundary. With nothing to pick up it simply starts now.
+          try {
+            const db = getDatabase() as unknown as InventorySessionDb;
+            const begin = startForNewRun(external, lastFinishedAt(db, branchId)) ?? new Date().toISOString();
+            sid = ensureOpenSession(db, branchId, begin, () => crypto.randomUUID());
+            startedAt = begin;
+            await saveDatabase();
+            if (cancelled) return;
+            setSessionId(sid);
+            setRunStartedAt(begin);
+          } catch { setFoldedIn('no-run'); return; }
+        }
+        if (!sid || !startedAt) { setFoldedIn('no-run'); return; }
+        const merged = mergeExternalChecks([...before.values()], external, startedAt);
         if (merged.changed.length === 0) { setFoldedIn('0'); return; }
         const next = new Map(merged.items.map(i => [i.productId, i]));
         // Store BEFORE reporting it: a fold-in the operator can see but that never reached the disk

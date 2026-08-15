@@ -776,6 +776,54 @@ async function main() {
     await clickText(app, 'Cancel');
     await sleep(500);
 
+    // -- G3.26 — the phone starts the run, the desktop joins it later -------
+    // The workflow this whole thing is for: nobody has opened an inventory, the shelf is walked with
+    // the phone, and the desktop is opened afterwards. Those checks have to be waiting in the right
+    // columns — a run that started when the dialog opened would show every card untouched.
+    await openModal(app);
+    await clickSel(app, '[data-testid="inv-finish"]');
+    await waitFor(app, '[data-testid="inv-finish-confirm"]', 10000);
+    await clickSel(app, '[data-testid="inv-finish-confirm"]');
+    await sleep(1500);
+    await clickText(app, 'Cancel');
+    await sleep(800);
+    ok(!ourSession(), 'G3.26 no inventory is running (' + S(sessions().filter(x => x.status === 'open').map(x => x.branch_id)) + ')');
+    const closedAt = sessions().filter(x => x.session_id !== 'sess-foreign' && x.closed_at).map(x => x.closed_at).sort().pop();
+    const histBeforePhoneFirst = checks().length;
+
+    const f1 = await phoneCheck('inv-a', 'available', 'phone first A');
+    await sleep(1100);
+    const f2 = await phoneCheck('inv-b', 'not_available', 'phone first B');
+    ok(f1.ok && f2.ok, 'G3.26 the phone recorded both checks with nothing open (' + f1.status + '/' + f2.status + ')');
+    ok(!ourSession(), 'G3.26 and recording them did not need a desktop at all');
+
+    await openModal(app);
+    ok(await sortedCol(app, 'available') === 'inv-a', 'G3.26 opening the desktop finds A already in Available (' + (await colIds(app, 'available') || []).join() + ')');
+    ok(await sortedCol(app, 'not_available') === 'inv-b', 'G3.26 and B in Not available (' + (await colIds(app, 'not_available') || []).join() + ')');
+    ok(await noteVal(app, 'inv-a') === 'phone first A', 'G3.26 with A\'s note (' + await noteVal(app, 'inv-a') + ')');
+    ok(await noteVal(app, 'inv-b') === 'phone first B', 'G3.26 and B\'s note (' + await noteVal(app, 'inv-b') + ')');
+    ok((await colIds(app, 'pending') || []).length === 0, 'G3.26 nothing that was checked is still waiting');
+    ok(checks().length === histBeforePhoneFirst + 2, 'G3.26 and opening wrote no history of its own (' + (checks().length - histBeforePhoneFirst) + ')');
+
+    // The run was opened BY the phone check, so it begins at that observation, not at this moment —
+    // and still after the finish, so none of the older verdicts came back with it.
+    const joined = ourSession();
+    const firstCheckAt = checks().filter(r => r.notes === 'phone first A').map(r => r.checked_at)[0];
+    ok(!!joined, 'G3.26 a run is now open (' + S(joined || null) + ')');
+    ok(!!joined && joined.started_at === firstCheckAt, 'G3.26 starting at the phone\'s first observation (' + (joined || {}).started_at + ' vs ' + firstCheckAt + ')');
+    ok(!!joined && !!closedAt && joined.started_at > closedAt, 'G3.26 and after the run that was finished (' + (joined || {}).started_at + ' > ' + closedAt + ')');
+    ok(sessions().filter(x => x.branch_id !== 'branch-e2e-other' && x.status === 'open').length === 1,
+      'G3.26 still exactly one open run for this branch (' + sessions().filter(x => x.status === 'open').length + ' overall)');
+
+    // Save must not re-report what the phone already recorded.
+    await clickSel(app, '[data-testid="inv-save"]');
+    await sleep(1500);
+    ok(checks().length === histBeforePhoneFirst + 2, 'G3.26 pressing Save adds nothing — both are already on record');
+    await waitModalClosed(app);
+
+    const foreignAfter = sessionItems().filter(r => r.session_id === 'sess-foreign');
+    ok(foreignAfter.length === 1 && foreignAfter[0].notes === 'foreign branch', 'G3.26 the other branch is still untouched');
+
     // -- G3.24 — the other branch was never touched --------------------------
     const foreignItems = sessionItems().filter(r => r.session_id === 'sess-foreign');
     ok(foreignItems.length === 1, 'G3.24 the other branch still holds exactly its own item (' + foreignItems.length + ')');
