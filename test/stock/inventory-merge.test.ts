@@ -18,6 +18,7 @@
 import {
   mergeExternalChecks,
   startForNewRun,
+  runFloor,
   isDecided,
   itemsNeedingHistory,
   type SessionItem,
@@ -212,6 +213,46 @@ const notesOf = (r: { items: SessionItem[] }, p: string) => r.items.find(i => i.
 {
   eq(startForNewRun([], null), null, 'no history at all opens nothing — the caller starts at now');
   eq(startForNewRun([], at('10:00')), null, 'and neither does an empty list after a finish');
+}
+
+
+// ── the bootstrap line under a history that predates inventories ───────────
+// An install that has been recording stock checks for months must not open its first inventory
+// pre-filled with all of them. The floor is written once, at the first boot that knows about the
+// feature, and everything under it is history for good.
+{
+  const BOOT = at('12:00');
+  const older = [check('a', 'available', at('09:00')), check('b', 'not_available', at('11:59'))];
+  eq(startForNewRun(older, runFloor(null, BOOT)), null, 'a history recorded before the feature opens nothing');
+  const r = mergeExternalChecks([], older, at('12:30'));
+  eq(r.changed, [], 'and a run started afterwards folds none of it in');
+
+  // …while a check made AFTER the line is exactly what should open the run.
+  const after = [...older, check('c', 'available', at('12:05'), 'chk-c', 'phone')];
+  eq(startForNewRun(after, runFloor(null, BOOT)), at('12:05'), 'the first check above the line opens the run');
+  const merged = mergeExternalChecks([], after, at('12:05'));
+  eq(merged.changed, ['c'], 'and only that one is folded in');
+  eq(notesOf(merged, 'c'), 'phone', 'with its note');
+  eq(statusOf(merged, 'a'), null, 'the old verdicts stay in To check');
+
+  // A check at the exact instant of the bootstrap belongs to what came before it.
+  eq(startForNewRun([check('a', 'available', BOOT)], runFloor(null, BOOT)), null,
+    'an observation at the instant of the bootstrap is below the line');
+}
+
+// ── the two lines together ─────────────────────────────────────────────────
+{
+  const BOOT = at('09:00');
+  eq(runFloor(null, BOOT), BOOT, 'with no finished run the bootstrap is the floor');
+  eq(runFloor(at('14:00'), BOOT), at('14:00'), 'a later finish raises it');
+  eq(runFloor(at('08:00'), BOOT), BOOT, 'a finish that somehow predates the bootstrap cannot lower it');
+  eq(runFloor(at('14:00'), null), at('14:00'), 'and without a bootstrap the finish still holds');
+  eq(runFloor(null, null), null, 'nothing known, nothing excluded');
+
+  // After a finish, checks from the run that was put away stay put away.
+  const checks = [check('a', 'available', at('13:00')), check('b', 'available', at('15:00'))];
+  eq(startForNewRun(checks, runFloor(at('14:00'), BOOT)), at('15:00'),
+    'only what came after the finish opens the next run');
 }
 
 console.log(`\ninventory-merge: ${PASS} passed, ${FAIL} failed`);

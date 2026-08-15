@@ -23,7 +23,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId } from '@/core/db/helpers';
 import {
   loadOpenSession, ensureOpenSession, persistSessionItems, closeSession, itemsNeedingHistory,
-  mergeExternalChecks, isDecided, lastFinishedAt, startForNewRun,
+  mergeExternalChecks, isDecided, lastFinishedAt, startForNewRun, bootstrapAt, runFloor,
   type InventorySessionDb, type SessionItem,
 } from '@/core/stock/inventory-session';
 import {
@@ -136,7 +136,8 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
           // of them on the wrong side of the boundary. With nothing to pick up it simply starts now.
           try {
             const db = getDatabase() as unknown as InventorySessionDb;
-            const begin = startForNewRun(external, lastFinishedAt(db, branchId)) ?? new Date().toISOString();
+            const floor = runFloor(lastFinishedAt(db, branchId), bootstrapAt(db));
+            const begin = startForNewRun(external, floor) ?? new Date().toISOString();
             sid = ensureOpenSession(db, branchId, begin, () => crypto.randomUUID());
             startedAt = begin;
             await saveDatabase();

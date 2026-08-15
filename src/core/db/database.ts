@@ -15,7 +15,10 @@ import { applyMediaSchema } from './media-schema';
 import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
 import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
-import { INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL } from '../stock/inventory-session';
+import {
+  INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
+  INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
+} from '../stock/inventory-session';
 import {
   atomicWrite,
   createSaveCoalescer,
@@ -635,6 +638,12 @@ function runMigrations(database: Database): void {
     // append-only record of what was observed, this one is the run in progress.
     INVENTORY_SESSION_DDL,
     INVENTORY_SESSION_ITEMS_DDL,
+
+    // The line under a history that existed before inventories did. Written by the FIRST boot that
+    // gets here and never again, so an install upgrading into this feature does not open its first
+    // inventory pre-filled with months of old verdicts.
+    INVENTORY_BOOTSTRAP_DDL,
+    INVENTORY_BOOTSTRAP_SEED,
 
     // Audit log table (Plan §History/Audit §4)
     `CREATE TABLE IF NOT EXISTS audit_log (

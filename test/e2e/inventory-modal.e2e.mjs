@@ -55,6 +55,7 @@ function dbQ(file, sql, params = []) {
 }
 const checks = () => dbQ(SERVER_DB, 'SELECT check_id, product_id, status, notes, checked_at, checked_by, checked_by_name, source, request_id FROM stock_checks ORDER BY checked_at');
 /** INVENTORY-SESSION — the worksheet lives in the BUSINESS db, next to the products it describes. */
+const bootstrap = () => { const r = dbQ(BIZ_DB, 'SELECT at FROM inventory_bootstrap WHERE id = 1'); return r.length ? r[0].at : null; };
 const sessions = () => dbQ(BIZ_DB, 'SELECT session_id, branch_id, status, started_at, closed_at FROM inventory_sessions ORDER BY started_at');
 const sessionItems = () => dbQ(BIZ_DB, 'SELECT session_id, product_id, status, notes, updated_at, applied_check_id FROM inventory_session_items ORDER BY product_id');
 /** Mutate the business db while the app is NOT running — the house fixture pattern. */
@@ -189,6 +190,19 @@ function seedProducts(items) {
   } finally { try { db.close(); } catch {} }
 }
 
+/** Write stock checks the way an older version of the app would have left them: at rest, with
+ *  their own timestamps, straight into the shared history. */
+function seedHistoricalChecks(items) {
+  const db = new DatabaseSync(SERVER_DB);
+  try {
+    const ins = db.prepare(
+      `INSERT INTO stock_checks (check_id, tenant_id, branch_id, product_id, status, notes,
+         checked_at, checked_by, checked_by_name, source, request_id, created_at)
+       VALUES (?, 'tenant-1', 'branch-main', ?, ?, ?, ?, NULL, 'Old Staff', 'desktop', NULL, ?)`);
+    for (const it of items) ins.run(it.id, it.productId, it.status, it.notes, it.at, it.at);
+  } finally { try { db.close(); } catch {} }
+}
+
 const FIXTURES = [
   { id: 'inv-a', categoryId: 'cat-watch', brand: 'Zenith', name: 'ZenTest Alpha', sku: 'ZEN-WCH-001', attributes: { reference_number: 'ZA-1', serial_number: 'SN-A' } },
   { id: 'inv-b', categoryId: 'cat-watch', brand: 'Zenith', name: 'ZenTest Beta', sku: 'ZEN-WCH-002', attributes: { reference_number: 'ZB-2', serial_number: 'SN-B' } },
@@ -272,14 +286,26 @@ async function main() {
   await waitInvoke(app);
   await ensureSignedIn(app);
 
+  // BOOTSTRAP — the install has already been recording stock checks for months before this feature
+  // existed. Staged at rest with real June/July timestamps, so they sit below the line the first
+  // boot wrote and can only ever be history.
+  const bootAt = bootstrap();
+  ok(!!bootAt, 'the first boot wrote a bootstrap line (' + bootAt + ')');
+
   // Restart with the fixtures staged at rest.
   app.close(); killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
   seedProducts(FIXTURES);
+  seedHistoricalChecks([
+    { id: 'old-june', productId: 'inv-a', status: 'available', notes: 'seen in June', at: '2026-06-11T09:15:00.000000+00:00' },
+    { id: 'old-july', productId: 'inv-b', status: 'not_available', notes: 'gone in July', at: '2026-07-04T14:40:00.000000+00:00' },
+  ]);
   app = await startApp();
   await waitInvoke(app);
   await ensureSignedIn(app);
 
-  ok(checks().length === 0, 'start state: no stock checks exist yet (' + checks().length + ')');
+  ok(checks().length === 2, 'start state: only the two historical checks exist (' + checks().length + ')');
+  const H0 = checks().length;          // the pre-existing history every count below is relative to
+  ok(bootstrap() === bootAt, 'and a second boot did NOT move the bootstrap line (' + bootstrap() + ')');
 
   // ── §G3.1 — the modal takes the FILTERED working set ──────────────────────
   // Navigate the way the operator does: the sidebar. The INVENTORY group is collapsed until it is
@@ -304,6 +330,11 @@ async function main() {
   const allPending = await colIds(app, 'pending');
   ok(Array.isArray(allPending) && allPending.length === FIXTURES.length,
     '§G3.1 unfiltered: the modal offers every product (' + (allPending || []).length + ' of ' + FIXTURES.length + ')');
+  // BOOTSTRAP — the two historical verdicts are in the history and NOT in the columns.
+  ok((await colIds(app, 'available') || []).length === 0, '§G3.1 the June check did not fill a column');
+  ok((await colIds(app, 'not_available') || []).length === 0, '§G3.1 nor did the July one');
+  ok(checks().length === 2, '§G3.1 while both are still in the history (' + checks().length + ')');
+  ok(bootstrap() === bootAt, '§G3.1 and opening the dialog did not move the bootstrap line');
   await clickText(app, 'Cancel');
   await sleep(400);
 
@@ -346,7 +377,7 @@ async function main() {
   await sleep(250);
   ok((await colIds(app, 'available') || []).join() === 'inv-b', '§G3.3 B is available again');
 
-  ok(checks().length === 0, '§G3.3 after six moves the database still has ZERO checks (' + checks().length + ')');
+  ok(checks().length === H0, '§G3.3 after six moves NOTHING new was written (' + (checks().length - H0) + ')');
 
   // ── §G3.4 — the close guard ───────────────────────────────────────────────
   await app.ev(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'})); return 1;`);
@@ -356,26 +387,27 @@ async function main() {
   await clickText(app, 'Continue editing');
   await sleep(400);
   ok((await colIds(app, 'not_available') || []).includes('inv-a'), '§G3.4 Continue editing keeps the draft intact');
-  ok(checks().length === 0, '§G3.4 and still nothing is written');
+  ok(checks().length === H0, '§G3.4 and still nothing is written');
 
   // ── §G3.5 — Save writes the FINAL decisions only ──────────────────────────
   await setVal(app, '[data-inv-note="inv-b"]', 'shelf 2');
   await sleep(200);
   await clickSel(app, '[data-testid="inv-save"]');
   const savedEnd = Date.now() + 20000;
-  while (Date.now() < savedEnd && checks().length < 2) await sleep(400);
+  while (Date.now() < savedEnd && checks().length < H0 + 2) await sleep(400);
   const afterSave = checks();
-  ok(afterSave.length === 2, '§G3.5 exactly two checks were written — one per final decision (' + afterSave.length + ')');
-  const byProduct = Object.fromEntries(afterSave.map(r => [r.product_id, r]));
+  ok(afterSave.length === H0 + 2, '§G3.5 exactly two checks were written — one per final decision (' + (afterSave.length - H0) + ')');
+  const mine = afterSave.filter(r => r.source === 'desktop' && r.checked_by_name !== 'Old Staff');
+  const byProduct = Object.fromEntries(mine.map(r => [r.product_id, r]));
   ok(byProduct['inv-a'] && byProduct['inv-a'].status === 'not_available', '§G3.5 A stored its FINAL status, not the first click');
   ok(byProduct['inv-b'] && byProduct['inv-b'].status === 'available', '§G3.5 B stored available');
   ok(byProduct['inv-a'] && byProduct['inv-a'].notes === 'in safe', '§G3.5 A kept its note');
   ok(byProduct['inv-b'] && byProduct['inv-b'].notes === 'shelf 2', '§G3.5 B kept the note it was edited to');
-  ok(afterSave.every(r => r.source === 'desktop'), '§G3.5 both were recorded as desktop checks');
-  ok(afterSave.every(r => !!r.checked_by_name), '§G3.5 both carry an actor');
-  ok(!afterSave.some(r => r.product_id === 'inv-c'), '§G3.5 the product left unassigned got NO check');
-  ok(!afterSave.some(r => r.product_id === 'inv-d'), '§G3.5 the filtered-out product got no check either');
-  ok(new Set(afterSave.map(r => r.request_id)).size === 2, '§G3.5 each check carries its own request id');
+  ok(mine.every(r => r.source === 'desktop'), '§G3.5 both were recorded as desktop checks');
+  ok(mine.every(r => !!r.checked_by_name), '§G3.5 both carry an actor');
+  ok(!mine.some(r => r.product_id === 'inv-c'), '§G3.5 the product left unassigned got NO check');
+  ok(!mine.some(r => r.product_id === 'inv-d'), '§G3.5 the filtered-out product got no check either');
+  ok(new Set(mine.map(r => r.request_id)).size === 2, '§G3.5 each check carries its own request id');
 
   // ── §G3.6 — a second Save adds nothing ────────────────────────────────────
   await sleep(600);
@@ -389,7 +421,7 @@ async function main() {
     await clickText(app, 'Cancel');
     await sleep(300);
   }
-  ok(checks().length === 2, '§G3.6 a second Save produced no further events (' + checks().length + ')');
+  ok(checks().length === H0 + 2, '§G3.6 a second Save produced no further events (' + (checks().length - H0) + ')');
 
   // ── §G3.7 — a refused note is not a silent success ────────────────────────
   await openModal(app);
@@ -399,7 +431,7 @@ async function main() {
   await sleep(200);
   await clickSel(app, '[data-testid="inv-save"]');
   await sleep(1200);
-  ok(checks().length === 2, '§G3.7 an over-long note saved NOTHING at all — no partial batch');
+  ok(checks().length === H0 + 2, '§G3.7 an over-long note saved NOTHING at all — no partial batch');
   const stayedOpen = await exists(app, '[data-inv-col="pending"]');
   ok(stayedOpen === true, '§G3.7 and the modal stayed open instead of reporting success');
   const complained = await app.ev(`return /longer than 500/i.test(document.body.innerText||'');`);
@@ -409,8 +441,8 @@ async function main() {
   await sleep(200);
   await clickSel(app, '[data-testid="inv-save"]');
   const end3 = Date.now() + 20000;
-  while (Date.now() < end3 && checks().length < 3) await sleep(400);
-  ok(checks().length === 3, '§G3.7 after the fix exactly one more check was written (' + checks().length + ')');
+  while (Date.now() < end3 && checks().length < H0 + 3) await sleep(400);
+  ok(checks().length === H0 + 3, '§G3.7 after the fix exactly one more check was written (' + (checks().length - H0) + ')');
 
   // ── §G3.8 — not one product column moved ──────────────────────────────────
   const after = productRows();
@@ -532,7 +564,9 @@ async function main() {
   const e13 = Date.now() + 20000;
   while (Date.now() < e13 && checks().length < base + 2) await sleep(400);
   ok(checks().length === base + 2, '§G3.13 editing only the note wrote exactly one new event (' + (checks().length - base - 1) + ')');
-  const bRows = checks().filter(r => r.product_id === 'inv-b');
+  // The install's own July verdict is in this list too; the claims below are about what THIS
+  // run recorded, so the pre-existing row is left out of them.
+  const bRows = checks().filter(r => r.product_id === 'inv-b' && r.checked_by_name !== 'Old Staff');
   ok(bRows.some(r => r.notes === 'shelf 9'), '§G3.13 with the new note');
   ok(bRows.some(r => r.notes === 'shelf 2'), '§G3.13 and the previous note is still on record');
   ok(bRows.every(r => r.status === 'available'), '§G3.13 the verdict itself was not touched');

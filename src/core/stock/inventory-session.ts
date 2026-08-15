@@ -46,6 +46,28 @@ export const INVENTORY_SESSION_ITEMS_DDL = `CREATE TABLE IF NOT EXISTS inventory
  * that time is what stops an older phone check from quietly filling the card back in. Without the
  * row there is nothing to compare an incoming observation against.
  */
+/**
+ * BOOTSTRAP CUTOFF — the line under everything that existed before this feature did.
+ *
+ * An install that has been checking stock for months already carries a history. Without a floor,
+ * the first inventory ever opened would treat all of it as the current working state and hand the
+ * operator a hundred pre-filled cards to un-tick — the exact opposite of walking the shelf.
+ *
+ * So the first boot that reaches this schema pass writes the moment it happened, once, and never
+ * again: `INSERT OR IGNORE` on a table that can only ever hold one row. Everything recorded before
+ * that instant is history and nothing else; everything after it can belong to a run. It is written
+ * here rather than derived later because it has to be fixed BEFORE the phone starts recording — a
+ * value computed at the first open would be set after those checks and would exclude them, which is
+ * precisely the workflow this whole feature exists to support.
+ */
+export const INVENTORY_BOOTSTRAP_DDL = `CREATE TABLE IF NOT EXISTS inventory_bootstrap (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  at TEXT NOT NULL
+)`;
+/** Written once, with the same ISO-8601 shape the sessions use so the two are directly comparable. */
+export const INVENTORY_BOOTSTRAP_SEED =
+  `INSERT OR IGNORE INTO inventory_bootstrap (id, at) VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`;
+
 export type SessionItemStatus = 'available' | 'not_available' | 'to_check';
 export const DECIDED: readonly SessionItemStatus[] = ['available', 'not_available'];
 export const isDecided = (s: SessionItemStatus): boolean => s !== 'to_check';
@@ -140,6 +162,26 @@ export function lastFinishedAt(db: InventorySessionDb, branchId: string): string
   return r.length === 0 ? null : String(r[0][0]);
 }
 
+/** The bootstrap instant, or null on a database old enough not to have one. */
+export function bootstrapAt(db: InventorySessionDb): string | null {
+  const r = rows(db, `SELECT at FROM inventory_bootstrap WHERE id = 1`);
+  return r.length === 0 ? null : String(r[0][0]);
+}
+
+/**
+ * The line an opening run may not reach under: the later of "when this install first knew about
+ * inventories" and "when this branch last finished one".
+ *
+ * Two different jobs, one answer. The bootstrap keeps a pre-existing history out of the very first
+ * run; the finished-run line keeps each later run out of the one before it. Whichever is later wins,
+ * because a check has to clear both to belong to what is opening now.
+ */
+export function runFloor(lastFinished: string | null, bootstrap: string | null): string | null {
+  if (!lastFinished) return bootstrap;
+  if (!bootstrap) return lastFinished;
+  return isAfter(lastFinished, bootstrap) ? lastFinished : bootstrap;
+}
+
 /**
  * When a run that nobody has opened yet should be considered to have STARTED.
  *
@@ -153,11 +195,11 @@ export function lastFinishedAt(db: InventorySessionDb, branchId: string): string
  */
 export function startForNewRun(
   checks: readonly ExternalCheck[],
-  lastFinished: string | null,
+  floor: string | null,
 ): string | null {
   let earliest: string | null = null;
   for (const c of checks) {
-    if (lastFinished && !isAfter(c.checked_at, lastFinished)) continue;
+    if (floor && !isAfter(c.checked_at, floor)) continue;
     if (earliest === null || isAfter(earliest, c.checked_at)) earliest = c.checked_at;
   }
   return earliest;
