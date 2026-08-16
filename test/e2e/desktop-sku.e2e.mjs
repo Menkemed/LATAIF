@@ -260,6 +260,17 @@ async function pickWatchCategory(c) {
   return previewText(c);
 }
 
+
+const SKU_FIELD = 'input[placeholder="Internal reference"]';
+/** The New Item dialog is gone — the suite's own signal, the inventory suite has a different one. */
+async function waitNewItemClosed(c, t = 30000) {
+  const end = Date.now() + t;
+  while (Date.now() < end) { if (!(await exists(c, '#new-field-categoryId'))) return true; await sleep(300); }
+  return false;
+}
+const dupShown = (c) => c.ev(`return [...document.querySelectorAll('button')].some(x=>/create anyway/i.test(x.textContent||''));`);
+const clickCreateAnyway = (c) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>/create anyway/i.test(x.textContent||'')); if(!b) return 'NO'; b.click(); return 'OK';`);
+
 async function prepareNewItem(c, name) {
   await openNewItem(c);
   // Three passes: a conditional attribute (`karat_color` behind `material`) does not exist until
@@ -600,6 +611,71 @@ async function main() {
   ok(afterDouble === beforeDouble + 1, '§S7 three clicks on Save consumed exactly one number (' + beforeDouble + ' → ' + afterDouble + ')');
   const names = dbQ(BIZ_DB, "SELECT COUNT(*) c FROM products WHERE name = 'Double Submit'");
   ok(names.length > 0 && names[0].c === 1, '§S7 and created exactly one product (' + (names[0] || {}).c + ')');
+
+
+  // ── §S9 — "Create anyway" is ONE decision, not two ───────────────────────
+  // The live failure: the override cleared the dialog, the item was created, and 800ms later the
+  // live detector ran again and found the item it had just made. The second prompt looked identical
+  // and answering it produced a twin with the next number.
+  const beforeDup = skusFor(STEM);
+  const counterBeforeDup = counterFor(STEM);
+  const namedBefore = (dbQ(BIZ_DB, "SELECT COUNT(*) c FROM products WHERE name = 'Real Two'")[0] || {}).c;
+  await prepareNewItem(app, 'Real Two');                 // a name the stock already carries
+  await clickMatch(app, 'Add to Collection');
+  await sleep(1200);
+  ok(await dupShown(app) === true, '§S9 the duplicate warning is raised for a name already in stock');
+  ok(await clickCreateAnyway(app) === 'OK', '§S9 and the operator answers it once');
+  ok(await waitNewItemClosed(app), '§S9 and the dialog closed after that single answer');
+
+  // Well past the detector's 800ms: if it were going to ask again, it would have by now.
+  await sleep(4000);
+  ok(await dupShown(app) === false, '§S9 the same question is not asked a second time');
+  const afterDup = skusFor(STEM).filter(x => !beforeDup.includes(x));
+  ok(afterDup.length === 1, '§S9 exactly ONE product was created (' + afterDup.join(',') + ')');
+  ok(counterFor(STEM) === counterBeforeDup + 1, '§S9 and exactly one number was claimed (' + counterBeforeDup + ' → ' + counterFor(STEM) + ')');
+  const twins = (dbQ(BIZ_DB, "SELECT COUNT(*) c FROM products WHERE name = 'Real Two'")[0] || {}).c;
+  ok(twins === namedBefore + 1, '§S9 no twin appeared a few seconds later (' + namedBefore + ' → ' + twins + ')');
+
+  // ── §S10 — a typed SKU is trimmed before it is anything else ─────────────
+  // `" TRIM-ME-001 "` and `"TRIM-ME-001"` have to be one number. Stored untrimmed they look
+  // identical on screen and are different strings to every uniqueness check there is.
+  const counterBeforeTyped = counterFor(STEM);
+  await prepareNewItem(app, 'Typed Sku One');
+  await setVal(app, SKU_FIELD, '  TRIM-ME-001  ');
+  await sleep(400);
+  await saveNewItem(app);
+  await sleep(1500);
+  const stored = skus().filter(x => String(x).includes('TRIM-ME-001'));
+  ok(stored.length === 1, '§S10 the typed SKU was stored once (' + S(stored) + ')');
+  ok(stored[0] === 'TRIM-ME-001', '§S10 without the spaces around it (' + S(stored[0]) + ')');
+  ok(counterFor(STEM) === counterBeforeTyped, '§S10 and a typed SKU claimed no number (' + counterBeforeTyped + ' → ' + counterFor(STEM) + ')');
+
+  // Whitespace alone is not a SKU — it must fall through to the allocator, not be stored as blank.
+  const counterBeforeBlank = counterFor(STEM);
+  const beforeBlank = skusFor(STEM);
+  await prepareNewItem(app, 'Blank Sku One');
+  await setVal(app, SKU_FIELD, '     ');
+  await sleep(400);
+  await saveNewItem(app);
+  await sleep(1500);
+  const fromBlank = skusFor(STEM).filter(x => !beforeBlank.includes(x));
+  ok(fromBlank.length === 1, '§S10 a whitespace-only entry still produced an automatic number (' + fromBlank.join(',') + ')');
+  ok(counterFor(STEM) === counterBeforeBlank + 1, '§S10 claimed from the counter as usual');
+
+  // …and the trimmed value collides with the one already on the shelf.
+  const beforeCollide = skus().length;
+  await prepareNewItem(app, 'Typed Sku Two');
+  await setVal(app, SKU_FIELD, 'TRIM-ME-001 ');
+  await sleep(400);
+  await clickMatch(app, 'Add to Collection');
+  await sleep(1500);
+  await passDuplicateWarning(app);
+  await sleep(1200);
+  ok(await exists(app, '#new-field-categoryId') === true, '§S10 a trailing space does not sneak past the taken check — the dialog stayed open');
+  ok(skus().length === beforeCollide, '§S10 and nothing was created (' + (skus().length - beforeCollide) + ')');
+  ok(skus().filter(x => String(x).trim() === 'TRIM-ME-001').length === 1, '§S10 the number is still held by exactly one product');
+  await clickText(app, 'Cancel');
+  await sleep(600);
 
   // ── the sequence as a whole ──────────────────────────────────────────────
   const finalSkus = skusFor(STEM);

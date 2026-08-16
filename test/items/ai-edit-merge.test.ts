@@ -178,17 +178,35 @@ const FULL_AI: AiProductIdentification = {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// §25 — create keeps its price estimates; edit does not
+// §25 — no price comes out of a photograph, in either dialog
+//
+// `FULL_AI` carries an estimate for every price field there is (999 / 888 / 777 / 1111), and an
+// empty form is the case that used to take them. What a piece cost and what it sells for is a
+// commercial decision; once a guess is saved nobody can tell it apart from a figure a person
+// entered, and it is reported on and paid against all the same.
 // ════════════════════════════════════════════════════════════════════════════
 {
-  const createPatch = buildAiFormPatch(FULL_AI, {}, { mode: 'create' });
-  ok(createPatch.plannedSalePrice === 999 && createPatch.purchasePrice === 888, '§25 CREATE still fills prices from an estimate');
-  ok(createPatch.minSalePrice === 777 && createPatch.maxSalePrice === 1111, '§25 …including min/max');
-  const createWithPrices = buildAiFormPatch(FULL_AI, { purchasePrice: 5, plannedSalePrice: 6 }, { mode: 'create' });
-  ok(!('purchasePrice' in createWithPrices) && !('plannedSalePrice' in createWithPrices),
-    '§25 …but even in create an already-entered price is never replaced');
-  const editPatch = buildAiFormPatch(FULL_AI, {}, { mode: 'edit' });
-  ok(!('plannedSalePrice' in editPatch) && !('purchasePrice' in editPatch), '§25 EDIT never fills a price');
+  const PRICES = ['purchasePrice', 'plannedSalePrice', 'minSalePrice', 'maxSalePrice'];
+  for (const mode of ['create', 'edit'] as const) {
+    const patch = buildAiFormPatch(FULL_AI, {}, { mode });
+    for (const f of PRICES) {
+      ok(!(f in patch), `§25 ${mode}: ${f} is not filled from an estimate, even into an empty field`);
+    }
+    // …and what the operator already entered is of course still untouched.
+    const kept = { purchasePrice: 120, plannedSalePrice: 250, minSalePrice: 200, maxSalePrice: 900 };
+    const onTop = { ...kept, ...buildAiFormPatch(FULL_AI, kept, { mode }) };
+    for (const f of PRICES) {
+      ok(onTop[f as keyof typeof kept] === kept[f as keyof typeof kept],
+        `§25 ${mode}: an existing ${f} comes back out of the merge unchanged (${onTop[f as keyof typeof kept]})`);
+    }
+    // A real 0 is a price, not an empty field — the defect that started this whole rule.
+    const zero = { purchasePrice: 0 };
+    ok(!('purchasePrice' in buildAiFormPatch(FULL_AI, zero, { mode })),
+      `§25 ${mode}: a purchase price of 0 is still a decision and is not replaced`);
+  }
+  // The identity fields the model IS for keep coming through — this is not a blanket refusal.
+  const still = buildAiFormPatch(FULL_AI, {}, { mode: 'edit' });
+  ok(still.brand === 'Rolex' && !!still.condition, '§25 brand and condition are still recognised');
 }
 
 // ════════════════════════════════════════════════════════════════════════════
