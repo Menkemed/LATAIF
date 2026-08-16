@@ -952,9 +952,8 @@ export function WatchList() {
                         // the durable allocator assigns one at the create, from brand + category.
                         if (result.condition) updated.condition = result.condition;
                         if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
-                        // AI-PRICE — the model does not price the stock; see `edit-merge`.
-                        if (result.minSalePrice && !f.minSalePrice) updated.minSalePrice = result.minSalePrice;
-                        if (result.maxSalePrice && !f.maxSalePrice) updated.maxSalePrice = result.maxSalePrice;
+                        // AI-PRICE — the model does not price the stock, and that includes the
+                        // negotiation floor and ceiling: they are sale prices like any other.
                         if (result.taxScheme && !f.taxScheme) updated.taxScheme = result.taxScheme;
                         if (result.storageLocation && !f.storageLocation) updated.storageLocation = result.storageLocation;
                         if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0 && (!f.scopeOfDelivery || f.scopeOfDelivery.length === 0)) {
