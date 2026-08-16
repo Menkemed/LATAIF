@@ -62,15 +62,51 @@ export function skuCategoryCode(categoryId?: string): string {
 }
 
 /**
+ * The three letters a brand is known by in a SKU.
+ *
+ * For most names the first three letters are already what the business writes — Cartier is CAR,
+ * Bvlgari BVL, Dior DIO — and those are in the stock exactly like that. Rolex is not: the shelf,
+ * the labels and every existing number say ROLEX is **RLX**, and a generator that answers ROL
+ * invents a second family for a brand that already has one.
+ *
+ * So the exceptions live here, in ONE place, keyed by the brand as typed. Both surfaces call the
+ * same function; a code that existed on the desktop and not on the phone would put the same watch
+ * under two stems and two counters. Anything not listed keeps the deterministic first-three rule.
+ */
+const CANONICAL_BRAND_CODES: Readonly<Record<string, string>> = {
+  ROLEX: 'RLX',
+};
+
+/** Normalise for lookup: letters only, uppercased — "Rolex ", "ROLEX", "rolex" are one brand. */
+function brandKey(brand?: string): string {
+  return (brand || '').replace(/[^A-Za-z]/g, '').toUpperCase();
+}
+
+/**
+ * Brand → the 3-letter code used in a generated SKU.
+ *
+ * Exported because the seed is not the only thing that needs it: anything explaining a number to
+ * the operator has to arrive at the same three letters, and there is only one way to be sure of
+ * that.
+ */
+export function skuBrandCode(brand?: string): string {
+  const key = brandKey(brand);
+  if (!key) return 'ITM';
+  return CANONICAL_BRAND_CODES[key] ?? key.slice(0, 3).padEnd(3, 'X');
+}
+
+/**
  * Build the seed for a product that has no SKU of its own: brand-3 + category-3.
+ *
+ * The middle group is the CATEGORY, never the model. A model in the stem would give every
+ * reference its own counter and its own `-001`, which is how the same shelf ends up with four
+ * parallel numbering families.
  *
  * Never returns an empty string — a product with no brand still gets `ITM-GEN-…`, because a
  * blank seed would produce a blank SKU and the whole point is that the field stops being empty.
  */
 export function buildSkuSeed(brand?: string, categoryId?: string): string {
-  const letters = (brand || '').replace(/[^A-Za-z]/g, '');
-  const brandCode = (letters || 'ITM').slice(0, 3).toUpperCase().padEnd(3, 'X');
-  return `${brandCode}-${skuCategoryCode(categoryId)}-001`;
+  return `${skuBrandCode(brand)}-${skuCategoryCode(categoryId)}-001`;
 }
 
 /**

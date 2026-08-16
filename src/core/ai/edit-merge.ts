@@ -92,7 +92,6 @@ export interface FormLike {
 export interface AiEditMergeOptions {
   mode: AiMergeMode;
   /** Used only to mint a unique SKU when the model proposes one and the product has none. */
-  nextAvailableSku?: (proposed: string) => string;
 }
 
 /**
@@ -121,9 +120,11 @@ export function buildAiFormPatch(
   if (isRecognised(result.name)) patch.name = result.name;
 
   // ── gap-fillers: only when the operator has not decided yet ──
-  if (isRecognised(result.sku) && !isRecognised(form.sku)) {
-    patch.sku = opts.nextAvailableSku ? opts.nextAvailableSku(result.sku as string) : (result.sku as string);
-  }
+  // SKU is deliberately NOT here. What the model returns for it is a reference or a model code —
+  // `RLX-DJ36`, `116610LN` — and letting that reach the field means the AI is naming the product.
+  // On an existing item that would rewrite a number the business already uses; on a new one it
+  // would bypass the durable counter that both surfaces share. An item without a SKU gets one from
+  // that counter when it is created, and one the operator typed is never touched.
   if (isRecognised(result.condition) && !isRecognised(form.condition)) patch.condition = result.condition;
   if (isRecognised(result.storageLocation) && !isRecognised(form.storageLocation)) patch.storageLocation = result.storageLocation;
   if (isRecognised(result.taxScheme) && !isRecognised(form.taxScheme)) patch.taxScheme = result.taxScheme;
