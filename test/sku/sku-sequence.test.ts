@@ -50,14 +50,14 @@ const addProduct = (db: DatabaseSync, id: string, sku: string | null) =>
   db.prepare('INSERT INTO products (id, sku, brand, name) VALUES (?,?,?,?)').run(id, sku, 'Rolex', 'Datejust 36');
 const delProduct = (db: DatabaseSync, id: string) => db.prepare('DELETE FROM products WHERE id=?').run(id);
 
-const SEED = 'ROL-WCH-001';
+const SEED = 'RLX-WCH-001';
 
 // ── §A5 — the first number is 001, not 002 ──────────────────────────────────
 {
   const { api } = freshDb();
-  eq(allocateSku(api, SEED), 'ROL-WCH-001', '§A5 an unused stem starts at 001');
-  eq(allocateSku(api, SEED), 'ROL-WCH-002', '§A5 the next is 002');
-  eq(allocateSku(api, SEED), 'ROL-WCH-003', '§A5 and then 003');
+  eq(allocateSku(api, SEED), 'RLX-WCH-001', '§A5 an unused stem starts at 001');
+  eq(allocateSku(api, SEED), 'RLX-WCH-002', '§A5 the next is 002');
+  eq(allocateSku(api, SEED), 'RLX-WCH-003', '§A5 and then 003');
 }
 
 // ── §A4 — a deleted product never gives its number back ─────────────────────
@@ -66,15 +66,15 @@ const SEED = 'ROL-WCH-001';
   const a = allocateSku(api, SEED); addProduct(db, 'p1', a);
   const b = allocateSku(api, SEED); addProduct(db, 'p2', b);
   const c = allocateSku(api, SEED); addProduct(db, 'p3', c);
-  eq([a, b, c], ['ROL-WCH-001', 'ROL-WCH-002', 'ROL-WCH-003'], '§A4 three products, three numbers');
+  eq([a, b, c], ['RLX-WCH-001', 'RLX-WCH-002', 'RLX-WCH-003'], '§A4 three products, three numbers');
 
   delProduct(db, 'p3');                                   // the -003 product is gone
   const next = allocateSku(api, SEED);
-  eq(next, 'ROL-WCH-004', '§A4 the number of the deleted product is NOT handed out again');
+  eq(next, 'RLX-WCH-004', '§A4 the number of the deleted product is NOT handed out again');
   ok(next !== c, '§A4 explicitly: the next SKU differs from the deleted one');
 
   delProduct(db, 'p1'); delProduct(db, 'p2');             // now nothing is left at all
-  eq(allocateSku(api, SEED), 'ROL-WCH-005',
+  eq(allocateSku(api, SEED), 'RLX-WCH-005',
     '§A4 even with the table emptied the counter keeps climbing — it does not live in products');
 }
 
@@ -83,35 +83,35 @@ const SEED = 'ROL-WCH-001';
   const { db, api } = freshDb();
   // A product that was deleted before this table existed: only the changelog still knows its SKU.
   db.prepare(`INSERT INTO sync_changelog (table_name, record_id, action, data) VALUES ('products','gone','delete',?)`)
-    .run(JSON.stringify({ id: 'gone', sku: 'ROL-WCH-007', brand: 'Rolex' }));
-  eq(historicalHighWater(api, 'ROL-WCH-'), 7, 'the changelog payload contributes to the high-water mark');
-  eq(allocateSku(api, SEED), 'ROL-WCH-008',
+    .run(JSON.stringify({ id: 'gone', sku: 'RLX-WCH-007', brand: 'Rolex' }));
+  eq(historicalHighWater(api, 'RLX-WCH-'), 7, 'the changelog payload contributes to the high-water mark');
+  eq(allocateSku(api, SEED), 'RLX-WCH-008',
     '§A4 a number retired before the counter existed is still not reused');
 
   const { db: db2, api: api2 } = freshDb();
   db2.prepare(`INSERT INTO audit_log (id, entity_type, entity_id, field_name, old_value, new_value) VALUES ('a1','products','p','sku',?,?)`)
-    .run('ROL-WCH-011', 'ROL-WCH-012');
-  eq(historicalHighWater(api2, 'ROL-WCH-'), 12, 'both sides of an audited SKU change count');
-  eq(allocateSku(api2, SEED), 'ROL-WCH-013', '§A4 the audit log seeds the counter too');
+    .run('RLX-WCH-011', 'RLX-WCH-012');
+  eq(historicalHighWater(api2, 'RLX-WCH-'), 12, 'both sides of an audited SKU change count');
+  eq(allocateSku(api2, SEED), 'RLX-WCH-013', '§A4 the audit log seeds the counter too');
 
   const { db: db3, api: api3 } = freshDb();
-  addProduct(db3, 'alive', 'ROL-WCH-020');
-  eq(allocateSku(api3, SEED), 'ROL-WCH-021', 'a living product with a higher number is respected');
+  addProduct(db3, 'alive', 'RLX-WCH-020');
+  eq(allocateSku(api3, SEED), 'RLX-WCH-021', 'a living product with a higher number is respected');
 }
 
 // ── §A6 — a manually typed SKU is never overwritten and never collided with ─
 {
   const { db, api } = freshDb();
-  addProduct(db, 'manual', 'ROL-WCH-002');                // operator typed this one by hand
+  addProduct(db, 'manual', 'RLX-WCH-002');                // operator typed this one by hand
   const first = allocateSku(api, SEED);
-  eq(first, 'ROL-WCH-003', 'the counter starts above a manually typed number');
+  eq(first, 'RLX-WCH-003', 'the counter starts above a manually typed number');
   addProduct(db, 'p1', first);
 
   // and if a manual SKU is typed AHEAD of the counter later, the allocator steps over it
   const { db: db2, api: api2 } = freshDb();
-  eq(allocateSku(api2, SEED), 'ROL-WCH-001', 'counter at 1');
-  addProduct(db2, 'manual2', 'ROL-WCH-002');              // typed by hand after the fact
-  eq(allocateSku(api2, SEED), 'ROL-WCH-003', 'the allocator skips a number a human already took');
+  eq(allocateSku(api2, SEED), 'RLX-WCH-001', 'counter at 1');
+  addProduct(db2, 'manual2', 'RLX-WCH-002');              // typed by hand after the fact
+  eq(allocateSku(api2, SEED), 'RLX-WCH-003', 'the allocator skips a number a human already took');
 }
 
 // ── §A3 — two allocations in the same tick cannot collide ───────────────────
@@ -120,15 +120,15 @@ const SEED = 'ROL-WCH-001';
   const claimed = new Set<string>();
   for (let i = 0; i < 50; i++) claimed.add(allocateSku(api, SEED));
   eq(claimed.size, 50, '§A3 fifty back-to-back allocations produced fifty distinct SKUs');
-  ok(claimed.has('ROL-WCH-001') && claimed.has('ROL-WCH-050'), '§A3 and they are the contiguous run 001…050');
+  ok(claimed.has('RLX-WCH-001') && claimed.has('RLX-WCH-050'), '§A3 and they are the contiguous run 001…050');
 }
 
 // ── stems do not interfere ──────────────────────────────────────────────────
 {
   const { api } = freshDb();
-  eq(allocateSku(api, buildSkuSeed('Rolex', 'cat-watch')), 'ROL-WCH-001', 'Rolex watch stem');
+  eq(allocateSku(api, buildSkuSeed('Rolex', 'cat-watch')), 'RLX-WCH-001', 'Rolex watch stem');
   eq(allocateSku(api, buildSkuSeed('Cartier', 'cat-gold-jewelry')), 'CAR-GLD-001', 'a different stem has its own counter');
-  eq(allocateSku(api, buildSkuSeed('Rolex', 'cat-watch')), 'ROL-WCH-002', 'the first stem continues where it was');
+  eq(allocateSku(api, buildSkuSeed('Rolex', 'cat-watch')), 'RLX-WCH-002', 'the first stem continues where it was');
 }
 
 // ── the model-number trap: an explicit suffix protects the stem ─────────────
@@ -146,9 +146,9 @@ const SEED = 'ROL-WCH-001';
 // ── width is preserved, and overflow widens rather than wrapping ────────────
 {
   const { db, api } = freshDb();
-  addProduct(db, 'p', 'ROL-WCH-998');
-  eq(allocateSku(api, SEED), 'ROL-WCH-999', 'three-digit width preserved');
-  eq(allocateSku(api, SEED), 'ROL-WCH-1000', 'past 999 the number widens instead of wrapping to 000');
+  addProduct(db, 'p', 'RLX-WCH-998');
+  eq(allocateSku(api, SEED), 'RLX-WCH-999', 'three-digit width preserved');
+  eq(allocateSku(api, SEED), 'RLX-WCH-1000', 'past 999 the number widens instead of wrapping to 000');
 }
 
 // ── a seed that cannot be split yields nothing rather than a bad SKU ────────

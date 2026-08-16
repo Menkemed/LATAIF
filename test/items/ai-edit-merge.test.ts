@@ -139,18 +139,30 @@ const FULL_AI: AiProductIdentification = {
 // §20/§29 — only allow-listed, category-known fields are merged
 // ════════════════════════════════════════════════════════════════════════════
 {
-  const patch = buildAiFormPatch(FULL_AI, {}, { mode: 'edit', nextAvailableSku: (s) => `${s}-1` });
+  const patch = buildAiFormPatch(FULL_AI, {}, { mode: 'edit' });
   ok(patch.brand === 'Rolex' && patch.name === 'Submariner Date', '§29 a recognised brand/name is applied — that is what identify is for');
-  ok(patch.sku === 'RLX-SUB-9-1', '§20 a proposed SKU goes through the uniqueness helper');
   ok(patch.condition === 'Pre-Owned' && patch.storageLocation === 'Safe A' && patch.taxScheme === 'VAT_10', '§20 operator gaps are filled');
   ok(JSON.stringify(patch.scopeOfDelivery) === JSON.stringify(['Box', 'Papers']), '§20 the included set is filled when empty');
 
-  // …but a decision the operator already made is NOT overwritten.
+  // The AI does not name products. `FULL_AI` carries `sku: 'RLX-SUB-9'`, and an empty SKU field is
+  // exactly the situation where it used to be taken — on an existing item that rewrote a number the
+  // business already prints on labels, and on a new one it went round the counter both surfaces
+  // share. It is out of the patch entirely, not merely filtered.
+  ok(!('sku' in patch), 'the AI never proposes a SKU, not even into an empty field');
+
+  // …and a decision the operator already made is NOT overwritten.
   const decided = { sku: 'MINE-1', condition: 'Unworn', storageLocation: 'Display', taxScheme: 'MARGIN', scopeOfDelivery: ['Box'] };
   const p2 = buildAiFormPatch(FULL_AI, decided, { mode: 'edit' });
   for (const f of ['sku', 'condition', 'storageLocation', 'taxScheme', 'scopeOfDelivery']) {
     ok(!(f in p2), `§29 ${f} is an operator decision once made and is not replaced`);
   }
+
+  // The live case: a Rolex already carrying a legacy number, identified again. Whatever the model
+  // says, the number the shelf uses has to come back out of the merge byte for byte.
+  const legacy = { brand: 'Rolex', name: 'Datejust 36', sku: 'RLX-DJ36-001' };
+  const merged = { ...legacy, ...buildAiFormPatch(FULL_AI, legacy, { mode: 'edit' }) };
+  ok(merged.sku === 'RLX-DJ36-001', 'an existing legacy SKU survives AI Identify unchanged (' + merged.sku + ')');
+  ok(!('sku' in buildAiFormPatch(FULL_AI, legacy, { mode: 'create' })), 'and the create mode does not propose one either');
 
   // §24 — description is additive; an existing one is never replaced or emptied.
   const withNotes = buildAiFormPatch(FULL_AI, { notes: 'seen at auction' }, { mode: 'edit' });

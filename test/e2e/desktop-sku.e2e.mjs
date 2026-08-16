@@ -217,6 +217,49 @@ const fillRequired = (c, name) => c.ev(`
   }
   return n;`);
 
+
+/** Retype the brand in the open dialog and wait for the debounced preview to catch up. */
+async function setBrand(c, brand) {
+  await setVal(c, '#new-field-brand input', brand);
+  await sleep(900);
+  return previewText(c);
+}
+/**
+ * Switch to a different category and return the resulting preview.
+ *
+ * The category is a row of BUTTONS, not a select — so this clicks, and it clicks by outcome rather
+ * than by label: whichever button changes the middle group of the suggested SKU is a different
+ * category, whatever it happens to be called in this install.
+ */
+async function pickOtherCategory(c) {
+  return c.ev(`
+    const box=document.querySelector('#new-field-categoryId');
+    if(!box) return { ok:false, why:'no category field' };
+    const before=(document.querySelector('[data-sku-preview]')||{}).getAttribute
+      ? document.querySelector('[data-sku-preview]').getAttribute('data-sku-preview') : null;
+    const middle=(s)=>String(s||'').split('-')[1];
+    const labels=[];
+    for (const b of box.querySelectorAll('button')) {
+      labels.push((b.textContent||'').trim());
+      b.click();
+      await new Promise(r=>setTimeout(r,700));
+      const now=(document.querySelector('[data-sku-preview]')||{}).getAttribute
+        ? document.querySelector('[data-sku-preview]').getAttribute('data-sku-preview') : null;
+      if (now && middle(now) !== middle(before)) return { ok:true, before, after:now, label:(b.textContent||'').trim() };
+    }
+    return { ok:false, why:'no category changed the stem', before, labels };
+  `);
+}
+/** Back to the watch category, by label, so the rest of the section is on known ground. */
+async function pickWatchCategory(c) {
+  await c.ev(`
+    const box=document.querySelector('#new-field-categoryId');
+    const b=[...(box?box.querySelectorAll('button'):[])].find(x=>/watch/i.test(x.textContent||''));
+    if(!b) return 'NO'; b.click(); return 'OK';`);
+  await sleep(900);
+  return previewText(c);
+}
+
 async function prepareNewItem(c, name) {
   await openNewItem(c);
   // Three passes: a conditional attribute (`karat_color` behind `material`) does not exist until
@@ -497,6 +540,45 @@ async function main() {
   } else {
     ok(false, '§S5 could not reach the mobile surface — shared-sequence not proven');
   }
+
+
+  // ── §S8 — the brand a SKU is known by ────────────────────────────────────
+  // CANONICAL_BRAND_CODE — the shelf writes Rolex as RLX, and every existing number says so. A
+  // generated stem of ROL would open a second family for a brand that already has one.
+  await prepareNewItem(app, 'Brand Code One');
+  const rlx = await setBrand(app, 'Rolex');
+  ok(rlx === 'RLX-WCH-001', '§S8 Rolex is offered the canonical RLX stem, not ROL (' + rlx + ')');
+
+  const car = await setBrand(app, 'Cartier');
+  ok(car === 'CAR-WCH-001', '§S8 changing the brand moves the preview with it (' + car + ')');
+
+  const swapped = await pickOtherCategory(app);
+  ok(swapped && swapped.ok === true, '§S8 and changing the category moves the middle group (' + S(swapped) + ')');
+  ok(swapped && String(swapped.after).startsWith('CAR-'), '§S8 while the brand code stays where it was (' + (swapped || {}).after + ')');
+
+  await pickWatchCategory(app);
+  const back = await setBrand(app, 'Rolex');
+  ok(back === 'RLX-WCH-001', '§S8 back to Rolex offers the same first number — nothing was taken (' + back + ')');
+  ok(counterFor('RLX-WCH-') === null && counterFor('CAR-WCH-') === null,
+    '§S8 and none of that browsing created a counter (' + S(counters().map(c => c.stem)) + ')');
+  await clickText(app, 'Cancel');
+  await sleep(800);
+  ok(counterFor('RLX-WCH-') === null, '§S8 cancelling left the Rolex counter unborn');
+
+  // …and the number the save actually claims is the canonical one.
+  await prepareNewItem(app, 'Brand Code Two');
+  await setBrand(app, 'Rolex');
+  const beforeRlx = new Set(skus());
+  await saveNewItem(app);
+  const endR = Date.now() + 20000;
+  let rolexSku = null;
+  while (Date.now() < endR && !rolexSku) {
+    rolexSku = skus().filter(x => !beforeRlx.has(x)).find(x => String(x).startsWith('RLX-')) || null;
+    if (!rolexSku) await sleep(400);
+  }
+  ok(rolexSku === 'RLX-WCH-001', '§S8 the saved Rolex carries the canonical stem (' + rolexSku + ')');
+  ok(counterFor('RLX-WCH-') === 2, '§S8 under its own counter (' + counterFor('RLX-WCH-') + ')');
+  ok(!skus().some(x => String(x).startsWith('ROL-')), '§S8 and no ROL-numbered product exists anywhere');
 
   // ── §S7 — one successful create consumes one number ──────────────────────
   const beforeDouble = counterFor(STEM);

@@ -30,7 +30,7 @@ const eq = (a: unknown, b: unknown, msg: string) =>
 
 // -- the seed ----------------------------------------------------------------
 {
-  eq(buildSkuSeed('Rolex', 'cat-watch'), 'ROL-WCH-001', 'seed is brand-3 + category-3 + an explicit sequence');
+  eq(buildSkuSeed('Rolex', 'cat-watch'), 'RLX-WCH-001', 'seed is brand-3 + category-3 + an explicit sequence');
   eq(buildSkuSeed('Bvlgari', 'cat-branded-gold-jewelry'), 'BVL-BGJ-001', 'branded gold gets its own code');
   eq(buildSkuSeed('AP', 'cat-watch'), 'APX-WCH-001', 'a two-letter brand is padded, never short');
   eq(buildSkuSeed('', 'cat-watch'), 'ITM-WCH-001', 'no brand still yields a usable seed');
@@ -53,7 +53,7 @@ const eq = (a: unknown, b: unknown, msg: string) =>
 
 // -- splitting ---------------------------------------------------------------
 {
-  eq(splitSku('ROL-WCH-001'), { stem: 'ROL-WCH-', number: 1, width: 3 }, 'stem, number and width are read off the seed');
+  eq(splitSku('RLX-WCH-001'), { stem: 'RLX-WCH-', number: 1, width: 3 }, 'stem, number and width are read off the seed');
   eq(splitSku('WATCH-0007'), { stem: 'WATCH-', number: 7, width: 4 }, 'a four-digit width is kept');
   eq(splitSku('ABC'), { stem: 'ABC-', number: 0, width: 3 }, 'a value with no digits becomes a stem awaiting 001');
   eq(splitSku(''), null, 'an empty value cannot be split');
@@ -77,8 +77,8 @@ const eq = (a: unknown, b: unknown, msg: string) =>
 
 // -- the sequence (the preview rule) -----------------------------------------
 {
-  eq(nextSkuFrom('ROL-WCH', []), 'ROL-WCH-001', 'a seed without a number starts at 001');
-  eq(nextSkuFrom('ROL-WCH-001', []), 'ROL-WCH-001', 'a fresh stem keeps the seed number - the first item is -001');
+  eq(nextSkuFrom('RLX-WCH', []), 'RLX-WCH-001', 'a seed without a number starts at 001');
+  eq(nextSkuFrom('RLX-WCH-001', []), 'RLX-WCH-001', 'a fresh stem keeps the seed number - the first item is -001');
   eq(nextSkuFrom('', ['A-001']), '', 'an empty seed yields an empty SKU rather than a bare number');
   eq(nextSkuFrom('WATCH-0001', ['WATCH-0007']), 'WATCH-0008', 'the seed padding width is preserved');
   eq(nextSkuFrom('CA/0007', ['CA/0009']), 'CA/0010', 'a non-dash separator is still a stem');
@@ -114,9 +114,9 @@ const eq = (a: unknown, b: unknown, msg: string) =>
   eq(resolveSku('MY-OWN-42', 'Rolex', 'cat-watch', ['MY-OWN-42']), 'MY-OWN-42',
     'a SKU the operator typed is returned unchanged, even when it is already in the list');
   eq(resolveSku('  spaced-1  ', 'Rolex', 'cat-watch', []), 'spaced-1', 'a typed SKU is only trimmed');
-  eq(resolveSku('', 'Rolex', 'cat-watch', ['ROL-WCH-001']), 'ROL-WCH-002', 'an empty SKU is allocated');
+  eq(resolveSku('', 'Rolex', 'cat-watch', ['RLX-WCH-001']), 'RLX-WCH-002', 'an empty SKU is allocated');
   eq(resolveSku(null, undefined, undefined, []), 'ITM-GEN-001', 'a missing SKU with no brand still gets one');
-  eq(resolveSku('', 'Rolex', 'cat-watch', []), 'ROL-WCH-001', 'the first watch of a brand is -001');
+  eq(resolveSku('', 'Rolex', 'cat-watch', []), 'RLX-WCH-001', 'the first watch of a brand is -001');
 }
 
 // -- the drain: allocation happens on the metadata that gets hashed ----------
@@ -145,9 +145,9 @@ const eq = (a: unknown, b: unknown, msg: string) =>
 
   {
     const { deps, seeds } = counterDeps();
-    eq(skuOf(withAllocatedSku(grantOf(base), deps)), 'ROL-WCH-001',
+    eq(skuOf(withAllocatedSku(grantOf(base), deps)), 'RLX-WCH-001',
       'an upload without a SKU is given one by the authoritative allocator');
-    eq(seeds, ['ROL-WCH-001'],
+    eq(seeds, ['RLX-WCH-001'],
       'the seed carries an explicit sequence suffix, so a model number can never be read as one');
   }
 
@@ -191,7 +191,7 @@ const eq = (a: unknown, b: unknown, msg: string) =>
     const first = skuOf(withAllocatedSku(grantOf(base), deps));
     const second = skuOf(withAllocatedSku(grantOf(base), deps));
     ok(first !== second, 'two uploads in one pass get different SKUs (' + first + ' vs ' + second + ')');
-    eq([first, second], ['ROL-WCH-001', 'ROL-WCH-002'], 'and they are consecutive, starting at 001');
+    eq([first, second], ['RLX-WCH-001', 'RLX-WCH-002'], 'and they are consecutive, starting at 001');
   }
 
   {
