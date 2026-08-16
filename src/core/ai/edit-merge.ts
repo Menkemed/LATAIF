@@ -91,7 +91,6 @@ export interface FormLike {
 
 export interface AiEditMergeOptions {
   mode: AiMergeMode;
-  /** Used only to mint a unique SKU when the model proposes one and the product has none. */
 }
 
 /**

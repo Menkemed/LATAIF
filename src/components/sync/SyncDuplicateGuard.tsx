@@ -36,7 +36,7 @@ interface PendingReview {
 }
 
 // SKU-ALLOC — the seed builder moved to `core/products/sku-allocation` so the drain, the store
-// and this guard cannot drift; `buildSkuSeed` is the same brand-3 + category-3 rule as before.
+// and this guard cannot drift; `buildSkuSeed` is the shared canonical-brand + category rule.
 
 const VALID_AI_CATEGORIES = new Set<string>([
   'cat-watch', 'cat-gold-jewelry', 'cat-branded-gold-jewelry',
