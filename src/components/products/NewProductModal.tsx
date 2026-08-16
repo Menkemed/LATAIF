@@ -394,7 +394,7 @@ export function NewProductModal({
                       // alone keeps a suggested number from being written as if it had been claimed.
                       if (result.condition) updated.condition = result.condition;
                       if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
-                      if (result.estimatedValue && !f.plannedSalePrice) updated.plannedSalePrice = result.estimatedValue;
+                      // AI-PRICE — the model does not price the stock; see `edit-merge`.
                       if (result.taxScheme && !f.taxScheme) updated.taxScheme = result.taxScheme;
                       if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0 && (!f.scopeOfDelivery || f.scopeOfDelivery.length === 0)) {
                         updated.scopeOfDelivery = result.scopeOfDelivery;

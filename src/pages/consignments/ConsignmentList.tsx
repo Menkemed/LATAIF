@@ -1016,9 +1016,8 @@ export function ConsignmentList() {
                         });
                         // AI-Schätzung schreibt in den Consignment-Agreed-Price-Vorschlag,
                         // da das Produkt selbst keinen Sale Price hat. Außerhalb des Updaters.
-                        if (result.estimatedValue && !form.agreedPrice) {
-                          setForm(prev => ({ ...prev, agreedPrice: String(result.estimatedValue) }));
-                        }
+                        // AI-PRICE — what the consignor is owed is negotiated, never estimated
+                        // from a photograph; see `edit-merge`.
                         // Sofortige Duplicate-Detection direkt nach AI-Erkennung.
                         const candidate: Partial<Product> = {
                           categoryId: productForm.categoryId,

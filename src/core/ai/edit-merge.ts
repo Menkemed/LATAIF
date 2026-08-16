@@ -109,7 +109,10 @@ export interface AiEditMergeOptions {
 export function buildAiFormPatch(
   result: AiProductIdentification | null | undefined,
   form: FormLike,
-  opts: AiEditMergeOptions,
+  // Deliberately unused: prices were the last thing this merge did differently per dialog, and they
+  // are gone from both. The parameter stays so every caller still has to say which dialog it is —
+  // the day something IS mode-dependent again, the call sites already carry the answer.
+  _opts: AiEditMergeOptions,
 ): Partial<FormLike> {
   const patch: Partial<FormLike> = {};
   if (!result) return patch;
@@ -138,13 +141,11 @@ export function buildAiFormPatch(
     patch.notes = existing ? `${existing}\n\n${result.description}` : (result.description as string);
   }
 
-  // ── prices: create only. In edit they are excluded structurally — see AI_EDIT_FORBIDDEN_FIELDS.
-  if (opts.mode === 'create') {
-    if (isRecognised(result.estimatedValue) && !isRecognised(form.plannedSalePrice)) patch.plannedSalePrice = result.estimatedValue;
-    if (isRecognised(result.purchasePriceEstimate) && !isRecognised(form.purchasePrice)) patch.purchasePrice = result.purchasePriceEstimate;
-    if (isRecognised(result.minSalePrice) && !isRecognised(form.minSalePrice)) patch.minSalePrice = result.minSalePrice;
-    if (isRecognised(result.maxSalePrice) && !isRecognised(form.maxSalePrice)) patch.maxSalePrice = result.maxSalePrice;
-  }
+  // ── prices are NOT here, in either mode ──
+  // What a watch cost and what it will sell for is a commercial decision, and a model that has seen
+  // a photograph is not the one to make it. Filling an empty field looks harmless until the figure
+  // is saved, reported on and paid against — at which point nobody can say whether a person or a
+  // guess put it there. The model may describe the piece; the price stays with the operator.
 
   return patch;
 }

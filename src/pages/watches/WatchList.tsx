@@ -16,7 +16,7 @@ import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
 import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
-import { buildSkuSeed } from '@/core/products/sku-allocation';
+import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { useAuthStore } from '@/stores/authStore';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { resolvePrimaryImageForExport } from '@/core/media/product-image-export';
@@ -324,24 +324,43 @@ export function WatchList() {
     return errs;
   }
 
-  function handleCreate() {
-    // Strikte Validierung: alle Pflichtfelder müssen ausgefüllt sein.
+  /**
+   * Everything that BLOCKS a create, in one place.
+   *
+   * The duplicate warning is a question — "this looks similar, still want it?" — and the operator is
+   * allowed to answer yes. A missing required field or a SKU that is already on the shelf is not a
+   * question, and answering the similarity prompt must not walk past it. Both entry points call
+   * this, so "Create anyway" cannot become a way around the hard rules.
+   *
+   * The typed SKU is trimmed before the collision test, not after: otherwise a trailing space is
+   * enough to slip a second product past a number that is already in use.
+   */
+  function blockingErrors(): Record<string, string> {
     const errs = validateForm();
-    if (form.sku && isSkuTaken(form.sku)) {
+    if (!skuIsEmpty(form.sku) && isSkuTaken(String(form.sku).trim())) {
       errs.sku = 'Diese SKU / Reference ist bereits vergeben.';
     }
-    if (Object.keys(errs).length > 0) {
-      setErrors(errs);
-      // Scroll zum ersten Fehler
-      const first = Object.keys(errs)[0];
-      const el = document.getElementById(`new-field-${first}`) || document.getElementById(`new-field-${first.replace(/^attr_/, 'attr_')}`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
+    return errs;
+  }
+
+  /** Show them where the problem is. Returns true when the create must not proceed. */
+  function stopOnErrors(errs: Record<string, string>): boolean {
+    if (Object.keys(errs).length === 0) return false;
+    setErrors(errs);
+    setDuplicateMatches([]);
+    const first = Object.keys(errs)[0];
+    const el = document.getElementById(`new-field-${first}`) || document.getElementById(`new-field-${first.replace(/^attr_/, 'attr_')}`);
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return true;
+  }
+
+  function handleCreate() {
+    if (stopOnErrors(blockingErrors())) return;
     // Score-basierte Duplicate Detection (nicht-blockierend): wenn ähnliche
     // Items im Bestand existieren, Modal zeigen — User kann trotzdem anlegen.
     const possible = findPossibleDuplicates(form);
     if (possible.length > 0) {
+      lastCheckedFp.current = fp;          // the live detector must not ask the same question again
       setDuplicateMatches(possible);
       return;
     }
@@ -349,6 +368,13 @@ export function WatchList() {
   }
 
   function confirmCreateAnyway() {
+    // "Create anyway" is the operator's answer for exactly this input, so record it the way a
+    // dismissal is recorded. Without that, clearing the dialog re-arms the live detector, which
+    // runs again 800ms later — and by then the item just created is itself the closest match. The
+    // second prompt looks identical, and answering it a second time creates a twin.
+    // The hard rules still apply — "anyway" answers the similarity question, nothing else.
+    if (stopOnErrors(blockingErrors())) return;
+    lastDismissedFp.current = fp;
     setDuplicateMatches([]);
     void runCreate();
   }
@@ -372,9 +398,12 @@ export function WatchList() {
       // form was showing: between opening the dialog and pressing Save another surface may have
       // taken it. A retry reuses the SKU it already claimed, so one successful create consumes
       // exactly one number no matter how often the images had to be retried.
-      const sku = form.sku || retrySku
-        || allocateSkuOnCreate(form.sku, form.brand, form.categoryId);
-      if (!form.sku && sku !== retrySku) setRetrySku(sku);
+      // A typed SKU is trimmed before it is anything else — `" RLX-WCH-001 "` and `"RLX-WCH-001"`
+      // have to be the same number, or the second one slips past every uniqueness check that
+      // compares strings. Whitespace alone is not a SKU, so it falls through to the allocator.
+      const typed = skuIsEmpty(form.sku) ? '' : String(form.sku).trim();
+      const sku = typed || retrySku || allocateSkuOnCreate(undefined, form.brand, form.categoryId);
+      if (!typed && sku !== retrySku) setRetrySku(sku);
       const payload = { ...form, sku, attributes: stripStaleAttributes(selectedCat ?? undefined, form.attributes) as typeof form.attributes };
       const result = await createProductWithMedia(payload, retryProductId ?? undefined);
       const ui = decideProductCreateUi(result);
@@ -923,8 +952,7 @@ export function WatchList() {
                         // the durable allocator assigns one at the create, from brand + category.
                         if (result.condition) updated.condition = result.condition;
                         if (result.description) updated.notes = f.notes ? `${f.notes}\n\n${result.description}` : result.description;
-                        if (result.estimatedValue && !f.plannedSalePrice) updated.plannedSalePrice = result.estimatedValue;
-                        if (result.purchasePriceEstimate && !f.purchasePrice) updated.purchasePrice = result.purchasePriceEstimate;
+                        // AI-PRICE — the model does not price the stock; see `edit-merge`.
                         if (result.minSalePrice && !f.minSalePrice) updated.minSalePrice = result.minSalePrice;
                         if (result.maxSalePrice && !f.maxSalePrice) updated.maxSalePrice = result.maxSalePrice;
                         if (result.taxScheme && !f.taxScheme) updated.taxScheme = result.taxScheme;

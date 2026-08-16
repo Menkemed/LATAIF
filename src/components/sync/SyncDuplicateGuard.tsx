@@ -111,7 +111,7 @@ async function runAutoIdentify(productId: string): Promise<void> {
     if (result.description) {
       patch.notes = current.notes ? `${current.notes}\n\n${result.description}` : result.description;
     }
-    if (result.estimatedValue && !current.plannedSalePrice) patch.plannedSalePrice = result.estimatedValue;
+    // AI-PRICE — the model does not price the stock; see `edit-merge`.
     if (result.taxScheme && !current.taxScheme) patch.taxScheme = result.taxScheme;
     if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0
         && (!current.scopeOfDelivery || current.scopeOfDelivery.length === 0)) {
