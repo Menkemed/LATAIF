@@ -922,14 +922,16 @@ pub fn cleanup_stale_control_copies(app_data_dir: &Path, root: &DataRoot) -> Vec
         Ok(Some(m)) if m.root_id == root.root_id() => {}
         _ => return removed,
     }
+    // A reparse point wearing the name of a control file is not a stale copy — it is a redirection,
+    // and deleting it is a guess. Fail closed and leave it.
     let stale_locator = root.path().join(data_root::LOCATOR_FILENAME);
-    if stale_locator.is_file() && fs::remove_file(&stale_locator).is_ok() {
+    if stale_locator.is_file() && !is_reparse(&stale_locator) && fs::remove_file(&stale_locator).is_ok() {
         removed.push(data_root::LOCATOR_FILENAME);
     }
     // (4) a pending move is recoverable state; its copy stays until the move is over.
     if read_intent(app_data_dir).is_none() {
         let stale_intent = root.path().join(MOVE_INTENT_FILENAME);
-        if stale_intent.is_file() && fs::remove_file(&stale_intent).is_ok() {
+        if stale_intent.is_file() && !is_reparse(&stale_intent) && fs::remove_file(&stale_intent).is_ok() {
             removed.push(MOVE_INTENT_FILENAME);
         }
     }

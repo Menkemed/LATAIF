@@ -121,6 +121,12 @@ fn enrich(conn: &Connection, tenant_id: &str, product: &mut serde_json::Value) {
                FROM media_links l
                JOIN media_variants v ON v.tenant_id = l.tenant_id AND v.media_id = l.media_id
                                     AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL
+               -- v0.8.44: the object join is not optional. Without it a DELETED media object still
+               -- handed the phone a thumbnail key, while the desktop gallery showed nothing for it —
+               -- and since the reachability contract (correctly) does not consider that file
+               -- required, a backup would not carry it. Phone and desktop now resolve the same set.
+               JOIN media_objects o ON o.tenant_id = v.tenant_id AND o.media_id = v.media_id
+                                   AND o.deleted_at IS NULL
                JOIN media_blobs b ON b.tenant_id = v.tenant_id AND b.blob_id = v.blob_id
                JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id
                                             AND g.generation_no = b.current_generation_no

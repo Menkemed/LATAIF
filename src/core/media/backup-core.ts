@@ -149,6 +149,11 @@ export function collectRequiredMediaFiles(db: MediaDbQuery): BackupFileEntry[] {
             g.byte_size, g.generation_no, g.extension
        FROM media_variants v
        JOIN media_links l ON l.tenant_id=v.tenant_id AND l.media_id=v.media_id AND l.deleted_at IS NULL
+       -- v0.8.44: same object join the Rust SSOT and the gallery resolver use. Without it a DELETED
+       -- media object still contributed its thumbnail. This module is dormant (no production caller
+       -- reaches it; the live backup is the Rust one), but a dormant duplicate that disagrees is a
+       -- disagreement waiting to be activated.
+       JOIN media_objects o ON o.tenant_id=v.tenant_id AND o.media_id=v.media_id AND o.deleted_at IS NULL
        JOIN media_blobs b ON b.tenant_id=v.tenant_id AND b.blob_id=v.blob_id AND b.blob_status='present'
        JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id
             AND g.generation_no=b.current_generation_no AND g.gen_status='available'

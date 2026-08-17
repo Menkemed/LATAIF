@@ -352,9 +352,18 @@ Backup baut sein Manifest aus **demselben SQL-Text** (`REQUIRED_MASTER_SQL`/`REQ
 die Media-GC nutzt `preserved_keys`, der Move `required_keys`. Damit gilt: **ein gültiger `complete`
 Snapshot ist nach dem Restore wieder verschiebbar** — der zentrale Regressionstest.
 
+**Alle Consumer gehen durch dieselbe Auflösung:** Gallery-Resolver, AI-Bildquelle und Bild-/Excel-Export
+konsumieren das Resolver-Ergebnis; die Mobile-Seite gibt Keys ausschließlich aus derselben
+link→object→current-Kette heraus (`product_query`), und `media_key_is_known` ist nur ein Serving-Guard
+für bereits ausgegebene Keys — es gibt **keinen** dauerhaften Business-Consumer, der eine Datei allein
+über den Content-Hash braucht. Der TS-Zwilling `backup-core.ts` ist dormant (kein Produktions-Caller;
+das Live-Backup ist das Rust-seitige), wird aber semantisch mitgeführt.
+
 *Beim Zusammenführen gefunden:* die Varianten-Abfrage kannte nur den Link, nicht das Objekt, und
 exportierte deshalb das Thumbnail eines **gelöschten** Media-Objekts. Der Resolver verwirft dabei
-Master und Thumbnail gemeinsam; die Abfrage joint jetzt ebenfalls `media_objects`.
+Master und Thumbnail gemeinsam; die Abfrage joint jetzt ebenfalls `media_objects` — ebenso die
+Mobile-Thumbnail-Abfrage in `product_query` und der dormante TS-Zwilling, damit Handy, Desktop,
+Backup und Move dieselbe Menge sehen.
 
 ### 5.7 Finalisierung und Commit
 
