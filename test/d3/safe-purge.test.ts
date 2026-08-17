@@ -257,9 +257,17 @@ async function testCount(): Promise<void> {
 }
 
 // ── Backup module ──
-function nodeBackupDeps(appDir: string, overrides: Partial<BackupFsDeps> = {}): BackupFsDeps {
+// DATA-ROOT-I1 — source and destination are now two SEPARATE roots, which is the whole point: the
+// data root is where the databases live, the backups root is wherever the owner pointed backups
+// (live: another drive entirely). A test that passes one directory for both cannot see the bug.
+function nodeBackupDeps(
+  dataDir: string,
+  backupsDir: string = pjoin(dataDir, 'backups'),
+  overrides: Partial<BackupFsDeps> = {},
+): BackupFsDeps {
   return {
-    appDataDir: async () => appDir,
+    dataRoot: async () => dataDir,
+    backupsRoot: async () => backupsDir,
     join: async (...parts: string[]) => pjoin(...parts),
     exists: async (p: string) => exists(p),
     readFile: async (p: string) => new Uint8Array(await readFile(p)),
@@ -305,7 +313,7 @@ async function testBackupRun(): Promise<void> {
   // failure: writeFile wirft → runPreDestructiveBackup wirft (→ Aufrufer bricht ab)
   const appDir2 = await mkdtemp(pjoin(tmpdir(), 'lataif-d3-'));
   await writeFile(pjoin(appDir2, 'lataif.db'), dbBytes);
-  const e = await threw(() => runPreDestructiveBackup('x', nodeBackupDeps(appDir2, {
+  const e = await threw(() => runPreDestructiveBackup('x', nodeBackupDeps(appDir2, undefined, {
     writeFile: async () => { throw new Error('simulated disk full'); },
   })));
   check(e instanceof Error, 'backup: copy failure throws (aborts destructive action)');
@@ -314,6 +322,37 @@ async function testBackupRun(): Promise<void> {
   const appDir3 = await mkdtemp(pjoin(tmpdir(), 'lataif-d3-'));
   const e2 = await threw(() => runPreDestructiveBackup('x', nodeBackupDeps(appDir3)));
   check(e2 instanceof Error, 'backup: no source DB files → throws');
+}
+
+// ── DATA-ROOT-I1 — the pre-destructive backup obeys the CONFIGURED backup root ──
+//
+// The bug this pins: the destination was hard-coded to `<appDataDir>/backups/…`, so on the live
+// install — where the owner pointed backups at `E:\` — the automatic safety copy taken before a
+// factory reset went to `C:`. Onto the drive the reset is about to clear, into a folder the owner
+// does not know to look in. The regular backup had honoured the setting for a whole release; only
+// the one backup taken when data is about to be destroyed did not.
+async function testPreDestructiveHonoursConfiguredBackupRoot(): Promise<void> {
+  const dataDir = await mkdtemp(pjoin(tmpdir(), 'lataif-dr-data-'));
+  const backupsDir = await mkdtemp(pjoin(tmpdir(), 'lataif-dr-backups-'));
+  const dbBytes = new TextEncoder().encode('SYNTHETIC-DB-CONTENT');
+  await writeFile(pjoin(dataDir, 'lataif.db'), dbBytes);
+  await writeFile(pjoin(dataDir, 'lataif_sync_server.db'), new TextEncoder().encode('SYNC'));
+
+  const res = await runPreDestructiveBackup('factory-reset', nodeBackupDeps(dataDir, backupsDir));
+
+  check(res.dir.startsWith(backupsDir), 'dr-1: snapshot lands in the CONFIGURED backup root');
+  check(!res.dir.startsWith(dataDir), 'dr-2: and never inside the data root');
+  check(!res.dir.includes(pjoin(dataDir, 'backups')), 'dr-3: the old hard-coded path is gone');
+  check(await exists(pjoin(res.dir, 'lataif.db')), 'dr-4: the database really arrived there');
+  check(await exists(res.manifestPath), 'dr-5: manifest written alongside it');
+  // Sources still come from the DATA root, not from the backups root.
+  const dbEntry = res.files.find(f => f.name === 'lataif.db')!;
+  check(dbEntry.srcPath.startsWith(dataDir), 'dr-6: sources are read from the data root');
+  check(dbEntry.dstPath.startsWith(backupsDir), 'dr-7: copies are written to the backups root');
+  check(res.files.length === 2, 'dr-8: both present DB files copied');
+  // A backups root on another volume is exactly the real configuration (`E:\`), so a destination
+  // outside the data root must not be treated as an error anywhere in the flow.
+  check(!(await exists(pjoin(dataDir, 'backups'))), 'dr-9: nothing was created under the data root');
 }
 
 // ── D3b: Factory-Reset-Guard ──
@@ -377,6 +416,7 @@ async function main(): Promise<void> {
   await testCount();
   testManifest();
   await testBackupRun();
+  await testPreDestructiveHonoursConfiguredBackupRoot();
   testResetGuardPure();
   await testGuardedReset();
 

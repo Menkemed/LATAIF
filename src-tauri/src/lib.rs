@@ -2,6 +2,7 @@
 mod printing;
 // MEDIA-04A-1 — isolated guarded image storage core. Compiled and unit-tested,
 // but deliberately not yet wired to any command/UI/DB (see src/media/mod.rs).
+mod data_root;
 mod media;
 mod sync;
 
@@ -62,6 +63,75 @@ struct AppHandleState {
     // MOBILE-04B2A2 — the controlled staging root the (future) upload path writes into and the
     // internal claim/handoff commands read verified bytes from. Never a client-supplied path.
     mobile_staging_root: std::path::PathBuf,
+    // DATA-ROOT-I1 — the resolved, validated data root. Resolved exactly once in `setup()`, before
+    // any database, media file or recovery step is touched, and shared from here. Nothing in the
+    // process may re-derive it.
+    data_root: data_root::DataRoot,
+}
+
+/// The active data root, for the handlers that only receive an `AppHandle`.
+///
+/// Every one of these used to call `app_handle.path().app_data_dir()` for itself. That was correct
+/// only while "the data" and "AppData" were the same thing by definition; the moment the root is
+/// configurable, a handler that resolves its own path is a second answer — and a backup, a GC or a
+/// restore aimed at the wrong directory is not a cosmetic bug.
+fn data_root_of(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.try_state::<AppHandleState>()
+        .map(|s| s.data_root.path().to_path_buf())
+        .ok_or_else(|| "DATA_ROOT_NOT_INITIALISED".to_string())
+}
+
+/// Tell the owner, in a window they cannot miss, why the app is refusing to start. `setup` failing
+/// only writes to a console nobody sees, and "it opens and the data is gone" is precisely the
+/// impression this slice exists to avoid giving.
+fn show_fatal_data_root_error(message: &str) {
+    // The automation build refuses just as hard, but silently: a modal message box would keep the
+    // process alive waiting for a click, and a test that hangs proves nothing about a refusal.
+    #[cfg(all(windows, not(feature = "e2e")))]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        fn wide(s: &str) -> Vec<u16> {
+            std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, utype: u32) -> i32;
+        }
+        let text = wide(message);
+        let caption = wide("LATAIF — data location");
+        const MB_OK: u32 = 0x0000_0000;
+        const MB_ICONERROR: u32 = 0x0000_0010;
+        const MB_SETFOREGROUND: u32 = 0x0001_0000;
+        unsafe {
+            MessageBoxW(0, text.as_ptr(), caption.as_ptr(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        }
+    }
+    #[cfg(not(all(windows, not(feature = "e2e"))))]
+    {
+        let _ = message;
+    }
+}
+
+/// The runtime paths the renderer needs. The renderer resolves NOTHING itself — see
+/// `src/core/runtime/runtime-paths.ts`. Read-only; no owner gate (a path is not a secret, and the
+/// Settings display needs it before anyone has typed a password).
+#[tauri::command]
+fn get_runtime_paths(
+    state: tauri::State<'_, AppHandleState>,
+) -> Result<serde_json::Value, String> {
+    let r = &state.data_root;
+    Ok(serde_json::json!({
+        "dataRoot": r.path().to_string_lossy(),
+        "rootId": r.root_id(),
+        "businessDb": r.business_db().to_string_lossy(),
+        "syncServerDb": r.sync_server_db().to_string_lossy(),
+        "mediaRoot": r.media_root().to_string_lossy(),
+        "mobileStagingRoot": r.mobile_staging_root().to_string_lossy(),
+        "openaiKey": r.openai_key().to_string_lossy(),
+        // Separate SSOT on purpose: the owner may point backups at another drive entirely, and a
+        // data-root change must never rewrite that choice.
+        "backupsRoot": media::backup_location::resolve_root(r.path()).to_string_lossy(),
+    }))
 }
 
 const SYNC_PORT: u16 = 3001;
@@ -338,11 +408,8 @@ struct TrustCtx {
 /// `primary_host_config` + the install-id file — never taken from the caller.
 fn trust_ctx(server: &sync::SyncServer) -> Result<TrustCtx, String> {
     let (conn, install_id) = open_config_db(server)?;
-    let app_data_dir = server
-        .db_path
-        .parent()
-        .ok_or_else(|| "Could not determine the app data directory".to_string())?
-        .to_path_buf();
+    // DATA-ROOT-I1 — the resolved root, not `db_path.parent()`.
+    let app_data_dir = server.data_root.path().to_path_buf();
     let cfg = sync::primary::load_config(&conn, "tenant-1", "branch-main")
         .map_err(|e| format!("Primary config unreadable: {e}"))?;
     let primary_state = sync::primary::resolve_state(cfg.as_ref(), &install_id);
@@ -1351,7 +1418,7 @@ async fn stop_server_and_confirm_free(
 // cancelled). Called by the coordinator during abort; no DB/media mutation.
 #[tauri::command]
 fn clear_pending_backup_intent(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     media::backup::clear_backup_intent(&app_dir).map_err(|code| code.code().to_string())
 }
 
@@ -1361,7 +1428,7 @@ fn clear_pending_backup_intent(app_handle: tauri::AppHandle) -> Result<(), Strin
 // the app reopens the CURRENT data). No DB/media mutation.
 #[tauri::command]
 fn clear_pending_restore_intent(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     media::restore_recovery::clear_intent(&app_dir).map_err(|code| code.code().to_string())
 }
 
@@ -2238,7 +2305,7 @@ fn list_restore_snapshots(
     sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
         .map_err(|code| code.to_string())?;
     drop(conn);
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     media::restore::list_snapshots(&app_dir).map_err(|code| code.code().to_string())
 }
 
@@ -2266,7 +2333,7 @@ fn schedule_restore_snapshot(
     }
     // 2+3. resolve + full pre-check + durable intent (no mutation). A traversal/foreign/incomplete id fails
     //      here with NO intent written and nothing touched.
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     media::restore::schedule_restore(&app_dir, &snapshot_id)
         .map_err(|code| code.code().to_string())?;
     Ok(serde_json::json!({ "snapshotId": snapshot_id, "scheduled": true }))
@@ -2289,7 +2356,7 @@ fn schedule_backup_snapshot(
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
             .map_err(|code| code.to_string())?;
     }
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     let now = chrono::Utc::now().to_rfc3339();
     // opaque, filesystem-safe single-segment id (no ':' — invalid on Windows).
     let id = format!("snap-{}", now.replace([':', '.', '+'], "-"));
@@ -2317,7 +2384,7 @@ fn staging_gc_dry_run(
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
             .map_err(|code| code.to_string())?;
     }
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     // Read-only: includes mobile-staging blob liveness via the server DB (read-only). Never deletes.
     media::staging_gc::analyze_with_blobs(
         &app_dir,
@@ -2340,7 +2407,7 @@ fn staging_gc_dry_run(
 fn get_backup_location(
     app_handle: tauri::AppHandle,
 ) -> Result<media::backup_location::BackupLocationInfo, String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     Ok(media::backup_location::current(&app_dir))
 }
 
@@ -2364,7 +2431,7 @@ fn set_backup_location(
         owner.user_id().to_string()
     };
     // validate + create + write-test + overlap-guard BEFORE persisting (fail-closed).
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     let stored = media::backup_location::validate_and_prepare(&app_dir, &path)
         .map_err(|code| code.code().to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -2393,7 +2460,7 @@ fn reset_backup_location(
     let (conn, _id) = open_config_db(&state.server)?;
     media::backup_location::clear_configured(&conn).map_err(|code| code.code().to_string())?;
     drop(conn);
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     Ok(media::backup_location::current(&app_dir))
 }
 
@@ -2401,7 +2468,7 @@ fn reset_backup_location(
 /// owner already configured). Creates the folder if missing so "open" always lands somewhere sensible.
 #[tauri::command]
 fn open_backup_location(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     let root = media::backup_location::resolve_root(&app_dir);
     let _ = std::fs::create_dir_all(&root);
     #[cfg(windows)]
@@ -2465,7 +2532,7 @@ async fn create_stock_check(
 
     let check = sync::stock_check::record(
         &conn,
-        &state.server.db_path.parent().ok_or("no app data dir")?.join("lataif.db"),
+        &state.data_root.business_db(),
         sync::stock_check::NewStockCheck {
             tenant_id: "tenant-1",
             branch_id: "branch-main",
@@ -2532,7 +2599,7 @@ async fn latest_stock_checks(
 fn get_backup_retention(
     app_handle: tauri::AppHandle,
 ) -> Result<media::backup_retention::RetentionInfo, String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     Ok(media::backup_retention::current(&app_dir))
 }
 
@@ -2559,7 +2626,7 @@ fn set_backup_retention(
     media::backup_retention::set_configured(&conn, enabled, keep_count, &owner_id, &now)
         .map_err(|code| code.code().to_string())?;
     drop(conn);
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     Ok(media::backup_retention::current(&app_dir))
 }
 
@@ -2582,7 +2649,7 @@ fn scan_unused_media(
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
             .map_err(|code| code.to_string())?;
     }
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     media::media_gc::plan(&app_dir).map_err(|e| e.code().to_string())
 }
 
@@ -2601,7 +2668,7 @@ fn schedule_media_gc(
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
             .map_err(|code| code.to_string())?;
     }
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let (conn, _id) = open_config_db(&state.server)?; // v0018 media_gc_runs exists after migrations
@@ -2613,7 +2680,7 @@ fn schedule_media_gc(
 /// REMOVES a scheduled destructive action; it can never delete media).
 #[tauri::command]
 fn clear_pending_gc_intent(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     media::media_gc::clear_intent(&app_dir);
     Ok(())
 }
@@ -2632,7 +2699,7 @@ fn finalize_media_gc(
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
             .map_err(|code| code.to_string())?;
     }
-    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_dir = data_root_of(&app_handle)?;
     let now = chrono::Utc::now().to_rfc3339();
     let (conn, _id) = open_config_db(&state.server)?;
     media::media_gc::finalize(&app_dir, &conn, &now).map_err(|e| e.code().to_string())
@@ -2659,11 +2726,34 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            let app_dir = app
+            // DATA-ROOT-I1 — the FIRST thing that happens in the process, before recovery, before any
+            // database or media file is opened, and before the window exists. `app_data_dir()` is used
+            // here for one purpose only: to find the LOCATOR. It is no longer, by itself, an answer to
+            // "where is the data".
+            //
+            // Failure is fatal on purpose. Every alternative — falling back to AppData, creating the
+            // folder, starting with an empty database — ends with someone working in the wrong data set
+            // and not noticing. A disconnected drive must look like "come back later", never like "start
+            // over", so the app tells the owner what is wrong and stops.
+            let locator_dir = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let _ = std::fs::create_dir_all(&app_dir);
+                .map_err(|e| format!("app data dir unavailable: {e}"))?;
+            let root = match data_root::resolve(&locator_dir) {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = e.message(None);
+                    eprintln!("[data-root] {} — {}", e.code(), msg);
+                    show_fatal_data_root_error(&msg);
+                    return Err(format!("{}: {}", e.code(), msg).into());
+                }
+            };
+            eprintln!(
+                "[data-root] active root: {} (legacyInPlace={})",
+                root.path().display(),
+                root.is_legacy_in_place()
+            );
+            let app_dir = root.path().to_path_buf();
             // MEDIA-04B2A12-R3 — boot recovery for an interrupted atomic restore. MUST run before ANY DB
             // or media file is opened. A pre-commit journal rolls the tree back to the exact prior state;
             // the committed state is kept; an unrecoverable journal fails startup closed (no DB/media use).
@@ -2718,18 +2808,18 @@ pub fn run() {
                 Ok(r) => { if r.moved_back > 0 || r.retained > 0 { eprintln!("media gc reconcile: movedBack={} retained={} failed={}", r.moved_back, r.retained, r.failed); } }
                 Err(e) => eprintln!("media gc reconcile skipped: {}", e.code()),
             }
-            let db_path = app_dir.join("lataif_sync_server.db");
-
-            let server = Arc::new(sync::SyncServer::new(db_path, resolve_sync_port()));
+            // DATA-ROOT-I1 — every runtime path below comes from the resolved root, not from a
+            // literal joined onto whatever directory happened to be at hand.
+            let server = Arc::new(sync::SyncServer::new(root.clone(), resolve_sync_port()));
             // MEDIA-04A-2A-R2 — build the ingest service exactly once, at app
             // setup, and share it via Tauri-managed state. Building one per
             // command handler (the previous shape) gave each handler its own
             // identity_locks map, silently breaking the concurrency contract.
             let media_ingest =
-                Arc::new(media::ingest::MediaIngestService::new(app_dir.join("media")));
-            let mobile_staging_root = app_dir.join("mobile-upload-staging");
+                Arc::new(media::ingest::MediaIngestService::new(root.media_root()));
+            let mobile_staging_root = root.mobile_staging_root();
             let _ = std::fs::create_dir_all(&mobile_staging_root);
-            app.manage(AppHandleState { server, media_ingest, mobile_staging_root });
+            app.manage(AppHandleState { server, media_ingest, mobile_staging_root, data_root: root });
 
             // M5-B — native WebView2-Reload-Bruecke (nur Windows) auf dem Main-Webview
             // installieren: F5/Ctrl+R nativ unterdruecken und als Tauri-Event ans Frontend
@@ -2759,6 +2849,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // DATA-ROOT-I1 — the renderer's only way to learn where anything lives.
+            get_runtime_paths,
             sync_server_start,
             primary_status,
             primary_configure,

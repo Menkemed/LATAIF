@@ -113,10 +113,12 @@ pub fn validate_and_prepare(app_data_dir: &Path, path: &str) -> Result<String, M
     // live tree. Reject if the target equals, contains, or is contained by the app-data dir. `media/`,
     // `mobile-upload-staging/`, `backups/` and the DB files all live UNDER the app-data dir, so the single
     // ancestor/descendant test against it covers every one of them (and the recursive-nesting case).
-    let target_c = std::fs::canonicalize(p).map_err(|_| MediaError::BackupLocationNotWritable)?;
-    let app_c = std::fs::canonicalize(app_data_dir)
-        .map_err(|e| MediaError::Io(format!("canon app dir: {e}")))?;
-    if target_c == app_c || target_c.starts_with(&app_c) || app_c.starts_with(&target_c) {
+    // DATA-ROOT-I1 — one shared overlap rule (`data_root::paths_overlap`), used here and, later, by
+    // the move. It canonicalises both sides, so case, `.`/`..` and trailing separators cannot smuggle
+    // the target into the live tree, and it compares whole components, so `…\LATAIFX` is correctly NOT
+    // inside `…\LATAIF`.
+    std::fs::canonicalize(p).map_err(|_| MediaError::BackupLocationNotWritable)?;
+    if crate::data_root::paths_overlap(p, app_data_dir) {
         return Err(MediaError::BackupLocationOverlapsAppData);
     }
     // Real write-test: create → write → fsync → remove a probe file. Proves we can actually write there

@@ -19,6 +19,7 @@ import {
   INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
 } from '../stock/inventory-session';
+import { getRuntimePaths } from '../runtime/runtime-paths';
 import {
   atomicWrite,
   createSaveCoalescer,
@@ -29,7 +30,6 @@ import {
 
 let db: Database | null = null;
 const STORAGE_KEY = 'lataif_db_v2';
-const DB_FILENAME = 'lataif.db';
 
 // D2: Signatur (size+mtime), wie wir den Disk-Stand der lataif.db zuletzt geladen/geschrieben
 // haben. null = keine Baseline (frischer Start / nach Reset). Schützt vor Stale-Overwrite:
@@ -67,15 +67,16 @@ async function getFsLike(): Promise<FsLike> {
   };
 }
 
+// DATA-ROOT-I1 — both come from the native resolver, which decided ONCE at startup where the data
+// root is. This file used to compute `appDataDir() + 'lataif.db'` itself, and the filename lived
+// here as a local constant; that was correct only while the root was AppData by definition. The
+// name now lives in exactly one place, `data_root::BUSINESS_DB_FILENAME`.
 async function getAppDataDir(): Promise<string> {
-  const { appDataDir } = await import('@tauri-apps/api/path');
-  return await appDataDir();
+  return (await getRuntimePaths()).dataRoot;
 }
 
 async function getDbFilePath(): Promise<string> {
-  const { appDataDir, join } = await import('@tauri-apps/api/path');
-  const dir = await appDataDir();
-  return await join(dir, DB_FILENAME);
+  return (await getRuntimePaths()).businessDb;
 }
 
 // ── Load DB from file (Tauri) or localStorage (browser) ──

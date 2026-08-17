@@ -141,6 +141,11 @@ pub struct AppState {
 }
 
 pub struct SyncServer {
+    /// DATA-ROOT-I1 — the resolved data root, handed in at construction. The server used to answer
+    /// "where is the data?" with `db_path.parent()`, which quietly made "the server DB sits
+    /// directly in the data root" a load-bearing assumption that nothing stated and nothing
+    /// checked. Now the root is the input and the DB path is derived from it.
+    pub data_root: crate::data_root::DataRoot,
     pub port: u16,
     pub running: Mutex<bool>,
     pub shutdown_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -157,8 +162,10 @@ pub struct SyncServer {
 }
 
 impl SyncServer {
-    pub fn new(db_path: PathBuf, port: u16) -> Self {
+    pub fn new(data_root: crate::data_root::DataRoot, port: u16) -> Self {
+        let db_path = data_root.sync_server_db();
         Self {
+            data_root,
             port,
             running: Mutex::new(false),
             shutdown_tx: Mutex::new(None),
@@ -238,22 +245,13 @@ impl SyncServer {
         .map_err(|_| "Self-token generation failed".to_string())?;
         *self.self_token.lock().await = Some(self_token);
 
-        // Frontend-DB liegt als lataif.db im selben Ordner wie die Sync-Server-DB.
-        let frontend_db_path = self
-            .db_path
-            .parent()
-            .map(|p| p.join("lataif.db"))
-            .unwrap_or_else(|| std::path::PathBuf::from("lataif.db"));
-
-        // MOBILE-04B2A8-I1 — the SAME staging root the desktop worker uses (AppHandleState derives it as
-        // `<app_data_dir>/mobile-upload-staging`; db_path lives directly in app_data_dir, so its parent is
-        // that dir). Created up front so the first upload can publish into it. If it can't be derived the
-        // ingress simply has no staging root and every accept_upload fails closed (never a wrong dir).
-        let mobile_staging_root = self
-            .db_path
-            .parent()
-            .map(|p| p.join("mobile-upload-staging"))
-            .unwrap_or_else(|| std::path::PathBuf::from("mobile-upload-staging"));
+        // DATA-ROOT-I1 — both paths come from the one resolved root, exactly like the desktop
+        // worker's. They used to be re-derived here from `db_path.parent()`, which was a second
+        // answer that happened to agree; now there is nothing to disagree about.
+        let frontend_db_path = self.data_root.business_db();
+        // MOBILE-04B2A8-I1 — MUST be the SAME staging root the desktop worker uses
+        // (`AppHandleState.mobile_staging_root`), so a job staged over HTTP is later found by prepare.
+        let mobile_staging_root = self.data_root.mobile_staging_root();
         let _ = std::fs::create_dir_all(&mobile_staging_root);
 
         let app_state = Arc::new(AppState {

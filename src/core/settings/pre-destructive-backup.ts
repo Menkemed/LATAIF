@@ -3,7 +3,15 @@
 // ═══════════════════════════════════════════════════════════
 //
 // Erstellt VOR jeder destruktiven Danger-Zone-Aktion automatisch einen lokalen
-// Snapshot der DB-Dateien nach <appDataDir>/backups/pre_destructive_<timestamp>/.
+// Snapshot der DB-Dateien nach <backupsRoot>/pre_destructive_<timestamp>/.
+//
+// DATA-ROOT-I1 — `backupsRoot` ist der OWNER-KONFIGURIERTE Backup-Ort (dieselbe SSOT wie das
+// regulaere Backup: `backup_location::resolve_root`), NICHT hart `<appDataDir>/backups`. Der alte
+// harte Pfad war ein echter Bug: live zeigt die Backup-Location auf `E:\`, die Sicherung vor einem
+// Factory Reset landete aber auf `C:` — an einem Ort, an dem der Owner sie nicht sucht, auf einem
+// Laufwerk, das er beim Neuaufsetzen gerade platt macht.
+//
+// Quelle bleibt der aktive DATA ROOT; Ziel ist der davon getrennte BACKUP ROOT.
 // Schlägt das Backup fehl, MUSS die destruktive Aktion abbrechen (Aufrufer wirft weiter).
 //
 // Der IO-Teil ist über `BackupFsDeps` injizierbar → headless testbar (Node-fs-Adapter,
@@ -14,7 +22,9 @@
 // zusammen ergeben sie einen wiederherstellbaren Satz, auch wenn der Snapshot nicht
 // perfekt punkt-genau konsistent ist (bester verfügbarer Ansatz ohne Server-Stopp).
 
-// Die zu sichernden Dateien (relativ zum appDataDir). lataif.db = Frontend-DB (SSOT);
+import { getRuntimePaths } from '../runtime/runtime-paths';
+
+// Die zu sichernden Dateien (relativ zum Data Root). lataif.db = Frontend-DB (SSOT);
 // die drei sync_server-Dateien sind optional (nur vorhanden, wenn LAN-Sync lief).
 export const BACKUP_SOURCE_FILES = [
   'lataif.db',
@@ -49,7 +59,10 @@ export interface BackupResult {
 
 // Injizierbare IO-Abhängigkeiten (Produktion: Tauri; Test: Node-fs-Adapter).
 export interface BackupFsDeps {
-  appDataDir(): Promise<string>;
+  /** Der aktive Data Root — Quelle der zu sichernden Dateien. */
+  dataRoot(): Promise<string>;
+  /** Der konfigurierte Backup-Root — Ziel. Getrennte SSOT, kann auf einem anderen Laufwerk liegen. */
+  backupsRoot(): Promise<string>;
   join(...parts: string[]): Promise<string>;
   exists(path: string): Promise<boolean>;
   readFile(path: string): Promise<Uint8Array>;
@@ -92,13 +105,14 @@ export function buildBackupManifest(input: {
 export async function runPreDestructiveBackup(action: string, deps: BackupFsDeps): Promise<BackupResult> {
   const timestamp = deps.nowIso();
   const safeStamp = timestamp.replace(/[:.]/g, '-'); // Windows-taugliche Ordnernamen
-  const appDir = await deps.appDataDir();
-  const backupDir = await deps.join(appDir, 'backups', `pre_destructive_${safeStamp}`);
+  const dataDir = await deps.dataRoot();
+  const backupsRoot = await deps.backupsRoot();
+  const backupDir = await deps.join(backupsRoot, `pre_destructive_${safeStamp}`);
   await deps.mkdir(backupDir, { recursive: true });
 
   const files: BackupFileEntry[] = [];
   for (const name of BACKUP_SOURCE_FILES) {
-    const srcPath = await deps.join(appDir, name);
+    const srcPath = await deps.join(dataDir, name);
     if (!(await deps.exists(srcPath))) continue; // -wal/-shm/sync-DB können fehlen
     const bytes = await deps.readFile(srcPath);
     const dstPath = await deps.join(backupDir, name);
@@ -150,7 +164,8 @@ export async function createPreDestructiveBackup(action: string): Promise<Backup
   const fs = await import('@tauri-apps/plugin-fs');
   const path = await import('@tauri-apps/api/path');
   const deps: BackupFsDeps = {
-    appDataDir: () => path.appDataDir(),
+    dataRoot: async () => (await getRuntimePaths()).dataRoot,
+    backupsRoot: async () => (await getRuntimePaths()).backupsRoot,
     join: (...parts: string[]) => path.join(...parts),
     exists: (p: string) => fs.exists(p),
     readFile: async (p: string) => new Uint8Array(await fs.readFile(p)),

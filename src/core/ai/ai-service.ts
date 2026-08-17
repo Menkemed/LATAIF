@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import { buildSystemPrompt, buildUserPrompt, categorySpec, AI_MODEL_PARAMS } from './identify-prompt.ts';
+import { getRuntimePaths } from '../runtime/runtime-paths';
 
 const STORAGE_KEY = 'lataif_openai_key';
 const MODEL_KEY = 'lataif_openai_model';
@@ -44,10 +45,9 @@ let _apiKeyCache: string | null = null;
 
 async function readKeyFromTauri(): Promise<string> {
   try {
-    const { appDataDir, join } = await import('@tauri-apps/api/path');
+    // DATA-ROOT-I1 — the key file lives in the data root, wherever that is. Resolved natively.
+    const { openaiKey: path } = await getRuntimePaths();
     const { readTextFile, exists } = await import('@tauri-apps/plugin-fs');
-    const dir = await appDataDir();
-    const path = await join(dir, 'openai.key');
     if (!(await exists(path))) return '';
     const blob = await readTextFile(path);
     return deobfuscate(blob.trim());
@@ -56,11 +56,9 @@ async function readKeyFromTauri(): Promise<string> {
 
 async function writeKeyToTauri(key: string): Promise<void> {
   try {
-    const { appDataDir, join } = await import('@tauri-apps/api/path');
+    const { dataRoot, openaiKey: path } = await getRuntimePaths();
     const { writeTextFile, mkdir, exists } = await import('@tauri-apps/plugin-fs');
-    const dir = await appDataDir();
-    if (!(await exists(dir))) await mkdir(dir, { recursive: true });
-    const path = await join(dir, 'openai.key');
+    if (!(await exists(dataRoot))) await mkdir(dataRoot, { recursive: true });
     await writeTextFile(path, obfuscate(key));
   } catch (e) { console.warn('[ai] failed to persist key to Tauri:', e); }
 }
@@ -96,10 +94,8 @@ export function clearApiKey() {
   if (isTauri()) {
     (async () => {
       try {
-        const { appDataDir, join } = await import('@tauri-apps/api/path');
+        const { openaiKey: path } = await getRuntimePaths();
         const { remove, exists } = await import('@tauri-apps/plugin-fs');
-        const dir = await appDataDir();
-        const path = await join(dir, 'openai.key');
         if (await exists(path)) await remove(path);
       } catch { /* */ }
     })();
