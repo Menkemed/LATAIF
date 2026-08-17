@@ -707,6 +707,15 @@ fn reconcile(app_data_dir: &Path, intent: MoveIntent) -> MoveOutcome {
         }
         // Nothing usable exists yet in any of these. Do the work (or give up if it keeps failing).
         MovePhase::Prepared | MovePhase::Copying | MovePhase::Verified => {
+            // A crash can land between the staging→target rename and the phase write. The target then
+            // already exists, complete, carrying OUR rootId — which is exactly the proof
+            // `target_finalized` relies on. Redoing the copy in that state would hit "the target
+            // already holds LATAIF data" and strand a complete copy nobody can use, so recognise it.
+            let finished_target = PathBuf::from(&intent.target_root);
+            if validate_final_root(&finished_target, &intent.root_id).is_ok() {
+                discard_staging(Path::new(&intent.staging_root));
+                return commit(app_data_dir, &intent);
+            }
             if intent.attempts >= MAX_ATTEMPTS {
                 return abort(app_data_dir, &intent, "too_many_attempts");
             }
@@ -727,6 +736,57 @@ fn reconcile(app_data_dir: &Path, intent: MoveIntent) -> MoveOutcome {
     }
 }
 
+/// Re-prove every safety property at the moment of the copy, against the paths the intent names.
+///
+/// The UI's preflight ran in a DIFFERENT PROCESS, before a relaunch. Between the two, the owner can
+/// have pointed backups somewhere else, a junction can have appeared at the target, a folder can
+/// have been filled, a drive can have shrunk. A preflight is a decision aid; this is the gate.
+fn revalidate_at_boot(intent: &MoveIntent, source: &Path, target: &Path) -> Result<(), MoveError> {
+    // Normalisation first — a path that cannot be compared safely is not copied to.
+    let target_n = normalize_for_compare(target)?;
+    let source_n = normalize_for_compare(source)?;
+    if target_n == source_n {
+        return Err(MoveError::TargetIsSource);
+    }
+    if overlaps_strict(target, source)? {
+        return Err(MoveError::OverlapsSource);
+    }
+    // The backup root is read fresh: it is owner-configurable and may have changed since the plan.
+    let backups = crate::media::backup_location::resolve_root(source);
+    if overlaps_strict(target, &backups)? {
+        return Err(MoveError::OverlapsBackupRoot);
+    }
+    if let Some(app) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        if overlaps_strict(target, &app)? {
+            return Err(MoveError::OverlapsAppFolder);
+        }
+    }
+    // A reparse point at the target (or at the staging parent) would take the copy off this volume.
+    if is_reparse(target) {
+        return Err(MoveError::TargetUnreachable);
+    }
+    if target.exists() {
+        if !target.is_dir() {
+            return Err(MoveError::TargetUnreachable);
+        }
+        if holds_lataif_data(target) {
+            return Err(MoveError::TargetHasLataifData);
+        }
+        if !dir_is_empty(target)? {
+            return Err(MoveError::TargetNotEmpty);
+        }
+    }
+    let parent = target.parent().ok_or(MoveError::NotNormalizable)?;
+    fs::create_dir_all(parent).map_err(|_| MoveError::TargetNotWritable)?;
+    write_probe(parent).map_err(|_| MoveError::TargetNotWritable)?;
+    // And the disk still has to hold it.
+    let required = required_bytes(scan_source(source)?.values().sum());
+    let free = crate::volume_free_bytes(parent).ok_or(MoveError::FreeSpaceUnknown)?;
+    check_space(required, free)?;
+    let _ = intent;
+    Ok(())
+}
+
 /// Copy → verify → finalise → commit. Every failure leaves the source authoritative and untouched.
 fn perform(app_data_dir: &Path, intent: &MoveIntent) -> Result<MoveOutcome, MoveError> {
     let source = PathBuf::from(&intent.source_root);
@@ -736,6 +796,7 @@ fn perform(app_data_dir: &Path, intent: &MoveIntent) -> Result<MoveOutcome, Move
     if !source.is_dir() {
         return Err(MoveError::Io("source root missing".into()));
     }
+    revalidate_at_boot(intent, &source, &target)?;
     // A retry must never accumulate staging trees.
     discard_staging(&staging);
 

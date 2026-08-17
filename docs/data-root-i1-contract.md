@@ -261,6 +261,7 @@ Der B1-Path-Cache wird **nie** manuell aktualisiert.
 | `prepared` | geplant, nichts kopiert | Copy (neu) starten |
 | `copying` | Teil-Staging vorhanden | Staging verwerfen, Copy neu starten |
 | `verified` | Staging vollständig + bewiesen | neu machen statt halb vertrauen |
+| *(Sonderfall)* | Ziel existiert bereits vollständig **mit unserer `rootId`** (Absturz zwischen Rename und Phasenschreiben) | wird als `target_finalized` erkannt und committet — sonst bliebe eine vollständige, unbenutzbare Kopie liegen |
 | `target_finalized` | Ziel vollständig + bewiesen | erneut validieren, dann committen (sonst Ziel-Kopie entfernen + abbrechen) |
 | `locator_switched` | Commit erfolgt | Ziel validieren; scheitert das → **Rollback** auf den im Intent gebundenen Source |
 
@@ -289,6 +290,16 @@ tiefsten existierenden Vorfahren und hängt die restlichen Komponenten an; `.`/`
 Lässt sich ein Pfad nicht normalisieren, wird der Move abgelehnt — **kein** Raw-String-Fallback für
 Sicherheitsentscheidungen. Verglichen wird komponentenweise (`…\LATAIFX` liegt korrekt nicht in
 `…\LATAIF`).
+
+### 5.5a Re-Validierung beim Boot (TOCTOU)
+
+Der UI-Preflight lief in einem **anderen Prozess**, vor dem Relaunch. Dazwischen kann der Owner den
+Backup-Ort umgestellt, jemand eine Junction ans Ziel gelegt, einen Ordner gefüllt oder die Platte
+gefüllt haben. Der Boot-Executor prüft deshalb vor der ersten Kopie **erneut** und gegen die im
+Intent stehenden Pfade: Normalisierung, Ziel ≠ Quelle, Überlappung mit Quelle, **frisch gelesenem**
+Backup-Root und App-Ordner, Reparse-Point am Ziel, Ziel leer und ohne fremde LATAIF-Daten,
+Schreibbarkeit des Zielelternteils, freier Platz. Der Preflight ist eine Entscheidungshilfe, diese
+Prüfung ist das Tor.
 
 ### 5.6 Copy + Verifikation
 

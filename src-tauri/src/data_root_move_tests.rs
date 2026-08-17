@@ -537,6 +537,84 @@ fn a_move_that_keeps_failing_gives_up_instead_of_blocking_every_future_start() {
     assert!(read_intent(&f.app).is_none(), "the app starts normally from now on");
 }
 
+// ── the gate at the moment of the copy, not at the moment of the plan ──────
+//
+// The preflight ran in the PREVIOUS process. Everything it checked can have changed by the time the
+// boot actually copies, so the boot re-checks it — these two prove that it does.
+
+#[test]
+fn foreign_data_that_appears_in_the_target_between_plan_and_boot_stops_the_move() {
+    let f = fixture("toctou-data");
+    // Somebody else's data set arrives at the chosen folder after the move was scheduled.
+    fs::create_dir_all(&f.target).unwrap();
+    make_source(&f.target, "a-different-data-set");
+    let foreign_marker = fs::read(f.target.join(data_root::MARKER_FILENAME)).unwrap();
+
+    let (root, outcome) = resolve_with_pending_move(&f.app).unwrap();
+    assert!(matches!(outcome, MoveOutcome::Aborted(_)), "the move refuses rather than overwriting");
+    assert_eq!(root.path(), f.src.as_path(), "and the source stays active");
+    assert_eq!(
+        fs::read(f.target.join(data_root::MARKER_FILENAME)).unwrap(),
+        foreign_marker,
+        "the foreign data set is untouched"
+    );
+    assert!(f.src.join(data_root::BUSINESS_DB_FILENAME).exists());
+}
+
+#[test]
+fn a_backup_root_that_starts_overlapping_the_target_after_the_plan_stops_the_move() {
+    // The realistic version: the owner points backups at a drive root between scheduling the move and
+    // the relaunch, so the destination is suddenly INSIDE the backup tree.
+    let src = tmp("toctou-bk-src");
+    make_source(&src, "id-move");
+    let app = make_app_data(&src, "id-move");
+    let root = root_of(&app);
+    let far_away = tmp("toctou-bk-elsewhere");
+    let target_parent = tmp("toctou-bk-parent");
+    let target = target_parent.join("Data");
+    let plan = plan_for(&root, &target, &far_away).unwrap();
+    schedule(&app, &root, &plan).unwrap();
+
+    // Now the configured backup root becomes the target's parent. `resolve_root` reads it from the
+    // server DB in the source root, so writing that row is all it takes.
+    let conn = Connection::open(src.join(data_root::SYNC_SERVER_DB_FILENAME)).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS backup_location_config (
+            tenant_id TEXT PRIMARY KEY, backup_root_path TEXT, updated_at TEXT, updated_by TEXT);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO backup_location_config VALUES ('tenant-1', ?1, 'now', 'owner')",
+        [target_parent.to_string_lossy().to_string()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let (active, outcome) = resolve_with_pending_move(&app).unwrap();
+    assert!(matches!(outcome, MoveOutcome::Aborted(_)), "the boot re-checks the CURRENT backup root");
+    assert_eq!(active.path(), src.as_path());
+    assert!(!target.join(data_root::BUSINESS_DB_FILENAME).exists(), "nothing was copied");
+}
+
+#[test]
+fn a_crash_between_the_rename_and_the_phase_write_is_recognised_and_committed() {
+    let f = fixture("crash-rename");
+    // The exact window: staging was renamed onto the target, the phase still says `verified`.
+    let staging = PathBuf::from(&f.plan.staging_root);
+    let manifest = scan_source(&f.src).unwrap();
+    copy_tree(&f.src, &staging, &manifest).unwrap();
+    fs::create_dir_all(f.target.parent().unwrap()).unwrap();
+    fs::rename(&staging, &f.target).unwrap();
+    set_phase(&f.app, MovePhase::Verified);
+
+    let (root, outcome) = resolve_with_pending_move(&f.app).unwrap();
+    assert_eq!(outcome, MoveOutcome::Switched, "a complete target with OUR rootId means it happened");
+    assert_eq!(root.path(), f.target.as_path());
+    assert!(read_intent(&f.app).is_none());
+    // And the source is still whole — nothing was stranded.
+    assert!(f.src.join(data_root::BUSINESS_DB_FILENAME).exists());
+}
+
 // ── temp cleanup must not eat a live move ───────────────────────────────────
 
 #[test]
