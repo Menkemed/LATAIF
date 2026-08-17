@@ -301,6 +301,12 @@ pub fn verify_restored(app_data_dir: &Path, manifest: &BackupManifest) -> Result
 // ════════════════════════════════════════════════════════════════════════════
 
 /// A snapshotId must be a single safe path segment — never a traversal, absolute path, or nested path.
+/// Test-only view of the segment rule, so the id generator can prove its output is resolvable.
+#[cfg(test)]
+pub fn is_unsafe_segment_for_test(id: &str) -> bool {
+    is_unsafe_segment(id)
+}
+
 fn is_unsafe_segment(id: &str) -> bool {
     id.is_empty()
         || id == "."

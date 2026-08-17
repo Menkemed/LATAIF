@@ -2446,9 +2446,13 @@ fn schedule_backup_snapshot(
             .map_err(|code| code.to_string())?;
     }
     let app_dir = data_root_of(&app_handle)?;
-    let now = chrono::Utc::now().to_rfc3339();
-    // opaque, filesystem-safe single-segment id (no ':' — invalid on Windows).
-    let id = format!("snap-{}", now.replace([':', '.', '+'], "-"));
+    // ONE instant, two representations. `created_at` stays UTC because the snapshot list and the
+    // retention prune order snapshots by comparing that string, and a mix of offsets would sort
+    // lexicographically instead of chronologically. The folder NAME is the local rendering of the
+    // same moment, with its offset spelled out — see `snapshot_id_for`.
+    let taken = chrono::Utc::now();
+    let now = taken.to_rfc3339();
+    let id = media::backup::snapshot_id_for(taken.with_timezone(&chrono::Local).fixed_offset());
     let intent = media::backup::BackupIntent {
         id: id.clone(),
         created_at: now,

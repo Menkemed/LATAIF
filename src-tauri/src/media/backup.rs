@@ -83,6 +83,39 @@ pub struct BackupManifest {
     pub status: String,
 }
 
+/// Build the directory name for a new snapshot from the instant it was taken, expressed in the
+/// LOCAL zone with the offset spelled out.
+///
+/// The id used to be UTC (`snap-2026-08-17T19-42-45-…`), which is defensible — an identifier that
+/// shifts with a timezone is not an identifier — but on a machine three hours off UTC it meant the
+/// folder said 19:42 for a backup taken at 22:42, with nothing on the name to say so. Carrying the
+/// offset in the name gives both: the number you recognise, and no ambiguity about what it means.
+///
+/// Constraints the shape has to satisfy, all of them load-bearing:
+///   • no `:` — illegal in a Windows path, which is why the old id mangled the offset into `-00-00`
+///     and made it look like more digits;
+///   • the zone is written `UTC+03-00`, so a NEGATIVE offset cannot be misread as a separator;
+///   • the sub-second component is kept as the uniqueness nonce (a backup needs a relaunch, so two
+///     in one second cannot really happen — but the id must not depend on that being true);
+///   • the result stays a single safe path segment, which `restore::is_unsafe_segment` enforces.
+///
+/// The id is OPAQUE. Nothing parses it: `created_at` in the manifest is the canonical instant, and
+/// listing, sorting, retention and restore all read that.
+pub fn snapshot_id_for(local: chrono::DateTime<chrono::FixedOffset>) -> String {
+    use chrono::Timelike;
+    let secs = local.offset().local_minus_utc();
+    let sign = if secs < 0 { '-' } else { '+' };
+    let abs = secs.abs();
+    format!(
+        "snap-{}_UTC{}{:02}-{:02}_{:09}",
+        local.format("%Y-%m-%dT%H-%M-%S"),
+        sign,
+        abs / 3600,
+        (abs % 3600) / 60,
+        local.nanosecond(),
+    )
+}
+
 pub struct SnapshotInput<'a> {
     pub media_root: &'a Path,
     /// The consistent on-disk frontend DB (`lataif.db`), already durably saved under the caller's lease.

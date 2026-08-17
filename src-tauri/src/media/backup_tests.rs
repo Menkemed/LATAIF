@@ -622,3 +622,115 @@ fn symlinked_media_file_fails_closed_if_perm() {
     assert_eq!(err.code(), "MEDIA_PATH_REPARSE_POINT_FORBIDDEN", "symlink/reparse rejected: {:?}", err);
     assert!(!l.out.exists(), "nothing published");
 }
+
+// ── v0.8.45: the snapshot folder name says the local time, and says which one ──
+//
+// The name is an identifier, not data — nothing parses it — but it is the one part of a backup a
+// person reads off the disk, and reading 19:42 for something taken at 22:42 is a question nobody
+// should have to ask twice.
+
+fn at(iso: &str) -> chrono::DateTime<chrono::FixedOffset> {
+    chrono::DateTime::parse_from_rfc3339(iso).unwrap()
+}
+
+#[test]
+fn the_id_carries_the_local_time_and_its_offset() {
+    let id = super::snapshot_id_for(at("2026-08-17T22:42:45.903984100+03:00"));
+    assert_eq!(id, "snap-2026-08-17T22-42-45_UTC+03-00_903984100");
+    assert!(id.contains("22-42-45"), "the hour a person saw on the clock");
+    assert!(id.contains("UTC+03-00"), "and what that hour is relative to");
+}
+
+#[test]
+fn a_negative_offset_cannot_be_misread_as_a_separator() {
+    // The old shape mangled the offset into a trailing `-05-00`, indistinguishable from more digits.
+    let id = super::snapshot_id_for(at("2026-08-17T14:42:45.000000001-05:00"));
+    assert_eq!(id, "snap-2026-08-17T14-42-45_UTC-05-00_000000001");
+    assert!(id.contains("UTC-05-00"));
+}
+
+#[test]
+fn a_half_hour_offset_survives_intact() {
+    let id = super::snapshot_id_for(at("2026-08-17T20:12:45.123456789+05:30"));
+    assert_eq!(id, "snap-2026-08-17T20-12-45_UTC+05-30_123456789");
+}
+
+#[test]
+fn the_id_is_a_safe_single_path_segment() {
+    for iso in [
+        "2026-08-17T22:42:45.903984100+03:00",
+        "2026-01-01T00:00:00.000000000+00:00",
+        "2026-12-31T23:59:59.999999999-11:00",
+    ] {
+        let id = super::snapshot_id_for(at(iso));
+        assert!(!id.contains(':'), "a colon is illegal in a Windows path: {id}");
+        assert!(!id.contains('/') && !id.contains('\\'), "not a path: {id}");
+        assert!(!id.contains(' '), "no spaces: {id}");
+        assert!(!crate::media::restore::is_unsafe_segment_for_test(&id), "resolvable as one segment: {id}");
+    }
+}
+
+#[test]
+fn two_snapshots_in_the_same_second_still_differ() {
+    let a = super::snapshot_id_for(at("2026-08-17T22:42:45.000000001+03:00"));
+    let b = super::snapshot_id_for(at("2026-08-17T22:42:45.999999999+03:00"));
+    assert_ne!(a, b, "the sub-second nonce is what keeps them apart");
+}
+
+#[test]
+fn the_same_instant_in_two_zones_produces_two_readable_names() {
+    // Same moment, two machines. Each name shows the time its owner would have seen, and each says
+    // what it is relative to — which is the whole point of putting the offset in.
+    let utc = at("2026-08-17T19:42:45.500000000+00:00");
+    let bahrain = utc.with_timezone(&chrono::FixedOffset::east_opt(3 * 3600).unwrap());
+    assert_eq!(super::snapshot_id_for(utc), "snap-2026-08-17T19-42-45_UTC+00-00_500000000");
+    assert_eq!(super::snapshot_id_for(bahrain), "snap-2026-08-17T22-42-45_UTC+03-00_500000000");
+}
+
+#[test]
+fn old_utc_named_and_new_local_named_snapshots_live_side_by_side() {
+    // Existing installations keep their UTC folder names — renaming a snapshot would be a pointless
+    // risk — so from now on a backups root holds BOTH shapes. Listing, ordering, retention and
+    // restore must not notice the difference, because none of them reads the name: the manifest's
+    // `created_at` is the canonical instant and the id stays opaque.
+    let l = layout();
+    let backups = l.base.join("backups");
+    std::fs::create_dir_all(&backups).unwrap();
+    let (h, size) = put_media(&l.root, "t1", b"one-image");
+    let selection = vec![sel("t1", &h, size, None)];
+
+    // The old shape, taken FIRST (earlier instant, UTC name)...
+    let old_id = "snap-2026-08-17T16-54-02-110835700-00-00";
+    let mut first = input(&l, &selection);
+    let old_dir = backups.join(old_id);
+    first.out_dir = &old_dir;
+    first.created_at = "2026-08-17T16:54:02.110835700+00:00".into();
+    super::snapshot(&first).unwrap();
+
+    // ...and the new shape, taken later, named in local time with its offset.
+    let new_id = super::snapshot_id_for(
+        chrono::DateTime::parse_from_rfc3339("2026-08-17T22:42:45.903984100+03:00").unwrap(),
+    );
+    let mut second = input(&l, &selection);
+    let new_dir = backups.join(&new_id);
+    second.out_dir = &new_dir;
+    // Same instant as the name, expressed as the canonical UTC the manifest always carries.
+    second.created_at = "2026-08-17T19:42:45.903984100+00:00".into();
+    super::snapshot(&second).unwrap();
+
+    // Both are listed, newest first, and the ordering follows the INSTANT, not the string in the name
+    // (the new folder reads 22-42 while the old reads 16-54 — a name comparison would still work here
+    // by accident, which is exactly why the assertion is about created_at).
+    let listed = crate::media::restore::list_snapshots(&l.base).unwrap();
+    assert_eq!(listed.len(), 2, "both shapes are listed");
+    assert_eq!(listed[0].snapshot_id, new_id, "newest first");
+    assert_eq!(listed[1].snapshot_id, old_id);
+    assert!(listed[0].created_at > listed[1].created_at, "ordered by the canonical instant");
+
+    // And both resolve back to a real directory, which is what restore and the retention prune do.
+    for id in [old_id, new_id.as_str()] {
+        let dir = crate::media::restore::resolve_snapshot_id(&l.base, id).unwrap();
+        assert!(dir.is_dir(), "{id} resolves");
+        crate::media::restore::validate_snapshot(&dir).unwrap();
+    }
+}

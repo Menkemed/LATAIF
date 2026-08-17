@@ -40,11 +40,10 @@ export function formatCreatedAt(iso: string): string {
 /**
  * The same instant, said unambiguously.
  *
- * A snapshot's folder name is UTC (it has to be: it is a filesystem-safe id, and an id that shifts
- * with a timezone is not an id). The list showed local time. Both were right, which is why someone
- * reasonably asked why the backup folder carried "the wrong time" - 17:13 on disk, 20:13 on screen,
- * three hours apart and nothing to say so. Naming the clock costs one word and removes the whole
- * question.
+ * Snapshots taken from v0.8.45 on are NAMED in local time with the offset spelled out
+ * (`snap-2026-08-17T22-42-45_UTC+03-00_…`), so folder and row agree. Older folders keep their UTC
+ * names — renaming a backup would be a pointless risk — which is the other reason the row says which
+ * clock it is showing: on a mixed set, that word is the only thing that makes the two comparable.
  */
 export function formatSnapshotTime(iso: string): string {
   const d = new Date(iso);
