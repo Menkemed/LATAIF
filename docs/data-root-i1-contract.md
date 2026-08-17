@@ -228,53 +228,104 @@ Prozess, dessen Root bereits validiert ist.
 
 ---
 
-## 5. Move Data Location — exakter Ablauf (noch nicht implementiert)
+## 5. Move Data Location — implementiert (B2)
 
-Architektonisch ist der Move ein **Restore in eine andere Wurzel**. Er benutzt exakt dieselbe
-bewährte Mechanik wie Restore/Backup/GC: durable Intent → koordinierter Stopp → Boot-Ausführung
-vor jedem DB-Open → Write-ahead-Journal → Commit erst nach Verify. Nichts davon wird neu erfunden.
+**Vertrag: COPY → VERIFY → LOCATOR-SWITCH → RELAUNCH.** Niemals „Quelle verschieben und hoffen".
+Der Quell-Root ist zu **jedem** Zeitpunkt vollständig, öffenbar und korrekt — auch in jedem
+Absturzfenster. B2 löscht ihn nicht und enthält **keine** Funktion, die ihn löschen könnte.
 
-1. **Owner-Gate.** Nur der Owner (Passwortprüfung wie `schedule_backup_snapshot`).
-2. **Ziel wählen** über den nativen Ordner-Dialog (kein freier Texteingabepfad, wie bei
-   Backup-Location).
-3. **Validieren, fail-closed, ohne jede Mutation:** absolut; erreichbar; beschreibbar
-   (echter Write-Probe wie `write_probe`); **nicht** identisch/innerhalb/Elter des aktuellen Data
-   Root; **nicht** überlappend mit dem konfigurierten Backup-Root (§4); Ziel ist leer **oder**
-   enthält nachweislich keinen fremden LATAIF-Bestand (Marker + `lataif.db` prüfen → sonst
-   `TARGET_HAS_DATA`, Abbruch).
-4. **Platz prüfen:** benötigt = Ist-Größe des Roots × 1,05, verfügbar am Ziel. Zu wenig →
-   Abbruch vor der ersten Kopie.
-5. **Runtime koordinieren:** `stopServerThenApproveRelaunch`-Pfad — DB-Flush, Server stoppen und
-   Freiwerden bestätigen, Autosave/Drain still. Der Single-Instance-Guard verhindert bereits einen
-   zweiten Schreiber.
-6. **Kopieren nach `<ziel>/.lataif-move-staging/`** — kein `rename` über Laufwerke voraussetzen;
-   immer Copy. Quelle bleibt unangetastet und bleibt kanonisch.
-   Ausgeschlossen von der Kopie: `.restore-staging/`, `.restore-rollback/`, `backup-ws-*` sowie
-   der Default-`backups/`-Unterordner (Backups ziehen nicht mit; siehe §4). Vorhandene
-   `.restore-intent`/`.backup-intent`/`.gc-intent` **blockieren** den Move (erst ausführen lassen).
-7. **Verifizieren, bevor irgendetwas umgeschaltet wird:** Dateizahl, Byte-Größen und SHA-256 je
-   Datei gegen die Quelle; `PRAGMA integrity_check` **und** `PRAGMA foreign_key_check` auf beiden
-   kopierten DBs; Medien-Beziehung: jeder in `media_blob_generations.storage_key` referenzierte
-   Blob muss im kopierten `media/` liegen (dieselbe fail-closed-Referenzmenge, die die Media-GC
-   benutzt). Ein einziger Fehlschlag → Staging löschen, alter Root bleibt kanonisch, **nichts**
-   ist passiert.
-8. **Umschalten:** `<ziel>/.lataif-move-staging/` → `<ziel>/` (gleiches Volume ⇒ atomarer Rename),
-   danach Locator atomar auf den neuen Root schreiben. **Der Locator-Write ist der Commit-Punkt.**
-9. **Kontrollierter Relaunch** über den bestehenden Relaunch-Pfad.
-10. **Neue Runtime öffnet ausschließlich den neuen Root.** Der alte Root wird **nicht** gelöscht,
-    sondern nur als `.lataif-data-root.superseded` markiert (Zeitstempel + Zielpfad), damit ein
-    versehentlicher Doppelbestand später eindeutig aufzulösen ist.
+### 5.1 Warum der Move beim Boot läuft
 
-**Fehler vor Schritt 8** → alter Root bleibt kanonisch, Ziel-Staging wird verworfen.
-**Fehler nach Schritt 8** (Start aus dem neuen Root schlägt fehl) → Recovery-Dialog mit genau zwei
-Optionen: erneut versuchen, oder **Rollback** = Locator zurück auf den alten Root (der noch
-vollständig existiert). Weil der alte Root nie gelöscht wird, ist der Rollback immer ein reiner
-Locator-Write.
-**Stromausfall** vor dem Locator-Write → alter Root; nach dem Locator-Write → neuer Root, der
-bereits vollständig verifiziert war; währenddessen ist der Write atomar (tmp+rename), also gibt es
-kein halb geschriebenes Locator-File.
+Eine laufende App zu quiescen (sql.js im Renderer, LAN-Server, Mobile-Drain, Media-Ingest, GC) ist
+ein Versprechen, das für jeden künftigen Writer weitergelten müsste. Der Boot-Pfad braucht dieses
+Versprechen nicht: dort ist keine DB offen, kein Server gebunden, kein Worker da und der Renderer
+existiert noch nicht — derselbe Grund, aus dem Restore, Backup und Media-GC bereits dort laufen.
 
----
+Die UI verschiebt deshalb nichts. Sie schreibt einen **Intent**; der bestehende koordinierte
+Relaunch (Writer pausieren → `saveDatabaseDurably` → Server stoppen + Port-Freigabe bestätigen →
+Relaunch) bringt uns in einen Prozess, in dem der Move trivial sicher ist. Der Move endet dort
+**vor** jedem Öffnen, und derselbe Prozess läuft anschließend auf dem NEUEN Root weiter. Damit gibt
+es auch keinen Hot-Switch eines lebenden Renderers: der Renderer, der hochkommt, kennt nur das Ziel.
+Der B1-Path-Cache wird **nie** manuell aktualisiert.
+
+### 5.2 Move-Intent (`<identifier-AppData>/data-move-intent.json`)
+
+`{ schemaVersion, moveId, rootId, sourceRoot, targetRoot, stagingRoot, phase, attempts, createdAt }`
+— keine Secrets, atomar geschrieben, außerhalb des Data Root (weil während eines Moves gerade
+„innerhalb des Data Root" mehrdeutig ist).
+
+### 5.3 Phasen und Crash-Regeln
+
+| Phase | Bedeutung | Recovery beim nächsten Boot |
+|---|---|---|
+| `prepared` | geplant, nichts kopiert | Copy (neu) starten |
+| `copying` | Teil-Staging vorhanden | Staging verwerfen, Copy neu starten |
+| `verified` | Staging vollständig + bewiesen | neu machen statt halb vertrauen |
+| `target_finalized` | Ziel vollständig + bewiesen | erneut validieren, dann committen (sonst Ziel-Kopie entfernen + abbrechen) |
+| `locator_switched` | Commit erfolgt | Ziel validieren; scheitert das → **Rollback** auf den im Intent gebundenen Source |
+
+**Vor dem Locator-Write ist immer die Quelle autoritativ.** Danach das Ziel — außer das Ziel lässt
+sich nicht sicher öffnen; dann ist der Rollback erlaubt, **weil** der Intent einen expliziten
+Quellpfad und dieselbe `rootId` bindet. Das ist Move-Recovery, keine „beste Root"-Heuristik, und die
+einzige Situation, in der der Locator je rückwärts geschrieben wird. Nach `MAX_ATTEMPTS` (2)
+erfolglosen Boots wird der Intent aufgegeben — ein kaputter Move darf nicht jeden Start blockieren.
+
+### 5.4 rootId
+
+Ein Move erzeugt **keine** neue Datenidentität: der Marker wird unverändert mitkopiert, der Locator
+wechselt nur den Pfad. Nach einem erfolgreichen Move existieren bewusst **zwei** vollständige Roots
+mit derselben `rootId`; ausschließlich der validierte Locator entscheidet, welcher aktiv ist.
+
+### 5.5 Preflight (owner-gated, kopiert nichts)
+
+Absoluter Pfad · erreichbar · beschreibbar (echter Write-Probe) · **nicht** die Quelle · keine
+Überlappung mit Quelle, Backup-Root oder App-Ordner (jeweils **beide** Richtungen) · Ziel leer und
+ohne fremde LATAIF-Daten (sonst `MOVE_TARGET_HAS_LATAIF_DATA`, **nie** Merge/Adopt) · genug freier
+Platz (Quellgröße + 5 %) · Unicode/Leerzeichen · Cross-Volume erlaubt. Bestehende Dateien im Ziel
+werden **nie** überschrieben.
+
+**Pfad-Normalisierung fail-closed (härtet den B1-Fund):** `normalize_for_compare` kanonisiert den
+tiefsten existierenden Vorfahren und hängt die restlichen Komponenten an; `.`/`..` werden abgelehnt.
+Lässt sich ein Pfad nicht normalisieren, wird der Move abgelehnt — **kein** Raw-String-Fallback für
+Sicherheitsentscheidungen. Verglichen wird komponentenweise (`…\LATAIFX` liegt korrekt nicht in
+`…\LATAIF`).
+
+### 5.6 Copy + Verifikation
+
+Kopiert wird **alles** im Data Root außer transienten Artefakten (`.restore-*`, `.backup-intent`,
+`.gc-intent`, `backup-ws-*`, eigene `*.tmp-*`) — also DBs, `media/`, `mobile-upload-staging/`, Root-
+Marker und die Schlüsseldateien, die laut B1 bewusst neben der Server-DB liegen. Ein Reparse-Point
+irgendwo im Quellbaum bricht den Move ab (folgen würde von außerhalb kopieren, nicht folgen würde
+still Daten verlieren). Ziel ist ein Staging-Pfad **auf dem Ziel-Volume**
+(`<target-parent>\.lataif-move-<moveId>`), damit die Finalisierung ein Rename ist.
+
+Vor dem Manifest werden die WALs der Quell-DBs eingecheckpointet, damit die Kopie in sich
+geschlossen und read-only prüfbar ist. Das ändert Bytes in der Quelle, aber keine Zeile — ein
+Checkpoint ist keine Bearbeitung.
+
+Verifiziert wird vor jedem Umschalten: gleiche relativen Pfade, gleiche Anzahl, gleiche Größen,
+**SHA-256 jeder Datei** (keine Gesamtgröße) · `PRAGMA integrity_check` + `PRAGMA foreign_key_check`
+auf Business- **und** Server-DB · jede in `media_blob_generations.storage_key` referenzierte Datei
+vorhanden und ohne Path-Escape · Marker mit derselben `rootId`. Ein einziger Fehlschlag ⇒ Locator
+bleibt Quelle.
+
+### 5.7 Finalisierung und Commit
+
+Staging → finaler Ziel-Root per Rename **innerhalb des Ziel-Volumes**; finaler Root nochmals
+validiert; dann **ein** atomarer Locator-Write auf Ziel + gleiche `rootId`. **Der Locator-Write ist
+der Commit-Punkt.** Danach zwingend der (bereits erfolgte) koordinierte Relaunch — kein Hot-Switch.
+
+### 5.8 Exklusivität
+
+Ein Move ist ein exklusiver Wartungszustand: `schedule` verweigert, wenn bereits ein Move-Intent
+existiert (`MOVE_ALREADY_PENDING`) oder ein Backup-/Restore-/GC-Intent im Quell-Root liegt
+(`MOVE_OPERATION_PENDING`). Der Doppelklick-Schutz in der UI ist derselbe Prädikat wie das
+Button-`disabled`. Zwei App-Instanzen bleiben durch den bestehenden Single-Instance-Guard aus.
+
+### 5.9 Was B2 NICHT tut
+
+Kein „Delete old data location" — auch nach erfolgreichem Move nicht. Kein automatisches Ändern der
+Backup-Location. Keine Fresh-Start-Auswahl. Kein Version-Bump.
 
 ## 6. Fresh Install / Fresh Start
 
@@ -340,21 +391,24 @@ gar kein AppData-Bestand existiert (echte Neuinstallation).
 
 ## 9. Phasenschnitt
 
-* **B1 — ERLEDIGT (dieser Commit).** Resolver + Locator/Marker + `rootId`-Bindung + fail-closed
-  Startvertrag + Konstanten-SSOT + `get_runtime_paths` + Renderer-Umstellung + Fix des
-  pre-destructive Backup-Ortes + zentralisierter Overlap-Validator. **Kein** Move, **keine**
-  Move-UI, **keine** Datenmigration, **kein** Fresh-Start-Dialog, **kein** Löschen alter Roots.
-  Ein Bestandsnutzer arbeitet physisch exakt dort weiter, wo seine Daten heute liegen — nur ist der
-  Ort jetzt explizit registriert statt implizit angenommen.
-* **B2 — Move Data Location** (§5): Intent, Boot-Ausführung, Verify, Commit über den Locator-Write,
-  Rollback, Settings-UI. Der alte Root wird dabei **nicht** automatisch gelöscht, sondern nur als
-  `.lataif-data-root.superseded` markiert.
-* **B3 — Fresh-Install-Auswahl** (§6): einmalige Ortswahl bei einer echten Neuinstallation.
-  Ein Update fragt weiterhin **nichts** und migriert **nichts**.
+* **B1 — ERLEDIGT.** Resolver + Locator/Marker + `rootId`-Bindung + fail-closed Startvertrag +
+  Konstanten-SSOT + `get_runtime_paths` + Renderer-Umstellung + Fix des pre-destructive Backup-Ortes
+  + zentralisierter Overlap-Validator.
+* **B2 — ERLEDIGT (dieser Commit).** Move-Engine (Intent, Boot-Ausführung, Preflight, Copy, Verify,
+  Finalisierung, Locator-Commit, Rollback), Settings-UI „Data Location", fail-closed
+  Pfad-Normalisierung, kontrolliertes Cleanup eigener Temp-Dateien. Der alte Root bleibt
+  **vollständig erhalten**; es gibt keine Löschfunktion.
+* **B3 — Fresh-Install-Auswahl** (§6): einmalige Ortswahl bei einer echten Neuinstallation. Ein
+  Update fragt weiterhin **nichts** und migriert **nichts**.
+* **Später, getrennt:** Altbestand-Cleanup — erst nach mehreren echten Starts, Backup, Restore und
+  Live-Validierung, und nur als bewusste, owner-gated Aktion.
 
-## 10. Was B1 NICHT tut
+## 10. Was B1/B2 NICHT tun
 
-* Kein automatischer C:→E:-Move, weder beim Update noch beim ersten Start.
-* Keine Änderung an Produktionsdaten, keine DB-Kopie, keine neue leere DB in irgendeinem Fehlerfall.
+* Kein automatischer C:→E:-Move, weder beim Update noch beim ersten Start — der Umzug ist immer eine
+  bewusste Owner-Aktion.
+* Keine Änderung an Produktionsdaten, keine DB-Kopie in einen fremden Bestand, keine neue leere DB in
+  irgendeinem Fehlerfall.
 * Keine Änderung an der Backup-Location-Konfiguration (live weiterhin `E:\`).
+* Kein Löschen eines alten Data Root.
 * Kein Version-Bump (bleibt `0.8.42`), kein Push, kein Tag, kein Release.

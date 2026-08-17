@@ -209,7 +209,7 @@ impl DataRoot {
 }
 
 // ── atomic little writes (temp → fsync → rename), same shape as the intent files ─────────────
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DataRootError> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DataRootError> {
     let tmp = path.with_extension(format!(
         "tmp-{}",
         uuid::Uuid::new_v4().as_simple()
@@ -224,7 +224,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), DataRootError> {
     Ok(())
 }
 
-fn read_locator(app_data_dir: &Path) -> Result<Option<Locator>, DataRootError> {
+pub(crate) fn read_locator(app_data_dir: &Path) -> Result<Option<Locator>, DataRootError> {
     let p = app_data_dir.join(LOCATOR_FILENAME);
     if !p.exists() {
         return Ok(None);
@@ -240,7 +240,7 @@ fn read_locator(app_data_dir: &Path) -> Result<Option<Locator>, DataRootError> {
     Ok(Some(loc))
 }
 
-fn read_marker(root: &Path) -> Result<Option<RootMarker>, DataRootError> {
+pub(crate) fn read_marker(root: &Path) -> Result<Option<RootMarker>, DataRootError> {
     let p = root.join(MARKER_FILENAME);
     if !p.exists() {
         return Ok(None);
@@ -253,18 +253,39 @@ fn read_marker(root: &Path) -> Result<Option<RootMarker>, DataRootError> {
     Ok(Some(m))
 }
 
-fn write_marker(root: &Path, m: &RootMarker) -> Result<(), DataRootError> {
+pub(crate) fn write_marker(root: &Path, m: &RootMarker) -> Result<(), DataRootError> {
     let bytes = serde_json::to_vec_pretty(m).map_err(io("encode marker"))?;
     write_atomic(&root.join(MARKER_FILENAME), &bytes)
 }
 
-fn write_locator(app_data_dir: &Path, l: &Locator) -> Result<(), DataRootError> {
+pub(crate) fn write_locator(app_data_dir: &Path, l: &Locator) -> Result<(), DataRootError> {
     let bytes = serde_json::to_vec_pretty(l).map_err(io("encode locator"))?;
     write_atomic(&app_data_dir.join(LOCATOR_FILENAME), &bytes)
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Point the locator at `root` with `root_id`. The ONLY way the active root ever changes, and the
+/// commit point of a move. Atomic (temp → fsync → rename).
+pub(crate) fn set_locator(app_data_dir: &Path, root: &Path, root_id: &str) -> Result<(), DataRootError> {
+    write_locator(
+        app_data_dir,
+        &Locator {
+            schema_version: LOCATOR_SCHEMA_VERSION,
+            data_root: root.to_string_lossy().to_string(),
+            root_id: root_id.to_string(),
+            updated_at: now_iso(),
+        },
+    )
+}
+
+/// Build a `DataRoot` for a path whose marker has ALREADY been validated against `root_id` by the
+/// caller. Used by the move engine after it has proven the target; never a way around `resolve`.
+pub(crate) fn validated(root: PathBuf, root_id: String, app_data_dir: &Path) -> DataRoot {
+    let legacy_in_place = same_dir(&root, app_data_dir);
+    DataRoot { root, root_id, legacy_in_place }
 }
 
 /// Resolve the active data root for this installation.

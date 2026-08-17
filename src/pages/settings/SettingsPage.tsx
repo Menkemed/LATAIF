@@ -16,6 +16,7 @@ import { OwnerProvisionDialog } from './OwnerProvisionDialog';
 import { PrimaryAdoptDialog } from './PrimaryAdoptDialog';
 import { BackupRestorePanel } from './BackupRestorePanel';
 import { StorageMaintenancePanel } from './StorageMaintenancePanel';
+import { DataLocationPanel } from './DataLocationPanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { exportFile } from '@/core/utils/export-file';
@@ -3182,6 +3183,8 @@ function DangerZoneTab() {
         <BackupRestorePanel />
         {/* STORAGE-PERF-I1 §9 — owner-gated legacy media migration (dry-run first). */}
         <StorageMaintenancePanel />
+        {/* DATA-ROOT-I1 B2 — where the data lives, and the owner-gated move (copy → verify → switch). */}
+        <DataLocationPanel />
       </Card>
 
       <div style={{ marginTop: 24 }} />

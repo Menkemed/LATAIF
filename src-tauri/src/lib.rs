@@ -3,6 +3,8 @@ mod printing;
 // MEDIA-04A-1 — isolated guarded image storage core. Compiled and unit-tested,
 // but deliberately not yet wired to any command/UI/DB (see src/media/mod.rs).
 mod data_root;
+/// DATA-ROOT-I1 / B2 — the boot-time move engine (copy → verify → locator switch).
+mod data_root_move;
 mod media;
 mod sync;
 
@@ -112,6 +114,77 @@ fn show_fatal_data_root_error(message: &str) {
     }
 }
 
+/// DATA-ROOT-I1 / B2 — the app's own installation directory, so a target inside it can be refused.
+/// Best-effort: an unresolvable exe path simply drops that one check rather than blocking the move.
+fn app_install_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+}
+
+/// OWNER-gated PREFLIGHT for a data-root move. Validates a chosen target completely and returns the
+/// plan the UI shows (sizes, free space, file count) — it copies nothing and schedules nothing, so
+/// the owner can see the refusal reason before committing to anything.
+#[tauri::command]
+fn preflight_data_root_move(
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    target: String,
+) -> Result<data_root_move::MovePlan, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let backups = media::backup_location::resolve_root(state.data_root.path());
+    data_root_move::preflight(&state.data_root, &target, &backups, app_install_dir().as_deref())
+        .map_err(|e| e.code().to_string())
+}
+
+/// OWNER-gated SCHEDULE. Re-runs the preflight server-side (the renderer's plan is never trusted),
+/// then durably records the intent. NOTHING is copied here: the move itself runs at the next boot,
+/// with every database closed and no server bound — the caller's job is only to reach that boot via
+/// the existing coordinated relaunch.
+#[tauri::command]
+fn schedule_data_root_move(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    target: String,
+) -> Result<data_root_move::MovePlan, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let locator_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let backups = media::backup_location::resolve_root(state.data_root.path());
+    let plan = data_root_move::preflight(&state.data_root, &target, &backups, app_install_dir().as_deref())
+        .map_err(|e| e.code().to_string())?;
+    data_root_move::schedule(&locator_dir, &state.data_root, &plan).map_err(|e| e.code().to_string())?;
+    Ok(plan)
+}
+
+/// Rollback for an aborted coordinated relaunch: drop a just-written move intent so a cancelled
+/// schedule can never trigger a move at the next boot. Removes only a not-yet-executed intent.
+#[tauri::command]
+fn clear_pending_data_root_move(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let locator_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    data_root_move::clear_intent(&locator_dir);
+    Ok(())
+}
+
+/// Read-only: is a move scheduled? The UI uses it to keep a second move (or a second click) out.
+#[tauri::command]
+fn pending_data_root_move(app_handle: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let locator_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(data_root_move::read_intent(&locator_dir).map(|i| {
+        serde_json::json!({ "moveId": i.move_id, "phase": i.phase, "targetRoot": i.target_root })
+    }))
+}
+
+/// Open the native folder picker is a renderer concern; this only exposes the CURRENT root so the
+/// dialog can start somewhere sensible.
 /// The runtime paths the renderer needs. The renderer resolves NOTHING itself — see
 /// `src/core/runtime/runtime-paths.ts`. Read-only; no owner gate (a path is not a secret, and the
 /// Settings display needs it before anyone has typed a password).
@@ -1874,7 +1947,7 @@ fn media_prepare_stock_image(
 // reasoning that turns a full disk into a failed write. The write path is still hardened separately
 // (temp → verify → rename), but the two are independent lines, not substitutes for each other.
 #[cfg(windows)]
-fn volume_free_bytes(path: &std::path::Path) -> Option<u64> {
+pub(crate) fn volume_free_bytes(path: &std::path::Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
@@ -1893,7 +1966,7 @@ fn volume_free_bytes(path: &std::path::Path) -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-fn volume_free_bytes(_path: &std::path::Path) -> Option<u64> {
+pub(crate) fn volume_free_bytes(_path: &std::path::Path) -> Option<u64> {
     None
 }
 
@@ -2735,8 +2808,17 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("app data dir unavailable: {e}"))?;
-            let root = match data_root::resolve(&locator_dir) {
-                Ok(r) => r,
+            // DATA-ROOT-I1 / B2 — a pending MOVE is reconciled here, before the root is handed out:
+            // "where is the data" and "is a move half-done" cannot be answered independently, because
+            // after the locator write the honest answer to the first is the target and only the intent
+            // knows whether that target was ever proven.
+            let root = match data_root_move::resolve_with_pending_move(&locator_dir) {
+                Ok((r, outcome)) => {
+                    if outcome != data_root_move::MoveOutcome::None {
+                        eprintln!("[data-move] boot outcome: {outcome:?}");
+                    }
+                    r
+                }
                 Err(e) => {
                     let msg = e.message(None);
                     eprintln!("[data-root] {} — {}", e.code(), msg);
@@ -2750,6 +2832,12 @@ pub fn run() {
                 root.is_legacy_in_place()
             );
             let app_dir = root.path().to_path_buf();
+            // B1 orphan finding: our own atomic-write leftovers, and ONLY those. Skipped entirely while a
+            // move is pending, so a recoverable move's files can never be swept away.
+            let swept = data_root_move::cleanup_own_temp_files(&locator_dir);
+            if swept > 0 {
+                eprintln!("[data-root] removed {swept} orphaned temp file(s)");
+            }
             // MEDIA-04B2A12-R3 — boot recovery for an interrupted atomic restore. MUST run before ANY DB
             // or media file is opened. A pre-commit journal rolls the tree back to the exact prior state;
             // the committed state is kept; an unrecoverable journal fails startup closed (no DB/media use).
@@ -2847,6 +2935,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // DATA-ROOT-I1 — the renderer's only way to learn where anything lives.
             get_runtime_paths,
+            // DATA-ROOT-I1 / B2 — move the data root (preflight → schedule → boot-time move).
+            preflight_data_root_move,
+            schedule_data_root_move,
+            clear_pending_data_root_move,
+            pending_data_root_move,
             sync_server_start,
             primary_status,
             primary_configure,

@@ -30,7 +30,7 @@ mod detect;
 // the thin Tauri command wrappers in `lib.rs` can reach it; still no UI/DB.
 pub(crate) mod ingest;
 mod normalize;
-mod storage;
+pub(crate) mod storage;
 
 pub use normalize::{create_thumbnail, inspect_image_bytes, normalize_stock_image};
 pub use storage::{
