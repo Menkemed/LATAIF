@@ -1921,14 +1921,10 @@ fn verify_owner_credentials(
 
 #[tauri::command]
 fn storage_free_bytes(state: tauri::State<'_, AppHandleState>) -> Result<u64, String> {
-    // The mobile staging root is `<app_data_dir>/mobile-upload-staging`, so its parent is the app
-    // data directory — which is where `lataif.db` and its temp file live. Free space is a property
-    // of the volume, so any real path under it gives the same answer.
-    let dir = state
-        .mobile_staging_root
-        .parent()
-        .unwrap_or(state.mobile_staging_root.as_path());
-    volume_free_bytes(dir).ok_or_else(|| ERR_FREE_SPACE_UNAVAILABLE.to_string())
+    // DATA-ROOT-I1 — the data root itself, where `lataif.db` and its temp file live. Free space is a
+    // property of the volume, so this is the volume the save has to fit on. Previously derived as
+    // `mobile_staging_root.parent()`, which was a second answer to the same question.
+    volume_free_bytes(state.data_root.path()).ok_or_else(|| ERR_FREE_SPACE_UNAVAILABLE.to_string())
 }
 
 #[tauri::command]

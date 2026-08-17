@@ -168,8 +168,11 @@ die passende `rootId`. Bei Uneindeutigkeit: fail closed.
   ziehen ihn über `data_root_of(&app_handle)`. `app_data_dir()` kommt in `lib.rs` nur noch **einmal**
   vor — beim Suchen des Locators.
 * `SyncServer` bekommt den `DataRoot` **im Konstruktor**; `frontend_db_path` und
-  `mobile_staging_root` kommen daraus. Die zweite SSOT `db_path.parent()` ist ersatzlos weg (auch in
-  `trust_ctx` und im Desktop-Stock-Check).
+  `mobile_staging_root` kommen daraus. `AppState` (der Axum-Server-State) traegt ihn ebenfalls, damit
+  auch die HTTP-Routen (Mobile-Media-Auslieferung, AI-Key-Lookup) ihn nicht rekonstruieren muessen.
+  Die zweite SSOT `db_path.parent()` / `frontend_db_path.parent()` / `mobile_staging_root.parent()`
+  ist ersatzlos weg — in `trust_ctx`, im Desktop-Stock-Check, in `storage_free_bytes` und in beiden
+  Routen.
   *Bewusste Ausnahme:* `install_id.rs` und `secret.rs` nehmen weiterhin den Server-DB-Pfad entgegen
   und legen ihre Schlüsseldatei daneben. Das ist keine zweite Wurzel-Antwort, sondern eine
   Datei-neben-Datei-Beziehung — und der Server-DB-Pfad kommt jetzt selbst aus `DataRoot`.

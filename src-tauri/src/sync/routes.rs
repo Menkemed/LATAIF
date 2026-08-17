@@ -1002,11 +1002,8 @@ async fn media_blob(
     if !super::product_query::media_key_is_known(&state.frontend_db_path, &claims.tenant_id, &params.key) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let media_root = state
-        .frontend_db_path
-        .parent()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .join("media");
+    // DATA-ROOT-I1 — from the resolved root, not re-derived from a DB path.
+    let media_root = state.data_root.media_root();
     let path = super::product_query::media_path_for_key(&media_root, &params.key)
         .ok_or(StatusCode::BAD_REQUEST)?;
     let bytes = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
@@ -1148,10 +1145,8 @@ async fn ai_identify_route(
     let req: super::ai_route::AiIdentifyRequest =
         serde_json::from_str(raw).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let app_dir = state
-        .frontend_db_path
-        .parent()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    // DATA-ROOT-I1 — the key file lives in the resolved data root.
+    let app_dir = state.data_root.path();
 
     match super::ai_route::identify(app_dir, &req).await {
         Ok(result) => Ok((StatusCode::OK, Json(serde_json::json!({ "result": result })))),
@@ -2494,6 +2489,7 @@ mod legacy_push_tests {
                 db: Mutex::new(db_q()), // sync_changelog + sync_cutover_state + sync_change_quarantine
                 jwt_secret: SECRET.to_string(),
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
+                data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,
                 mobile_staging_root: std::env::temp_dir().join("lataif-routes-test-staging"),
             })
@@ -2556,6 +2552,7 @@ mod legacy_push_tests {
                 db: Mutex::new(conn),
                 jwt_secret: SECRET.to_string(),
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
+                data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,
                 mobile_staging_root: std::env::temp_dir().join("lataif-routes-test-staging"),
             })

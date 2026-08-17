@@ -199,6 +199,13 @@ impl DataRoot {
     pub fn openai_key(&self) -> PathBuf {
         self.root.join(OPENAI_KEY_FILENAME)
     }
+
+    /// Test-only: a root that was never resolved from a locator. Used by the in-crate route
+    /// fixtures, which need a `DataRoot` but have no AppData to bootstrap from.
+    #[cfg(test)]
+    pub fn for_test(root: PathBuf) -> Self {
+        Self { root, root_id: "test-root".into(), legacy_in_place: false }
+    }
 }
 
 // ── atomic little writes (temp → fsync → rename), same shape as the intent files ─────────────

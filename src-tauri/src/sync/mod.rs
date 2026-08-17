@@ -133,6 +133,10 @@ pub struct AppState {
     /// changes while the server runs (a role change goes through an explicit command,
     /// which restarts the server).
     pub primary_state: primary::State,
+    /// DATA-ROOT-I1 — the ONE resolved data root, so a route never has to reconstruct it. The mobile
+    /// media route and the AI-key lookup used to derive it as `frontend_db_path.parent()`: correct
+    /// today, but a second answer that would not follow the root if the definition ever changed.
+    pub data_root: crate::data_root::DataRoot,
     /// MOBILE-04B2A8-I1 — the controlled staging root the authenticated mobile upload ingress
     /// (`/api/mobile/upload` → `accept_upload`) publishes image bytes into. MUST be the SAME directory
     /// the desktop worker's claim/prepare reads from (`AppHandleState.mobile_staging_root`), so a job
@@ -258,6 +262,7 @@ impl SyncServer {
             db: Mutex::new(conn),
             jwt_secret,
             frontend_db_path,
+            data_root: self.data_root.clone(),
             primary_state: state,
             mobile_staging_root,
         });
