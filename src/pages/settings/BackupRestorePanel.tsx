@@ -236,9 +236,9 @@ export function BackupRestorePanel() {
                 style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderTop: '1px solid #F1F3F5' }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 13, color: '#0F0F10' }} data-testid="brp-row-created">
-                    Created: {formatSnapshotTime(s.createdAt)} \u00b7 v{s.appVersion}
+                    Created: {formatSnapshotTime(s.createdAt)} {'\u00b7'} v{s.appVersion}
                   </div>
-                  <div style={cell}>{formatBytes(s.dbSizeBytes + s.mediaSizeBytes)} \u00b7 {s.mediaFileCount} media \u00b7 complete</div>
+                  <div style={cell}>{formatBytes(s.dbSizeBytes + s.mediaSizeBytes)} {'\u00b7'} {s.mediaFileCount} media {'\u00b7'} complete</div>
                   <div style={{ ...cell, fontFamily: 'monospace', fontSize: 11 }} data-testid="brp-row-id">{s.snapshotId}</div>
                 </div>
                 <button data-testid="brp-restore" data-snapshot-id={s.snapshotId}

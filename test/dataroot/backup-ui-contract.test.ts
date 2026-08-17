@@ -80,5 +80,24 @@ ok(formatSnapshotTime('not-a-date') === 'not-a-date', 'an unparsable value is pa
 ok(/formatSnapshotTime\(s\.createdAt\)/.test(panel), 'the row actually uses it');
 ok(/data-testid="brp-row-id"/.test(panel), 'and the opaque snapshot id is shown, so disk and screen match up');
 
-console.log(`\nbackup-ui-contract: ${PASS} passed, ${FAIL} failed`);
+// ── 4. no unicode escape reaches the screen as text ───────────────────────
+//
+// Shipped in v0.8.44 and spotted within the hour: the separator in the snapshot row was written as a
+// bare \u00b7 in JSX TEXT, where an escape sequence means nothing — so the row literally read
+// "…local time \u00b7 v0.8.44". The identical escape inside a string expression is correct and
+// renders a middle dot, which is exactly why the mistake is easy to make and easy to miss in a diff.
+// It is a known trap in this codebase; now it is a gate.
+const jsxTextEscape = /(?:^|[>}])[^'"`\n]*\\u[0-9a-fA-F]{4}/;
+const escapeOffenders: string[] = [];
+for (const [file, src] of [['BackupRestorePanel.tsx', panel], ['SettingsPage.tsx', settings]] as const) {
+  src.split(/\r?\n/).forEach((line, i) => {
+    if (/^\s*(\/\/|\*|\/\*)/.test(line)) return; // a comment describing the trap is not the trap
+    if (jsxTextEscape.test(line)) escapeOffenders.push(`${file}:${i + 1} ${line.trim().slice(0, 70)}`);
+  });
+}
+ok(escapeOffenders.length === 0, `no bare unicode escape sits in JSX text\n     ${escapeOffenders.join('\n     ')}`);
+ok(panel.includes("{'\\u00b7'}"), 'the separator is a string expression, so it renders as a character');
+
+console.log(`
+backup-ui-contract: ${PASS} passed, ${FAIL} failed`);
 if (FAIL > 0) { for (const f of failures) console.log(`   - ${f}`); process.exit(1); }
