@@ -129,19 +129,13 @@ fn is_reparse(md: &std::fs::Metadata) -> bool {
 /// The canonical reference set: EVERY tracked generation's storage_key (media-root-relative path). Fail-closed
 /// — any DB open/read error is an error so a failed reference build can never turn every file into an orphan.
 fn referenced_rel_paths(front_db: &Path) -> Result<BTreeSet<String>, MediaError> {
+    // v0.8.44 — this is the PRESERVED set (see `reachability`): every generation row, whatever its
+    // status. Deliberately wider than what a business consumer can reach, because the question here
+    // is "may I delete this?", not "must this exist?". Fail-closed — a failed read is an error, never
+    // an empty set that would turn every file into an orphan.
     let conn = Connection::open_with_flags(front_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| MediaError::Io(format!("gc open front: {}", e)))?;
-    let mut stmt = conn
-        .prepare("SELECT storage_key FROM media_blob_generations")
-        .map_err(|e| MediaError::Io(format!("gc prepare: {}", e)))?;
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .map_err(|e| MediaError::Io(format!("gc query: {}", e)))?;
-    let mut set = BTreeSet::new();
-    for row in rows {
-        set.insert(normalize(&row.map_err(|e| MediaError::Io(format!("gc row: {}", e)))?));
-    }
-    Ok(set)
+    super::reachability::preserved_keys(&conn)
 }
 
 /// Normalize a stored key / scanned path to forward slashes for set comparison.

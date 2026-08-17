@@ -32,9 +32,9 @@ import { scanUnusedMedia, scheduleUnusedMediaGc, finalizeUnusedMediaGc, type GcR
 import {
   sanitizeBackupError,
   formatBytes,
-  formatCreatedAt,
   canRunOwnerAction,
   canConfirmRestore,
+  formatSnapshotTime,
 } from './backup-restore-panel-logic';
 
 const primaryBtn: CSSProperties = { padding: '8px 14px', borderRadius: 8, border: '1px solid #715DE3', background: '#715DE3', color: '#fff', cursor: 'pointer' };
@@ -224,6 +224,32 @@ export function BackupRestorePanel() {
       {error && <div data-testid="brp-error" style={{ color: '#B42318', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
       {/* BACKUP-LOCATION — owner-configurable backup folder. Snapshots + restore use this exact location. */}
+      {/* v0.8.44 - this list used to be rendered after the media-cleanup box, so it read as part of
+          "Unused media cleanup". It belongs directly under the button that loads it. */}
+      {snapshots && (
+        <div data-testid="brp-list-section" style={{ marginBottom: 16, maxWidth: 640 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: '#0F0F10', marginBottom: 6 }}>Available snapshots</div>
+          <div data-testid="brp-list" style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
+            {snapshots.length === 0 && <div style={{ padding: 12, fontSize: 13, color: '#6B7280' }}>No snapshots yet.</div>}
+            {snapshots.map((s) => (
+              <div key={s.snapshotId} data-testid="brp-row" data-snapshot-id={s.snapshotId}
+                style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderTop: '1px solid #F1F3F5' }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, color: '#0F0F10' }} data-testid="brp-row-created">
+                    Created: {formatSnapshotTime(s.createdAt)} \u00b7 v{s.appVersion}
+                  </div>
+                  <div style={cell}>{formatBytes(s.dbSizeBytes + s.mediaSizeBytes)} \u00b7 {s.mediaFileCount} media \u00b7 complete</div>
+                  <div style={{ ...cell, fontFamily: 'monospace', fontSize: 11 }} data-testid="brp-row-id">{s.snapshotId}</div>
+                </div>
+                <button data-testid="brp-restore" data-snapshot-id={s.snapshotId}
+                  onClick={() => { setConfirmId(s.snapshotId); setConfirmPw(''); setError(null); }}
+                  disabled={busy} style={dangerBtn}>Restore</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div data-testid="brp-loc" style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: 12, marginBottom: 16, maxWidth: 640 }}>
         <div style={{ fontSize: 13, fontWeight: 500, color: '#0F0F10', marginBottom: 6 }}>Backup location</div>
         <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
@@ -336,24 +362,6 @@ export function BackupRestorePanel() {
           </div>
         </div>
       </Modal>
-
-      {snapshots && (
-        <div data-testid="brp-list" style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
-          {snapshots.length === 0 && <div style={{ padding: 12, fontSize: 13, color: '#6B7280' }}>No snapshots yet.</div>}
-          {snapshots.map((s) => (
-            <div key={s.snapshotId} data-testid="brp-row" data-snapshot-id={s.snapshotId}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderTop: '1px solid #F1F3F5' }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, color: '#0F0F10' }}>{formatCreatedAt(s.createdAt)} · v{s.appVersion}</div>
-                <div style={cell}>{formatBytes(s.dbSizeBytes + s.mediaSizeBytes)} · {s.mediaFileCount} media · complete</div>
-              </div>
-              <button data-testid="brp-restore" data-snapshot-id={s.snapshotId}
-                onClick={() => { setConfirmId(s.snapshotId); setConfirmPw(''); setError(null); }}
-                disabled={busy} style={dangerBtn}>Restore</button>
-            </div>
-          ))}
-        </div>
-      )}
 
       <Modal open={confirmId !== null} onClose={cancelConfirm} title="Restore backup" width={520}>
         <div data-testid="brp-confirm-modal" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

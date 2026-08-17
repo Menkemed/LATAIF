@@ -58,6 +58,16 @@ fn make_app_data(root: &Path, root_id: &str) -> PathBuf {
     app
 }
 
+/// A LEGACY installation: the locator lives in the very directory that holds the data, which is what
+/// every pre-0.8.43 install looks like and the only shape in which control-plane files can end up
+/// inside a data root at all.
+fn make_legacy_root(root_id: &str) -> PathBuf {
+    let dir = tmp("legacy");
+    make_source(&dir, root_id);
+    data_root::set_locator(&dir, &dir, root_id).unwrap();
+    dir
+}
+
 fn root_of(app: &Path) -> DataRoot {
     data_root::resolve(app).unwrap()
 }
@@ -298,15 +308,35 @@ fn a_corrupted_database_copy_is_caught_before_any_switch() {
 }
 
 #[test]
-fn a_referenced_media_file_that_did_not_arrive_is_caught() {
+fn a_reachable_media_file_that_did_not_arrive_is_caught() {
+    // v0.8.44: "referenced" now means REACHABLE (link -> object -> current generation), so the test
+    // has to build an image a gallery could actually show. A bare generation row is no longer enough
+    // - and that is the whole point of the change, proved from the other side by the parity test.
     let src = tmp("v-media");
     make_source(&src, "id-1");
-    let (staging, mut manifest) = stage(&src, "id-1");
-    let blob = staging.join("media").join("scope-a").join("ab").join("abcdef.jpg");
-    fs::remove_file(&blob).unwrap();
-    manifest.remove("media/scope-a/ab/abcdef.jpg");
+    let conn = Connection::open(src.join(data_root::BUSINESS_DB_FILENAME)).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE media_objects (tenant_id TEXT, media_id TEXT, master_blob_id TEXT, deleted_at TEXT);
+         CREATE TABLE media_blobs (tenant_id TEXT, blob_id TEXT, blob_status TEXT, current_generation_no INTEGER, deleted_at TEXT);
+         CREATE TABLE media_variants (tenant_id TEXT, media_id TEXT, blob_id TEXT, variant_type TEXT, deleted_at TEXT);
+         CREATE TABLE media_links (tenant_id TEXT, media_id TEXT, media_role TEXT, entity_id TEXT, deleted_at TEXT);
+         DROP TABLE media_blob_generations;
+         CREATE TABLE media_blob_generations (tenant_id TEXT, blob_id TEXT, generation_no INTEGER, storage_key TEXT,
+             stored_blob_hash TEXT, byte_size INTEGER, extension TEXT, gen_status TEXT, deleted_at TEXT);
+         INSERT INTO media_objects VALUES ('scope-a','m1','b1',NULL);
+         INSERT INTO media_blobs VALUES ('scope-a','b1','present',1,NULL);
+         INSERT INTO media_blob_generations VALUES ('scope-a','b1',1,'scope-a/ab/abcdef.jpg','abcdef',7,'jpg','available',NULL);
+         INSERT INTO media_links VALUES ('scope-a','m1','gallery','p1',NULL);",
+    )
+    .unwrap();
+    drop(conn);
+    let (staging, manifest) = stage(&src, "id-1");
+    // The copy is faithful, so the ONLY problem is the missing picture itself.
+    fs::remove_file(staging.join("media").join("scope-a").join("ab").join("abcdef.jpg")).unwrap();
+    let mut m = manifest.clone();
+    m.remove("media/scope-a/ab/abcdef.jpg");
     fs::remove_file(src.join("media").join("scope-a").join("ab").join("abcdef.jpg")).unwrap();
-    assert_eq!(verify(&src, &staging, &manifest, "id-1").unwrap_err(), MoveError::MediaReferenceMissing);
+    assert_eq!(verify(&src, &staging, &m, "id-1").unwrap_err(), MoveError::MediaReferenceMissing);
 }
 
 #[test]
@@ -625,6 +655,205 @@ fn a_crash_between_the_rename_and_the_phase_write_is_recognised_and_committed() 
     assert!(read_intent(&f.app).is_none());
     // And the source is still whole — nothing was stranded.
     assert!(f.src.join(data_root::BUSINESS_DB_FILENAME).exists());
+}
+
+// -- control-plane files never travel into a data root ----------------------
+//
+// The v0.8.43 production move carried `data-location.json` and `data-move-intent.json` into the new
+// root, because on a legacy install AppData IS the data root. They are dead there - nothing reads
+// them - but two files that look authoritative and are not is precisely the confusion this slice
+// exists to remove.
+
+#[test]
+fn a_move_does_not_carry_the_locator_or_the_move_intent_into_the_target() {
+    let src = make_legacy_root("id-legacy-move");
+    let root = root_of(&src);
+    let backups = tmp("control-bk");
+    let target = tmp("control-parent").join("Data");
+    let plan = plan_for(&root, &target, &backups).unwrap();
+    schedule(&src, &root, &plan).unwrap();
+    assert!(src.join(data_root::LOCATOR_FILENAME).is_file(), "precondition: legacy layout");
+    assert!(src.join(MOVE_INTENT_FILENAME).is_file(), "precondition: a move is scheduled");
+
+    // The manifest the copy works from must not list them.
+    let manifest = scan_source(&src).unwrap();
+    assert!(!manifest.contains_key(data_root::LOCATOR_FILENAME));
+    assert!(!manifest.contains_key(MOVE_INTENT_FILENAME));
+
+    let (active, outcome) = resolve_with_pending_move(&src).unwrap();
+    assert_eq!(outcome, MoveOutcome::Switched);
+    assert_eq!(active.path(), target.as_path());
+
+    assert!(!target.join(MOVE_INTENT_FILENAME).exists(), "no dead move intent in the new root");
+    assert!(!target.join(data_root::LOCATOR_FILENAME).exists(), "no dead locator in the new root");
+    // Everything that IS data still arrived.
+    assert!(target.join(data_root::BUSINESS_DB_FILENAME).exists());
+    assert!(target.join(data_root::MARKER_FILENAME).exists(), "the marker belongs to the root and travels");
+    assert!(target.join("sync_install_id.key").exists());
+    assert!(target.join("media").join("scope-a").join("ab").join("abcdef.jpg").exists());
+    // And the authoritative locator, which never moved, still points at the new root.
+    assert_eq!(data_root::read_locator(&src).unwrap().unwrap().root_id, "id-legacy-move");
+}
+
+#[test]
+fn the_stale_copy_cleanup_never_touches_a_legacy_in_place_root() {
+    // The one genuinely dangerous mistake: on a legacy install the "copy" IS the real locator.
+    let src = make_legacy_root("id-legacy");
+    let root = root_of(&src);
+    assert!(root.is_legacy_in_place());
+
+    let removed = cleanup_stale_control_copies(&src, &root);
+    assert!(removed.is_empty());
+    assert!(src.join(data_root::LOCATOR_FILENAME).is_file(), "the REAL locator is still there");
+}
+
+#[test]
+fn the_stale_copy_cleanup_removes_only_proven_dead_copies() {
+    let f = fixture("clean-stale");
+    let (root, _) = resolve_with_pending_move(&f.app).unwrap();
+    // Simulate the v0.8.43 state: dead copies sitting in the (non-legacy) target root.
+    fs::write(f.target.join(data_root::LOCATOR_FILENAME), b"{dead}").unwrap();
+    fs::write(f.target.join(MOVE_INTENT_FILENAME), b"{dead}").unwrap();
+
+    let removed = cleanup_stale_control_copies(&f.app, &root);
+    assert_eq!(removed.len(), 2, "both dead copies go");
+    assert!(!f.target.join(data_root::LOCATOR_FILENAME).exists());
+    assert!(!f.target.join(MOVE_INTENT_FILENAME).exists());
+    // The authoritative one, outside the root, is untouched.
+    assert!(f.app.join(data_root::LOCATOR_FILENAME).is_file());
+    assert_eq!(data_root::read_locator(&f.app).unwrap().unwrap().root_id, root.root_id());
+}
+
+#[test]
+fn the_stale_copy_cleanup_stands_down_when_anything_is_ambiguous() {
+    let f = fixture("clean-ambig");
+    let (root, _) = resolve_with_pending_move(&f.app).unwrap();
+    fs::write(f.target.join(data_root::LOCATOR_FILENAME), b"{dead}").unwrap();
+    fs::write(f.target.join(MOVE_INTENT_FILENAME), b"{dead}").unwrap();
+
+    // (a) a move is pending again -> the intent copy is recoverable state, so it stays.
+    let intent = MoveIntent {
+        schema_version: MOVE_INTENT_SCHEMA_VERSION,
+        move_id: "later".into(),
+        root_id: root.root_id().to_string(),
+        source_root: f.target.to_string_lossy().to_string(),
+        target_root: tmp("clean-ambig-2").join("Data").to_string_lossy().to_string(),
+        staging_root: tmp("clean-ambig-3").to_string_lossy().to_string(),
+        phase: MovePhase::Prepared,
+        attempts: 0,
+        created_at: "2026-01-01T00:00:00Z".into(),
+    };
+    fs::write(intent_path(&f.app), serde_json::to_vec_pretty(&intent).unwrap()).unwrap();
+    let removed = cleanup_stale_control_copies(&f.app, &root);
+    assert_eq!(removed, vec![data_root::LOCATOR_FILENAME], "the intent copy stays while a move is live");
+    clear_intent(&f.app);
+
+    // (b) the authoritative locator names a DIFFERENT data set -> touch nothing at all.
+    data_root::set_locator(&f.app, &f.target, "a-different-id").unwrap();
+    assert!(cleanup_stale_control_copies(&f.app, &root).is_empty());
+    assert!(f.target.join(MOVE_INTENT_FILENAME).exists());
+}
+
+// -- backup -> restore -> move, the parity that was broken -------------------
+
+#[test]
+fn a_complete_snapshot_can_be_restored_and_then_moved_again() {
+    // The central regression. A data set the backup calls complete must, after a real restore, still
+    // satisfy the move's media check - which it did not, because the two disagreed about what
+    // "referenced" meant. The orphan generation below is the exact shape found in production.
+    use crate::media::{backup, reachability, restore};
+
+    let src = tmp("parity-src");
+    make_source(&src, "id-parity");
+    // Content-addressed for real: the backup reads each file back and checks that its bytes hash to
+    // the declared key, so made-up hashes would fail long before the interesting assertion.
+    let linked_bytes = b"linked-image-bytes";
+    let orphan_bytes = b"orphan-image-bytes";
+    let linked = crate::media::storage::sha256_hex(linked_bytes);
+    let orphan = crate::media::storage::sha256_hex(orphan_bytes);
+    let (linked, orphan) = (linked.as_str(), orphan.as_str());
+    let conn = Connection::open(src.join(data_root::BUSINESS_DB_FILENAME)).unwrap();
+    conn.execute_batch(
+        "DROP TABLE media_blob_generations;
+         CREATE TABLE media_objects (tenant_id TEXT, media_id TEXT, master_blob_id TEXT, deleted_at TEXT);
+         CREATE TABLE media_blobs (tenant_id TEXT, blob_id TEXT, blob_status TEXT, current_generation_no INTEGER, deleted_at TEXT);
+         CREATE TABLE media_variants (tenant_id TEXT, media_id TEXT, blob_id TEXT, variant_type TEXT, deleted_at TEXT);
+         CREATE TABLE media_links (tenant_id TEXT, media_id TEXT, media_role TEXT, entity_id TEXT, deleted_at TEXT);
+         CREATE TABLE media_blob_generations (tenant_id TEXT, blob_id TEXT, generation_no INTEGER, storage_key TEXT,
+             stored_blob_hash TEXT, byte_size INTEGER, extension TEXT, gen_status TEXT, deleted_at TEXT);",
+    )
+    .unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO media_objects VALUES ('t1','m1','b1',NULL);
+         INSERT INTO media_blobs VALUES ('t1','b1','present',1,NULL);
+         INSERT INTO media_blob_generations VALUES ('t1','b1',1,'t1/{la}/{l}.jpg','{l}',18,'jpg','available',NULL);
+         INSERT INTO media_links VALUES ('t1','m1','gallery','p1',NULL);
+         INSERT INTO media_objects VALUES ('t1','m9','b9',NULL);
+         INSERT INTO media_blobs VALUES ('t1','b9','present',1,NULL);
+         INSERT INTO media_blob_generations VALUES ('t1','b9',1,'t1/{oa}/{o}.jpg','{o}',18,'jpg','available',NULL);",
+        la = &linked[0..2], l = linked, oa = &orphan[0..2], o = orphan
+    ))
+    .unwrap();
+    drop(conn);
+    for (h, bytes) in [(linked, &linked_bytes[..]), (orphan, &orphan_bytes[..])] {
+        let d = src.join("media").join("t1").join(&h[0..2]);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(format!("{h}.jpg")), bytes).unwrap();
+    }
+
+    // The REAL backup engine decides what to carry.
+    let conn = Connection::open(src.join(data_root::BUSINESS_DB_FILENAME)).unwrap();
+    let selection = backup::collect_selection_from_db(&conn).unwrap();
+    drop(conn);
+    assert_eq!(selection.len(), 1, "the orphan is deliberately not carried");
+    let backups = tmp("parity-backups");
+    let out = backups.join("snap-1");
+    let manifest = backup::snapshot(&backup::SnapshotInput {
+        media_root: &src.join("media"),
+        frontend_db: &src.join(data_root::BUSINESS_DB_FILENAME),
+        server_db: Some(&src.join(data_root::SYNC_SERVER_DB_FILENAME)),
+        selection: &selection,
+        created_at: "2026-08-17T00:00:00Z".into(),
+        app_version: "0.8.44".into(),
+        schema_version: "1".into(),
+        media_schema_version: "1".into(),
+        out_dir: &out,
+        workspace_parent: &backups,
+    })
+    .unwrap();
+    assert_eq!(manifest.status, "complete");
+    restore::validate_snapshot(&out).unwrap();
+
+    // Restore it into a FRESH root, exactly as the boot path would.
+    let restored = tmp("parity-restored");
+    data_root::write_marker(
+        &restored,
+        &data_root::RootMarker {
+            schema_version: data_root::MARKER_SCHEMA_VERSION,
+            root_id: "id-parity".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            bootstrap_pending: false,
+            business_db_expected: true,
+        },
+    )
+    .unwrap();
+    restore::restore(&restore::RestoreInput { backup_dir: &out, app_data_dir: &restored }, false).unwrap();
+
+    // The orphan's FILE is gone - the backup never carried it - while its DB row survives.
+    let restored_db = restored.join(data_root::BUSINESS_DB_FILENAME);
+    let c = Connection::open_with_flags(&restored_db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(reachability::preserved_keys(&c).unwrap().len(), 2, "both generation rows are still there");
+    assert_eq!(reachability::required_keys(&c).unwrap().len(), 1, "only one of them is reachable");
+    drop(c);
+    let orphan_file = restored.join("media").join("t1").join(&orphan[0..2]).join(format!("{orphan}.jpg"));
+    assert!(!orphan_file.exists(), "the unreachable file did not come along");
+
+    // ...and THIS is the claim: the restored root passes the move's media check.
+    check_media(&restored).expect("a restored complete snapshot must be movable again");
+
+    // The rule loosened exactly one thing: a REACHABLE file that goes missing is still fatal.
+    fs::remove_file(restored.join("media").join("t1").join(&linked[0..2]).join(format!("{linked}.jpg"))).unwrap();
+    assert_eq!(check_media(&restored).unwrap_err(), MoveError::MediaReferenceMissing);
 }
 
 // ── temp cleanup must not eat a live move ───────────────────────────────────

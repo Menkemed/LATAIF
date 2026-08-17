@@ -261,6 +261,27 @@ async function main() {
   ok(statSync(join(APP_DATA_DIR, 'lataif.db')).size > 0, 'B11: and the business database is intact');
   c.close(); killApp(); await sleep(1500);
 
+  // ── the production shape: an unreachable generation row whose file is gone ──
+  //
+  // This is what an abandoned upload leaves behind, and it is what made a restored snapshot
+  // unmovable before v0.8.44: the row is real, nothing links to it, no gallery shows it, and a
+  // backup therefore never carried its file. The move used to demand that file anyway. Injected
+  // while the app is closed, so sql.js loads it from disk on the next start.
+  const ORPHAN_KEY = 'tenant-1/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jpg';
+  {
+    const db = new DatabaseSync(join(APP_DATA_DIR, 'lataif.db'));
+    db.exec(
+      `INSERT INTO media_blob_generations
+         (tenant_id, blob_id, generation_no, storage_key, stored_blob_hash, byte_size,
+          content_kind, mime_type, extension, is_encrypted, gen_status, created_at)
+       VALUES ('tenant-1','blob-e2e-orphan',1,'${ORPHAN_KEY}',
+               'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',123,
+               'raster_image','image/jpeg','jpg',0,'available','2026-08-01T00:00:00.000Z')`,
+    );
+    db.close();
+  }
+  ok(!existsSync(join(APP_DATA_DIR, 'media', 'tenant-1', 'ee')), 'A0: the orphan has no file on disk');
+
   // ════════════════════════════════════════════════════════════════════════
   // §A HAPPY PATH — through the real panel this time.
   // ════════════════════════════════════════════════════════════════════════
@@ -330,6 +351,16 @@ async function main() {
   ok(readJson(join(TARGET, '.lataif-data-root.json')).rootId === rootIdBefore, 'A17: the target marker carries the same rootId');
   ok(!existsSync(MOVE_INTENT), 'A18: the intent is consumed');
   ok(!(await exists(c, 'input[placeholder="e.g. Al-Khalifa Luxury"]')), 'A19: no onboarding — this is the same data set');
+
+  // The orphan travelled as a ROW and not as a file, and the move went through regardless — the
+  // whole point of the shared reachability contract.
+  {
+    const db = new DatabaseSync(join(TARGET, 'lataif.db'), { readOnly: true });
+    const n = db.prepare("SELECT COUNT(*) c FROM media_blob_generations WHERE blob_id='blob-e2e-orphan'").get().c;
+    db.close();
+    ok(n === 1, 'A19b: the unreachable generation row is still in the moved database');
+  }
+  ok(!existsSync(join(TARGET, 'media', 'tenant-1', 'ee')), 'A19c: its file was never required and never appeared');
 
   // Everything the source has, the target has.
   //

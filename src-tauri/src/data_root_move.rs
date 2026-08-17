@@ -80,6 +80,17 @@ const EXCLUDED_EXACT: &[&str] = &[
     ".backup-intent",
     ".gc-intent",
 ];
+
+/// RESERVED CONTROL-PLANE FILES — authoritative only in the identifier-scoped AppData directory,
+/// never inside a data root.
+///
+/// On a legacy installation those two directories are the same one, so a move used to carry the
+/// locator and the move intent into the new root, where they are dead files that nevertheless look
+/// authoritative. (That is exactly what the v0.8.43 production move left behind.) They are listed
+/// by exact name, not by pattern: a data root is allowed to contain any `.json` it likes, and only
+/// a file the contract explicitly places OUTSIDE the root may be dropped from a copy.
+pub const RESERVED_CONTROL_FILES: &[&str] =
+    &[data_root::LOCATOR_FILENAME, MOVE_INTENT_FILENAME];
 const EXCLUDED_PREFIX: &[&str] = &["backup-ws-", "data-location.tmp-", ".lataif-data-root.tmp-", STAGING_PREFIX];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,7 +271,9 @@ fn is_windows_reparse(_p: &Path) -> bool {
 }
 
 fn excluded(name: &str) -> bool {
-    EXCLUDED_EXACT.contains(&name) || EXCLUDED_PREFIX.iter().any(|p| name.starts_with(p))
+    EXCLUDED_EXACT.contains(&name)
+        || RESERVED_CONTROL_FILES.contains(&name)
+        || EXCLUDED_PREFIX.iter().any(|p| name.starts_with(p))
 }
 
 /// Every file the move carries, as `relative/path -> byte size`. Rejects the whole operation if a
@@ -555,33 +568,29 @@ fn check_db(p: &Path) -> Result<(), MoveError> {
     Ok(())
 }
 
-/// Every media blob the copied business DB still references must exist in the copied media tree.
-/// The reference set is the same fail-closed one the media GC uses, so "referenced" means the same
-/// thing in both directions.
+/// Every media file a business consumer can actually REACH must exist in the copied tree.
+///
+/// This used to demand a file for every generation row — the media GC's set — and that was a real
+/// contradiction, found on a live install: two blobs from an abandoned upload in August were
+/// referenced by generation rows, linked to nothing, displayed nowhere, and therefore never carried
+/// by a backup. A snapshot the backup called complete could not be moved afterwards. The backup was
+/// right about which files matter; the move now asks the same question through the same predicate
+/// (`reachability::required_keys`), so a data set that can be backed up can always be moved.
+///
+/// A missing REQUIRED file is still a hard failure — that is a picture somebody would open and not
+/// find. Only the unreachable remainder is no longer a blocker.
 fn check_media(root: &Path) -> Result<(), MoveError> {
     let db = root.join(data_root::BUSINESS_DB_FILENAME);
-    if !db.exists() {
-        return Ok(());
-    }
+    let required = crate::media::reachability::required_keys_from_db(&db)
+        .map_err(|_| MoveError::DbIntegrityFailed)?;
     let media_root = root.join(data_root::MEDIA_DIRNAME);
-    let conn = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| MoveError::DbIntegrityFailed)?;
-    let mut stmt = match conn.prepare("SELECT storage_key FROM media_blob_generations") {
-        Ok(s) => s,
-        Err(_) => return Ok(()), // table absent → nothing is referenced yet
-    };
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .map_err(|_| MoveError::DbIntegrityFailed)?;
-    for row in rows {
-        let key = row.map_err(|_| MoveError::DbIntegrityFailed)?;
-        let norm = key.replace('\\', "/");
+    for key in required {
         // A stored key must stay inside the media root — an escape is a corrupted reference, not a
         // missing file, and must never be "found" by walking out of the tree.
-        if norm.starts_with('/') || norm.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
+        if key.starts_with('/') || key.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
             return Err(MoveError::MediaReferenceMissing);
         }
-        if !media_root.join(norm.replace('/', std::path::MAIN_SEPARATOR_STR)).exists() {
+        if !media_root.join(key.replace('/', std::path::MAIN_SEPARATOR_STR)).exists() {
             return Err(MoveError::MediaReferenceMissing);
         }
     }
@@ -871,6 +880,60 @@ fn commit(app_data_dir: &Path, intent: &MoveIntent) -> MoveOutcome {
     clear_intent(app_data_dir);
     eprintln!("[data-move] committed — active root is now the target");
     MoveOutcome::Switched
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Stale control-plane copies inside a data root (the v0.8.43 live finding)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Remove the DEAD copies of the locator / move intent that an earlier move carried into the data
+/// root, and only those.
+///
+/// This is deliberately the narrowest possible contract, because the file being deleted has the
+/// same name as the one file the whole architecture depends on. Every one of these must hold:
+///
+///   1. the data root is NOT the AppData directory — on a legacy in-place install those two are the
+///      same folder and the file there is the REAL locator. This check alone prevents the only
+///      genuinely dangerous mistake;
+///   2. an authoritative locator exists in AppData, parses, and names THIS root;
+///   3. its `rootId` matches the marker of the root we are standing in;
+///   4. for the move intent: no move is pending, so nothing recoverable can be thrown away.
+///
+/// Anything ambiguous is left alone and reported. Nothing else in the root is touched — there is no
+/// pattern matching, no "*.json", no temp sweep.
+pub fn cleanup_stale_control_copies(app_data_dir: &Path, root: &DataRoot) -> Vec<&'static str> {
+    let mut removed = Vec::new();
+    // (1) legacy in-place root: the files there are authoritative. Never.
+    if root.is_legacy_in_place() || normalize_for_compare(root.path()) == normalize_for_compare(app_data_dir) {
+        return removed;
+    }
+    // (2)+(3) the real locator must exist outside, name this root, and share its identity.
+    let Ok(Some(loc)) = data_root::read_locator(app_data_dir) else { return removed };
+    if loc.root_id != root.root_id() {
+        return removed;
+    }
+    let named = normalize_for_compare(Path::new(loc.data_root.trim()));
+    let here = normalize_for_compare(root.path());
+    match (named, here) {
+        (Ok(a), Ok(b)) if a == b => {}
+        _ => return removed,
+    }
+    match data_root::read_marker(root.path()) {
+        Ok(Some(m)) if m.root_id == root.root_id() => {}
+        _ => return removed,
+    }
+    let stale_locator = root.path().join(data_root::LOCATOR_FILENAME);
+    if stale_locator.is_file() && fs::remove_file(&stale_locator).is_ok() {
+        removed.push(data_root::LOCATOR_FILENAME);
+    }
+    // (4) a pending move is recoverable state; its copy stays until the move is over.
+    if read_intent(app_data_dir).is_none() {
+        let stale_intent = root.path().join(MOVE_INTENT_FILENAME);
+        if stale_intent.is_file() && fs::remove_file(&stale_intent).is_ok() {
+            removed.push(MOVE_INTENT_FILENAME);
+        }
+    }
+    removed
 }
 
 // ════════════════════════════════════════════════════════════════════════════

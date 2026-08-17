@@ -303,8 +303,18 @@ Prüfung ist das Tor.
 
 ### 5.6 Copy + Verifikation
 
+**Control-Plane-Dateien liegen außerhalb des Data Root und werden nie mitkopiert.** `RESERVED_CONTROL_FILES`
+= `data-location.json` + `data-move-intent.json`: auf einer Legacy-Installation sind AppData und Data
+Root derselbe Ordner, weshalb der v0.8.43-Move beide als tote, autoritativ aussehende Kopien ins neue
+Verzeichnis getragen hat. Ausschluss **namentlich**, nicht per Muster — ein Data Root darf beliebige
+`.json` enthalten, ausgeschlossen wird nur, was der Vertrag ausdrücklich außerhalb verortet. Bereits
+entstandene Kopien räumt `cleanup_stale_control_copies` beim Boot auf, und zwar **nur** wenn: der Root
+kein Legacy-in-place-Root ist (dort ist die Datei die echte), ein gültiger Locator außerhalb genau
+diesen Root mit passender `rootId` benennt, der Marker dazu passt, und für den Intent kein Move
+aussteht. Bei jeder Unklarheit: nichts anfassen.
+
 Kopiert wird **alles** im Data Root außer transienten Artefakten (`.restore-*`, `.backup-intent`,
-`.gc-intent`, `backup-ws-*`, eigene `*.tmp-*`) — also DBs, `media/`, `mobile-upload-staging/`, Root-
+`.gc-intent`, `backup-ws-*`, eigene `*.tmp-*`) und den Control-Plane-Dateien — also DBs, `media/`, `mobile-upload-staging/`, Root-
 Marker und die Schlüsseldateien, die laut B1 bewusst neben der Server-DB liegen. Ein Reparse-Point
 irgendwo im Quellbaum bricht den Move ab (folgen würde von außerhalb kopieren, nicht folgen würde
 still Daten verlieren). Ziel ist ein Staging-Pfad **auf dem Ziel-Volume**
@@ -316,9 +326,35 @@ Checkpoint ist keine Bearbeitung.
 
 Verifiziert wird vor jedem Umschalten: gleiche relativen Pfade, gleiche Anzahl, gleiche Größen,
 **SHA-256 jeder Datei** (keine Gesamtgröße) · `PRAGMA integrity_check` + `PRAGMA foreign_key_check`
-auf Business- **und** Server-DB · jede in `media_blob_generations.storage_key` referenzierte Datei
-vorhanden und ohne Path-Escape · Marker mit derselben `rootId`. Ein einziger Fehlschlag ⇒ Locator
+auf Business- **und** Server-DB · jede **erreichbare** Mediendatei vorhanden und ohne Path-Escape
+(§5.6a) · Marker mit derselben `rootId`. Ein einziger Fehlschlag ⇒ Locator
 bleibt Quelle.
+
+### 5.6a Gemeinsamer Media-Reachability-Vertrag (v0.8.44)
+
+Drei Subsysteme beantworteten „welche Mediendateien zählen?" unterschiedlich — und das fiel live auf:
+ein Snapshot, den das Backup als *complete* erstellt hatte, ließ sich danach **nicht mehr verschieben**.
+Zwei Blobs eines abgebrochenen Uploads hingen an keinem Business-Objekt, wurden nirgends angezeigt und
+deshalb nie gesichert; der Move verlangte sie trotzdem.
+
+`media::reachability` ist jetzt die einzige Definition, mit **zwei** benannten Mengen:
+
+* **REQUIRED** — erreichbar über `media_links` (aktiv) → `media_objects` (nicht gelöscht) → Blob
+  `present` → **aktuelle** Generation `available`, plus deren Varianten. Exakt das, was der
+  Gallery-Resolver auflöst, und exakt das, was Backup mitnimmt und der Move verlangt. Fehlt hier
+  etwas, ist es ein Loch, das jemand sieht → **harter Fehler**.
+* **PRESERVED** — jede `media_blob_generations`-Zeile, unabhängig vom Status. Echte Obermenge:
+  In-flight-Ingest, abgelöste Generationen, verwaiste Uploads. Nichts davon darf die **GC löschen**,
+  nichts davon muss existieren. „Darf ich das löschen?" und „muss das existieren?" sind verschiedene
+  Fragen, und die zweite ist die kleinere Menge.
+
+Backup baut sein Manifest aus **demselben SQL-Text** (`REQUIRED_MASTER_SQL`/`REQUIRED_VARIANT_SQL`),
+die Media-GC nutzt `preserved_keys`, der Move `required_keys`. Damit gilt: **ein gültiger `complete`
+Snapshot ist nach dem Restore wieder verschiebbar** — der zentrale Regressionstest.
+
+*Beim Zusammenführen gefunden:* die Varianten-Abfrage kannte nur den Link, nicht das Objekt, und
+exportierte deshalb das Thumbnail eines **gelöschten** Media-Objekts. Der Resolver verwirft dabei
+Master und Thumbnail gemeinsam; die Abfrage joint jetzt ebenfalls `media_objects`.
 
 ### 5.7 Finalisierung und Commit
 

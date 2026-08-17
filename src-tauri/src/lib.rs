@@ -2856,6 +2856,13 @@ pub fn run() {
             let app_dir = root.path().to_path_buf();
             // B1 orphan finding: our own atomic-write leftovers, and ONLY those. Skipped entirely while a
             // move is pending, so a recoverable move's files can never be swept away.
+            // v0.8.44 — dead copies of the locator / move intent that an earlier move carried into the
+            // data root. Narrowly gated (never on a legacy in-place root, never during a move) — see
+            // `cleanup_stale_control_copies`.
+            let dropped = data_root_move::cleanup_stale_control_copies(&locator_dir, &root);
+            if !dropped.is_empty() {
+                eprintln!("[data-root] removed stale control-plane copies: {}", dropped.join(", "));
+            }
             let swept = data_root_move::cleanup_own_temp_files(&locator_dir);
             if swept > 0 {
                 eprintln!("[data-root] removed {swept} orphaned temp file(s)");

@@ -19,7 +19,6 @@ import { StorageMaintenancePanel } from './StorageMaintenancePanel';
 import { DataLocationPanel } from './DataLocationPanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
-import { exportFile } from '@/core/utils/export-file';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { useProductStore } from '@/stores/productStore';
 import { runSafePurge, countPurge, PURGE_PLANS, runGuardedReset, isFactoryResetBlocked, FACTORY_RESET_BLOCKED_MESSAGE, type PurgeDb } from '@/core/settings/safe-purge';
@@ -3016,7 +3015,6 @@ function DangerZoneTab() {
   const [purgeBusy, setPurgeBusy] = useState(false);
   const [resetError, setResetError] = useState('');
   const [resetBlocked, setResetBlocked] = useState(false);
-  const [backupMsg, setBackupMsg] = useState('');
 
   // D3b: Beim Öffnen des Factory-Reset-Modals prüfen, ob Sync/LAN konfiguriert ist.
   // Ist es das, wird der Reset blockiert (lokaler Reset könnte Server-Daten resurrecten).
@@ -3045,42 +3043,6 @@ function DangerZoneTab() {
     }
   }, [purgeTarget]);
 
-  async function handleBackup() {
-    try {
-      const db = getDatabase();
-      const data = db.export();
-      await exportFile(
-        `lataif_backup_${new Date().toISOString().split('T')[0]}.db`,
-        new Uint8Array(data),
-        'application/octet-stream'
-      );
-      setBackupMsg('Backup gespeichert.');
-    } catch (e) { setBackupMsg(`Backup failed: ${e}`); }
-  }
-
-  function handleRestore(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const data = new Uint8Array(reader.result as ArrayBuffer);
-        const initSqlJs = (await import('sql.js')).default;
-        const wasmUrl = (await import('sql.js/dist/sql-wasm.wasm?url')).default;
-        const SQL = await initSqlJs({ locateFile: () => wasmUrl });
-        // Validate it's a real SQLite DB
-        const testDb = new SQL.Database(data);
-        testDb.exec('SELECT COUNT(*) FROM tenants');
-        testDb.close();
-        // Save it
-        // Write to storage
-        localStorage.setItem('lataif_db_v2', btoa(String.fromCharCode(...data)));
-        setBackupMsg('Restore successful! Reloading...');
-        setTimeout(() => window.location.reload(), 1000);
-      } catch (err) { setBackupMsg(`Restore failed: invalid backup file. ${err}`); }
-    };
-    reader.readAsArrayBuffer(file);
-  }
 
   async function handleReset() {
     if (confirmText !== 'RESET' || purgeBusy) return;
@@ -3161,24 +3123,12 @@ function DangerZoneTab() {
     <div>
       {/* Backup & Restore */}
       <SectionTitle>Backup & Restore</SectionTitle>
-      {backupMsg && <SuccessBanner message={backupMsg} onDone={() => setBackupMsg('')} />}
       <Card>
-        <div style={{ padding: 8, display: 'flex', gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <h4 style={{ fontSize: 14, fontWeight: 500, color: '#0F0F10', marginBottom: 4 }}>Export Backup</h4>
-            <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }}>Download the entire database as a file. Keep it safe.</p>
-            <Button variant="secondary" onClick={handleBackup}>Download Backup</Button>
-          </div>
-          <div style={{ width: 1, background: '#E5E9EE' }} />
-          <div style={{ flex: 1 }}>
-            <h4 style={{ fontSize: 14, fontWeight: 500, color: '#0F0F10', marginBottom: 4 }}>Restore from Backup</h4>
-            <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }}>Upload a .db backup file. Current data will be replaced.</p>
-            <label className="cursor-pointer">
-              <span style={{ display: 'inline-block', padding: '8px 16px', fontSize: 13, borderRadius: 6, border: '1px solid #D5D9DE', color: '#4B5563', background: 'transparent' }}>Upload Backup File</span>
-              <input type="file" accept=".db" style={{ display: 'none' }} onChange={handleRestore} />
-            </label>
-          </div>
-        </div>
+        {/* v0.8.44 - the legacy "Export Backup" / "Restore from Backup" pair used to sit here. Both are
+            superseded by the snapshot backup below, and the restore half was worse than superseded: it
+            wrote the uploaded file into localStorage, which the desktop app never reads (it loads the
+            database FROM DISK in the data root). It could only ever report success and change nothing.
+            A restore control that lies is more dangerous than no restore control. */}
         {/* MOBILE-04B2A12-U2 — full DB+media snapshot create + owner-gated boot-scheduled restore. */}
         <BackupRestorePanel />
         {/* STORAGE-PERF-I1 §9 — owner-gated legacy media migration (dry-run first). */}

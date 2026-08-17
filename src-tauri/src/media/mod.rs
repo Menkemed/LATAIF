@@ -16,6 +16,9 @@ pub mod backup;
 pub mod backup_location;
 pub mod backup_retention;
 pub mod media_gc;
+// v0.8.44 — the ONE definition of "which media files matter". Backup, the data-root move and the
+// media GC all read it, each naming which of the two sets it needs.
+pub mod reachability;
 // MEDIA-04B2A12-R1/U1 — real atomic DB+media restore (pre-check → atomic swap → rollback). PRODUCTION
 // since U1 (validate_snapshot / list_snapshots / restore_by_id feed the owner-gated restore command); the
 // crash-injection surface (`restore_crashing`/`CrashAt`) stays `cfg(test, e2e)` and is never exposed.

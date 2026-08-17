@@ -105,18 +105,10 @@ pub struct SnapshotInput<'a> {
 /// deduped by content address. Staging temp files are never selected.
 pub fn collect_selection_from_db(conn: &rusqlite::Connection) -> Result<Vec<MediaSelection>, MediaError> {
     let mut out: std::collections::BTreeMap<String, MediaSelection> = std::collections::BTreeMap::new();
-    let master_sql = "SELECT l.tenant_id, l.media_id, l.media_role, g.stored_blob_hash, g.byte_size, g.generation_no, g.extension \
-        FROM media_links l \
-        JOIN media_objects o ON o.tenant_id=l.tenant_id AND o.media_id=l.media_id AND o.deleted_at IS NULL \
-        JOIN media_blobs b ON b.tenant_id=o.tenant_id AND b.blob_id=o.master_blob_id AND b.blob_status='present' \
-        JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id AND g.generation_no=b.current_generation_no AND g.gen_status='available' \
-        WHERE l.deleted_at IS NULL";
-    let variant_sql = "SELECT v.tenant_id, v.media_id, v.variant_type, g.stored_blob_hash, g.byte_size, g.generation_no, g.extension \
-        FROM media_variants v \
-        JOIN media_links l ON l.tenant_id=v.tenant_id AND l.media_id=v.media_id AND l.deleted_at IS NULL \
-        JOIN media_blobs b ON b.tenant_id=v.tenant_id AND b.blob_id=v.blob_id AND b.blob_status='present' \
-        JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id AND g.generation_no=b.current_generation_no AND g.gen_status='available' \
-        WHERE v.deleted_at IS NULL";
+    // v0.8.44 — the predicate lives in ONE place. The move verifies against the same two statements,
+    // so "the backup considers this complete" and "the move considers this complete" cannot drift.
+    let master_sql = super::reachability::REQUIRED_MASTER_SQL;
+    let variant_sql = super::reachability::REQUIRED_VARIANT_SQL;
     let mut collect = |sql: &str, is_variant: bool| -> Result<(), MediaError> {
         let mut stmt = conn.prepare(sql).map_err(|e| MediaError::Io(format!("prepare: {}", e)))?;
         let rowset = stmt
@@ -154,10 +146,7 @@ pub fn collect_selection_from_db(conn: &rusqlite::Connection) -> Result<Vec<Medi
 }
 
 fn rel_path_for(scope: &str, hash: &str, ext: &str) -> Result<String, MediaError> {
-    if hash.len() < 2 || !hash.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return Err(MediaError::PathOutsideRoot);
-    }
-    Ok(format!("{}/{}/{}.{}", scope, &hash[0..2], hash, ext))
+    super::reachability::rel_path_for(scope, hash, ext)
 }
 
 /// WAL-checkpoint (TRUNCATE) a SQLite DB so a byte copy of the main file is complete + consistent.

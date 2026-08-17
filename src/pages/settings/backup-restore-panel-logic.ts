@@ -37,6 +37,21 @@ export function formatCreatedAt(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+/**
+ * The same instant, said unambiguously.
+ *
+ * A snapshot's folder name is UTC (it has to be: it is a filesystem-safe id, and an id that shifts
+ * with a timezone is not an id). The list showed local time. Both were right, which is why someone
+ * reasonably asked why the backup folder carried "the wrong time" - 17:13 on disk, 20:13 on screen,
+ * three hours apart and nothing to say so. Naming the clock costs one word and removes the whole
+ * question.
+ */
+export function formatSnapshotTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.toLocaleString()} local time`;
+}
+
 /** A create/list action is allowed only with owner credentials and while nothing else is running. */
 export function canRunOwnerAction(email: string, password: string, busy: boolean): boolean {
   return !busy && email.trim().length > 0 && password.length > 0;
