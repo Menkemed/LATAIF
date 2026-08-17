@@ -114,6 +114,23 @@ fn show_fatal_data_root_error(message: &str) {
     }
 }
 
+/// The identifier-scoped AppData directory — where the locator and the move intent live. NOT the
+/// data root: during a move those two are exactly the things that differ.
+fn locator_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+/// The exclusion, applied at every command that queues boot-time maintenance.
+///
+/// A move is an exclusive maintenance state in BOTH directions: the move refuses to start while a
+/// backup/restore/GC intent is queued, and — this — nothing else may be queued while a move is. The
+/// move does not carry the other operations' intents to the new root (they describe work against the
+/// old one), so a backup queued after a move would be silently dropped at the switch and a restore
+/// queued after a move would try to swap databases into a root that is about to stop being active.
+fn reject_if_move_pending(app: &tauri::AppHandle) -> Result<(), String> {
+    data_root_move::ensure_no_pending_move(&locator_dir(app)?)
+}
+
 /// DATA-ROOT-I1 / B2 — the app's own installation directory, so a target inside it can be refused.
 /// Best-effort: an unresolvable exe path simply drops that one check rather than blocking the move.
 fn app_install_dir() -> Option<std::path::PathBuf> {
@@ -2394,6 +2411,8 @@ fn schedule_restore_snapshot(
     password: String,
     snapshot_id: String,
 ) -> Result<serde_json::Value, String> {
+    // 0. a pending move outranks everything: no second boot-time operation may exist.
+    reject_if_move_pending(&app_handle)?;
     // 1. owner gate (fresh connection, dropped immediately) — reject BEFORE writing any intent.
     {
         let (conn, _id) = open_config_db(&state.server)?;
@@ -2420,6 +2439,7 @@ fn schedule_backup_snapshot(
     email: String,
     password: String,
 ) -> Result<serde_json::Value, String> {
+    reject_if_move_pending(&app_handle)?;
     {
         let (conn, _id) = open_config_db(&state.server)?;
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
@@ -2732,6 +2752,7 @@ fn schedule_media_gc(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    reject_if_move_pending(&app_handle)?;
     {
         let (conn, _id) = open_config_db(&state.server)?;
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
@@ -2763,6 +2784,7 @@ fn finalize_media_gc(
     email: String,
     password: String,
 ) -> Result<media::media_gc::GcApplyReport, String> {
+    reject_if_move_pending(&app_handle)?;
     {
         let (conn, _id) = open_config_db(&state.server)?;
         sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)

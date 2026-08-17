@@ -123,6 +123,8 @@ pub enum MoveError {
     InsufficientSpace,
     FreeSpaceUnknown,
     ReparsePointInSource,
+    /// A backup/restore/GC is already queued, so the MOVE is refused (the other direction of the
+    /// same exclusion — see `ensure_no_pending_move`).
     OperationPending,
     MoveAlreadyPending,
     CopyFailed(String),
@@ -152,7 +154,7 @@ impl MoveError {
             MoveError::InsufficientSpace => "MOVE_INSUFFICIENT_SPACE",
             MoveError::FreeSpaceUnknown => "MOVE_FREE_SPACE_UNKNOWN",
             MoveError::ReparsePointInSource => "MOVE_SOURCE_HAS_REPARSE_POINT",
-            MoveError::OperationPending => "MOVE_OPERATION_PENDING",
+            MoveError::OperationPending => "MOVE_BLOCKED_BY_MAINTENANCE",
             MoveError::MoveAlreadyPending => "MOVE_ALREADY_PENDING",
             MoveError::CopyFailed(_) => "MOVE_COPY_FAILED",
             MoveError::ManifestMismatch => "MOVE_MANIFEST_MISMATCH",
@@ -443,6 +445,30 @@ fn write_intent(app_data_dir: &Path, intent: &MoveIntent) -> Result<(), MoveErro
 
 pub fn clear_intent(app_data_dir: &Path) {
     let _ = fs::remove_file(intent_path(app_data_dir));
+}
+
+/// The code every maintenance command refuses with while a move is pending. Deliberately reads as
+/// what it is — "a move operation is pending" — so it can never be confused with the opposite
+/// refusal (`MOVE_BLOCKED_BY_MAINTENANCE`, a move refused because maintenance is queued).
+pub const ERR_MOVE_PENDING: &str = "MOVE_OPERATION_PENDING";
+
+/// The single server-side lock: while a move intent exists, NO other maintenance may be scheduled.
+///
+/// A move is an exclusive maintenance state in both directions. The move already refuses to start
+/// while a backup/restore/GC intent is queued; this is the mirror, and it has to be here rather than
+/// in each command, because the property that matters is "no second boot-time operation exists",
+/// and a property enforced in four places is a property enforced in three places after the next
+/// person adds a fifth command.
+///
+/// Why it matters concretely: the move deliberately does NOT copy the other operations' intent files
+/// (they describe work against the OLD root). A backup scheduled after a move would therefore be
+/// silently dropped at the switch — and a restore scheduled after a move would be worse, because it
+/// would try to swap databases into a root that is about to stop being the active one.
+pub fn ensure_no_pending_move(app_data_dir: &Path) -> Result<(), String> {
+    match read_intent(app_data_dir) {
+        Some(_) => Err(ERR_MOVE_PENDING.to_string()),
+        None => Ok(()),
+    }
 }
 
 /// Durably record the scheduled move. Refuses while another move is pending, or while any other

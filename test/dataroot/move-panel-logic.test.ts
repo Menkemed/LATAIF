@@ -40,6 +40,7 @@ const CODES = [
   'MOVE_SOURCE_HAS_REPARSE_POINT',
   'MOVE_ALREADY_PENDING',
   'MOVE_OPERATION_PENDING',
+  'MOVE_BLOCKED_BY_MAINTENANCE',
 ];
 for (const c of CODES) {
   const msg = explainMoveCode(c);

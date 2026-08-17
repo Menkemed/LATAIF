@@ -41,8 +41,10 @@ export function explainMoveCode(code: string): string {
       return 'The current data folder contains a shortcut or junction. Please contact support — moving it could silently lose data.';
     case 'MOVE_ALREADY_PENDING':
       return 'A move is already scheduled. Restart the app to complete it.';
-    case 'MOVE_OPERATION_PENDING':
+    case 'MOVE_BLOCKED_BY_MAINTENANCE':
       return 'Another maintenance action (backup, restore or cleanup) is still pending. Restart the app first.';
+    case 'MOVE_OPERATION_PENDING':
+      return 'A data move is scheduled. Restart the app to complete it before running anything else.';
     case 'PRIMARY_OWNER_INVALID_CREDENTIALS':
     case 'OWNER_INVALID_CREDENTIALS':
       return 'Owner email or password is not correct.';

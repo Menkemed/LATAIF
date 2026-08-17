@@ -294,6 +294,24 @@ async function main() {
   // A second schedule while one is pending is refused — this is the double-click guarantee.
   const second = await invokeResult(c, 'schedule_data_root_move', { email: OWNER_EMAIL, password: OWNER_PW, target: TARGET });
   ok(second.ok === false && /ALREADY_PENDING/.test(second.err), `A9: a second move cannot be scheduled while one is pending (${second.err})`);
+
+  // A move is an exclusive maintenance state in BOTH directions. With the move intent on disk, no
+  // other boot-time operation may be queued — and, more importantly, none may leave an intent file
+  // behind, because the move does not carry those files to the new root.
+  const BACKUP_INTENT = join(APP_DATA_DIR, '.backup-intent');
+  const RESTORE_INTENT = join(APP_DATA_DIR, '.restore-intent');
+  const GC_INTENT = join(APP_DATA_DIR, '.gc-intent');
+  const backupBlocked = await invokeResult(c, 'schedule_backup_snapshot', { email: OWNER_EMAIL, password: OWNER_PW });
+  ok(backupBlocked.ok === false && /MOVE_OPERATION_PENDING/.test(backupBlocked.err), `A9b: backup is refused while a move is pending (${backupBlocked.err})`);
+  ok(!existsSync(BACKUP_INTENT), 'A9c: and no backup intent was written');
+  const restoreBlocked = await invokeResult(c, 'schedule_restore_snapshot', { email: OWNER_EMAIL, password: OWNER_PW, snapshotId: 'snap-whatever' });
+  ok(restoreBlocked.ok === false && /MOVE_OPERATION_PENDING/.test(restoreBlocked.err), `A9d: restore is refused while a move is pending (${restoreBlocked.err})`);
+  ok(!existsSync(RESTORE_INTENT), 'A9e: and no restore intent was written');
+  const gcBlocked = await invokeResult(c, 'schedule_media_gc', { email: OWNER_EMAIL, password: OWNER_PW });
+  ok(gcBlocked.ok === false && /MOVE_OPERATION_PENDING/.test(gcBlocked.err), `A9f: media GC is refused while a move is pending (${gcBlocked.err})`);
+  ok(!existsSync(GC_INTENT), 'A9g: and no GC intent was written');
+  const finalizeBlocked = await invokeResult(c, 'finalize_media_gc', { email: OWNER_EMAIL, password: OWNER_PW });
+  ok(finalizeBlocked.ok === false && /MOVE_OPERATION_PENDING/.test(finalizeBlocked.err), `A9h: the destructive GC finalize is refused too (${finalizeBlocked.err})`);
   c.close(); killApp(); await sleep(1500);
 
 

@@ -388,7 +388,19 @@ fn a_move_cannot_be_scheduled_while_another_boot_operation_is_queued() {
     let target = tmp("busy-parent").join("Data");
     let plan = plan_for(&root, &target, &backups).unwrap();
     fs::write(src.join(".restore-intent"), b"pending").unwrap();
-    assert_eq!(schedule(&app, &root, &plan).unwrap_err(), MoveError::OperationPending);
+    let err = schedule(&app, &root, &plan).unwrap_err();
+    assert_eq!(err, MoveError::OperationPending);
+    assert_eq!(err.code(), "MOVE_BLOCKED_BY_MAINTENANCE", "the code says which way round the refusal is");
+}
+
+#[test]
+fn while_a_move_is_pending_no_other_maintenance_may_be_scheduled() {
+    let f = fixture("exclusive");
+    assert_eq!(ensure_no_pending_move(&f.app).unwrap_err(), ERR_MOVE_PENDING);
+    assert_eq!(ERR_MOVE_PENDING, "MOVE_OPERATION_PENDING");
+    // …and the lock lifts exactly when the intent is gone, not a moment earlier.
+    clear_intent(&f.app);
+    assert!(ensure_no_pending_move(&f.app).is_ok());
 }
 
 #[test]

@@ -328,9 +328,18 @@ der Commit-Punkt.** Danach zwingend der (bereits erfolgte) koordinierte Relaunch
 
 ### 5.8 Exklusivität
 
-Ein Move ist ein exklusiver Wartungszustand: `schedule` verweigert, wenn bereits ein Move-Intent
-existiert (`MOVE_ALREADY_PENDING`) oder ein Backup-/Restore-/GC-Intent im Quell-Root liegt
-(`MOVE_OPERATION_PENDING`). Der Doppelklick-Schutz in der UI ist derselbe Prädikat wie das
+Ein Move ist ein exklusiver Wartungszustand **in beide Richtungen**:
+
+* `schedule_data_root_move` verweigert, wenn bereits ein Move-Intent existiert
+  (`MOVE_ALREADY_PENDING`) oder ein Backup-/Restore-/GC-Intent im Quell-Root liegt
+  (`MOVE_BLOCKED_BY_MAINTENANCE`).
+* Umgekehrt verweigern `schedule_backup_snapshot`, `schedule_restore_snapshot`, `schedule_media_gc`
+  und `finalize_media_gc` mit `MOVE_OPERATION_PENDING`, solange ein Move-Intent existiert — zentral
+  über `data_root_move::ensure_no_pending_move`, als **erste** Anweisung, also bevor irgendein Intent
+  geschrieben werden könnte. Grund: der Move kopiert die Intents der anderen Operationen bewusst
+  **nicht** mit (sie beschreiben Arbeit am ALTEN Root); ein danach geplantes Backup würde beim
+  Umschalten still verloren gehen, ein danach geplanter Restore würde DBs in einen Root tauschen, der
+  gerade aufhört, der aktive zu sein. Der Doppelklick-Schutz in der UI ist derselbe Prädikat wie das
 Button-`disabled`. Zwei App-Instanzen bleiben durch den bestehenden Single-Instance-Guard aus.
 
 ### 5.9 Was B2 NICHT tut
