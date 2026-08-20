@@ -297,7 +297,10 @@ pub fn verify_restored(app_data_dir: &Path, manifest: &BackupManifest) -> Result
 // ════════════════════════════════════════════════════════════════════════════
 // MEDIA-04B2A12-U1 — production safe listing + id-only restore (the surface the Tauri commands call).
 // The renderer NEVER supplies a filesystem path: it gets opaque ids from `list_snapshots` and passes an id
-// back to `restore_by_id`, which re-resolves it against the ONE canonical `<app_data_dir>/backups/` root.
+// back to `restore_by_id`, which re-resolves it against the ONE canonical backups root — the value
+// `backup_location::resolve_root` returns, i.e. the owner-configured location when there is one and
+// `<data_root>/backups/` otherwise. There is no second, hard-wired `<app_data_dir>/backups/` path:
+// listing and restoring must read the SAME root the snapshots were written to.
 // ════════════════════════════════════════════════════════════════════════════
 
 /// A snapshotId must be a single safe path segment — never a traversal, absolute path, or nested path.

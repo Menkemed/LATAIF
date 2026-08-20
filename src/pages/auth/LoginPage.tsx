@@ -6,12 +6,54 @@ export function LoginPage() {
   const { login, loading, error } = useAuthStore();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetMsg, setResetMsg] = useState('');
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     try {
       await login(email, password);
     } catch { /* error is set in store */ }
+  }
+
+  // D3/D3b — der Reset auf dem Login-Screen ist derselbe destruktive Vorgang wie der in der
+  // Danger Zone und läuft deshalb über DENSELBEN Vertrag `runGuardedReset`:
+  //   • Sync/LAN konfiguriert → blockiert (ein lokaler Reset könnte Server-Daten resurrecten),
+  //   • Pre-destructive Backup ZUERST; schlägt es fehl, wirft es und es wird NICHTS gelöscht,
+  //   • kein Erfolgssignal ohne Backup.
+  // Vorher rief diese Stelle `resetDatabase()` direkt hinter einem `confirm()` auf — ohne Backup,
+  // ohne Resurrection-Guard, und vor jeder Anmeldung erreichbar.
+  async function handleReset() {
+    if (resetBusy) return;
+    if (!confirm('Reset database? This wipes all data on this device.')) return;
+    setResetBusy(true);
+    setResetMsg('');
+    try {
+      const [purge, backup, db, sync, lan] = await Promise.all([
+        import('@/core/settings/safe-purge'),
+        import('@/core/settings/pre-destructive-backup'),
+        import('@/core/db/database'),
+        import('@/core/sync/sync-service'),
+        import('@/core/sync/auto-lan'),
+      ]);
+      const result = await purge.runGuardedReset({
+        syncConfigured: sync.isSyncConfigured(),
+        lanMode: lan.getLanMode(),
+        backup: async () => {
+          await db.flushDatabase().catch(() => {});
+          return backup.createPreDestructiveBackup('factory-reset-login');
+        },
+        reset: db.resetDatabase,
+        onBlocked: () => setResetMsg(purge.FACTORY_RESET_BLOCKED_MESSAGE),
+      });
+      if (result.blocked) return; // KEINE DB gelöscht, KEIN Backup
+      localStorage.clear();
+      window.location.reload();
+    } catch (err) {
+      setResetMsg(`Reset abgebrochen — es wurde nichts gelöscht. Grund: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setResetBusy(false);
+    }
   }
 
   return (
@@ -93,13 +135,16 @@ export function LoginPage() {
           </div>
         </form>
 
+        {resetMsg && (
+          <div style={{ marginTop: 20, padding: '10px 14px', background: 'rgba(220,38,38,0.08)', borderRadius: 6, border: '1px solid rgba(220,38,38,0.2)' }}>
+            <p style={{ fontSize: 13, color: '#AA6E6E' }}>{resetMsg}</p>
+          </div>
+        )}
+
         <div className="text-center" style={{ marginTop: 24 }}>
           <button
-            onClick={async () => {
-              if (!confirm('Reset database? This wipes all data on this device.')) return;
-              const { resetDatabase } = await import('@/core/db/database');
-              await resetDatabase(); localStorage.clear(); window.location.reload();
-            }}
+            onClick={handleReset}
+            disabled={resetBusy}
             className="cursor-pointer transition-colors"
             style={{ fontSize: 11, color: '#6B7280', background: 'none', border: 'none', textDecoration: 'underline' }}
             onMouseEnter={e => (e.currentTarget.style.color = '#AA6E6E')}
