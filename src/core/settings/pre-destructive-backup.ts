@@ -21,8 +21,12 @@
 // WAL-Modus. Wir kopieren die Haupt-DB + `-wal` + `-shm` GEMEINSAM (soweit vorhanden) —
 // zusammen ergeben sie einen wiederherstellbaren Satz, auch wenn der Snapshot nicht
 // perfekt punkt-genau konsistent ist (bester verfügbarer Ansatz ohne Server-Stopp).
-
-import { getRuntimePaths } from '../runtime/runtime-paths';
+//
+// `runtime-paths` wird NUR im Tauri-Zweig geladen (dynamischer Import in
+// `createPreDestructiveBackup`), wie die übrigen Tauri-Abhängigkeiten dieser Datei. Als
+// statischer Top-Level-Import zog er die Tauri-Kette in jeden Importeur — auch in das
+// headless-Gate `test/d3/safe-purge.test.ts`, das nur die injizierbaren reinen Funktionen
+// braucht und daran mit ERR_MODULE_NOT_FOUND scheiterte.
 
 // Die zu sichernden Dateien (relativ zum Data Root). lataif.db = Frontend-DB (SSOT);
 // die drei sync_server-Dateien sind optional (nur vorhanden, wenn LAN-Sync lief).
@@ -163,6 +167,7 @@ export async function createPreDestructiveBackup(action: string): Promise<Backup
   }
   const fs = await import('@tauri-apps/plugin-fs');
   const path = await import('@tauri-apps/api/path');
+  const { getRuntimePaths } = await import('../runtime/runtime-paths.ts');
   const deps: BackupFsDeps = {
     dataRoot: async () => (await getRuntimePaths()).dataRoot,
     backupsRoot: async () => (await getRuntimePaths()).backupsRoot,

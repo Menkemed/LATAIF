@@ -83,7 +83,12 @@ for (const name of suites) {
 
     // The env helper must be used for EVERY spawn of the app binary: a second spawn with a plain
     // `process.env` would silently fall back to the production port.
-    const spawnsWithoutEnv = lines.filter((l) => /spawn\(APP/.test(l) && !/env:/.test(l));
+    //
+    // `env` counts whether it is written long-hand (`env: appEnv()`) or as an object shorthand
+    // (`{ env, stdio }`, where `env` is the suite's own isolated-env parameter). Matching only
+    // `env:` flagged `data-root-move.e2e.mjs`, whose every caller passes `envFor(...)` — a
+    // correctly isolated suite failing on punctuation.
+    const spawnsWithoutEnv = lines.filter((l) => /spawn\(APP/.test(l) && !/\benv\s*[:,}]/.test(l));
     ok(spawnsWithoutEnv.length === 0, `${name}: every app spawn passes an explicit env (${spawnsWithoutEnv.length} without)`);
     if (spawnsWithoutEnv.length > 0) reasons.push('an app spawn has no explicit env');
 
