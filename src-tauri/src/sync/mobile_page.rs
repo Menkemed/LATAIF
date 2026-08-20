@@ -37,6 +37,12 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   .photo-area.has-image { padding: 0; border-style: solid; }
   .photo-area img { max-width: 100%; border-radius: 6px; display: block; }
   .photo-area .hint { color: #6B6B73; font-size: 13px; }
+  .photo-strip { display: flex; gap: 8px; overflow-x: auto; padding: 10px 2px 2px; }
+  .photo-thumb { position: relative; flex: 0 0 auto; width: 78px; height: 78px; border-radius: 8px; overflow: hidden; border: 2px solid #2A2A32; background: #08080A; }
+  .photo-thumb.is-primary { border-color: #C6A36D; }
+  .photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .photo-thumb .rm { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; line-height: 20px; padding: 0; border-radius: 999px; background: rgba(0,0,0,.72); border: 1px solid #2A2A32; color: #EAEAEA; font-size: 13px; text-align: center; }
+  .photo-thumb .cover { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(198,163,109,.92); color: #14140F; font-size: 10px; letter-spacing: .06em; text-align: center; padding: 2px 0; }
   .photo-area .icon { font-size: 36px; }
   .hidden { display: none; }
   /* MOBILE-FIELDS — dynamic per-category fields */
@@ -122,15 +128,23 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 
   <div class="card">
     <div class="header-row">
-      <span style="font-size: 13px; color: #A1A1AA;">Photo</span>
+      <span style="font-size: 13px; color: #A1A1AA;">Photos</span>
       <span id="cPhotoStatus" class="badge hidden">Captured</span>
     </div>
+    <!-- MOBILE-MULTI-IMAGE §3 — a product may carry several photos. The upload contract and the
+         desktop ingest have always accepted an ordered batch (slots 0..N-1, primary = slot 0); only
+         this capture UI held it to one. The strip below IS that order: the first thumbnail is the
+         cover, and tapping another one promotes it. -->
     <label for="cPhotoInput" class="photo-area" id="cPhotoArea">
       <div class="icon">📷</div>
-      <div>Tap to take photo</div>
-      <div class="hint">or choose from gallery</div>
+      <div>Tap to take photos</div>
+      <div class="hint">or choose from gallery — several at once</div>
     </label>
-    <input id="cPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" />
+    <div id="cPhotoStrip" class="photo-strip hidden"></div>
+    <div id="cPhotoHint" class="hidden" style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">
+      First photo is the cover. Tap a photo to make it the cover, ✕ to remove it.
+    </div>
+    <input id="cPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" multiple />
     <!-- MOBILE-I1C §4 — identification is a SUGGESTION step. It fills empty fields from the photo
          and is only offered once a photo exists; the photo, the quantity and anything already typed
          are never touched by it. -->
@@ -1005,10 +1019,75 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       }
     };
   }
-  const EMPTY_C = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">or choose from gallery</div>';
+  const EMPTY_C = '<div class="icon">📷</div><div>Tap to take photos</div><div class="hint">or choose from gallery — several at once</div>';
   const EMPTY_R = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">photograph the item at intake</div>';
   const EMPTY_B = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">snap the item you bought</div>';
-  bindPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', 'cError', EMPTY_C);
+
+  // ── MOBILE-MULTI-IMAGE §3 — the collection form keeps an ORDERED LIST of photos ─────────────
+  //
+  // `collectionPhotos[0]` is the cover, exactly as the upload contract defines it (primary = slot 0),
+  // so the strip the operator sees IS what gets uploaded — there is no second ordering rule hidden
+  // anywhere. The server caps a batch at MAX_UPLOAD_IMAGES; the same cap is enforced here so the
+  // operator learns about it while picking, not after a rejected upload.
+  const MAX_PHOTOS = 8;
+  const collectionPhotos = [];
+
+  function renderCollectionPhotos() {
+    const strip = $('cPhotoStrip'), area = $('cPhotoArea'), hint = $('cPhotoHint');
+    strip.innerHTML = '';
+    const has = collectionPhotos.length > 0;
+    strip.classList.toggle('hidden', !has);
+    hint.classList.toggle('hidden', !has);
+    $('cPhotoStatus').classList.toggle('hidden', !has);
+    if (has) $('cPhotoStatus').textContent = collectionPhotos.length + (collectionPhotos.length === 1 ? ' photo' : ' photos');
+    // Die Aufnahmeflaeche bleibt IMMER sichtbar — sonst gaebe es keinen Weg, ein zweites Foto
+    // hinzuzufuegen, ohne das erste zu verlieren.
+    area.classList.remove('has-image');
+    area.innerHTML = has
+      ? '<div class="icon">📷</div><div>Add more photos</div><div class="hint">' + collectionPhotos.length + ' of ' + MAX_PHOTOS + ' selected</div>'
+      : EMPTY_C;
+    collectionPhotos.forEach(function (src, i) {
+      const t = el('div', { class: 'photo-thumb' + (i === 0 ? ' is-primary' : '') });
+      const im = el('img'); im.src = src; t.appendChild(im);
+      if (i === 0) t.appendChild(el('div', { class: 'cover' }, 'COVER'));
+      const rm = el('button', { type: 'button', class: 'rm' }, '✕');
+      rm.onclick = function (ev) { ev.stopPropagation(); ev.preventDefault(); removeCollectionPhoto(i); };
+      t.appendChild(rm);
+      // Tippen befoerdert dieses Foto zum Cover — die Reihenfolge der uebrigen bleibt erhalten.
+      t.onclick = function () { if (i === 0) return; const [p] = collectionPhotos.splice(i, 1); collectionPhotos.unshift(p); renderCollectionPhotos(); };
+      strip.appendChild(t);
+    });
+    syncAiButtonState();
+  }
+  function removeCollectionPhoto(i) {
+    if (i < 0 || i >= collectionPhotos.length) return;
+    collectionPhotos.splice(i, 1);
+    renderCollectionPhotos();
+  }
+  function clearCollectionPhotos() {
+    collectionPhotos.length = 0;
+    $('cPhotoInput').value = '';
+    renderCollectionPhotos();
+  }
+  $('cPhotoInput').onchange = async (e) => {
+    const files = Array.from((e.target && e.target.files) || []);
+    if (!files.length) return;
+    let rejected = 0;
+    for (const f of files) {
+      if (collectionPhotos.length >= MAX_PHOTOS) { rejected++; continue; }
+      try {
+        collectionPhotos.push(await resizePhoto(f, 1600, 0.85));
+      } catch (err) {
+        // Ein unlesbares Foto darf die bereits ausgewaehlten NIE mitreissen.
+        setText('cError', 'One photo could not be loaded — the others are kept.');
+      }
+    }
+    // Denselben Input erneut mit derselben Datei zu benutzen loest sonst kein `change` aus.
+    e.target.value = '';
+    renderCollectionPhotos();
+    if (rejected > 0) setText('cError', 'At most ' + MAX_PHOTOS + ' photos per item — ' + rejected + ' not added.');
+  };
+  renderCollectionPhotos();
 
   // ── MOBILE-I1C §4 — AI Identify on the capture form ────────────────────────
   //
@@ -1063,8 +1142,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
 
   // MOBILE-I1H — the AI button is DERIVED from the one canonical photo state, never polled.
   //
-  // `photos.collection` is written in exactly two places - the capture handler in `bindPhoto` and
-  // `clearPhoto` (which the post-upload reset also runs through) - and both call this. The previous
+  // `collectionPhotos` is written in exactly three places - the capture handler, removeCollectionPhoto and
+  // `clearCollectionPhotos` (which the post-upload reset runs through) - all of them re-render, and the
   // version re-read the same state on a 400 ms timer, which meant the button could lag a capture by
   // up to a frame budget's worth of scheduling and made the e2e wait for it flaky under load.
   //
@@ -1072,14 +1151,14 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   function syncAiButtonState() {
     const btn = $('cAiBtn');
     if (!btn) return;
-    if (photos.collection) btn.classList.remove('hidden'); else btn.classList.add('hidden');
+    if (collectionPhotos.length) btn.classList.remove('hidden'); else btn.classList.add('hidden');
   }
   syncAiButtonState();   // initial: no photo yet, so the button starts hidden
 
   if ($('cAiBtn')) $('cAiBtn').onclick = async () => {
     if (aiBusy) return;
     const msg = $('cAiMsg');
-    if (!photos.collection) { if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'Take a photo first.'; } return; }
+    if (!collectionPhotos.length) { if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'Take a photo first.'; } return; }
     aiBusy = true;
     $('cAiBtn').textContent = 'Identifying…';
     if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Reading the photo…'; }
@@ -1090,7 +1169,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
         body: JSON.stringify({
           category_id: $('cCategory').value,
-          image: photos.collection,
+          image: collectionPhotos[0],
           hints: [$('cBrand').value, $('cName').value].filter(Boolean).join(' ').trim() || null,
         }),
       });
@@ -1303,12 +1382,12 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     $('cPurchasePrice').value = ''; $('cSalePrice').value = ''; $('cMinSalePrice').value = '';
     $('cQuantity').value = '1';   // back to the overwhelmingly common case, never to empty
     renderCollectionFields($('cCategory').value); // resets condition/attributes/scope for the current category
-    clearPhoto('collection', 'cPhotoArea', 'cPhotoInput', 'cPhotoStatus', EMPTY_C);
+    clearCollectionPhotos();
   }
   $('cRetryPending').onclick = drainPending;
   $('cSaveBtn').onclick = async () => {
     setText('cError', ''); setText('cSuccess', '');
-    if (!photos.collection) return setText('cError', 'A photo is required for a mobile upload.');
+    if (!collectionPhotos.length) return setText('cError', 'A photo is required for a mobile upload.');
     const { metadata, errors, label } = buildCollectionMetadata();
     if (errors.length) return setText('cError', errors[0]);
     const token = localStorage.getItem(TOKEN_KEY);
@@ -1319,7 +1398,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       // Full desktop-parity metadata (brand/name/sku/condition/Included/attributes + the three optional prices).
       // The durable entry (uploadEventId + bytes + FULL metadata) is persisted BEFORE the first request, so an
       // offline retry resends the exact same fields under the same id. Scope comes from the JWT server-side.
-      const entry = await uploadQueue.enqueue({ metadata, images: [photos.collection], protocolVersion: 2 });
+      const entry = await uploadQueue.enqueue({ metadata, images: collectionPhotos.slice(), protocolVersion: 2 });
       const r = await uploadQueue.drainEntry(entry.uploadEventId, token);
       if (r.outcome === 'done') {
         setText('cSuccess', label + ' uploaded. It appears on the desktop once the owner enables mobile uploads.');
