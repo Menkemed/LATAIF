@@ -55,3 +55,38 @@ Produktionsaufrufer von `resetDatabase` durch `runGuardedReset` geht und ein `ba
 plus die Reihenfolge im Vertrag selbst (Backup vor Reset, `await`, kein verschlucktes `catch`).
 Genau die Lücke, die der Kern-Test nicht sehen konnte, weil er den Vertrag prüft und nicht seine
 Aufrufer.
+
+## Verlangt der Factory Reset Owner-Credentials? Nein — und das ist so gewollt
+
+Die Frage wurde am Code und am kanonischen Vertrag entschieden, nicht daran, dass beide
+Einstiegspunkte dasselbe tun.
+
+**Der Vertrag** steht in `src/core/settings/safe-purge.ts` (Abschnitt „D3b — Factory-Reset-Guard"):
+*„Factory Reset löscht NUR die lokale DB. Ist Sync/LAN konfiguriert oder aktiv, kann ein späterer
+Pull alte Server-Daten wiederherstellen (Resurrection) — genau die D0-Klasse. Darum: Reset
+blockieren, solange Sync/LAN konfiguriert ist."* Die dort benannte Gefahr ist **Wiederauferstehung
+gelöschter Daten**, nicht ein unbefugter Löschversuch. Ein Owner-Gate kommt im gesamten
+D3/D3b-Vertrag nicht vor.
+
+**Die Codelage stützt das.** Es gibt gar kein Rust-Command für den Factory Reset — `resetDatabase`
+entfernt die lokale Frontend-DB-Datei, sonst nichts. Die 48 `authorize_owner`-Aufrufe sitzen
+ausnahmslos an Commands, die **außerhalb** der lokalen DB wirken: Restore, Data-Root-Move,
+Media-GC (Schedule und Finalize), Backup-Ort, Retention, Staging-GC. Genau die Trennlinie ist die
+Regel: Owner-Credentials schützen, was Dateien außerhalb der lokalen Datenbank verschiebt oder
+löscht — und was ein anderes Gerät oder eine spätere Wiederherstellung betrifft.
+
+**Die Schutzkette für den lokalen Reset** ist damit dreigliedrig und für beide Einstiegspunkte
+identisch: (1) ausdrückliche Bestätigung — getipptes `RESET` in der Danger Zone, `confirm()` auf
+dem Login-Screen; (2) `isFactoryResetBlocked` — Reset gesperrt, solange Sync oder LAN konfiguriert
+ist, Signale beim Klick frisch gelesen; (3) Pre-destructive Backup **vor** dem Löschen, dessen
+Fehlschlag den Reset abbricht.
+
+**Ehrliche Grenze der dritten Stufe:** `runPreDestructiveBackup` kopiert die DB-Dateien und
+schreibt Größe + SHA-256 je Datei ins Manifest — es liest die geschriebenen Kopien aber **nicht
+zurück**. Die Hashes stammen aus den gelesenen Quellbytes. Ein defekter Schreibvorgang fiele damit
+erst beim Restore auf, der seinerseits jede Datei gegen das Manifest prüft. Das ist der Stand des
+Vertrags, kein neu eingeführter Mangel — und der Grund, warum hier „Verifikation" *aufgezeichnete*
+Prüfsummen meint und nicht *rückgelesene*.
+
+Ergebnis: ein unauthentifizierter lokaler Reset ist zulässig, solange diese drei Glieder halten.
+Es wurde deshalb **kein** Owner-Gate ergänzt — weder in der Danger Zone noch auf dem Login-Screen.

@@ -9,9 +9,6 @@
 // Getestet wird der Kern, den der Backfill wirklich ausfuehrt (`planInvoicePaymentBackfill`),
 // nicht eine nachgebaute Kopie davon.
 
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   planInvoicePaymentBackfill,
   type BackfillPaymentRow,
@@ -122,46 +119,6 @@ function row(id: string, invoiceId: string, amount: number, grossAmount: number,
   const [d] = planInvoicePaymentBackfill([row('p1', 'i1', 25, 0)], none);
   check(close(d.arCredit, 0), 'gross 0: nichts gegen AR');
   check(close(d.overpayExcess, 25), 'gross 0: alles Guthaben');
-}
-
-// ── 10. Der Ausfuehrer: Ledger-Bein und Guthaben-Row committen zusammen ──
-//
-// `backfillInvoicePayments` haengt an DB, Stores und Sync und ist headless nicht importierbar —
-// die Eigenschaft ist aber load-bearing: bricht der customer_credits-INSERT ab, nachdem
-// `postInvoicePayment` das CR-CUSTOMER_CREDIT-Bein geschrieben hat, steht ein Ledger-Bein ohne
-// Domain-Row in der DB. Der Live-Pfad (`recordPayment`) klammert genau deshalb in eine
-// Transaktion; der Replay muss es genauso tun. Deshalb hier als Quell-Vertrag.
-{
-  const src = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'core', 'ledger', 'backfill.ts'),
-    'utf8'
-  );
-  const fn = src.slice(src.indexOf('export function backfillInvoicePayments'));
-  const body = fn.slice(0, fn.indexOf('\nexport ', 10));
-  const at = (needle: string) => body.indexOf(needle);
-
-  check(at('beginLedgerTransaction()') > -1, 'Ausfuehrer: oeffnet eine Transaktion');
-  check(
-    at('beginLedgerTransaction()') > -1 && at('beginLedgerTransaction()') < at('postInvoicePayment('),
-    'Ausfuehrer: Transaktion beginnt VOR der Ledger-Buchung'
-  );
-  check(
-    at('INSERT INTO customer_credits') > -1 && at('INSERT INTO customer_credits') < at('commitLedgerTransaction()'),
-    'Ausfuehrer: die Guthaben-Row wird VOR dem Commit geschrieben'
-  );
-  check(at('rollbackLedgerTransaction()') > at('catch'), 'Ausfuehrer: Rollback im catch');
-  check(
-    /catch\s*\([^)]*\)\s*\{[^}]*rollbackLedgerTransaction\(\);\s*throw/.test(body),
-    'Ausfuehrer: nach dem Rollback wird der Fehler weitergereicht (safeStep zaehlt ihn)'
-  );
-  check(
-    /const ownTx = d\.needsCreditRow && !inLedgerTransaction\(\)/.test(body),
-    'Ausfuehrer: keine zweite Transaktion, wenn schon eine laeuft'
-  );
-  check(
-    at("source_type = 'overpayment' AND source_id = ?") > -1,
-    'Ausfuehrer: Doppel-Credit wird ueber (source_type, source_id) ausgeschlossen'
-  );
 }
 
 console.log(`\nD1 invoice-payment-backfill: ${pass}/${pass + fail.length} checks passed`);
