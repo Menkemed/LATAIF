@@ -40,6 +40,10 @@ import {
   hasReversalFor,
   reverseSource,
   reverseTransaction,
+  inLedgerTransaction,
+  beginLedgerTransaction,
+  commitLedgerTransaction,
+  rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { planInvoicePaymentBackfill } from '@/core/ledger/backfill-payment-plan';
 import { canonicalLoanDirection } from '@/core/models/types';
@@ -280,23 +284,35 @@ export function backfillInvoicePayments(branchId: string): BackfillResult {
     };
 
     safeStep(res, `payment ${d.id.slice(0, 8)}`, () => {
-      postInvoicePayment(payment, customerId, d.openRemainder);
-      // Domain-Row zum CR-CUSTOMER_CREDIT-Bein — nur wenn sie fuer diese Zahlung noch fehlt.
-      if (d.needsCreditRow) {
-        const existing = query(
-          `SELECT id FROM customer_credits WHERE source_type = 'overpayment' AND source_id = ?`,
-          [d.id]
-        );
-        if (existing.length === 0) {
-          const overCreditId = uuid();
-          const now = payment.receivedAt || payment.createdAt || new Date().toISOString();
-          db.run(
-            `INSERT INTO customer_credits (id, branch_id, customer_id, source_type, source_id, amount, used_amount, status, note, created_at, created_by)
-             VALUES (?, ?, ?, 'overpayment', ?, ?, 0, 'OPEN', ?, ?, ?)`,
-            [overCreditId, branchId, customerId, d.id, d.overpayExcess, `Ueberzahlung ${r.invoice_number as string}`, now, userId]
+      // Atomaritaet wie im Live-Pfad (`recordPayment`): erzeugt die Ueberzahlung ein Guthaben,
+      // MUESSEN Ledger-Beine und customer_credits-Row zusammen committen oder zusammen fallen.
+      // Ohne das haette ein Fehler beim INSERT ein CR-CUSTOMER_CREDIT-Bein ohne Domain-Row
+      // hinterlassen — genau die Divergenz, die der Split-Helper verhindern soll.
+      const ownTx = d.needsCreditRow && !inLedgerTransaction();
+      if (ownTx) beginLedgerTransaction();
+      try {
+        postInvoicePayment(payment, customerId, d.openRemainder);
+        // Domain-Row zum CR-CUSTOMER_CREDIT-Bein — nur wenn sie fuer diese Zahlung noch fehlt.
+        if (d.needsCreditRow) {
+          const existing = query(
+            `SELECT id FROM customer_credits WHERE source_type = 'overpayment' AND source_id = ?`,
+            [d.id]
           );
-          trackInsert('customer_credits', overCreditId, { customerId, amount: d.overpayExcess, sourcePaymentId: d.id });
+          if (existing.length === 0) {
+            const overCreditId = uuid();
+            const now = payment.receivedAt || payment.createdAt || new Date().toISOString();
+            db.run(
+              `INSERT INTO customer_credits (id, branch_id, customer_id, source_type, source_id, amount, used_amount, status, note, created_at, created_by)
+               VALUES (?, ?, ?, 'overpayment', ?, ?, 0, 'OPEN', ?, ?, ?)`,
+              [overCreditId, branchId, customerId, d.id, d.overpayExcess, `Ueberzahlung ${r.invoice_number as string}`, now, userId]
+            );
+            trackInsert('customer_credits', overCreditId, { customerId, amount: d.overpayExcess, sourcePaymentId: d.id });
+          }
         }
+        if (ownTx) commitLedgerTransaction();
+      } catch (err) {
+        if (ownTx) rollbackLedgerTransaction();
+        throw err;
       }
     });
   }
