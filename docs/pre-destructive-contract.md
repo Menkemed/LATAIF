@@ -11,7 +11,7 @@ Operation ab und meldet das — kein Erfolg ohne Sicherung, kein halber Zustand.
 
 | # | Entry Point / UI | Command / Core | Owner-/Auth-Gate | Preflight | Pre-destructive Sicherung | Ziel | Verifikation | Commit Point | Fehlerverhalten |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | Settings → Danger Zone → Factory Reset | `SettingsPage.handleReset` → `runGuardedReset` → `resetDatabase` | eingeloggt + getipptes `RESET` | `isFactoryResetBlocked` (Sync/LAN konfiguriert → gesperrt), Signale beim Klick frisch gelesen | `flushDatabase` + `createPreDestructiveBackup('factory-reset')` | `<backupsRoot>/pre_destructive_<ts>/` | `manifest.json` mit Größe + SHA-256 je Datei | `deps.reset()` NACH erfolgreichem Backup | Backup wirft → kein Reset, Meldung „es wurde nichts gelöscht" |
+| 1 | Settings → Danger Zone → Factory Reset | `SettingsPage.handleReset` → `runGuardedReset` → `resetDatabase` | eingeloggt + getipptes `RESET` | `isFactoryResetBlocked` (Sync/LAN konfiguriert → gesperrt), Signale beim Klick frisch gelesen | `flushDatabase` + `createPreDestructiveBackup('factory-reset')` | `<backupsRoot>/pre_destructive_<ts>/` | Kopien zurückgelesen: Existenz + Größe + SHA-256 der Zielbytes, dazu `manifest.json` | `deps.reset()` NACH erfolgreichem Backup | Backup wirft → kein Reset, Meldung „es wurde nichts gelöscht" |
 | 2 | Login-Screen → „Reset Database" | `LoginPage.handleReset` → `runGuardedReset` | getipptes `confirm` | wie #1 | wie #1 (`'factory-reset-login'`) | wie #1 | wie #1 | wie #1 | wie #1 |
 | 3 | Settings → Danger Zone → Safe Purge | `SettingsPage.handlePurge` → `runSafePurge` | eingeloggt + getipptes `DELETE` | `countPurge` (read-only Vorschau), `PURGE_PLANS` Kinder-vor-Eltern | `flushDatabase` + `createPreDestructiveBackup('purge:<target>')` | wie #1 | wie #1 | `commit()` der Ledger-Tx | Backup- **oder** Purge-Fehler → `rollback()`, nichts (halb) gelöscht |
 | 4 | Settings → Import → Produkte importieren | `ImportPage.handleImport` → `runProductImport` | eingeloggt | Klassifizierung + Dedup vor dem Schreiben | `createPreDestructiveBackup('import-products')` | wie #1 | wie #1 | pro Zeile (**nicht** atomar — bewusst, dokumentiert) | ohne Backup-Erfolg **kein** `createProduct` |
@@ -81,12 +81,21 @@ dem Login-Screen; (2) `isFactoryResetBlocked` — Reset gesperrt, solange Sync o
 ist, Signale beim Klick frisch gelesen; (3) Pre-destructive Backup **vor** dem Löschen, dessen
 Fehlschlag den Reset abbricht.
 
-**Ehrliche Grenze der dritten Stufe:** `runPreDestructiveBackup` kopiert die DB-Dateien und
-schreibt Größe + SHA-256 je Datei ins Manifest — es liest die geschriebenen Kopien aber **nicht
-zurück**. Die Hashes stammen aus den gelesenen Quellbytes. Ein defekter Schreibvorgang fiele damit
-erst beim Restore auf, der seinerseits jede Datei gegen das Manifest prüft. Das ist der Stand des
-Vertrags, kein neu eingeführter Mangel — und der Grund, warum hier „Verifikation" *aufgezeichnete*
-Prüfsummen meint und nicht *rückgelesene*.
+**Die dritte Stufe verifiziert das Ziel, nicht die Quelle.** Bis zu diesem Slice schrieb
+`runPreDestructiveBackup` die Prüfsumme der *Quellbytes* ins Manifest — die sagt nichts darüber
+aus, ob am Ziel dasselbe angekommen ist. Ein abgeschnittener Schreibvorgang (volle Platte,
+ausgehängtes Laufwerk, stiller IO-Fehler) wäre erst beim Restore aufgefallen, also lange nachdem
+die destruktive Aktion die Originale gelöscht hat. Jetzt wird jede geschriebene Kopie —
+DB-Dateien **und** `manifest.json` — **zurückgelesen** und gegen Existenz, Größe und SHA-256 der
+zurückgelesenen Bytes geprüft. Fehlende Datei, Lesefehler, Größenabweichung, Hash-Mismatch oder
+eine nicht verfügbare Hash-Funktion brechen den Backup ab, und damit die destruktive Aktion. Kein
+„best effort": ein nicht verifizierbares Backup ist kein Backup.
 
 Ergebnis: ein unauthentifizierter lokaler Reset ist zulässig, solange diese drei Glieder halten.
 Es wurde deshalb **kein** Owner-Gate ergänzt — weder in der Danger Zone noch auf dem Login-Screen.
+
+`test/d3/pre-destructive-destination-verify.test.ts` hält die Ziel-Verifikation fest: ein
+Fake-Dateisystem verfälscht den Schreibvorgang gezielt (abgeschnitten, ein gekipptes Bit bei
+gleicher Länge, Datei verschluckt, Ziel unlesbar, kaputtes Manifest, abweichende Rücklesung) und
+prüft jedes Mal über den echten `runGuardedReset`, dass `resetDatabase()` **nicht** erreicht wird —
+und im Happy-Path genau einmal. Nimmt man die Verifikation heraus, fallen 11 der 19 Checks.

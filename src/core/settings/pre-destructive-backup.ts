@@ -102,9 +102,71 @@ export function buildBackupManifest(input: {
 }
 
 /**
+ * Liest eine gerade geschriebene Kopie ZURÜCK und vergleicht sie mit dem, was sie sein soll.
+ *
+ * Vorher stand im Manifest die Prüfsumme der QUELLBYTES — sie sagte nichts darüber aus, ob am
+ * Ziel dasselbe angekommen ist. Ein abgeschnittener Schreibvorgang (volle Platte, ausgehängtes
+ * Laufwerk, stiller IO-Fehler) wäre erst beim Restore aufgefallen, also lange nachdem die
+ * destruktive Aktion die Originale gelöscht hat. Genau dafür ist dieser Schritt da: das Backup
+ * gilt erst als vorhanden, wenn die Kopie nachweislich am Ziel liegt.
+ *
+ * Fail-closed in jeder Richtung — fehlende Datei, Lesefehler, abweichende Größe, abweichender
+ * Hash oder eine nicht verfügbare Hash-Funktion führen alle zum Abbruch. „Best effort" gibt es
+ * hier nicht: ein nicht verifizierbares Backup ist kein Backup.
+ *
+ * @returns die Prüfsumme der ZURÜCKGELESENEN Bytes (identisch mit der der Quelle) fürs Manifest.
+ */
+async function verifyWrittenCopy(
+  deps: BackupFsDeps,
+  name: string,
+  dstPath: string,
+  sourceBytes: Uint8Array
+): Promise<string> {
+  const fail = (why: string): never => {
+    throw new Error(`Pre-destructive backup: Kopie „${name}" nicht verifizierbar (${why}) — Aktion abgebrochen.`);
+  };
+
+  let expected: string;
+  try {
+    expected = await deps.sha256(sourceBytes);
+  } catch {
+    return fail('Prüfsumme der Quelle nicht berechenbar');
+  }
+
+  let exists = false;
+  try {
+    exists = await deps.exists(dstPath);
+  } catch {
+    return fail('Zieldatei nicht prüfbar');
+  }
+  if (!exists) return fail('Zieldatei fehlt nach dem Schreiben');
+
+  let written: Uint8Array;
+  try {
+    written = await deps.readFile(dstPath);
+  } catch {
+    return fail('Zieldatei nicht lesbar');
+  }
+  if (written.length !== sourceBytes.length) {
+    return fail(`Größe weicht ab (${written.length} statt ${sourceBytes.length} Bytes)`);
+  }
+
+  let actual: string;
+  try {
+    actual = await deps.sha256(written);
+  } catch {
+    return fail('Prüfsumme der Kopie nicht berechenbar');
+  }
+  if (actual !== expected) return fail('Prüfsumme weicht ab');
+
+  return actual;
+}
+
+/**
  * Führt den Pre-destructive-Backup über die injizierten IO-Deps aus.
- * Wirft bei JEDEM Fehler (Ordner/Copy/Manifest) → der Aufrufer bricht die destruktive
- * Aktion ab. Erfolg: kopierte Dateien + geschriebenes manifest.json, Rückgabe mit Pfad.
+ * Wirft bei JEDEM Fehler (Ordner/Copy/Verifikation/Manifest) → der Aufrufer bricht die
+ * destruktive Aktion ab. Erfolg heißt: jede Kopie liegt nachweislich am Ziel (zurückgelesen,
+ * Größe und Prüfsumme geprüft) und das manifest.json steht ebenso verifiziert daneben.
  */
 export async function runPreDestructiveBackup(action: string, deps: BackupFsDeps): Promise<BackupResult> {
   const timestamp = deps.nowIso();
@@ -121,12 +183,7 @@ export async function runPreDestructiveBackup(action: string, deps: BackupFsDeps
     const bytes = await deps.readFile(srcPath);
     const dstPath = await deps.join(backupDir, name);
     await deps.writeFile(dstPath, bytes); // Fehler hier → wirft → Abbruch
-    let sha: string | null = null;
-    try {
-      sha = await deps.sha256(bytes);
-    } catch {
-      sha = null; // SHA nur „wenn praktikabel" — kein Grund zum Abbruch
-    }
+    const sha = await verifyWrittenCopy(deps, name, dstPath, bytes);
     files.push({ name, srcPath, dstPath, size: bytes.length, sha256: sha });
   }
 
@@ -137,7 +194,10 @@ export async function runPreDestructiveBackup(action: string, deps: BackupFsDeps
   const appVersion = await deps.appVersion().catch(() => '?');
   const manifest = buildBackupManifest({ action, timestamp, appVersion, backupDir, files });
   const manifestPath = await deps.join(backupDir, 'manifest.json');
-  await deps.writeFile(manifestPath, new TextEncoder().encode(JSON.stringify(manifest, null, 2)));
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
+  await deps.writeFile(manifestPath, manifestBytes);
+  // Das Manifest gehört zum Backup: ohne lesbares Manifest ist der Restore blind.
+  await verifyWrittenCopy(deps, 'manifest.json', manifestPath, manifestBytes);
 
   return { location: backupDir, dir: backupDir, manifestPath, files };
 }
