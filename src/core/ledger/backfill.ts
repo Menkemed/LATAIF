@@ -41,9 +41,12 @@ import {
   reverseSource,
   reverseTransaction,
 } from '@/core/ledger/posting';
+import { planInvoicePaymentBackfill } from '@/core/ledger/backfill-payment-plan';
 import { canonicalLoanDirection } from '@/core/models/types';
-import { query } from '@/core/db/helpers';
+import { query, currentUserId } from '@/core/db/helpers';
 import { getDatabase, saveDatabase } from '@/core/db/database';
+import { trackInsert } from '@/core/sync/track';
+import { v4 as uuid } from 'uuid';
 import type {
   Invoice, InvoiceLine, Purchase, PurchaseLine, Expense,
   BankTransfer, Debt, CreditNote, Payment, PaymentMethod,
@@ -215,31 +218,87 @@ export function backfillInvoiceCogs(branchId: string): BackfillResult {
   return res;
 }
 
+// D1 — Ueberzahlungen im Backfill.
+//
+// `postInvoicePayment` ohne dritten Parameter bedeutet `openRemainder === undefined`, und
+// `computePaymentSplit` legt dann den GESAMTEN Betrag auf ACCOUNTS_RECEIVABLE. Fuer eine
+// historische Ueberzahlung (Rechnung 100, Zahlung 120) war das Ergebnis AR = -20 BD: eine
+// Phantom-Forderung mit negativem Vorzeichen statt 20 BD redeembarem Kundenguthaben. Der
+// Live-Pfad (`recordPayment`) macht es seit Slice 3 richtig; nur der Replay historischer
+// Zahlungen kannte den offenen Rest nicht.
+//
+// Rekonstruktion: `openRemainder` ist der offene Rest VOR der jeweiligen Zahlung. Die aktuelle
+// `invoices.paid_amount` ist der Stand NACH allen Zahlungen und damit unbrauchbar — also je
+// Rechnung chronologisch durchlaufen und mitzaehlen. Bereits ledgerisierte Zahlungen werden
+// zwar nicht neu gepostet, zaehlen aber in die Summe: sie haben den offenen Rest wirtschaftlich
+// genauso verbraucht.
+//
+// Dieselbe SSOT wie live: der Split kommt aus `computePaymentSplit`, und der Ueberschuss
+// bekommt dieselbe `customer_credits`-Row (`source_type='overpayment'`, `source_id=paymentId`)
+// wie in `recordPayment` — auf genau diesem Schluessel ist der Schritt auch idempotent.
 export function backfillInvoicePayments(branchId: string): BackfillResult {
   const res = emptyResult('invoice_payments');
   const rows = query(
-    `SELECT p.id, p.invoice_id, p.amount, p.method, p.received_at, p.created_at, i.customer_id
+    `SELECT p.id, p.invoice_id, p.amount, p.method, p.received_at, p.created_at,
+            i.customer_id, i.gross_amount, i.invoice_number
      FROM payments p JOIN invoices i ON i.id = p.invoice_id
-     WHERE i.branch_id = ?`,
+     WHERE i.branch_id = ?
+     ORDER BY p.invoice_id, COALESCE(p.received_at, p.created_at), p.created_at, p.id`,
     [branchId]
   );
   res.total = rows.length;
-  for (const r of rows) {
-    const id = r.id as string;
-    // Skip, sobald JE ledgerisiert (auch reversiert) — cancelInvoice reverst das Payment-
-    // Ledger, BEHAELT aber die payments-Row. hasLedgerEntries (nur lebendes Original) liefert
-    // dann false → Backfill re-postet DR CASH / CR AR ohne Gegenreversal → AR/Cash-Drift.
-    if (hasAnyLedgerEntries('PAYMENT', id)) { res.skipped++; continue; }
+  const db = getDatabase();
+  let userId = 'user-owner';
+  try { userId = currentUserId(); } catch { /* Backfill laeuft auch ohne Session */ }
+
+  // Der Plan (offener Rest je Zahlung + Split) kommt aus dem reinen Kern — dieselbe Logik, die
+  // `test/d1/invoice-payment-backfill.test.ts` direkt prueft. Skip, sobald JE ledgerisiert (auch
+  // reversiert): cancelInvoice reverst das Payment-Ledger, BEHAELT aber die payments-Row.
+  const plan = planInvoicePaymentBackfill(
+    rows.map((r) => ({
+      id: r.id as string,
+      invoiceId: r.invoice_id as string,
+      amount: Number(r.amount || 0),
+      method: (r.method as string) || 'cash',
+      grossAmount: Number(r.gross_amount || 0),
+    })),
+    (paymentId) => hasAnyLedgerEntries('PAYMENT', paymentId)
+  );
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const d = plan[i];
+    if (d.skipped) { res.skipped++; continue; }
     const customerId = r.customer_id as string;
     const payment: Payment = {
-      id,
-      invoiceId: r.invoice_id as string,
+      id: d.id,
+      invoiceId: d.invoiceId,
       amount: Number(r.amount || 0),
       method: (r.method as PaymentMethod) || 'cash',
       receivedAt: r.received_at as string,
       createdAt: r.created_at as string,
     };
-    safeStep(res, `payment ${id.slice(0, 8)}`, () => postInvoicePayment(payment, customerId));
+
+    safeStep(res, `payment ${d.id.slice(0, 8)}`, () => {
+      postInvoicePayment(payment, customerId, d.openRemainder);
+      // Domain-Row zum CR-CUSTOMER_CREDIT-Bein — nur wenn sie fuer diese Zahlung noch fehlt.
+      if (d.needsCreditRow) {
+        const existing = query(
+          `SELECT id FROM customer_credits WHERE source_type = 'overpayment' AND source_id = ?`,
+          [d.id]
+        );
+        if (existing.length === 0) {
+          const overCreditId = uuid();
+          const now = payment.receivedAt || payment.createdAt || new Date().toISOString();
+          db.run(
+            `INSERT INTO customer_credits (id, branch_id, customer_id, source_type, source_id, amount, used_amount, status, note, created_at, created_by)
+             VALUES (?, ?, ?, 'overpayment', ?, ?, 0, 'OPEN', ?, ?, ?)`,
+            [overCreditId, branchId, customerId, d.id, d.overpayExcess, `Ueberzahlung ${r.invoice_number as string}`, now, userId]
+          );
+          trackInsert('customer_credits', overCreditId, { customerId, amount: d.overpayExcess, sourcePaymentId: d.id });
+        }
+      }
+    });
   }
   return res;
 }

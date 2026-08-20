@@ -15,6 +15,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import { v4 as uuid } from 'uuid';
+import { computePaymentSplit } from '@/core/ledger/payment-split';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
@@ -683,26 +684,11 @@ export function postSalesReturnCogs(
 //   DEBIT  CASH/BANK/CARD_CLEARING  by amount
 //   CREDIT ACCOUNTS_RECEIVABLE      by amount
 
-// Slice 3 — Ueberzahlungs-Split: der Teil einer Zahlung UEBER dem offenen Invoice-Rest
-// (openRemainder = gross - bereits-bezahlt) gehoert NICHT auf ACCOUNTS_RECEIVABLE (das
-// triebe AR negativ = Phantom-Forderung), sondern auf CUSTOMER_CREDIT (redeembare
-// Verbindlichkeit). Rounding-SICHER: creditCredit per Subtraktion, sodass
-// arCredit + creditCredit === ROUND(amount) (sonst postEntries-Imbalance). EINE Quelle —
-// recordPayment leitet die customer_credits-Row-Hoehe aus demselben Helper ab, damit
-// Domain-Row und Ledger-Bein nie um einen Fil divergieren. openRemainder === undefined
-// (Alt-Aufrufer / kein Split gewuenscht) ODER method 'credit' (Guthaben-Einloesung cappt
-// in applyCreditToInvoice bereits, ein Split waere self-referential DR/CR CUSTOMER_CREDIT)
-// → arCredit = voller Betrag, creditCredit 0 (unveraendertes 2-Bein-Verhalten).
-export function computePaymentSplit(
-  amount: number,
-  openRemainder: number | undefined,
-  method: PaymentMethod | 'credit'
-): { arCredit: number; creditCredit: number } {
-  const amt = ROUND(amount);
-  if (openRemainder === undefined || method === 'credit') return { arCredit: amt, creditCredit: 0 };
-  const arCredit = Math.min(amt, Math.max(0, ROUND(openRemainder)));
-  return { arCredit, creditCredit: ROUND(amt - arCredit) };
-}
+// Slice 3 — Ueberzahlungs-Split. Die Implementierung liegt in `payment-split.ts`: ein reiner
+// Kern ohne DB-/Store-Imports, damit ihn auch der Replay-Pfad (`backfill-payment-plan`) und ein
+// Node-Gate benutzen koennen. Hier nur der Re-Export, damit sich fuer bestehende Aufrufer
+// (postInvoicePayment, invoiceStore.recordPayment) nichts aendert — EINE Quelle bleibt EINE.
+export { computePaymentSplit };
 
 export function postInvoicePayment(
   payment: Payment,
