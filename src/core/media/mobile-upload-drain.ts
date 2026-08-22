@@ -216,6 +216,8 @@ const ERR_BATCH_MISMATCH = 'MOBILE_UPLOAD_BATCH_MISMATCH';
 // MOBILE-EDIT-S2 — ein Edit-Job, der mehr will als Text, wird quarantaeniert statt halb ausgefuehrt.
 const ERR_EDIT_GALLERY_UNSUPPORTED = 'MOBILE_EDIT_GALLERY_NOT_SUPPORTED';
 const ERR_EDIT_PATCH_INVALID = 'MOBILE_EDIT_PATCH_INVALID';
+// MOBILE-EDIT-S3 — eine Job-Art, die dieser Stand nicht kennt, wird abgelehnt statt geraten.
+const ERR_UNKNOWN_JOB_KIND = 'MOBILE_UNKNOWN_JOB_KIND';
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource);
@@ -362,6 +364,13 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
   // steht in `processEditClaim` und ist dort genauso fail-closed.
   if (isMobileTextEditJob(grant.metadataJson)) return processEditClaim(grant, deps, sc, entryRevision);
   if (isMobileGalleryEditJob(grant.metadataJson)) return processGalleryEditClaim(grant, deps, sc, entryRevision);
+  // Ein `kind`, das dieser Desktop nicht kennt, wird NICHT als Create behandelt. Der Server weist so
+  // etwas schon beim Annehmen ab; taucht es hier trotzdem auf (aelterer Job, anderer Stand), ist die
+  // Absicht unbekannt — und ein unbekannter Auftrag wird quarantaeniert, nicht geraten.
+  if (mobileJobKindMarker(grant.metadataJson) === 'unknown') {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_UNKNOWN_JOB_KIND, sc);
+    return { code: 'manifest_invalid', detail: ERR_UNKNOWN_JOB_KIND };
+  }
 
   // Re-verify the handed-off manifest structure before creating anything.
   const mf = verifyGrantManifest(grant);
@@ -450,6 +459,19 @@ export const MOBILE_TEXT_EDIT_FIELDS: ReadonlySet<string> = new Set([
  *  nur `mode='collection'` zu) und geht in den payload_hash ein, ist also genauso bindend. */
 export function isMobileTextEditJob(metadataJson: string): boolean {
   try { return (JSON.parse(metadataJson) as { kind?: unknown } | null)?.kind === 'text_edit'; } catch { return false; }
+}
+
+/** Die Job-Art, wie sie in der Metadata steht — Spiegel von `mobile_job_kind()` in Rust.
+ *  FEHLENDES `kind` ist ein Create (so kommt jeder Create-Job). Ein VORHANDENES, unbekanntes `kind`
+ *  ist ausdruecklich `unknown` und wird abgelehnt, nicht als Create durchgereicht. */
+export function mobileJobKindMarker(metadataJson: string): 'create' | 'text_edit' | 'gallery_edit' | 'unknown' {
+  let meta: { kind?: unknown } | null;
+  try { meta = JSON.parse(metadataJson) as { kind?: unknown } | null; } catch { return 'unknown'; }
+  if (!meta || typeof meta !== 'object') return 'unknown';
+  if (!('kind' in meta)) return 'create';
+  if (meta.kind === 'text_edit') return 'text_edit';
+  if (meta.kind === 'gallery_edit') return 'gallery_edit';
+  return 'unknown';
 }
 
 /** Den Patch aus der Job-Metadata lesen — fail closed: unbekannte Felder machen den Job ungueltig,

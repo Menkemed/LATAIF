@@ -60,7 +60,9 @@ class FakeGateway implements MediaCommandGateway {
     const r = this.rend(i.imageBytes);
     return { ingest_request_id: i.ingestRequestId, request_hash: i.requestHash, state: 'prepared', main_descriptor: d(r.main, 24), thumbnail_descriptor: d(r.thumb, 12) };
   }
+  commits = 0;
   async commitStockImage(i: CommitInput): Promise<CommitResult> {
+    this.commits++;
     const bytes = this.req.get(i.ingestRequestId);
     if (!bytes) throw new Error('MEDIA_INGEST_NOT_FOUND');
     const r = this.rend(bytes);
@@ -91,6 +93,12 @@ function allLinks(db: { exec: (sql: string, p?: unknown[]) => Array<{ values: un
 }
 const activeLinks = (db: never): LinkRow[] => allLinks(db).filter((l) => l.deletedAt === null).sort((a, b) => a.sortOrder - b.sortOrder);
 const sameRows = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+/** Zeilen einer Medien-Tabelle zaehlen — fuer den Nachweis, dass ein gescheiterter Save WIRKLICH
+ *  nichts geschrieben hat, nicht nur nichts an `media_links`. */
+function countRows(db: never, table: string): number {
+  const r = (db as unknown as { exec: (s: string) => Array<{ values: unknown[][] }> }).exec(`SELECT COUNT(*) FROM ${table}`);
+  return r.length ? Number(r[0].values[0][0]) : -1;
+}
 
 function newDb(SQL: { Database: new () => never }): never {
   const db = new SQL.Database();
@@ -461,6 +469,70 @@ async function main(): Promise<void> {
     ok(sameRows(allLinks(db as never), snapshot), 'ADD-FAIL the removal was NOT committed on its own');
     ok(activeLinks(db as never).some((l) => l.linkId === c.linkId), 'ADD-FAIL C is still in the gallery');
     ok(activeLinks(db as never).length === 4, 'ADD-FAIL all four images are still there');
+  }
+
+  // ── §4 ORPHANS: was passiert, wenn ein Bild schon veroeffentlicht ist ─────
+  //
+  // Der ehrliche Ablauf: `applyEditBatch` committet JEDES neue Bild beim Gateway, BEVOR die
+  // Transaktion beginnt. Scheitert danach etwas, sind die Bytes bereits veroeffentlicht — die
+  // Datenbank aber unberuehrt. Genau das wird hier gemessen: ein Batch mit zwei neuen Bildern, bei
+  // dem das zweite von seinem eingefrorenen Deskriptor abweicht. Das erste ist dann committed, der
+  // Job faellt, und es darf trotzdem KEINE Zeile entstehen.
+  {
+    const { db, gw, co, baseline, fp } = await fixture();
+    const snapshot = allLinks(db as never);
+    const objectsBefore = countRows(db as never, 'media_objects');
+    const gensBefore = countRows(db as never, 'media_blob_generations');
+    const variantsBefore = countRows(db as never, 'media_variants');
+    const commitsBefore = gw.commits;
+
+    const good = await prepareNew(gw, 'E', 0);
+    // Das zweite Bild traegt einen eingefrorenen Deskriptor, den der Commit nicht bestaetigen wird.
+    const diverged = [1, { requestId: 'diverged', prepared: { ...good[1].prepared, ingest_request_id: 'diverged', main_descriptor: d('9'.repeat(64), 24) } as PrepareResult }] as const;
+    let thrown: unknown = null;
+    try {
+      await applyPlan(co, planFor(fp, [...baseline.map((b) => ({ keep: b.linkId })), { new: 0 }, { new: 1 }]), new Map([good, diverged]), 'batch-orphan');
+    } catch (e) { thrown = e; }
+
+    ok(thrown !== null, `ORPHAN the save fails (${(thrown as { message?: string })?.message?.slice(0, 40)})`);
+    ok(gw.commits > commitsBefore, `ORPHAN at least one new image WAS already published (${gw.commits - commitsBefore})`);
+    ok(sameRows(allLinks(db as never), snapshot), 'ORPHAN not one media_links row was written');
+    ok(countRows(db as never, 'media_objects') === objectsBefore, `ORPHAN no media_objects row (${countRows(db as never, 'media_objects')} vs ${objectsBefore})`);
+    ok(countRows(db as never, 'media_blob_generations') === gensBefore, `ORPHAN no generation row (${countRows(db as never, 'media_blob_generations')} vs ${gensBefore})`);
+    ok(countRows(db as never, 'media_variants') === variantsBefore, `ORPHAN no variant row (${variantsBefore})`);
+    ok(activeLinks(db as never).length === 4 && activeLinks(db as never)[0].isPrimary === 1, 'ORPHAN the old gallery and its cover are intact');
+    // Damit steht der Vertrag fest: das veroeffentlichte, aber nirgends verknuepfte Rendition ist
+    // UNERREICHBAR und wird ausschliesslich vom bestehenden Reachability-/GC-Vertrag abgeraeumt.
+    // Hier wird bewusst NICHTS geloescht — ad-hoc-Loeschen waere genau der Weg, auf dem ein noch
+    // referenziertes Bild verschwinden koennte.
+    ok(!allLinks(db as never).some((l) => l.mediaId.includes('diverged')), 'ORPHAN the unreferenced rendition is reachable from nothing');
+  }
+
+  // ── §6 REPLAY NACH FREMDER AENDERUNG: kein Wiederherstellen, kein Ueberschreiben ──
+  //
+  // Der gefaehrliche Fall hinter `noop_already_applied`: derselbe Plan wird ein zweites Mal
+  // vorgelegt, NACHDEM jemand anders die Galerie weiterbewegt hat. Er darf weder den alten Zustand
+  // zurueckholen noch die fremde Aenderung ueberschreiben.
+  {
+    const { db, gw, co, baseline, fp } = await fixture();
+    const plan = planFor(fp, baseline.slice(1).map((b) => ({ keep: b.linkId })), [baseline[0].linkId]);
+    await applyPlan(co, plan, new Map(), 'batch-r1');
+    ok(activeLinks(db as never).length === 3, `REPLAY-EXT the first save applied (${activeLinks(db as never).length})`);
+
+    // Jemand anders fuegt danach ein Bild hinzu.
+    const nowBase = co.readGalleryBaseline(SCOPE);
+    const preparedX = new Map([await prepareNew(gw, 'X', 0)]);
+    await applyPlan(co, planFor(await galleryBaselineFingerprint(nowBase), [...nowBase.map((b) => ({ keep: b.linkId })), { new: 0 }]), preparedX, 'batch-ext');
+    const external = allLinks(db as never);
+    ok(activeLinks(db as never).length === 4, `REPLAY-EXT someone else added an image (${activeLinks(db as never).length})`);
+
+    // Derselbe alte Plan noch einmal — ueber den vollen mobilen Weg, so wie ein Resume ihn nimmt.
+    let thrown: unknown = null;
+    try { await applyPlan(co, plan, new Map(), 'batch-r1'); } catch (e) { thrown = e; }
+    ok((thrown as { code?: string })?.code === ERR_GALLERY_BASELINE_CHANGED,
+      `REPLAY-EXT the stale plan is a conflict, not a success (${(thrown as { code?: string })?.code})`);
+    ok(sameRows(allLinks(db as never), external), 'REPLAY-EXT the external change is untouched');
+    ok(activeLinks(db as never).length === 4, 'REPLAY-EXT the removed image was NOT restored and nothing was overwritten');
   }
 
   // ── §7 TEXT-ONLY bleibt unberuehrt: der Galerie-Pfad fasst ihn nicht an ───

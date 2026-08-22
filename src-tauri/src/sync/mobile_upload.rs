@@ -244,15 +244,26 @@ pub enum MobileJobKind {
     Create,
     TextEdit,
     GalleryEdit,
+    /// `kind` ist da, aber nicht einer der bekannten Werte. Ein eigener Zustand, KEIN Create.
+    Unknown,
 }
 
-/// Fail closed: alles, was nicht ausdruecklich ein bekannter Edit-Marker ist, ist ein Create — und
-/// ein Create kann den Marker nicht tragen, weil `kind` kein erlaubtes Create-Feld ist.
+pub const ERR_UNKNOWN_JOB_KIND: &str = "MOBILE_UNKNOWN_JOB_KIND";
+
+/// Die eine Stelle, an der aus einer Metadata die Job-Art wird.
+///
+/// FEHLENDES `kind` heisst Create — das muss so bleiben, weil jeder bisherige und jeder heutige
+/// Create-Job ohne Marker kommt. Ein VORHANDENES, aber unbekanntes `kind` ist dagegen etwas anderes:
+/// ein Client, der eine Absicht ausdrueckt, die diese Version nicht kennt. Ihn stillschweigend als
+/// Create zu behandeln und darauf zu vertrauen, dass die Create-Feld-Allowlist ihn schon irgendwie
+/// abweist, waere ein Zufallsschutz — und ein neuer erlaubter Feldname wuerde ihn aushebeln. Deshalb
+/// bekommt dieser Fall einen eigenen Zustand, der ausdruecklich und mit eigenem Code abgelehnt wird.
 pub fn mobile_job_kind(meta: &Value) -> MobileJobKind {
-    match meta.get("kind").and_then(|v| v.as_str()) {
-        Some("text_edit") => MobileJobKind::TextEdit,
-        Some("gallery_edit") => MobileJobKind::GalleryEdit,
-        _ => MobileJobKind::Create,
+    match meta.get("kind") {
+        None => MobileJobKind::Create,
+        Some(Value::String(s)) if s == "text_edit" => MobileJobKind::TextEdit,
+        Some(Value::String(s)) if s == "gallery_edit" => MobileJobKind::GalleryEdit,
+        Some(_) => MobileJobKind::Unknown,
     }
 }
 
@@ -517,8 +528,9 @@ fn verify_and_load_manifest(conn: &Connection, staging_root: &Path, t: &TrustedU
             .map(|m| mobile_job_kind(&m))
             .unwrap_or(MobileJobKind::Create);
         // Ein Create ohne Bild bleibt abgelehnt. Ein Text-Edit hat naturgemaess keins, und ein
-        // Galerie-Edit, der nur entfernt oder umsortiert, ebenfalls nicht.
-        if kind == MobileJobKind::Create { return Err(ERR_MANIFEST_INVALID); }
+        // Galerie-Edit, der nur entfernt oder umsortiert, ebenfalls nicht. Alles andere — auch eine
+        // unbekannte Job-Art — ist hier ungueltig.
+        if !matches!(kind, MobileJobKind::TextEdit | MobileJobKind::GalleryEdit) { return Err(ERR_MANIFEST_INVALID); }
     }
     for (i, (slot, ..)) in rows.iter().enumerate() {
         if *slot != i as i64 { return Err(ERR_MANIFEST_INVALID); } // gap / duplicate / non-contiguous slot
@@ -712,6 +724,8 @@ pub fn accept_upload(
     match kind {
         MobileJobKind::TextEdit => validate_text_edit_metadata(&meta).map_err(reject)?,
         MobileJobKind::GalleryEdit => validate_gallery_edit_metadata(&meta, sub.images.len()).map_err(reject)?,
+        // Ausdrueckliche Ablehnung mit eigenem Code, nicht "faellt schon irgendwo durch".
+        MobileJobKind::Unknown => return Err(reject(ERR_UNKNOWN_JOB_KIND)),
         MobileJobKind::Create => {}
     }
     // Ein Create ohne Bild bleibt abgelehnt; beide Edit-Arten duerfen ohne neues Bild kommen — ein

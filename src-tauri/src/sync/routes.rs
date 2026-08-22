@@ -706,6 +706,10 @@ async fn mobile_upload_ingress(
         // und jede Entfernung nennt ihre stabile `link_id`.
         super::mobile_upload::MobileJobKind::GalleryEdit =>
             super::mobile_upload::validate_gallery_edit_metadata(&req.metadata, req.images.len()),
+        // Ein `kind`, das diese Version nicht kennt, wird ausdruecklich abgelehnt — nicht als Create
+        // durchgereicht in der Hoffnung, die Feld-Allowlist fange es schon ab.
+        super::mobile_upload::MobileJobKind::Unknown =>
+            Err(super::mobile_upload::ERR_UNKNOWN_JOB_KIND),
         super::mobile_upload::MobileJobKind::Create => Ok(()),
     };
     if let Err(code) = kind_check {

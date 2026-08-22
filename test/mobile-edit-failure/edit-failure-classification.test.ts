@@ -22,6 +22,7 @@
 
 import {
   processMobileUploadClaim, drainMobileUploads,
+  mobileJobKindMarker,
   type ClaimGrant, type ClaimedImage, type DrainScope, type MobileDrainDeps,
   type MobileUploadBridge, type PreparedMediaItem, type ReadyResult,
 } from '../../src/core/media/mobile-upload-drain.ts';
@@ -310,6 +311,31 @@ async function main(): Promise<void> {
     ok(row.state === 'quarantined' && row.errorCode === 'MOBILE_GALLERY_PLAN_INVALID', `GALLERY a malformed plan is terminal (${row.errorCode})`);
     ok(fx.applies === 0, 'GALLERY …and nothing was applied');
     ok(fx.creates === 0, 'GALLERY …and above all no product was created');
+  }
+
+  // ── MOBILE-EDIT-S3 §2 — eine unbekannte Job-Art wird abgelehnt, nicht geraten ──
+  //
+  // Frueher waere so ein Job als Create durch den Manifest-Pfad gelaufen und nur deshalb gescheitert,
+  // weil `kind` kein erlaubtes Create-Feld ist. Das ist Zufallsschutz. Jetzt hat der Fall einen
+  // eigenen Zustand und einen eigenen Code.
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add('ev-unknown-kind', { kind: 'gallery_wipe', productId: PRODUCT });
+    const deps = {
+      ...depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; }),
+      applyGalleryEdit: async () => { fx.applies++; return { ok: true }; },
+    };
+    await drainMobileUploads(deps, 25);
+    ok(row.state === 'quarantined' && row.errorCode === 'MOBILE_UNKNOWN_JOB_KIND',
+      `UNKNOWN KIND terminal, with its own code (${row.state}/${row.errorCode})`);
+    ok(row.claims === 1, `UNKNOWN KIND claimed exactly once (${row.claims})`);
+    ok(fx.creates === 0 && fx.prepares === 0 && fx.applies === 0, 'UNKNOWN KIND nothing was created, prepared or applied');
+  }
+  ok(mobileJobKindMarker('{"brand":"Rolex"}') === 'create', 'MARKER a job without the field is a create — that is how every create arrives');
+  ok(mobileJobKindMarker('{"kind":"text_edit"}') === 'text_edit', 'MARKER text_edit is exactly that');
+  ok(mobileJobKindMarker('{"kind":"gallery_edit"}') === 'gallery_edit', 'MARKER gallery_edit is exactly that');
+  for (const bad of ['{"kind":"gallery_wipe"}', '{"kind":42}', '{"kind":null}', 'not json']) {
+    ok(mobileJobKindMarker(bad) === 'unknown', `MARKER ${bad} is unknown, never a create`);
   }
 
   // ── NEGATIVKONTROLLE: die Terminal-Pruefung ist nicht tautologisch ────────

@@ -907,9 +907,11 @@ fn the_three_job_kinds_never_collapse_into_each_other() {
     assert_eq!(mobile_job_kind(&serde_json::json!({"brand":"Rolex"})), MobileJobKind::Create);
     assert_eq!(mobile_job_kind(&serde_json::json!({"kind":"text_edit"})), MobileJobKind::TextEdit);
     assert_eq!(mobile_job_kind(&serde_json::json!({"kind":"gallery_edit"})), MobileJobKind::GalleryEdit);
-    // Unbekannt heisst NICHT "irgendein Edit" — es faellt auf den Create-Vertrag zurueck, und der
-    // weist `kind` als unerlaubtes Feld ab.
-    assert_eq!(mobile_job_kind(&serde_json::json!({"kind":"something_else"})), MobileJobKind::Create);
+    // Fehlt der Marker ganz, ist es ein Create — so kommt jeder Create-Job.
+    // Ein VORHANDENES, unbekanntes `kind` ist ausdruecklich unbekannt — nicht "dann eben Create".
+    assert_eq!(mobile_job_kind(&serde_json::json!({"kind":"something_else"})), MobileJobKind::Unknown);
+    assert_eq!(mobile_job_kind(&serde_json::json!({"kind":42})), MobileJobKind::Unknown);
+    assert_eq!(mobile_job_kind(&serde_json::json!({"kind":null})), MobileJobKind::Unknown);
     assert_eq!(mobile_job_kind(&serde_json::Value::Null), MobileJobKind::Create);
 }
 
@@ -929,4 +931,23 @@ fn a_real_composite_link_id_is_accepted() {
         "galleryBaseline": "a".repeat(64), "order": [{"keep": link}], "remove": []
     });
     assert!(validate_gallery_edit_metadata(&m, 0).is_ok());
+}
+
+/// MOBILE-EDIT-S3 — ein unbekanntes `kind` wird mit EIGENEM Code abgelehnt.
+///
+/// Frueher fiel so etwas auf den Create-Vertrag zurueck und scheiterte nur deshalb, weil `kind` kein
+/// erlaubtes Create-Feld ist. Das war Zufallsschutz: ein neuer erlaubter Feldname haette ihn
+/// ausgehebelt, und der Fehler haette "unbekanntes Feld" geheissen statt "unbekannte Job-Art".
+#[test]
+fn an_unknown_job_kind_is_refused_on_its_own_terms() {
+    let s = Temp::new("unknown-kind");
+    let mut c = init_db(s.path());
+    let err = accept_upload(
+        &mut c, s.path(), &trusted(),
+        &sub("ev-unknown", vec![], r#"{"kind":"gallery_wipe","productId":"prod-1"}"#),
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), ERR_UNKNOWN_JOB_KIND, "not UNKNOWN_FIELD, not NO_IMAGES");
+    assert_eq!(inbox_count(&c), 0, "and nothing was stored");
 }
