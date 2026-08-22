@@ -331,11 +331,90 @@ async function main() {
   ok(JSON.stringify(mediaFiles()) === JSON.stringify(beforeFail.files), 'FAILURE not one media file changed');
 
   // ════════════════════════════════════════════════════════════════════════
+  // Der Vertrag selbst — direkt gegen /api/mobile/upload, ohne die UI
+  // ════════════════════════════════════════════════════════════════════════
+  const postUpload = async (body) => {
+    const r = await fetch(`${BASE}/api/mobile/upload`, {
+      method: 'POST', headers: { 'content-type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify({ protocol_version: 2, mode: 'collection', ...body }),
+    });
+    let json = null; try { json = await r.json(); } catch {}
+    return { status: r.status, json };
+  };
+  const editBody = (over) => ({
+    upload_event_id: 'ct-' + Math.random().toString(36).slice(2),
+    entity_id: 'ct-entity-' + Math.random().toString(36).slice(2),
+    metadata: { kind: 'text_edit', productId: pid.id, patch: { notes: 'contract' } },
+    images: [],
+    ...over,
+  });
+
+  // §3 — die Null-Bild-Ausnahme gilt NUR fuer einen Text-Edit. Ein Create ohne Bild bleibt ungueltig.
+  const emptyCreate = await postUpload({
+    upload_event_id: 'ct-empty-' + Date.now(), entity_id: 'ct-empty-entity-' + Date.now(),
+    metadata: { categoryId: 'cat-watch', brand: 'Rolex', name: 'No Photo', condition: 'Pre-Owned', attributes: { dial: 'Black', material: 'Steel' } },
+    images: [],
+  });
+  ok(emptyCreate.status === 422, `ZERO-IMAGE a create without a photo is still refused (${emptyCreate.status})`);
+
+  // §2 — ein Create darf den Edit-Marker gar nicht erst tragen koennen.
+  const markedCreate = await postUpload({
+    upload_event_id: 'ct-mark-' + Date.now(), entity_id: 'ct-mark-entity-' + Date.now(),
+    metadata: { kind: 'text_edit', categoryId: 'cat-watch', brand: 'Rolex', name: 'Marked', condition: 'Pre-Owned' },
+    images: [],
+  });
+  ok(markedCreate.status === 422, `ROUTING a create payload carrying the edit marker is refused (${markedCreate.status})`);
+
+  // §2 — kaputter Patch: fail closed, kein Job.
+  const badPatch = await postUpload(editBody({ metadata: { kind: 'text_edit', productId: pid.id, patch: { sku: 'HACK-1' } } }));
+  ok(badPatch.status === 422, `ROUTING a patch touching a field outside the allowlist is refused (${badPatch.status})`);
+  const noTarget = await postUpload(editBody({ metadata: { kind: 'text_edit', patch: { notes: 'x' } } }));
+  ok(noTarget.status === 422, `ROUTING an edit without a target product is refused (${noTarget.status})`);
+
+  // §5 — POST angenommen, Anwendung scheitert: das Ziel gibt es nicht.
+  const beforeGhost = { products: dbQ(BIZ_DB, 'SELECT COUNT(*) c FROM products')[0].c, links: linkRows(pid.id), files: mediaFiles() };
+  const ghost = await postUpload(editBody({ metadata: { kind: 'text_edit', productId: 'does-not-exist-' + Date.now(), patch: { notes: 'ghost' } } }));
+  ok(ghost.status === 201, `POST-ACCEPT the job is accepted first (${ghost.status})`);
+  const ghostEvent = ghost.json?.uploadEventId;
+  const ghostState = async () => {
+    const end = Date.now() + 90000;
+    while (Date.now() < end) {
+      const r = dbQ(SERVER_DB, 'SELECT state, error_code FROM mobile_upload_inbox WHERE upload_event_id = ?', [ghostEvent])[0];
+      if (r && r.state !== 'accepted' && r.state !== 'processing') return r;
+      await sleep(1000);
+    }
+    return dbQ(SERVER_DB, 'SELECT state, error_code FROM mobile_upload_inbox WHERE upload_event_id = ?', [ghostEvent])[0];
+  };
+  const ghostRow = await ghostState();
+  ok(ghostRow?.state === 'quarantined', `POST-ACCEPT the drain ends it in a clean terminal state (${JSON.stringify(ghostRow)})`);
+  ok(ghostRow?.error_code === 'MOBILE_UPLOAD_TARGET_CONFLICT', 'POST-ACCEPT …with the reason recorded');
+  ok(dbQ(BIZ_DB, 'SELECT COUNT(*) c FROM products')[0].c === beforeGhost.products, 'POST-ACCEPT no product was created by a failed edit');
+  ok(sameLinks(linkRows(pid.id), beforeGhost.links), 'POST-ACCEPT the gallery is untouched');
+  ok(JSON.stringify(mediaFiles()) === JSON.stringify(beforeGhost.files), 'POST-ACCEPT not one media file changed');
+
+  // §6 — derselbe Job noch einmal: der Replay ist ein no-op, keine zweite Wirkung.
+  const beforeReplay = { links: linkRows(pid.id), products: dbQ(BIZ_DB, 'SELECT COUNT(*) c FROM products')[0].c };
+  const replayBody = editBody({ metadata: { kind: 'text_edit', productId: pid.id, patch: { notes: 'replayed once' } } });
+  const first = await postUpload(replayBody);
+  ok(first.status === 201, `REPLAY the edit is accepted (${first.status})`);
+  ok(await waitProductField(pid.id, 'notes', 'replayed once', 90000), 'REPLAY …and applied');
+  const again = await postUpload(replayBody);            // exakt derselbe uploadEventId + Inhalt
+  ok(again.status === 200 && again.json?.state === 'replay', `REPLAY the repeat is answered as a replay, not a second job (${again.status} ${again.json?.state})`);
+  await sleep(4000);
+  ok(dbQ(SERVER_DB, 'SELECT COUNT(*) c FROM mobile_upload_inbox WHERE upload_event_id = ?', [replayBody.upload_event_id])[0].c === 1,
+    'REPLAY exactly one inbox row for that event id');
+  ok(productRow(pid.id)?.notes === 'replayed once', 'REPLAY the field carries the value exactly once');
+  ok(dbQ(BIZ_DB, 'SELECT COUNT(*) c FROM products')[0].c === beforeReplay.products, 'REPLAY no second product');
+  ok(sameLinks(linkRows(pid.id), beforeReplay.links), 'REPLAY no media side effect');
+
+  // ════════════════════════════════════════════════════════════════════════
   // Keine gestrandeten Jobs, kein Staging-Rest
   // ════════════════════════════════════════════════════════════════════════
   const inbox = inboxRows();
-  ok(inbox.every((r) => r.state === 'ready'), `no stranded upload job (${JSON.stringify(inbox)})`);
-  ok(inbox.length === 3, `inbox holds exactly the fixture create plus the two text edits (${inbox.length}: ${inbox.map((r) => r.state).join(',')})`);
+  // Jede Zeile steht auf einem TERMINALEN Zustand — nichts haengt in `accepted`/`processing` fest.
+  // `quarantined` ist dabei ein gewolltes Ergebnis: der absichtlich ins Leere zielende Edit.
+  ok(inbox.every((r) => r.state === 'ready' || r.state === 'quarantined'), `no stranded upload job (${JSON.stringify(inbox)})`);
+  ok(inbox.filter((r) => r.state === 'quarantined').length === 1, `exactly the one deliberately failed edit is quarantined (${inbox.filter((r) => r.state === 'quarantined').length})`);
   ok(stagedFiles() === stagedBeforeEdit, `a text edit stages nothing (${stagedFiles()} vs ${stagedBeforeEdit})`);
   ok(consoleErrors.length === 0, `no uncaught page exception (${consoleErrors.slice(0, 2).join(' | ')})`);
   const unexpected = httpErrors.filter((h) => !/401/.test(h));
