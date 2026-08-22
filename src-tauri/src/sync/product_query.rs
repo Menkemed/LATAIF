@@ -189,6 +189,12 @@ fn enrich(conn: &Connection, tenant_id: &str, product: &mut serde_json::Value) {
             .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
         })
         .unwrap_or_default();
+    // ACHTUNG fuer S3 (Galerie-Edit): `unwrap_or_default()` macht aus einem Lesefehler eine LEERE
+    // Galerie. Fuer S1/S2 ist das harmlos — der Textedit fasst `media_links` per Vertrag nicht an,
+    // eine leere Anzeige kann also nichts loeschen. Sobald ein Save die Galerie schreibt, ist es das
+    // NICHT mehr: "leer" waere dann von "hat keine Bilder" nicht zu unterscheiden und der Baseline
+    // waere der Fingerabdruck des Nichts. Ein Galerie-Edit muss diesen Fall vorher fail-closed
+    // machen (Lesefehler = Fehler, nicht leere Liste).
 
     // Der Baseline-Nachweis: ein Fingerabdruck GENAU der Galerie, die das Handy gerade bekommen hat
     // — Identitaet, Position und Titelbild-Flag jeder Zeile, in Reihenfolge. Ein spaeterer Save

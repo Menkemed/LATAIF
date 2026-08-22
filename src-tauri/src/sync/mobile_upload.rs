@@ -628,9 +628,17 @@ pub fn accept_upload(
     // MOBILE-EDIT-S2: fuer einen Edit gilt das genau anders herum. Er zielt naturgemaess auf ein
     // Produkt, das es schon gibt — und dessen abgeschlossener (`ready`) Create-Job steht noch in der
     // Inbox. Wuerde der hier als Konflikt zaehlen, koennte ein Artikel nach dem Anlegen NIE wieder
-    // bearbeitet werden. Was auch fuer einen Edit ein echter Konflikt bleibt: ein Job zum selben
-    // Artikel, der GERADE laeuft (`accepted`/`processing`) — zwei gleichzeitige Mutationen an einem
-    // Datensatz werden weiterhin serialisiert.
+    // bearbeitet werden. Deshalb zaehlt fuer einen Edit nur ein GERADE laufender Job
+    // (`accepted`/`processing`) auf derselben `entity_id` als Konflikt.
+    //
+    // Was diese Vorpruefung fuer einen Edit NICHT leistet, ausdruecklich: die `entity_id` eines
+    // Edit-Jobs ist eine frische Job-Id (die Queue vergibt sie pro Eintrag) und nie die Produkt-Id —
+    // das Ziel steht in der Metadata. Zwei gleichzeitige Edits am selben Artikel werden hier also
+    // NICHT gegeneinander serialisiert. Das ist tragbar, weil ein Edit ausschliesslich den
+    // kanonischen durablen Textedit ausfuehrt: er fasst `media_links` nicht an, setzt nur die
+    // uebergebenen Textfelder, und der schlechteste Fall ist damit last-writer-wins auf einem
+    // Textfeld — kein verlorenes Bild und kein zweiter Artikel. Dass das Ziel ueberhaupt existiert,
+    // prueft der Drain vor der Mutation und quarantaeniert sonst (`MOBILE_UPLOAD_TARGET_CONFLICT`).
     let active_states: &[&str] = if is_edit { &["accepted", "processing"] } else { &["accepted", "processing", "ready"] };
     let placeholders = active_states.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(

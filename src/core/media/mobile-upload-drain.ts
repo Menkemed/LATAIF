@@ -440,7 +440,7 @@ export const MOBILE_TEXT_EDIT_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /** Traegt dieser Job den Edit-Marker? Er sitzt in der Metadata (die Inbox-Tabelle laesst per CHECK
- *  nur  zu) und geht in den payload_hash ein, ist also genauso bindend. */
+ *  nur `mode='collection'` zu) und geht in den payload_hash ein, ist also genauso bindend. */
 export function isMobileTextEditJob(metadataJson: string): boolean {
   try { return (JSON.parse(metadataJson) as { kind?: unknown } | null)?.kind === 'text_edit'; } catch { return false; }
 }

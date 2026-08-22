@@ -692,8 +692,8 @@ async fn mobile_upload_ingress(
     // und passt darauf nicht; der Patch hat seinen eigenen, engeren Vertrag: nur die freigegebenen
     // Textspalten, nur Strings oder null, mindestens ein Feld. Er wird hier genauso streng geprueft,
     // bevor irgendetwas gespeichert wird.
-    // Der Marker sitzt in der Metadata, nicht in : die Inbox-Tabelle laesst per CHECK nur
-    //  zu, und ein Umbau dieser CHECK-Bedingung waere ein Tabellen-Rebuild — genau das,
+    // Der Marker sitzt in der Metadata, nicht in `mode`: die Inbox-Tabelle laesst per CHECK nur
+    // `mode='collection'` zu, und ein Umbau dieser CHECK-Bedingung waere ein Tabellen-Rebuild — genau das,
     // was die Migrationsdisziplin dieses Projekts nicht erlaubt. Die Metadata geht in den
     // payload_hash ein, der Marker ist also genauso bindend wie ein eigenes Feld.
     let is_edit = req.metadata.get("kind").and_then(|v| v.as_str()) == Some("text_edit");
