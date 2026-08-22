@@ -696,14 +696,26 @@ async fn mobile_upload_ingress(
     // `mode='collection'` zu, und ein Umbau dieser CHECK-Bedingung waere ein Tabellen-Rebuild — genau das,
     // was die Migrationsdisziplin dieses Projekts nicht erlaubt. Die Metadata geht in den
     // payload_hash ein, der Marker ist also genauso bindend wie ein eigenes Feld.
-    let is_edit = req.metadata.get("kind").and_then(|v| v.as_str()) == Some("text_edit");
+    let kind = super::mobile_upload::mobile_job_kind(&req.metadata);
+    let is_edit = kind != super::mobile_upload::MobileJobKind::Create;
+    let kind_check = match kind {
+        super::mobile_upload::MobileJobKind::TextEdit =>
+            super::mobile_upload::validate_text_edit_metadata(&req.metadata),
+        // MOBILE-EDIT-S3 — der Galerie-Plan wird gegen die MITGESCHICKTE Bildanzahl geprueft, bevor
+        // ein einziges Byte dekodiert oder gespeichert wird: jedes Bild braucht seinen Platz im Plan,
+        // und jede Entfernung nennt ihre stabile `link_id`.
+        super::mobile_upload::MobileJobKind::GalleryEdit =>
+            super::mobile_upload::validate_gallery_edit_metadata(&req.metadata, req.images.len()),
+        super::mobile_upload::MobileJobKind::Create => Ok(()),
+    };
+    if let Err(code) = kind_check {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "state": "rejected", "code": code })),
+        ));
+    }
     if is_edit {
-        if let Err(code) = super::mobile_upload::validate_text_edit_metadata(&req.metadata) {
-            return Ok((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({ "state": "rejected", "code": code })),
-            ));
-        }
+        // beide Edit-Arten haben ihren eigenen, engeren Vertrag — das Create-Feldschema passt nicht.
     } else if let Err(e) = super::mobile_field_schema::validate_metadata(&req.metadata, req.protocol_version) {
         return Ok((
             StatusCode::UNPROCESSABLE_ENTITY,

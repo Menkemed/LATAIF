@@ -18,6 +18,7 @@ import type { MobileUploadReceiptIntent } from '../../stores/productStore';
 import type { PrepareResult } from './gateway';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
 import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
+import { parseMobileGalleryPlan, ERR_GALLERY_PLAN_INVALID, type MobileGalleryPlan } from './mobile-gallery-edit.ts';
 
 /** One image prepared out-of-band (Rust staged + rendered it) for the durable create batch — an
  *  opaque descriptor, no bytes. */
@@ -165,6 +166,11 @@ export interface MobileDrainDeps {
    *  Abhaengigkeit, wird ein Edit-Job NICHT verarbeitet und auch nicht terminal markiert — er
    *  bleibt fuer einen spaeteren, vollstaendig verdrahteten Lauf liegen. */
   applyTextEdit?: (entityId: string, patch: Record<string, string | null>) => Promise<{ ok: boolean; errorCode?: string }>;
+  /** MOBILE-EDIT-S3 — den geprueften Galerie-Plan durabel anwenden: Baseline unter der Sperre lesen,
+   *  `buildMobileGalleryEnvelope` bauen und ueber `applyEditDurably` in EINER Transaktion committen.
+   *  Fehlt die Abhaengigkeit, wird ein Galerie-Job NICHT verarbeitet und auch nicht terminal
+   *  markiert — er bleibt fuer einen spaeteren, vollstaendig verdrahteten Lauf liegen. */
+  applyGalleryEdit?: (grant: ClaimGrant, prepared: PreparedMediaItem[], plan: MobileGalleryPlan) => Promise<{ ok: boolean; errorCode?: string }>;
 }
 
 export type DrainCode =
@@ -355,6 +361,7 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
   // zwangslaeufig scheitern. Die passende Regel fuer einen Edit — die Bildliste MUSS leer sein —
   // steht in `processEditClaim` und ist dort genauso fail-closed.
   if (isMobileTextEditJob(grant.metadataJson)) return processEditClaim(grant, deps, sc, entryRevision);
+  if (isMobileGalleryEditJob(grant.metadataJson)) return processGalleryEditClaim(grant, deps, sc, entryRevision);
 
   // Re-verify the handed-off manifest structure before creating anything.
   const mf = verifyGrantManifest(grant);
@@ -542,6 +549,129 @@ async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: Dr
   }
   const res = await deps.bridge.markReady(
     u, grant.uploadEventId, grant.claimToken, grant.entityId, grant.payloadHash, parsed.productId, sc,
+  );
+  return res === 'rejected' ? { code: 'ready_rejected' } : { code: 'ready' };
+}
+
+/** Traegt dieser Job den Galerie-Edit-Marker? Wie beim Textedit sitzt er in der Metadata und ist
+ *  ueber den `payload_hash` gebunden. */
+export function isMobileGalleryEditJob(metadataJson: string): boolean {
+  try { return (JSON.parse(metadataJson) as { kind?: unknown } | null)?.kind === 'gallery_edit'; } catch { return false; }
+}
+
+/** Fehler, deren Wiederholung mit DEMSELBEN Job nie gelingen kann, weil der Plan auf einer
+ *  ueberholten oder widerspruechlichen Sicht beruht. §18: fuer den Galerie-Edit ist ein
+ *  Baseline-Konflikt ein fachlicher Konflikt, kein Hintergrundrauschen — der Benutzer muss neu
+ *  laden. Ein endloses Wiederholen wuerde denselben veralteten Plan immer wieder anwenden wollen. */
+const GALLERY_TERMINAL_CODES = [
+  'MOBILE_GALLERY_BASELINE_CHANGED',
+  'MOBILE_GALLERY_PLAN_INCOMPLETE',
+  'MOBILE_GALLERY_TOO_MANY_IMAGES',
+  'MOBILE_GALLERY_PLAN_INVALID',
+  'MEDIA_EDIT_BASELINE_CHANGED',
+  'MEDIA_EDIT_PRODUCT_BASELINE_CHANGED',
+  'MEDIA_EDIT_PLAN_CONFLICT',
+  'MEDIA_EDIT_KEEP_NOT_IN_BASELINE',
+  'MEDIA_EDIT_KEEP_MISSING',
+  'MEDIA_EDIT_DUPLICATE_MEDIA',
+  'MEDIA_EDIT_NEW_NOT_PREPARED',
+  'MEDIA_EDIT_RENDITION_DIVERGED',
+] as const;
+
+export function galleryFailureIsTerminal(errorCode: string | undefined): boolean {
+  if (!errorCode) return false;
+  return GALLERY_TERMINAL_CODES.some((c) => errorCode.includes(c));
+}
+
+/**
+ * MOBILE-EDIT-S3 — die Galerie eines bestehenden Artikels aendern.
+ *
+ * Der Ablauf ist der des Creates, mit einem anderen Ende: die Bilder werden ueber DENSELBEN
+ * Out-of-band-Prepare gestaged (Bytes bleiben in Rust), und statt eines neuen Produkts entsteht ein
+ * `EditPlanEnvelope`, den der vorhandene Koordinator in EINER Transaktion anwendet.
+ *
+ * Sicherheitsgrenzen, alle fail-closed:
+ *   • das Produkt MUSS existieren,
+ *   • der Plan muss formal gueltig sein (sonst: quarantaeniert, nicht geraten),
+ *   • der mitgeschickte Baseline muss dem AKTUELLEN Stand entsprechen — sonst Konflikt,
+ *   • der Plan muss die gesehene Galerie vollstaendig abdecken — ein fehlendes Bild ist ein Fehler,
+ *     niemals eine Loeschung,
+ *   • gestagte, aber nie angewandte Bilder raeumt der bestehende Staging-/GC-Vertrag ab.
+ *
+ * Fehlerklassifikation wie in S2, mit EINER Verschaerfung (§18): ein Baseline-/Plan-Konflikt ist
+ * terminal. Er beruht auf einer Sicht, die es nicht mehr gibt; ein Retry wuerde denselben veralteten
+ * Plan erneut anwenden wollen und im schlimmsten Fall ein inzwischen hinzugekommenes Bild treffen.
+ */
+async function processGalleryEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: DrainScope, entryRevision: number): Promise<DrainOutcome> {
+  const u = grant.authenticatedUserId;
+  if (!deps.applyGalleryEdit) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: 'gallery_edit_not_wired' };
+  }
+  const parsed = parseMobileGalleryPlan(grant.metadataJson);
+  if (!parsed.ok) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_GALLERY_PLAN_INVALID, sc);
+    return { code: 'manifest_invalid', detail: ERR_GALLERY_PLAN_INVALID };
+  }
+  if (!deps.productExists(parsed.plan.productId)) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_CONFLICT, sc);
+    return { code: 'target_conflict' };
+  }
+  // Jedes hochgeladene Bild braucht seinen Platz im Plan — sonst gehoeren Plan und Batch nicht
+  // zusammen. Rust prueft das schon beim Annehmen; hier steht es noch einmal, weil der Drain sich
+  // auf die andere Seite nicht verlaesst.
+  const newSlots = parsed.plan.order.filter((e): e is { new: number } => typeof (e as { new?: unknown }).new === 'number');
+  if (newSlots.length !== grant.images.length) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_GALLERY_PLAN_INVALID, sc);
+    return { code: 'manifest_invalid', detail: ERR_GALLERY_PLAN_INVALID };
+  }
+
+  // Bilder out-of-band vorbereiten — identisch zum Create-Zweig. Schlaegt das fehl, ist NICHTS an
+  // der Galerie passiert: der Plan wird erst danach gebaut und angewandt.
+  let prepared: PreparedMediaItem[] = [];
+  if (grant.images.length > 0) {
+    try {
+      prepared = await deps.preparePreparedMedia(grant, sc);
+    } catch (e) {
+      if (await claimFenced(deps, entryRevision)) {
+        await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+        return { code: 'deferred', detail: 'scope_fenced' };
+      }
+      if (e instanceof MaterializeError && e.kind === 'broken') {
+        await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_MANIFEST, sc);
+        return { code: 'manifest_invalid' };
+      }
+      await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+      return { code: 'deferred', detail: 'prepare_unavailable' };
+    }
+  }
+  // Fence direkt vor der einzigen Mutation dieses Zweigs.
+  if (await claimFenced(deps, entryRevision)) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: 'scope_fenced' };
+  }
+
+  let applied: { ok: boolean; errorCode?: string };
+  try {
+    applied = await deps.applyGalleryEdit(grant, prepared, parsed.plan);
+  } catch (e) {
+    applied = { ok: false, errorCode: (e as { message?: string })?.message ?? 'gallery_edit_failed' };
+  }
+  if (!applied.ok) {
+    if (galleryFailureIsTerminal(applied.errorCode)) {
+      const code = applied.errorCode ?? ERR_GALLERY_PLAN_INVALID;
+      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, code, sc);
+      return { code: 'operation_conflict', detail: code };
+    }
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: applied.errorCode ?? 'gallery_edit_failed' };
+  }
+  if (await claimFenced(deps, entryRevision)) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: 'scope_fenced' };
+  }
+  const res = await deps.bridge.markReady(
+    u, grant.uploadEventId, grant.claimToken, grant.entityId, grant.payloadHash, parsed.plan.productId, sc,
   );
   return res === 'rejected' ? { code: 'ready_rejected' } : { code: 'ready' };
 }

@@ -244,6 +244,74 @@ async function main(): Promise<void> {
     ok(fx.applies === 1, 'TRANSIENT …applied exactly once in total');
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // MOBILE-EDIT-S3 §18 — beim GALERIE-Edit ist ein Baseline-Konflikt TERMINAL
+  //
+  // Anders als beim Textedit: der Plan beschreibt eine Sicht, die es nicht mehr gibt. Ihn immer
+  // wieder zu versuchen hiesse, eine veraltete Absicht gegen eine neuere Galerie zu fahren — im
+  // schlimmsten Fall gegen ein Bild, das der Benutzer nie gesehen hat. Der Job wird deshalb
+  // konfliktmarkiert; das Handy muss neu laden.
+  // ══════════════════════════════════════════════════════════════════════════
+  const galleryJob = (productId: string) => ({
+    kind: 'gallery_edit', productId, galleryBaseline: 'a'.repeat(64),
+    order: [{ keep: 'lnk-1' }], remove: [],
+  });
+  for (const code of ['MOBILE_GALLERY_BASELINE_CHANGED', 'MEDIA_EDIT_BASELINE_CHANGED', 'MOBILE_GALLERY_PLAN_INCOMPLETE', 'MOBILE_GALLERY_TOO_MANY_IMAGES']) {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add(`ev-gallery-${code}`, galleryJob(PRODUCT));
+    const deps = {
+      ...depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; }),
+      applyGalleryEdit: async () => { fx.applies++; return { ok: false, errorCode: code }; },
+    };
+    await drainMobileUploads(deps, 25);
+    ok(row.state === 'quarantined', `GALLERY ${code} ends terminal (${row.state})`);
+    ok(row.errorCode === code, `GALLERY …carrying its own code (${row.errorCode})`);
+    ok(row.claims === 1, `GALLERY …claimed exactly once, no retry loop (${row.claims})`);
+    ok(fx.creates === 0 && fx.prepares === 0, 'GALLERY …and no create or media side effect');
+  }
+
+  // Ein echter Hintergrundfehler bleibt dagegen wiederholbar — sonst waere die Unterscheidung wertlos.
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add('ev-gallery-transient', galleryJob(PRODUCT));
+    let failing = true;
+    const deps = {
+      ...depsFor(inbox, fx, new Set([PRODUCT]), async () => ({ ok: true })),
+      applyGalleryEdit: async () => { fx.applies++; return failing ? { ok: false, errorCode: 'MEDIA_ORCH_DB_PERSIST_FAILED' } : { ok: true }; },
+    };
+    const grant = await inbox.claim('instance-1', 60, { expectedBindingRevision: 7, expectedTenantId: TENANT, expectedBranchId: BRANCH });
+    const out = await processMobileUploadClaim(grant as ClaimGrant, deps);
+    ok(out.code === 'deferred', `GALLERY a persist failure is deferred, not terminal (${out.code})`);
+    ok(row.state === 'accepted' && row.errorCode === null, 'GALLERY …the job stays claimable');
+    failing = false;
+    await drainMobileUploads(deps, 25);
+    ok(row.state === 'ready' && row.productId === PRODUCT, `GALLERY …and a later pass really applies it (${row.state})`);
+  }
+
+  // Ein Galerie-Job ohne Verdrahtung wird NICHT terminal — er wartet auf einen vollstaendigen Lauf.
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add('ev-gallery-unwired', galleryJob(PRODUCT));
+    const grant = await inbox.claim('instance-1', 60, { expectedBindingRevision: 7, expectedTenantId: TENANT, expectedBranchId: BRANCH });
+    const out = await processMobileUploadClaim(grant as ClaimGrant, depsFor(inbox, fx, new Set([PRODUCT]), async () => ({ ok: true })));
+    ok(out.code === 'deferred' && out.detail === 'gallery_edit_not_wired', `GALLERY an unwired gallery job defers (${out.detail})`);
+    ok(row.state === 'accepted' && row.errorCode === null, 'GALLERY …and is not quarantined for a wiring gap');
+  }
+
+  // Ein malformter Galerie-Plan ist terminal — und wird NIE als Textedit oder Create missverstanden.
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add('ev-gallery-malformed', { kind: 'gallery_edit', productId: PRODUCT, order: [], remove: [] });
+    const deps = {
+      ...depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; }),
+      applyGalleryEdit: async () => { fx.applies++; return { ok: true }; },
+    };
+    await drainMobileUploads(deps, 25);
+    ok(row.state === 'quarantined' && row.errorCode === 'MOBILE_GALLERY_PLAN_INVALID', `GALLERY a malformed plan is terminal (${row.errorCode})`);
+    ok(fx.applies === 0, 'GALLERY …and nothing was applied');
+    ok(fx.creates === 0, 'GALLERY …and above all no product was created');
+  }
+
   // ── NEGATIVKONTROLLE: die Terminal-Pruefung ist nicht tautologisch ────────
   // Waeren die Zustandsuebergaenge oben wirkungslos, saehe ein transienter Job genauso aus wie ein
   // permanenter. Hier laeuft derselbe Job einmal gegen ein fehlendes und einmal gegen ein

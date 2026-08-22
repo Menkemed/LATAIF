@@ -828,3 +828,105 @@ fn a4_new_revision_worker_takes_over_restartable_job() {
     assert_eq!(inbox_state(&c, "ev-1"), "ready");
     assert_eq!(claim_rows(&c), 0, "claim removed on ready — no duplicate claim rows");
 }
+
+// ── MOBILE-EDIT-S3 — der Galerie-Plan-Vertrag an der Grenze ─────────────────
+//
+// Die entscheidende Eigenschaft, die hier festgenagelt wird: eine Loeschung entsteht NIE dadurch,
+// dass ein Bild im Plan fehlt. Wer entfernen will, nennt die stabile `link_id` ausdruecklich.
+
+fn gplan(v: serde_json::Value) -> serde_json::Value { v }
+
+#[test]
+fn a_well_formed_gallery_plan_is_accepted() {
+    let m = gplan(serde_json::json!({
+        "kind": "gallery_edit", "productId": "p-1", "galleryBaseline": "a".repeat(64),
+        "order": [{"keep": "lnk-1"}, {"new": 0}], "remove": ["lnk-2"]
+    }));
+    assert!(validate_gallery_edit_metadata(&m, 1).is_ok());
+    assert_eq!(mobile_job_kind(&m), MobileJobKind::GalleryEdit);
+}
+
+#[test]
+fn a_pure_reorder_needs_no_image_at_all() {
+    let m = serde_json::json!({
+        "kind": "gallery_edit", "productId": "p-1", "galleryBaseline": "b".repeat(64),
+        "order": [{"keep": "lnk-2"}, {"keep": "lnk-1"}], "remove": []
+    });
+    assert!(validate_gallery_edit_metadata(&m, 0).is_ok());
+}
+
+#[test]
+fn a_gallery_plan_is_refused_when_it_is_not_a_plan() {
+    let base = "c".repeat(64);
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        ("no product", serde_json::json!({"kind":"gallery_edit","galleryBaseline":base,"order":[],"remove":["l"]})),
+        ("no baseline", serde_json::json!({"kind":"gallery_edit","productId":"p","order":[],"remove":["l"]})),
+        ("short baseline", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":"abc","order":[],"remove":["l"]})),
+        ("uppercase baseline", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":"A".repeat(64),"order":[],"remove":["l"]})),
+        ("no order", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"remove":["l"]})),
+        ("no remove", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":[{"keep":"l"}]})),
+        ("empty plan", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":[],"remove":[]})),
+        ("duplicate keep", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":[{"keep":"l"},{"keep":"l"}],"remove":[]})),
+        ("duplicate remove", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":[],"remove":["l","l"]})),
+        ("keep and remove the same link", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":[{"keep":"l"}],"remove":["l"]})),
+        ("an entry that is both", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":[{"keep":"l","new":0}],"remove":[]})),
+        ("an empty link id", serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":[{"keep":""}],"remove":[]})),
+    ];
+    for (what, m) in cases {
+        assert_eq!(
+            validate_gallery_edit_metadata(&m, 0).unwrap_err(),
+            ERR_GALLERY_PLAN_INVALID,
+            "must refuse: {what}"
+        );
+    }
+}
+
+#[test]
+fn every_uploaded_image_must_have_a_place_in_the_plan() {
+    let base = "d".repeat(64);
+    // Zwei Bilder hochgeladen, nur eines im Plan → der Rest waere ein Upload ins Nichts.
+    let m = serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,
+                               "order":[{"new":0}],"remove":[]});
+    assert_eq!(validate_gallery_edit_metadata(&m, 2).unwrap_err(), ERR_GALLERY_PLAN_INVALID);
+    // Ein Slot, den es im Batch gar nicht gibt.
+    let m2 = serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,
+                                "order":[{"new":5}],"remove":[]});
+    assert_eq!(validate_gallery_edit_metadata(&m2, 1).unwrap_err(), ERR_GALLERY_PLAN_INVALID);
+}
+
+#[test]
+fn the_final_gallery_may_not_exceed_the_cap() {
+    let base = "e".repeat(64);
+    let order: Vec<serde_json::Value> = (0..9).map(|i| serde_json::json!({"keep": format!("lnk-{i}")})).collect();
+    let m = serde_json::json!({"kind":"gallery_edit","productId":"p","galleryBaseline":base,"order":order,"remove":[]});
+    assert_eq!(validate_gallery_edit_metadata(&m, 0).unwrap_err(), ERR_GALLERY_PLAN_INVALID);
+}
+
+#[test]
+fn the_three_job_kinds_never_collapse_into_each_other() {
+    assert_eq!(mobile_job_kind(&serde_json::json!({"brand":"Rolex"})), MobileJobKind::Create);
+    assert_eq!(mobile_job_kind(&serde_json::json!({"kind":"text_edit"})), MobileJobKind::TextEdit);
+    assert_eq!(mobile_job_kind(&serde_json::json!({"kind":"gallery_edit"})), MobileJobKind::GalleryEdit);
+    // Unbekannt heisst NICHT "irgendein Edit" — es faellt auf den Create-Vertrag zurueck, und der
+    // weist `kind` als unerlaubtes Feld ab.
+    assert_eq!(mobile_job_kind(&serde_json::json!({"kind":"something_else"})), MobileJobKind::Create);
+    assert_eq!(mobile_job_kind(&serde_json::Value::Null), MobileJobKind::Create);
+}
+
+/// Regression: eine echte `link_id` ist der zusammengesetzte Bezeichner aus `linkIdFor()` und
+/// deutlich laenger als 128 Zeichen. Eine zu enge Laengengrenze hat jeden echten Galerie-Save an der
+/// Grenze mit 422 abgewiesen — gefunden im E2E, hier festgenagelt.
+#[test]
+fn a_real_composite_link_id_is_accepted() {
+    let link = format!(
+        "link-tenant-1-branch-main-product-{}-stock_image-media-{}",
+        "11111111-2222-3333-4444-555555555555",
+        "a".repeat(64)
+    );
+    assert!(link.len() > 128, "the fixture must really be longer than the old cap ({})", link.len());
+    let m = serde_json::json!({
+        "kind": "gallery_edit", "productId": "11111111-2222-3333-4444-555555555555",
+        "galleryBaseline": "a".repeat(64), "order": [{"keep": link}], "remove": []
+    });
+    assert!(validate_gallery_edit_metadata(&m, 0).is_ok());
+}

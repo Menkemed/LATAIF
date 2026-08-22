@@ -18,6 +18,9 @@ import type { Product } from '@/core/models/types';
 import { buildMobileFieldSchema, filterAttributesToSchema, isValidQuantity, type MobileAttrValue } from '@/core/mobile/mobile-field-schema';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { ProductMediaResolver } from '@/core/media/product-media-resolver';
+import { getStockMediaOrchestrator } from '@/core/media/orchestrator';
+import { canonicalRequestHash } from '@/core/media/product-media-cutover';
+import { buildMobileGalleryEnvelope, type MobileGalleryPlan } from '@/core/media/mobile-gallery-edit';
 import { useProductStore } from '@/stores/productStore';
 import {
   createTauriMobileUploadBridge, triggerMobileUploadDrainSafe, canonicalProductMetadataHash, MaterializeError,
@@ -232,7 +235,51 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
         ? { ok: true }
         : { ok: false, errorCode: (res as { errorCode?: string }).errorCode ?? res.status };
     },
+    applyGalleryEdit,
   };
+}
+
+/**
+ * MOBILE-EDIT-S3 — den Galerie-Plan vom Handy durabel anwenden.
+ *
+ * Es gibt hier bewusst KEINE eigene Galerie-Logik. Der Ablauf ist der des Desktops:
+ * `prepareAndRegisterEdit` liest den Baseline unter der Sperre und friert den Plan ein,
+ * `applyEditDurably` wendet ihn in EINER Transaktion an. Der Unterschied ist allein, dass die neuen
+ * Bilder schon out-of-band in Rust vorbereitet sind (der Drain uebergibt fertige Deskriptoren, keine
+ * Bytes) und dass `buildMobileGalleryEnvelope` vor dem Bauen prueft, ob die Galerie noch die ist,
+ * die der Benutzer gesehen hat.
+ *
+ * Die Batch-Id ist aus dem `uploadEventId` abgeleitet und damit ueber Neustarts hinweg stabil: ein
+ * wiederaufgenommener Job landet auf demselben Plan, und ein bereits angewandter ist ein No-op.
+ */
+async function applyGalleryEdit(
+  grant: ClaimGrant,
+  prepared: PreparedMediaItem[],
+  plan: MobileGalleryPlan,
+): Promise<{ ok: boolean; errorCode?: string }> {
+  const scope = currentScope();
+  if (!scope) return { ok: false, errorCode: 'MEDIA_EDIT_SCOPE_REQUIRED' };
+  const preparedBySlot = new Map(prepared.map((p) => [p.slot, { requestId: p.ingestRequestId, prepared: p.prepared }]));
+  const batchId = `gallery-edit:${scope.tenantId}:${scope.branchId}:${plan.productId}:${ROLE}:${grant.uploadEventId}`;
+  try {
+    const orchestrator = await getStockMediaOrchestrator();
+    const env = await orchestrator.prepareAndRegisterEdit(
+      { tenantId: scope.tenantId, scopeKind: 'branch', branchId: scope.branchId, entityType: 'product', entityId: plan.productId, role: ROLE },
+      [], // die Bilder sind bereits vorbereitet — hier wird nichts mehr gestaged
+      async (baseline) => buildMobileGalleryEnvelope({
+        plan, baseline, preparedBySlot, batchId,
+        tenantId: scope.tenantId, branchId: scope.branchId, entityId: plan.productId, role: ROLE,
+        // Dieselbe Plan-Hash-Funktion wie auf dem Desktop — der Plan-Hash ist die Identitaet des
+        // eingefrorenen Plans, und beide Wege muessen fuer denselben Plan denselben Wert liefern.
+        digestHex: (s) => canonicalRequestHash(new TextEncoder().encode(s), 'edit-plan'),
+      }),
+    );
+    await orchestrator.applyEditDurably(env);
+  } catch (e) {
+    return { ok: false, errorCode: (e as { message?: string })?.message ?? 'MEDIA_EDIT_FAILED' };
+  }
+  useProductStore.getState().loadProducts();
+  return { ok: true };
 }
 
 /** Fire-and-forget drain trigger for the post-auth / media-recovery-complete / lifecycle-resume

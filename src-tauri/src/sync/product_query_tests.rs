@@ -260,3 +260,130 @@ fn an_unknown_media_key_is_not_served() {
     assert!(!media_key_is_known(&db, "t-1", "tenant-1/99/never.jpg"));
     assert!(!media_key_is_known(&db, "t-other", "tenant-1/53/known.jpg"), "keys are tenant-scoped");
 }
+
+// ── MOBILE-EDIT-S3 §1 — ein Lesefehler ist keine leere Galerie ──────────────
+//
+// Die harte Vorbedingung fuer jeden Galerie-Save: die Seite darf niemals "hat keine Bilder" sehen,
+// wenn in Wahrheit "konnte nicht gelesen werden" gilt. Beide Fehlerquellen werden geprueft — die
+// gescheiterte Abfrage UND die einzelne unlesbare Zeile, die frueher still uebersprungen wurde.
+
+/// Die Medien-Tabellen, die der Galerie-Read verbindet — nur die benutzten Spalten.
+const MEDIA_DDL: &str = r#"
+CREATE TABLE media_links (tenant_id TEXT, link_id TEXT, media_id TEXT, entity_type TEXT, entity_id TEXT,
+                          is_primary INTEGER, sort_order INTEGER, deleted_at TEXT);
+CREATE TABLE media_objects (tenant_id TEXT, media_id TEXT, master_blob_id TEXT, ingest_status TEXT, deleted_at TEXT);
+CREATE TABLE media_blobs (tenant_id TEXT, blob_id TEXT, blob_status TEXT, current_generation_no INTEGER);
+CREATE TABLE media_blob_generations (tenant_id TEXT, blob_id TEXT, generation_no INTEGER, storage_key TEXT,
+                                     gen_status TEXT, deleted_at TEXT);
+CREATE TABLE media_variants (tenant_id TEXT, media_id TEXT, variant_type TEXT, blob_id TEXT, deleted_at TEXT);
+"#;
+
+fn seed_two_image_gallery(db: &std::path::Path, second_storage_key: Option<&str>) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute_batch(MEDIA_DDL).unwrap();
+    conn.execute_batch(
+        r#"
+        INSERT INTO media_links VALUES ('t-1','lnk-a','med-a','product','p-dj41',1,0,NULL),
+                                       ('t-1','lnk-b','med-b','product','p-dj41',0,1,NULL);
+        INSERT INTO media_objects VALUES ('t-1','med-a','blob-a','ready',NULL),
+                                         ('t-1','med-b','blob-b','ready',NULL);
+        INSERT INTO media_blobs VALUES ('t-1','blob-a','present',1), ('t-1','blob-b','present',1);
+        "#,
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO media_blob_generations VALUES ('t-1','blob-a',1,'t-1/aa/a.jpg','available',NULL)",
+        [],
+    )
+    .unwrap();
+    // Die zweite Generation traegt den Storage-Key, den der Aufrufer vorgibt — `None` erzeugt genau
+    // die Zeile, an der `r.get::<_, String>(..)` scheitert.
+    conn.execute(
+        "INSERT INTO media_blob_generations VALUES ('t-1','blob-b',1,?1,'available',NULL)",
+        rusqlite::params![second_storage_key],
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_healthy_gallery_read_reports_ok_with_a_baseline() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    seed_two_image_gallery(&db, Some("t-1/bb/b.jpg"));
+
+    let p = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
+    assert_eq!(p["gallery_ok"], serde_json::json!(true));
+    let g = p["gallery"].as_array().expect("a successful read carries the gallery");
+    assert_eq!(g.len(), 2);
+    assert_eq!(g[0]["link_id"], serde_json::json!("lnk-a"));
+    assert_eq!(g[0]["is_primary"], serde_json::json!(true));
+    assert_eq!(g[1]["link_id"], serde_json::json!("lnk-b"));
+    let base = p["gallery_baseline"].as_str().unwrap();
+    assert_eq!(base.len(), 64, "the baseline is a sha-256 hex digest");
+}
+
+#[test]
+fn a_failed_gallery_query_is_reported_not_flattened_to_empty() {
+    let d = tmp_dir();
+    let db = fixture(&d); // ohne Medien-Tabellen: die Abfrage scheitert real
+
+    let p = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
+    assert_eq!(p["gallery_ok"], serde_json::json!(false), "a read failure must be visible as such");
+    assert!(p.get("gallery").is_none(), "no gallery list may be invented from a failure");
+    assert!(
+        p.get("gallery_baseline").is_none(),
+        "and above all NO baseline — a fingerprint of nothing would authorise deleting everything"
+    );
+}
+
+#[test]
+fn one_unreadable_row_fails_the_whole_read_instead_of_vanishing() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    seed_two_image_gallery(&db, None); // die zweite Zeile hat keinen Storage-Key
+
+    let p = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
+    assert_eq!(
+        p["gallery_ok"],
+        serde_json::json!(false),
+        "a single unreadable row must not silently shrink the gallery to one image"
+    );
+    assert!(p.get("gallery").is_none());
+    assert!(p.get("gallery_baseline").is_none());
+}
+
+#[test]
+fn the_baseline_changes_when_the_gallery_changes() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    seed_two_image_gallery(&db, Some("t-1/bb/b.jpg"));
+    let before = by_id(&db, "t-1", "b-1", "p-dj41").unwrap()["gallery_baseline"].as_str().unwrap().to_string();
+
+    // Zweimal lesen ohne Aenderung: identisch.
+    let again = by_id(&db, "t-1", "b-1", "p-dj41").unwrap()["gallery_baseline"].as_str().unwrap().to_string();
+    assert_eq!(before, again, "the baseline is deterministic");
+
+    // Nur die Reihenfolge tauschen — der Fingerabdruck MUSS sich unterscheiden.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE media_links SET sort_order = 1, is_primary = 0 WHERE link_id = 'lnk-a'", []).unwrap();
+    conn.execute("UPDATE media_links SET sort_order = 0, is_primary = 1 WHERE link_id = 'lnk-b'", []).unwrap();
+    let after = by_id(&db, "t-1", "b-1", "p-dj41").unwrap()["gallery_baseline"].as_str().unwrap().to_string();
+    assert_ne!(before, after, "a reorder must be visible in the baseline");
+}
+
+/// MOBILE-EDIT-S3 — DERSELBE Vektor steht in `test/mobile-gallery-edit/gallery-baseline.test.ts`.
+/// Rust liest die Datei read-only, der Drain die laufende sql.js-Instanz; beide berechnen den
+/// Fingerabdruck selbst. Laufen die Formeln auseinander, wuerde JEDER Galerie-Save faelschlich als
+/// Konflikt enden — dieser Vektor haelt sie zusammen.
+#[test]
+fn the_shared_baseline_vector_is_stable() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    seed_two_image_gallery(&db, Some("t-1/bb/b.jpg"));
+    let p = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
+    assert_eq!(
+        p["gallery_baseline"].as_str().unwrap(),
+        "4ede7717390d74cb4b3818fe48f6ddf7e20f3d956bfdbf5fbf1cac08f4f0b8e3",
+        "canonical input: lnk-a:med-a:0:1|lnk-b:med-b:1:0"
+    );
+}

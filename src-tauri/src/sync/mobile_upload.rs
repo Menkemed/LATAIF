@@ -229,6 +229,101 @@ pub fn validate_text_edit_metadata(meta: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
+pub const ERR_GALLERY_PLAN_INVALID: &str = "MOBILE_GALLERY_PLAN_INVALID";
+const MAX_PRODUCT_ID_LEN: usize = 128;
+/// Eine `link_id` ist kein Kurzschluessel, sondern der zusammengesetzte Bezeichner aus
+/// `linkIdFor()` — Tenant, Branch, Entitaetstyp, Produkt-Id, Rolle und Media-Id in einem String.
+/// Real sind das gut 150 Zeichen; die Grenze begrenzt nur die Groesse, sie ist kein Formatvertrag.
+const MAX_LINK_ID_LEN: usize = 512;
+
+/// Welche Art Job eine Metadata beschreibt. Der Marker steht in der Metadata und geht in den
+/// `payload_hash` ein, ist also genauso bindend wie eine eigene Spalte — die Inbox-Tabelle laesst
+/// per CHECK nur `mode='collection'` zu, und ein Rebuild dieser Tabelle ist hier nicht erlaubt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobileJobKind {
+    Create,
+    TextEdit,
+    GalleryEdit,
+}
+
+/// Fail closed: alles, was nicht ausdruecklich ein bekannter Edit-Marker ist, ist ein Create — und
+/// ein Create kann den Marker nicht tragen, weil `kind` kein erlaubtes Create-Feld ist.
+pub fn mobile_job_kind(meta: &Value) -> MobileJobKind {
+    match meta.get("kind").and_then(|v| v.as_str()) {
+        Some("text_edit") => MobileJobKind::TextEdit,
+        Some("gallery_edit") => MobileJobKind::GalleryEdit,
+        _ => MobileJobKind::Create,
+    }
+}
+
+/// MOBILE-EDIT-S3 — der Galerie-Plan-Vertrag.
+///
+/// ```json
+/// { "kind":"gallery_edit", "productId":"…", "galleryBaseline":"<64 hex>",
+///   "order":[ {"keep":"<linkId>"} | {"new":<slot>} , … ],
+///   "remove":[ "<linkId>", … ] }
+/// ```
+///
+/// Die entscheidende Eigenschaft ist, was hier NICHT erlaubt ist: eine Loeschung entsteht niemals
+/// dadurch, dass ein Bild in `order` fehlt. Wer ein bestehendes Bild entfernen will, muss seine
+/// stabile `link_id` ausdruecklich in `remove` nennen. Ob `order` + `remove` die gesehene Galerie
+/// vollstaendig abdecken, prueft der Drain gegen den eingefrorenen Baseline — hier wird die FORM
+/// geprueft, bevor irgendetwas gespeichert wird.
+pub fn validate_gallery_edit_metadata(meta: &Value, image_count: usize) -> Result<(), &'static str> {
+    let target = meta.get("productId").and_then(|v| v.as_str()).unwrap_or("");
+    if target.is_empty() || target.chars().count() > MAX_PRODUCT_ID_LEN { return Err(ERR_GALLERY_PLAN_INVALID); }
+
+    // Der Baseline ist das Herz des Vertrags: ohne ihn gibt es nichts zu vergleichen. Genau 64
+    // Kleinbuchstaben-Hex — der Fingerabdruck aus `product_query.rs`.
+    let base = meta.get("galleryBaseline").and_then(|v| v.as_str()).unwrap_or("");
+    if base.len() != 64 || !base.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(ERR_GALLERY_PLAN_INVALID);
+    }
+
+    let order = meta.get("order").and_then(|v| v.as_array()).ok_or(ERR_GALLERY_PLAN_INVALID)?;
+    if order.len() > MAX_UPLOAD_IMAGES { return Err(ERR_GALLERY_PLAN_INVALID); }
+    let mut keeps: Vec<&str> = Vec::new();
+    let mut new_slots: Vec<u64> = Vec::new();
+    for entry in order {
+        let obj = entry.as_object().ok_or(ERR_GALLERY_PLAN_INVALID)?;
+        if obj.len() != 1 { return Err(ERR_GALLERY_PLAN_INVALID); }
+        match (obj.get("keep"), obj.get("new")) {
+            (Some(k), None) => {
+                let id = k.as_str().ok_or(ERR_GALLERY_PLAN_INVALID)?;
+                if id.is_empty() || id.chars().count() > MAX_LINK_ID_LEN { return Err(ERR_GALLERY_PLAN_INVALID); }
+                if keeps.contains(&id) { return Err(ERR_GALLERY_PLAN_INVALID); }
+                keeps.push(id);
+            }
+            (None, Some(n)) => {
+                let slot = n.as_u64().ok_or(ERR_GALLERY_PLAN_INVALID)?;
+                if slot as usize >= image_count { return Err(ERR_GALLERY_PLAN_INVALID); }
+                if new_slots.contains(&slot) { return Err(ERR_GALLERY_PLAN_INVALID); }
+                new_slots.push(slot);
+            }
+            _ => return Err(ERR_GALLERY_PLAN_INVALID),
+        }
+    }
+    // Jedes hochgeladene Bild muss im Plan vorkommen. Ein Bild ohne Platz waere ein bezahlter
+    // Upload, der nirgends landet — und ein Hinweis darauf, dass Plan und Batch nicht zusammengehoeren.
+    if new_slots.len() != image_count { return Err(ERR_GALLERY_PLAN_INVALID); }
+
+    let remove = meta.get("remove").and_then(|v| v.as_array()).ok_or(ERR_GALLERY_PLAN_INVALID)?;
+    let mut removes: Vec<&str> = Vec::new();
+    for r in remove {
+        let id = r.as_str().ok_or(ERR_GALLERY_PLAN_INVALID)?;
+        if id.is_empty() || id.chars().count() > MAX_LINK_ID_LEN { return Err(ERR_GALLERY_PLAN_INVALID); }
+        if removes.contains(&id) { return Err(ERR_GALLERY_PLAN_INVALID); }
+        // Ein Bild gleichzeitig behalten und entfernen zu wollen ist kein Grenzfall, sondern ein
+        // widerspruechlicher Plan — und wird abgewiesen, statt eine der beiden Absichten zu raten.
+        if keeps.contains(&id) { return Err(ERR_GALLERY_PLAN_INVALID); }
+        removes.push(id);
+    }
+
+    // Ein Plan, der weder etwas anordnet noch etwas entfernt, hat nichts zu tun.
+    if order.is_empty() && removes.is_empty() { return Err(ERR_GALLERY_PLAN_INVALID); }
+    Ok(())
+}
+
 /// MOBILE-EDIT-S2 — dieselbe Bildpruefung fuer beide Wege, mit EINEM Unterschied: ein Text-Edit
 /// kommt ohne neue Bilder. Ein Create ohne Bild bleibt abgelehnt. Anzahl, Groesse und
 /// Dekodierbarkeit jedes einzelnen Bildes gelten unveraendert, damit ein Edit nie einen
@@ -418,11 +513,12 @@ fn verify_and_load_manifest(conn: &Connection, staging_root: &Path, t: &TrustedU
             params![t.tenant_id, t.branch_id, t.authenticated_user_id, event],
             |r| r.get(0),
         ).map_err(|_| ERR_MANIFEST_INVALID)?;
-        let is_text_edit = serde_json::from_str::<Value>(&meta_json)
-            .ok()
-            .and_then(|m| m.get("kind").and_then(|v| v.as_str()).map(str::to_string))
-            .as_deref() == Some("text_edit");
-        if !is_text_edit { return Err(ERR_MANIFEST_INVALID); }
+        let kind = serde_json::from_str::<Value>(&meta_json)
+            .map(|m| mobile_job_kind(&m))
+            .unwrap_or(MobileJobKind::Create);
+        // Ein Create ohne Bild bleibt abgelehnt. Ein Text-Edit hat naturgemaess keins, und ein
+        // Galerie-Edit, der nur entfernt oder umsortiert, ebenfalls nicht.
+        if kind == MobileJobKind::Create { return Err(ERR_MANIFEST_INVALID); }
     }
     for (i, (slot, ..)) in rows.iter().enumerate() {
         if *slot != i as i64 { return Err(ERR_MANIFEST_INVALID); } // gap / duplicate / non-contiguous slot
@@ -612,8 +708,15 @@ pub fn accept_upload(
     // `payload_hash` ein, der Marker ist also ebenso bindend wie eine eigene Spalte, und er wird
     // hier autoritativ nachgeprueft (die Route prueft ihn schon vorher, verlaesst sich aber nicht).
     let meta: Value = serde_json::from_str(&sub.metadata_json).unwrap_or(Value::Null);
-    let is_edit = meta.get("kind").and_then(|v| v.as_str()) == Some("text_edit");
-    if is_edit { validate_text_edit_metadata(&meta).map_err(reject)?; }
+    let kind = mobile_job_kind(&meta);
+    match kind {
+        MobileJobKind::TextEdit => validate_text_edit_metadata(&meta).map_err(reject)?,
+        MobileJobKind::GalleryEdit => validate_gallery_edit_metadata(&meta, sub.images.len()).map_err(reject)?,
+        MobileJobKind::Create => {}
+    }
+    // Ein Create ohne Bild bleibt abgelehnt; beide Edit-Arten duerfen ohne neues Bild kommen — ein
+    // reines Umsortieren oder Entfernen laedt naturgemaess nichts hoch.
+    let is_edit = kind != MobileJobKind::Create;
 
     let validated = validate_batch_for(&sub.images, is_edit)?;
     let ph = payload_hash(trusted, sub, &validated)?;

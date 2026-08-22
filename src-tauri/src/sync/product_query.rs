@@ -156,7 +156,14 @@ fn enrich(conn: &Connection, tenant_id: &str, product: &mut serde_json::Value) {
     // (`link_id`, `media_id`), ihre Position und ob sie das Titelbild ist. Sichtbarkeitsbedingung und
     // Sortierung sind exakt die der Abfragen oben, damit Handy und Desktop denselben Satz in
     // derselben Reihenfolge sehen. Read-only: diese Funktion mutiert nichts.
-    let gallery: Vec<serde_json::Value> = conn
+    //
+    // MOBILE-EDIT-S3 §1 — HARTE VORBEDINGUNG: ein Lesefehler ist KEINE leere Galerie.
+    // Frueher schluckte `unwrap_or_default()` den Query-Fehler und `filter_map(|r| r.ok())` jede
+    // einzelne unlesbare Zeile — beides machte aus "konnte nicht gelesen werden" ein "hat keine
+    // Bilder". Solange nur Text bearbeitet wurde, war das folgenlos. Sobald ein Save die Galerie
+    // schreibt, waere es Datenverlust: die Seite haette nichts gesehen, was sie behalten koennte.
+    // Deshalb wird hier strikt gesammelt und der Fehler nach oben gereicht.
+    let gallery: Result<Vec<serde_json::Value>, rusqlite::Error> = conn
         .prepare(
             "SELECT l.link_id, l.media_id, l.is_primary, l.sort_order, g.storage_key, t.storage_key
                FROM media_links l
@@ -186,15 +193,20 @@ fn enrich(conn: &Connection, tenant_id: &str, product: &mut serde_json::Value) {
                     "thumb_key":  r.get::<_, Option<String>>(5)?,
                 }))
             })
-            .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-        })
-        .unwrap_or_default();
-    // ACHTUNG fuer S3 (Galerie-Edit): `unwrap_or_default()` macht aus einem Lesefehler eine LEERE
-    // Galerie. Fuer S1/S2 ist das harmlos — der Textedit fasst `media_links` per Vertrag nicht an,
-    // eine leere Anzeige kann also nichts loeschen. Sobald ein Save die Galerie schreibt, ist es das
-    // NICHT mehr: "leer" waere dann von "hat keine Bilder" nicht zu unterscheiden und der Baseline
-    // waere der Fingerabdruck des Nichts. Ein Galerie-Edit muss diesen Fall vorher fail-closed
-    // machen (Lesefehler = Fehler, nicht leere Liste).
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        });
+
+    // Fail closed: ohne vollstaendig gelesene Galerie gibt es weder eine Liste noch einen Baseline.
+    // `gallery_ok:false` ist das einzige, was die Seite dann sieht — sie zeigt einen Fehler und
+    // laesst keine Galerie-Bearbeitung zu, statt eine leere Galerie zu behaupten.
+    let gallery = match gallery {
+        Ok(g) => g,
+        Err(_) => {
+            product["gallery_ok"] = serde_json::Value::Bool(false);
+            return;
+        }
+    };
+    product["gallery_ok"] = serde_json::Value::Bool(true);
 
     // Der Baseline-Nachweis: ein Fingerabdruck GENAU der Galerie, die das Handy gerade bekommen hat
     // — Identitaet, Position und Titelbild-Flag jeder Zeile, in Reihenfolge. Ein spaeterer Save

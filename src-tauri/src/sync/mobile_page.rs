@@ -705,12 +705,26 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         +   '<div class="row"><label>Condition</label><input id="peCondition" type="text" maxlength="60" /></div>'
         +   '<div class="row"><label>Location</label><input id="peLocation" type="text" maxlength="120" /></div>'
         +   '<div class="row"><label>Notes</label><input id="peNotes" type="text" maxlength="500" /></div>'
-        +   '<div style="display:flex; gap:8px;">'
+        // MOBILE-EDIT-S3 — die Galerie desselben Artikels. Der Streifen IST der Endzustand: die
+        // Reihenfolge, die hier steht, wird gespeichert, und das erste Bild ist das Titelbild.
+        // Bestehende Bilder verschwinden NIE dadurch, dass sie hier fehlen — nur ein ausdrueckliches
+        // ✕ markiert eines zum Entfernen, und das bleibt bis zum Speichern sichtbar.
+        +   '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase; margin:14px 0 6px;">Photos</div>'
+        +   '<div id="peGalleryError" class="hidden" style="color:#AA6E6E; font-size:12px; line-height:1.5; margin-bottom:8px;"></div>'
+        +   '<div id="peGalleryBox">'
+        +     '<div id="peStrip" class="photo-strip"></div>'
+        +     '<label for="peAddInput" class="photo-area" id="peAddArea" style="margin-top:8px;">'
+        +       '<div class="icon">📷</div><div>Add photos</div><div class="hint" id="peAddHint"></div>'
+        +     '</label>'
+        +     '<input id="peAddInput" class="hidden" type="file" accept="image/*" capture="environment" multiple />'
+        +     '<div style="color:#6B6B73; font-size:12px; margin-top:6px; line-height:1.5;">First photo is the cover. Tap a photo to make it the cover, ‹ moves it left, ✕ removes it.</div>'
+        +   '</div>'
+        +   '<div style="display:flex; gap:8px; margin-top:12px;">'
         +     '<button id="peCancel" class="ghost" style="flex:1;">Cancel</button>'
         +     '<button id="peSave" style="flex:1;">Save changes</button>'
         +   '</div>'
         +   '<div id="peMsg" style="font-size:12px; margin-top:8px;"></div>'
-        +   '<div style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">Photos, SKU and prices are not changed here.</div>'
+        +   '<div style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">SKU and prices are not changed here.</div>'
         + '</div>'
         + '</div>';
       html += ''
@@ -874,9 +888,112 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // Immer OEFFNEN, nie umschalten: nach einem Speichern bleibt das Formular mit seiner Meldung
     // stehen, und ein zweiter Tipp auf "Edit item" soll dann nicht ueberraschend zuklappen.
     // Geschlossen wird ueber Cancel.
-    btn.onclick = () => { fill(); if (msg) msg.textContent = ''; form.classList.remove('hidden'); };
-    // Cancel verwirft ALLES: Formular zu, Werte zurueck auf den Ausgangsstand, kein einziger Request.
-    $('peCancel').onclick = () => { fill(); if (msg) msg.textContent = ''; form.classList.add('hidden'); };
+    // ── MOBILE-EDIT-S3 — der Galerie-Teil des Formulars ────────────────────
+    //
+    // `peItems` IST der gewuenschte Endzustand: die Reihenfolge der nicht entfernten Eintraege ist
+    // die Reihenfolge der Galerie, der erste ist das Titelbild. Ein bestehendes Bild wird nur durch
+    // ein ausdrueckliches ✕ zum Entfernen markiert und bleibt bis zum Speichern sichtbar — es kann
+    // nicht dadurch verschwinden, dass es hier fehlt.
+    //
+    // §1 fail closed: konnte die Galerie nicht gelesen werden (`gallery_ok === false`), gibt es
+    // hier gar keinen Editor. Ohne verlaesslich gelesenen Stand darf nichts an ihr geaendert werden.
+    const galleryOk = p.gallery_ok === true && Array.isArray(p.gallery) && typeof p.gallery_baseline === 'string';
+    let peItems = [];
+    let gallerySaved = false;   // nach einem erfolgreichen Galerie-Save ist der Baseline ueberholt
+    const resetGallery = () => {
+      peItems = galleryOk ? p.gallery.map(function (g) {
+        return { kind: 'existing', linkId: g.link_id, mediaId: g.media_id, key: g.thumb_key || g.image_key, removed: false };
+      }) : [];
+      renderPeStrip();
+    };
+    const peKept = () => peItems.filter(function (it) { return !it.removed; });
+    function renderPeStrip() {
+      const strip = $('peStrip'), box = $('peGalleryBox'), err = $('peGalleryError');
+      if (!strip || !box || !err) return;
+      if (!galleryOk) {
+        box.classList.add('hidden');
+        err.classList.remove('hidden');
+        err.textContent = 'The photos of this item could not be read. Editing photos is disabled — reload before changing anything.';
+        return;
+      }
+      box.classList.remove('hidden');
+      if (gallerySaved) {
+        err.classList.remove('hidden');
+        err.style.color = '#6B6B73';
+        err.textContent = 'Photos saved. Reload the item to edit them again.';
+      } else { err.classList.add('hidden'); err.style.color = '#AA6E6E'; }
+      strip.innerHTML = '';
+      const kept = peKept();
+      peItems.forEach(function (it, i) {
+        const isCover = !it.removed && kept.indexOf(it) === 0;
+        // Die stabile Identitaet steht am Element: so ist im Test (und beim Nachsehen im Browser)
+        // eindeutig, welches Bild gemeint ist — Position allein waere zweideutig.
+        const t = el('div', { class: 'photo-thumb' + (isCover ? ' is-primary' : ''), 'data-link': it.kind === 'existing' ? it.linkId : '' });
+        if (it.removed) t.style.opacity = '0.35';
+        const im = el('img'); t.appendChild(im);
+        // Ein bestehendes Bild kommt ueber die authentifizierte Medienroute (ein `<img src>` kann
+        // keinen Authorization-Header tragen); ein noch nicht gespeichertes liegt bereits als
+        // Data-URL vor.
+        if (it.kind === 'new') { im.src = it.src; im.style.display = 'block'; } else paintMedia(im, it.key);
+        if (isCover) t.appendChild(el('div', { class: 'cover' }, 'COVER'));
+        if (it.removed) t.appendChild(el('div', { class: 'cover' }, 'REMOVED'));
+        if (it.kind === 'new' && !it.removed) t.appendChild(el('div', { class: 'cover' }, 'NEW'));
+        const rm = el('button', { type: 'button', class: 'rm' }, it.removed ? '↺' : '✕');
+        rm.onclick = function (ev) {
+          ev.stopPropagation(); ev.preventDefault();
+          // Ein neues, noch nicht gespeichertes Bild wird einfach verworfen. Ein bestehendes wird
+          // markiert — und laesst sich bis zum Speichern zurueckholen.
+          if (it.kind === 'new') peItems.splice(i, 1); else it.removed = !it.removed;
+          renderPeStrip();
+        };
+        t.appendChild(rm);
+        if (!it.removed && kept.indexOf(it) > 0) {
+          const left = el('button', { type: 'button', class: 'rm' }, '‹');
+          left.style.right = 'auto'; left.style.left = '2px';
+          left.onclick = function (ev) {
+            ev.stopPropagation(); ev.preventDefault();
+            const j = peItems.indexOf(it);
+            let k = j - 1;
+            while (k >= 0 && peItems[k].removed) k--;   // ueber markierte hinweg
+            if (k >= 0) { peItems.splice(j, 1); peItems.splice(k, 0, it); renderPeStrip(); }
+          };
+          t.appendChild(left);
+        }
+        t.onclick = function () {
+          if (it.removed) return;
+          const j = peItems.indexOf(it);
+          if (j <= 0) return;
+          peItems.splice(j, 1); peItems.unshift(it);
+          renderPeStrip();
+        };
+        strip.appendChild(t);
+      });
+      const hint = $('peAddHint');
+      if (hint) hint.textContent = kept.length + ' of ' + MAX_PHOTOS + ' — ' + (MAX_PHOTOS - kept.length) + ' more possible';
+    }
+    if ($('peAddInput')) $('peAddInput').onchange = async function (e) {
+      const files = Array.from((e.target && e.target.files) || []);
+      if (!files.length) return;
+      let rejected = 0;
+      for (const f of files) {
+        if (peKept().length >= MAX_PHOTOS) { rejected++; continue; }
+        try {
+          peItems.push({ kind: 'new', src: await resizePhoto(f, 1600, 0.85), removed: false });
+        } catch (err) {
+          // §15.A — ein unlesbares NEUES Bild darf die bestehende Auswahl nie mitreissen.
+          if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'One photo could not be loaded — the others are kept.'; }
+        }
+      }
+      e.target.value = '';
+      renderPeStrip();
+      if (rejected > 0 && msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'At most ' + MAX_PHOTOS + ' photos per item — ' + rejected + ' not added.'; }
+    };
+    resetGallery();
+
+    btn.onclick = () => { fill(); resetGallery(); if (msg) msg.textContent = ''; form.classList.remove('hidden'); };
+    // Cancel verwirft ALLES: Formular zu, Werte zurueck auf den Ausgangsstand, Galerie-Auswahl
+    // zurueckgesetzt, kein einziger Request.
+    $('peCancel').onclick = () => { fill(); resetGallery(); if (msg) msg.textContent = ''; form.classList.add('hidden'); };
 
     let saving = false;
     $('peSave').onclick = async () => {
@@ -889,14 +1006,76 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (now === before) continue;         // unveraendert → gar nicht erst mitschicken
         changed[key] = now === '' ? null : now;
       }
-      if (Object.keys(changed).length === 0) {
+      // ── MOBILE-EDIT-S3 — den Galerie-Plan aus dem Streifen ableiten ──────
+      //
+      // `order` ist die gewuenschte Endreihenfolge, `remove` nennt jede zu entfernende bestehende
+      // Verknuepfung AUSDRUECKLICH. Beides zusammen deckt die gesehene Galerie vollstaendig ab —
+      // der Drain weist einen Plan zurueck, der das nicht tut.
+      let galleryPlan = null;
+      if (galleryOk && !gallerySaved) {
+        const order = [], images = [], remove = [];
+        for (const it of peKept()) {
+          if (it.kind === 'existing') order.push({ keep: it.linkId });
+          else { order.push({ new: images.length }); images.push(it.src); }
+        }
+        for (const it of peItems) if (it.kind === 'existing' && it.removed) remove.push(it.linkId);
+        const before = p.gallery.map(function (g) { return g.link_id; }).join(',');
+        const now = peKept().filter(function (it) { return it.kind === 'existing'; }).map(function (it) { return it.linkId; }).join(',');
+        const galleryChanged = images.length > 0 || remove.length > 0 || before !== now;
+        if (galleryChanged) galleryPlan = { order: order, images: images, remove: remove };
+      }
+
+      if (Object.keys(changed).length === 0 && !galleryPlan) {
         if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Nothing changed.'; }
+        return;
+      }
+      if (galleryPlan && galleryPlan.order.length > MAX_PHOTOS) {
+        if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'At most ' + MAX_PHOTOS + ' photos per item.'; }
         return;
       }
       saving = true;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
       try {
+        if (galleryPlan) {
+          // Eigener durabler Job mit eigenem Vertrag. Der mitgeschickte `galleryBaseline` ist genau
+          // der, den dieser Bildschirm beim Laden bekommen hat — hat sich die Galerie inzwischen
+          // geaendert, wird der Job als Konflikt abgewiesen und NICHTS angewandt.
+          const gEntry = await uploadQueue.enqueue({
+            metadata: {
+              kind: 'gallery_edit', productId: p.id, galleryBaseline: p.gallery_baseline,
+              order: galleryPlan.order, remove: galleryPlan.remove,
+            },
+            images: galleryPlan.images,
+            protocolVersion: 2,
+          });
+          const gr = await uploadQueue.drainEntry(gEntry.uploadEventId, localStorage.getItem(TOKEN_KEY));
+          if (gr && gr.outcome && gr.outcome !== 'done') throw new Error('Photos ' + gr.outcome);
+          // Der Baseline dieses Bildschirms beschreibt jetzt einen ueberholten Stand. Statt den
+          // naechsten Save garantiert in einen Konflikt laufen zu lassen, wird die Galerie hier
+          // gesperrt, bis der Artikel neu geladen ist.
+          gallerySaved = true;
+          renderPeStrip();
+        }
+      } catch (e) {
+        const raw = (e && e.message) ? String(e.message) : '';
+        // §18 — ein Baseline-Konflikt ist kein Hintergrundfehler: der Artikel hat sich geaendert,
+        // und der Benutzer muss neu laden, bevor er erneut speichert.
+        const stale = /BASELINE_CHANGED|PLAN_INCOMPLETE|conflict/i.test(raw);
+        if (msg) {
+          msg.style.color = '#AA6E6E';
+          msg.textContent = stale ? 'Item changed. Reload before saving.' : 'Save failed — nothing was changed. ' + raw;
+        }
+        saving = false;
+        $('peSave').disabled = false;
+        return;
+      }
+      try {
+        if (Object.keys(changed).length === 0) {
+          if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
+          saving = false; $('peSave').disabled = false;
+          return;
+        }
         // Derselbe durable Weg wie ein neuer Artikel: Queue → /api/mobile/upload → Inbox → Drain.
         // Nur ohne Bilder und mit `mode:'edit'`. Der Drain wendet den Patch ueber den kanonischen
         // durablen Textedit an, der `media_links` nicht anfasst — es gibt keinen zweiten Schreibweg

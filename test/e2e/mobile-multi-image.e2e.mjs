@@ -121,6 +121,23 @@ const setValE = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); 
 const clickE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; e.click(); return 'OK';`);
 async function setFiles(c, sel, paths) { const r = await c.send('Runtime.evaluate', { expression: `document.querySelector(${S(sel)})`, returnByValue: false }); await c.send('DOM.setFileInputFiles', { objectId: r.result.objectId, files: paths }); }
 async function mobileLogin(c) { await waitE(c, '#email'); await setValE(c, '#email', OWNER_EMAIL); await setValE(c, '#password', OWNER_PW); await clickE(c, '#loginBtn'); await waitVisE(c, '#modePicker'); }
+
+/** Anmelden UND beweisen, dass das Token wirklich gilt. Der eingebettete Server kann waehrend des
+ *  Hochfahrens noch einmal neu starten; faellt das zwischen Login und erstem Upload, ist das gerade
+ *  ausgestellte Token ungueltig und der Upload scheitert mit 401, ohne dass die Seite etwas falsch
+ *  gemacht haette. Das ist eine Vorbedingung — hier wird sie hergestellt und geprueft. */
+async function mobileLoginVerified(c) {
+  const probe = async () => {
+    const t = await c.ev(`return localStorage.getItem('lataif_mobile_token');`);
+    if (!t) return 0;
+    const r = await fetch(`${BASE}/api/products/by-sku/__auth_probe__`, { headers: { Authorization: 'Bearer ' + t } });
+    return r.status;
+  };
+  await mobileLogin(c);
+  let st = await probe();
+  if (st === 401) { await c.ev(`localStorage.removeItem('lataif_mobile_token'); location.reload(); return 1;`); await sleep(2500); await mobileLogin(c); st = await probe(); }
+  ok(st !== 0 && st !== 401, `the mobile session is really authenticated before the fixture (${st})`);
+}
 const thumbCount = (c) => c.ev(`return document.querySelectorAll('#cPhotoStrip .photo-thumb').length;`);
 const primaryIndex = (c) => c.ev(`const t=[...document.querySelectorAll('#cPhotoStrip .photo-thumb')]; return t.findIndex(x=>x.classList.contains('is-primary'));`);
 const removeThumb = (c, i) => c.ev(`const t=document.querySelectorAll('#cPhotoStrip .photo-thumb')[${i}]; if(!t) return 'NO'; t.querySelector('.rm').click(); return 'OK';`);
@@ -209,7 +226,7 @@ async function main() {
   await frontendLogin(app);
 
   const { c: edge, uploads, responses, consoleErrors } = await startEdge(`${BASE}/mobile`);
-  await waitE(edge, '#loginBtn', 20000); await mobileLogin(edge);
+  await waitE(edge, '#loginBtn', 20000); await mobileLoginVerified(edge);
   await clickE(edge, '.mode-btn[data-mode="collection"]'); await waitVisE(edge, '#formCollection');
 
   // ── §3 die Auswahl selbst: mehrere Fotos, entfernen, Cover wechseln ──────

@@ -43,6 +43,8 @@ const STAGING = join(APP_DATA_DIR, 'mobile-upload-staging');
 let PASS = 0, FAIL = 0; const fails = [];
 const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  \u2717 ' + m); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const thumbCount = (c) => c.ev(`return document.querySelectorAll('#cPhotoStrip .photo-thumb').length;`);
+async function waitThumbs(c, n, ms) { const end = Date.now() + ms; while (Date.now() < end) { if (await thumbCount(c) === n) return true; await sleep(200); } return false; }
 const seed = (mode, arg) => execFileSync(SEED, [mode, arg ?? SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' }).trim();
 const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
 const S = (v) => JSON.stringify(v);
@@ -129,6 +131,28 @@ const clickE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!
 const textE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return e ? e.textContent.trim() : '';`);
 async function setFiles(c, sel, paths) { const r = await c.send('Runtime.evaluate', { expression: `document.querySelector(${S(sel)})`, returnByValue: false }); await c.send('DOM.setFileInputFiles', { objectId: r.result.objectId, files: paths }); }
 async function mobileLogin(c) { await waitE(c, '#email'); await setValE(c, '#email', OWNER_EMAIL); await setValE(c, '#password', OWNER_PW); await clickE(c, '#loginBtn'); await waitVisE(c, '#modePicker'); }
+/**
+ * Anmelden UND beweisen, dass das erhaltene Token wirklich gilt.
+ *
+ * Der eingebettete Server kann waehrend des Hochfahrens noch einmal neu starten (Datenwurzel,
+ * Primary-Zustand). Faellt das zwischen Login und ersten Upload, ist das gerade ausgestellte Token
+ * gegen ein neues Secret ungueltig und der erste Upload scheitert mit 401 — ohne dass die Seite
+ * etwas falsch gemacht haette. Das ist eine VORBEDINGUNG des Tests, kein Ergebnis: hier wird sie
+ * hergestellt und geprueft, statt sie zu hoffen. Kein blindes Wiederholen: hoechstens ein zweiter
+ * Anlauf, und das Ergebnis wird zugesichert.
+ */
+async function mobileLoginVerified(c) {
+  const probe = async () => {
+    const t = await c.ev(`return localStorage.getItem('lataif_mobile_token');`);
+    if (!t) return 0;
+    const r = await fetch(`${BASE}/api/products/by-sku/__auth_probe__`, { headers: { Authorization: 'Bearer ' + t } });
+    return r.status;
+  };
+  await mobileLogin(c);
+  let st = await probe();
+  if (st === 401) { await c.ev(`localStorage.removeItem('lataif_mobile_token'); location.reload(); return 1;`); await sleep(2500); await mobileLogin(c); st = await probe(); }
+  ok(st !== 0 && st !== 401, `the mobile session is really authenticated before the fixture (${st})`);
+}
 
 async function startEdge(url) {
   edgeProc = spawn(EDGE, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${EDGE_PROFILE}`, `--remote-debugging-port=${EDGE_CDP}`, 'about:blank'], { stdio: 'ignore' });
@@ -211,7 +235,7 @@ async function main() {
   await frontendLogin(app);
 
   const { c: edge, pushes, consoleErrors, httpErrors, uploadStatus, phase } = await startEdge(`${BASE}/mobile`);
-  await waitE(edge, '#loginBtn', 20000); await mobileLogin(edge);
+  await waitE(edge, '#loginBtn', 20000); await mobileLoginVerified(edge);
 
   // ── Fixture: EIN Artikel mit VIER Bildern, ueber den echten Create-Pfad ──
   await clickE(edge, '.mode-btn[data-mode="collection"]'); await waitVisE(edge, '#formCollection');
@@ -220,8 +244,18 @@ async function main() {
   await setValE(edge, '#cCondition', 'Pre-Owned');
   await setValE(edge, '#attr_dial', 'Black'); await setValE(edge, '#attr_material', 'Steel');
   await setFiles(edge, '#cPhotoInput', paths); await waitVisE(edge, '#cPhotoStrip', 10000);
-  await clickE(edge, '#cSaveBtn');
-  ok(await waitReady(app, 1, 120000), 'fixture: the four-photo upload drained');
+  // Auf ALLE vier Kacheln warten, nicht nur auf den sichtbaren Streifen: die Seite skaliert jedes
+  // Foto einzeln, und ein Save mitten in dieser Verarbeitung waere ein Rennen, kein Test.
+  ok(await waitThumbs(edge, 4, 20000), `fixture: all four photos are prepared (${await thumbCount(edge)})`);
+  ok(await clickE(edge, '#cSaveBtn') === 'OK', 'fixture: the save button clicks');
+  const drained = await waitReady(app, 1, 120000);
+  if (!drained) {
+    console.log('DIAG inbox=' + JSON.stringify(dbQ(SERVER_DB, 'SELECT upload_event_id, state, error_code FROM mobile_upload_inbox')));
+    console.log('DIAG cError=' + (await textE(edge, '#cError')) + ' cSuccess=' + (await textE(edge, '#cSuccess')));
+    console.log('DIAG pushes=' + pushes.length + ' uploadStatus=' + JSON.stringify(uploadStatus) + ' exc=' + JSON.stringify(consoleErrors.slice(0, 3)));
+    console.log('DIAG httpErrors=' + JSON.stringify(httpErrors.slice(0, 5)));
+  }
+  ok(drained, 'fixture: the four-photo upload drained');
   await sleep(2000);
 
   const pid = dbQ(BIZ_DB, "SELECT id, sku FROM products WHERE name = 'Edit Fixture'")[0];
