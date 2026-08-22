@@ -138,6 +138,10 @@ async function startEdge(url) {
   const c = new CDP(ws);
   await c.send('Page.enable'); await c.send('Runtime.enable'); await c.send('DOM.enable'); await c.send('Network.enable');
   const pushes = [], consoleErrors = [], httpErrors = [], uploadStatus = [];
+  // Welcher Testabschnitt gerade laeuft. Nur so laesst sich der EINE absichtlich provozierte 401
+  // von jedem anderen unterscheiden — ein pauschales "401 ist ok" wuerde einen echten Auth-Fehler
+  // an anderer Stelle stillschweigend durchlassen.
+  const phase = { name: 'boot' };
   c.on((m) => {
     if (m.method === 'Network.requestWillBeSent') {
       const r = m.params.request;
@@ -151,12 +155,12 @@ async function startEdge(url) {
       const r = m.params.response;
       if (r && /\/api\/mobile\/upload$/.test(r.url)) uploadStatus.push(r.status);
       // Das Favicon interessiert hier nicht — die Seite liefert keins, der Browser fragt trotzdem.
-      if (r && r.status >= 400 && !/favicon\.ico$/.test(r.url)) httpErrors.push(`${r.status} ${String(r.url).slice(0, 90)}`);
+      if (r && r.status >= 400 && !/favicon\.ico$/.test(r.url)) httpErrors.push({ status: r.status, url: String(r.url), phase: phase.name });
     }
     else if (m.method === 'Runtime.exceptionThrown') { consoleErrors.push(String(m.params.exceptionDetails?.exception?.description || m.params.exceptionDetails?.text || 'exception')); }
   });
   await c.send('Page.navigate', { url }); await sleep(1500);
-  return { c, pushes, consoleErrors, httpErrors, uploadStatus };
+  return { c, pushes, consoleErrors, httpErrors, uploadStatus, phase };
 }
 
 async function serverLogin() {
@@ -185,6 +189,12 @@ async function waitProductField(id, field, want, ms) {
 }
 const sameLinks = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+// Der EINE absichtlich herbeigefuehrte Auth-Fehler dieses Laufs, identifiziert ueber Status,
+// Ziel-Route UND Testabschnitt. Alles andere ist ein echter Fehler.
+const PROVOKED_401_PHASE = 'deliberate-401';
+const isProvoked401 = (h) => h.status === 401 && h.phase === PROVOKED_401_PHASE && /\/api\/mobile\/upload$/.test(h.url);
+const fmtErr = (h) => `${h.status} ${h.phase} ${String(h.url).slice(0, 70)}`;
+
 // ════════════════════════════════════════════════════════════════════════════
 async function main() {
   killAllApp();
@@ -200,7 +210,7 @@ async function main() {
   ok(cfg.ok && cfg.value?.configured === true, 'owner configured runtime binding');
   await frontendLogin(app);
 
-  const { c: edge, pushes, consoleErrors, httpErrors, uploadStatus } = await startEdge(`${BASE}/mobile`);
+  const { c: edge, pushes, consoleErrors, httpErrors, uploadStatus, phase } = await startEdge(`${BASE}/mobile`);
   await waitE(edge, '#loginBtn', 20000); await mobileLogin(edge);
 
   // ── Fixture: EIN Artikel mit VIER Bildern, ueber den echten Create-Pfad ──
@@ -319,6 +329,11 @@ async function main() {
   // ════════════════════════════════════════════════════════════════════════
   const beforeFail = { product: productRow(pid.id), links: linkRows(pid.id), files: mediaFiles() };
   // Ein ungueltiges Token laesst den Push real scheitern (401) — kein kuenstlicher Abbruch.
+  // Das gute Token wird vorher gesichert und danach wiederhergestellt: sonst bliebe die Seite bis
+  // zum Ende kaputt und JEDER weitere 401 waere entschuldbar — genau die Unschaerfe, die hier weg soll.
+  const goodToken = await edge.ev(`return localStorage.getItem('lataif_mobile_token');`);
+  ok(!!goodToken, 'FAILURE the page held a valid token before it was broken on purpose');
+  phase.name = PROVOKED_401_PHASE;
   await edge.ev(`localStorage.setItem('lataif_mobile_token','broken-token'); return 1;`);
   await clickE(edge, '#pdEditBtn'); await waitVisE(edge, '#pdEditForm', 10000);
   await setValE(edge, '#peName', 'SHOULD NOT PERSIST');
@@ -329,6 +344,8 @@ async function main() {
   ok(productRow(pid.id)?.name === beforeFail.product.name, 'FAILURE the product keeps its previous name');
   ok(sameLinks(linkRows(pid.id), beforeFail.links), 'FAILURE the gallery is untouched');
   ok(JSON.stringify(mediaFiles()) === JSON.stringify(beforeFail.files), 'FAILURE not one media file changed');
+  await edge.ev(`localStorage.setItem('lataif_mobile_token', ${S(goodToken)}); return 1;`);
+  phase.name = 'contract';
 
   // ════════════════════════════════════════════════════════════════════════
   // Der Vertrag selbst — direkt gegen /api/mobile/upload, ohne die UI
@@ -417,8 +434,24 @@ async function main() {
   ok(inbox.filter((r) => r.state === 'quarantined').length === 1, `exactly the one deliberately failed edit is quarantined (${inbox.filter((r) => r.state === 'quarantined').length})`);
   ok(stagedFiles() === stagedBeforeEdit, `a text edit stages nothing (${stagedFiles()} vs ${stagedBeforeEdit})`);
   ok(consoleErrors.length === 0, `no uncaught page exception (${consoleErrors.slice(0, 2).join(' | ')})`);
-  const unexpected = httpErrors.filter((h) => !/401/.test(h));
-  ok(unexpected.length === 0, `no unexpected HTTP error (${unexpected.slice(0, 3).join(' | ')})`);
+  // Genau EIN 401 ist gewollt: der Upload-POST, den der Test im Abschnitt oben mit einem kaputten
+  // Token provoziert hat. Er wird ueber alle drei Merkmale identifiziert — Status, Ziel-Route und
+  // Testabschnitt. Jeder andere 401 (andere Route, anderer Abschnitt) bleibt ein Fehler.
+  const unexpected = httpErrors.filter((h) => !isProvoked401(h));
+  ok(unexpected.length === 0, `no unexpected HTTP error (${unexpected.slice(0, 3).map(fmtErr).join(' | ')})`);
+  ok(httpErrors.some(isProvoked401), 'the deliberately provoked 401 really happened — the exemption is not covering an empty set');
+
+  // NEGATIVKONTROLLE fuer genau dieses Gate: ein zusaetzlicher, NICHT provozierter 401 muss es
+  // fallen lassen. Geprueft wird derselbe Ausdruck, der oben entscheidet — nicht eine Kopie davon.
+  const strays = [
+    { status: 401, url: `${BASE}/api/mobile/upload`, phase: 'edit-save' },   // richtige Route, falscher Abschnitt
+    { status: 401, url: `${BASE}/api/mobile/product`, phase: PROVOKED_401_PHASE }, // richtiger Abschnitt, falsche Route
+    { status: 403, url: `${BASE}/api/mobile/upload`, phase: PROVOKED_401_PHASE }, // alles richtig ausser dem Status
+  ];
+  for (const stray of strays) {
+    const wouldFail = [...httpErrors, stray].filter((h) => !isProvoked401(h));
+    ok(wouldFail.length === 1 && wouldFail[0] === stray, `NEGATIVE CONTROL the gate falls on an extra ${stray.status} (${stray.phase}, ${stray.url.replace(BASE, '')})`);
+  }
 
   edge.closeWs(); killEdge(); app.closeWs(); killApp();
 }

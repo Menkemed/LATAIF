@@ -17,7 +17,7 @@
 // Produktionsinstallation wird nie geöffnet — weder lesend noch schreibend.
 
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
@@ -156,11 +156,12 @@ async function runBackfillViaUi(c) {
 }
 
 /** Settings → Danger Zone öffnen und den Factory-Reset-Dialog bis zum scharfen Button führen. */
-async function armFactoryReset(c) {
+async function armFactoryReset(c, { keepSync = false } = {}) {
   // D3b sperrt den Reset, solange Sync/LAN konfiguriert ist. Die e2e-Instanz startet als
   // provisionierter Primary — ohne dieses Abschalten prüfte der Test nur die Sperre und nie den
-  // Backup-Pfad dahinter.
-  await turnSyncOff(c);
+  // Backup-Pfad dahinter. `keepSync` ist ausschliesslich fuer die Negativkontrolle da, die genau
+  // diese Sperre sehen WILL.
+  if (!keepSync) await turnSyncOff(c);
   await goto(c, '/settings');
   await sleep(1500);
   await c.ev(`const b=[...document.querySelectorAll('button,div,span')].find(x=>x.textContent.trim()==='Danger Zone'); if(b) b.click(); return 1;`);
@@ -181,6 +182,10 @@ const guardState = (c) => c.ev(
 );
 const turnSyncOff = (c) => c.ev(
   "localStorage.removeItem('lataif_lan_mode'); localStorage.removeItem('lataif_sync_url'); localStorage.removeItem('lataif_sync_token'); return 1;"
+);
+// Nur fuer die Negativkontrolle: `isFactoryResetBlocked` sperrt bei jedem lanMode ausser 'off'/''.
+const turnSyncOn = (c) => c.ev(
+  "localStorage.setItem('lataif_lan_mode','client'); localStorage.setItem('lataif_sync_url','http://127.0.0.1:65000/'); localStorage.setItem('lataif_sync_token','control'); return 1;"
 );
 const bodyText = (c) => c.ev('return document.body.innerText;');
 
@@ -242,10 +247,34 @@ async function main() {
   // Pre-destructive — ECHTER Backup-I/O-Fehler blockiert den Reset
   // ════════════════════════════════════════════════════════════════════════
   const productsBefore = bizNum('SELECT COUNT(*) n FROM invoices');
+
+  // ── NEGATIVKONTROLLE ZUERST: ein blosser D3b-Block darf nicht wie ein Backup-Fehler aussehen ──
+  //
+  // Ohne sie waere die Abbruchmeldung unten kein Beweis: haette der Reset schon an der Sync-Sperre
+  // gehalten, saehe "die Datenbank ist noch da" identisch aus. Hier laeuft derselbe Klick EINMAL mit
+  // konfiguriertem Sync — er muss die Sperre zeigen und die Abbruchmeldung darf NICHT erscheinen.
+  ws = await startApp(); c = new CDP(ws);
+  await waitInvoke(c); await frontendLogin(c); await sleep(2000);
+  await turnSyncOn(c);
+  await armFactoryReset(c, { keepSync: true });
+  const gOn = await guardState(c);
+  ok(gOn.lan === 'client', `CONTROL sync/LAN is configured for this attempt (${JSON.stringify(gOn)})`);
+  ok(await clickText(c, 'Factory Reset') === 'OK', 'CONTROL the armed Factory Reset button clicks with sync on');
+  await sleep(5000);
+  const blockedText = await bodyText(c);
+  ok(/blockiert/i.test(blockedText), `CONTROL the D3b block banner appears ("${(blockedText.match(/[^\n]*blockiert[^\n]*/i) || [''])[0].slice(0, 90)}")`);
+  ok(!/Reset abgebrochen/i.test(blockedText), 'CONTROL …and the abort message does NOT — a block is not a backup failure');
+  ok(backupDirs().length === 0, `CONTROL a blocked reset wrote no backup folder (${backupDirs().length})`);
+  ok(bizNum('SELECT COUNT(*) n FROM invoices') === productsBefore, 'CONTROL …and touched no data');
+  c.closeWs(); killApp();
+  // Auf die freigegebene Portbindung warten statt zu hoffen: der naechste Start bringt seinen
+  // eigenen Sync-Server mit und haengt beim Booten, wenn der alte den Port noch haelt.
+  ok(await waitPortFree(PORT), 'CONTROL the isolated sync port is free again before the next boot');
+
   try { rmSync(BACKUPS, { recursive: true, force: true }); } catch { /* none yet */ }
   // Eine DATEI dort, wo der Backup-Root ein Ordner sein muss → mkdir scheitert real.
   writeFileSync(BACKUPS, 'not a directory');
-  ok(existsSync(BACKUPS) && !readdirSync(APP_DATA_DIR).includes('backups/'), 'the backups root is now a file — every mkdir there must fail');
+  ok(statSync(BACKUPS).isFile(), 'the backups root is a FILE, not a directory — every mkdir there must fail');
 
   ws = await startApp(); c = new CDP(ws);
   await waitInvoke(c); await frontendLogin(c); await sleep(2000);

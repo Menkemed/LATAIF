@@ -475,6 +475,31 @@ export function parseMobileTextEdit(metadataJson: string): { ok: true; productId
  *   • angewandt wird ueber den kanonischen durablen Textedit, der `media_links` nicht anfasst.
  * Idempotenz: derselbe uploadEventId wird vom Rust-Inbox-Vertrag nur einmal `ready`; und der
  * Textedit selbst ist replay-sicher (Baseline-Guard: Ziel bereits erreicht → no-op).
+ *
+ * FEHLERKLASSIFIKATION (MOBILE-EDIT-S2-R1) — ein Job muss in dem Zustand landen, aus dem er wieder
+ * herauskommt, und NUR dann. Die Trennlinie ist nicht "wie schlimm", sondern: kann derselbe Job
+ * durch blosse Wiederholung jemals gelingen?
+ *
+ *   PERMANENT → `markQuarantined` mit stabilem Code, terminal, nie wieder beansprucht:
+ *     • Ziel existiert nicht                    → MOBILE_UPLOAD_TARGET_CONFLICT
+ *     • Patch malformed / verbotenes Feld       → MOBILE_EDIT_PATCH_INVALID
+ *     • Text-Edit bringt Bilder mit             → MOBILE_EDIT_GALLERY_NOT_SUPPORTED
+ *   Alle drei sind Eigenschaften des Jobs selbst und aendern sich durch Warten nicht.
+ *
+ *   TRANSIENT → `release`, der Job bleibt beanspruchbar:
+ *     • Scope-Fence / Rebind waehrend des Claims  — der naechste Lauf hat wieder einen gueltigen Scope
+ *     • `applyTextEdit` fehlt (nicht verdrahtet)  — ein spaeterer, vollstaendiger Lauf holt ihn ab
+ *     • `applyTextEdit` wirft                     — nichts wurde durabel, ein Retry ist sinnvoll
+ *     • `applyTextEdit` meldet !ok                — die drei moeglichen Gruende sind alle aufloesbar:
+ *       fehlender Scope (kommt mit dem Login), BASELINE_CHANGED (die Baseline wird bei JEDEM Versuch
+ *       frisch aus der aktuellen Zeile abgeleitet, ein Konflikt ist also ein Rennen, kein Zustand)
+ *       und ein noch nicht durchgefuehrter Legacy-Cutover (den der Desktop nachholt).
+ *
+ * Kein Versuchszaehler, keine eigene Retry-Mechanik: das unbegrenzte Wiederholen eines transienten
+ * Fehlers ist die bestehende Eigenschaft des GESAMTEN Mobile-Drains (der Create-Zweig verhaelt sich
+ * bei `product_save_failed` identisch) und waere hier weder neu einzufuehren noch allein zu aendern.
+ * Bewiesen in `test/mobile-edit-failure/edit-failure-classification.test.ts` am persistierten
+ * Job-Zustand und am Claim-Zaehler, inklusive Negativkontrolle.
  */
 async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: DrainScope, entryRevision: number): Promise<DrainOutcome> {
   const u = grant.authenticatedUserId;
