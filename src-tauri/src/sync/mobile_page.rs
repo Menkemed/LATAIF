@@ -641,8 +641,22 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     let imgs = [];
     try { imgs = typeof p.images === 'string' ? JSON.parse(p.images) : (p.images || []); } catch (_) {}
     const img0 = (imgs && imgs.length) ? String(imgs[0] || '') : '';
+    // MOBILE-EDIT-S1 — ALLE Fotos, nicht nur das Titelbild. Der Read-Vertrag liefert die geordnete
+    // Galerie mit stabilen Identitaeten; hier wird sie sichtbar. Das grosse Bild bleibt das
+    // Titelbild (`image_key`), darunter steht der Rest in Galerie-Reihenfolge. Rein anzeigend.
+    const gal = Array.isArray(p.gallery) ? p.gallery : [];
     if (p.image_key) {
       html += '<img id="pdPhoto" alt="" style="width:100%; border-radius:8px; margin-bottom:14px; display:none;" />';
+      if (gal.length > 1) {
+        html += '<div id="pdGallery" class="photo-strip" style="margin-bottom:14px;">'
+          + gal.map(function (g, i) {
+              return '<div class="photo-thumb' + (g.is_primary ? ' is-primary' : '') + '" data-gi="' + i + '">'
+                + '<img alt="" style="display:none;" />'
+                + (g.is_primary ? '<div class="cover">COVER</div>' : '')
+                + '</div>';
+            }).join('')
+          + '</div>';
+      }
     } else if (/^(data:|https?:)/.test(img0)) {
       html += '<img src="' + esc(img0) + '" onerror="this.style.display=\'none\'" style="width:100%; border-radius:8px; margin-bottom:14px;" />';
     }
@@ -673,7 +687,32 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // MOBILE-I1 §16 — the stock-check block is ADDED to the existing details, never replaces them.
     // It is only offered when the product has an id (i.e. it came from the business database, which
     // is the only source that can be checked against).
+    // MOBILE-EDIT-S2 — Textfelder eines BESTEHENDEN Artikels aendern.
+    //
+    // Bewusst eng: Name, Marke, Zustand, Lagerort und Notiz. Kein SKU (der wird nie nachtraeglich
+    // veraendert), keine Preise, keine Kategorie, keine Attribute — und vor allem NICHTS an der
+    // Galerie. Der Save schickt ausschliesslich die Felder, die der Benutzer wirklich geaendert
+    // hat; nicht angefasste Felder tauchen im Payload gar nicht erst auf und koennen dadurch auch
+    // nicht mit leer/null ueberschrieben werden.
     if (p.id) {
+      html += ''
+        + '<div style="margin-top:18px; padding-top:14px; border-top:1px solid #2A2A32;">'
+        + '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px;">Edit</div>'
+        + '<button id="pdEditBtn" class="ghost" style="width:100%;">Edit item</button>'
+        + '<div id="pdEditForm" class="hidden" style="margin-top:12px;">'
+        +   '<div class="row"><label>Model / Name</label><input id="peName" type="text" maxlength="200" /></div>'
+        +   '<div class="row"><label>Brand</label><input id="peBrand" type="text" maxlength="120" /></div>'
+        +   '<div class="row"><label>Condition</label><input id="peCondition" type="text" maxlength="60" /></div>'
+        +   '<div class="row"><label>Location</label><input id="peLocation" type="text" maxlength="120" /></div>'
+        +   '<div class="row"><label>Notes</label><input id="peNotes" type="text" maxlength="500" /></div>'
+        +   '<div style="display:flex; gap:8px;">'
+        +     '<button id="peCancel" class="ghost" style="flex:1;">Cancel</button>'
+        +     '<button id="peSave" style="flex:1;">Save changes</button>'
+        +   '</div>'
+        +   '<div id="peMsg" style="font-size:12px; margin-top:8px;"></div>'
+        +   '<div style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">Photos, SKU and prices are not changed here.</div>'
+        + '</div>'
+        + '</div>';
       html += ''
         + '<div style="margin-top:18px; padding-top:14px; border-top:1px solid #2A2A32;">'
         + '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px;">Stock check</div>'
@@ -712,6 +751,14 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const b = $('pdBack');
     if (b) b.onclick = backToSearch;
     if (p.image_key) paintMedia($('pdPhoto'), p.image_key);
+    // Jede Galerie-Kachel bekommt ihr eigenes Bild — bevorzugt das Thumbnail, sonst das Original.
+    // Ein fehlendes Einzelbild darf die Detailansicht nie kippen (paintMedia schluckt das bereits).
+    const galEls = document.querySelectorAll('#pdGallery .photo-thumb');
+    const gal = Array.isArray(p.gallery) ? p.gallery : [];
+    for (let i = 0; i < galEls.length && i < gal.length; i++) {
+      paintMedia(galEls[i].querySelector('img'), gal[i].thumb_key || gal[i].image_key);
+    }
+    if (p.id) wireProductEdit(p);
     if (p.id) wireStockCheck(p.id);
   }
 
@@ -799,6 +846,79 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       const l = $('scLatest');
       if (l) l.textContent = 'Check history unavailable.';
     }
+  }
+
+  // ── MOBILE-EDIT-S2 — Textedit eines bestehenden Artikels ────────────────────
+  //
+  // Der Save laeuft ueber denselben `/api/sync/push`, den die Repair- und Purchase-Formulare seit
+  // jeher benutzen — ein vollstaendig konsumierter Weg, kein neuer Job, kein Inbox-Eintrag, nichts
+  // was liegenbleiben koennte. Entscheidend fuer die Sicherheit ist die Nutzlast: der Desktop
+  // schreibt beim Anwenden GENAU die mitgeschickten Spalten. Was der Benutzer nicht geaendert hat,
+  // steht nicht drin und bleibt darum unberuehrt — `media_links`, `images`, SKU und Preise fasst
+  // dieser Weg nie an.
+  const EDIT_FIELDS = [
+    ['peName', 'name'],
+    ['peBrand', 'brand'],
+    ['peCondition', 'condition'],
+    ['peLocation', 'storage_location'],
+    ['peNotes', 'notes'],
+  ];
+  function wireProductEdit(p) {
+    const btn = $('pdEditBtn'), form = $('pdEditForm'), msg = $('peMsg');
+    if (!btn || !form) return;
+    // Die Ausgangswerte, gegen die spaeter verglichen wird. Genau das, was der Read-Vertrag geliefert
+    // hat — nicht das, was das Formular gerade zufaellig anzeigt.
+    const original = { name: p.name, brand: p.brand, condition: p.condition, storage_location: p.storage_location, notes: p.notes };
+    const fill = () => { for (const [id, key] of EDIT_FIELDS) { const el = $(id); if (el) el.value = original[key] == null ? '' : String(original[key]); } };
+    fill();
+    // Immer OEFFNEN, nie umschalten: nach einem Speichern bleibt das Formular mit seiner Meldung
+    // stehen, und ein zweiter Tipp auf "Edit item" soll dann nicht ueberraschend zuklappen.
+    // Geschlossen wird ueber Cancel.
+    btn.onclick = () => { fill(); if (msg) msg.textContent = ''; form.classList.remove('hidden'); };
+    // Cancel verwirft ALLES: Formular zu, Werte zurueck auf den Ausgangsstand, kein einziger Request.
+    $('peCancel').onclick = () => { fill(); if (msg) msg.textContent = ''; form.classList.add('hidden'); };
+
+    let saving = false;
+    $('peSave').onclick = async () => {
+      if (saving) return;                     // Doppeltipp: genau eine Mutation
+      const changed = {};
+      for (const [id, key] of EDIT_FIELDS) {
+        const el = $(id); if (!el) continue;
+        const now = el.value.trim();
+        const before = original[key] == null ? '' : String(original[key]);
+        if (now === before) continue;         // unveraendert → gar nicht erst mitschicken
+        changed[key] = now === '' ? null : now;
+      }
+      if (Object.keys(changed).length === 0) {
+        if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Nothing changed.'; }
+        return;
+      }
+      saving = true;
+      $('peSave').disabled = true;
+      if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
+      try {
+        // Derselbe durable Weg wie ein neuer Artikel: Queue → /api/mobile/upload → Inbox → Drain.
+        // Nur ohne Bilder und mit `mode:'edit'`. Der Drain wendet den Patch ueber den kanonischen
+        // durablen Textedit an, der `media_links` nicht anfasst — es gibt keinen zweiten Schreibweg
+        // und keinen Job, den niemand konsumiert.
+        const entry = await uploadQueue.enqueue({
+          metadata: { kind: 'text_edit', productId: p.id, patch: changed },
+          images: [],
+          protocolVersion: 2,
+        });
+        const r = await uploadQueue.drainEntry(entry.uploadEventId, localStorage.getItem(TOKEN_KEY));
+        if (r && r.outcome && r.outcome !== 'done') throw new Error('Upload ' + r.outcome);
+        for (const k of Object.keys(changed)) { original[k] = changed[k]; p[k] = changed[k]; }
+        if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
+      } catch (e) {
+        // Fehlschlag aendert NICHTS — weder am Artikel noch am Formular. Der Benutzer kann es
+        // erneut versuchen, ohne dass irgendwo ein halber Zustand zurueckbleibt.
+        if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'Save failed — nothing was changed. ' + ((e && e.message) ? e.message : ''); }
+      } finally {
+        saving = false;
+        $('peSave').disabled = false;
+      }
+    };
   }
 
   function wireStockCheck(productId) {

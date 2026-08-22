@@ -160,6 +160,11 @@ export interface MobileDrainDeps {
   /** Real post-create verification: product in scope, gallery == ordered manifest, primary slot 0,
    *  active media hash-verified, products.images has no new base64, sync/audit exactly once. */
   verifyReady: (grant: ClaimGrant) => Promise<ReadyVerdict>;
+  /** MOBILE-EDIT-S2 — den kanonischen durablen Textedit anwenden (`editProductTextDurably`). Er
+   *  fasst `media_links` per Vertrag nicht an und setzt nur die uebergebenen Felder. Fehlt die
+   *  Abhaengigkeit, wird ein Edit-Job NICHT verarbeitet und auch nicht terminal markiert — er
+   *  bleibt fuer einen spaeteren, vollstaendig verdrahteten Lauf liegen. */
+  applyTextEdit?: (entityId: string, patch: Record<string, string | null>) => Promise<{ ok: boolean; errorCode?: string }>;
 }
 
 export type DrainCode =
@@ -202,6 +207,9 @@ const ERR_RECEIPT_INCONSISTENT = 'MOBILE_UPLOAD_RECEIPT_INCONSISTENT';
 const ERR_BROKEN = 'MOBILE_UPLOAD_MEDIA_BROKEN';
 const ERR_METADATA_MISMATCH = 'MOBILE_UPLOAD_METADATA_MISMATCH';
 const ERR_BATCH_MISMATCH = 'MOBILE_UPLOAD_BATCH_MISMATCH';
+// MOBILE-EDIT-S2 — ein Edit-Job, der mehr will als Text, wird quarantaeniert statt halb ausgefuehrt.
+const ERR_EDIT_GALLERY_UNSUPPORTED = 'MOBILE_EDIT_GALLERY_NOT_SUPPORTED';
+const ERR_EDIT_PATCH_INVALID = 'MOBILE_EDIT_PATCH_INVALID';
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource);
@@ -342,6 +350,12 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
     await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // foreign — hand it straight back
     return { code: 'foreign_scope' };
   }
+  // MOBILE-EDIT-S2 — die Verzweigung sitzt VOR der Manifest-Pruefung: die prueft die Bildliste
+  // eines Creates (Slots 0..N-1, genau ein primary) und muss bei einem Text-Edit mit null Bildern
+  // zwangslaeufig scheitern. Die passende Regel fuer einen Edit — die Bildliste MUSS leer sein —
+  // steht in `processEditClaim` und ist dort genauso fail-closed.
+  if (isMobileTextEditJob(grant.metadataJson)) return processEditClaim(grant, deps, sc, entryRevision);
+
   // Re-verify the handed-off manifest structure before creating anything.
   const mf = verifyGrantManifest(grant);
   if (!mf.ok) {
@@ -416,6 +430,95 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
   }
   // 'created' or 'media_incomplete' → product durable. Verify before marking ready.
   return finishReady(grant, deps, 'ready', entryRevision, sc);
+}
+
+/** Die Felder, die ein mobiler Text-Edit setzen darf. Bewusst eng und bewusst OHNE `sku`, Preise,
+ *  Kategorie, Attribute oder irgendetwas Bildbezogenes: was hier nicht steht, kann vom Handy aus
+ *  gar nicht geschrieben werden. */
+export const MOBILE_TEXT_EDIT_FIELDS: ReadonlySet<string> = new Set([
+  'name', 'brand', 'condition', 'storageLocation', 'notes',
+]);
+
+/** Traegt dieser Job den Edit-Marker? Er sitzt in der Metadata (die Inbox-Tabelle laesst per CHECK
+ *  nur  zu) und geht in den payload_hash ein, ist also genauso bindend. */
+export function isMobileTextEditJob(metadataJson: string): boolean {
+  try { return (JSON.parse(metadataJson) as { kind?: unknown } | null)?.kind === 'text_edit'; } catch { return false; }
+}
+
+/** Den Patch aus der Job-Metadata lesen — fail closed: unbekannte Felder machen den Job ungueltig,
+ *  statt still ignoriert zu werden (sonst koennte ein Client glauben, er habe etwas gesetzt). */
+export function parseMobileTextEdit(metadataJson: string): { ok: true; productId: string; patch: Record<string, string | null> } | { ok: false } {
+  let meta: unknown;
+  try { meta = JSON.parse(metadataJson); } catch { return { ok: false }; }
+  const productId = (meta as { productId?: unknown } | null)?.productId;
+  if (typeof productId !== 'string' || productId === '') return { ok: false };
+  const raw = (meta as { patch?: unknown } | null)?.patch;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false };
+  const patch: Record<string, string | null> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!MOBILE_TEXT_EDIT_FIELDS.has(k)) return { ok: false };
+    if (v !== null && typeof v !== 'string') return { ok: false };
+    patch[k] = v as string | null;
+  }
+  if (Object.keys(patch).length === 0) return { ok: false };
+  return { ok: true, productId, patch };
+}
+
+/**
+ * MOBILE-EDIT-S2 — Textfelder eines bestehenden Artikels anwenden.
+ *
+ * Sicherheitsgrenzen, alle fail-closed:
+ *   • das Produkt MUSS existieren (sonst waere es ein verkappter Create),
+ *   • Bilder im Edit-Job werden NICHT verarbeitet — der Galerie-Edit ist eine eigene Stufe, und ein
+ *     halb verstandener Job wird quarantaeniert statt teilweise ausgefuehrt,
+ *   • der Patch darf nur die freigegebenen Textfelder tragen,
+ *   • angewandt wird ueber den kanonischen durablen Textedit, der `media_links` nicht anfasst.
+ * Idempotenz: derselbe uploadEventId wird vom Rust-Inbox-Vertrag nur einmal `ready`; und der
+ * Textedit selbst ist replay-sicher (Baseline-Guard: Ziel bereits erreicht → no-op).
+ */
+async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: DrainScope, entryRevision: number): Promise<DrainOutcome> {
+  const u = grant.authenticatedUserId;
+  if (!deps.applyTextEdit) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: 'edit_not_wired' };
+  }
+  const parsed = parseMobileTextEdit(grant.metadataJson);
+  if (!parsed.ok) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_EDIT_PATCH_INVALID, sc);
+    return { code: 'manifest_invalid', detail: ERR_EDIT_PATCH_INVALID };
+  }
+  if (!deps.productExists(parsed.productId)) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_CONFLICT, sc);
+    return { code: 'target_conflict' };
+  }
+  if (grant.images.length > 0) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_EDIT_GALLERY_UNSUPPORTED, sc);
+    return { code: 'manifest_invalid', detail: ERR_EDIT_GALLERY_UNSUPPORTED };
+  }
+  // Fence direkt vor der einzigen Mutation dieses Zweigs.
+  if (await claimFenced(deps, entryRevision)) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: 'scope_fenced' };
+  }
+  let applied: { ok: boolean; errorCode?: string };
+  try {
+    applied = await deps.applyTextEdit(parsed.productId, parsed.patch);
+  } catch (e) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // nichts durabel → spaeter erneut
+    return { code: 'deferred', detail: (e as { message?: string })?.message ?? 'edit_failed' };
+  }
+  if (!applied.ok) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: applied.errorCode ?? 'edit_failed' };
+  }
+  if (await claimFenced(deps, entryRevision)) {
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    return { code: 'deferred', detail: 'scope_fenced' };
+  }
+  const res = await deps.bridge.markReady(
+    u, grant.uploadEventId, grant.claimToken, grant.entityId, grant.payloadHash, parsed.productId, sc,
+  );
+  return res === 'rejected' ? { code: 'ready_rejected' } : { code: 'ready' };
 }
 
 async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode: DrainCode, entryRevision: number, sc: DrainScope): Promise<DrainOutcome> {

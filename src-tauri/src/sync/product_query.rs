@@ -147,6 +147,75 @@ fn enrich(conn: &Connection, tenant_id: &str, product: &mut serde_json::Value) {
     if let Some(k) = thumb {
         product["thumb_key"] = serde_json::Value::String(k);
     }
+
+    // ── MOBILE-EDIT-S1 — die VOLLSTAENDIGE geordnete Galerie, nicht nur das Titelbild ──
+    //
+    // Zum Bearbeiten reicht `image_key` nicht. Wer nur das erste Bild kennt, kann die anderen weder
+    // zeigen noch bewusst behalten — und genau daraus entsteht die Fehlerklasse "Save loescht die
+    // vier Bilder, die das Handy nie gesehen hat". Jede Zeile traegt deshalb ihre STABILE Identitaet
+    // (`link_id`, `media_id`), ihre Position und ob sie das Titelbild ist. Sichtbarkeitsbedingung und
+    // Sortierung sind exakt die der Abfragen oben, damit Handy und Desktop denselben Satz in
+    // derselben Reihenfolge sehen. Read-only: diese Funktion mutiert nichts.
+    let gallery: Vec<serde_json::Value> = conn
+        .prepare(
+            "SELECT l.link_id, l.media_id, l.is_primary, l.sort_order, g.storage_key, t.storage_key
+               FROM media_links l
+               JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
+               JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id
+               JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id
+                                            AND g.generation_no = b.current_generation_no
+               LEFT JOIN media_variants v ON v.tenant_id = l.tenant_id AND v.media_id = l.media_id
+                                         AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL
+               LEFT JOIN media_blobs tb ON tb.tenant_id = v.tenant_id AND tb.blob_id = v.blob_id
+               LEFT JOIN media_blob_generations t ON t.tenant_id = tb.tenant_id AND t.blob_id = tb.blob_id
+                                                 AND t.generation_no = tb.current_generation_no
+                                                 AND t.gen_status = 'available' AND t.deleted_at IS NULL
+              WHERE l.tenant_id = ?1 AND l.entity_type = 'product' AND l.entity_id = ?2
+                AND l.deleted_at IS NULL AND o.deleted_at IS NULL AND g.deleted_at IS NULL
+                AND o.ingest_status = 'ready' AND b.blob_status = 'present' AND g.gen_status = 'available'
+              ORDER BY l.is_primary DESC, l.sort_order ASC, l.link_id ASC",
+        )
+        .and_then(|mut st| {
+            st.query_map(rusqlite::params![tenant_id, product_id], |r| {
+                Ok(serde_json::json!({
+                    "link_id":    r.get::<_, String>(0)?,
+                    "media_id":   r.get::<_, String>(1)?,
+                    "is_primary": r.get::<_, i64>(2)? != 0,
+                    "sort_order": r.get::<_, i64>(3)?,
+                    "image_key":  r.get::<_, String>(4)?,
+                    "thumb_key":  r.get::<_, Option<String>>(5)?,
+                }))
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    // Der Baseline-Nachweis: ein Fingerabdruck GENAU der Galerie, die das Handy gerade bekommen hat
+    // — Identitaet, Position und Titelbild-Flag jeder Zeile, in Reihenfolge. Ein spaeterer Save
+    // schickt ihn zurueck; weicht er dann vom aktuellen Stand ab, hat sich die Galerie inzwischen
+    // geaendert. Deterministisch aus genau diesem Zustand, sonst waere er als Waechter wertlos.
+    let fingerprint = gallery
+        .iter()
+        .map(|g| {
+            format!(
+                "{}:{}:{}:{}",
+                g["link_id"].as_str().unwrap_or(""),
+                g["media_id"].as_str().unwrap_or(""),
+                g["sort_order"].as_i64().unwrap_or(-1),
+                i32::from(g["is_primary"].as_bool().unwrap_or(false))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    product["gallery"] = serde_json::Value::Array(gallery);
+    product["gallery_baseline"] = serde_json::Value::String(sha256_hex(fingerprint.as_bytes()));
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Tenancy: `products` has no tenant_id, so the binding is the join onto `branches` — identical to

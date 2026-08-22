@@ -687,15 +687,32 @@ async fn mobile_upload_ingress(
     // MOBILE-FIELDS — validate product-field metadata against the desktop SSOT BEFORE decoding/staging any
     // bytes, so an invalid request leaves NO inbox row and NO staged blob. v1 = validity only (old minimal
     // payloads stay valid); v2 = full field contract (required + dependsOn, same as the desktop create flow).
-    if let Err(e) = super::mobile_field_schema::validate_metadata(&req.metadata, req.protocol_version) {
+    // MOBILE-EDIT-S2 — ein Edit traegt KEIN vollstaendiges Produkt, sondern einen Patch aus wenigen
+    // Textfeldern. Das Feld-Schema (Pflichtfelder, dependsOn) beschreibt das Anlegen eines Artikels
+    // und passt darauf nicht; der Patch hat seinen eigenen, engeren Vertrag: nur die freigegebenen
+    // Textspalten, nur Strings oder null, mindestens ein Feld. Er wird hier genauso streng geprueft,
+    // bevor irgendetwas gespeichert wird.
+    // Der Marker sitzt in der Metadata, nicht in : die Inbox-Tabelle laesst per CHECK nur
+    //  zu, und ein Umbau dieser CHECK-Bedingung waere ein Tabellen-Rebuild — genau das,
+    // was die Migrationsdisziplin dieses Projekts nicht erlaubt. Die Metadata geht in den
+    // payload_hash ein, der Marker ist also genauso bindend wie ein eigenes Feld.
+    let is_edit = req.metadata.get("kind").and_then(|v| v.as_str()) == Some("text_edit");
+    if is_edit {
+        if let Err(code) = super::mobile_upload::validate_text_edit_metadata(&req.metadata) {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "state": "rejected", "code": code })),
+            ));
+        }
+    } else if let Err(e) = super::mobile_field_schema::validate_metadata(&req.metadata, req.protocol_version) {
         return Ok((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({ "state": "rejected", "code": e.code, "field": e.field, "message": e.message })),
         ));
     }
     // Cheap pre-checks before decoding bytes (accept_upload re-validates authoritatively): at least one
-    // image, never more than the hard cap.
-    if req.images.is_empty() || req.images.len() > super::mobile_upload::MAX_UPLOAD_IMAGES {
+    // image for a create — an edit carries none — and never more than the hard cap.
+    if (!is_edit && req.images.is_empty()) || req.images.len() > super::mobile_upload::MAX_UPLOAD_IMAGES {
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     // Decode base64 image bytes (strict standard alphabet). A bad encoding is a 400.

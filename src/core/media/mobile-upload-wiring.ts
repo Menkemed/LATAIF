@@ -223,6 +223,15 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
     createProduct: (grant, prepared, receiptIntent) =>
       useProductStore.getState().createProductWithMedia(collectionDataFromGrant(grant), grant.entityId, receiptIntent, { kind: 'prepared_media', items: prepared }),
     verifyReady,
+    // MOBILE-EDIT-S2 — der Textedit vom Handy laeuft durch GENAU dieselbe Store-Aktion wie der
+    // Desktop-Textedit: `editProductTextDurably` diffed die freigegebenen Spalten, wendet sie in
+    // einer Transaktion an und ruehrt `media_links` nicht an. Keine zweite Merge-Semantik.
+    applyTextEdit: async (entityId, patch) => {
+      const res = await useProductStore.getState().editProductTextDurably(entityId, patch as Record<string, never>);
+      return res.status === 'edited'
+        ? { ok: true }
+        : { ok: false, errorCode: (res as { errorCode?: string }).errorCode ?? res.status };
+    },
   };
 }
 

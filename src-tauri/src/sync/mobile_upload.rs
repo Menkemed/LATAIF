@@ -194,7 +194,47 @@ fn validate_image(slot: usize, raw: &RawUploadImage) -> Result<ValidatedImage, U
 }
 
 fn validate_batch(images: &[RawUploadImage]) -> Result<Vec<ValidatedImage>, UploadError> {
-    if images.is_empty() { return Err(reject(ERR_NO_IMAGES)); }
+    validate_batch_for(images, false)
+}
+
+/// Die Felder, die ein mobiler Text-Edit setzen darf — bewusst eng und bewusst OHNE `sku`, Preise,
+/// Kategorie, Attribute oder irgendetwas Bildbezogenes. Spiegelt `MOBILE_TEXT_EDIT_FIELDS` in
+/// `src/core/media/mobile-upload-drain.ts`; beide Seiten pruefen, damit weder Server noch Desktop
+/// sich auf den anderen verlaesst.
+pub const MOBILE_TEXT_EDIT_FIELDS: [&str; 5] = ["name", "brand", "condition", "storageLocation", "notes"];
+pub const ERR_EDIT_PATCH_INVALID: &str = "MOBILE_EDIT_PATCH_INVALID";
+/// Laengengrenze je Textfeld — dieselbe Groessenordnung wie die Eingabefelder auf der Seite.
+const MAX_EDIT_FIELD_LEN: usize = 500;
+
+/// MOBILE-EDIT-S2 — der Patch-Vertrag: `{"patch": {feld: "wert"|null, …}}`, mindestens ein Feld,
+/// nur freigegebene Felder, nur Strings oder null, jeder Wert begrenzt. Fail closed — ein
+/// unbekanntes Feld macht die Anfrage ungueltig, statt still ignoriert zu werden.
+pub fn validate_text_edit_metadata(meta: &Value) -> Result<(), &'static str> {
+    // Das Ziel steht in der Metadata, NICHT in `entity_id`. Grund: `entity_id` traegt beim Anlegen
+    // die Produkt-Id, und ein partieller UNIQUE-Index laesst pro Produkt nur EINEN aktiven Job zu —
+    // ein fertiger (`ready`) Create-Job wuerde also jeden spaeteren Edit blockieren. Ein Edit bekommt
+    // deshalb eine eigene Job-Identitaet und nennt sein Ziel ausdruecklich.
+    let target = meta.get("productId").and_then(|v| v.as_str()).unwrap_or("");
+    if target.is_empty() || target.chars().count() > 128 { return Err(ERR_EDIT_PATCH_INVALID); }
+    let patch = meta.get("patch").and_then(|p| p.as_object()).ok_or(ERR_EDIT_PATCH_INVALID)?;
+    if patch.is_empty() { return Err(ERR_EDIT_PATCH_INVALID); }
+    for (k, v) in patch {
+        if !MOBILE_TEXT_EDIT_FIELDS.contains(&k.as_str()) { return Err(ERR_EDIT_PATCH_INVALID); }
+        match v {
+            Value::Null => {}
+            Value::String(s) if s.chars().count() <= MAX_EDIT_FIELD_LEN => {}
+            _ => return Err(ERR_EDIT_PATCH_INVALID),
+        }
+    }
+    Ok(())
+}
+
+/// MOBILE-EDIT-S2 — dieselbe Bildpruefung fuer beide Wege, mit EINEM Unterschied: ein Text-Edit
+/// kommt ohne neue Bilder. Ein Create ohne Bild bleibt abgelehnt. Anzahl, Groesse und
+/// Dekodierbarkeit jedes einzelnen Bildes gelten unveraendert, damit ein Edit nie einen
+/// schwaecheren Vertrag bekommt als ein Create.
+fn validate_batch_for(images: &[RawUploadImage], allow_empty: bool) -> Result<Vec<ValidatedImage>, UploadError> {
+    if images.is_empty() && !allow_empty { return Err(reject(ERR_NO_IMAGES)); }
     if images.len() > MAX_UPLOAD_IMAGES { return Err(reject(ERR_TOO_MANY_IMAGES)); }
     let mut total = 0usize;
     let mut out = Vec::with_capacity(images.len());
@@ -365,12 +405,33 @@ fn verify_and_load_manifest(conn: &Connection, staging_root: &Path, t: &TrustedU
     ).map_err(|_| ERR_MANIFEST_INVALID)?.filter_map(|r| r.ok()).collect();
 
     // 1. manifest shape
-    if rows.is_empty() { return Err(ERR_MANIFEST_INVALID); }
+    //
+    // MOBILE-EDIT-S2: ein Text-Edit-Job traegt bewusst KEIN Bild — fuer ihn ist die leere Bildliste
+    // die richtige Form, und alles andere waere der Fehler. Die Pruefung wird dadurch nicht
+    // schwaecher: die Job-Art steht in der Metadata, die Metadata steckt im `payload_hash`, und
+    // Schicht 2 unten prueft genau diesen Hash gegen den gespeicherten Stand. Ein Create bleibt
+    // ohne Bild abgelehnt.
+    if rows.is_empty() {
+        let meta_json: String = conn.query_row(
+            "SELECT metadata_json FROM mobile_upload_inbox
+              WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4",
+            params![t.tenant_id, t.branch_id, t.authenticated_user_id, event],
+            |r| r.get(0),
+        ).map_err(|_| ERR_MANIFEST_INVALID)?;
+        let is_text_edit = serde_json::from_str::<Value>(&meta_json)
+            .ok()
+            .and_then(|m| m.get("kind").and_then(|v| v.as_str()).map(str::to_string))
+            .as_deref() == Some("text_edit");
+        if !is_text_edit { return Err(ERR_MANIFEST_INVALID); }
+    }
     for (i, (slot, ..)) in rows.iter().enumerate() {
         if *slot != i as i64 { return Err(ERR_MANIFEST_INVALID); } // gap / duplicate / non-contiguous slot
     }
     let primaries: Vec<i64> = rows.iter().filter(|r| r.1 == 1).map(|r| r.0).collect();
-    if primaries != vec![0] { return Err(ERR_MANIFEST_INVALID); } // exactly one primary, only at slot 0
+    // Genau ein primary bei Slot 0 — und bei einer (nur fuer Text-Edits zugelassenen) leeren Liste
+    // gibt es folgerichtig gar keins.
+    if !rows.is_empty() && primaries != vec![0] { return Err(ERR_MANIFEST_INVALID); }
+    if rows.is_empty() && !primaries.is_empty() { return Err(ERR_MANIFEST_INVALID); }
     let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for (_, _, _, _, _, _, hash, key) in &rows {
         if let Some(prev) = seen.insert(key, hash) { if prev != hash { return Err(ERR_MANIFEST_INVALID); } }
@@ -541,9 +602,20 @@ pub fn accept_upload(
     }
     if sub.upload_event_id.is_empty() { return Err(reject(ERR_NO_EVENT_ID)); }
     if !MOBILE_UPLOAD_SUPPORTED_PROTOCOLS.contains(&sub.protocol_version) { return Err(reject(ERR_UNSUPPORTED_PROTOCOL)); }
+    // `collection` = neuer Artikel, `edit` = Textfelder eines bestehenden Artikels. repair und
+    // purchase_inbox laufen weiterhin nicht ueber diesen Weg. Beide Modi teilen sich Staging,
+    // Idempotenz, Ziel-Konflikt-Pruefung und den Drain — es gibt keinen zweiten Transport.
     if sub.mode != "collection" { return Err(reject(ERR_UNSUPPORTED_MODE)); } // repair/purchase_inbox
+    // Der Edit-Marker sitzt in der Metadata, nicht in `mode`. Grund: die Inbox-Tabelle laesst per
+    // CHECK nur `mode='collection'` zu, und diese Bedingung zu aendern hiesse die Tabelle neu zu
+    // bauen — genau das, was die Migrationsdisziplin hier nicht erlaubt. Die Metadata geht in den
+    // `payload_hash` ein, der Marker ist also ebenso bindend wie eine eigene Spalte, und er wird
+    // hier autoritativ nachgeprueft (die Route prueft ihn schon vorher, verlaesst sich aber nicht).
+    let meta: Value = serde_json::from_str(&sub.metadata_json).unwrap_or(Value::Null);
+    let is_edit = meta.get("kind").and_then(|v| v.as_str()) == Some("text_edit");
+    if is_edit { validate_text_edit_metadata(&meta).map_err(reject)?; }
 
-    let validated = validate_batch(&sub.images)?;
+    let validated = validate_batch_for(&sub.images, is_edit)?;
     let ph = payload_hash(trusted, sub, &validated)?;
 
     // idempotency by (tenant, branch, user, uploadEventId) — with stored-job integrity.
@@ -552,11 +624,27 @@ pub fn accept_upload(
     }
     // Target-entity uniqueness (create-only): a DIFFERENT event id may not target an entity id
     // already held by an active job (fast pre-check; the partial UNIQUE index is the race backstop).
-    let target_held: Option<String> = conn.query_row(
+    //
+    // MOBILE-EDIT-S2: fuer einen Edit gilt das genau anders herum. Er zielt naturgemaess auf ein
+    // Produkt, das es schon gibt — und dessen abgeschlossener (`ready`) Create-Job steht noch in der
+    // Inbox. Wuerde der hier als Konflikt zaehlen, koennte ein Artikel nach dem Anlegen NIE wieder
+    // bearbeitet werden. Was auch fuer einen Edit ein echter Konflikt bleibt: ein Job zum selben
+    // Artikel, der GERADE laeuft (`accepted`/`processing`) — zwei gleichzeitige Mutationen an einem
+    // Datensatz werden weiterhin serialisiert.
+    let active_states: &[&str] = if is_edit { &["accepted", "processing"] } else { &["accepted", "processing", "ready"] };
+    let placeholders = active_states.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
         "SELECT upload_event_id FROM mobile_upload_inbox
           WHERE tenant_id=?1 AND branch_id=?2 AND entity_id=?3 AND upload_event_id<>?4
-            AND state IN ('accepted','processing','ready') LIMIT 1",
-        params![trusted.tenant_id, trusted.branch_id, sub.entity_id, sub.upload_event_id],
+            AND state IN ({placeholders}) LIMIT 1"
+    );
+    let mut args: Vec<&dyn rusqlite::ToSql> = vec![
+        &trusted.tenant_id, &trusted.branch_id, &sub.entity_id, &sub.upload_event_id,
+    ];
+    for s in active_states { args.push(s); }
+    let target_held: Option<String> = conn.query_row(
+        &sql,
+        rusqlite::params_from_iter(args),
         |r| r.get(0),
     ).optional().map_err(map_db)?;
     if target_held.is_some() {
