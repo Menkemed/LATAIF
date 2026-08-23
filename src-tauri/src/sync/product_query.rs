@@ -241,6 +241,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
 const SCOPE_JOIN: &str = "FROM products p JOIN branches b ON b.id = p.branch_id AND b.tenant_id = ?1 \
      WHERE p.branch_id = ?2";
 
+/// v0.8.48 — darf die Bedienoberflaeche fuer diesen Artikel Preisfelder anbieten?
+///
+/// Das ist eine ANZEIGE-Auskunft, keine Freigabe: verbindlich entscheidet der Drain, bevor er
+/// schreibt. Beide stellen dieselben drei Fragen ueber echte Relationen — gibt es eine Einkaufszeile,
+/// gibt es ein Lot, ist es Eigenbestand. Nur wenn es fuer den Artikel keinerlei Beschaffungs- oder
+/// Kostenbeleg gibt, ist `products.purchase_price` ueberhaupt die Grundlage, und eine Korrektur
+/// schreibt nichts um. Fehlschlaege werden zu `false` — ein Feld nicht anzubieten ist immer sicher.
+fn price_editable(conn: &Connection, product_id: &str) -> bool {
+    let count = |sql: &str| -> i64 {
+        conn.query_row(sql, rusqlite::params![product_id], |r| r.get::<_, i64>(0)).unwrap_or(-1)
+    };
+    let lines = count("SELECT COUNT(*) FROM purchase_lines WHERE product_id = ?1");
+    let lots = count("SELECT COUNT(*) FROM stock_lots WHERE product_id = ?1");
+    let source: String = conn
+        .query_row("SELECT COALESCE(source_type,'') FROM products WHERE id = ?1", rusqlite::params![product_id], |r| r.get(0))
+        .unwrap_or_default();
+    lines == 0 && lots == 0 && source == "OWN"
+}
 pub fn by_sku(
     db_path: &std::path::Path,
     tenant_id: &str,

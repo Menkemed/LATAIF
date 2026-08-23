@@ -21,6 +21,7 @@ import { buildEditPlanEnvelope, type EditDesiredSlot } from './product-media-edi
 import { galleryBaselineFingerprint } from './gallery-baseline.ts';
 import type { EditBaselineLink, EditPlanEnvelope, ProductEditIntent } from './coordinator.ts';
 import type { PrepareResult } from './gateway.ts';
+import { parseMobileProductPatch } from './mobile-product-patch.ts';
 
 /** Hoechstzahl Bilder in der fertigen Galerie — derselbe Wert wie `MAX_UPLOAD_IMAGES` in Rust. */
 export const MOBILE_GALLERY_MAX = 8;
@@ -42,6 +43,9 @@ export interface MobileGalleryPlan {
   order: MobileGalleryOrderEntry[];
   /** Ausdruecklich zu entfernende bestehende Verknuepfungen (stabile `link_id`). */
   remove: string[];
+  /** v0.8.48 §17 — Feldaenderungen aus DEMSELBEN Save. Sie werden in derselben Transaktion
+   *  angewandt wie der Bildwechsel, damit kein halber Zustand entstehen kann. */
+  patch?: Record<string, unknown>;
 }
 
 const isKeep = (e: MobileGalleryOrderEntry): e is { keep: string } => typeof (e as { keep?: unknown }).keep === 'string';
@@ -88,7 +92,16 @@ export function parseMobileGalleryPlan(metadataJson: string): { ok: true; plan: 
     remove.push(r);
   }
   if (order.length === 0 && remove.length === 0) return { ok: false };
-  return { ok: true, plan: { productId, galleryBaseline, order, remove } };
+
+  // Der Feld-Patch ist optional. Ist er da, muss er die gleiche Form-Pruefung bestehen wie ein
+  // reiner Feld-Edit — geprueft wird er inhaltlich spaeter, gegen den aktuellen Stand.
+  let patch: Record<string, unknown> | undefined;
+  if (m.patch !== undefined) {
+    const parsed = parseMobileProductPatch(m.patch);
+    if (!parsed.ok) return { ok: false };
+    patch = parsed.patch as Record<string, unknown>;
+  }
+  return { ok: true, plan: { productId, galleryBaseline, order, remove, ...(patch ? { patch } : {}) } };
 }
 
 /** Ein Fehler, der NUR fuer diese Sicht gilt: eine Wiederholung mit demselben Plan kann nie

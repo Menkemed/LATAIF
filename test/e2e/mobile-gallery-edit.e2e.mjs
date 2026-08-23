@@ -401,6 +401,82 @@ async function main() {
   ok(afterBoth.filter((l) => l.is_primary === 1).length === 1, 'ADD+REMOVE exactly one primary');
 
   // ════════════════════════════════════════════════════════════════════════
+  // v0.8.48 §19 — FRISCH LESEN nach dem eigenen Save (der Live-Fehler)
+  //
+  // Der Fehler aus dem Produktionseinsatz: nach einem Save fuehrt "Back to search" zur
+  // zwischengespeicherten Trefferliste, und wer denselben Treffer wieder oeffnet, sah den Stand VOR
+  // seiner Aenderung — samt veraltetem `gallery_baseline`. Der naechste vollkommen legitime Save
+  // wurde dadurch als Konflikt abgewiesen. Hier wird beides geprueft: die Liste bleibt erhalten,
+  // der Artikel wird neu gelesen, und der Folge-Save geht durch.
+  // ════════════════════════════════════════════════════════════════════════
+  phase.name = "fresh-read";
+  {
+    const beforeFresh = activeLinks(pid.id);
+    // Zurueck zur Liste — sie darf ausdruecklich aus dem Cache kommen (keine zweite Abfrage).
+    await edge.ev(`const b=document.querySelector("#pdBack"); if(b) b.click(); return 1;`);
+    await sleep(600);
+    ok(await visE(edge, "#searchPane"), "FRESH the cached result list is back without a new search");
+    const hitsShown = await edge.ev(`return document.querySelectorAll("#searchResults .card, #searchResults > div").length;`);
+    ok(hitsShown >= 1, `FRESH …and still shows its hits (${hitsShown})`);
+
+    // Denselben Treffer wieder oeffnen.
+    await edge.ev(`const h=document.querySelector("#searchResults .card, #searchResults > div"); if(h) h.click(); return 1;`);
+    await waitVisE(edge, "#scanResult", 15000);
+    await waitE(edge, "#pdEditBtn", 10000);
+    ok(!(await existsE(edge, "#pdRetryRead")), "FRESH the item was read fresh, not served from the cached row");
+    await clickE(edge, "#pdEditBtn");
+    await waitVisE(edge, "#pdEditForm", 10000);
+    ok(await waitStrip(edge, beforeFresh.length, 15000),
+      `FRESH the editor shows the CURRENT number of photos (${await stripCount(edge)} vs ${beforeFresh.length})`);
+    const shownLinks = (await thumbLinks(edge)).filter(Boolean).sort();
+    ok(same(shownLinks, beforeFresh.map((l) => l.link_id).sort()),
+      "FRESH …and exactly the current photo identities, not the ones from before the last save");
+
+    // Der eigentliche Beweis: ein Folge-Save auf DIESEM Bildschirm muss durchgehen. Vorher wurde er
+    // wegen des eigenen vorherigen Saves als BASELINE_CHANGED abgewiesen.
+    const quarantinedBefore = inboxRows().filter((r) => r.state === "quarantined").length;
+    const promote = beforeFresh.length > 1 ? await indexOfLink(edge, beforeFresh[1].link_id) : -1;
+    ok(promote > 0, `FRESH a second photo is available to promote (index ${promote})`);
+    await tapThumb(edge, promote);
+    await saveEdit(edge);
+    ok(await waitReady(app, ++ready, 120000), `FRESH the follow-up save drained (inbox ${JSON.stringify(inboxRows())})`);
+    ok(inboxRows().filter((r) => r.state === "quarantined").length === quarantinedBefore,
+      "FRESH …without a single new conflict — the old stale-baseline bug is gone");
+    ok(activeLinks(pid.id)[0].link_id === beforeFresh[1].link_id,
+      "FRESH …and it really applied the new cover");
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // v0.8.48 §20 — kann NICHT frisch gelesen werden, wird gar nicht bearbeitet
+  // ════════════════════════════════════════════════════════════════════════
+  phase.name = "stale-closed";
+  {
+    const linksBefore = linkRows(pid.id);
+    const inboxBefore = inboxRows().length;
+    const uploadsBefore = uploads.length;
+    // Die Leseroute wird auf Browserebene blockiert — ein echter Fehlschlag, keine Attrappe.
+    await edge.send("Network.setBlockedURLs", { urls: ["*/api/products/by-id/*"] });
+    await edge.ev(`const b=document.querySelector("#pdBack"); if(b) b.click(); return 1;`);
+    await sleep(600);
+    await edge.ev(`const h=document.querySelector("#searchResults .card, #searchResults > div"); if(h) h.click(); return 1;`);
+    await waitVisE(edge, "#scanResult", 15000);
+    await waitE(edge, "#pdRetryRead", 15000);
+    ok(await existsE(edge, "#pdRetryRead"), "STALE-CLOSED the refresh failure is shown with a Retry");
+    ok(!(await existsE(edge, "#pdEditBtn")), "STALE-CLOSED and there is NO way into the edit form");
+    ok(!(await existsE(edge, "#pdEditForm")), "STALE-CLOSED …the form is not in the page at all");
+    await sleep(1500);
+    ok(uploads.length === uploadsBefore, "STALE-CLOSED nothing was sent");
+    ok(inboxRows().length === inboxBefore, "STALE-CLOSED no upload job was created");
+    ok(same(linkRows(pid.id), linksBefore), "STALE-CLOSED not one media_links row changed");
+
+    // Retry, sobald die Route wieder erreichbar ist → der Edit ist wieder da.
+    await edge.send("Network.setBlockedURLs", { urls: [] });
+    await clickE(edge, "#pdRetryRead");
+    await waitE(edge, "#pdEditBtn", 20000);
+    ok(await existsE(edge, "#pdEditBtn"), "STALE-CLOSED Retry restores editing once the item can be read again");
+    ok(!(await existsE(edge, "#pdRetryRead")), "STALE-CLOSED …and the failure notice is gone");
+  }
+  // ════════════════════════════════════════════════════════════════════════
   // §22.15 GALLERY READ FAILURE → fail closed (direkt am Vertrag)
   // ════════════════════════════════════════════════════════════════════════
   phase.name = 'contract';

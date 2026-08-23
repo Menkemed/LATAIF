@@ -951,3 +951,95 @@ fn an_unknown_job_kind_is_refused_on_its_own_terms() {
     assert_eq!(err.code(), ERR_UNKNOWN_JOB_KIND, "not UNKNOWN_FIELD, not NO_IMAGES");
     assert_eq!(inbox_count(&c), 0, "and nothing was stored");
 }
+
+// ── v0.8.48 — der erweiterte Feld-Patch an der Grenze ───────────────────────
+//
+// Die Form wird hier geprueft, bevor irgendetwas gespeichert wird. Was fachlich erlaubt ist —
+// welches Attribut die Kategorie kennt, ob dieser Artikel seine Preise noch aendern darf — kann der
+// Server nicht wissen; das prueft der Desktop gegen die echten Daten. Beide Ebenen sind noetig.
+
+fn patch_meta(patch: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "kind": "text_edit", "productId": "prod-1", "patch": patch })
+}
+
+#[test]
+fn the_wider_patch_accepts_every_field_the_edit_screen_offers() {
+    let m = patch_meta(serde_json::json!({
+        "name": "Formula 1", "brand": "TAG Heuer", "condition": "Pre-Owned",
+        "storageLocation": "Safe 2", "notes": "scratch on the glass",
+        "purchasePrice": 110.5, "plannedSalePrice": 165.0, "minSalePrice": 150.0,
+        "scopeOfDelivery": ["Box", "Papers"],
+        "attributes": { "serial_number": "WPM0325", "case_diameter_mm": 41, "year": 2019 }
+    }));
+    assert!(validate_text_edit_metadata(&m).is_ok());
+}
+
+#[test]
+fn a_price_may_be_cleared_but_never_be_nonsense() {
+    assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "purchasePrice": null }))).is_ok());
+    assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "purchasePrice": 0 }))).is_ok());
+    for bad in [
+        serde_json::json!({ "purchasePrice": -1 }),
+        serde_json::json!({ "purchasePrice": "110" }),
+        serde_json::json!({ "plannedSalePrice": "" }),
+        serde_json::json!({ "minSalePrice": true }),
+    ] {
+        assert_eq!(
+            validate_text_edit_metadata(&patch_meta(bad.clone())).unwrap_err(),
+            ERR_EDIT_PATCH_INVALID,
+            "must refuse {bad}"
+        );
+    }
+}
+
+#[test]
+fn the_immutable_fields_are_refused_at_the_boundary() {
+    for field in ["sku", "categoryId", "quantity", "images", "stockStatus"] {
+        let m = patch_meta(serde_json::json!({ field: "whatever" }));
+        assert_eq!(
+            validate_text_edit_metadata(&m).unwrap_err(),
+            ERR_EDIT_PATCH_INVALID,
+            "must refuse a patch touching {field}"
+        );
+    }
+}
+
+#[test]
+fn attributes_and_scope_must_have_a_usable_shape() {
+    assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "attributes": { "dial": "Black" } }))).is_ok());
+    assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "attributes": { "year": 2019 } }))).is_ok());
+    assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "attributes": { "dial": null } }))).is_ok());
+    for bad in [
+        serde_json::json!({ "attributes": {} }),
+        serde_json::json!({ "attributes": [] }),
+        serde_json::json!({ "attributes": { "dial": { "nested": 1 } } }),
+        serde_json::json!({ "scopeOfDelivery": "Box" }),
+        serde_json::json!({ "scopeOfDelivery": [""] }),
+        serde_json::json!({ "scopeOfDelivery": [1] }),
+    ] {
+        assert_eq!(
+            validate_text_edit_metadata(&patch_meta(bad.clone())).unwrap_err(),
+            ERR_EDIT_PATCH_INVALID,
+            "must refuse {bad}"
+        );
+    }
+}
+
+#[test]
+fn a_gallery_edit_may_carry_the_same_patch_in_one_save() {
+    let base = "a".repeat(64);
+    let m = serde_json::json!({
+        "kind": "gallery_edit", "productId": "prod-1", "galleryBaseline": base,
+        "order": [{"keep": "lnk-1"}], "remove": [],
+        "patch": { "notes": "changed together with the photos", "plannedSalePrice": 165.0 }
+    });
+    assert!(validate_gallery_edit_metadata(&m, 0).is_ok());
+
+    // Ein kaputter Patch macht auch den Galerie-Job ungueltig — nicht "Bilder ja, Felder nein".
+    let bad = serde_json::json!({
+        "kind": "gallery_edit", "productId": "prod-1", "galleryBaseline": "b".repeat(64),
+        "order": [{"keep": "lnk-1"}], "remove": [],
+        "patch": { "sku": "X-1" }
+    });
+    assert_eq!(validate_gallery_edit_metadata(&bad, 0).unwrap_err(), ERR_GALLERY_PLAN_INVALID);
+}

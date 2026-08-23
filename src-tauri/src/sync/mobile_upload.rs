@@ -197,18 +197,66 @@ fn validate_batch(images: &[RawUploadImage]) -> Result<Vec<ValidatedImage>, Uplo
     validate_batch_for(images, false)
 }
 
-/// Die Felder, die ein mobiler Text-Edit setzen darf — bewusst eng und bewusst OHNE `sku`, Preise,
-/// Kategorie, Attribute oder irgendetwas Bildbezogenes. Spiegelt `MOBILE_TEXT_EDIT_FIELDS` in
-/// `src/core/media/mobile-upload-drain.ts`; beide Seiten pruefen, damit weder Server noch Desktop
+/// Die einfachen Textfelder, die ein mobiler Edit setzen darf. Spiegelt `MOBILE_TEXT_EDIT_FIELDS`
+/// in `src/core/media/mobile-upload-drain.ts`; beide Seiten pruefen, damit weder Server noch Desktop
 /// sich auf den anderen verlaesst.
 pub const MOBILE_TEXT_EDIT_FIELDS: [&str; 5] = ["name", "brand", "condition", "storageLocation", "notes"];
+/// Die drei Preise. Ob sie fuer DIESEN Artikel geaendert werden duerfen, entscheidet nicht die Form,
+/// sondern die Herkunft — das prueft der Drain gegen die echten Beschaffungsrelationen.
+/// Die Namen sind die kanonischen Produktschluessel des Desktops (`plannedSalePrice`, nicht
+/// `salePrice`) — eine zweite Vokabel nur fuers Handy waere genau die Drift, die wir vermeiden.
+pub const MOBILE_PRICE_FIELDS: [&str; 3] = ["purchasePrice", "plannedSalePrice", "minSalePrice"];
 pub const ERR_EDIT_PATCH_INVALID: &str = "MOBILE_EDIT_PATCH_INVALID";
 /// Laengengrenze je Textfeld — dieselbe Groessenordnung wie die Eingabefelder auf der Seite.
 const MAX_EDIT_FIELD_LEN: usize = 500;
+/// Obergrenze fuer einen einzelnen Attributwert und fuer die Zahl der Attribute in einem Patch.
+const MAX_ATTR_VALUE_LEN: usize = 500;
+const MAX_ATTRS_PER_PATCH: usize = 40;
+const MAX_SCOPE_ITEMS: usize = 20;
 
-/// MOBILE-EDIT-S2 — der Patch-Vertrag: `{"patch": {feld: "wert"|null, …}}`, mindestens ein Feld,
-/// nur freigegebene Felder, nur Strings oder null, jeder Wert begrenzt. Fail closed — ein
-/// unbekanntes Feld macht die Anfrage ungueltig, statt still ignoriert zu werden.
+/// Ist der Wert ein zulaessiger Preis? Zahl >= 0 und endlich, oder `null` ("nicht gesetzt").
+/// `""` wird NICHT zu 0 gemacht — die Domaene unterscheidet "kein Preis" von "Preis 0".
+fn valid_price(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Number(n) => n.as_f64().map(|f| f.is_finite() && f >= 0.0).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Ein einzelner Attributwert: Text, Zahl, Bool oder Stringliste — genau die Typen, die das
+/// Kategorie-Schema kennt. Die fachliche Pruefung gegen Enum/`dependsOn` macht der Drain gegen die
+/// SSOT; hier wird nur die Form begrenzt, bevor irgendetwas gespeichert wird.
+fn valid_attr_value(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::String(s) => s.chars().count() <= MAX_ATTR_VALUE_LEN,
+        Value::Number(n) => n.as_f64().map(f64::is_finite).unwrap_or(false),
+        Value::Bool(_) => true,
+        Value::Array(items) => items.len() <= MAX_SCOPE_ITEMS && items.iter().all(|i| {
+            matches!(i, Value::String(s) if s.chars().count() <= MAX_ATTR_VALUE_LEN)
+        }),
+        _ => false,
+    }
+}
+
+/// MOBILE-EDIT-S2/v0.8.48 — der Patch-Vertrag.
+///
+/// ```json
+/// { "patch": { "name": "…"|null, …,
+///              "purchasePrice": 12.5|null,
+///              "scopeOfDelivery": ["Box","Papers"],
+///              "attributes": { "serial_number": "…", … } } }
+/// ```
+///
+/// Mindestens ein Feld, nur freigegebene Felder, jeder Wert typgerecht und begrenzt. Fail closed —
+/// ein unbekanntes Feld macht die Anfrage ungueltig, statt still ignoriert zu werden. `sku`,
+/// `categoryId` und `quantity` stehen bewusst nirgends: sie sind unveraenderlich, und ein Request,
+/// der sie mitschickt, wird genau deshalb hier abgewiesen.
+///
+/// `attributes` traegt NUR die geaenderten Schluessel. Zusammengefuehrt wird gegen den aktuellen
+/// Stand im Drain — ein Ersetzen des ganzen JSON waere der Weg, auf dem eine Korrektur an einer
+/// Seriennummer alle anderen Attribute mitnehmen wuerde.
 pub fn validate_text_edit_metadata(meta: &Value) -> Result<(), &'static str> {
     // Das Ziel steht in der Metadata, NICHT in `entity_id`. Grund: `entity_id` traegt beim Anlegen
     // die Produkt-Id, und ein partieller UNIQUE-Index laesst pro Produkt nur EINEN aktiven Job zu —
@@ -217,12 +265,41 @@ pub fn validate_text_edit_metadata(meta: &Value) -> Result<(), &'static str> {
     let target = meta.get("productId").and_then(|v| v.as_str()).unwrap_or("");
     if target.is_empty() || target.chars().count() > 128 { return Err(ERR_EDIT_PATCH_INVALID); }
     let patch = meta.get("patch").and_then(|p| p.as_object()).ok_or(ERR_EDIT_PATCH_INVALID)?;
+    validate_product_patch(patch)
+}
+
+/// Der Patch selbst — getrennt, weil ihn beide Job-Arten tragen koennen: ein reiner Feld-Edit und
+/// ein Galerie-Edit, der im selben Save auch Felder aendert.
+pub fn validate_product_patch(patch: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
     if patch.is_empty() { return Err(ERR_EDIT_PATCH_INVALID); }
     for (k, v) in patch {
-        if !MOBILE_TEXT_EDIT_FIELDS.contains(&k.as_str()) { return Err(ERR_EDIT_PATCH_INVALID); }
-        match v {
-            Value::Null => {}
-            Value::String(s) if s.chars().count() <= MAX_EDIT_FIELD_LEN => {}
+        match k.as_str() {
+            "scopeOfDelivery" => {
+                let items = v.as_array().ok_or(ERR_EDIT_PATCH_INVALID)?;
+                if items.len() > MAX_SCOPE_ITEMS { return Err(ERR_EDIT_PATCH_INVALID); }
+                for i in items {
+                    match i {
+                        Value::String(s) if !s.is_empty() && s.chars().count() <= MAX_ATTR_VALUE_LEN => {}
+                        _ => return Err(ERR_EDIT_PATCH_INVALID),
+                    }
+                }
+            }
+            "attributes" => {
+                let attrs = v.as_object().ok_or(ERR_EDIT_PATCH_INVALID)?;
+                if attrs.is_empty() || attrs.len() > MAX_ATTRS_PER_PATCH { return Err(ERR_EDIT_PATCH_INVALID); }
+                for (ak, av) in attrs {
+                    if ak.is_empty() || ak.chars().count() > 64 { return Err(ERR_EDIT_PATCH_INVALID); }
+                    if !valid_attr_value(av) { return Err(ERR_EDIT_PATCH_INVALID); }
+                }
+            }
+            _ if MOBILE_PRICE_FIELDS.contains(&k.as_str()) => {
+                if !valid_price(v) { return Err(ERR_EDIT_PATCH_INVALID); }
+            }
+            _ if MOBILE_TEXT_EDIT_FIELDS.contains(&k.as_str()) => match v {
+                Value::Null => {}
+                Value::String(s) if s.chars().count() <= MAX_EDIT_FIELD_LEN => {}
+                _ => return Err(ERR_EDIT_PATCH_INVALID),
+            },
             _ => return Err(ERR_EDIT_PATCH_INVALID),
         }
     }
@@ -332,6 +409,14 @@ pub fn validate_gallery_edit_metadata(meta: &Value, image_count: usize) -> Resul
 
     // Ein Plan, der weder etwas anordnet noch etwas entfernt, hat nichts zu tun.
     if order.is_empty() && removes.is_empty() { return Err(ERR_GALLERY_PLAN_INVALID); }
+
+    // v0.8.48 §17 — ein Save darf Felder UND Bilder zugleich aendern. Der Feld-Patch reist dann im
+    // selben Job mit und wird spaeter in derselben Transaktion angewandt wie der Bildwechsel; ein
+    // "Preis gespeichert, Bild verloren" kann so gar nicht entstehen. Der Patch ist optional.
+    if let Some(p) = meta.get("patch") {
+        let obj = p.as_object().ok_or(ERR_GALLERY_PLAN_INVALID)?;
+        validate_product_patch(obj).map_err(|_| ERR_GALLERY_PLAN_INVALID)?;
+    }
     Ok(())
 }
 

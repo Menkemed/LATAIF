@@ -694,7 +694,20 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // Galerie. Der Save schickt ausschliesslich die Felder, die der Benutzer wirklich geaendert
     // hat; nicht angefasste Felder tauchen im Payload gar nicht erst auf und koennen dadurch auch
     // nicht mit leer/null ueberschrieben werden.
-    if (p.id) {
+    // v0.8.48 §5/§6 — bearbeitet wird nur, was verlaesslich frisch gelesen wurde. Kam der Artikel
+    // aus dem Cache (Refresh gescheitert) oder liess sich seine Galerie nicht lesen, koennten auch
+    // Name, Attribute, Lieferumfang und Preise veraltet sein — dann gibt es hier keinen Edit,
+    // sondern eine Meldung und einen Knopf zum erneuten Laden.
+    const editable = p.id && currentReadState === 'fresh' && p.gallery_ok === true;
+    if (p.id && !editable) {
+      html += ''
+        + '<div style="margin-top:18px; padding-top:14px; border-top:1px solid #2A2A32;">'
+        + '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px;">Edit</div>'
+        + '<div style="color:#AA6E6E; font-size:13px; line-height:1.5; margin-bottom:10px;">Could not refresh this item. Editing is disabled so nothing is saved against an outdated view.</div>'
+        + '<button id="pdRetryRead" class="ghost" style="width:100%;">Retry</button>'
+        + '</div>';
+    }
+    if (editable) {
       html += ''
         + '<div style="margin-top:18px; padding-top:14px; border-top:1px solid #2A2A32;">'
         + '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px;">Edit</div>'
@@ -702,9 +715,20 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         + '<div id="pdEditForm" class="hidden" style="margin-top:12px;">'
         +   '<div class="row"><label>Model / Name</label><input id="peName" type="text" maxlength="200" /></div>'
         +   '<div class="row"><label>Brand</label><input id="peBrand" type="text" maxlength="120" /></div>'
-        +   '<div class="row"><label>Condition</label><input id="peCondition" type="text" maxlength="60" /></div>'
+        +   '<div class="row"><label>Condition</label><select id="peCondition"></select></div>'
         +   '<div class="row"><label>Location</label><input id="peLocation" type="text" maxlength="120" /></div>'
         +   '<div class="row"><label>Notes</label><input id="peNotes" type="text" maxlength="500" /></div>'
+        // v0.8.48 — die Kategorieattribute und der Lieferumfang kommen aus DERSELBEN Definition wie
+        // beim Anlegen; hier steht nur die Huelle, gefuellt wird sie zur Laufzeit.
+        +   '<div id="peAttrs"></div>'
+        +   '<div class="row hidden" id="peScopeRow"><label>Included</label><div id="peScope" class="chips"></div></div>'
+        // Die Preise erscheinen nur, wenn der Artikel sie ueberhaupt noch aendern darf. Verbindlich
+        // entscheidet das der Desktop beim Anwenden — das hier ist die Anzeige dazu.
+        +   '<div id="pePrices" class="hidden">'
+        +     '<div class="row"><label>Purchase price (BHD)</label><input id="pePurchasePrice" type="number" inputmode="decimal" step="any" min="0" /></div>'
+        +     '<div class="row"><label>Sale price (BHD)</label><input id="peSalePrice" type="number" inputmode="decimal" step="any" min="0" /></div>'
+        +     '<div class="row"><label>Minimum sale price (BHD)</label><input id="peMinSalePrice" type="number" inputmode="decimal" step="any" min="0" /></div>'
+        +   '</div>'
         // MOBILE-EDIT-S3 — die Galerie desselben Artikels. Der Streifen IST der Endzustand: die
         // Reihenfolge, die hier steht, wird gespeichert, und das erste Bild ist das Titelbild.
         // Bestehende Bilder verschwinden NIE dadurch, dass sie hier fehlen — nur ein ausdrueckliches
@@ -748,14 +772,19 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // Both callers land here, so a searched product cannot drift into a different, thinner rendering
   // than a scanned one. Everything below only ADDS behaviour to the markup renderProduct produced.
   let currentProduct = null;
+  let currentReadState = 'fresh';
   // POST-V0838 §B — where the open came from. A search hit remembers enough to put the operator
   // back exactly where they were; a QR scan deliberately remembers nothing, so scanning never
   // fabricates a search history to go "back" to.
   let searchReturn = null;
   let lastHits = [];
-  function showProduct(p, origin) {
+  // `readState`: 'fresh' = eben vom Server gelesen, 'stale' = nur der zwischengespeicherte Treffer.
+  // Nur ein frisch gelesener Artikel darf bearbeitet werden — sonst waeren nicht nur die Bilder,
+  // sondern auch Name, Attribute, Lieferumfang und Preise moeglicherweise veraltet.
+  function showProduct(p, origin, readState) {
     releaseMedia();
     currentProduct = p;
+    currentReadState = readState || 'fresh';
     const back = origin === 'search'
       ? '<button id="pdBack" class="ghost" style="margin-bottom:12px; padding:8px 12px;">&larr; Back to search</button>'
       : '';
@@ -772,17 +801,45 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     for (let i = 0; i < galEls.length && i < gal.length; i++) {
       paintMedia(galEls[i].querySelector('img'), gal[i].thumb_key || gal[i].image_key);
     }
-    if (p.id) wireProductEdit(p);
+    if ($('pdRetryRead')) $('pdRetryRead').onclick = async () => {
+      const btn = $('pdRetryRead'); btn.disabled = true; btn.textContent = 'Loading…';
+      const fresh = await fetchProductById(p.id);
+      if (fresh) { showProduct(fresh, 'search', 'fresh'); return; }
+      btn.disabled = false; btn.textContent = 'Retry';
+    };
+    if ($('pdEditForm')) wireProductEdit(p);
     if (p.id) wireStockCheck(p.id);
   }
 
   // §B1/§B2 — with hundreds of hits, leaving the list under the detail makes the page unusable.
   // Opening a hit hides the whole search pane, so the detail is the only thing on screen.
-  function openHit(h) {
+  /** Den Artikel FRISCH vom Server holen. `null`, wenn das aus irgendeinem Grund nicht gelingt. */
+  async function fetchProductById(id) {
+    if (!id) return null;
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch('/api/products/by-id/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return (data && data.id) ? data : null;
+    } catch (_) { return null; }
+  }
+
+  // v0.8.48 — ein zwischengespeicherter Suchtreffer ist NICHT der bearbeitbare Zustand.
+  //
+  // Die Trefferliste bleibt beim Zurueckgehen bewusst erhalten (keine zweite Abfrage, keine
+  // Umsortierung, kein Flackern). Sie taugt aber nur zur Navigation: nach einer eigenen Aenderung
+  // traegt sie veraltete Felder, eine veraltete Galerie und vor allem einen veralteten
+  // `gallery_baseline`. Wird sie zur Bearbeitungsgrundlage, speichert der Benutzer gegen eine Sicht,
+  // die es nicht mehr gibt — und der Baseline-Schutz weist seinen eigenen zweiten Save als Konflikt
+  // ab. Deshalb wird beim Oeffnen IMMER frisch gelesen; die Id aus dem Treffer ist alles, was von
+  // ihm uebernommen wird.
+  async function openHit(h) {
     const input = $('searchInput');
     searchReturn = { query: input ? input.value : '', hits: lastHits, scrollY: window.scrollY || 0 };
     hide('searchPane');
-    showProduct(h, 'search');
+    const fresh = await fetchProductById(h && h.id);
+    showProduct(fresh || h, 'search', fresh ? 'fresh' : 'stale');
   }
 
   // §B3 — back restores the query, the SAME results (no second round trip, so no reordering and no
@@ -883,7 +940,75 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // Die Ausgangswerte, gegen die spaeter verglichen wird. Genau das, was der Read-Vertrag geliefert
     // hat — nicht das, was das Formular gerade zufaellig anzeigt.
     const original = { name: p.name, brand: p.brand, condition: p.condition, storage_location: p.storage_location, notes: p.notes };
-    const fill = () => { for (const [id, key] of EDIT_FIELDS) { const el = $(id); if (el) el.value = original[key] == null ? '' : String(original[key]); } };
+
+    // ── v0.8.48 — die uebrigen fachlich erlaubten Felder ────────────────────
+    //
+    // Kategorieattribute, Lieferumfang und die drei Preise kommen aus derselben Definition, aus der
+    // auch das Anlegeformular gebaut wird — es gibt keine zweite Liste fuers Bearbeiten. Die
+    // Element-Ids tragen den Prefix `pea_`/`perow_`, damit sie sich nicht mit dem Anlegeformular
+    // ueberlagern, das gleichzeitig im DOM steht.
+    const cat = catById(p.category_id);
+    const origAttrs = (function () { try { return typeof p.attributes === 'string' ? JSON.parse(p.attributes || '{}') : (p.attributes || {}); } catch (_) { return {}; } })();
+    const origScope = (function () { try { return typeof p.scope_of_delivery === 'string' ? JSON.parse(p.scope_of_delivery || '[]') : (p.scope_of_delivery || []); } catch (_) { return []; } })();
+    const priceEditable = p.price_editable === true;
+    const PRICE_FIELDS = [['pePurchasePrice', 'purchase_price', 'purchasePrice'], ['peSalePrice', 'planned_sale_price', 'plannedSalePrice'], ['peMinSalePrice', 'min_sale_price', 'minSalePrice']];
+    const peScopeState = new Set();
+
+    function buildEditFields() {
+      const cs = $('peCondition');
+      if (cs) {
+        cs.innerHTML = ''; cs.appendChild(el('option', { value: '' }, '— Select —'));
+        for (const o of (cat ? cat.conditionOptions : [])) cs.appendChild(el('option', { value: o }, o));
+        // Ein Altwert, den die Kategorie nicht mehr kennt, wird angeboten statt still verworfen —
+        // sonst wuerde das blosse Oeffnen des Formulars ihn zur Aenderung machen.
+        if (p.condition && (!cat || cat.conditionOptions.indexOf(p.condition) === -1)) cs.appendChild(el('option', { value: p.condition }, p.condition));
+      }
+      const host = $('peAttrs'); if (host) { host.innerHTML = '';
+        if (cat) for (const a2 of cat.attributes) {
+          const row = el('div', { class: 'row', id: 'perow_' + a2.key });
+          const lbl = el('label'); lbl.innerHTML = a2.label + (a2.unit ? ' (' + a2.unit + ')' : '');
+          row.appendChild(lbl); row.appendChild(makeControl(a2, 'pea_')); host.appendChild(row);
+        }
+        if (cat) for (const a2 of cat.attributes) {
+          if (a2.dependsOn) { const dep = $('pea_' + a2.dependsOn.key); if (dep && dep.tagName === 'SELECT') dep.addEventListener('change', () => applyDependencies(cat, 'pea_')); }
+        }
+      }
+      const scopeRow = $('peScopeRow'), scopeHost = $('peScope');
+      if (scopeRow && scopeHost) {
+        scopeHost.innerHTML = '';
+        if (cat && cat.scopeOptions.length) {
+          scopeRow.classList.remove('hidden');
+          for (const o of cat.scopeOptions) {
+            const b = el('button', { type: 'button', class: 'chip' }, o);
+            b.onclick = () => { if (peScopeState.has(o)) { peScopeState.delete(o); b.classList.remove('on'); } else { peScopeState.add(o); b.classList.add('on'); } };
+            scopeHost.appendChild(b);
+          }
+        } else { scopeRow.classList.add('hidden'); }
+      }
+      const pricesBox = $('pePrices');
+      if (pricesBox) pricesBox.classList.toggle('hidden', !priceEditable);
+    }
+
+    /** Alle Felder auf den Ausgangsstand zuruecksetzen — Text, Attribute, Lieferumfang, Preise. */
+    const fill = () => {
+      for (const [id, key] of EDIT_FIELDS) { const e = $(id); if (e) e.value = original[key] == null ? '' : String(original[key]); }
+      if (cat) for (const a2 of cat.attributes) {
+        const e = $('pea_' + a2.key); if (!e) continue;
+        const v = origAttrs[a2.key];
+        if (a2.type === 'multiselect') { for (const c of e.children) c.classList.toggle('on', Array.isArray(v) && v.indexOf(c.textContent) !== -1); }
+        else if (a2.type === 'boolean') { for (const c of e.children) c.classList.toggle('on', v !== undefined && String(v) === c.dataset.val); }
+        else e.value = (v === undefined || v === null) ? '' : String(v);
+      }
+      peScopeState.clear();
+      const scopeHost = $('peScope');
+      if (scopeHost) for (const c of scopeHost.children) {
+        const on = Array.isArray(origScope) && origScope.indexOf(c.textContent) !== -1;
+        c.classList.toggle('on', on); if (on) peScopeState.add(c.textContent);
+      }
+      for (const [id, col] of PRICE_FIELDS) { const e = $(id); if (e) e.value = (p[col] === null || p[col] === undefined) ? '' : String(p[col]); }
+      if (cat) applyDependencies(cat, 'pea_');
+    };
+    buildEditFields();
     fill();
     // Immer OEFFNEN, nie umschalten: nach einem Speichern bleibt das Formular mit seiner Meldung
     // stehen, und ein zweiter Tipp auf "Edit item" soll dann nicht ueberraschend zuklappen.
@@ -998,13 +1123,56 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     let saving = false;
     $('peSave').onclick = async () => {
       if (saving) return;                     // Doppeltipp: genau eine Mutation
+      // Der Patch traegt AUSSCHLIESSLICH das, was der Benutzer wirklich geaendert hat — Feld fuer
+      // Feld gegen den Ausgangsstand verglichen. Ein Feld, das er nicht angefasst hat, taucht gar
+      // nicht auf und kann deshalb auch nicht mit leer ueberschrieben werden. Die Schluessel sind
+      // die kanonischen Produktschluessel des Desktops, keine mobile Sondervokabel.
+      const KEY_OF = { name: 'name', brand: 'brand', condition: 'condition', storage_location: 'storageLocation', notes: 'notes' };
+      const KEY_OF_INV = { name: 'name', brand: 'brand', condition: 'condition', storageLocation: 'storage_location', notes: 'notes' };
       const changed = {};
       for (const [id, key] of EDIT_FIELDS) {
         const el = $(id); if (!el) continue;
         const now = el.value.trim();
         const before = original[key] == null ? '' : String(original[key]);
         if (now === before) continue;         // unveraendert → gar nicht erst mitschicken
-        changed[key] = now === '' ? null : now;
+        changed[KEY_OF[key]] = now === '' ? null : now;
+      }
+
+      // Kategorieattribute: nur die geaenderten Schluessel, und niemals ein ausgeblendetes Feld —
+      // was `dependsOn` gerade verbirgt, gehoert nicht in den Patch.
+      const attrPatch = {};
+      if (cat) for (const a2 of cat.attributes) {
+        if (!dependsSatisfied(a2, 'pea_')) continue;
+        const v = readAttr(a2, 'pea_');
+        if (v === undefined) continue;
+        if (typeof v === 'number' && Number.isNaN(v)) return setText('peMsg', 'Please check the number in "' + a2.label + '".');
+        const before = origAttrs[a2.key];
+        const sameArr = Array.isArray(v) && Array.isArray(before) && v.length === before.length && v.every((x, i) => x === before[i]);
+        const same = sameArr || (!Array.isArray(v) && String(v === '' ? '' : v) === String(before === undefined || before === null ? '' : before));
+        if (same) continue;
+        attrPatch[a2.key] = (v === '' ? null : v);
+      }
+      if (Object.keys(attrPatch).length) changed.attributes = attrPatch;
+
+      // Lieferumfang: als Ganzes, aber nur wenn er sich wirklich unterscheidet.
+      if (cat && cat.scopeOptions.length) {
+        const nowScope = cat.scopeOptions.filter(function (o) { return peScopeState.has(o); });
+        const beforeScope = (Array.isArray(origScope) ? origScope : []).slice().sort();
+        if (JSON.stringify(nowScope.slice().sort()) !== JSON.stringify(beforeScope)) changed.scopeOfDelivery = nowScope;
+      }
+
+      // Preise: nur wenn der Artikel sie ueberhaupt aendern darf, und nur die geaenderten.
+      if (priceEditable) {
+        for (const [id, col, key] of PRICE_FIELDS) {
+          const e = $(id); if (!e) continue;
+          const raw = (e.value || '').trim();
+          const before = (p[col] === null || p[col] === undefined) ? '' : String(p[col]);
+          if (raw === before) continue;
+          if (raw === '') { changed[key] = null; continue; }   // leeren heisst "kein Preis", nicht 0
+          const n = normNumber(raw);
+          if (n === null || Number.isNaN(n)) return setText('peMsg', 'Please check the price fields.');
+          changed[key] = n;
+        }
       }
       // ── MOBILE-EDIT-S3 — den Galerie-Plan aus dem Streifen ableiten ──────
       //
@@ -1045,6 +1213,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
             metadata: {
               kind: 'gallery_edit', productId: p.id, galleryBaseline: p.gallery_baseline,
               order: galleryPlan.order, remove: galleryPlan.remove,
+              // §17 — Feldaenderungen reisen im SELBEN Job mit und werden in derselben Transaktion
+              // angewandt. Sonst koennte "Preis gespeichert, Bild verloren" entstehen.
+              ...(Object.keys(changed).length ? { patch: changed } : {}),
             },
             images: galleryPlan.images,
             protocolVersion: 2,
@@ -1071,8 +1242,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         return;
       }
       try {
-        if (Object.keys(changed).length === 0) {
+        // §17 — hat der Galerie-Job die Feldaenderungen schon mitgenommen, gibt es hier nichts mehr
+        // zu tun. Ein zweiter Job wuerde denselben Patch ein zweites Mal anwenden wollen.
+        if (galleryPlan || Object.keys(changed).length === 0) {
           if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
+          for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
           saving = false; $('peSave').disabled = false;
           return;
         }
@@ -1087,7 +1261,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         });
         const r = await uploadQueue.drainEntry(entry.uploadEventId, localStorage.getItem(TOKEN_KEY));
         if (r && r.outcome && r.outcome !== 'done') throw new Error('Upload ' + r.outcome);
-        for (const k of Object.keys(changed)) { original[k] = changed[k]; p[k] = changed[k]; }
+        for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
         if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
       } catch (e) {
         // Fehlschlag aendert NICHTS — weder am Artikel noch am Formular. Der Benutzer kann es
@@ -1550,21 +1724,26 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (attrs) for (const k in attrs) { if (k === 'class') e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
     if (text != null) e.textContent = text; return e;
   }
-  function dependsSatisfied(attr) {
+  function dependsSatisfied(attr, pre) {
     if (!attr.dependsOn) return true;
-    const dep = $('attr_' + attr.dependsOn.key);
+    const dep = $((pre || 'attr_') + attr.dependsOn.key);
     return dep ? attr.dependsOn.valueIncludes.indexOf(dep.value) !== -1 : false;
   }
-  function applyDependencies(cat) {
-    for (const a of cat.attributes) { if (!a.dependsOn) continue; const row = $('row_' + a.key); if (row) row.classList.toggle('hidden', !dependsSatisfied(a)); }
+  // Prefix, damit dieselbe Aufbaulogik zweimal im DOM leben kann: das Anlegeformular unter `attr_`,
+  // das Bearbeitungsformular unter `pea_`. Ohne den Prefix wuerden sich die Element-Ids ueberlagern
+  // und `$()` das falsche Feld liefern.
+  function applyDependencies(cat, pre) {
+    const p = pre || 'attr_';
+    for (const a of cat.attributes) { if (!a.dependsOn) continue; const row = $((p === 'attr_' ? 'row_' : 'perow_') + a.key); if (row) row.classList.toggle('hidden', !dependsSatisfied(a, p)); }
   }
-  function makeControl(a) {
+  function makeControl(a, pre) {
+    const idOf = (k) => (pre || 'attr_') + k;
     if (a.type === 'select') {
-      const s = el('select', { id: 'attr_' + a.key }); s.appendChild(el('option', { value: '' }, '— Select —'));
+      const s = el('select', { id: idOf(a.key) }); s.appendChild(el('option', { value: '' }, '— Select —'));
       for (const o of (a.options || [])) s.appendChild(el('option', { value: o }, o)); return s;
     }
     if (a.type === 'multiselect' || a.type === 'boolean') {
-      const wrap = el('div', { id: 'attr_' + a.key, class: 'chips' }); wrap.dataset.kind = a.type;
+      const wrap = el('div', { id: idOf(a.key), class: 'chips' }); wrap.dataset.kind = a.type;
       const opts = a.type === 'boolean' ? ['Yes', 'No'] : (a.options || []);
       for (const o of opts) {
         const b = el('button', { type: 'button', class: 'chip' }, o);
@@ -1574,7 +1753,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       }
       return wrap;
     }
-    const inp = el('input', { id: 'attr_' + a.key, type: a.type === 'number' ? 'number' : 'text' });
+    const inp = el('input', { id: idOf(a.key), type: a.type === 'number' ? 'number' : 'text' });
     if (a.type === 'number') { inp.setAttribute('inputmode', 'decimal'); inp.setAttribute('step', 'any'); inp.setAttribute('min', '0'); }
     return inp;
   }
@@ -1610,8 +1789,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (!/^[0-9]+(\.[0-9]+)?$/.test(s)) return NaN;
     const n = Number(s); return Number.isFinite(n) ? n : NaN;
   }
-  function readAttr(a) {
-    const e = $('attr_' + a.key); if (!e) return undefined;
+  function readAttr(a, pre) {
+    const e = $((pre || 'attr_') + a.key); if (!e) return undefined;
     if (a.type === 'multiselect') { const out = []; for (const c of e.children) if (c.classList.contains('on')) out.push(c.textContent); return out; }
     if (a.type === 'boolean') { for (const c of e.children) if (c.classList.contains('on')) return c.dataset.val === 'true'; return undefined; }
     if (a.type === 'number') return normNumber(e.value);

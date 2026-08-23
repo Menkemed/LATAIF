@@ -19,6 +19,12 @@ import type { PrepareResult } from './gateway';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
 import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
 import { parseMobileGalleryPlan, ERR_GALLERY_PLAN_INVALID, type MobileGalleryPlan } from './mobile-gallery-edit.ts';
+import {
+  parseMobileProductPatch, resolveMobileProductPatch, patchTouchesPrices,
+  ERR_PRICE_NOT_ELIGIBLE,
+  type MobileProductPatch, type CurrentProductState,
+} from './mobile-product-patch.ts';
+import type { MobileFieldSchema } from '../mobile/mobile-field-schema.ts';
 
 /** One image prepared out-of-band (Rust staged + rendered it) for the durable create batch — an
  *  opaque descriptor, no bytes. */
@@ -165,12 +171,21 @@ export interface MobileDrainDeps {
    *  fasst `media_links` per Vertrag nicht an und setzt nur die uebergebenen Felder. Fehlt die
    *  Abhaengigkeit, wird ein Edit-Job NICHT verarbeitet und auch nicht terminal markiert — er
    *  bleibt fuer einen spaeteren, vollstaendig verdrahteten Lauf liegen. */
-  applyTextEdit?: (entityId: string, patch: Record<string, string | null>) => Promise<{ ok: boolean; errorCode?: string }>;
+  applyTextEdit?: (entityId: string, patch: Record<string, unknown>) => Promise<{ ok: boolean; errorCode?: string }>;
   /** MOBILE-EDIT-S3 — den geprueften Galerie-Plan durabel anwenden: Baseline unter der Sperre lesen,
    *  `buildMobileGalleryEnvelope` bauen und ueber `applyEditDurably` in EINER Transaktion committen.
    *  Fehlt die Abhaengigkeit, wird ein Galerie-Job NICHT verarbeitet und auch nicht terminal
    *  markiert — er bleibt fuer einen spaeteren, vollstaendig verdrahteten Lauf liegen. */
   applyGalleryEdit?: (grant: ClaimGrant, prepared: PreparedMediaItem[], plan: MobileGalleryPlan) => Promise<{ ok: boolean; errorCode?: string }>;
+  /** v0.8.48 — der aktuelle Stand des Artikels, gelesen unter der Sperre: Kategorie, gespeicherte
+   *  Attribute und Lieferumfang. Grundlage fuer den Merge und fuer die Schema-Pruefung. */
+  readProductState?: (productId: string) => CurrentProductState | null;
+  /** Die Kategorie-Definition, die auch das Anlegen benutzt. Eine zweite Liste fuers Handy gibt es nicht. */
+  fieldSchema?: () => MobileFieldSchema;
+  /** Darf DIESER Artikel seine Preise noch aendern? Wahr nur, wenn es keinerlei Beschaffungs- oder
+   *  Kostenbeleg gibt (keine Einkaufszeile, kein Lot, Eigenbestand). Fehlt die Abhaengigkeit, wird
+   *  jede Preisaenderung abgelehnt — fail closed. */
+  priceEditAllowed?: (productId: string) => boolean;
 }
 
 export type DrainCode =
@@ -476,21 +491,39 @@ export function mobileJobKindMarker(metadataJson: string): 'create' | 'text_edit
 
 /** Den Patch aus der Job-Metadata lesen — fail closed: unbekannte Felder machen den Job ungueltig,
  *  statt still ignoriert zu werden (sonst koennte ein Client glauben, er habe etwas gesetzt). */
-export function parseMobileTextEdit(metadataJson: string): { ok: true; productId: string; patch: Record<string, string | null> } | { ok: false } {
+export function parseMobileTextEdit(metadataJson: string): { ok: true; productId: string; patch: MobileProductPatch } | { ok: false; code: string } {
   let meta: unknown;
-  try { meta = JSON.parse(metadataJson); } catch { return { ok: false }; }
+  try { meta = JSON.parse(metadataJson); } catch { return { ok: false, code: ERR_EDIT_PATCH_INVALID }; }
   const productId = (meta as { productId?: unknown } | null)?.productId;
-  if (typeof productId !== 'string' || productId === '') return { ok: false };
-  const raw = (meta as { patch?: unknown } | null)?.patch;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false };
-  const patch: Record<string, string | null> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (!MOBILE_TEXT_EDIT_FIELDS.has(k)) return { ok: false };
-    if (v !== null && typeof v !== 'string') return { ok: false };
-    patch[k] = v as string | null;
+  if (typeof productId !== 'string' || productId === '') return { ok: false, code: ERR_EDIT_PATCH_INVALID };
+  const parsed = parseMobileProductPatch((meta as { patch?: unknown } | null)?.patch);
+  if (!parsed.ok) return { ok: false, code: parsed.code };
+  return { ok: true, productId, patch: parsed.patch };
+}
+
+/**
+ * Den gelesenen Patch gegen den AKTUELLEN Stand und die Kategorie-SSOT aufloesen — inklusive der
+ * Herkunftsfrage bei Preisen.
+ *
+ * Preise duerfen vom Handy aus nur an einem Artikel geaendert werden, fuer den es noch keinerlei
+ * Beschaffungs- oder Kostenbeleg gibt. Das ist keine Schaetzung aus SKU, Datum oder Kategorie,
+ * sondern eine Aussage ueber echte Relationen: keine Einkaufszeile, kein Lot, Eigenbestand. Nur
+ * dann ist `products.purchase_price` ueberhaupt die Grundlage — sobald ein Lot existiert, rechnet
+ * die Bewertung mit dessen `unit_cost`, und eine Korrektur hier waere wirkungslos oder irrefuehrend.
+ */
+function resolvePatchForApply(
+  productId: string,
+  patch: MobileProductPatch,
+  deps: MobileDrainDeps,
+): { ok: true; resolved: Record<string, unknown> } | { ok: false; code: string } {
+  if (patchTouchesPrices(patch)) {
+    if (!deps.priceEditAllowed) return { ok: false, code: ERR_PRICE_NOT_ELIGIBLE };
+    if (!deps.priceEditAllowed(productId)) return { ok: false, code: ERR_PRICE_NOT_ELIGIBLE };
   }
-  if (Object.keys(patch).length === 0) return { ok: false };
-  return { ok: true, productId, patch };
+  if (!deps.readProductState || !deps.fieldSchema) return { ok: false, code: ERR_EDIT_PATCH_INVALID };
+  const current = deps.readProductState(productId);
+  if (!current) return { ok: false, code: ERR_TARGET_CONFLICT };
+  return resolveMobileProductPatch(patch, current, deps.fieldSchema());
 }
 
 /**
@@ -538,8 +571,8 @@ async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: Dr
   }
   const parsed = parseMobileTextEdit(grant.metadataJson);
   if (!parsed.ok) {
-    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_EDIT_PATCH_INVALID, sc);
-    return { code: 'manifest_invalid', detail: ERR_EDIT_PATCH_INVALID };
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, parsed.code, sc);
+    return { code: 'manifest_invalid', detail: parsed.code };
   }
   if (!deps.productExists(parsed.productId)) {
     await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_CONFLICT, sc);
@@ -549,6 +582,14 @@ async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: Dr
     await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_EDIT_GALLERY_UNSUPPORTED, sc);
     return { code: 'manifest_invalid', detail: ERR_EDIT_GALLERY_UNSUPPORTED };
   }
+  // Gegen den AKTUELLEN Stand aufloesen: Attribute mergen, Auswahlwerte und Abhaengigkeiten gegen
+  // die Kategorie-SSOT pruefen, und bei Preisen die Herkunft. Alles davon ist deterministisch —
+  // scheitert es, ist der Job terminal und wird nicht endlos wiederholt.
+  const resolvedEdit = resolvePatchForApply(parsed.productId, parsed.patch, deps);
+  if (!resolvedEdit.ok) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, resolvedEdit.code, sc);
+    return { code: 'manifest_invalid', detail: resolvedEdit.code };
+  }
   // Fence direkt vor der einzigen Mutation dieses Zweigs.
   if (await claimFenced(deps, entryRevision)) {
     await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
@@ -556,7 +597,7 @@ async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: Dr
   }
   let applied: { ok: boolean; errorCode?: string };
   try {
-    applied = await deps.applyTextEdit(parsed.productId, parsed.patch);
+    applied = await deps.applyTextEdit(parsed.productId, resolvedEdit.resolved);
   } catch (e) {
     await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // nichts durabel → spaeter erneut
     return { code: 'deferred', detail: (e as { message?: string })?.message ?? 'edit_failed' };
@@ -673,9 +714,22 @@ async function processGalleryEditClaim(grant: ClaimGrant, deps: MobileDrainDeps,
     return { code: 'deferred', detail: 'scope_fenced' };
   }
 
+  // v0.8.48 §17 — bringt der Save auch Feldaenderungen mit, werden sie JETZT gegen den aktuellen
+  // Stand aufgeloest und wandern zusammen mit dem Bildplan in dieselbe Transaktion. Scheitert die
+  // Aufloesung, wird gar nichts angewandt — weder Felder noch Bilder.
+  let planForApply = parsed.plan;
+  if (parsed.plan.patch) {
+    const res = resolvePatchForApply(parsed.plan.productId, parsed.plan.patch as MobileProductPatch, deps);
+    if (!res.ok) {
+      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, res.code, sc);
+      return { code: 'manifest_invalid', detail: res.code };
+    }
+    planForApply = { ...parsed.plan, patch: res.resolved };
+  }
+
   let applied: { ok: boolean; errorCode?: string };
   try {
-    applied = await deps.applyGalleryEdit(grant, prepared, parsed.plan);
+    applied = await deps.applyGalleryEdit(grant, prepared, planForApply);
   } catch (e) {
     applied = { ok: false, errorCode: (e as { message?: string })?.message ?? 'gallery_edit_failed' };
   }

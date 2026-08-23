@@ -92,7 +92,7 @@ export type EditProductResult =
  * so the two diff identically. `images` is deliberately NOT here — the gallery
  * is owned by the durable media system, never by a product-column write.
  */
-function buildProductEditColumns(
+export function buildProductEditColumns(
   cur: Record<string, unknown> | undefined,
   data: Partial<Product>,
 ): Array<{ col: string; baseline: string | number | null; target: string | number | null }> {

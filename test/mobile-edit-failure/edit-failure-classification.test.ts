@@ -113,6 +113,24 @@ function depsFor(
     createProduct: async () => { effects.creates++; throw new Error('the edit branch must never create a product'); },
     verifyReady: async () => 'ready',
     applyTextEdit,
+    // v0.8.48 — der Patch wird gegen den aktuellen Stand und die Kategorie-SSOT aufgeloest. Ohne
+    // diese Leser waere jeder Edit fail-closed ungueltig; hier steht ein Artikel mit einer echten
+    // Kategorie und einem bereits gefuellten Attribut, damit der Merge etwas zu bewahren hat.
+    readProductState: (id) => (products.has(id)
+      ? { categoryId: 'cat-test', attributes: { serial_number: 'OLD-1', dial: 'Black' }, scopeOfDelivery: [] }
+      : null),
+    fieldSchema: () => ({
+      version: 1,
+      categories: [{
+        id: 'cat-test', name: 'Test', brandRequired: true,
+        conditionOptions: ['Pre-Owned', 'Unworn'], scopeOptions: ['Box'],
+        attributes: [
+          { key: 'serial_number', label: 'Serial', type: 'text', required: false },
+          { key: 'dial', label: 'Dial', type: 'text', required: false },
+        ],
+      }],
+    }),
+    priceEditAllowed: () => true,
   };
 }
 
@@ -165,7 +183,8 @@ async function main(): Promise<void> {
 
     await drainMobileUploads(deps, 25);
     ok(row.state === 'quarantined', `PERMANENT a forbidden field ends terminal (${row.state})`);
-    ok(row.errorCode === 'MOBILE_EDIT_PATCH_INVALID', `PERMANENT …with the same stable code (${row.errorCode})`);
+    // v0.8.48: `sku` ist nicht "unbekannt", sondern ausdruecklich unveraenderlich — eigener Code.
+    ok(row.errorCode === 'MOBILE_EDIT_IMMUTABLE_FIELD', `PERMANENT …named as immutable, not merely unknown (${row.errorCode})`);
     ok(fx.applies === 0, 'PERMANENT …and NOTHING was applied — not even the allowed half of the patch');
   }
 
@@ -245,6 +264,95 @@ async function main(): Promise<void> {
     ok(fx.applies === 1, 'TRANSIENT …applied exactly once in total');
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // v0.8.48 — der erweiterte Feld-Patch: Attribute, Lieferumfang, Preise
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Attribute werden GEMERGED, nicht ersetzt: eine Korrektur an der Seriennummer darf das
+  // Zifferblatt nicht mitnehmen. Der Fake haelt {serial_number:"OLD-1", dial:"Black"}.
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add("ev-attr-merge", editJob(PRODUCT, { attributes: { serial_number: "NEW-9" } }));
+    let seen: Record<string, unknown> | null = null;
+    const deps = depsFor(inbox, fx, new Set([PRODUCT]), async (_id, patch) => { fx.applies++; seen = patch as Record<string, unknown>; return { ok: true }; });
+    await drainMobileUploads(deps, 25);
+    ok(row.state === "ready", `ATTR the merge applied (${row.state}/${row.errorCode})`);
+    const attrs = ((seen as unknown as { attributes?: Record<string, unknown> } | null)?.attributes) ?? {};
+    ok(attrs.serial_number === "NEW-9", `ATTR the changed key is the new value (${String(attrs.serial_number)})`);
+    ok(attrs.dial === "Black", `ATTR the untouched attribute survived — no replace-all (${String(attrs.dial)})`);
+    ok(Object.keys(attrs).length === 2, `ATTR nothing else appeared (${Object.keys(attrs).join(",")})`);
+  }
+
+  // Ein Attribut, das die Kategorie gar nicht kennt, ist ein Fehler — nicht ein zu ignorierendes Extra.
+  for (const [what, patch] of [
+    ["an unknown attribute", { attributes: { not_a_field: "x" } }],
+    ["an attribute of another category", { attributes: { karat: "18K" } }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add("ev-attr-" + what.slice(0, 12), editJob(PRODUCT, patch));
+    const deps = depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; });
+    await drainMobileUploads(deps, 25);
+    ok(row.state === "quarantined" && row.errorCode === "MOBILE_EDIT_ATTRIBUTE_INVALID",
+      `ATTR ${what} is refused (${row.state}/${row.errorCode})`);
+    ok(fx.applies === 0, `ATTR ${what} — nothing was applied`);
+  }
+
+  // Lieferumfang: nur Werte aus der Kategorie-Liste.
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const good = inbox.add("ev-scope-ok", editJob(PRODUCT, { scopeOfDelivery: ["Box"] }));
+    const bad = inbox.add("ev-scope-bad", editJob(PRODUCT, { scopeOfDelivery: ["Certificate"] }));
+    const deps = depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; });
+    await drainMobileUploads(deps, 25);
+    ok(good.state === "ready", `SCOPE a listed value is accepted (${good.state}/${good.errorCode})`);
+    ok(bad.state === "quarantined" && bad.errorCode === "MOBILE_EDIT_SCOPE_INVALID",
+      `SCOPE a value the category does not offer is refused (${bad.state}/${bad.errorCode})`);
+  }
+
+  // Preise: die Herkunft entscheidet, nicht die Form. Ohne Berechtigung wird abgewiesen — und ein
+  // fehlender Herkunfts-Leser gilt als NICHT berechtigt.
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add("ev-price-blocked", editJob(PRODUCT, { plannedSalePrice: 165 }));
+    const deps = { ...depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; }), priceEditAllowed: () => false };
+    await drainMobileUploads(deps, 25);
+    ok(row.state === "quarantined" && row.errorCode === "MOBILE_EDIT_PRICE_NOT_ELIGIBLE",
+      `PRICE a purchase-origin item refuses a price change (${row.state}/${row.errorCode})`);
+    ok(fx.applies === 0, "PRICE …and nothing was applied");
+  }
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add("ev-price-nodep", editJob(PRODUCT, { purchasePrice: 110 }));
+    const base = depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; });
+    const deps = { ...base, priceEditAllowed: undefined };
+    await drainMobileUploads(deps, 25);
+    ok(row.state === "quarantined" && row.errorCode === "MOBILE_EDIT_PRICE_NOT_ELIGIBLE",
+      `PRICE without a provenance reader it is refused, not assumed (${row.errorCode})`);
+  }
+  {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add("ev-price-ok", editJob(PRODUCT, { purchasePrice: 110, plannedSalePrice: 165, minSalePrice: 150 }));
+    let seen: Record<string, unknown> | null = null;
+    const deps = depsFor(inbox, fx, new Set([PRODUCT]), async (_id, patch) => { fx.applies++; seen = patch as Record<string, unknown>; return { ok: true }; });
+    await drainMobileUploads(deps, 25);
+    ok(row.state === "ready", `PRICE an eligible item accepts all three (${row.state}/${row.errorCode})`);
+    const got = seen as unknown as Record<string, unknown> | null;
+    ok(got?.purchasePrice === 110 && got?.plannedSalePrice === 165 && got?.minSalePrice === 150, `PRICE …with the exact values (${JSON.stringify(got)})`);
+    ok(Object.keys(got ?? {}).length === 3, "PRICE …and nothing else was sent along");
+  }
+
+  // Unveraenderliche Felder bekommen ihren eigenen Code — auch Kategorie und Menge.
+  for (const [field, patch] of [
+    ["sku", { sku: "X-1" }], ["categoryId", { categoryId: "cat-other" }], ["quantity", { quantity: 5 }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    const inbox = new Inbox(); const fx: Effects = { creates: 0, prepares: 0, applies: 0 };
+    const row = inbox.add("ev-immutable-" + field, editJob(PRODUCT, patch));
+    const deps = depsFor(inbox, fx, new Set([PRODUCT]), async () => { fx.applies++; return { ok: true }; });
+    await drainMobileUploads(deps, 25);
+    ok(row.state === "quarantined" && row.errorCode === "MOBILE_EDIT_IMMUTABLE_FIELD",
+      `IMMUTABLE ${field} is refused as immutable (${row.state}/${row.errorCode})`);
+    ok(fx.applies === 0, `IMMUTABLE ${field} — nothing was applied`);
+  }
   // ══════════════════════════════════════════════════════════════════════════
   // MOBILE-EDIT-S3 §18 — beim GALERIE-Edit ist ein Baseline-Konflikt TERMINAL
   //

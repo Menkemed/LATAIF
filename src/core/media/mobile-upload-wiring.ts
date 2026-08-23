@@ -21,7 +21,11 @@ import { ProductMediaResolver } from '@/core/media/product-media-resolver';
 import { getStockMediaOrchestrator } from '@/core/media/orchestrator';
 import { canonicalRequestHash } from '@/core/media/product-media-cutover';
 import { buildMobileGalleryEnvelope, type MobileGalleryPlan } from '@/core/media/mobile-gallery-edit';
-import { useProductStore } from '@/stores/productStore';
+import { diffProductText } from '@/core/media/product-edit-draft';
+import { isSyncConfigured } from '@/core/sync/sync-service';
+import type { ProductEditIntent } from '@/core/media/coordinator';
+import type { CurrentProductState } from '@/core/media/mobile-product-patch';
+import { useProductStore, buildProductEditColumns } from '@/stores/productStore';
 import {
   createTauriMobileUploadBridge, triggerMobileUploadDrainSafe, canonicalProductMetadataHash, MaterializeError,
   type ClaimGrant, type MobileDrainDeps, type ReadyVerdict, type DurableReceipt, type PreparedMediaItem, type BoundBatchJob, type GallerySlot, type DrainScope,
@@ -236,7 +240,52 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
         : { ok: false, errorCode: (res as { errorCode?: string }).errorCode ?? res.status };
     },
     applyGalleryEdit,
+    readProductState,
+    // Dieselbe Kategorie-Definition, aus der auch die Seite ihre Felder rendert und der Rust-
+    // Validator seine Regeln nimmt. Eine dritte Quelle waere genau die Drift, die wir vermeiden.
+    fieldSchema: () => buildMobileFieldSchema(),
+    priceEditAllowed,
   };
+}
+
+/** Der aktuelle Stand, den der Patch-Merge braucht: Kategorie, gespeicherte Attribute, Lieferumfang. */
+function readProductState(productId: string): CurrentProductState | null {
+  const rows = query('SELECT category_id, attributes, scope_of_delivery FROM products WHERE id = ?', [productId]);
+  if (rows.length === 0) return null;
+  const r = rows[0] as { category_id?: string; attributes?: string; scope_of_delivery?: string };
+  const parse = <T>(raw: unknown, fallback: T): T => {
+    if (typeof raw !== 'string' || raw === '') return fallback;
+    try { return JSON.parse(raw) as T; } catch { return fallback; }
+  };
+  return {
+    categoryId: String(r.category_id ?? ''),
+    attributes: parse<Record<string, unknown>>(r.attributes, {}),
+    scopeOfDelivery: parse<string[]>(r.scope_of_delivery, []),
+  };
+}
+
+/**
+ * Darf dieser Artikel seine Preise noch vom Handy aus geaendert bekommen?
+ *
+ * Die Frage ist nicht "wurde er ueber Collection angelegt", sondern die belastbarere: gibt es fuer
+ * ihn IRGENDEINEN Beschaffungs- oder Kostenbeleg? Solange keine Einkaufszeile und kein Lot
+ * existieren und er Eigenbestand ist, ist `products.purchase_price` die einzige Kostengrundlage —
+ * eine Korrektur schreibt dann nichts um. Sobald ein Lot da ist, rechnet die Bewertung mit dessen
+ * `unit_cost`, und Einkaeufe, Rechnungen und Buchungen fuehren ohnehin ihre eigenen eingefrorenen
+ * Werte. Geprueft werden echte Relationen, nicht SKU, Datum oder Kategorie.
+ */
+function priceEditAllowed(productId: string): boolean {
+  const one = (sql: string): number => {
+    const rows = query(sql, [productId]);
+    return rows.length > 0 ? Number((rows[0] as Record<string, unknown>).c ?? 0) : -1;
+  };
+  const lines = one('SELECT COUNT(*) AS c FROM purchase_lines WHERE product_id = ?');
+  const lots = one('SELECT COUNT(*) AS c FROM stock_lots WHERE product_id = ?');
+  const own = query("SELECT source_type FROM products WHERE id = ?", [productId]);
+  // Fail closed: kann eine der Fragen nicht beantwortet werden, gilt der Artikel als nicht berechtigt.
+  if (lines < 0 || lots < 0 || own.length === 0) return false;
+  const sourceType = String((own[0] as Record<string, unknown>).source_type ?? '');
+  return lines === 0 && lots === 0 && sourceType === 'OWN';
 }
 
 /**
@@ -261,6 +310,22 @@ async function applyGalleryEdit(
   if (!scope) return { ok: false, errorCode: 'MEDIA_EDIT_SCOPE_REQUIRED' };
   const preparedBySlot = new Map(prepared.map((p) => [p.slot, { requestId: p.ingestRequestId, prepared: p.prepared }]));
   const batchId = `gallery-edit:${scope.tenantId}:${scope.branchId}:${plan.productId}:${ROLE}:${grant.uploadEventId}`;
+  // §17 — Feldaenderungen aus demselben Save reisen als `productEdit` MIT in den Umschlag und
+  // werden dadurch in derselben Transaktion angewandt wie der Bildwechsel. Der Diff entsteht ueber
+  // genau dieselben Helfer wie auf dem Desktop, damit beide Wege identisch vergleichen.
+  let productEdit: ProductEditIntent | undefined;
+  if (plan.patch) {
+    const cur = query('SELECT * FROM products WHERE id = ?', [plan.productId])[0] as Record<string, unknown> | undefined;
+    const diff = diffProductText(buildProductEditColumns(cur, plan.patch as Record<string, never>));
+    if (diff.set.length > 0) {
+      productEdit = {
+        set: diff.set, baseline: diff.baseline,
+        invalidateImageDerived: true,   // die Galerie aendert sich in demselben Vorgang
+        withSync: isSyncConfigured(),
+        audit: { module: 'Product', changedBy: null, newValueJson: JSON.stringify(Object.fromEntries(diff.set)) },
+      };
+    }
+  }
   try {
     const orchestrator = await getStockMediaOrchestrator();
     const env = await orchestrator.prepareAndRegisterEdit(
@@ -269,6 +334,7 @@ async function applyGalleryEdit(
       async (baseline) => buildMobileGalleryEnvelope({
         plan, baseline, preparedBySlot, batchId,
         tenantId: scope.tenantId, branchId: scope.branchId, entityId: plan.productId, role: ROLE,
+        ...(productEdit ? { productEdit } : {}),
         // Dieselbe Plan-Hash-Funktion wie auf dem Desktop — der Plan-Hash ist die Identitaet des
         // eingefrorenen Plans, und beide Wege muessen fuer denselben Plan denselben Wert liefern.
         digestHex: (s) => canonicalRequestHash(new TextEncoder().encode(s), 'edit-plan'),

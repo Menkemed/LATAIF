@@ -108,7 +108,7 @@ function newDb(SQL: { Database: new () => never }): never {
   run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   for (const t of Object.values(MEDIA_ENTITY_SCOPE)) run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
   run(`ALTER TABLE products ADD COLUMN images TEXT DEFAULT '[]'`);
-  for (const c of ['brand', 'name', 'category_id', 'sku', 'attributes', 'updated_at']) run(`ALTER TABLE products ADD COLUMN ${c} TEXT`);
+  for (const c of ['brand', 'name', 'category_id', 'sku', 'attributes', 'updated_at', 'image_hash', 'image_description', 'image_embedding', 'scope_of_delivery']) run(`ALTER TABLE products ADD COLUMN ${c} TEXT`);
   run(`CREATE TABLE sync_changelog (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT, action TEXT)`);
   run(`CREATE TABLE audit_log (id TEXT PRIMARY KEY, branch_id TEXT, module TEXT, entity_type TEXT, entity_id TEXT, action_type TEXT, field_name TEXT, old_value TEXT, new_value TEXT, changed_by TEXT, changed_at TEXT)`);
   run(`INSERT INTO tenants (id) VALUES ('${TENANT}')`);
@@ -535,6 +535,60 @@ async function main(): Promise<void> {
     ok(activeLinks(db as never).length === 4, 'REPLAY-EXT the removed image was NOT restored and nothing was overwritten');
   }
 
+  // ── v0.8.48 §17 GEMISCHTER SAVE: Felder UND Bilder in EINER Transaktion ──
+  //
+  // Der Benutzer aendert im selben Bildschirm die Notiz und die Reihenfolge und drueckt einmal
+  // Speichern. Beides muss zusammen ankommen — "Preis gespeichert, Bildaenderung verloren" darf es
+  // nicht geben. Der Feld-Patch reist als `productEdit` im selben Umschlag.
+  {
+    const { db, co, baseline, fp } = await fixture();
+    (db as unknown as { run: (s: string, p?: unknown[]) => void }).run(`UPDATE products SET name = ? WHERE id = ?`, ["Alt", PRODUCT]);
+    const want = [baseline[2], baseline[0], baseline[1], baseline[3]];
+    const env = await buildMobileGalleryEnvelope({
+      plan: planFor(fp, want.map((b) => ({ keep: b.linkId }))),
+      baseline: co.readGalleryBaseline(SCOPE), preparedBySlot: new Map(), batchId: "batch-mixed",
+      tenantId: TENANT, branchId: BRANCH, entityId: PRODUCT, role: ROLE, digestHex,
+      productEdit: {
+        set: [["name", "Neu"]], baseline: ["Alt"], invalidateImageDerived: true, withSync: false,
+        audit: { module: "Product", changedBy: null, newValueJson: "{}" },
+      },
+    });
+    co.registerEditPlan(env);
+    await co.applyEditBatch(env);
+
+    const after = activeLinks(db as never);
+    ok(sameRows(after.map((l) => l.linkId), want.map((b) => b.linkId)), "MIXED the gallery order really moved");
+    const nameNow = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(`SELECT name FROM products WHERE id=?`, [PRODUCT]);
+    ok(String(nameNow[0].values[0][0]) === "Neu", `MIXED …and the field change landed in the SAME save (${nameNow[0].values[0][0]})`);
+    ok(after.filter((l) => l.isPrimary === 1).length === 1, "MIXED exactly one primary");
+  }
+
+  // Und der Gegenbeweis: scheitert der Bildteil, darf der Feldteil NICHT allein durchkommen.
+  {
+    const { db, gw, co, baseline, fp } = await fixture();
+    (db as unknown as { run: (s: string, p?: unknown[]) => void }).run(`UPDATE products SET name = ? WHERE id = ?`, ["Alt", PRODUCT]);
+    const snapshot = allLinks(db as never);
+    const broken = new Map([[0, { requestId: "mixed-broken", prepared: { ingest_request_id: "mixed-broken", request_hash: "z".repeat(64), state: "prepared", main_descriptor: d("7".repeat(64), 24), thumbnail_descriptor: d("8".repeat(64), 12) } as PrepareResult }]]);
+    let thrown: unknown = null;
+    try {
+      const env = await buildMobileGalleryEnvelope({
+        plan: planFor(fp, [...baseline.map((b) => ({ keep: b.linkId })), { new: 0 }]),
+        baseline: co.readGalleryBaseline(SCOPE), preparedBySlot: broken, batchId: "batch-mixed-fail",
+        tenantId: TENANT, branchId: BRANCH, entityId: PRODUCT, role: ROLE, digestHex,
+        productEdit: {
+          set: [["name", "Neu"]], baseline: ["Alt"], invalidateImageDerived: true, withSync: false,
+          audit: { module: "Product", changedBy: null, newValueJson: "{}" },
+        },
+      });
+      co.registerEditPlan(env);
+      await co.applyEditBatch(env);
+    } catch (e) { thrown = e; }
+    ok(thrown !== null, "MIXED-FAIL the combined save fails");
+    ok(sameRows(allLinks(db as never), snapshot), "MIXED-FAIL the gallery is untouched");
+    const nameNow = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(`SELECT name FROM products WHERE id=?`, [PRODUCT]);
+    ok(String(nameNow[0].values[0][0]) === "Alt", `MIXED-FAIL …and the field change was NOT committed on its own (${nameNow[0].values[0][0]})`);
+    void gw;
+  }
   // ── §7 TEXT-ONLY bleibt unberuehrt: der Galerie-Pfad fasst ihn nicht an ───
   {
     const { db, co } = await fixture();
