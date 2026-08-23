@@ -247,13 +247,15 @@ const SCOPE_JOIN: &str = "FROM products p JOIN branches b ON b.id = p.branch_id 
 /// der Schreib-Transaktion. Beide stellen dieselben zwei Fragen, und zwar ueber echte Relationen,
 /// nicht ueber SKU, Datum oder Kategorie:
 ///
-///   A — stammt der Artikel aus der mobilen Collection-Aufnahme? Beweis ist eine Zeile in
-///       `mobile_upload_receipts`; die schreibt ausschliesslich der Create-Pfad, im selben durablen
-///       Checkpoint wie die Produktzeile.
+///   A — ist es eigener, freier Bestand? `products.source_type = 'OWN'` — eine echte
+///       Domaenen-Klassifikation: Agenten- und Kommissionsware tragen `AGENT` bzw. `CONSIGNMENT`
+///       und bekommen `OWN` erst zurueck, wenn sie zurueckkommen. WIE der Artikel angelegt wurde,
+///       spielt ausdruecklich keine Rolle: Desktop-Collection, Handy-Collection, Import und
+///       Altbestand sind gleichberechtigt.
 ///   B — haengt er an keinem Geschaeftsvorgang? Geprueft wird jede Tabelle mit Produktbezug.
 ///
 /// Bewusst NICHT dabei: `inventory_session_items` (eine Zaehlung ist kein Vorgang) und
-/// `mobile_upload_receipts` selbst (das ist der Herkunftsnachweis aus A).
+/// `mobile_upload_receipts` (eine technische Upload-Quittung, keine geschaeftliche Bindung).
 /// Die Liste spiegelt `TRANSACTION_RELATIONS` in `src/core/products/price-eligibility.ts`.
 /// Fehlschlaege werden zu `false` — ein Feld nicht anzubieten ist immer sicher.
 const PRICE_LOCK_RELATIONS: [&str; 13] = [
@@ -266,8 +268,8 @@ fn price_editable(conn: &Connection, product_id: &str) -> bool {
     let count = |sql: &str| -> i64 {
         conn.query_row(sql, rusqlite::params![product_id], |r| r.get::<_, i64>(0)).unwrap_or(-1)
     };
-    // A — Herkunft positiv nachgewiesen.
-    if count("SELECT COUNT(*) FROM mobile_upload_receipts WHERE product_id = ?1") <= 0 {
+    // A — eigener, freier Bestand (und der Artikel existiert ueberhaupt).
+    if count("SELECT COUNT(*) FROM products WHERE id = ?1 AND source_type = 'OWN'") != 1 {
         return false;
     }
     // B — keine einzige geschaeftliche Verknuepfung. `-1` (nicht lesbar) sperrt ebenfalls.

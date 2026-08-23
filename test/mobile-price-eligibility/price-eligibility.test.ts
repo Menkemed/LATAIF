@@ -84,11 +84,11 @@ const counter = (db: Db) => (sql: string, params: unknown[]): number => {
   return r.length && r[0].values.length ? Number(r[0].values[0][0]) : -1;
 };
 
-function addProduct(db: Db, id: string, opts: { receipt: boolean; purchase?: number; sale?: number; min?: number }): void {
+function addProduct(db: Db, id: string, opts: { receipt: boolean; sourceType?: string; purchase?: number; sale?: number; min?: number }): void {
   db.run(
     `INSERT INTO products (id, branch_id, tenant_id, name, source_type, purchase_price, planned_sale_price, min_sale_price, updated_at)
-     VALUES (?, ?, ?, ?, 'OWN', ?, ?, ?, '2026-01-01T00:00:00Z')`,
-    [id, BRANCH, TENANT, 'Item ' + id, opts.purchase ?? 100, opts.sale ?? 150, opts.min ?? 140],
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00Z')`,
+    [id, BRANCH, TENANT, 'Item ' + id, opts.sourceType ?? 'OWN', opts.purchase ?? 100, opts.sale ?? 150, opts.min ?? 140],
   );
   if (opts.receipt) {
     db.run(
@@ -123,21 +123,40 @@ function mobilePriceEdit(set: Array<[string, number | null]>, baseline: Array<nu
 async function main(): Promise<void> {
   const SQL = await initSqlJs({ locateFile: () => WASM }) as unknown as { Database: new () => Db };
 
-  // ── Die Regel selbst ─────────────────────────────────────────────────────
+  // ── Die Regel selbst: eigener freier Bestand, unabhaengig vom Anlageweg ──
   {
     const db = newDb(SQL);
-    addProduct(db, 'p-fresh', { receipt: true });
-    addProduct(db, 'p-desktop', { receipt: false });
+    // Genau derselbe Artikel, einmal ueber das Handy angelegt (mit Upload-Quittung) und einmal am
+    // Desktop (ohne). Fachlich sind beide dasselbe: eigener, unverkaufter Bestand.
+    addProduct(db, "p-mobile", { receipt: true });
+    addProduct(db, "p-desktop", { receipt: false });
+    addProduct(db, "p-legacy", { receipt: false });
+    addProduct(db, "p-consigned", { receipt: false, sourceType: "CONSIGNMENT" });
+    addProduct(db, "p-agent", { receipt: true, sourceType: "AGENT" });
     const c = counter(db);
 
-    ok(evaluatePriceEligibility('p-fresh', c).allowed, 'A a fresh mobile-collection item is eligible');
-    const desktop = evaluatePriceEligibility('p-desktop', c);
-    ok(!desktop.allowed && desktop.reason === 'not_collection_origin',
-      `A an item without the collection receipt is NOT eligible (${JSON.stringify(desktop)})`);
-    ok(!evaluatePriceEligibility('', c).allowed, 'A an empty id is never eligible');
-    ok(!evaluatePriceEligibility('p-does-not-exist', c).allowed, 'A an unknown item is never eligible');
-  }
+    ok(evaluatePriceEligibility("p-mobile", c).allowed, "ORIGIN a mobile-created item is eligible");
+    ok(evaluatePriceEligibility("p-desktop", c).allowed,
+      "ORIGIN a DESKTOP-created item is just as eligible — the upload receipt is not a permission");
+    ok(evaluatePriceEligibility("p-legacy", c).allowed,
+      "ORIGIN an imported or migrated item is not locked out for lacking a receipt");
 
+    const cons = evaluatePriceEligibility("p-consigned", c);
+    ok(!cons.allowed && cons.reason === "not_own_stock", `ORIGIN consigned goods are NOT own stock (${JSON.stringify(cons)})`);
+    const agent = evaluatePriceEligibility("p-agent", c);
+    ok(!agent.allowed && agent.reason === "not_own_stock",
+      `ORIGIN goods out with an agent are NOT own stock, receipt or not (${JSON.stringify(agent)})`);
+
+    ok(!evaluatePriceEligibility("", c).allowed, "ORIGIN an empty id is never eligible");
+    ok(!evaluatePriceEligibility("p-does-not-exist", c).allowed, "ORIGIN an unknown item is never eligible");
+
+    // NEGATIVKONTROLLE der alten, falschen Regel: haenge man die Berechtigung wieder an die
+    // Upload-Quittung, waere der Desktop-Artikel gesperrt — genau der Fehler, der hier behoben wird.
+    const receiptCount = c("SELECT COUNT(*) AS c FROM mobile_upload_receipts WHERE product_id = ?", ["p-desktop"]);
+    ok(receiptCount === 0, "NEGATIVE CONTROL the desktop item really has no upload receipt…");
+    ok(evaluatePriceEligibility("p-desktop", c).allowed,
+      "NEGATIVE CONTROL …and is eligible anyway — the old receipt condition would have refused it");
+  }
   // JEDE Relation sperrt — einzeln geprueft, damit keine vergessen werden kann.
   for (const table of TRANSACTION_RELATIONS) {
     const db = newDb(SQL);
@@ -171,10 +190,10 @@ async function main(): Promise<void> {
   ok(touchesPriceColumns([['notes', 'x']]) === false, 'RULE a text-only patch does not touch the price rule');
   ok(touchesPriceColumns([['notes', 'x'], ['min_sale_price', 1]]) === true, 'RULE a patch containing one price does');
 
-  // ── A: der erlaubte Fall, durch den ECHTEN Koordinator ───────────────────
+  // ── A: der erlaubte Fall, durch den ECHTEN Koordinator — OHNE Quittung ───
   {
     const db = newDb(SQL);
-    addProduct(db, 'p-1', { receipt: true });
+    addProduct(db, 'p-1', { receipt: false });   // Desktop-Collection: kein Mobile-Receipt
     const co = new MediaDbCoordinator(db as never, new UnusedGateway());
     const before = priceRow(db, 'p-1');
     co.applyProductTextEditDurably({

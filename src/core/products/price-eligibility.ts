@@ -4,23 +4,33 @@
 // Zwei Bedingungen, beide ueber ECHTE Relationen, keine aus SKU, Datum, Preis, Kategorie oder Name
 // geratene Herkunft:
 //
-//   A — HERKUNFT, positiv bewiesen. `mobile_upload_receipts` traegt genau dann eine Zeile fuer ein
-//       Produkt, wenn es ueber die mobile Collection-Aufnahme entstanden ist: die Quittung wird
-//       ausschliesslich von `createProductWithMedia` geschrieben, und zwar in DEMSELBEN durablen
-//       Checkpoint wie die Produktzeile. Kein anderer Erzeugungsweg schreibt sie. Ein Produkt vom
-//       Desktop, aus einem Import, aus einer Produktion oder aus einer Migration hat sie nicht — und
-//       ist damit hier NICHT berechtigt. Das ist bewusst streng: fuer diese Wege gibt es keinen
-//       Herkunftsbeweis im Schema, und Raten waere schlechter als Ablehnen.
+//   A — EIGENER, FREIER BESTAND. `products.source_type` ist eine echte Domaenen-Klassifikation, kein
+//       geratenes Herkunftsmerkmal: `agentStore` setzt `AGENT`, wenn ein Stueck zu einem Agenten
+//       geht, und `OWN` zurueck, wenn es zurueckkommt; `consignmentStore` setzt `CONSIGNMENT` und
+//       ebenfalls `OWN` beim Teardown. `OWN` heisst also: der Laden fuehrt das Stueck als eigenen
+//       Bestand, es gehoert niemandem sonst.
+//
+//       Ausdruecklich NICHT Teil dieser Bedingung: WIE der Artikel angelegt wurde. Ein am Desktop in
+//       Collection erfasstes Stueck hat dieselben Preisrechte wie ein ueber das Handy erfasstes, und
+//       ein alter, importierter oder migrierter Artikel wird nicht deshalb gesperrt, weil seine
+//       technische Herkunft unbekannt ist. `mobile_upload_receipts` beweist nur "kam ueber den
+//       mobilen Create" — das ist keine fachliche Berechtigung und darf keine sein.
 //
 //   B — KEINE GESCHAEFTLICHE VERKNUEPFUNG. Sobald der Artikel Teil eines Einkaufs, Verkaufs,
 //       Angebots, Auftrags, einer Kommission, einer Uebergabe an einen Agenten, einer Retoure, einer
 //       Produktion, einer Reparatur oder eines Bestands-Lots ist, sind die drei Preise gesperrt.
+//       Das ist die eigentliche Sicherheitsgrenze.
 //
 // Was ABSICHTLICH nicht sperrt:
 //   • `inventory_session_items` — eine Inventurzaehlung ist eine Beobachtung, kein Geschaeftsvorgang.
-//     Wer seinen Bestand zaehlt, soll danach nicht plotzlich keine Preise mehr korrigieren koennen.
-//   • `mobile_upload_receipts` — das IST der Herkunftsnachweis aus A; er wuerde sonst jeden mobil
-//     angelegten Artikel sofort selbst sperren.
+//     Wer seinen Bestand zaehlt, soll danach nicht ploetzlich keine Preise mehr korrigieren koennen.
+//   • `mobile_upload_receipts` — eine technische Upload-Quittung fuer Replay und Idempotenz. Sie sagt
+//     nichts ueber eine geschaeftliche Bindung aus, weder in die eine noch in die andere Richtung.
+//
+// Indirekte Bindungen sind mitgedeckt, ohne Sonderregel: Zahlungen, Gutschriften, Rechnungs-Edits,
+// Einkaufs- und Verkaufsretouren haengen an einer Rechnung oder einem Einkauf, nie direkt am Produkt
+// — und deren Zeilen (`invoice_lines`, `purchase_lines`, `sales_return_lines`,
+// `purchase_return_lines`) tragen den Produktbezug und stehen unten in der Liste.
 //
 // Diese Datei ist die EINE Definition. Der Koordinator prueft sie INNERHALB der Schreib-Transaktion
 // (verbindlich), die Verdrahtung nutzt sie fuer eine fruehe, freundliche Ablehnung, und der
@@ -57,7 +67,10 @@ export type CountFn = (sql: string, params: unknown[]) => number;
 
 export type PriceEligibility =
   | { allowed: true }
-  | { allowed: false; reason: 'not_collection_origin' | 'has_transaction'; relation?: string };
+  | { allowed: false; reason: 'not_own_stock' | 'has_transaction'; relation?: string };
+
+/** Eine einzelne Textspalte lesen — fuer `source_type`. */
+export type ValueFn = (sql: string, params: unknown[]) => string | null;
 
 /**
  * Die Entscheidung. Fail closed in jeder Richtung: eine Abfrage, die nicht beantwortet werden kann,
@@ -65,10 +78,13 @@ export type PriceEligibility =
  * freizugeben nicht.
  */
 export function evaluatePriceEligibility(productId: string, count: CountFn): PriceEligibility {
-  if (!productId) return { allowed: false, reason: 'not_collection_origin' };
+  if (!productId) return { allowed: false, reason: 'not_own_stock' };
 
-  const receipts = safeCount(count, 'SELECT COUNT(*) AS c FROM mobile_upload_receipts WHERE product_id = ?', [productId]);
-  if (receipts <= 0) return { allowed: false, reason: 'not_collection_origin' };
+  // A — eigener, freier Bestand. Gezaehlt statt gelesen, damit dieselbe eine Abfrage-Funktion reicht:
+  // genau eine Zeile mit `source_type='OWN'` heisst "existiert UND gehoert uns". Ein unbekanntes
+  // Produkt liefert 0, ein Lesefehler -1 — beides sperrt.
+  const own = safeCount(count, "SELECT COUNT(*) AS c FROM products WHERE id = ? AND source_type = 'OWN'", [productId]);
+  if (own !== 1) return { allowed: false, reason: 'not_own_stock' };
 
   for (const table of TRANSACTION_RELATIONS) {
     const n = safeCount(count, `SELECT COUNT(*) AS c FROM ${table} WHERE product_id = ?`, [productId]);

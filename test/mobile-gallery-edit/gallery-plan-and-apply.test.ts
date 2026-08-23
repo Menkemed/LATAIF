@@ -109,12 +109,13 @@ function newDb(SQL: { Database: new () => never }): never {
   run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   for (const t of Object.values(MEDIA_ENTITY_SCOPE)) run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
   run(`ALTER TABLE products ADD COLUMN images TEXT DEFAULT '[]'`);
-  for (const c of ['brand', 'name', 'category_id', 'sku', 'attributes', 'updated_at', 'image_hash', 'image_description', 'image_embedding', 'scope_of_delivery']) run(`ALTER TABLE products ADD COLUMN ${c} TEXT`);
+  for (const c of ['brand', 'name', 'category_id', 'sku', 'attributes', 'updated_at', 'image_hash', 'image_description', 'image_embedding', 'scope_of_delivery', 'source_type']) run(`ALTER TABLE products ADD COLUMN ${c} TEXT`);
   run(`CREATE TABLE sync_changelog (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT, action TEXT)`);
   run(`CREATE TABLE audit_log (id TEXT PRIMARY KEY, branch_id TEXT, module TEXT, entity_type TEXT, entity_id TEXT, action_type TEXT, field_name TEXT, old_value TEXT, new_value TEXT, changed_by TEXT, changed_at TEXT)`);
   run(`INSERT INTO tenants (id) VALUES ('${TENANT}')`);
   run(`INSERT INTO branches (id, tenant_id) VALUES ('${BRANCH}','${TENANT}')`);
-  run(`INSERT INTO products (id, branch_id, tenant_id, images) VALUES ('${PRODUCT}','${BRANCH}','${TENANT}','[]')`);
+  // `source_type='OWN'` = eigener freier Bestand; das ist Bedingung A der Preisregel.
+  run(`INSERT INTO products (id, branch_id, tenant_id, images, source_type) VALUES ('${PRODUCT}','${BRANCH}','${TENANT}','[]','OWN')`);
   // v0.8.48 — fuer den gemischten Save mit Preis: die Herkunftsquittung und die Relationen, an
   // denen die Preisberechtigung haengt. Ohne sie waere jeder Preis hier ohnehin gesperrt.
   for (const c of ['purchase_price', 'planned_sale_price', 'min_sale_price']) run(`ALTER TABLE products ADD COLUMN ${c} REAL`);
