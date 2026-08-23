@@ -28,7 +28,7 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
           brand TEXT, name TEXT, sku TEXT, condition TEXT, scope_of_delivery TEXT,
           storage_location TEXT, purchase_price REAL, planned_sale_price REAL,
           min_sale_price REAL, max_sale_price REAL, stock_status TEXT,
-          images TEXT, attributes TEXT, quantity INTEGER, notes TEXT
+          images TEXT, attributes TEXT, quantity INTEGER, notes TEXT, source_type TEXT
         );
         INSERT INTO tenants VALUES ('t-1');
         INSERT INTO branches VALUES ('b-1','t-1'), ('b-other','t-1');
@@ -46,6 +46,26 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
           ('p-nosku','b-1','cat-watch','Ebel',NULL,NULL,'in_stock','[]','{}',1,'wrong shelf'),
           ('p-elsewhere','b-other','cat-watch','Rolex','Datejust 41','RLX-DJ41-999','in_stock','[]',
            '{"serial_number":"785757575"}',1,NULL);
+
+        -- v0.8.48 — der reale Ausgangszustand: eigener, freier Bestand.
+        UPDATE products SET source_type = 'OWN';
+
+        -- Die Relationen, an denen die Preissperre haengt, leer angelegt. Erst eine eingefuegte
+        -- Zeile macht aus einem freien Artikel einen gebundenen — genau so entsteht die Sperre
+        -- auch in der echten Datenbank.
+        CREATE TABLE purchase_lines (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE purchase_return_lines (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE invoice_lines (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE sales_return_lines (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE offer_lines (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE orders (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE order_lines (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE stock_lots (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE consignments (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE agent_transfers (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE production_inputs (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE production_outputs (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE repairs (id TEXT PRIMARY KEY, product_id TEXT);
         "#,
     )
     .unwrap();
@@ -386,4 +406,177 @@ fn the_shared_baseline_vector_is_stable() {
         "4ede7717390d74cb4b3818fe48f6ddf7e20f3d956bfdbf5fbf1cac08f4f0b8e3",
         "canonical input: lnk-a:med-a:0:1|lnk-b:med-b:1:0"
     );
+}
+
+// ── v0.8.48 — die Preissperre erklaert sich selbst ─────────────────────────
+//
+// Die Seite zeigt die drei Preisfelder IMMER; gesperrt sind sie sichtbar gesperrt, mit dem Grund
+// daneben. Damit dieser Grund stimmt, muss der Lesevertrag ihn liefern — und er darf ihn nur dann
+// nennen, wenn er ihn sicher kennt. Verbindlich bleibt die Pruefung im Koordinator, INNERHALB der
+// Schreib-Transaktion; hier steht ausschliesslich die Anzeige auf dem Pruefstand.
+
+/// (freigegeben, Grund, Detail) — fehlende Felder werden zu leeren Zeichenketten, damit ein
+/// vergessenes Feld nicht als "kein Grund" durchgeht, sondern sichtbar wird.
+fn verdict(db: &std::path::Path, id: &str) -> (bool, String, String) {
+    let p = by_id(db, "t-1", "b-1", id).expect("the item is readable");
+    (
+        p["price_editable"].as_bool().unwrap_or(false),
+        p.get("price_lock_reason").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        p.get("price_lock_detail").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    )
+}
+
+/// REGRESSION: die Auskunft wurde berechnet, aber nie mitgeschickt. Die Seite fragt
+/// `p.price_editable === true` — ein Feld, das gar nicht existiert, ist nie wahr, also blieben die
+/// Preisfelder selbst bei einem voellig freien Artikel unsichtbar. Der Vertrag muss sie tragen.
+#[test]
+fn the_read_contract_actually_carries_the_price_verdict() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    let p = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
+    assert!(
+        p.get("price_editable").is_some(),
+        "without this field the phone can never offer a price — it asks for exactly this key"
+    );
+    let mut hits = search(&db, "t-1", "b-1", "RLX-DJ41-002", 5);
+    assert_eq!(hits.len(), 1);
+    let hit = hits.remove(0);
+    assert_eq!(
+        hit["price_editable"], p["price_editable"],
+        "search hit and detail read must agree — otherwise the screen changes its mind on open"
+    );
+}
+
+#[test]
+fn a_free_own_item_is_released_and_names_no_reason() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    let (editable, reason, detail) = verdict(&db, "p-dj41");
+    assert!(editable, "own, unsold stock may still be priced");
+    assert_eq!(reason, "", "nothing is locked, so nothing is explained away");
+    assert_eq!(detail, "");
+}
+
+/// Jede einzelne Relation nennt sich selbst. Das ist der Kern der Anzeige: "gesperrt" allein hilft
+/// niemandem, "linked to Invoice" schon.
+#[test]
+fn every_business_relation_names_itself_as_the_reason() {
+    for (table, label) in PRICE_LOCK_RELATIONS {
+        let d = tmp_dir();
+        let db = fixture(&d);
+        Connection::open(&db)
+            .unwrap()
+            .execute(&format!("INSERT INTO {table} (id, product_id) VALUES ('x-1', 'p-dj41')"), [])
+            .unwrap();
+        let (editable, reason, detail) = verdict(&db, "p-dj41");
+        assert!(!editable, "{table} must lock the prices");
+        assert_eq!(reason, "linked", "{table} is a business link");
+        assert_eq!(detail, label, "{table} must be named as {label}");
+    }
+}
+
+/// Und die vier, die der Nutzer tatsaechlich zu sehen bekommt, buchstabiert ausgeschrieben.
+#[test]
+fn the_common_reasons_read_the_way_the_screen_shows_them() {
+    for (table, expected) in [
+        ("invoice_lines", "Invoice"),
+        ("purchase_lines", "Purchase"),
+        ("stock_lots", "Stock lot"),
+        ("consignments", "Consignment"),
+    ] {
+        let d = tmp_dir();
+        let db = fixture(&d);
+        Connection::open(&db)
+            .unwrap()
+            .execute(&format!("INSERT INTO {table} (id, product_id) VALUES ('x-1', 'p-dj41')"), [])
+            .unwrap();
+        assert_eq!(verdict(&db, "p-dj41"), (false, "linked".to_string(), expected.to_string()));
+    }
+}
+
+/// Fremde Ware ist kein Vorgang, sondern eine Eigentumsfrage — und wird auch so benannt, statt ein
+/// Dokument zu erfinden, das es nicht gibt.
+#[test]
+fn consignment_and_agent_stock_say_so_instead_of_naming_a_document() {
+    for (source, label) in [("CONSIGNMENT", "Consignment"), ("AGENT", "Agent")] {
+        let d = tmp_dir();
+        let db = fixture(&d);
+        Connection::open(&db)
+            .unwrap()
+            .execute("UPDATE products SET source_type = ?1 WHERE id = 'p-dj41'", rusqlite::params![source])
+            .unwrap();
+        let (editable, reason, detail) = verdict(&db, "p-dj41");
+        assert!(!editable, "{source} is not our own free stock");
+        assert_eq!(reason, "not_own_stock");
+        assert_eq!(detail, label);
+    }
+}
+
+/// Der wichtigste Fall: gesperrt, aber der Grund ist NICHT sicher. Dann wird keiner behauptet.
+#[test]
+fn an_unclear_state_locks_without_inventing_a_reason() {
+    // (a) eine Klasse, die diese Anzeige nicht kennt
+    let d = tmp_dir();
+    let db = fixture(&d);
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE products SET source_type = 'SOMETHING_NEW' WHERE id = 'p-dj41'", [])
+        .unwrap();
+    assert_eq!(verdict(&db, "p-dj41"), (false, "unknown".to_string(), String::new()));
+
+    // (b) gar keine Klasse
+    let d = tmp_dir();
+    let db = fixture(&d);
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE products SET source_type = NULL WHERE id = 'p-dj41'", [])
+        .unwrap();
+    assert_eq!(verdict(&db, "p-dj41"), (false, "unknown".to_string(), String::new()));
+
+    // (c) eine Relation, die sich nicht lesen laesst. Das sperrt — aber es ist KEIN Beleg fuer eine
+    // Verknuepfung und wird deshalb auch nicht als eine ausgegeben.
+    let d = tmp_dir();
+    let db = fixture(&d);
+    Connection::open(&db).unwrap().execute("DROP TABLE stock_lots", []).unwrap();
+    let (editable, reason, detail) = verdict(&db, "p-dj41");
+    assert!(!editable, "an unreadable relation must fail closed");
+    assert_eq!(reason, "unknown", "a failed read is not evidence of a link");
+    assert_eq!(detail, "");
+}
+
+/// Die erste gefundene Bindung gewinnt, und sie gewinnt vor jeder spaeteren — die Anzeige nennt
+/// genau einen Grund, nicht eine Liste.
+#[test]
+fn the_first_binding_found_is_the_one_shown() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("INSERT INTO invoice_lines (id, product_id) VALUES ('i-1','p-dj41')", []).unwrap();
+    conn.execute("INSERT INTO repairs (id, product_id) VALUES ('r-1','p-dj41')", []).unwrap();
+    let (_, reason, detail) = verdict(&db, "p-dj41");
+    assert_eq!(reason, "linked");
+    assert!(!detail.is_empty(), "one named reason, never an empty one");
+}
+
+/// ANTI-DRIFT: die Tabellen, ueber die die ANZEIGE entscheidet, muessen exakt die sein, ueber die
+/// der Koordinator VERBINDLICH entscheidet. Liefen sie auseinander, wuerde die Seite ein Feld
+/// freigeben, das der Desktop danach ablehnt — oder umgekehrt eines sperren, das erlaubt waere.
+#[test]
+fn the_displayed_lock_list_matches_the_authoritative_one() {
+    let ts = include_str!("../../../src/core/products/price-eligibility.ts");
+    let block = ts
+        .split("TRANSACTION_RELATIONS: readonly string[] = [")
+        .nth(1)
+        .expect("the SSOT still declares TRANSACTION_RELATIONS")
+        .split("];")
+        .next()
+        .unwrap();
+    let mut from_ts: Vec<&str> = block.split('\'').skip(1).step_by(2).collect();
+    let mut from_rust: Vec<&str> = PRICE_LOCK_RELATIONS.iter().map(|(t, _)| *t).collect();
+    from_ts.sort_unstable();
+    from_rust.sort_unstable();
+    assert_eq!(from_ts, from_rust, "display and authority must lock on exactly the same relations");
+    for (table, label) in PRICE_LOCK_RELATIONS {
+        assert!(!label.is_empty(), "{table} needs a name a human can read");
+    }
 }

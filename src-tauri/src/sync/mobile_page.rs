@@ -722,9 +722,12 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         // beim Anlegen; hier steht nur die Huelle, gefuellt wird sie zur Laufzeit.
         +   '<div id="peAttrs"></div>'
         +   '<div class="row hidden" id="peScopeRow"><label>Included</label><div id="peScope" class="chips"></div></div>'
-        // Die Preise erscheinen nur, wenn der Artikel sie ueberhaupt noch aendern darf. Verbindlich
-        // entscheidet das der Desktop beim Anwenden — das hier ist die Anzeige dazu.
-        +   '<div id="pePrices" class="hidden">'
+        // Die Preise sind IMMER sichtbar. Darf der Artikel sie nicht mehr aendern, stehen sie
+        // gesperrt da — mit dem aktuellen Wert und dem Grund daneben. Ein Feld, das einfach fehlt,
+        // erklaert nichts; eines, das sichtbar gesperrt ist, schon. Verbindlich entscheidet die
+        // Sperre weiterhin der Desktop beim Anwenden — das hier ist reine Anzeige.
+        +   '<div id="pePrices">'
+        +     '<div id="pePriceLock" class="hidden" style="color:#C8A96A; font-size:12px; line-height:1.5; margin:12px 0 2px;"></div>'
         +     '<div class="row"><label>Purchase price (BHD)</label><input id="pePurchasePrice" type="number" inputmode="decimal" step="any" min="0" /></div>'
         +     '<div class="row"><label>Sale price (BHD)</label><input id="peSalePrice" type="number" inputmode="decimal" step="any" min="0" /></div>'
         +     '<div class="row"><label>Minimum sale price (BHD)</label><input id="peMinSalePrice" type="number" inputmode="decimal" step="any" min="0" /></div>'
@@ -951,6 +954,15 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const origAttrs = (function () { try { return typeof p.attributes === 'string' ? JSON.parse(p.attributes || '{}') : (p.attributes || {}); } catch (_) { return {}; } })();
     const origScope = (function () { try { return typeof p.scope_of_delivery === 'string' ? JSON.parse(p.scope_of_delivery || '[]') : (p.scope_of_delivery || []); } catch (_) { return []; } })();
     const priceEditable = p.price_editable === true;
+    // Der Hinweis unter der Sperre. Benannt wird ein Grund NUR, wenn der Lesevertrag ihn sicher
+    // kennt — `unknown` bleibt bewusst allgemein, statt einen plausiblen Grund zu erfinden.
+    const priceLockText = (function () {
+      const d = typeof p.price_lock_detail === 'string' ? p.price_lock_detail : '';
+      if (p.price_lock_reason === 'linked' && d) return '\uD83D\uDD12 Price editing locked \u2014 linked to ' + d + '.';
+      if (p.price_lock_reason === 'not_own_stock' && d === 'Consignment') return '\uD83D\uDD12 Price editing locked \u2014 consignment stock, the price belongs to the consignor.';
+      if (p.price_lock_reason === 'not_own_stock' && d === 'Agent') return '\uD83D\uDD12 Price editing locked \u2014 this piece is out with an agent.';
+      return '\uD83D\uDD12 Price editing locked for this item.';
+    })();
     const PRICE_FIELDS = [['pePurchasePrice', 'purchase_price', 'purchasePrice'], ['peSalePrice', 'planned_sale_price', 'plannedSalePrice'], ['peMinSalePrice', 'min_sale_price', 'minSalePrice']];
     const peScopeState = new Set();
 
@@ -985,8 +997,18 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           }
         } else { scopeRow.classList.add('hidden'); }
       }
-      const pricesBox = $('pePrices');
-      if (pricesBox) pricesBox.classList.toggle('hidden', !priceEditable);
+      // Sichtbar in beiden Faellen — gesperrt heisst `disabled` plus Begruendung, nicht `hidden`.
+      // Die uebrigen erlaubten Felder bleiben davon voellig unberuehrt.
+      const lockNote = $('pePriceLock');
+      if (lockNote) {
+        lockNote.textContent = priceEditable ? '' : priceLockText;
+        lockNote.classList.toggle('hidden', priceEditable);
+      }
+      for (const pf of PRICE_FIELDS) {
+        const e = $(pf[0]); if (!e) continue;
+        e.disabled = !priceEditable;
+        e.style.opacity = priceEditable ? '' : '.55';
+      }
     }
 
     /** Alle Felder auf den Ausgangsstand zuruecksetzen — Text, Attribute, Lieferumfang, Preise. */

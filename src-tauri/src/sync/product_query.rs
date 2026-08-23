@@ -93,6 +93,13 @@ fn enrich(conn: &Connection, tenant_id: &str, product: &mut serde_json::Value) {
 
     let Some(product_id) = product.get("id").and_then(|v| v.as_str()).map(str::to_string) else { return };
 
+    // v0.8.48 — die Auskunft zur Preissperre gehoert an JEDES Produkt-JSON, das die Seite je zu
+    // sehen bekommt. Ohne diesen Aufruf blieb `price_editable` schlicht aus: die Seite fragt
+    // `p.price_editable === true`, und was nie mitgeschickt wird, ist nie wahr — die Preisfelder
+    // erschienen damit auch bei einem voellig freien Artikel nicht. Verbindlich entscheidet
+    // weiterhin der Koordinator INNERHALB der Schreib-Transaktion; das hier ist die Anzeige dazu.
+    attach_price_verdict(conn, &product_id, product);
+
     // Primary first, then gallery order — the same ordering the desktop resolver uses, so the
     // photo on the phone is the photo on the desktop.
     let master: Option<String> = conn
@@ -241,7 +248,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 const SCOPE_JOIN: &str = "FROM products p JOIN branches b ON b.id = p.branch_id AND b.tenant_id = ?1 \
      WHERE p.branch_id = ?2";
 
-/// v0.8.48 — darf die Bedienoberflaeche fuer diesen Artikel Preisfelder anbieten?
+/// v0.8.48 — darf die Bedienoberflaeche die Preisfelder dieses Artikels FREIGEBEN, und wenn nicht: warum?
 ///
 /// Das ist eine ANZEIGE-Auskunft, keine Freigabe: verbindlich entscheidet der Koordinator INNERHALB
 /// der Schreib-Transaktion. Beide stellen dieselben zwei Fragen, und zwar ueber echte Relationen,
@@ -257,29 +264,88 @@ const SCOPE_JOIN: &str = "FROM products p JOIN branches b ON b.id = p.branch_id 
 /// Bewusst NICHT dabei: `inventory_session_items` (eine Zaehlung ist kein Vorgang) und
 /// `mobile_upload_receipts` (eine technische Upload-Quittung, keine geschaeftliche Bindung).
 /// Die Liste spiegelt `TRANSACTION_RELATIONS` in `src/core/products/price-eligibility.ts`.
-/// Fehlschlaege werden zu `false` — ein Feld nicht anzubieten ist immer sicher.
-const PRICE_LOCK_RELATIONS: [&str; 13] = [
-    "purchase_lines", "purchase_return_lines", "invoice_lines", "sales_return_lines",
-    "offer_lines", "orders", "order_lines", "stock_lots", "consignments", "agent_transfers",
-    "production_inputs", "production_outputs", "repairs",
+/// Fehlschlaege sperren — ein Feld nicht freizugeben ist immer sicher. Sichtbar bleiben die Felder
+/// trotzdem: der Nutzer sieht den Preis und daneben den Grund, warum er ihn hier nicht aendert.
+const PRICE_LOCK_RELATIONS: [(&str, &str); 13] = [
+    ("purchase_lines", "Purchase"),
+    ("purchase_return_lines", "Purchase return"),
+    ("invoice_lines", "Invoice"),
+    ("sales_return_lines", "Sales return"),
+    ("offer_lines", "Offer"),
+    ("orders", "Order"),
+    ("order_lines", "Order"),
+    ("stock_lots", "Stock lot"),
+    ("consignments", "Consignment"),
+    ("agent_transfers", "Agent transfer"),
+    ("production_inputs", "Production"),
+    ("production_outputs", "Production"),
+    ("repairs", "Repair"),
 ];
 
-fn price_editable(conn: &Connection, product_id: &str) -> bool {
-    let count = |sql: &str| -> i64 {
-        conn.query_row(sql, rusqlite::params![product_id], |r| r.get::<_, i64>(0)).unwrap_or(-1)
-    };
-    // A — eigener, freier Bestand (und der Artikel existiert ueberhaupt).
-    if count("SELECT COUNT(*) FROM products WHERE id = ?1 AND source_type = 'OWN'") != 1 {
-        return false;
+/// Das Ergebnis dieser Auskunft. `Unknown` ist ausdruecklich kein Sammelbecken, sondern eine eigene
+/// Aussage: "gesperrt, aber der Grund ist NICHT sicher bekannt" — dann nennt die Seite auch keinen.
+/// Einen falschen Grund zu behaupten waere schlimmer als gar keinen.
+enum PriceVerdict {
+    Editable,
+    /// Haengt an einem Geschaeftsvorgang; der Wert ist dessen Anzeigename.
+    Linked(&'static str),
+    /// Gehoert nicht zum eigenen freien Bestand; der Wert ist die erkannte Klasse.
+    NotOwnStock(&'static str),
+    Unknown,
+}
+
+fn price_verdict(conn: &Connection, product_id: &str) -> PriceVerdict {
+    // A — eigener, freier Bestand. Gelesen wird die echte Spalte. Ein fehlender Datensatz, ein
+    // NULL-Wert oder eine Klasse, die diese Anzeige nicht kennt, sperrt OHNE Begruendung.
+    match conn.query_row(
+        "SELECT source_type FROM products WHERE id = ?1",
+        rusqlite::params![product_id],
+        |r| r.get::<_, Option<String>>(0),
+    ) {
+        Ok(Some(s)) if s == "OWN" => {}
+        Ok(Some(s)) if s == "CONSIGNMENT" => return PriceVerdict::NotOwnStock("Consignment"),
+        Ok(Some(s)) if s == "AGENT" => return PriceVerdict::NotOwnStock("Agent"),
+        _ => return PriceVerdict::Unknown,
     }
-    // B — keine einzige geschaeftliche Verknuepfung. `-1` (nicht lesbar) sperrt ebenfalls.
-    for table in PRICE_LOCK_RELATIONS {
-        if count(&format!("SELECT COUNT(*) FROM {table} WHERE product_id = ?1")) != 0 {
-            return false;
+    // B — keine einzige geschaeftliche Verknuepfung. `-1` heisst "nicht lesbar": das sperrt
+    // ebenfalls, ist aber kein Beleg fuer eine Verknuepfung und wird deshalb auch nicht als einer
+    // ausgegeben.
+    for (table, label) in PRICE_LOCK_RELATIONS {
+        match conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE product_id = ?1"),
+                rusqlite::params![product_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(-1)
+        {
+            0 => {}
+            n if n > 0 => return PriceVerdict::Linked(label),
+            _ => return PriceVerdict::Unknown,
         }
     }
-    true
+    PriceVerdict::Editable
 }
+
+/// Die Auskunft in das Produkt-JSON schreiben: immer genau ein `price_editable`, und einen Grund
+/// nur dann, wenn er sicher ist. Die Seite zeigt die drei Preisfelder daraufhin sichtbar, aber
+/// gesperrt, mit genau diesem Grund als Hinweis.
+fn attach_price_verdict(conn: &Connection, product_id: &str, product: &mut serde_json::Value) {
+    let (editable, reason, detail) = match price_verdict(conn, product_id) {
+        PriceVerdict::Editable => (true, None, None),
+        PriceVerdict::Linked(l) => (false, Some("linked"), Some(l)),
+        PriceVerdict::NotOwnStock(l) => (false, Some("not_own_stock"), Some(l)),
+        PriceVerdict::Unknown => (false, Some("unknown"), None),
+    };
+    product["price_editable"] = serde_json::Value::Bool(editable);
+    if let Some(r) = reason {
+        product["price_lock_reason"] = serde_json::Value::String(r.to_string());
+    }
+    if let Some(d) = detail {
+        product["price_lock_detail"] = serde_json::Value::String(d.to_string());
+    }
+}
+
 pub fn by_sku(
     db_path: &std::path::Path,
     tenant_id: &str,
