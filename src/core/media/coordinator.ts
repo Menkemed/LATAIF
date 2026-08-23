@@ -13,6 +13,7 @@
 // in a later slice.
 // ════════════════════════════════════════════════════════════════════════════
 
+import { evaluatePriceEligibility, touchesPriceColumns } from '../products/price-eligibility.ts';
 import {
   blobIdFor,
   dedupTokenFor,
@@ -148,6 +149,10 @@ export interface ProductEditIntent {
   invalidateImageDerived: boolean;
   /** Emit the one durable sync changelog row (skipped when sync is off). */
   withSync: boolean;
+  /** v0.8.48 — nur der mobile Edit setzt das. Traegt der Patch dann einen der drei Preise, wird die
+   *  Berechtigung INNERHALB dieser Transaktion geprueft, unmittelbar bevor geschrieben wird. Der
+   *  Desktop laesst das Feld weg und unterliegt der Regel nicht. */
+  priceEligibilityRequired?: boolean;
   /** One audit row for the whole edit. */
   audit: { module: string; changedBy: string | null; newValueJson: string };
 }
@@ -1221,6 +1226,19 @@ export class MediaDbCoordinator {
    *  structurally (the media edit path), and the product-text-only path
    *  (`applyProductTextEditDurably`) hands in the same three fields directly. */
   private applyProductEditInTx(ctx: { entityId: string; branchId: string | null; batchId: string }, pe: ProductEditIntent, now: string): void {
+    // v0.8.48 §6 — die verbindliche Preisberechtigung. Sie wird HIER geprueft, in derselben
+    // Transaktion, in der der UPDATE laeuft: zwischen einer frueheren Pruefung und dem Schreiben
+    // koennte sonst ein Verkauf, ein Einkauf oder ein Lot entstehen, und der Preis wuerde an einem
+    // Artikel geaendert, der inzwischen an einem Geschaeftsvorgang haengt.
+    if (pe.priceEligibilityRequired && touchesPriceColumns(pe.set)) {
+      const verdict = evaluatePriceEligibility(ctx.entityId, (sql, params) => {
+        const rows = this.db.exec(sql, params as unknown[]);
+        return rows.length && rows[0].values.length ? Number(rows[0].values[0][0]) : -1;
+      });
+      if (!verdict.allowed) {
+        throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MOBILE_PRICE_NOT_ELIGIBLE');
+      }
+    }
     const parts: string[] = pe.set.map(([c]) => `${c} = ?`);
     const vals: unknown[] = pe.set.map(([, v]) => v);
     if (pe.invalidateImageDerived) parts.push('image_hash = NULL', 'image_description = NULL', 'image_embedding = NULL');

@@ -360,7 +360,7 @@ interface ProductStore {
    * cannot be lost by a pure text save. The gallery reconciliation lives ONLY in
    * editProductWithMedia and runs ONLY when the user actually edited images.
    */
-  editProductTextDurably: (id: string, data: Partial<Product>) => Promise<EditProductResult>;
+  editProductTextDurably: (id: string, data: Partial<Product>, opts?: { priceEligibilityRequired?: boolean }) => Promise<EditProductResult>;
   updateProduct: (id: string, data: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
@@ -1057,7 +1057,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     return { status: 'edited', batchId };
   },
 
-  editProductTextDurably: async (id, data) => {
+  editProductTextDurably: async (id, data, opts) => {
     // MEDIA-EDIT-PRESERVE — the save path when the user changed NO image. It
     // diffs only the whitelisted product columns and applies them through the
     // durable coordinator WITHOUT any gallery reconciliation, so a mobile
@@ -1080,6 +1080,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // fields (hash/description/embedding) stay valid — never invalidated here.
       invalidateImageDerived: false,
       withSync: isSyncConfigured(),
+      // v0.8.48 — nur der mobile Edit verlangt die Preisberechtigung; der Desktop laesst das Feld
+      // weg und unterliegt der Regel nicht. Geprueft wird sie im Koordinator, in der Transaktion.
+      ...(opts?.priceEligibilityRequired ? { priceEligibilityRequired: true } : {}),
       audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify(Object.fromEntries(textDiff.set)) },
     };
     // A fresh batch id per save: a text edit stages nothing in Rust, so there is

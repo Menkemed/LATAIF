@@ -25,6 +25,7 @@ import { diffProductText } from '@/core/media/product-edit-draft';
 import { isSyncConfigured } from '@/core/sync/sync-service';
 import type { ProductEditIntent } from '@/core/media/coordinator';
 import type { CurrentProductState } from '@/core/media/mobile-product-patch';
+import { evaluatePriceEligibility } from '@/core/products/price-eligibility';
 import { useProductStore, buildProductEditColumns } from '@/stores/productStore';
 import {
   createTauriMobileUploadBridge, triggerMobileUploadDrainSafe, canonicalProductMetadataHash, MaterializeError,
@@ -234,7 +235,7 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
     // Desktop-Textedit: `editProductTextDurably` diffed die freigegebenen Spalten, wendet sie in
     // einer Transaktion an und ruehrt `media_links` nicht an. Keine zweite Merge-Semantik.
     applyTextEdit: async (entityId, patch) => {
-      const res = await useProductStore.getState().editProductTextDurably(entityId, patch as Record<string, never>);
+      const res = await useProductStore.getState().editProductTextDurably(entityId, patch as Record<string, never>, { priceEligibilityRequired: true });
       return res.status === 'edited'
         ? { ok: true }
         : { ok: false, errorCode: (res as { errorCode?: string }).errorCode ?? res.status };
@@ -265,27 +266,15 @@ function readProductState(productId: string): CurrentProductState | null {
 }
 
 /**
- * Darf dieser Artikel seine Preise noch vom Handy aus geaendert bekommen?
- *
- * Die Frage ist nicht "wurde er ueber Collection angelegt", sondern die belastbarere: gibt es fuer
- * ihn IRGENDEINEN Beschaffungs- oder Kostenbeleg? Solange keine Einkaufszeile und kein Lot
- * existieren und er Eigenbestand ist, ist `products.purchase_price` die einzige Kostengrundlage —
- * eine Korrektur schreibt dann nichts um. Sobald ein Lot da ist, rechnet die Bewertung mit dessen
- * `unit_cost`, und Einkaeufe, Rechnungen und Buchungen fuehren ohnehin ihre eigenen eingefrorenen
- * Werte. Geprueft werden echte Relationen, nicht SKU, Datum oder Kategorie.
+ * Fruehe, freundliche Ablehnung fuer die Verdrahtung — dieselbe Definition, die auch der
+ * Koordinator benutzt. VERBINDLICH ist die Pruefung dort, innerhalb der Schreib-Transaktion; hier
+ * wird nur vermieden, dass ein aussichtsloser Job ueberhaupt bis dahin laeuft.
  */
 function priceEditAllowed(productId: string): boolean {
-  const one = (sql: string): number => {
-    const rows = query(sql, [productId]);
-    return rows.length > 0 ? Number((rows[0] as Record<string, unknown>).c ?? 0) : -1;
-  };
-  const lines = one('SELECT COUNT(*) AS c FROM purchase_lines WHERE product_id = ?');
-  const lots = one('SELECT COUNT(*) AS c FROM stock_lots WHERE product_id = ?');
-  const own = query("SELECT source_type FROM products WHERE id = ?", [productId]);
-  // Fail closed: kann eine der Fragen nicht beantwortet werden, gilt der Artikel als nicht berechtigt.
-  if (lines < 0 || lots < 0 || own.length === 0) return false;
-  const sourceType = String((own[0] as Record<string, unknown>).source_type ?? '');
-  return lines === 0 && lots === 0 && sourceType === 'OWN';
+  return evaluatePriceEligibility(productId, (sql, params) => {
+    const rows = query(sql, params as unknown[]);
+    return rows.length > 0 ? Number((rows[0] as Record<string, unknown>).c ?? -1) : -1;
+  }).allowed;
 }
 
 /**
@@ -322,6 +311,7 @@ async function applyGalleryEdit(
         set: diff.set, baseline: diff.baseline,
         invalidateImageDerived: true,   // die Galerie aendert sich in demselben Vorgang
         withSync: isSyncConfigured(),
+        priceEligibilityRequired: true, // §6 — verbindlich in der Transaktion geprueft
         audit: { module: 'Product', changedBy: null, newValueJson: JSON.stringify(Object.fromEntries(diff.set)) },
       };
     }

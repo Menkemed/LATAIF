@@ -243,21 +243,40 @@ const SCOPE_JOIN: &str = "FROM products p JOIN branches b ON b.id = p.branch_id 
 
 /// v0.8.48 — darf die Bedienoberflaeche fuer diesen Artikel Preisfelder anbieten?
 ///
-/// Das ist eine ANZEIGE-Auskunft, keine Freigabe: verbindlich entscheidet der Drain, bevor er
-/// schreibt. Beide stellen dieselben drei Fragen ueber echte Relationen — gibt es eine Einkaufszeile,
-/// gibt es ein Lot, ist es Eigenbestand. Nur wenn es fuer den Artikel keinerlei Beschaffungs- oder
-/// Kostenbeleg gibt, ist `products.purchase_price` ueberhaupt die Grundlage, und eine Korrektur
-/// schreibt nichts um. Fehlschlaege werden zu `false` — ein Feld nicht anzubieten ist immer sicher.
+/// Das ist eine ANZEIGE-Auskunft, keine Freigabe: verbindlich entscheidet der Koordinator INNERHALB
+/// der Schreib-Transaktion. Beide stellen dieselben zwei Fragen, und zwar ueber echte Relationen,
+/// nicht ueber SKU, Datum oder Kategorie:
+///
+///   A — stammt der Artikel aus der mobilen Collection-Aufnahme? Beweis ist eine Zeile in
+///       `mobile_upload_receipts`; die schreibt ausschliesslich der Create-Pfad, im selben durablen
+///       Checkpoint wie die Produktzeile.
+///   B — haengt er an keinem Geschaeftsvorgang? Geprueft wird jede Tabelle mit Produktbezug.
+///
+/// Bewusst NICHT dabei: `inventory_session_items` (eine Zaehlung ist kein Vorgang) und
+/// `mobile_upload_receipts` selbst (das ist der Herkunftsnachweis aus A).
+/// Die Liste spiegelt `TRANSACTION_RELATIONS` in `src/core/products/price-eligibility.ts`.
+/// Fehlschlaege werden zu `false` — ein Feld nicht anzubieten ist immer sicher.
+const PRICE_LOCK_RELATIONS: [&str; 13] = [
+    "purchase_lines", "purchase_return_lines", "invoice_lines", "sales_return_lines",
+    "offer_lines", "orders", "order_lines", "stock_lots", "consignments", "agent_transfers",
+    "production_inputs", "production_outputs", "repairs",
+];
+
 fn price_editable(conn: &Connection, product_id: &str) -> bool {
     let count = |sql: &str| -> i64 {
         conn.query_row(sql, rusqlite::params![product_id], |r| r.get::<_, i64>(0)).unwrap_or(-1)
     };
-    let lines = count("SELECT COUNT(*) FROM purchase_lines WHERE product_id = ?1");
-    let lots = count("SELECT COUNT(*) FROM stock_lots WHERE product_id = ?1");
-    let source: String = conn
-        .query_row("SELECT COALESCE(source_type,'') FROM products WHERE id = ?1", rusqlite::params![product_id], |r| r.get(0))
-        .unwrap_or_default();
-    lines == 0 && lots == 0 && source == "OWN"
+    // A — Herkunft positiv nachgewiesen.
+    if count("SELECT COUNT(*) FROM mobile_upload_receipts WHERE product_id = ?1") <= 0 {
+        return false;
+    }
+    // B — keine einzige geschaeftliche Verknuepfung. `-1` (nicht lesbar) sperrt ebenfalls.
+    for table in PRICE_LOCK_RELATIONS {
+        if count(&format!("SELECT COUNT(*) FROM {table} WHERE product_id = ?1")) != 0 {
+            return false;
+        }
+    }
+    true
 }
 pub fn by_sku(
     db_path: &std::path::Path,

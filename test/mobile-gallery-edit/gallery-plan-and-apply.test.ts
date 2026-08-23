@@ -32,6 +32,7 @@ import {
   ERR_GALLERY_BASELINE_CHANGED, ERR_GALLERY_PLAN_INCOMPLETE, ERR_GALLERY_TOO_MANY,
 } from '../../src/core/media/mobile-gallery-edit.ts';
 import { galleryBaselineFingerprint, galleryBaselineInput } from '../../src/core/media/gallery-baseline.ts';
+import { TRANSACTION_RELATIONS } from '../../src/core/products/price-eligibility.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..');
@@ -114,6 +115,17 @@ function newDb(SQL: { Database: new () => never }): never {
   run(`INSERT INTO tenants (id) VALUES ('${TENANT}')`);
   run(`INSERT INTO branches (id, tenant_id) VALUES ('${BRANCH}','${TENANT}')`);
   run(`INSERT INTO products (id, branch_id, tenant_id, images) VALUES ('${PRODUCT}','${BRANCH}','${TENANT}','[]')`);
+  // v0.8.48 — fuer den gemischten Save mit Preis: die Herkunftsquittung und die Relationen, an
+  // denen die Preisberechtigung haengt. Ohne sie waere jeder Preis hier ohnehin gesperrt.
+  for (const c of ['purchase_price', 'planned_sale_price', 'min_sale_price']) run(`ALTER TABLE products ADD COLUMN ${c} REAL`);
+  run(`CREATE TABLE mobile_upload_receipts (tenant_id TEXT, branch_id TEXT, authenticated_user_id TEXT, upload_event_id TEXT, payload_hash TEXT, entity_id TEXT, create_batch_id TEXT, product_id TEXT, canonical_product_metadata_hash TEXT, prepared_manifest_hash TEXT, created_at TEXT)`);
+  run(`INSERT INTO mobile_upload_receipts (tenant_id, branch_id, authenticated_user_id, upload_event_id, payload_hash, entity_id, create_batch_id, product_id, canonical_product_metadata_hash, prepared_manifest_hash, created_at) VALUES ('${TENANT}','${BRANCH}','u1','ev-1','ph','${PRODUCT}','batch','${PRODUCT}','h','h','2026-01-01T00:00:00Z')`);
+  for (const t of TRANSACTION_RELATIONS) {
+    run(`CREATE TABLE IF NOT EXISTS ${t} (id TEXT PRIMARY KEY, product_id TEXT)`);
+    const cols = (db as unknown as { exec: (s: string) => Array<{ values: unknown[][] }> }).exec(`PRAGMA table_info(${t})`)[0].values.map((v) => String(v[1]));
+    if (!cols.includes('product_id')) run(`ALTER TABLE ${t} ADD COLUMN product_id TEXT`);
+    run(`DELETE FROM ${t}`);
+  }
   return db;
 }
 
@@ -588,6 +600,58 @@ async function main(): Promise<void> {
     const nameNow = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(`SELECT name FROM products WHERE id=?`, [PRODUCT]);
     ok(String(nameNow[0].values[0][0]) === "Alt", `MIXED-FAIL …and the field change was NOT committed on its own (${nameNow[0].values[0][0]})`);
     void gw;
+  }
+  // ── v0.8.48 §9 GEMISCHTER SAVE MIT PREIS ────────────────────────────────
+  //
+  // Erlaubter Artikel: Preis und Bildreihenfolge zusammen — beides landet.
+  {
+    const { db, co, baseline, fp } = await fixture();
+    (db as unknown as { run: (s: string, p?: unknown[]) => void }).run(`UPDATE products SET planned_sale_price = 150 WHERE id = ?`, [PRODUCT]);
+    const want = [baseline[1], baseline[0], baseline[2], baseline[3]];
+    const env = await buildMobileGalleryEnvelope({
+      plan: planFor(fp, want.map((b) => ({ keep: b.linkId }))),
+      baseline: co.readGalleryBaseline(SCOPE), preparedBySlot: new Map(), batchId: "batch-price-mixed",
+      tenantId: TENANT, branchId: BRANCH, entityId: PRODUCT, role: ROLE, digestHex,
+      productEdit: {
+        set: [["planned_sale_price", 165]], baseline: [150], invalidateImageDerived: true, withSync: false,
+        priceEligibilityRequired: true,
+        audit: { module: "Product", changedBy: null, newValueJson: "{}" },
+      },
+    });
+    co.registerEditPlan(env);
+    await co.applyEditBatch(env);
+    const price = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(`SELECT planned_sale_price FROM products WHERE id=?`, [PRODUCT]);
+    ok(Number(price[0].values[0][0]) === 165, `PRICE-MIXED the price landed (${price[0].values[0][0]})`);
+    ok(sameRows(activeLinks(db as never).map((l) => l.linkId), want.map((b) => b.linkId)), "PRICE-MIXED …and so did the new order");
+  }
+
+  // Gesperrter Artikel: derselbe gemischte Save wird KOMPLETT abgewiesen — auch die Bilder.
+  {
+    const { db, co, baseline, fp } = await fixture();
+    (db as unknown as { run: (s: string, p?: unknown[]) => void }).run(`UPDATE products SET planned_sale_price = 150 WHERE id = ?`, [PRODUCT]);
+    (db as unknown as { run: (s: string, p?: unknown[]) => void }).run(`INSERT INTO invoice_lines (id, product_id) VALUES (?, ?)`, ["inv-1", PRODUCT]);
+    const snapshot = allLinks(db as never);
+    const want = [baseline[1], baseline[0], baseline[2], baseline[3]];
+    let thrown: unknown = null;
+    try {
+      const env = await buildMobileGalleryEnvelope({
+        plan: planFor(fp, want.map((b) => ({ keep: b.linkId }))),
+        baseline: co.readGalleryBaseline(SCOPE), preparedBySlot: new Map(), batchId: "batch-price-locked",
+        tenantId: TENANT, branchId: BRANCH, entityId: PRODUCT, role: ROLE, digestHex,
+        productEdit: {
+          set: [["planned_sale_price", 165]], baseline: [150], invalidateImageDerived: true, withSync: false,
+          priceEligibilityRequired: true,
+          audit: { module: "Product", changedBy: null, newValueJson: "{}" },
+        },
+      });
+      co.registerEditPlan(env);
+      await co.applyEditBatch(env);
+    } catch (e) { thrown = e; }
+    ok((thrown as { message?: string })?.message === "MOBILE_PRICE_NOT_ELIGIBLE",
+      `PRICE-LOCKED the whole save is refused (${(thrown as { message?: string })?.message})`);
+    const price = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(`SELECT planned_sale_price FROM products WHERE id=?`, [PRODUCT]);
+    ok(Number(price[0].values[0][0]) === 150, "PRICE-LOCKED the price did not move");
+    ok(sameRows(allLinks(db as never), snapshot), "PRICE-LOCKED …and the gallery did not move either — no half state");
   }
   // ── §7 TEXT-ONLY bleibt unberuehrt: der Galerie-Pfad fasst ihn nicht an ───
   {
