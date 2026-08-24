@@ -71,12 +71,41 @@ export function formatProductOneLine(
  *  (Reference, Serial, Material, Karat, Farbe, …) — für die Tiefen-Suche in
  *  Produkt-Pickern via `SearchSelectOption.searchText`. */
 export function productSearchText(product: Product): string {
-  const attrs = (product.attributes as Record<string, unknown>) || {};
-  const attrValues = Object.values(attrs).map(v => (Array.isArray(v) ? v.join(' ') : v));
-  return [product.brand, product.name, product.sku, product.condition, ...attrValues]
+  return [product.brand, product.name, product.sku, product.condition,
+    ...productAttributeSearchValues(product)]
     .map(v => String(v ?? '').toLowerCase())
     .filter(Boolean)
     .join(' ');
+}
+
+/**
+ * Die EINE Stelle, die aus den Attributen eines Produkts Suchtext macht.
+ *
+ * Zwei Grenzen, beide gegen dieselbe Fehlerklasse: aus `attributes` darf kein technischer
+ * Inhalt in die Suche geraten, nur der fachliche Wert, den ein Mensch am Artikel sieht.
+ *
+ *   • FORM — nur einfache Werte und Listen einfacher Werte. Ein verschachteltes Objekt wird
+ *     nicht serialisiert; frueher wurde daraus "[object Object]", und alles darin haette
+ *     mitsuchen koennen, sobald jemand strukturierte Metadaten in ein Attribut legt.
+ *   • SCHLUESSEL — ist die Kategorie bekannt, zaehlen ausschliesslich die Attribute, die sie
+ *     wirklich definiert. Ein unbekannter oder technischer Schluessel, wie ihn ein Import oder
+ *     eine KI-Antwort hinterlassen kann, wird damit nicht von selbst durchsuchbar.
+ *
+ * Ohne Kategorie greift nur die Formgrenze — der Aufrufer, der keine Kategorie kennt, kann
+ * einen Schluessel nicht pruefen. Die Listensuche gibt sie mit, wo sie sie hat.
+ */
+export function productAttributeSearchValues(product: Product, category?: Category): string[] {
+  const attrs = (product.attributes as Record<string, unknown>) || {};
+  const defined = category ? new Set((category.attributes || []).map(a => a.key)) : null;
+  const out: string[] = [];
+  const primitive = (v: unknown): boolean =>
+    typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+  for (const [key, value] of Object.entries(attrs)) {
+    if (defined && !defined.has(key)) continue;
+    if (Array.isArray(value)) { for (const v of value) if (primitive(v)) out.push(String(v)); continue; }
+    if (primitive(value)) out.push(String(value));
+  }
+  return out;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -103,32 +132,47 @@ export function productSearchText(product: Product): string {
 // benutzt — sie zaehlen nur nicht als fachlicher Suchbegriff.
 // ════════════════════════════════════════════════════════════════════════════
 
-/** Die fachlichen Produktfelder, die eine Textsuche sieht. Dient zugleich als Beleg,
-  * dass die Liste bewusst gepflegt ist — der Test vergleicht sie gegen den echten Typ. */
+/**
+ * Die fachlichen Produktfelder, die eine Textsuche sieht — die vollstaendige Liste.
+ *
+ * Suche ist Identifikation und Beschreibung eines Artikels: woran erkennt ein Mensch ihn
+ * wieder, wenn er ihn in der Hand hatte. Nicht dabei ist alles, wonach man FILTERT statt
+ * sucht — Preise, Steuerschema, Eigentumsart und der interne Bestandsstatus haben dafuer
+ * ihre eigenen Schaltflaechen und wuerden als Freitext nur Zufallstreffer erzeugen: eine
+ * Suche nach "126" darf kein Produkt finden, dessen Preis zufaellig 126 enthaelt.
+ */
 export const PRODUCT_SEARCH_FIELDS = [
-  'brand', 'name', 'sku', 'condition', 'attributes',          // via productSearchText
-  'storageLocation', 'notes', 'supplierName', 'purchaseSource', 'purchaseDate',
-  'stockStatus', 'taxScheme', 'sourceType', 'purchaseCurrency', 'paidFrom',
-  'scopeOfDelivery', 'quantity', 'purchasePrice', 'plannedSalePrice', 'minSalePrice',
-  'maxSalePrice', 'lastOfferPrice', 'lastSalePrice',
+  'brand', 'name', 'sku', 'condition',      // Identitaet
+  'attributes',                             // die fachlichen Werte der Kategorie-Attribute
+  'notes', 'storageLocation', 'scopeOfDelivery',
+  'supplierName',                           // der Lieferant als Klartext-Name
 ] as const;
 
 /**
- * Der vollstaendige fachliche Suchtext eines Produkts — die kanonische Projektion fuer
- * jede Listensuche. Baut auf `productSearchText` auf (Marke, Name, SKU, Zustand + alle
- * Attributwerte, also auch Referenz, Seriennummer, Modell, Beschreibung, Material …) und
- * ergaenzt die uebrigen fachlichen Felder, die eine Listensuche bisher zu Recht gefunden
- * hat: Lagerort, Notiz, Lieferant, Herkunft, Lieferumfang, Status und die Preise.
+ * Der fachliche Suchtext eines Produkts — die kanonische Projektion fuer jede Listensuche.
+ *
+ * Marke, Name, SKU und Zustand kommen aus derselben Ableitung wie im Produkt-Picker
+ * (`productSearchText`), die Attributwerte aus derselben Stelle wie dort
+ * (`productAttributeSearchValues`) — dadurch bleiben Referenz, Seriennummer, Modell,
+ * Beschreibung und Material auffindbar, ohne dass es zwei Feldlisten gibt. Dazu kommen
+ * Notiz, Lagerort, Lieferumfang und der Lieferantenname.
+ *
+ * Der Lieferant steht als Klartext am Produkt (`supplier_name`) — es gibt keine Id
+ * aufzuloesen, also auch keine zusaetzliche Abfrage je Artikel.
+ *
+ * Ausdruecklich NICHT enthalten: die drei Preise, Steuerschema, Eigentumsart
+ * (`sourceType`), der interne Bestandsstatus, die technische Herkunft (`purchaseSource`),
+ * Waehrung, Zahlungsart, Menge und Datumsfelder — dafuer gibt es Filter. Ebenso wenig die
+ * KI- und Maschinendaten (Bildbeschreibung, Embedding, Hashes, Snapshots) und die
+ * technischen Identitaeten. Ein neues technisches Feld am Produkt ist von sich aus nicht
+ * durchsuchbar; es muesste hier ausdruecklich aufgenommen werden.
  */
-export function productBusinessSearchText(product: Product): string {
+export function productBusinessSearchText(product: Product, category?: Category): string {
   const parts: unknown[] = [
-    productSearchText(product),
-    product.storageLocation, product.notes, product.supplierName, product.purchaseSource,
-    product.purchaseDate, product.stockStatus, product.taxScheme, product.sourceType,
-    product.purchaseCurrency, product.paidFrom,
+    product.brand, product.name, product.sku, product.condition,
+    product.notes, product.storageLocation, product.supplierName,
     ...(Array.isArray(product.scopeOfDelivery) ? product.scopeOfDelivery : []),
-    product.quantity, product.purchasePrice, product.plannedSalePrice, product.minSalePrice,
-    product.maxSalePrice, product.lastOfferPrice, product.lastSalePrice,
+    ...productAttributeSearchValues(product, category),
   ];
   return parts.map(v => String(v ?? '').toLowerCase()).filter(Boolean).join(' ');
 }
