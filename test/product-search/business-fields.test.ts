@@ -21,7 +21,7 @@ import {
   productBusinessSearchText, productSearchText, PRODUCT_SEARCH_FIELDS,
   isProductLike, isCategoryLike,
 } from '../../src/core/utils/product-format.ts';
-import { registerCategoryLookup, clearCategoryLookup } from '../../src/core/utils/category-lookup.ts';
+import { registerCategoryLookup, clearCategoryLookup, categorySelection } from '../../src/core/utils/category-lookup.ts';
 
 let PASS = 0, FAIL = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  x ' + m); } };
@@ -308,6 +308,80 @@ const finds = (p: Any, q: string): boolean => matchesDeep(p, q, [category]);
   ok(!picker.includes('987654321'), 'PICKER never carried prices either');
 }
 
+// ── deaktivierte Kategorie: die Definition gilt fuer bestehende Artikel weiter ──
+//
+// Eine Kategorie zu deaktivieren heisst "nicht mehr fuer Neuanlagen anbieten". Die Artikel,
+// die schon in ihr liegen, behalten ihre Kategorie und ihre Attribute — sie duerfen dadurch
+// nicht unauffindbar werden. Genau deshalb loest die Suche ueber ALLE bekannten Definitionen
+// auf, waehrend die Auswahlliste weiterhin nur die aktiven zeigt.
+{
+  const retired = { ...category, id: "cat-retired", name: "Retired Line", active: false };
+  // Genau die Aufteilung, die auch der Store benutzt — die echte Funktion, keine Kopie.
+  const { schema, active } = categorySelection([category, retired] as never);
+  registerCategoryLookup((id) => (schema.find(c => c.id === id) as never) ?? undefined);
+
+  const old = product({
+    sku: "OLD-001", categoryId: "cat-retired", brand: "Cartier", supplierName: "Al Noor Trading",
+    attributes: { reference_number: "INACTIVE-REF-777", material: "Steel", _leftover: "straytoken2" },
+  });
+  ok(matchesDeep(old, "inactive-ref-777"),
+    "INACTIVE an item in a deactivated category is still found by its reference");
+  ok(matchesDeep(old, "steel"), "INACTIVE …and by its material");
+  ok(matchesDeep(old, "old-001") && matchesDeep(old, "al noor"), "INACTIVE …and by SKU and supplier");
+  ok(!matchesDeep(old, "straytoken2"), "INACTIVE …while the key boundary still holds there");
+
+  // Die Auswahlliste sieht ausschliesslich aktive Kategorien — dieselbe Trennung, die der
+  // Store macht: `categories` = aktiv, `categorySchema` = alle bekannten.
+  ok(!active.some(c => c.id === "cat-retired"), "INACTIVE the retired category is NOT offered for new items");
+  ok(active.some(c => c.id === "cat-watch"), "INACTIVE …while the active one still is");
+  ok(schema.some(c => c.id === "cat-retired"), "INACTIVE …but its definition is still known");
+
+  // Und das gilt auch dort, wo der Artikel in einem Beleg steckt und niemand eine Kategorie
+  // mitgibt — derselbe zentrale Weg wie fuer alle sechs Flaechen.
+  const order = { id: "or-9", orderNumber: "ORD-000009", status: "ordered", product: old };
+  const invoice = { id: "i-9", invoiceNumber: "INV-000009", lines: [{ id: "l-9", productId: old.id }] };
+  ok(matchesDeep(order, "inactive-ref-777"), "INACTIVE an embedded product resolves it too (nested)");
+  ok(matchesDeep(invoice, "inactive-ref-777", [old]), "INACTIVE …and as an extra (line products)");
+  ok(!matchesDeep(order, "straytoken2") && !matchesDeep(invoice, "straytoken2", [old]),
+    "INACTIVE …and neither form opens the undefined key");
+
+  // Eine Kategorie-Id, die es wirklich nicht gibt, bleibt geschlossen.
+  const ghost = product({ sku: "GHOST-1", categoryId: "does-not-exist", attributes: { mystery_key: "SHOULD-NOT-MATCH" } });
+  ok(!matchesDeep(ghost, "should-not-match"), "UNKNOWN an unknown category opens no attribute at all");
+  ok(matchesDeep(ghost, "ghost-1") && matchesDeep(ghost, "rolex") && matchesDeep(ghost, "al noor"),
+    "UNKNOWN …while SKU, brand and supplier still find it");
+}
+
+// ── Lebenszyklus der Auflösung: nichts wird eingefroren ───────────────────
+{
+  // (a) noch nichts angemeldet — kein Absturz, keine Attribute.
+  clearCategoryLookup();
+  const p = product({ sku: "LC-1" });
+  let threw = null;
+  try { ok(!matchesDeep(p, "126334"), "LIFECYCLE before registration no attribute is searched"); }
+  catch (e) { threw = e; }
+  ok(threw === null, `LIFECYCLE …and nothing throws (${threw && (threw as Error).message})`);
+  ok(matchesDeep(p, "lc-1"), "LIFECYCLE …while the basic fields keep working");
+
+  // (b) angemeldet — dieselben Attribute sind sofort da.
+  registerCategoryLookup((id) => (id === category.id ? (category as never) : undefined));
+  ok(matchesDeep(p, "126334"), "LIFECYCLE registering the lookup makes them searchable immediately");
+
+  // (c) die Definitionen wechseln (Neuladen, anderer Zweig): der AKTUELLE Stand entscheidet.
+  // Der Store meldet eine Funktion an, die ihren Zustand bei jedem Aufruf neu liest — genau
+  // das wird hier nachgestellt, damit ein eingefrorener Schnappschuss auffliegen wuerde.
+  let live: unknown[] = [category];
+  registerCategoryLookup((id) => (live.find((c) => (c as { id: string }).id === id) as never) ?? undefined);
+  const swapped = product({ sku: "LC-2", categoryId: "cat-swap", attributes: { swap_key: "swaptoken" } });
+  ok(!matchesDeep(swapped, "swaptoken"), "LIFECYCLE an unknown category stays closed");
+  live = [category, { ...category, id: "cat-swap", name: "Swapped", attributes: [{ key: "swap_key", label: "Swap", type: "text" }] }];
+  ok(matchesDeep(swapped, "swaptoken"), "LIFECYCLE …and after a reload the CURRENT definitions decide");
+  live = [category];
+  ok(!matchesDeep(swapped, "swaptoken"), "LIFECYCLE …in both directions — nothing is cached");
+
+  registerCategoryLookup((id) => (id === category.id ? (category as never) : undefined));
+}
+
 // ── §11 die sechs Flaechen benutzen wirklich diesen einen Weg ──────────────
 {
   const { readFileSync } = await import('node:fs');
@@ -329,6 +403,21 @@ const finds = (p: Any, q: string): boolean => matchesDeep(p, q, [category]);
     ok(!/productBusinessSearchText|PRODUCT_SEARCH_FIELDS/.test(src),
       `WIRING ${name} keeps no product field list of its own`);
   }
+  // Auswahl und Auslegung sind im Store getrennt — und nur die Auswahl ist auf aktiv gefiltert.
+  const store = readFileSync(new URL('../../src/stores/productStore.ts', import.meta.url), 'utf8');
+  ok(store.includes('const { schema, active } = categorySelection(rows.map(rowToCategory));')
+    && store.includes('set({ categorySchema: schema, categories: active });'),
+    'WIRING the store keeps all definitions but offers only active ones for selection');
+  ok(store.includes('registerCategoryLookup((id) => useProductStore.getState().getCategorySchema(id));'),
+    'WIRING …and the search resolves against the definitions, not against the selection list');
+  ok(!/SELECT * FROM categories WHERE branch_id = ? AND active = 1/.test(store),
+    'WIRING the definitions are no longer dropped at the query');
+  // Keine Oberflaeche darf die Definitionsliste als Auswahl benutzen.
+  for (const file of ['src/pages/watches/WatchList.tsx', 'src/pages/watches/ProductDetail.tsx', 'src/pages/settings/SettingsPage.tsx']) {
+    const src = readFileSync(new URL('../../' + file, import.meta.url), 'utf8');
+    ok(!/categorySchema/.test(src), `WIRING ${file} does not offer the raw definitions anywhere`);
+  }
+
   const deep = readFileSync(new URL('../../src/core/utils/deep-search.ts', import.meta.url), 'utf8');
   ok(/isProductLike\(value\)\)\s*\{[\s\S]{0,300}productBusinessSearchText\(value, own\)/.test(deep),
     'WIRING a product is searched through its business projection, not field by field');

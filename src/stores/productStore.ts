@@ -7,7 +7,7 @@ import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queri
 import { nextSkuFrom } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
-import { registerCategoryLookup } from '@/core/utils/category-lookup';
+import { registerCategoryLookup, categorySelection } from '@/core/utils/category-lookup';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // pHash entfernt 2026-05-18 — Duplicate-Detection laeuft jetzt nur ueber
 // AI-Embedding + Text-Felder (SKU/Serial/Reference). image-hash.ts wird nicht
@@ -324,7 +324,16 @@ function queryProductLinks(ids: string[]): Map<string, ProductLink[]> {
 
 interface ProductStore {
   products: Product[];
+  /** Nur AKTIVE Kategorien — das ist die Auswahl fuer Anlegen und Bearbeiten. */
   categories: Category[];
+  /**
+   * ALLE bekannten Kategorien, auch deaktivierte — die Definitionen, mit denen ein
+   * BESTEHENDES Produkt ausgelegt wird. Eine Kategorie zu deaktivieren heisst "nicht mehr
+   * fuer Neuanlagen anbieten", nicht "es hat sie nie gegeben": die Artikel behalten ihre
+   * `categoryId`, und ihre Attribute bleiben fachliche Daten. Ausschliesslich fuer
+   * Auslegung und Suche — nie fuer eine Auswahlliste.
+   */
+  categorySchema: Category[];
   loading: boolean;
   searchQuery: string;
   filterCategory: string;
@@ -336,6 +345,8 @@ interface ProductStore {
   loadProducts: () => void;
   getProduct: (id: string) => Product | undefined;
   getCategory: (id: string) => Category | undefined;
+  /** Die Definition zu einer Kategorie-Id — auch wenn sie deaktiviert ist. */
+  getCategorySchema: (id: string) => Category | undefined;
   createProduct: (data: Partial<Product>) => Product;
   /**
    * MEDIA-04A-3B2B — create a new product whose photos live in the durable
@@ -638,6 +649,7 @@ function parseResults(results: { columns: string[]; values: unknown[][] }[]): Re
 export const useProductStore = create<ProductStore>((set, get) => ({
   products: [],
   categories: [],
+  categorySchema: [],
   loading: false,
   searchQuery: '',
   filterCategory: '',
@@ -648,14 +660,20 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   setFilterStatus: (s) => set({ filterStatus: s }),
 
   loadCategories: () => {
+    // EINE Abfrage fuer beides: die Auswahl (nur aktive) und die Auslegung (alle bekannten).
+    // Der Filter steht bewusst hier und nicht im SQL — so kann die Definition einer
+    // deaktivierten Kategorie nicht verlorengehen, waehrend die Auswahlliste unveraendert
+    // nur aktive Kategorien zeigt.
+    const apply = (rows: Record<string, unknown>[]) => {
+      const { schema, active } = categorySelection(rows.map(rowToCategory));
+      set({ categorySchema: schema, categories: active });
+    };
     try {
       const branchId = currentBranchId();
-      const rows = query('SELECT * FROM categories WHERE branch_id = ? AND active = 1 ORDER BY sort_order', [branchId]);
-      set({ categories: rows.map(rowToCategory) });
+      apply(query('SELECT * FROM categories WHERE branch_id = ? ORDER BY sort_order', [branchId]));
     } catch {
       // Not authenticated yet, load without branch filter
-      const rows = parseResults(getDatabase().exec('SELECT * FROM categories WHERE active = 1 ORDER BY sort_order'));
-      set({ categories: rows.map(rowToCategory) });
+      apply(parseResults(getDatabase().exec('SELECT * FROM categories ORDER BY sort_order')));
     }
   },
 
@@ -675,6 +693,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
   getProduct: (id) => get().products.find(p => p.id === id),
   getCategory: (id) => get().categories.find(c => c.id === id),
+  getCategorySchema: (id) => get().categorySchema.find(c => c.id === id)
+    ?? get().categories.find(c => c.id === id),
 
   createProduct: (data) => {
     const db = getDatabase();
@@ -1529,4 +1549,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 // Auflösung an, die dieser Store ohnehin haelt: die Kategorien liegen im Speicher, der
 // Zugriff ist ein Lookup, keine Abfrage.
 // ════════════════════════════════════════════════════════════════════════════
-registerCategoryLookup((id) => useProductStore.getState().getCategory(id));
+// Bewusst `getCategorySchema` und nicht `getCategory`: ein Artikel, dessen Kategorie
+// spaeter deaktiviert wurde, verlaere sonst seine Attributsuche, obwohl seine Daten
+// unveraendert gueltig sind. Die Funktion liest den Zustand bei JEDEM Aufruf neu — es wird
+// nichts eingefroren, ein Neuladen der Kategorien wirkt sofort.
+registerCategoryLookup((id) => useProductStore.getState().getCategorySchema(id));

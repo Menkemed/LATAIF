@@ -18,6 +18,19 @@
 // ════════════════════════════════════════════════════════════════════════════
 import type { Category } from '@/core/models/types';
 
+/**
+ * Die Trennung in einem Ausdruck — der einzige Ort, an dem sie definiert ist.
+ *
+ *   `schema` — ALLE bekannten Definitionen, auch deaktivierte. Damit wird ein BESTEHENDER
+ *              Artikel ausgelegt: seine Attribute bleiben fachliche Daten, auch wenn die
+ *              Kategorie fuer Neuanlagen abgeschaltet wurde.
+ *   `active` — die Auswahl fuer Anlegen und Bearbeiten. Eine deaktivierte Kategorie darf
+ *              hier NICHT auftauchen.
+ */
+export function categorySelection(all: Category[]): { schema: Category[]; active: Category[] } {
+  return { schema: all, active: all.filter(c => c.active) };
+}
+
 let resolver: ((id: string) => Category | undefined) | null = null;
 
 /** Einmal beim Laden des Stores aufgerufen — die eine kanonische Auflösung. */
