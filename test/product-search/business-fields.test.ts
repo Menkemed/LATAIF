@@ -21,6 +21,7 @@ import {
   productBusinessSearchText, productSearchText, PRODUCT_SEARCH_FIELDS,
   isProductLike, isCategoryLike,
 } from '../../src/core/utils/product-format.ts';
+import { registerCategoryLookup, clearCategoryLookup } from '../../src/core/utils/category-lookup.ts';
 
 let PASS = 0, FAIL = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  x ' + m); } };
@@ -76,6 +77,11 @@ const category = {
   scopeOptions: ['Box', 'Papers'], conditionOptions: ['New', 'Pre-Owned'], active: true, sortOrder: 1,
   createdAt: '2026-01-01T00:00:00.000Z',
 };
+
+// Die kanonische Kategorie-Auflösung, so wie sie im laufenden Programm der Produkt-Store
+// anmeldet. Damit gilt die Attributgrenze ueberall gleich — auch dort, wo das Produkt in
+// einem Beleg steckt und niemand eine Kategorie mitgibt.
+registerCategoryLookup((id) => (id === category.id ? (category as never) : undefined));
 
 /** Die Collection-Suche, wortgleich zu `WatchList.tsx`. */
 const collection = (list: Any[], q: string): Any[] => list.filter(p => matchesDeep(p, q, [category]));
@@ -170,9 +176,26 @@ const finds = (p: Any, q: string): boolean => matchesDeep(p, q, [category]);
   ok(!matchesDeep(nested, 'object object'), 'ATTR …and does not leak as "[object Object]" either');
   ok(matchesDeep(nested, 'a-4'), 'ATTR …while the item stays findable without a category too');
 
-  // Ohne Kategorie greift die Formgrenze, nicht die Schluesselgrenze — bewusst und benannt.
-  ok(matchesDeep(stray, 'unknownkeytoken'),
-    'ATTR without a category the key cannot be checked — the shape rule is what holds there');
+  // Auch OHNE mitgegebene Kategorie: die Auflösung liefert sie, die Grenze gilt.
+  ok(!matchesDeep(stray, 'unknownkeytoken'),
+    'ATTR the key boundary holds even when no category is handed to the search');
+  ok(matchesDeep(stray, 'gold'), 'ATTR …and a defined attribute still matches there');
+
+  // FAIL CLOSED: Kategorie nicht aufloesbar ⇒ gar keine Attribute — der Rest bleibt.
+  const orphan = product({ sku: 'A-5', categoryId: 'cat-does-not-exist' });
+  ok(!matchesDeep(orphan, '126334'), 'ATTR an unresolvable category means NO attribute is searched');
+  ok(!matchesDeep(orphan, 'steel'), 'ATTR …not one of them');
+  ok(matchesDeep(orphan, 'a-5') && matchesDeep(orphan, 'rolex') && matchesDeep(orphan, 'al noor'),
+    'ATTR …while SKU, brand and supplier stay searchable');
+
+  // Dasselbe, wenn ueberhaupt keine Auflösung angemeldet ist.
+  clearCategoryLookup();
+  ok(!matchesDeep(product({ sku: 'A-6' }), '126334'),
+    'ATTR with no canonical lookup at all, attributes are not searched either');
+  ok(matchesDeep(product({ sku: 'A-6' }), 'a-6'), 'ATTR …and the item is still found by its SKU');
+  ok(matchesDeep(product({ sku: 'A-7' }), '126334', [category]),
+    'ATTR …but a category handed in directly still opens its own attributes');
+  registerCategoryLookup((id) => (id === category.id ? (category as never) : undefined));
 }
 
 // ── §12 die Formerkennung trifft nur Produkte ──────────────────────────────
@@ -230,7 +253,8 @@ const finds = (p: Any, q: string): boolean => matchesDeep(p, q, [category]);
   const p = product({
     sku: 'RLX-WCH-777', name: 'Submariner', supplierName: 'Al Noor Trading',
     imageDescription: 'a large steel bezel with descriptiontoken',
-    attributes: { reference_number: '116610', serial_number: 'Z1', material: 'Steel' },
+    // Ein Schluessel, den die Kategorie NICHT definiert — der Rest aus einem Import.
+    attributes: { reference_number: '116610', serial_number: 'Z1', material: 'Steel', _internal_meta: 'straykeytoken' },
   });
   const customer = { id: 'c-1', firstName: 'Ali', lastName: 'Hassan', phone: '39001122', email: 'ali@example.com' };
   const surfaces: Array<[string, unknown, unknown[], string]> = [
@@ -250,6 +274,11 @@ const finds = (p: Any, q: string): boolean => matchesDeep(p, q, [category]);
     ok(!matchesDeep(obj, '987654321', extras), `${name} does NOT leak the product's purchase price`);
     ok(!matchesDeep(obj, 'ownershiptoken', extras), `${name} does NOT leak the ownership type`);
     ok(!matchesDeep(obj, 'supplieridtoken', extras), `${name} does NOT leak the supplier id`);
+    // Die Attributgrenze — auf ALLEN sechs Flaechen dieselbe. Nur die Collection reicht eine
+    // Kategorie mit; die fuenf Beleglisten kommen ueber die kanonische Auflösung dorthin.
+    ok(!matchesDeep(obj, 'straykeytoken', extras), `${name} does NOT search an attribute key the category never defined`);
+    ok(matchesDeep(obj, '116610', extras), `${name} …while a defined attribute (reference) still matches`);
+    ok(matchesDeep(obj, 'steel', extras), `${name} …and so does the material`);
   }
   // Der Beleg behaelt seine eigenen fachlichen Felder — inklusive Betraegen und Status.
   const invoice = surfaces[1][1];

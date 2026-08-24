@@ -7,6 +7,7 @@ import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queri
 import { nextSkuFrom } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
+import { registerCategoryLookup } from '@/core/utils/category-lookup';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // pHash entfernt 2026-05-18 — Duplicate-Detection laeuft jetzt nur ueber
 // AI-Embedding + Text-Felder (SKU/Serial/Reference). image-hash.ts wird nicht
@@ -1519,3 +1520,13 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     return results.slice(0, 8);
   },
 }));
+
+// ════════════════════════════════════════════════════════════════════════════
+// Die Produktsuche braucht die kanonische Kategorie eines Artikels — auch dann, wenn der
+// Artikel in einem Beleg steckt und nur seine `categoryId` traegt. Nur so laesst sich
+// entscheiden, welche Attributschluessel fachlich sind. Statt dafuer eine zweite
+// Kategorie-Quelle aufzumachen oder je Artikel nachzuschlagen, meldet sich hier die
+// Auflösung an, die dieser Store ohnehin haelt: die Kategorien liegen im Speicher, der
+// Zugriff ist ein Lookup, keine Abfrage.
+// ════════════════════════════════════════════════════════════════════════════
+registerCategoryLookup((id) => useProductStore.getState().getCategory(id));

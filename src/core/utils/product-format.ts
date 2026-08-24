@@ -2,6 +2,7 @@
 // (nicht nur Brand+Name). Dieser Helper baut eine vollständige Beschreibung
 // aus Brand, Name, SKU, Condition + allen Kategorie-Attributen.
 import type { Product, Category, CategoryAttribute } from '@/core/models/types';
+import { lookupCategory } from './category-lookup.ts';
 
 function formatAttrValue(attr: CategoryAttribute, value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
@@ -87,21 +88,28 @@ export function productSearchText(product: Product): string {
  *   • FORM — nur einfache Werte und Listen einfacher Werte. Ein verschachteltes Objekt wird
  *     nicht serialisiert; frueher wurde daraus "[object Object]", und alles darin haette
  *     mitsuchen koennen, sobald jemand strukturierte Metadaten in ein Attribut legt.
- *   • SCHLUESSEL — ist die Kategorie bekannt, zaehlen ausschliesslich die Attribute, die sie
+ *   • SCHLUESSEL — es zaehlen ausschliesslich die Attribute, die die Kategorie des Artikels
  *     wirklich definiert. Ein unbekannter oder technischer Schluessel, wie ihn ein Import oder
  *     eine KI-Antwort hinterlassen kann, wird damit nicht von selbst durchsuchbar.
  *
- * Ohne Kategorie greift nur die Formgrenze — der Aufrufer, der keine Kategorie kennt, kann
- * einen Schluessel nicht pruefen. Die Listensuche gibt sie mit, wo sie sie hat.
+ * Die Kategorie kommt entweder vom Aufrufer (die Collection reicht sie mit) oder aus der
+ * kanonischen Auflösung des Stores — dieselbe Grenze auf allen Flaechen, egal ob das Produkt
+ * selbst durchsucht wird oder in einem Beleg steckt.
+ *
+ * FAIL CLOSED: laesst sich die Kategorie nicht sicher aufloesen, wird KEIN Attribut
+ * durchsucht. Lieber ein Treffer weniger als ein Suchtext aus unbekannten Daten; Marke,
+ * Name, SKU, Lieferant, Notiz und Lagerort bleiben davon unberuehrt.
  */
 export function productAttributeSearchValues(product: Product, category?: Category): string[] {
+  const own = category && category.id === product.categoryId ? category : lookupCategory(product.categoryId);
+  if (!own) return [];
   const attrs = (product.attributes as Record<string, unknown>) || {};
-  const defined = category ? new Set((category.attributes || []).map(a => a.key)) : null;
+  const defined = new Set((own.attributes || []).map(a => a.key));
   const out: string[] = [];
   const primitive = (v: unknown): boolean =>
     typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
   for (const [key, value] of Object.entries(attrs)) {
-    if (defined && !defined.has(key)) continue;
+    if (!defined.has(key)) continue;
     if (Array.isArray(value)) { for (const v of value) if (primitive(v)) out.push(String(v)); continue; }
     if (primitive(value)) out.push(String(value));
   }
