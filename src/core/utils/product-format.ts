@@ -79,6 +79,94 @@ export function productSearchText(product: Product): string {
     .join(' ');
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// PRODUKTSUCHE — eine positive Liste fachlicher Felder statt einer Ausschlussliste
+//
+// Ein Produkt traegt neben seinen fachlichen Daten auch reine Maschinendaten: den
+// KI-Beschreibungstext des Fotos, den Embedding-Vektor, Bild-Hashes, KI-Snapshots und
+// Korrekturprotokolle. Die Listensuche hat frueher ALLES durchsucht, was nicht
+// ausdruecklich ausgenommen war — und damit auch das. An der echten Produktionsdatenbank
+// gemessen (66 Artikel):
+//
+//   "large" → 6 Treffer statt 2   (KI-Text: "large, bold hour markers")
+//   "126"   → ALLE 66 Artikel     (Zahlen des Embedding-Vektors, als Text verglichen)
+//   "steel" → ALLE 66 Artikel     (die Auswahlliste der Kategorie, nicht das Produkt)
+//
+// Eine Referenznummer war damit nicht mehr auffindbar. Deshalb die Umkehrung: gesucht
+// wird nur in dem, was hier aufgezaehlt ist. Ein neues technisches Feld am Produkt ist
+// dadurch von sich aus nicht durchsuchbar — niemand muss daran denken, es irgendwo
+// auszuschliessen. Das ist der ganze Punkt der Liste.
+//
+// Ausdruecklich NICHT durchsuchbar: `imageDescription`, `imageEmbedding`, `imageHash`,
+// `aiIdentifiedSnapshot`, `aiCorrections`, `aiConfirmedAt`, `images`, technische Ids und
+// Zeitstempel. Die Daten bleiben gespeichert und werden von den KI-Funktionen weiter
+// benutzt — sie zaehlen nur nicht als fachlicher Suchbegriff.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Die fachlichen Produktfelder, die eine Textsuche sieht. Dient zugleich als Beleg,
+  * dass die Liste bewusst gepflegt ist — der Test vergleicht sie gegen den echten Typ. */
+export const PRODUCT_SEARCH_FIELDS = [
+  'brand', 'name', 'sku', 'condition', 'attributes',          // via productSearchText
+  'storageLocation', 'notes', 'supplierName', 'purchaseSource', 'purchaseDate',
+  'stockStatus', 'taxScheme', 'sourceType', 'purchaseCurrency', 'paidFrom',
+  'scopeOfDelivery', 'quantity', 'purchasePrice', 'plannedSalePrice', 'minSalePrice',
+  'maxSalePrice', 'lastOfferPrice', 'lastSalePrice',
+] as const;
+
+/**
+ * Der vollstaendige fachliche Suchtext eines Produkts — die kanonische Projektion fuer
+ * jede Listensuche. Baut auf `productSearchText` auf (Marke, Name, SKU, Zustand + alle
+ * Attributwerte, also auch Referenz, Seriennummer, Modell, Beschreibung, Material …) und
+ * ergaenzt die uebrigen fachlichen Felder, die eine Listensuche bisher zu Recht gefunden
+ * hat: Lagerort, Notiz, Lieferant, Herkunft, Lieferumfang, Status und die Preise.
+ */
+export function productBusinessSearchText(product: Product): string {
+  const parts: unknown[] = [
+    productSearchText(product),
+    product.storageLocation, product.notes, product.supplierName, product.purchaseSource,
+    product.purchaseDate, product.stockStatus, product.taxScheme, product.sourceType,
+    product.purchaseCurrency, product.paidFrom,
+    ...(Array.isArray(product.scopeOfDelivery) ? product.scopeOfDelivery : []),
+    product.quantity, product.purchasePrice, product.plannedSalePrice, product.minSalePrice,
+    product.maxSalePrice, product.lastOfferPrice, product.lastSalePrice,
+  ];
+  return parts.map(v => String(v ?? '').toLowerCase()).filter(Boolean).join(' ');
+}
+
+/**
+ * Ist dieses Objekt ein Produkt? Gefragt wird nach der Form, nicht nach einer Markierung:
+ * ein Produkt hat immer eine Kategorie, einen Bestandsstatus, einen Attribut-Satz und
+ * mindestens Marke oder SKU. Kein Beleg (Rechnung, Angebot, Auftrag, Reparatur,
+ * Kommission) traegt diese Kombination — deshalb greift die Projektion auch dann, wenn
+ * ein Produkt IN einem Beleg steckt und nicht selbst das durchsuchte Objekt ist.
+ */
+export function isProductLike(value: unknown): value is Product {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.categoryId === 'string'
+    && typeof v.stockStatus === 'string'
+    && typeof v.attributes === 'object' && v.attributes !== null && !Array.isArray(v.attributes)
+    && (typeof v.brand === 'string' || typeof v.sku === 'string');
+}
+
+/**
+ * Eine Kategorie ist eine DEFINITION, kein Artikel. Ihre Attributliste enthaelt Labels
+ * ("Serial Number") und Auswahlwerte ("Steel", "Leather") — wer die mitdurchsucht, findet
+ * bei "steel" jede Uhr, weil ihre Kategorie Stahl anbietet, nicht weil der Artikel aus
+ * Stahl ist. Genau das ist real passiert (alle 66 Artikel). Durchsuchbar ist deshalb nur
+ * der Name der Kategorie; das Material des Artikels steht ohnehin in seinen Attributen.
+ */
+export function isCategoryLike(value: unknown): value is Category {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.name === 'string' && Array.isArray(v.attributes)
+    && (Array.isArray(v.conditionOptions) || Array.isArray(v.scopeOptions));
+}
+
+/** Der durchsuchbare Teil einer Kategorie: ihr Name. */
+export function categorySearchText(category: Category): string {
+  return String(category.name ?? '').toLowerCase();
+}
 /** Multi-line Beschreibung für PDF/Print: "Brand Name\nRef: X\nDiameter: 40mm\n…". */
 export function formatProductMultiLine(
   product: Product | undefined,
