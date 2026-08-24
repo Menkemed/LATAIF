@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "lataif"
-version = "0.8.47"
+version = "0.8.48"
 dependencies = [
  "aes-gcm",
  "argon2",
