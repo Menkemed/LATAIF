@@ -979,6 +979,25 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
    * etwas, das noch gar nicht passiert ist. Deshalb wird der Inhalt geprueft: jedes Feld, das
    * dieser Save behauptet gesetzt zu haben, muss im gelesenen Zustand so dastehen.
    */
+  /**
+   * Traegt dieser Save ein NEUES Foto, dessen Identitaet dieses Geraet nicht kennen kann?
+   *
+   * Ein frisch hochgeladenes Bild bekommt seine Kennung erst beim Anwenden: der Desktop
+   * normalisiert die Bytes neu und legt sie unter dem Hash des NORMALISIERTEN Ergebnisses ab.
+   * Das Handy kennt weder diesen Hash noch die Kennung des Ingest-Auftrags (sie bindet
+   * Protokollversion, Scope und Normalisierungsparameter), und keine Route meldet ihm das
+   * Ergebnis eines Auftrags zurueck. Fuer ein neues Foto laesst sich deshalb belegen, DASS an
+   * der verlangten Stelle eines dazugekommen ist — nicht, dass es genau dieses ist. Ein
+   * gleichzeitiger fremder Upload waere von hier aus nicht zu unterscheiden.
+   *
+   * Also wird es auch nicht behauptet: in diesem Fall meldet die Seite den gespeicherten
+   * Zustand und zeigt ihn, statt ein bestimmtes Medium als bestaetigt auszugeben.
+   */
+  function galleryAddsNewPhotos(expected) {
+    const order = expected && expected.gallery && expected.gallery.order;
+    return Array.isArray(order) && order.some((o) => o && o.keep === undefined);
+  }
+
   function patchApplied(fresh, expected) {
     if (!fresh || !expected) return false;
     const norm = (x) => (x === undefined || x === null || x === '' ? '' : String(x));
@@ -1072,7 +1091,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       if (patchApplied(fresh, expected)) {
         showProduct(fresh, currentOrigin, 'fresh');
         const host = $('scanDetails');
-        if (host) host.insertAdjacentHTML('afterbegin', '<div style="color:#7FA87F; font-size:13px; margin-bottom:10px;">Saved.</div>');
+        // Was bewiesen ist, wird gemeldet; was nicht, wird gezeigt statt behauptet.
+        const said = galleryAddsNewPhotos(expected)
+          ? 'Saved — the photos above are the current state of this item.'
+          : 'Saved.';
+        if (host) host.insertAdjacentHTML('afterbegin', '<div style="color:#7FA87F; font-size:13px; margin-bottom:10px;">' + said + '</div>');
         return true;
       }
     }

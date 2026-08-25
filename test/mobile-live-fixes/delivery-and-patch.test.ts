@@ -208,9 +208,27 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
   ok(!patchApplied(gal([['a', true], ['b', false], ['n9', false]]), newCoverPlan),
     'GALLERY …and not while a kept photo is still the cover');
 
+  // ── Die Grenze: ein NEUES Foto ist von hier aus nicht identifizierbar ───
+  //
+  // Seine Kennung entsteht erst beim Anwenden (der Desktop normalisiert die Bytes neu und legt sie
+  // unter dem Hash des Ergebnisses ab), und keine Route meldet dem Handy das Ergebnis eines
+  // Auftrags. Belegbar ist, DASS an der verlangten Stelle eines dazugekommen ist — nicht, dass es
+  // genau dieses ist. Dieser Test haelt fest, dass die Seite das auch nicht behauptet.
+  const galleryAddsNewPhotos = new Function(`${cut('galleryAddsNewPhotos')} return galleryAddsNewPhotos;`)() as
+    (expected: unknown) => boolean;
+  ok(galleryAddsNewPhotos(addPlan), 'LIMIT a plan with a new photo is recognised as not fully provable');
+  ok(galleryAddsNewPhotos(newCoverPlan), 'LIMIT …and so is one that makes a new photo the cover');
+  ok(!galleryAddsNewPhotos(reorderPlan) && !galleryAddsNewPhotos(coverPlan) && !galleryAddsNewPhotos(removePlan),
+    'LIMIT reorder, cover change and removal are fully provable — they only touch known photos');
+  ok(!galleryAddsNewPhotos({}), 'LIMIT a save without a gallery plan is fully provable');
+  ok(/Saved — the photos above are the current state of this item\./.test(page),
+    'LIMIT the wording for that case states the shown state instead of claiming a specific photo');
+  ok(/const said = galleryAddsNewPhotos\(expected\)/.test(page),
+    'LIMIT …and the page really chooses its wording by that rule');
+
   // Und der Ablauf drumherum, mit gestellten Antworten.
   const showSavedState = new Function(
-    'fetchProductById', 'showProduct', '$', 'patchApplied', 'currentOrigin', 'viewSeq',
+    'fetchProductById', 'showProduct', '$', 'patchApplied', 'galleryAddsNewPhotos', 'currentOrigin', 'viewSeq',
     `${cut('showSavedState')} return showSavedState;`,
   ) as (...a: unknown[]) => (id: string, expected: unknown, msg: unknown, opts: unknown) => Promise<boolean>;
 
@@ -221,7 +239,7 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
       async () => answers[Math.min(i++, answers.length - 1)],
       (fresh: unknown) => drawn.push(fresh),
       () => null,
-      patchApplied, 'search', 0,
+      patchApplied, galleryAddsNewPhotos, 'search', 0,
     );
     const msg: Record<string, unknown> = { style: {}, textContent: '' };
     const okd = await fn('p-1', expected, msg, { intervalMs: 1, timeoutMs: 120 });
