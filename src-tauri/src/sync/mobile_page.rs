@@ -571,7 +571,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   async function lookupProduct(sku) {
     try {
       const token = localStorage.getItem(TOKEN_KEY);
-      const res = await fetch('/api/products/by-sku/' + encodeURIComponent(sku), { headers: { Authorization: 'Bearer ' + token } });
+      const res = await fetch('/api/products/by-sku/' + encodeURIComponent(sku), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } });
       if (res.status === 404) { $('scanDetails').innerHTML = '<div style="color:#AA6E6E; text-align:center;">No product found for this SKU.</div>'; return; }
       if (!res.ok) { $('scanDetails').textContent = 'Lookup failed (' + res.status + ').'; return; }
       // §32 — the scanner renders through the SAME showProduct the search hits use. No origin:
@@ -675,6 +675,12 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     add('Condition', p.condition);
     add('Status', (p.stock_status || '').replace(/_/g, ' '));
     add('Location', p.storage_location);
+    // v0.8.49 — was sich vom Handy bearbeiten laesst, muss hier auch wiederzufinden sein.
+    // Lieferumfang und Notiz fehlten in dieser Ansicht vollstaendig: man konnte sie aendern,
+    // bekam "Saved.", und sah danach nirgends, dass es angekommen war.
+    let scope = [];
+    try { scope = typeof p.scope_of_delivery === 'string' ? JSON.parse(p.scope_of_delivery || '[]') : (p.scope_of_delivery || []); } catch (_) {}
+    add('Included', Array.isArray(scope) ? scope.join(', ') : '');
     // 6) Specs in fester Reihenfolge; diamonds/movement raus; description zuletzt
     const keys = Object.keys(attrs).filter(k => !ATTR_HIDE.has(k) && attrs[k] != null && attrs[k] !== '');
     const ordered = [];
@@ -682,6 +688,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     for (const k of keys) if (k !== 'description' && ATTR_ORDER.indexOf(k) === -1) ordered.push(k);
     if (keys.indexOf('description') !== -1) ordered.push('description');
     ordered.forEach(k => { let v = attrs[k]; if (typeof v === 'boolean') v = v ? 'Yes' : 'No'; add(prettyAttr(k), v); });
+    add('Notes', p.notes);
     html += rows.join('');
 
     // MOBILE-I1 §16 — the stock-check block is ADDED to the existing details, never replaces them.
@@ -776,6 +783,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // than a scanned one. Everything below only ADDS behaviour to the markup renderProduct produced.
   let currentProduct = null;
   let currentReadState = 'fresh';
+  // Woher der gerade gezeigte Artikel geoeffnet wurde — damit ein Neuzeichnen denselben
+  // Zurueck-Weg behaelt, den der Benutzer hatte.
+  let currentOrigin = 'scan';
   // POST-V0838 §B — where the open came from. A search hit remembers enough to put the operator
   // back exactly where they were; a QR scan deliberately remembers nothing, so scanning never
   // fabricates a search history to go "back" to.
@@ -788,6 +798,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     releaseMedia();
     currentProduct = p;
     currentReadState = readState || 'fresh';
+    currentOrigin = origin || 'scan';
     const back = origin === 'search'
       ? '<button id="pdBack" class="ghost" style="margin-bottom:12px; padding:8px 12px;">&larr; Back to search</button>'
       : '';
@@ -821,7 +832,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (!id) return null;
     try {
       const token = localStorage.getItem(TOKEN_KEY);
-      const res = await fetch('/api/products/by-id/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + token } });
+      const res = await fetch('/api/products/by-id/' + encodeURIComponent(id), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } });
       if (!res.ok) return null;
       const data = await res.json();
       return (data && data.id) ? data : null;
@@ -837,6 +848,19 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // die es nicht mehr gibt — und der Baseline-Schutz weist seinen eigenen zweiten Save als Konflikt
   // ab. Deshalb wird beim Oeffnen IMMER frisch gelesen; die Id aus dem Treffer ist alles, was von
   // ihm uebernommen wird.
+  // v0.8.49 — das Zurueckwischen auf dem Handy ist KEIN neuer Seitenaufruf: der Browser holt
+  // die Seite aus seinem Vor-/Zurueck-Speicher zurueck, genau so, wie sie war — samt eines
+  // Bildschirms, der inzwischen veraltet sein kann. Das ist etwas anderes als der HTTP-Cache
+  // und wird von `no-store` allein nicht zuverlaessig verhindert. Deshalb wird bei einer
+  // Wiederherstellung ausdruecklich neu gelesen.
+  window.addEventListener('pageshow', function (ev) {
+    if (!ev.persisted) return;
+    if (!currentProduct || !currentProduct.id) return;
+    fetchProductById(currentProduct.id).then(function (fresh) {
+      if (fresh) showProduct(fresh, currentOrigin, 'fresh');
+    });
+  });
+
   async function openHit(h) {
     const input = $('searchInput');
     searchReturn = { query: input ? input.value : '', hits: lastHits, scrollY: window.scrollY || 0 };
@@ -911,8 +935,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   async function loadChecks(productId) {
     try {
       const token = localStorage.getItem(TOKEN_KEY);
+      // `no-store`: eine Zaehl-Historie aus dem Cache verschweigt die letzte Zaehlung.
       const res = await fetch('/api/stock-checks?product_id=' + encodeURIComponent(productId) + '&limit=20',
-        { headers: { Authorization: 'Bearer ' + token } });
+        { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } });
       if (!res.ok) { const l = $('scLatest'); if (l) l.textContent = 'Check history unavailable.'; return; }
       const data = await res.json();
       renderChecks(data.checks || []);
@@ -937,6 +962,34 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     ['peLocation', 'storage_location'],
     ['peNotes', 'notes'],
   ];
+  /**
+   * v0.8.49 — nach "Saved." darf nicht der Bildschirm von vorhin stehenbleiben.
+   *
+   * Der Auftrag ist durabel: er liegt in der Warteschlange, der Desktop wendet ihn an, das
+   * dauert einen Moment. Ein sofortiger Leseversuch wuerde deshalb den ALTEN Stand liefern und
+   * wie ein verlorener Save aussehen. Also wird so lange frisch gelesen, bis der Server einen
+   * NEUEREN Stand meldet (`updated_at`) — und dann wird genau dieser gezeichnet. Nichts wird
+   * lokal zusammengebaut: sichtbar ist, was gespeichert wurde.
+   *
+   * Kommt in der Frist nichts an, bleibt das Formular stehen und sagt das auch. Lieber ein
+   * ehrliches "noch nicht angewandt" als eine Anzeige, die etwas behauptet.
+   */
+  async function showSavedState(productId, seenUpdatedAt, msg) {
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1200));
+      const fresh = await fetchProductById(productId);
+      if (fresh && String(fresh.updated_at || '') !== String(seenUpdatedAt || '')) {
+        showProduct(fresh, currentOrigin, 'fresh');
+        const host = $('scanDetails');
+        if (host) host.insertAdjacentHTML('afterbegin', '<div style="color:#7FA87F; font-size:13px; margin-bottom:10px;">Saved.</div>');
+        return true;
+      }
+    }
+    if (msg) { msg.style.color = '#C8A96A'; msg.textContent = 'Saved — the desktop has not applied it yet.'; }
+    return false;
+  }
+
   function wireProductEdit(p) {
     const btn = $('pdEditBtn'), form = $('pdEditForm'), msg = $('peMsg');
     if (!btn || !form) return;
@@ -1168,11 +1221,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         const v = readAttr(a2, 'pea_');
         if (v === undefined) continue;
         if (typeof v === 'number' && Number.isNaN(v)) return setText('peMsg', 'Please check the number in "' + a2.label + '".');
-        const before = origAttrs[a2.key];
-        const sameArr = Array.isArray(v) && Array.isArray(before) && v.length === before.length && v.every((x, i) => x === before[i]);
-        const same = sameArr || (!Array.isArray(v) && String(v === '' ? '' : v) === String(before === undefined || before === null ? '' : before));
-        if (same) continue;
-        attrPatch[a2.key] = (v === '' ? null : v);
+        const change = attrChange(v, origAttrs[a2.key]);
+        if (change === undefined) continue;      // unveraendert → gar nicht erst mitschicken
+        attrPatch[a2.key] = change;
       }
       if (Object.keys(attrPatch).length) changed.attributes = attrPatch;
 
@@ -1223,6 +1274,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'At most ' + MAX_PHOTOS + ' photos per item.'; }
         return;
       }
+      // Der Stand, gegen den verglichen wird: der, den dieser Bildschirm gelesen hat.
+      const seenUpdatedAt = p.updated_at || '';
       saving = true;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
@@ -1270,6 +1323,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
           for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
           saving = false; $('peSave').disabled = false;
+          showSavedState(p.id, seenUpdatedAt, msg);
           return;
         }
         // Derselbe durable Weg wie ein neuer Artikel: Queue → /api/mobile/upload → Inbox → Drain.
@@ -1285,6 +1339,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (r && r.outcome && r.outcome !== 'done') throw new Error('Upload ' + r.outcome);
         for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
         if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
+        showSavedState(p.id, seenUpdatedAt, msg);
       } catch (e) {
         // Fehlschlag aendert NICHTS — weder am Artikel noch am Formular. Der Benutzer kann es
         // erneut versuchen, ohne dass irgendwo ein halber Zustand zurueckbleibt.
@@ -1370,7 +1425,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     try {
       const token = localStorage.getItem(TOKEN_KEY);
       const res = await fetch('/api/products/search?q=' + encodeURIComponent(term) + '&limit=20',
-        { headers: { Authorization: 'Bearer ' + token } });
+        { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } });
       // A slower earlier request must never overwrite a newer answer.
       if (seq !== searchSeq) return;
       if (!res.ok) { box.innerHTML = '<div class="card" style="color:#AA6E6E;">Search failed (' + res.status + ').</div>'; return; }
@@ -1811,6 +1866,31 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (!/^[0-9]+(\.[0-9]+)?$/.test(s)) return NaN;
     const n = Number(s); return Number.isFinite(n) ? n : NaN;
   }
+  /**
+   * v0.8.49 — was ein Attribut zum Patch beitraegt. Drei Faelle, und nur drei:
+   *
+   *   war leer, ist leer      → gar nichts (der Schluessel taucht im Patch NICHT auf)
+   *   hatte einen Wert, jetzt leer → ausdrueckliches `null` (bewusstes Loeschen bleibt moeglich)
+   *   Wert geaendert          → der neue Wert
+   *
+   * Vorher rutschte jedes leere ZAHLENfeld als `null` in jeden Patch: ein leeres Eingabefeld
+   * liest sich als `null`, ein nie gesetztes Attribut als `undefined`, und der Textvergleich
+   * ("null" gegen "") sagte "geaendert". In echten Payloads stand deshalb bei jedem Speichern
+   * `year: null` — eine Aenderung, die niemand vorgenommen hatte.
+   *
+   * Rueckgabe `undefined` heisst ausdruecklich "keine Aenderung"; `null` heisst "geleert".
+   */
+  function attrChange(now, before) {
+    const empty = (x) => x === undefined || x === null || x === '' || (Array.isArray(x) && x.length === 0);
+    if (empty(now) && empty(before)) return undefined;
+    if (empty(now)) return null;
+    if (Array.isArray(now) || Array.isArray(before)) {
+      const a = Array.isArray(now) ? now : [], b = Array.isArray(before) ? before : [];
+      return (a.length === b.length && a.every((x, i) => x === b[i])) ? undefined : now;
+    }
+    return String(now) === String(before) ? undefined : now;
+  }
+
   function readAttr(a, pre) {
     const e = $((pre || 'attr_') + a.key); if (!e) return undefined;
     if (a.type === 'multiselect') { const out = []; for (const c of e.children) if (c.classList.contains('on')) out.push(c.textContent); return out; }

@@ -28,7 +28,8 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
           brand TEXT, name TEXT, sku TEXT, condition TEXT, scope_of_delivery TEXT,
           storage_location TEXT, purchase_price REAL, planned_sale_price REAL,
           min_sale_price REAL, max_sale_price REAL, stock_status TEXT,
-          images TEXT, attributes TEXT, quantity INTEGER, notes TEXT, source_type TEXT
+          images TEXT, attributes TEXT, quantity INTEGER, notes TEXT, source_type TEXT,
+          updated_at TEXT
         );
         INSERT INTO tenants VALUES ('t-1');
         INSERT INTO branches VALUES ('b-1','t-1'), ('b-other','t-1');
@@ -48,7 +49,7 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
            '{"serial_number":"785757575"}',1,NULL);
 
         -- v0.8.48 — der reale Ausgangszustand: eigener, freier Bestand.
-        UPDATE products SET source_type = 'OWN';
+        UPDATE products SET source_type = 'OWN', updated_at = '2026-08-01T10:00:00.000Z';
 
         -- Die Relationen, an denen die Preissperre haengt, leer angelegt. Erst eine eingefuegte
         -- Zeile macht aus einem freien Artikel einen gebundenen — genau so entsteht die Sperre
@@ -579,4 +580,27 @@ fn the_displayed_lock_list_matches_the_authoritative_one() {
     for (table, label) in PRICE_LOCK_RELATIONS {
         assert!(!label.is_empty(), "{table} needs a name a human can read");
     }
+}
+
+/// v0.8.49 — nach einem mobilen Speichern muss die Seite erkennen koennen, DASS der Desktop den
+/// Auftrag angewandt hat. Ohne einen Zeitstempel im Vertrag bliebe ihr nur Raten oder ein selbst
+/// zusammengebauter Zustand — beides waere eine Anzeige, die etwas behauptet.
+#[test]
+fn the_read_contract_carries_the_last_change_timestamp() {
+    let d = tmp_dir();
+    let db = fixture(&d);
+    let p = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
+    assert_eq!(p["updated_at"], serde_json::json!("2026-08-01T10:00:00.000Z"));
+
+    // Suche und Detailabruf liefern denselben Zeitstempel — sonst haette die Seite zwei Wahrheiten.
+    let hits = search(&db, "t-1", "b-1", "RLX-DJ41-002", 5);
+    assert_eq!(hits[0]["updated_at"], p["updated_at"]);
+
+    // Und er bewegt sich, wenn sich der Artikel bewegt.
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE products SET updated_at = '2026-08-02T11:00:00.000Z' WHERE id = 'p-dj41'", [])
+        .unwrap();
+    let after = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
+    assert_ne!(after["updated_at"], p["updated_at"], "a change must be visible in the contract");
 }

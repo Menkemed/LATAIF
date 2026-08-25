@@ -31,7 +31,8 @@ pub const MAX_SEARCH_RESULTS: u32 = 50;
 /// The columns every product JSON is built from. One list, so the scan and the search cannot drift.
 const PRODUCT_COLUMNS: &str = "p.id, p.brand, p.name, p.sku, p.condition, p.scope_of_delivery, \
      p.storage_location, p.purchase_price, p.planned_sale_price, p.min_sale_price, p.max_sale_price, \
-     p.stock_status, p.images, p.attributes, p.category_id, p.quantity, p.notes";
+     p.stock_status, p.images, p.attributes, p.category_id, p.quantity, p.notes, \
+     p.updated_at";
 
 fn col_num(r: &rusqlite::Row, idx: usize) -> Option<f64> {
     use rusqlite::types::ValueRef;
@@ -62,6 +63,10 @@ fn row_to_product_json(r: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Va
         "category_id":       r.get::<_, Option<String>>(14)?,
         "quantity":          col_num(r, 15),
         "notes":             r.get::<_, Option<String>>(16)?,
+        // v0.8.49 — der Zeitstempel gehoert in den Vertrag: nach einem Speichern erkennt die
+        // Seite daran, DASS der Desktop den Auftrag angewandt hat, statt es zu vermuten oder
+        // sich den neuen Zustand selbst zusammenzubauen.
+        "updated_at":        r.get::<_, Option<String>>(17)?,
     }))
 }
 

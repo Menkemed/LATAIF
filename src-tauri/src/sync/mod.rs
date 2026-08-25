@@ -1,6 +1,21 @@
 use axum::{response::Html, Router};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
+/// Der Router, den die Produktion wirklich ausliefert — als Funktion, damit ein Test genau
+/// diesen fahren kann und nicht eine Nachbildung. Die Reihenfolge der Layer gehoert zum
+/// Vertrag: die Auslieferungsregel (`no_store_if_absent`) sitzt ueber allen Routen und laesst
+/// eine Route, die ihre eigene Cache-Angabe macht, in Ruhe.
+pub(crate) fn build_app_router(state: std::sync::Arc<AppState>, cors: CorsLayer) -> Router {
+    Router::new()
+        .nest("/api", routes::build_api_router(state.clone(), routes::MAX_SYNC_PUSH_BODY_BYTES))
+        .route("/mobile", axum::routing::get(serve_mobile_page))
+        .route("/zxing-wasm.js", axum::routing::get(serve_zxing_wasm_js))
+        .route("/zxing_reader.wasm", axum::routing::get(serve_zxing_wasm))
+        .route("/", axum::routing::get(serve_root))
+        .layer(axum::middleware::from_fn(routes::no_store_if_absent))
+        .layer(cors)
+        .with_state(state)
+}
 async fn serve_mobile_page() -> Html<&'static str> {
     Html(mobile_page::MOBILE_HTML)
 }
@@ -64,6 +79,10 @@ pub mod recovery;
 /// MOBILE-I1 — read-only product lookup, relevance search and media-key resolution against the
 /// business database. The single place a product JSON is built, so scan and search cannot drift.
 pub mod product_query;
+
+/// v0.8.49 — der Auslieferungsvertrag (Cache-Regeln) auf dem echten Produktions-Router.
+#[cfg(test)]
+mod delivery_cache_tests;
 pub mod recovery_entry;
 pub mod routes;
 pub mod secret;
@@ -275,14 +294,7 @@ impl SyncServer {
         // M6-B3A3 §3 — the 50 MB raw push-body limit now lives INSIDE build_api_router (applied to the
         // /api routes, before the auth route_layer), so production and the runtime integration test
         // share the EXACT same router construction + layer order — only the limit value differs.
-        let app = Router::new()
-            .nest("/api", routes::build_api_router(state.clone(), routes::MAX_SYNC_PUSH_BODY_BYTES))
-            .route("/mobile", axum::routing::get(serve_mobile_page))
-            .route("/zxing-wasm.js", axum::routing::get(serve_zxing_wasm_js))
-            .route("/zxing_reader.wasm", axum::routing::get(serve_zxing_wasm))
-            .route("/", axum::routing::get(serve_root))
-            .layer(cors)
-            .with_state(state);
+        let app = build_app_router(state, cors);
         let https_app = app.clone();
 
         let addr = format!("0.0.0.0:{}", self.port);

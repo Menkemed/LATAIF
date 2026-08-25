@@ -11,6 +11,30 @@ use std::sync::Arc;
 
 use super::{auth, models::*, AppState};
 
+/// v0.8.49 — DER AUSLIEFERUNGSVERTRAG: was dieser Server ausliefert, darf ein Browser nicht
+/// auf eigene Faust wiederverwenden — es sei denn, die Route sagt ausdruecklich etwas anderes.
+///
+/// Real passiert: nach dem Update auf v0.8.48 zeigte ein Handy weiterhin die ALTE Mobilseite,
+/// mit den alten Feldern und ohne den frischen Read. Die Seite kam aus dem Cache des Browsers,
+/// weil die Antwort keine einzige Cache-Anweisung trug — kein `Cache-Control`, kein `ETag`,
+/// kein `Last-Modified`. Dasselbe gilt fuer die JSON-Antworten: derselbe Artikel unter
+/// derselben Adresse konnte aus dem Cache beantwortet werden, und der Bildschirm zeigte einen
+/// Stand, den es nicht mehr gab.
+///
+/// Deshalb: alles ohne eigene Angabe wird `no-store`. `entry(..).or_insert(..)` setzt den Wert
+/// NUR, wenn die Route keinen gesetzt hat — die Medien-Route bleibt damit unberuehrt: ihre
+/// Bytes sind inhaltsadressiert (der Schluessel enthaelt den Hash) und duerfen dauerhaft
+/// gecacht werden. Sie ist die einzige Ausnahme, und sie bleibt eine.
+pub async fn no_store_if_absent(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    res.headers_mut()
+        .entry(axum::http::header::CACHE_CONTROL)
+        .or_insert(axum::http::HeaderValue::from_static("no-store"));
+    res
+}
 /// M6-B3A3 §3 — the production limit on a raw `/sync/push` body. 50 MB covers the largest legit
 /// batch (pushChanges LIMITs 100 changes; a mobile photo at 1600px @ 0.85 is ~0.5 MB base64). It is
 /// the value production always uses; only the test router substitutes a small limit to prove the
