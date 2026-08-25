@@ -228,7 +228,7 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
 
   // Und der Ablauf drumherum, mit gestellten Antworten.
   const showSavedState = new Function(
-    'fetchProductById', 'showProduct', '$', 'patchApplied', 'galleryAddsNewPhotos', 'currentOrigin', 'viewSeq',
+    'fetchProductById', 'showProduct', '$', 'patchApplied', 'galleryAddsNewPhotos', 'currentOrigin', 'viewSeq', 'saveSeq',
     `${cut('showSavedState')} return showSavedState;`,
   ) as (...a: unknown[]) => (id: string, expected: unknown, msg: unknown, opts: unknown) => Promise<boolean>;
 
@@ -239,7 +239,7 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
       async () => answers[Math.min(i++, answers.length - 1)],
       (fresh: unknown) => drawn.push(fresh),
       () => null,
-      patchApplied, galleryAddsNewPhotos, 'search', 0,
+      patchApplied, galleryAddsNewPhotos, 'search', 0, 0,
     );
     const msg: Record<string, unknown> = { style: {}, textContent: '' };
     const okd = await fn('p-1', expected, msg, { intervalMs: 1, timeoutMs: 120 });
@@ -258,6 +258,25 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
   ok(race.okd === true, 'FLOW a foreign edit in between does not stop the confirmation');
   ok(race.drawn.length === 1 && race.drawn[0] === mine,
     'FLOW …and what gets drawn is the state that carries the OWN change, never the foreign one');
+
+  // Ein Warten, das gegenstandslos geworden ist, hoert auf — es liest nicht im Hintergrund
+  // weiter. Real aufgefallen: nach einem Speichern lief das Warten noch, waehrend der naechste
+  // Vorgang schon lief, und schickte Leseanfragen, die niemand mehr brauchte.
+  {
+    let reads = 0, stop = false;
+    const fn = showSavedState(
+      async () => { reads++; stop = true; return foreign; },
+      () => { throw new Error('nothing may be drawn from a cancelled wait'); },
+      () => null, patchApplied, galleryAddsNewPhotos, 'search', 0, 0,
+    );
+    const done = await fn('p-1', want, { style: {}, textContent: '' },
+      { intervalMs: 1, timeoutMs: 200, cancelled: () => stop });
+    ok(done === false, 'CANCEL a wait that has become pointless ends without a result');
+    ok(reads === 1, `CANCEL …and stops reading instead of polling on (${reads} read)`);
+  }
+  ok(/const cancelled = \(opts && opts\.cancelled\) \|\| \(\(\) => seq !== viewSeq \|\| mine !== saveSeq\)/.test(page),
+    'CANCEL the page ends the wait when the view moved on or another save started');
+  ok(/saveSeq\+\+;/.test(page), 'CANCEL …and every new save really supersedes the previous wait');
 
   const never = await run([foreign], want);
   ok(never.okd === false, 'FLOW an unapplied save is never reported as done');

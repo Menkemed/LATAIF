@@ -790,6 +790,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // nachdem inzwischen eine neuere Ansicht gilt, wird sie verworfen statt gezeichnet —
   // sonst ueberschreibt das langsamere Rennen das schnellere.
   let viewSeq = 0;
+  // Und jeder Speichervorgang. Ein neuer Save loest den vorigen ab: dessen Warten auf die
+  // Bestaetigung ist damit gegenstandslos und hoert auf, statt im Hintergrund weiterzulaufen.
+  let saveSeq = 0;
   // POST-V0838 §B — where the open came from. A search hit remembers enough to put the operator
   // back exactly where they were; a QR scan deliberately remembers nothing, so scanning never
   // fabricates a search history to go "back" to.
@@ -1083,11 +1086,17 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const every = (opts && opts.intervalMs) || 1200;
     const within = (opts && opts.timeoutMs) || 20000;
     const seq = ++viewSeq;
+    const mine = ++saveSeq;
+    // Wann dieses Warten gegenstandslos ist: der Benutzer ist woanders, oder es wurde erneut
+    // gespeichert. Dann hoert es auf — ein Wartelauf, den niemand mehr braucht, soll auch
+    // nicht weiter im Hintergrund lesen.
+    const cancelled = (opts && opts.cancelled) || (() => seq !== viewSeq || mine !== saveSeq);
     const deadline = Date.now() + within;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, every));
+      if (cancelled()) return false;            // vor dem Lesen, nicht erst danach
       const fresh = await fetchProductById(productId);
-      if (seq !== viewSeq) return false;        // der Benutzer ist inzwischen woanders
+      if (cancelled()) return false;
       if (patchApplied(fresh, expected)) {
         showProduct(fresh, currentOrigin, 'fresh');
         const host = $('scanDetails');
@@ -1391,6 +1400,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       const expected = JSON.parse(JSON.stringify(changed));
       if (galleryPlan) expected.gallery = { order: galleryPlan.order, remove: galleryPlan.remove };
       saving = true;
+      // Ein neuer Speichervorgang loest ein noch laufendes Warten auf Bestaetigung ab.
+      saveSeq++;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
       try {
