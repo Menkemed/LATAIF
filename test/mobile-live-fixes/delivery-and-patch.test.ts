@@ -164,8 +164,49 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
     'CORRELATION what is included is confirmed regardless of order');
   ok(!patchApplied(item({ scope_of_delivery: '["Box"]' }), { scopeOfDelivery: ['Box', 'Papers'] }),
     'CORRELATION …but not when one is missing');
-  ok(patchApplied(item(), { __galleryCount: 2 }), 'CORRELATION a gallery save is confirmed by the resulting count');
-  ok(!patchApplied(item(), { __galleryCount: 3 }), 'CORRELATION …and not by the wrong count');
+  // ── Galerie: der gewuenschte ENDZUSTAND, nicht die Anzahl ───────────────
+  //
+  // Die Anzahl allein beweist nichts. Eine fremde Aenderung kann zufaellig auf dieselbe Anzahl
+  // kommen, und Umsortieren oder ein anderes Titelbild aendert sie ueberhaupt nicht.
+  const gal = (spec: Array<[string, boolean]>): Record<string, unknown> =>
+    item({ gallery: spec.map(([id, primary], i) => ({ link_id: id, is_primary: primary, sort_order: i })) });
+
+  // Foto hinzufuegen: a,b,c bleiben in dieser Reihenfolge, ein neues kommt dazu, a bleibt Titel.
+  const addPlan = { gallery: { order: [{ keep: 'a' }, { keep: 'b' }, { keep: 'c' }, { new: 0 }], remove: [] } };
+  ok(patchApplied(gal([['a', true], ['b', false], ['c', false], ['n1', false]]), addPlan),
+    'GALLERY adding a photo is confirmed by the resulting gallery');
+  ok(!patchApplied(gal([['a', true], ['b', false], ['c', false]]), addPlan),
+    'GALLERY …and not while the photo is still missing');
+  ok(!patchApplied(gal([['a', true], ['b', false], ['x', false], ['y', false]]), addPlan),
+    'GALLERY a FOREIGN change that happens to reach the same count confirms nothing');
+
+  // Umsortieren: gleiche Bilder, gleiche Anzahl — nur die Reihenfolge zaehlt.
+  const reorderPlan = { gallery: { order: [{ keep: 'c' }, { keep: 'a' }, { keep: 'b' }], remove: [] } };
+  ok(patchApplied(gal([['c', true], ['a', false], ['b', false]]), reorderPlan),
+    'GALLERY a reorder is confirmed by the new order');
+  ok(!patchApplied(gal([['a', true], ['b', false], ['c', false]]), reorderPlan),
+    'GALLERY …and the old order does not confirm it, though the count is identical');
+
+  // Titelbild: gleiche Bilder, gleiche Anzahl, gleiche Reihenfolge — nur der Titel wechselt.
+  const coverPlan = { gallery: { order: [{ keep: 'b' }, { keep: 'a' }, { keep: 'c' }], remove: [] } };
+  ok(patchApplied(gal([['b', true], ['a', false], ['c', false]]), coverPlan),
+    'GALLERY a new cover is confirmed when it really is the cover');
+  ok(!patchApplied(gal([['b', false], ['a', true], ['c', false]]), coverPlan),
+    'GALLERY …and not while the old one still carries the cover');
+
+  // Entfernen: was weg sollte, muss weg sein.
+  const removePlan = { gallery: { order: [{ keep: 'a' }, { keep: 'c' }], remove: ['b'] } };
+  ok(patchApplied(gal([['a', true], ['c', false]]), removePlan), 'GALLERY a removal is confirmed once it is gone');
+  ok(!patchApplied(gal([['a', true], ['b', false]]), removePlan),
+    'GALLERY …and not while the removed photo is still there, even at the right count');
+
+  // Ein NEUES Foto soll das Titelbild werden: seine Identitaet kennt das Geraet noch nicht, aber
+  // der Titel darf dann keines der behaltenen sein.
+  const newCoverPlan = { gallery: { order: [{ new: 0 }, { keep: 'a' }, { keep: 'b' }], remove: [] } };
+  ok(patchApplied(gal([['n9', true], ['a', false], ['b', false]]), newCoverPlan),
+    'GALLERY a newly added cover is confirmed when the cover is not one of the kept ones');
+  ok(!patchApplied(gal([['a', true], ['b', false], ['n9', false]]), newCoverPlan),
+    'GALLERY …and not while a kept photo is still the cover');
 
   // Und der Ablauf drumherum, mit gestellten Antworten.
   const showSavedState = new Function(

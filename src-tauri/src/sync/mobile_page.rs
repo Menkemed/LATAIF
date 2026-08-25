@@ -990,9 +990,33 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     let attrs = {};
     try { attrs = typeof fresh.attributes === 'string' ? JSON.parse(fresh.attributes || '{}') : (fresh.attributes || {}); } catch (_) { return false; }
     for (const k of Object.keys(expected)) {
-      if (k === '__galleryCount') {
+      if (k === 'gallery') {
+        // Der gewuenschte ENDZUSTAND der Galerie, nicht ihre Groesse: was bleiben sollte, ist
+        // da; was weg sollte, ist weg; die behaltenen Bilder stehen in der verlangten
+        // Reihenfolge; und das Titelbild ist das, das der Plan vorne hat. Eine fremde
+        // Aenderung kann zufaellig dieselbe Anzahl erzeugen — aber nicht dieselbe Galerie.
         const gal = Array.isArray(fresh.gallery) ? fresh.gallery : null;
-        if (!gal || gal.length !== expected.__galleryCount) return false;
+        if (!gal) return false;
+        const want = expected.gallery || {};
+        const order = Array.isArray(want.order) ? want.order : [];
+        const remove = Array.isArray(want.remove) ? want.remove : [];
+        if (gal.length !== order.length) return false;
+        const ids = gal.map((g) => String(g.link_id));
+        for (const r of remove) if (ids.indexOf(String(r)) !== -1) return false;
+        const keptWanted = order.filter((o) => o && o.keep).map((o) => String(o.keep));
+        for (const id of keptWanted) if (ids.indexOf(id) === -1) return false;
+        // Die behaltenen Bilder in genau der verlangten Reihenfolge — neue Bilder haben noch
+        // keine Identitaet, die dieses Geraet kennen koennte, und werden deshalb nur gezaehlt.
+        const keptActual = ids.filter((id) => keptWanted.indexOf(id) !== -1);
+        if (keptActual.join('|') !== keptWanted.join('|')) return false;
+        const primary = gal.filter((g) => g.is_primary)[0] || gal[0];
+        const first = order[0];
+        if (first && first.keep) {
+          if (!primary || String(primary.link_id) !== String(first.keep)) return false;
+        } else if (first) {
+          // Ein NEUES Foto soll das Titelbild sein: dann darf es keines der behaltenen sein.
+          if (!primary || keptWanted.indexOf(String(primary.link_id)) !== -1) return false;
+        }
         continue;
       }
       if (k === 'attributes') {
@@ -1342,7 +1366,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       // Was dieser Save behauptet zu tun. Genau das muss der Server danach zeigen, bevor
       // irgendetwas als gespeichert gemeldet wird.
       const expected = JSON.parse(JSON.stringify(changed));
-      if (galleryPlan) expected.__galleryCount = galleryPlan.order.length;
+      if (galleryPlan) expected.gallery = { order: galleryPlan.order, remove: galleryPlan.remove };
       saving = true;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
