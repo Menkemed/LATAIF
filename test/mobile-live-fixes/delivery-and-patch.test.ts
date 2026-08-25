@@ -89,16 +89,20 @@ ok(!!mediaFetch, 'CACHE the media read exists');
 ok(!!mediaFetch && !mediaFetch.includes('no-store'), 'CACHE …and is deliberately left cacheable');
 
 // ── B) nach dem Speichern wird der gespeicherte Stand gezeigt ─────────────
-ok(/async function showSavedState\(productId, seenUpdatedAt, msg\)/.test(page),
-  'SAVED the page has one place that shows the saved state');
-ok(/String\(fresh\.updated_at \|\| ''\) !== String\(seenUpdatedAt \|\| ''\)/.test(page),
-  'SAVED it waits for the server to report a NEWER state, it does not guess');
+ok(/async function showSavedState\(productId, expected, msg, opts\)/.test(page),
+  'SAVED the page has one place that shows the confirmed state');
+ok(/if \(patchApplied\(fresh, expected\)\) \{/.test(page),
+  'SAVED it confirms on CONTENT — a newer timestamp alone is not proof');
 ok(/showProduct\(fresh, currentOrigin, 'fresh'\)/.test(page),
   'SAVED …and then draws exactly that state');
-ok((page.match(/showSavedState\(p\.id, seenUpdatedAt, msg\);/g) || []).length === 2,
+ok((page.match(/showSavedState\(p\.id, expected, msg\);/g) || []).length === 2,
   'SAVED both success paths use it — the plain edit and the one that rides along with the gallery');
-ok(/the desktop has not applied it yet/.test(page),
-  'SAVED …and if it never arrives, the page says so instead of pretending');
+ok(/accepted, but the desktop has not applied it yet/.test(page),
+  'SAVED …and if it never arrives, the page says accepted — not saved');
+ok(/Saved — waiting for the desktop/.test(page),
+  'SAVED the wording separates "accepted" from "confirmed"');
+ok(/const seq = \+\+viewSeq;/.test(page) && (page.match(/seq !== viewSeq/g) || []).length === 3,
+  'ORDER every async view carries a generation guard — a slow old answer cannot overwrite a newer view');
 
 // ── Rueckkehr aus dem Vor-/Zurueck-Speicher ist NICHT der HTTP-Cache ──────
 ok(/addEventListener\('pageshow'/.test(page), 'RESTORE a restored page is handled explicitly');
@@ -111,6 +115,96 @@ ok(page.includes("add('Included', Array.isArray(scope) ? scope.join(', ') : '');
   'DETAIL …and so is what is included');
 for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price', 'Cost Price']) {
   ok(page.includes(`add('${label}'`), `DETAIL ${label} is still rendered`);
+}
+
+// ── Der eigene Save muss WIRKLICH bestaetigt sein ─────────────────────────
+//
+// Der gefaehrliche Fall: waehrend der eigene Auftrag noch in der Warteschlange liegt, aendert
+// jemand am Desktop denselben Artikel. Der Stand ist dann neuer — die eigene Aenderung steht aber
+// nicht drin. Wer auf "neuer" prueft, meldet Erfolg fuer etwas, das nicht passiert ist.
+{
+  const cut = (name: string): string => {
+    let from = page.indexOf(`function ${name}(`);
+    if (page.slice(from - 6, from) === 'async ') from -= 6;   // sonst faellt das `async` weg
+    let d = 0, to = -1, seen = false;
+    for (let i = from; i < page.length; i++) {
+      const c = page[i];
+      if (c === '{') { d++; seen = true; } else if (c === '}') { d--; if (seen && d === 0) { to = i + 1; break; } }
+    }
+    return page.slice(from, to);
+  };
+  const patchApplied = new Function(`${cut('patchApplied')} return patchApplied;`)() as
+    (fresh: unknown, expected: unknown) => boolean;
+
+  const item = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'p-1', name: 'Flip Face', brand: 'Fendi', condition: 'Pre-Owned',
+    storage_location: null, notes: null, purchase_price: null, planned_sale_price: null,
+    min_sale_price: null, scope_of_delivery: '[]',
+    attributes: JSON.stringify({ dial: 'Beige', material: 'Steel' }),
+    gallery: [{ link_id: 'l1' }, { link_id: 'l2' }], updated_at: '2026-08-25T15:00:00.000Z', ...over,
+  });
+
+  ok(patchApplied(item({ storage_location: 'LIVE-LOC-0849' }), { storageLocation: 'LIVE-LOC-0849' }),
+    'CORRELATION a state that carries the change confirms it');
+  ok(!patchApplied(item({ notes: 'someone else', updated_at: '2026-08-25T16:00:00.000Z' }), { storageLocation: 'LIVE-LOC-0849' }),
+    'CORRELATION a FOREIGN change with a newer timestamp confirms nothing');
+  ok(!patchApplied(item(), { storageLocation: 'LIVE-LOC-0849' }), 'CORRELATION …and neither does the untouched state');
+  ok(patchApplied(item({ notes: null }), { notes: null }), 'CORRELATION clearing a field is confirmed by it being empty');
+  ok(!patchApplied(item({ notes: 'still here' }), { notes: null }), 'CORRELATION …and not while the old text is still there');
+  ok(patchApplied(item({ purchase_price: 60, planned_sale_price: 110, min_sale_price: 70 }),
+    { purchasePrice: 60, plannedSalePrice: 110, minSalePrice: 70 }), 'CORRELATION prices are confirmed by value');
+  ok(!patchApplied(item({ purchase_price: 60 }), { purchasePrice: 60, plannedSalePrice: 110 }),
+    'CORRELATION …and a half-applied price set is not a confirmation');
+  ok(patchApplied(item({ attributes: JSON.stringify({ dial: 'Beige', material: 'Steel', year: 1998 }) }),
+    { attributes: { year: 1998 } }), 'CORRELATION an attribute is confirmed in the stored attributes');
+  ok(!patchApplied(item(), { attributes: { year: 1998 } }), 'CORRELATION …and not while it is missing');
+  ok(patchApplied(item({ attributes: JSON.stringify({ dial: 'Beige' }) }), { attributes: { material: null } }),
+    'CORRELATION a cleared attribute is confirmed by its absence');
+  ok(patchApplied(item({ scope_of_delivery: '["Box","Papers"]' }), { scopeOfDelivery: ['Papers', 'Box'] }),
+    'CORRELATION what is included is confirmed regardless of order');
+  ok(!patchApplied(item({ scope_of_delivery: '["Box"]' }), { scopeOfDelivery: ['Box', 'Papers'] }),
+    'CORRELATION …but not when one is missing');
+  ok(patchApplied(item(), { __galleryCount: 2 }), 'CORRELATION a gallery save is confirmed by the resulting count');
+  ok(!patchApplied(item(), { __galleryCount: 3 }), 'CORRELATION …and not by the wrong count');
+
+  // Und der Ablauf drumherum, mit gestellten Antworten.
+  const showSavedState = new Function(
+    'fetchProductById', 'showProduct', '$', 'patchApplied', 'currentOrigin', 'viewSeq',
+    `${cut('showSavedState')} return showSavedState;`,
+  ) as (...a: unknown[]) => (id: string, expected: unknown, msg: unknown, opts: unknown) => Promise<boolean>;
+
+  const run = async (answers: Array<Record<string, unknown>>, expected: unknown) => {
+    const drawn: unknown[] = [];
+    let i = 0;
+    const fn = showSavedState(
+      async () => answers[Math.min(i++, answers.length - 1)],
+      (fresh: unknown) => drawn.push(fresh),
+      () => null,
+      patchApplied, 'search', 0,
+    );
+    const msg: Record<string, unknown> = { style: {}, textContent: '' };
+    const okd = await fn('p-1', expected, msg, { intervalMs: 1, timeoutMs: 120 });
+    return { okd, drawn, msg };
+  };
+
+  const want = { storageLocation: 'LIVE-LOC-0849' };
+  const mine = item({ storage_location: 'LIVE-LOC-0849', updated_at: '2026-08-25T17:00:00.000Z' });
+  const foreign = item({ notes: 'desk edit', updated_at: '2026-08-25T16:00:00.000Z' });
+
+  const normal = await run([item(), mine], want);
+  ok(normal.okd === true, 'FLOW the own change is confirmed once the server carries it');
+  ok(normal.drawn.length === 1 && normal.drawn[0] === mine, 'FLOW …and exactly that state is drawn');
+
+  const race = await run([foreign, foreign, mine], want);
+  ok(race.okd === true, 'FLOW a foreign edit in between does not stop the confirmation');
+  ok(race.drawn.length === 1 && race.drawn[0] === mine,
+    'FLOW …and what gets drawn is the state that carries the OWN change, never the foreign one');
+
+  const never = await run([foreign], want);
+  ok(never.okd === false, 'FLOW an unapplied save is never reported as done');
+  ok(never.drawn.length === 0, 'FLOW …nothing is drawn from it');
+  ok(String(never.msg.textContent).includes('accepted'),
+    `FLOW …and the message says accepted, not saved ("${never.msg.textContent}")`);
 }
 
 // ── Syntaxgate: die ausgelieferte Seite parst ─────────────────────────────

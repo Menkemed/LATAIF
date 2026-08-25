@@ -786,6 +786,10 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // Woher der gerade gezeigte Artikel geoeffnet wurde — damit ein Neuzeichnen denselben
   // Zurueck-Weg behaelt, den der Benutzer hatte.
   let currentOrigin = 'scan';
+  // Jede angestossene Ansicht bekommt eine Nummer. Kommt eine langsame Antwort zurueck,
+  // nachdem inzwischen eine neuere Ansicht gilt, wird sie verworfen statt gezeichnet —
+  // sonst ueberschreibt das langsamere Rennen das schnellere.
+  let viewSeq = 0;
   // POST-V0838 §B — where the open came from. A search hit remembers enough to put the operator
   // back exactly where they were; a QR scan deliberately remembers nothing, so scanning never
   // fabricates a search history to go "back" to.
@@ -856,7 +860,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   window.addEventListener('pageshow', function (ev) {
     if (!ev.persisted) return;
     if (!currentProduct || !currentProduct.id) return;
+    const seq = ++viewSeq;
     fetchProductById(currentProduct.id).then(function (fresh) {
+      if (seq !== viewSeq) return;
       if (fresh) showProduct(fresh, currentOrigin, 'fresh');
     });
   });
@@ -865,7 +871,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const input = $('searchInput');
     searchReturn = { query: input ? input.value : '', hits: lastHits, scrollY: window.scrollY || 0 };
     hide('searchPane');
+    const seq = ++viewSeq;
     const fresh = await fetchProductById(h && h.id);
+    if (seq !== viewSeq) return;                 // inzwischen gilt eine neuere Ansicht
     showProduct(fresh || h, 'search', fresh ? 'fresh' : 'stale');
   }
 
@@ -963,33 +971,90 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     ['peNotes', 'notes'],
   ];
   /**
-   * v0.8.49 — nach "Saved." darf nicht der Bildschirm von vorhin stehenbleiben.
+   * Enthaelt dieser Serverstand WIRKLICH das, was dieser Save geschickt hat?
    *
-   * Der Auftrag ist durabel: er liegt in der Warteschlange, der Desktop wendet ihn an, das
-   * dauert einen Moment. Ein sofortiger Leseversuch wuerde deshalb den ALTEN Stand liefern und
-   * wie ein verlorener Save aussehen. Also wird so lange frisch gelesen, bis der Server einen
-   * NEUEREN Stand meldet (`updated_at`) — und dann wird genau dieser gezeichnet. Nichts wird
-   * lokal zusammengebaut: sichtbar ist, was gespeichert wurde.
-   *
-   * Kommt in der Frist nichts an, bleibt das Formular stehen und sagt das auch. Lieber ein
-   * ehrliches "noch nicht angewandt" als eine Anzeige, die etwas behauptet.
+   * Ein neuerer Zeitstempel beweist das NICHT. Aendert jemand am Desktop denselben Artikel,
+   * waehrend der eigene Auftrag noch in der Warteschlange liegt, ist der Stand neuer — aber die
+   * eigene Aenderung steht nicht drin. Wer sich auf "neuer" verlaesst, meldet dann Erfolg fuer
+   * etwas, das noch gar nicht passiert ist. Deshalb wird der Inhalt geprueft: jedes Feld, das
+   * dieser Save behauptet gesetzt zu haben, muss im gelesenen Zustand so dastehen.
    */
-  async function showSavedState(productId, seenUpdatedAt, msg) {
-    const deadline = Date.now() + 20000;
+  function patchApplied(fresh, expected) {
+    if (!fresh || !expected) return false;
+    const norm = (x) => (x === undefined || x === null || x === '' ? '' : String(x));
+    const COL = {
+      name: 'name', brand: 'brand', condition: 'condition', storageLocation: 'storage_location',
+      notes: 'notes', purchasePrice: 'purchase_price', plannedSalePrice: 'planned_sale_price',
+      minSalePrice: 'min_sale_price',
+    };
+    let attrs = {};
+    try { attrs = typeof fresh.attributes === 'string' ? JSON.parse(fresh.attributes || '{}') : (fresh.attributes || {}); } catch (_) { return false; }
+    for (const k of Object.keys(expected)) {
+      if (k === '__galleryCount') {
+        const gal = Array.isArray(fresh.gallery) ? fresh.gallery : null;
+        if (!gal || gal.length !== expected.__galleryCount) return false;
+        continue;
+      }
+      if (k === 'attributes') {
+        for (const ak of Object.keys(expected.attributes || {})) {
+          const want = expected.attributes[ak], got = attrs[ak];
+          if (want === null) { if (!(got === undefined || got === null || got === '')) return false; continue; }
+          if (Array.isArray(want)) {
+            const g = Array.isArray(got) ? got : [];
+            if (g.length !== want.length || !want.every((x, i) => String(x) === String(g[i]))) return false;
+            continue;
+          }
+          if (norm(got) !== norm(want)) return false;
+        }
+        continue;
+      }
+      if (k === 'scopeOfDelivery') {
+        let sc = [];
+        try { sc = typeof fresh.scope_of_delivery === 'string' ? JSON.parse(fresh.scope_of_delivery || '[]') : (fresh.scope_of_delivery || []); } catch (_) { return false; }
+        const want = expected.scopeOfDelivery || [];
+        if (!Array.isArray(sc) || sc.length !== want.length) return false;
+        if (!want.every((x) => sc.indexOf(x) !== -1)) return false;
+        continue;
+      }
+      const col = COL[k];
+      if (!col) continue;                      // ein Feld, das der Lesevertrag nicht fuehrt
+      if (norm(fresh[col]) !== norm(expected[k])) return false;
+    }
+    return true;
+  }
+
+  /**
+   * v0.8.49 — nach dem Speichern den BESTAETIGTEN Stand zeigen, nicht den Bildschirm von vorhin.
+   *
+   * Der Auftrag ist durabel: er liegt in der Warteschlange, der Desktop wendet ihn an, das dauert
+   * einen Moment. Deshalb wird so lange frisch gelesen, bis der gelesene Zustand die eigene
+   * Aenderung wirklich enthaelt (`patchApplied`) — ein fremder Edit desselben Artikels macht den
+   * Stand zwar neuer, aber nicht bestaetigt, und wird hier nicht als Erfolg verbucht.
+   *
+   * Bis dahin sagt die Meldung, was gilt: der Auftrag ist ANGENOMMEN. Erst mit dem bestaetigten
+   * Zustand wird neu gezeichnet und "Saved." gemeldet. Laeuft die Frist ab, bleibt es beim
+   * ehrlichen "angenommen, noch nicht angewandt" — kein erfundener Erfolg, kein alter Stand, der
+   * als neuer ausgegeben wird.
+   */
+  async function showSavedState(productId, expected, msg, opts) {
+    const every = (opts && opts.intervalMs) || 1200;
+    const within = (opts && opts.timeoutMs) || 20000;
+    const seq = ++viewSeq;
+    const deadline = Date.now() + within;
     while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, every));
       const fresh = await fetchProductById(productId);
-      if (fresh && String(fresh.updated_at || '') !== String(seenUpdatedAt || '')) {
+      if (seq !== viewSeq) return false;        // der Benutzer ist inzwischen woanders
+      if (patchApplied(fresh, expected)) {
         showProduct(fresh, currentOrigin, 'fresh');
         const host = $('scanDetails');
         if (host) host.insertAdjacentHTML('afterbegin', '<div style="color:#7FA87F; font-size:13px; margin-bottom:10px;">Saved.</div>');
         return true;
       }
     }
-    if (msg) { msg.style.color = '#C8A96A'; msg.textContent = 'Saved — the desktop has not applied it yet.'; }
+    if (msg) { msg.style.color = '#C8A96A'; msg.textContent = 'Saved — accepted, but the desktop has not applied it yet.'; }
     return false;
   }
-
   function wireProductEdit(p) {
     const btn = $('pdEditBtn'), form = $('pdEditForm'), msg = $('peMsg');
     if (!btn || !form) return;
@@ -1274,8 +1339,10 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'At most ' + MAX_PHOTOS + ' photos per item.'; }
         return;
       }
-      // Der Stand, gegen den verglichen wird: der, den dieser Bildschirm gelesen hat.
-      const seenUpdatedAt = p.updated_at || '';
+      // Was dieser Save behauptet zu tun. Genau das muss der Server danach zeigen, bevor
+      // irgendetwas als gespeichert gemeldet wird.
+      const expected = JSON.parse(JSON.stringify(changed));
+      if (galleryPlan) expected.__galleryCount = galleryPlan.order.length;
       saving = true;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
@@ -1320,10 +1387,10 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         // §17 — hat der Galerie-Job die Feldaenderungen schon mitgenommen, gibt es hier nichts mehr
         // zu tun. Ein zweiter Job wuerde denselben Patch ein zweites Mal anwenden wollen.
         if (galleryPlan || Object.keys(changed).length === 0) {
-          if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
+          if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saved — waiting for the desktop…'; }
           for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
           saving = false; $('peSave').disabled = false;
-          showSavedState(p.id, seenUpdatedAt, msg);
+          showSavedState(p.id, expected, msg);
           return;
         }
         // Derselbe durable Weg wie ein neuer Artikel: Queue → /api/mobile/upload → Inbox → Drain.
@@ -1338,8 +1405,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         const r = await uploadQueue.drainEntry(entry.uploadEventId, localStorage.getItem(TOKEN_KEY));
         if (r && r.outcome && r.outcome !== 'done') throw new Error('Upload ' + r.outcome);
         for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
-        if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
-        showSavedState(p.id, seenUpdatedAt, msg);
+        if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saved — waiting for the desktop…'; }
+        showSavedState(p.id, expected, msg);
       } catch (e) {
         // Fehlschlag aendert NICHTS — weder am Artikel noch am Formular. Der Benutzer kann es
         // erneut versuchen, ohne dass irgendwo ein halber Zustand zurueckbleibt.
@@ -1377,7 +1444,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (!res.ok || data.error) {
           if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = data.error ? String(data.error) : ('Could not save (' + res.status + ').'); }
         } else {
-          if (msg) { msg.style.color = '#7FA87F'; msg.textContent = 'Saved.'; }
+          if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saved — waiting for the desktop…'; }
           if ($('scNotes')) $('scNotes').value = '';
           await loadChecks(productId);
         }
