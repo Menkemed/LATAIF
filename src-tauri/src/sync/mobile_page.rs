@@ -789,10 +789,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // Jede angestossene Ansicht bekommt eine Nummer. Kommt eine langsame Antwort zurueck,
   // nachdem inzwischen eine neuere Ansicht gilt, wird sie verworfen statt gezeichnet —
   // sonst ueberschreibt das langsamere Rennen das schnellere.
-  let viewSeq = 0;
-  // Und jeder Speichervorgang. Ein neuer Save loest den vorigen ab: dessen Warten auf die
+  // …und jeder Speichervorgang. Ein neuer Save loest den vorigen ab: dessen Warten auf die
   // Bestaetigung ist damit gegenstandslos und hoert auf, statt im Hintergrund weiterzulaufen.
-  let saveSeq = 0;
+  // Beide Zaehler stehen zusammen in EINEM Objekt — so liest jede Pruefung den aktuellen
+  // Stand und nicht eine Kopie von vorhin.
+  const pageGen = { view: 0, save: 0 };
   // POST-V0838 §B — where the open came from. A search hit remembers enough to put the operator
   // back exactly where they were; a QR scan deliberately remembers nothing, so scanning never
   // fabricates a search history to go "back" to.
@@ -863,9 +864,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   window.addEventListener('pageshow', function (ev) {
     if (!ev.persisted) return;
     if (!currentProduct || !currentProduct.id) return;
-    const seq = ++viewSeq;
+    const seq = ++pageGen.view;
     fetchProductById(currentProduct.id).then(function (fresh) {
-      if (seq !== viewSeq) return;
+      if (seq !== pageGen.view) return;
       if (fresh) showProduct(fresh, currentOrigin, 'fresh');
     });
   });
@@ -874,9 +875,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const input = $('searchInput');
     searchReturn = { query: input ? input.value : '', hits: lastHits, scrollY: window.scrollY || 0 };
     hide('searchPane');
-    const seq = ++viewSeq;
+    const seq = ++pageGen.view;
     const fresh = await fetchProductById(h && h.id);
-    if (seq !== viewSeq) return;                 // inzwischen gilt eine neuere Ansicht
+    if (seq !== pageGen.view) return;                 // inzwischen gilt eine neuere Ansicht
     showProduct(fresh || h, 'search', fresh ? 'fresh' : 'stale');
   }
 
@@ -1085,17 +1086,20 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   async function showSavedState(productId, expected, msg, opts) {
     const every = (opts && opts.intervalMs) || 1200;
     const within = (opts && opts.timeoutMs) || 20000;
-    const seq = ++viewSeq;
-    const mine = ++saveSeq;
+    const seq = ++pageGen.view;
+    const mine = ++pageGen.save;
     // Wann dieses Warten gegenstandslos ist: der Benutzer ist woanders, oder es wurde erneut
     // gespeichert. Dann hoert es auf — ein Wartelauf, den niemand mehr braucht, soll auch
     // nicht weiter im Hintergrund lesen.
-    const cancelled = (opts && opts.cancelled) || (() => seq !== viewSeq || mine !== saveSeq);
+    const cancelled = (opts && opts.cancelled) || (() => seq !== pageGen.view || mine !== pageGen.save);
     const deadline = Date.now() + within;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, every));
       if (cancelled()) return false;            // vor dem Lesen, nicht erst danach
       const fresh = await fetchProductById(productId);
+      // Der wichtigere der beiden Checks: dieser Lesevorgang lief bereits, als das Warten noch
+      // galt. Kommt er zurueck, nachdem der Benutzer weitergegangen ist oder erneut gespeichert
+      // wurde, darf er NICHTS mehr tun — nicht zeichnen, nichts melden, nicht weiterlaufen.
       if (cancelled()) return false;
       if (patchApplied(fresh, expected)) {
         showProduct(fresh, currentOrigin, 'fresh');
@@ -1401,7 +1405,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       if (galleryPlan) expected.gallery = { order: galleryPlan.order, remove: galleryPlan.remove };
       saving = true;
       // Ein neuer Speichervorgang loest ein noch laufendes Warten auf Bestaetigung ab.
-      saveSeq++;
+      pageGen.save++;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
       try {

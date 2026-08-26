@@ -101,7 +101,7 @@ ok(/accepted, but the desktop has not applied it yet/.test(page),
   'SAVED …and if it never arrives, the page says accepted — not saved');
 ok(/Saved — waiting for the desktop/.test(page),
   'SAVED the wording separates "accepted" from "confirmed"');
-ok(/const seq = \+\+viewSeq;/.test(page) && (page.match(/seq !== viewSeq/g) || []).length === 3,
+ok(/const seq = \+\+pageGen\.view;/.test(page) && (page.match(/seq !== pageGen\.view/g) || []).length === 3,
   'ORDER every async view carries a generation guard — a slow old answer cannot overwrite a newer view');
 
 // ── Rueckkehr aus dem Vor-/Zurueck-Speicher ist NICHT der HTTP-Cache ──────
@@ -228,18 +228,22 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
 
   // Und der Ablauf drumherum, mit gestellten Antworten.
   const showSavedState = new Function(
-    'fetchProductById', 'showProduct', '$', 'patchApplied', 'galleryAddsNewPhotos', 'currentOrigin', 'viewSeq', 'saveSeq',
+    'fetchProductById', 'showProduct', '$', 'patchApplied', 'galleryAddsNewPhotos', 'currentOrigin', 'pageGen',
     `${cut('showSavedState')} return showSavedState;`,
   ) as (...a: unknown[]) => (id: string, expected: unknown, msg: unknown, opts: unknown) => Promise<boolean>;
 
+  // Die ECHTEN Generationen der Seite — der Test dreht sie von aussen weiter und prueft damit
+  // die tatsaechliche Abbruchbedingung, nicht eine nachgebaute.
+  let gen = { view: 0, save: 0 };
   const run = async (answers: Array<Record<string, unknown>>, expected: unknown) => {
+    gen = { view: 0, save: 0 };
     const drawn: unknown[] = [];
     let i = 0;
     const fn = showSavedState(
       async () => answers[Math.min(i++, answers.length - 1)],
       (fresh: unknown) => drawn.push(fresh),
       () => null,
-      patchApplied, galleryAddsNewPhotos, 'search', 0, 0,
+      patchApplied, galleryAddsNewPhotos, 'search', gen,
     );
     const msg: Record<string, unknown> = { style: {}, textContent: '' };
     const okd = await fn('p-1', expected, msg, { intervalMs: 1, timeoutMs: 120 });
@@ -267,16 +271,76 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
     const fn = showSavedState(
       async () => { reads++; stop = true; return foreign; },
       () => { throw new Error('nothing may be drawn from a cancelled wait'); },
-      () => null, patchApplied, galleryAddsNewPhotos, 'search', 0, 0,
+      () => null, patchApplied, galleryAddsNewPhotos, 'search', { view: 0, save: 0 },
     );
     const done = await fn('p-1', want, { style: {}, textContent: '' },
       { intervalMs: 1, timeoutMs: 200, cancelled: () => stop });
     ok(done === false, 'CANCEL a wait that has become pointless ends without a result');
     ok(reads === 1, `CANCEL …and stops reading instead of polling on (${reads} read)`);
   }
-  ok(/const cancelled = \(opts && opts\.cancelled\) \|\| \(\(\) => seq !== viewSeq \|\| mine !== saveSeq\)/.test(page),
+  ok(/const cancelled = \(opts && opts\.cancelled\) \|\| \(\(\) => seq !== pageGen\.view \|\| mine !== pageGen\.save\)/.test(page),
     'CANCEL the page ends the wait when the view moved on or another save started');
-  ok(/saveSeq\+\+;/.test(page), 'CANCEL …and every new save really supersedes the previous wait');
+  ok(/pageGen\.save\+\+;/.test(page), 'CANCEL …and every new save really supersedes the previous wait');
+
+  // ── Lebenszyklus: ein Warten, das nicht mehr gilt, bleibt vollstaendig wirkungslos ──
+  //
+  // Nicht nur "vor dem naechsten Lesen abbrechen": ein Lesevorgang, der bereits lief, muss nach
+  // seiner Rueckkehr erkennen, dass seine Generation ungueltig ist — sonst zeichnet er die alte
+  // Antwort in eine Ansicht, die es so nicht mehr gibt.
+  const lifecycle = async (breakIt: (g: { view: number; save: number }) => void, answer: Record<string, unknown> | null) => {
+    gen = { view: 0, save: 0 };
+    const drawn: unknown[] = [];
+    let reads = 0;
+    const fn = showSavedState(
+      async () => { reads++; breakIt(gen); return answer; },      // waehrend des Lesens gilt es nicht mehr
+      (fresh: unknown) => drawn.push(fresh),
+      () => null, patchApplied, galleryAddsNewPhotos, 'search', gen,
+    );
+    const msg: Record<string, unknown> = { style: {}, textContent: 'untouched' };
+    const done = await fn('p-1', want, msg, { intervalMs: 1, timeoutMs: 120 });
+    return { done, drawn, reads, msg };
+  };
+
+  // 1) Der Benutzer ist weitergegangen, waehrend der Lesevorgang lief — und die Antwort HAETTE
+  //    bestaetigt. Sie darf trotzdem nichts bewirken.
+  const viewGone = await lifecycle((g) => { g.view++; }, mine);
+  ok(viewGone.done === false, 'LIFECYCLE a wait whose view is gone reports nothing');
+  ok(viewGone.drawn.length === 0, 'LIFECYCLE …draws nothing, although the answer would have confirmed');
+  ok(viewGone.reads === 1, `LIFECYCLE …and stops reading (${viewGone.reads})`);
+  ok(viewGone.msg.textContent === 'untouched', 'LIFECYCLE …and leaves the message of the new view alone');
+
+  // 2) Save A wartet, Save B beginnt — A darf B nicht bestaetigen, auch nicht mit passendem Stand.
+  const superseded = await lifecycle((g) => { g.save++; }, mine);
+  ok(superseded.done === false, 'LIFECYCLE a save that was superseded by the next one confirms nothing');
+  ok(superseded.drawn.length === 0, 'LIFECYCLE …and draws nothing into the newer save');
+  ok(superseded.reads === 1, `LIFECYCLE …and stops (${superseded.reads})`);
+
+  // 3) Der entwertete Lesevorgang scheitert (abgelaufenes Token liefert nichts) — das darf die
+  //    neue Ansicht ebenso wenig beruehren.
+  const failedLate = await lifecycle((g) => { g.view++; }, null);
+  ok(failedLate.done === false && failedLate.drawn.length === 0 && failedLate.msg.textContent === 'untouched',
+    'LIFECYCLE a failed read of an invalidated wait leaves the new view untouched');
+
+  // 3b) Wird das Warten schon vor dem naechsten Takt gegenstandslos, wird gar nicht erst gelesen.
+  {
+    gen = { view: 0, save: 0 };
+    let reads = 0;
+    const fn = showSavedState(
+      async () => { reads++; return mine; },
+      () => { throw new Error('nothing may be drawn'); },
+      () => null, patchApplied, galleryAddsNewPhotos, 'search', gen,
+    );
+    const pending = fn('p-1', want, { style: {}, textContent: '' }, { intervalMs: 5, timeoutMs: 120 });
+    gen.view++;                                  // der Benutzer geht weiter, bevor der Takt faellt
+    const done = await pending;
+    ok(done === false, 'LIFECYCLE a wait invalidated before the next tick ends without a result');
+    ok(reads === 0, `LIFECYCLE …and does not even read once more (${reads})`);
+  }
+
+  // 4) Und der gueltige Fall bestaetigt weiterhin.
+  const stillValid = await lifecycle(() => {}, mine);
+  ok(stillValid.done === true && stillValid.drawn.length === 1,
+    'LIFECYCLE the current save still confirms and draws exactly once');
 
   const never = await run([foreign], want);
   ok(never.okd === false, 'FLOW an unapplied save is never reported as done');
