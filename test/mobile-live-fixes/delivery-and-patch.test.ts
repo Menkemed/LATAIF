@@ -101,8 +101,17 @@ ok(/accepted, but the desktop has not applied it yet/.test(page),
   'SAVED …and if it never arrives, the page says accepted — not saved');
 ok(/Saved — waiting for the desktop/.test(page),
   'SAVED the wording separates "accepted" from "confirmed"');
-ok(/const seq = \+\+pageGen\.view;/.test(page) && (page.match(/seq !== pageGen\.view/g) || []).length === 3,
+// v0.8.50 — vier Wege lesen asynchron in eine Detailansicht: sie oeffnen, sie nach einer
+// Wiederherstellung neu lesen, der Wiederholen-Knopf, und das Warten auf die Bestaetigung.
+// Jeder nimmt sich eine Generation und prueft sie NACH seinem Warten wieder.
+ok((page.match(/const seq = \+\+pageGen\.view;/g) || []).length === 4
+  && (page.match(/seq !== pageGen\.view/g) || []).length === 4,
   'ORDER every async view carries a generation guard — a slow old answer cannot overwrite a newer view');
+// …und das Verlassen der Ansicht dreht sie weiter — sonst haelt sich ein Warten fuer gueltig,
+// dessen Bildschirm es nicht mehr gibt, und zeichnet ihn ueber die Trefferliste. Der ganze
+// Ablauf steht in test/mobile-back-to-search/back-to-search-generation.test.ts.
+ok(/function backToSearch\(\) \{\r?\n\s*if \(!searchReturn\) return;\r?\n(\s*\/\/[^\r\n]*\r?\n)*\s*pageGen\.view\+\+;/.test(page),
+  'ORDER …and leaving the detail view invalidates it right there, before anything is switched');
 
 // ── Rueckkehr aus dem Vor-/Zurueck-Speicher ist NICHT der HTTP-Cache ──────
 ok(/addEventListener\('pageshow'/.test(page), 'RESTORE a restored page is handled explicitly');

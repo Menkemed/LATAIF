@@ -825,7 +825,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     }
     if ($('pdRetryRead')) $('pdRetryRead').onclick = async () => {
       const btn = $('pdRetryRead'); btn.disabled = true; btn.textContent = 'Loading…';
+      const seq = ++pageGen.view;
       const fresh = await fetchProductById(p.id);
+      if (seq !== pageGen.view) return;              // die Ansicht dazu gibt es nicht mehr
       if (fresh) { showProduct(fresh, 'search', 'fresh'); return; }
       btn.disabled = false; btn.textContent = 'Retry';
     };
@@ -885,6 +887,17 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // flash of "searching") and the scroll offset the operator left at.
   function backToSearch() {
     if (!searchReturn) return;
+    // v0.8.50 — das Verlassen der Detailansicht entwertet sie SOFORT, im selben synchronen
+    // Schritt wie das Umschalten der Ansicht.
+    //
+    // Live gefunden: wer speichert und gleich auf die Trefferliste zurueckgeht, bekam Sekunden
+    // spaeter die Detailansicht ueber die Liste gezeichnet. Der Bestaetigungs-Lesevorgang lief
+    // noch und hielt seine Generation fuer gueltig, weil niemand sie weitergedreht hatte —
+    // `showProduct` zeigt `scanResult` wieder an, ohne `searchPane` zu verstecken (das tut nur
+    // `openHit`). Deshalb erschien der Artikel UNTER der Liste. Ein einziges Hochzaehlen hier
+    // macht jeden noch laufenden Vorgang dieser Ansicht gegenstandslos: er zeichnet nicht,
+    // meldet nichts und liest nicht noch einmal.
+    pageGen.view++;
     const state = searchReturn;
     searchReturn = null;
     releaseMedia();
@@ -1406,6 +1419,13 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       saving = true;
       // Ein neuer Speichervorgang loest ein noch laufendes Warten auf Bestaetigung ab.
       pageGen.save++;
+      // …und er gehoert zu GENAU dieser Detailansicht. Verlaesst der Benutzer sie waehrend des
+      // Hochladens, darf danach nichts mehr in sie hineingeschrieben werden: keine Meldung, kein
+      // zurueckgeschriebener Feldstand und vor allem kein Warten — denn `showSavedState` nimmt
+      // sich beim Start eine FRISCHE Generation und wuerde damit die Trefferliste ueberzeichnen.
+      // Der hochgeladene Auftrag bleibt davon unberuehrt: er liegt durabel und wird angewandt.
+      const viewAtSave = pageGen.view;
+      const viewGone = () => pageGen.view !== viewAtSave;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
       try {
@@ -1426,6 +1446,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           });
           const gr = await uploadQueue.drainEntry(gEntry.uploadEventId, localStorage.getItem(TOKEN_KEY));
           if (gr && gr.outcome && gr.outcome !== 'done') throw new Error('Photos ' + gr.outcome);
+          if (viewGone()) return;      // der Auftrag liegt durabel, die Ansicht dazu gibt es nicht mehr
           // Der Baseline dieses Bildschirms beschreibt jetzt einen ueberholten Stand. Statt den
           // naechsten Save garantiert in einen Konflikt laufen zu lassen, wird die Galerie hier
           // gesperrt, bis der Artikel neu geladen ist.
@@ -1433,6 +1454,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           renderPeStrip();
         }
       } catch (e) {
+        if (viewGone()) { saving = false; $('peSave').disabled = false; return; }
         const raw = (e && e.message) ? String(e.message) : '';
         // §18 — ein Baseline-Konflikt ist kein Hintergrundfehler: der Artikel hat sich geaendert,
         // und der Benutzer muss neu laden, bevor er erneut speichert.
@@ -1466,13 +1488,16 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         });
         const r = await uploadQueue.drainEntry(entry.uploadEventId, localStorage.getItem(TOKEN_KEY));
         if (r && r.outcome && r.outcome !== 'done') throw new Error('Upload ' + r.outcome);
+        if (viewGone()) return;        // derselbe Fall: der Auftrag ist durabel, die Ansicht nicht
         for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
         if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saved — waiting for the desktop…'; }
         showSavedState(p.id, expected, msg);
       } catch (e) {
         // Fehlschlag aendert NICHTS — weder am Artikel noch am Formular. Der Benutzer kann es
         // erneut versuchen, ohne dass irgendwo ein halber Zustand zurueckbleibt.
-        if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'Save failed — nothing was changed. ' + ((e && e.message) ? e.message : ''); }
+        // Auch ein Fehlschlag gehoert in die Ansicht, in der gespeichert wurde — nicht in die,
+        // zu der der Benutzer inzwischen weitergegangen ist.
+        if (msg && !viewGone()) { msg.style.color = '#AA6E6E'; msg.textContent = 'Save failed — nothing was changed. ' + ((e && e.message) ? e.message : ''); }
       } finally {
         saving = false;
         $('peSave').disabled = false;
