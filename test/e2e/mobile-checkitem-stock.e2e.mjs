@@ -637,7 +637,9 @@ async function main() {
   writeFileSync(shotB, Buffer.concat([JPEG, Buffer.from([0x01])]));
   await setFile(edge, '#cPhotoInput', shotB);
   await waitUnhidden(edge, '#cPhotoStatus', 15000);
-  ok(await aiBtnHidden(edge) === false, 'ai-button D/E: replacing the photo keeps it available');
+  // Seit dem Multi-Foto-Vertrag ERSETZT eine zweite Aufnahme die erste nicht mehr, sie kommt dazu.
+  // Fuer diesen Knopf aendert das nichts: er haengt daran, DASS Fotos da sind.
+  ok(await aiBtnHidden(edge) === false, 'ai-button D/E: adding another photo keeps it available');
 
   // Prove it is not a timer at all: the state is right on the very next event-loop turn.
   const immediate = await edge.ev(
@@ -865,20 +867,29 @@ async function main() {
     let chain, filePath;
     try {
       chain = d.prepare(
-        "SELECT l.link_id, o.ingest_status, b.blob_status, g.gen_status, g.storage_key" +
+        "SELECT l.link_id, l.is_primary, l.sort_order, o.ingest_status, b.blob_status, g.gen_status, g.storage_key" +
         "  FROM media_links l" +
         "  JOIN media_objects o ON o.tenant_id=l.tenant_id AND o.media_id=l.media_id" +
         "  JOIN media_blobs b ON b.tenant_id=o.tenant_id AND b.blob_id=o.master_blob_id" +
         "  JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id AND g.generation_no=b.current_generation_no" +
-        " WHERE l.entity_id=? AND l.deleted_at IS NULL").all(row.id);
+        " WHERE l.entity_id=? AND l.deleted_at IS NULL ORDER BY l.sort_order").all(row.id);
     } finally { d.close(); }
-    ok(chain.length === 1, 'ai-drain: exactly one active gallery link (' + chain.length + ')');
-    if (chain.length === 1) {
-      ok(chain[0].ingest_status === 'ready', 'ai-drain: the media object is ready');
-      ok(chain[0].blob_status === 'present', 'ai-drain: the blob is present');
-      ok(chain[0].gen_status === 'available', 'ai-drain: the generation is available');
-      filePath = join(MEDIA_ROOT, chain[0].storage_key.replace(/\//g, sep));
-      ok(existsSync(filePath), 'ai-drain: the image file exists on disk');
+    // Der Vertrag von heute — seit "capture several photos for one item": jedes aufgenommene Foto
+    // bekommt seinen eigenen Galerieplatz, genau eines ist das Titelbild, und das ist das erste.
+    // Dieses Fixture nimmt DREI Fotos auf (btn-a, btn-b, capture), bevor es hochlaedt; die frueher
+    // hier stehende "genau ein Link"-Annahme stammt aus der Zeit, als nur ein Foto moeglich war.
+    ok(chain.length === 3, 'ai-drain: one active gallery link per captured photo (' + chain.length + ')');
+    if (chain.length === 3) {
+      ok(chain.every((c) => c.ingest_status === 'ready'), 'ai-drain: every media object is ready');
+      ok(chain.every((c) => c.blob_status === 'present'), 'ai-drain: every blob is present');
+      ok(chain.every((c) => c.gen_status === 'available'), 'ai-drain: every generation is available');
+      ok(chain.filter((c) => c.is_primary).length === 1 && chain[0].is_primary === 1,
+        'ai-drain: exactly one primary link, and it is the first in sort order');
+      ok(chain.map((c) => c.sort_order).join(',') === '0,1,2',
+        'ai-drain: the slots are 0,1,2 with no gap (' + chain.map((c) => c.sort_order).join(',') + ')');
+      const files = chain.map((c) => join(MEDIA_ROOT, c.storage_key.replace(/\//g, sep)));
+      ok(files.every((p) => existsSync(p)), 'ai-drain: every image file exists on disk');
+      filePath = files[0];
     }
 
     // ── §7 — replay the SAME receipt and drain again ───────────────────────
@@ -898,7 +909,7 @@ async function main() {
     const d3 = new DatabaseSync(BIZ_DB);
     let links2;
     try { links2 = d3.prepare('SELECT COUNT(*) c FROM media_links WHERE entity_id=? AND deleted_at IS NULL').get(row.id).c; } finally { d3.close(); }
-    ok(links2 === 1, 'ai-replay: still exactly one active media link, no second attachment (' + links2 + ')');
+    ok(links2 === 3, 'ai-replay: still one link per captured photo, no second attachment (' + links2 + ')');
   }
 
   // ── ai-failure: timeout and malformed must preserve everything ────────────
