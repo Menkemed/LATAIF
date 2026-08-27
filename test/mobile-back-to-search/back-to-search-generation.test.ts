@@ -55,32 +55,44 @@ ok(cut(page, 'openHit').includes("hide('searchPane');"),
 // ── Der Prueftisch: echte `backToSearch` + echte `showSavedState` ─────────
 type El = {
   id: string; value: string; innerHTML: string; textContent: string;
+  style: Record<string, string>; focus(): void;
   classList: { add(c: string): void; remove(c: string): void };
   insertAdjacentHTML(where: string, html: string): void;
 };
 type Harness = {
   backToSearch: () => void;
   showSavedState: (id: string, expected: unknown, msg: unknown, opts: unknown) => Promise<boolean>;
+  findMode: (mode: string) => void;
+  lookupProduct: (sku: string) => Promise<void>;
+  loadChecks: (productId: string) => Promise<void>;
 };
 
 const SHOW = /const show = \(id\) => \$\(id\)\.classList\.remove\('hidden'\);/;
 const HIDE = /const hide = \(id\) => \$\(id\)\.classList\.add\('hidden'\);/;
 ok(SHOW.test(page) && HIDE.test(page), 'MODEL the page defines show/hide as one-liners over a "hidden" class');
 
-const build = (src: string, deps: Record<string, unknown>): Harness => {
+const build = (src: string, deps: Record<string, unknown>, names: string[] = ['backToSearch', 'showSavedState']): Harness => {
   const body = [
     'const { $, renderHits, releaseMedia, showProduct, read, patchApplied, galleryAddsNewPhotos, document, window } = deps;',
+    'const { fetch, localStorage, renderChecks, stopScan, startScan, setText, TOKEN_KEY } = deps;',
     (SHOW.exec(src) as RegExpExecArray)[0],
     (HIDE.exec(src) as RegExpExecArray)[0],
     'let searchReturn = deps.searchReturn;',
     "let currentOrigin = 'search';",
     'const pageGen = deps.pageGen;',
     'const fetchProductById = (id) => read(id);',
-    cut(src, 'backToSearch'),
-    cut(src, 'showSavedState'),
-    'return { backToSearch, showSavedState };',
+    ...names.map((n) => cut(src, n)),
+    'return { ' + names.join(', ') + ' };',
   ].join('\n');
   return (new Function('deps', body) as (d: Record<string, unknown>) => Harness)(deps);
+};
+
+/** Eine Zeile NUR innerhalb einer Funktion entfernen — sonst trifft die Mutation den falschen Weg. */
+const without = (src: string, fn: string, needle: RegExp): string => {
+  const body = cut(src, fn);
+  const cutBody = body.replace(needle, '');
+  if (cutBody === body) throw new Error('mutation did not apply in ' + fn);
+  return src.replace(body, cutBody);
 };
 
 const patchApplied = new Function(cut(page, 'patchApplied') + ' return patchApplied;')() as
@@ -107,7 +119,7 @@ type Obs = {
 const mkEl = (hidden: Set<string>, els: Map<string, El>) => (id: string): El => {
   if (!els.has(id)) {
     els.set(id, {
-      id, value: '', innerHTML: '', textContent: '',
+      id, value: '', innerHTML: '', textContent: '', style: {}, focus: () => { /* … */ },
       classList: {
         add: (c: string) => { if (c === 'hidden') hidden.add(id); },
         remove: (c: string) => { if (c === 'hidden') hidden.delete(id); },
@@ -178,10 +190,8 @@ ok(fixed.hits === 1 && fixed.query === 'fendi' && fixed.scrolledTo === 420,
 //
 // Ohne es muss GENAU dieser Ablauf wieder den Live-Fehler zeigen: die Detailansicht kommt zurueck,
 // waehrend die Trefferliste noch steht. Findet der Test das nicht, prueft er nichts.
-ok((page.match(/\n\s*pageGen\.view\+\+;/g) || []).length === 1,
-  'CONTROL the invalidation is exactly one line, so removing it is an honest mutation');
-const broken = page.replace(/\n\s*pageGen\.view\+\+;/, '');
-ok(broken.length < page.length, 'CONTROL the mutation applied');
+const broken = without(page, 'backToSearch', /\r?\n\s*pageGen\.view\+\+;/);
+ok(broken.length < page.length, 'CONTROL the mutation removed exactly the invalidation, inside backToSearch only');
 const old = await scenario(broken, true);
 ok(old.drawn === 1, 'CONTROL without it the late answer redraws the detail (' + old.drawn + ')');
 ok(old.detailVisible && old.searchVisible,
@@ -219,13 +229,140 @@ ok(stay.searchVisible === false, 'NEIGHBOUR …and does not pull the search list
   ok(pageGen.view === 8, 'NEIGHBOUR a second back does nothing at all — there is no view left to leave');
 }
 
+// ── 3b) Der Tabwechsel ist derselbe Ausgang wie "Back to search" ──────────
+//
+// `findMode` versteckt `scanResult` genauso — nur heisst es nicht "zurueck". Ein Warten, das die
+// Ansicht ueberlebt, zeichnet sie dann ueber den anderen Tab. Derselbe Beweis, derselbe Ablauf.
+const tabSwitch = async (src: string): Promise<{ drawn: number; done: boolean; detailVisible: boolean }> => {
+  const hidden = new Set<string>();
+  const els = new Map<string, El>();
+  const $ = mkEl(hidden, els);
+  let drawn = 0, reads = 0;
+  let resolveRead: ((v: unknown) => void) | null = null;
+  const pageGen = { view: 0, save: 0 };
+  const h = build(src, {
+    $, patchApplied, galleryAddsNewPhotos, pageGen,
+    searchReturn: { query: 'fendi', hits: [], scrollY: 0 },
+    renderHits: () => { /* … */ }, releaseMedia: () => { /* … */ },
+    stopScan: () => { /* … */ }, startScan: () => { /* … */ }, setText: () => { /* … */ },
+    showProduct: () => { drawn++; $('scanResult').classList.remove('hidden'); },
+    read: () => { reads++; return new Promise((r) => { resolveRead = r as (v: unknown) => void; }); },
+    document: { documentElement: { scrollHeight: 100 } }, window: { scrollTo: () => { /* … */ } },
+  }, ['findMode', 'showSavedState']);
+
+  $('searchPane').classList.add('hidden');
+  $('scanResult').classList.remove('hidden');
+  const pending = h.showSavedState('p-1', WANT, { style: {}, textContent: WAITING }, { intervalMs: 1, timeoutMs: 3000 });
+  for (let i = 0; i < 2000 && reads === 0; i++) await new Promise((r) => setTimeout(r, 1));
+  h.findMode('search');                       // Tab gewechselt, Detailansicht ist weg
+  (resolveRead as unknown as (v: unknown) => void)(CONFIRMING);
+  const done = await pending;
+  return { drawn, done, detailVisible: !hidden.has('scanResult') };
+};
+const tab = await tabSwitch(page);
+ok(tab.drawn === 0 && tab.done === false, 'TAB switching tabs during a save-wait leaves the wait without effect');
+ok(!tab.detailVisible, 'TAB …and the detail does not reappear over the other tab');
+const tabOld = await tabSwitch(without(page, 'findMode', /\r?\n\s*pageGen\.view\+\+;/));
+ok(tabOld.drawn === 1 && tabOld.detailVisible,
+  'TAB control: without the invalidation in findMode the very same symptom comes back');
+
+// ── 3c) Der Scanner oeffnet eine Detailansicht — mit eigener Generation ───
+const scan = async (src: string, leave: boolean): Promise<{ drawn: number; text: string }> => {
+  const hidden = new Set<string>();
+  const els = new Map<string, El>();
+  const $ = mkEl(hidden, els);
+  let drawn = 0;
+  let release: (() => void) | null = null;
+  const pageGen = { view: 0, save: 0 };
+  const h = build(src, {
+    $, patchApplied, galleryAddsNewPhotos, pageGen,
+    searchReturn: null, renderHits: () => { /* … */ }, releaseMedia: () => { /* … */ },
+    stopScan: () => { /* … */ }, startScan: () => { /* … */ }, setText: () => { /* … */ },
+    showProduct: () => { drawn++; },
+    read: () => Promise.resolve(null),
+    localStorage: { getItem: () => 'tok' }, TOKEN_KEY: 't',
+    document: { documentElement: { scrollHeight: 100 } }, window: { scrollTo: () => { /* … */ } },
+    fetch: () => new Promise((r) => {
+      release = () => r({ ok: true, status: 200, json: async () => CONFIRMING });
+    }),
+  }, ['lookupProduct', 'findMode']);
+
+  const pending = h.lookupProduct('TAG-WCH-003');
+  for (let i = 0; i < 2000 && !release; i++) await new Promise((r) => setTimeout(r, 1));
+  if (leave) h.findMode('search');            // waehrend der Abfrage in die Suche gewechselt
+  (release as unknown as () => void)();
+  await pending;
+  return { drawn, text: String($('scanDetails').textContent) };
+};
+const scanStayed = await scan(page, false);
+ok(scanStayed.drawn === 1, 'SCAN a scan that nobody interrupts still renders its item');
+const scanLeft = await scan(page, true);
+ok(scanLeft.drawn === 0 && scanLeft.text === '',
+  'SCAN …but after a tab switch the late answer neither draws nor writes a message');
+// Kontrolle: die Pruefungen nach den Wartepunkten fallen weg — `seq` bleibt definiert, damit die
+// Mutation den ALTEN Ablauf zeigt statt abzustuerzen. Genau so sah dieser Weg vorher aus.
+const scanOld = await scan(
+  without(page, 'lookupProduct', /\r?\n\s*if \(seq !== pageGen\.view\) return;/g), true);
+ok(scanOld.drawn === 1, 'SCAN control: without the checks after its reads the scan draws into the pane the user left');
+
+// ── 3d) Die Zaehl-Historie gehoert zu der Ansicht, die sie angefordert hat ─
+const checks = async (src: string, leave: boolean): Promise<{ rendered: number }> => {
+  const hidden = new Set<string>();
+  const els = new Map<string, El>();
+  const $ = mkEl(hidden, els);
+  let rendered = 0;
+  let release: (() => void) | null = null;
+  const pageGen = { view: 4, save: 0 };
+  const h = build(src, {
+    $, patchApplied, galleryAddsNewPhotos, pageGen,
+    searchReturn: { query: '', hits: [], scrollY: 0 },
+    renderHits: () => { /* … */ }, releaseMedia: () => { /* … */ },
+    stopScan: () => { /* … */ }, startScan: () => { /* … */ }, setText: () => { /* … */ },
+    showProduct: () => { /* … */ }, read: () => Promise.resolve(null),
+    renderChecks: () => { rendered++; },
+    localStorage: { getItem: () => 'tok' }, TOKEN_KEY: 't',
+    document: { documentElement: { scrollHeight: 100 } }, window: { scrollTo: () => { /* … */ } },
+    fetch: () => new Promise((r) => { release = () => r({ ok: true, json: async () => ({ checks: [{ id: 'c1' }] }) }); }),
+  }, ['loadChecks', 'findMode']);
+
+  const pending = h.loadChecks('p-1');
+  for (let i = 0; i < 2000 && !release; i++) await new Promise((r) => setTimeout(r, 1));
+  if (leave) h.findMode('search');
+  (release as unknown as () => void)();
+  await pending;
+  return { rendered };
+};
+ok((await checks(page, false)).rendered === 1, 'CHECKS the history of the open item is rendered');
+ok((await checks(page, true)).rendered === 0,
+  'CHECKS …but a late one is not written into whatever item is on screen by then');
+ok((await checks(
+  without(page, 'loadChecks', /\r?\n\s*if \(seq !== pageGen\.view\) return;/g), true)).rendered === 1,
+  'CHECKS control: without the checks after its reads the stale history lands in the wrong item');
+
 // ── 4) Der Rest des Lebenszyklus bleibt, wie er war ───────────────────────
-ok((page.match(/const seq = \+\+pageGen\.view;/g) || []).length === 4
-  && (page.match(/seq !== pageGen\.view/g) || []).length === 4,
-  'LIFECYCLE every async view path still takes a generation AND checks it after its await');
-ok(cut(page, 'openHit').includes('const seq = ++pageGen.view;')
-  && cut(page, 'openHit').includes('if (seq !== pageGen.view) return;'),
-  'LIFECYCLE reopening a hit still reads fresh under its own generation');
+// Der Vertrag, Weg fuer Weg statt als Zaehlung: wer eine Detailansicht OEFFNET, nimmt sich eine
+// frische Generation; wer sie VERLAESST, dreht sie weiter; wer nur in sie hineinliest, merkt sie
+// sich. Und jeder von ihnen prueft nach seinem Warten erneut.
+for (const [fn, opens] of [['openHit', true], ['lookupProduct', true]] as Array<[string, boolean]>) {
+  const src = cut(page, fn);
+  ok(src.includes('const seq = ++pageGen.view;') === opens,
+    'LIFECYCLE ' + fn + ' opens a view and takes a fresh generation for it');
+  ok((src.match(/if \(seq !== pageGen\.view\) return;/g) || []).length >= 1,
+    'LIFECYCLE …and re-checks it after every await before it renders');
+}
+for (const [fn, needle] of [['loadChecks', 'const seq = pageGen.view;']] as Array<[string, string]>) {
+  const src = cut(page, fn);
+  ok(src.includes(needle) && !src.includes('++pageGen.view'),
+    'LIFECYCLE ' + fn + ' only remembers the running view — it does not start a new one');
+  ok((src.match(/if \(seq !== pageGen\.view\) return;/g) || []).length >= 2,
+    'LIFECYCLE …and checks it after each of its awaits');
+}
+for (const fn of ['backToSearch', 'findMode']) {
+  ok(/\n\s*pageGen\.view\+\+;/.test(cut(page, fn)), 'LIFECYCLE ' + fn + ' leaves the detail view and invalidates it');
+  ok(cut(page, fn).includes("hide('scanResult');"), 'LIFECYCLE …which is exactly why it must: it hides the detail');
+}
+ok(cut(page, 'showSavedState').includes('seq !== pageGen.view || mine !== pageGen.save'),
+  'LIFECYCLE the wait is bound to BOTH its view and its save');
 ok(/addEventListener\('pageshow'/.test(page) && /if \(!ev\.persisted\) return;/.test(page),
   'LIFECYCLE the v0.8.49 restore handler is untouched');
 ok(/if \(seq !== pageGen\.view\) return;[^\n]*\r?\n\s*if \(fresh\) \{ showProduct\(fresh, 'search', 'fresh'\); return; \}/.test(page),

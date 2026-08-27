@@ -569,15 +569,24 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     lookupProduct(value);
   }
   async function lookupProduct(sku) {
+    // v0.8.50 — auch der Scanner oeffnet eine Detailansicht, also nimmt er sich eine Generation
+    // wie `openHit`. Wechselt der Benutzer waehrend der Abfrage den Tab, darf die spaete Antwort
+    // weder den Artikel zeichnen noch eine Fehlermeldung in einen Bildschirm schreiben, den es
+    // so nicht mehr gibt.
+    const seq = ++pageGen.view;
     try {
       const token = localStorage.getItem(TOKEN_KEY);
       const res = await fetch('/api/products/by-sku/' + encodeURIComponent(sku), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } });
+      if (seq !== pageGen.view) return;
       if (res.status === 404) { $('scanDetails').innerHTML = '<div style="color:#AA6E6E; text-align:center;">No product found for this SKU.</div>'; return; }
       if (!res.ok) { $('scanDetails').textContent = 'Lookup failed (' + res.status + ').'; return; }
       // §32 — the scanner renders through the SAME showProduct the search hits use. No origin:
       // a scan is not a search, so it gets no back control and leaves any search state alone.
-      showProduct(await res.json());
+      const data = await res.json();
+      if (seq !== pageGen.view) return;
+      showProduct(data);
     } catch (e) {
+      if (seq !== pageGen.view) return;
       $('scanDetails').textContent = 'Lookup error: ' + (e && e.message ? e.message : e);
     }
   }
@@ -588,6 +597,10 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   function findMode(mode) {
     const searching = mode === 'search';
     searchReturn = null;   // §B3 — a tab switch is not "back"; never leave a stale target behind
+    // v0.8.50 — und er verlaesst die Detailansicht ebenso wie "Back to search": gleich darunter
+    // wird `scanResult` versteckt. Ohne das Weiterdrehen haelt ein noch laufender Vorgang dieser
+    // Ansicht sich fuer gueltig und zeichnet sie ueber den anderen Tab.
+    pageGen.view++;
     if (searching) stopScan();
     hide('scanResult');
     releaseMedia();
@@ -958,15 +971,23 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   }
 
   async function loadChecks(productId) {
+    // v0.8.50 — diese Liste gehoert in die Ansicht, die sie angefordert hat. `$(id)` findet nach
+    // einem Wechsel dieselben Kennungen im NEUEN Artikel wieder — eine spaete Antwort wuerde also
+    // die Zaehl-Historie des vorigen Artikels in den jetzt gezeigten schreiben. Sie faengt keine
+    // neue Ansicht an, sie merkt sich die laufende (kein Hochzaehlen).
+    const seq = pageGen.view;
     try {
       const token = localStorage.getItem(TOKEN_KEY);
       // `no-store`: eine Zaehl-Historie aus dem Cache verschweigt die letzte Zaehlung.
       const res = await fetch('/api/stock-checks?product_id=' + encodeURIComponent(productId) + '&limit=20',
         { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } });
+      if (seq !== pageGen.view) return;
       if (!res.ok) { const l = $('scLatest'); if (l) l.textContent = 'Check history unavailable.'; return; }
       const data = await res.json();
+      if (seq !== pageGen.view) return;
       renderChecks(data.checks || []);
     } catch (_) {
+      if (seq !== pageGen.view) return;
       const l = $('scLatest');
       if (l) l.textContent = 'Check history unavailable.';
     }

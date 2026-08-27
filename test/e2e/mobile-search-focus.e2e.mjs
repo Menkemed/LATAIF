@@ -430,9 +430,15 @@ async function main() {
   const count = (re) => (pageSrc.match(re) || []).length;
   ok(count(/function\s+showProduct\s*\(/g) === 1, '§G2 the shipped page defines exactly ONE product entry point');
   ok(count(/function\s+renderProduct\s*\(/g) === 1, '§G2 and exactly ONE product renderer - there is no second simplified view');
-  ok(/showProduct\(await res\.json\(\)\);/.test(pageSrc),
-    '§G2 the QR lookup calls that same entry point with NO origin argument');
-  ok(count(/showProduct\(h,\s*'search'\)/g) === 1, '§G2 only the search path passes an origin');
+  // v0.8.50 — die Zusicherung gilt der ABSICHT, nicht einer Schreibweise: der Scanner ruft denselben
+  // Eingang ohne Herkunft auf. Dass er dazwischen auf seine Generation prueft (und deshalb nicht mehr
+  // `showProduct(await res.json())` in einer Zeile schreiben kann), aendert daran nichts.
+  const calls = pageSrc.match(/showProduct\([^;\n]*\);/g) || [];
+  const noOrigin = calls.filter((c) => !c.includes(','));
+  ok(noOrigin.length === 1 && /showProduct\(\s*data\s*\);/.test(noOrigin[0]),
+    '§G2 the QR lookup calls that same entry point with NO origin argument (' + noOrigin.join(' | ') + ')');
+  ok(calls.length > 1 && calls.filter((c) => c.includes(',')).every((c) => /'search'|currentOrigin/.test(c)),
+    '§G2 only the search path passes an origin');
   ok(/if\s*\(b\)\s*b\.onclick\s*=\s*backToSearch;/.test(pageSrc) || /pdBack/.test(pageSrc),
     '§G2 the back control is wired from the same entry point');
 

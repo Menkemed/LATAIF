@@ -101,11 +101,11 @@ ok(/accepted, but the desktop has not applied it yet/.test(page),
   'SAVED …and if it never arrives, the page says accepted — not saved');
 ok(/Saved — waiting for the desktop/.test(page),
   'SAVED the wording separates "accepted" from "confirmed"');
-// v0.8.50 — vier Wege lesen asynchron in eine Detailansicht: sie oeffnen, sie nach einer
-// Wiederherstellung neu lesen, der Wiederholen-Knopf, und das Warten auf die Bestaetigung.
-// Jeder nimmt sich eine Generation und prueft sie NACH seinem Warten wieder.
-ok((page.match(/const seq = \+\+pageGen\.view;/g) || []).length === 4
-  && (page.match(/seq !== pageGen\.view/g) || []).length === 4,
+// v0.8.50 — jeder Weg, der asynchron in eine Detailansicht liest, traegt eine Generation und
+// prueft sie NACH seinem Warten wieder. Keiner darf fehlen: sonst zeichnet eine langsame alte
+// Antwort in einen Bildschirm, den es so nicht mehr gibt.
+ok((page.match(/const seq = \+\+pageGen\.view;/g) || []).length
+  <= (page.match(/if \(seq !== pageGen\.view\) return;/g) || []).length,
   'ORDER every async view carries a generation guard — a slow old answer cannot overwrite a newer view');
 // …und das Verlassen der Ansicht dreht sie weiter — sonst haelt sich ein Warten fuer gueltig,
 // dessen Bildschirm es nicht mehr gibt, und zeichnet ihn ueber die Trefferliste. Der ganze
