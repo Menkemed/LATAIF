@@ -117,6 +117,7 @@ async function waitPortFree(port, ms = 20000) {
 }
 
 const setVal = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; const p=e.tagName==='SELECT'?HTMLSelectElement.prototype:(e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype); Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+const attr = (c, sel, name) => c.ev(`const e=document.querySelector(${S(sel)}); return e ? e.getAttribute(${S(name)}) : null;`);
 const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const clickSel = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; e.click(); return 'OK';`);
 const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO'; b.click(); return 'OK';`);
@@ -267,7 +268,7 @@ ok(productsNamed('Twin Model').length === 1, 'A …and nothing was created while
 await clickText(c, 'Create anyway');
 await sleep(2500);
 {
-  const made = (await waitRows('Copy Model', 2)).filter((p) => p.id !== 'dup-copy-src');
+  const made = (await waitRows('Twin Model', 2)).filter((p) => p.id !== 'dup-existing');
   ok(made.length === 1, `A one deliberate "Create anyway" creates exactly ONE item (${made.length})`);
   const cons = consignmentsFor(made.map((p) => p.id));
   ok(cons.length === 1, `A …and exactly one consignment for it (${cons.length})`);
@@ -293,6 +294,13 @@ ok(await clickText(c, 'Copy details') === 'OK', 'B the copy control is there and
   ok(vals.includes('COPY-1'), `B the details of the found item really landed in the visible form (${vals.slice(0, 200)})`);
   ok(vals.includes('Copybrand') && vals.includes('Copy Model'), 'B …its brand and name among them');
   ok(!vals.includes('CPY-WCH-001'), 'B …but never its SKU — every piece keeps its own number');
+  // Der Kern des Vertrags, direkt gemessen statt aus dem Verhalten geschlossen: der Merker
+  // beschreibt exakt den Zustand, den das Formular nach der Uebernahme traegt.
+  const fpNow = await attr(c, '[data-cn-create]', 'data-dup-fp');
+  const fpDismissed = await attr(c, '[data-cn-create]', 'data-dup-dismissed');
+  ok(!!fpNow && fpNow === fpDismissed,
+    `B the remembered fingerprint IS the one the copied form carries (${fpDismissed} vs ${fpNow})`);
+  ok(fpNow.includes('COPY-1'), 'B …and it is built from the copied values, not the typed ones');
 }
 // Deutlich laenger als der Entprellwert der Live-Pruefung (800 ms) — genau darin sprang der
 // Hinweis vorher ein zweites Mal auf.
@@ -307,9 +315,31 @@ await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   ale
 await sleep(1500);
 if (await dupOpen(c)) { await clickText(c, 'Create anyway'); await sleep(2500); }
 {
-  const made = (await waitRows('Twin Model', 2)).filter((p) => p.id !== 'dup-existing');
+  const made = (await waitRows('Copy Model', 2)).filter((p) => p.id !== 'dup-copy-src');
   ok(made.length === 1, `B the deliberate save after a copy adds exactly one item (${made.length})`);
   ok(consignmentsFor(made.map((p) => p.id)).length === 1, 'B …with exactly one consignment');
+}
+
+// ── B2) Kein Dauer-Bypass: eine echte Aenderung laesst die Pruefung wieder laufen ─────
+await openNewConsignment(c);
+await fillForm(c, { brand: 'Copybrand', name: 'Copy Model' });
+await clickSel(c, '[data-cn-create]');
+await sleep(1500);
+ok(await dupOpen(c) === true, 'B2 the hint appears');
+await clickText(c, 'Copy details');
+await sleep(3000);
+ok(await dupOpen(c) === false, 'B2 …and stays away after the copy');
+{
+  // Jetzt aendert der Benutzer wirklich etwas Duplikat-Relevantes.
+  await setVal(c, 'input[placeholder="e.g. Submariner, Birkin 30"]', 'Twin Model');
+  await setVal(c, 'input[placeholder="e.g. Rolex, Hermes, Cartier"]', 'Dupebrand');
+  const end2 = Date.now() + 12000;
+  let back = false;
+  while (Date.now() < end2 && !back) { await sleep(400); back = await dupOpen(c); }
+  ok(back === true, 'B2 a real change to a duplicate-relevant field lets the check run again — no permanent bypass');
+  // Den Hinweis schliessen, ohne den Anlegen-Dialog zu treffen: sein Cancel steht zuletzt.
+  await c.ev("const b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Cancel').pop(); if(!b) return 'NO'; b.click(); return 'OK';");
+  await sleep(800);
 }
 
 // ── C) Ohne Duplikat: ein Klick, eine Anlage ────────────────────────────────

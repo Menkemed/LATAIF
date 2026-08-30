@@ -1228,6 +1228,8 @@ export function ConsignmentList() {
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}
               data-cn-create
+              data-dup-fp={consignFp}
+              data-dup-dismissed={lastDismissedFp.current}
               disabled={!form.consignorId || !productForm.categoryId}
             >Create Consignment</Button>
           </div>
