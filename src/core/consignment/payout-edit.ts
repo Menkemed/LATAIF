@@ -71,6 +71,28 @@ export function payoutModelLock(con: Consignment | null | undefined): PayoutLock
   return { locked: false, reason: null };
 }
 
+/**
+ * DIESELBE Bedingung wie `payoutModelLock`, nur als SQL — und zwar fuer die WHERE-Klausel des
+ * schreibenden UPDATE.
+ *
+ * Der Grund ist keine Redundanz, sondern der Zeitpunkt: eine Pruefung vor dem Schreiben beurteilt
+ * einen Zustand, der beim Schreiben schon ein anderer sein kann (der Bildschirm stand offen,
+ * waehrenddessen kam ein Verkauf oder eine Auszahlung — auch ueber den Sync von einem anderen
+ * Geraet). Steht die Bedingung IM Update, entscheidet die Datenbank im selben Schritt, in dem sie
+ * schreibt: passt sie nicht mehr, trifft das Update keine Zeile und es aendert sich nichts.
+ *
+ * Die Feldliste ist Zeile fuer Zeile dieselbe wie oben; der Test haelt beide gegeneinander.
+ */
+export const PAYOUT_EDITABLE_SQL = [
+  'invoice_id IS NULL',
+  'sale_price IS NULL',
+  'commission_amount IS NULL',
+  'payout_amount IS NULL',
+  'COALESCE(payout_paid_amount, 0) <= 0',
+  "COALESCE(payout_status, 'pending') = 'pending'",
+  "status = 'active'",
+].join(' AND ');
+
 /** Die Spalten, die ein Payout-Patch IMMER vollstaendig setzt. */
 export interface PayoutPatch {
   commissionType: PayoutModel;

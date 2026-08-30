@@ -10,7 +10,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { registerHooks } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve as resolvePath } from 'node:path';
 import type { Consignment } from '../../src/core/models/types.ts';
 
@@ -36,7 +36,7 @@ registerHooks({
 
 const {
   payoutModelLock, buildPayoutPatch, payoutFieldsFor, normalizePayoutModel,
-  PayoutPatchError, PAYOUT_MODELS,
+  PayoutPatchError, PAYOUT_MODELS, PAYOUT_EDITABLE_SQL,
 } = await import('../../src/core/consignment/payout-edit.ts');
 const { computeConsignmentSale } = await import('../../src/core/consignment/economics.ts');
 
@@ -251,6 +251,108 @@ insert('c-sold', {
   ok(after.notes === 'post-sale note', 'HISTORY an unrelated field is still editable while the payout is locked');
   ok(after.commission_type === 'percent' && after.commission_amount === 180,
     'HISTORY …and that edit changes nothing about the booked payout');
+}
+
+// ── D) Die Erlaubnis gilt IM schreibenden Update, nicht davor ─────────────
+//
+// Die Pruefung vor dem Schreiben beurteilt einen Zustand, der beim Schreiben ein anderer sein
+// kann. Deshalb traegt das UPDATE dieselbe Bedingung in seiner WHERE-Klausel. Hier wird beides
+// gegeneinander gehalten — und der gefaehrliche Ablauf einmal komplett durchgespielt.
+
+/** Die WHERE-Bedingung des Stores, gegen dieselbe Zeile gefragt. */
+const sqlSaysEditable = (id: string): boolean =>
+  (db.prepare(`SELECT COUNT(*) c FROM consignments WHERE id = ? AND ${PAYOUT_EDITABLE_SQL}`)
+    .get(id) as { c: number }).c === 1;
+
+/** Das echte UPDATE des Stores — Bedingung inklusive. Gibt zurueck, ob die Zeile getroffen wurde. */
+const guardedUpdate = (id: string, patch: { commissionType: string; commissionRate: number; excessSplitPct: number | null }): boolean => {
+  const before = read(id);
+  db.prepare(
+    `UPDATE consignments SET commission_type = ?, commission_rate = ?, excess_split_pct = ?, updated_at = ?
+      WHERE id = ? AND ${PAYOUT_EDITABLE_SQL}`
+  ).run(patch.commissionType, patch.commissionRate, patch.excessSplitPct, '2026-04-04T00:00:00.000Z', id);
+  const after = read(id);
+  return after.commission_type === patch.commissionType && (after.excess_split_pct ?? null) === patch.excessSplitPct
+    && after.updated_at !== before.updated_at;
+};
+
+// Beide Formulierungen derselben Regel muessen fuer JEDEN Fall dasselbe sagen. Sonst gaebe es zwei
+// Wahrheiten, und die WHERE-Klausel waere nur Dekoration.
+const cases: Array<[string, Partial<Consignment>, Record<string, unknown>]> = [
+  ['free', {}, {}],
+  ['invoiced', { invoiceId: 'inv-1' }, { invoice_id: 'inv-1' }],
+  ['sold price', { salePrice: 1200 }, { sale_price: 1200 }],
+  ['commission booked', { commissionAmount: 180 }, { commission_amount: 180 }],
+  ['commission booked as 0', { commissionAmount: 0 }, { commission_amount: 0 }],
+  ['payout booked', { payoutAmount: 1020 }, { payout_amount: 1020 }],
+  ['partly paid', { payoutPaidAmount: 500 }, { payout_paid_amount: 500 }],
+  ['zero paid', { payoutPaidAmount: 0 }, { payout_paid_amount: 0 }],
+  ['payout partial', { payoutStatus: 'partial' }, { payout_status: 'partial' }],
+  ['payout paid', { payoutStatus: 'paid' }, { payout_status: 'paid' }],
+  ['payout returned', { payoutStatus: 'returned' }, { payout_status: 'returned' }],
+  ['status sold', { status: 'sold' }, { status: 'sold' }],
+  ['status paid_out', { status: 'paid_out' }, { status: 'paid_out' }],
+  ['status returned', { status: 'returned' }, { status: 'returned' }],
+  ['status expired', { status: 'expired' }, { status: 'expired' }],
+];
+cases.forEach(([label, tsOver, sqlOver], i) => {
+  const id = 'agree-' + i;
+  insert(id, sqlOver);
+  const tsEditable = !payoutModelLock(free(tsOver)).locked;
+  ok(sqlSaysEditable(id) === tsEditable,
+    `AGREE the rule and the SQL condition agree on "${label}" (${tsEditable ? 'editable' : 'locked'})`);
+});
+
+// Der gefaehrliche Ablauf, komplett: Bildschirm offen → Vorpruefung sagt "frei" → INZWISCHEN wird
+// verkauft und ausgezahlt → der alte Edit will speichern.
+insert('c-stale');
+const precheckSaidEditable = !payoutModelLock(free({ id: 'c-stale' })).locked;
+ok(precheckSaidEditable, 'STALE the editor legitimately opened on a free consignment');
+db.prepare(
+  `UPDATE consignments SET invoice_id = ?, sale_price = ?, commission_amount = ?, payout_amount = ?,
+     payout_status = ?, payout_paid_amount = ?, status = ?, updated_at = ? WHERE id = ?`
+).run('inv-stale', 1200, 180, 1020, 'paid', 1020, 'sold', '2026-03-03T00:00:00.000Z', 'c-stale');
+const booked = read('c-stale');
+ok(!sqlSaysEditable('c-stale'), 'STALE …meanwhile the sale and the payout were recorded');
+ok(guardedUpdate('c-stale', buildPayoutPatch({ model: 'cost_split', excessSplitPct: '60' })) === false,
+  'STALE …and the stale save does NOT go through');
+{
+  const after = read('c-stale');
+  ok(after.commission_type === 'percent' && after.excess_split_pct === null,
+    'STALE …the payout model is exactly as it was when the amounts were booked');
+  ok(after.commission_amount === booked.commission_amount && after.payout_amount === booked.payout_amount
+    && after.sale_price === booked.sale_price && after.payout_paid_amount === booked.payout_paid_amount
+    && after.invoice_id === booked.invoice_id,
+    'STALE …and no booked amount moved');
+  ok(after.updated_at === booked.updated_at, 'STALE …the row was not written at all');
+}
+
+// Und der gueltige Fall geht durch denselben Weg weiterhin durch.
+insert('c-ok');
+ok(guardedUpdate('c-ok', buildPayoutPatch({ model: 'cost_split', excessSplitPct: '60' })) === true,
+  'STALE a free consignment still saves through the very same guarded update');
+
+// ── E) …und der Store benutzt genau diesen Weg ────────────────────────────
+//
+// Alles oben waere wertlos, wenn der Store daneben ein nacktes UPDATE abschickte. Deshalb wird
+// seine Quelle hier auf die drei Eigenschaften festgenagelt, die den Unterschied ausmachen.
+{
+  const src = readFileSync(resolvePath(repo, 'src/stores/consignmentStore.ts'), 'utf8');
+  const from = src.indexOf('updateConsignmentPayoutModel: (id, input) => {');
+  const to = src.indexOf('\n  markSold:', from);
+  ok(from > 0 && to > from, 'STORE the payout action was located in the store');
+  const fn = src.slice(from, to);
+  ok(/SELECT \* FROM consignments WHERE id = \?/.test(fn) && /rowToConsignment/.test(fn),
+    'STORE it checks the row it reads FROM THE DATABASE, not the loaded list');
+  ok(!/getConsignment\(id\)/.test(fn), 'STORE …and not the in-memory copy, which can lag behind');
+  ok(/WHERE id = \? AND \$\{PAYOUT_EDITABLE_SQL\}/.test(fn),
+    'STORE the same condition rides along in the WHERE clause of the writing UPDATE');
+  ok(/SELECT commission_type, excess_split_pct FROM consignments WHERE id = \?/.test(fn),
+    'STORE it reads the row back instead of assuming the write landed');
+  const saveAt = fn.indexOf('saveDatabase()');
+  const throwAt = fn.lastIndexOf('throw new PayoutPatchError');
+  ok(throwAt > 0 && saveAt > throwAt,
+    'STORE nothing is persisted, tracked or reloaded before that read-back agreed');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment payout model edit: ${pass} passed, ${fails.length} failed`);

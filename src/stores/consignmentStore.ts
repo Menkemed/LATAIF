@@ -15,7 +15,7 @@ import { usePurchaseStore } from './purchaseStore';
 import { useExpenseStore } from './expenseStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { computeConsignmentSale } from '@/core/consignment/economics';
-import { payoutModelLock, buildPayoutPatch, PayoutPatchError, type PayoutInput } from '@/core/consignment/payout-edit';
+import { payoutModelLock, buildPayoutPatch, PayoutPatchError, PAYOUT_EDITABLE_SQL, type PayoutInput } from '@/core/consignment/payout-edit';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -285,18 +285,44 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
   // wenn ein Bildschirm veraltet ist. Der Feldsatz kommt vollstaendig aus der SSOT, also wird
   // Modell und Parameter in EINEM Update geschrieben; ein Zwischenzustand existiert nicht.
   updateConsignmentPayoutModel: (id, input) => {
-    const con = get().getConsignment(id);
-    const lock = payoutModelLock(con ?? null);
+    const db = getDatabase();
+    // 1. Die Erlaubnis wird gegen die DATENBANK gefragt, nicht gegen den Bildschirm und nicht
+    //    gegen die geladene Liste — die kann aelter sein als die Datenbank (ein Sync-Pull schreibt
+    //    zuerst und laedt die Stores erst danach nach).
+    const rows = query(`SELECT * FROM consignments WHERE id = ?`, [id]);
+    const fresh = rows.length > 0 ? rowToConsignment(rows[0]) : null;
+    const lock = payoutModelLock(fresh);
     if (lock.locked) throw new PayoutPatchError(lock.reason ?? 'The payout model can no longer be changed.');
+
+    // 2. Und dieselbe Bedingung steht IM Update. Damit gilt die Erlaubnis fuer denselben Zustand,
+    //    auf den geschrieben wird: entsteht dazwischen doch eine Bindung, trifft das Update keine
+    //    Zeile, statt eine bereits abgerechnete zu ueberschreiben.
     const patch = buildPayoutPatch(input);
-    // Der Schluessel bleibt im Objekt, auch wenn der Wert leer ist — `updateConsignment` bindet
-    // ihn dann als SQL-NULL. Genau so wird der Parameter des alten Modells geloescht statt
-    // uebersehen.
-    get().updateConsignment(id, {
+    const now = new Date().toISOString();
+    db.run(
+      `UPDATE consignments
+          SET commission_type = ?, commission_rate = ?, excess_split_pct = ?, updated_at = ?
+        WHERE id = ? AND ${PAYOUT_EDITABLE_SQL}`,
+      [patch.commissionType, patch.commissionRate, patch.excessSplitPct, now, id]
+    );
+
+    // 3. Und es wird nachgelesen, statt geglaubt: nur was wirklich in der Zeile steht, gilt als
+    //    gespeichert — und nur dann werden Persistenz, Sync und Liste angefasst.
+    const after = query(`SELECT commission_type, excess_split_pct FROM consignments WHERE id = ?`, [id]);
+    const stored = after[0];
+    if (!stored || stored.commission_type !== patch.commissionType
+      || (stored.excess_split_pct ?? null) !== patch.excessSplitPct) {
+      throw new PayoutPatchError(
+        'The payout model was not changed — the consignment is no longer free (a sale or payout was recorded).'
+      );
+    }
+    saveDatabase();
+    trackUpdate('consignments', id, {
       commissionType: patch.commissionType,
       commissionRate: patch.commissionRate,
-      excessSplitPct: patch.excessSplitPct ?? undefined,
+      excessSplitPct: patch.excessSplitPct,
     });
+    get().loadConsignments();
   },
 
   markSold: (id, salePrice, buyerId, saleMethod) => {
