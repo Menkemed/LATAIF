@@ -607,7 +607,7 @@ export function ConsignmentDetail() {
             <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
               {/* Die Beschriftung eines GEBUCHTEN Verkaufs nennt die damalige Basis, nicht die
                   heutige: der Agreed Price bleibt danach aenderbar, die Buchung daneben nicht. */}
-              <span style={{ color: '#6B7280' }}>
+              <span data-booked-margin-label style={{ color: '#6B7280' }}>
                 {bookedLabelInput ? commissionLineLabel(bookedLabelInput) : HISTORICAL_MARGIN_LABEL}
               </span>
               <span className="font-mono" style={{ color: (consignment.commissionAmount || 0) < 0 ? '#DC2626' : '#0F0F10' }}>
@@ -1020,7 +1020,7 @@ export function ConsignmentDetail() {
       {/* Edit Modal — ersetzt den alten Inline-Edit-Mode (2026-05-18) */}
       <Modal open={editing} onClose={() => setEditing(false)} title={`Edit Consignment — ${consignment.consignmentNumber}`} width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Input required label="AGREED PRICE (BHD)" type="number" value={form.agreedPrice}
+          <Input required label="AGREED PRICE (BHD)" type="number" data-testid="pe-agreed" value={form.agreedPrice}
             onChange={e => setForm({ ...form, agreedPrice: e.target.value })} />
           <Input label="MINIMUM PRICE (BHD)" type="number" placeholder="Optional" value={form.minimumPrice}
             onChange={e => setForm({ ...form, minimumPrice: e.target.value })} />
@@ -1034,6 +1034,8 @@ export function ConsignmentDetail() {
             <div className="flex flex-wrap gap-2">
               {PAYOUT_MODELS.map(t => (
                 <button key={t} type="button"
+                  data-payout-model={t}
+                  data-payout-selected={form.payoutModel === t ? '1' : '0'}
                   disabled={payoutLock.locked}
                   onClick={() => setForm({ ...form, payoutModel: t })}
                   className="rounded transition-all duration-200"
@@ -1053,7 +1055,8 @@ export function ConsignmentDetail() {
                 </button>
               ))}
             </div>
-            <p style={{ fontSize: 11, color: payoutLock.locked ? '#B54708' : '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+            <p data-payout-lock={payoutLock.locked ? '1' : '0'}
+              style={{ fontSize: 11, color: payoutLock.locked ? '#B54708' : '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
               {payoutLock.locked
                 ? payoutLock.reason
                 : form.payoutModel === 'consignor_fixed'
@@ -1066,13 +1069,13 @@ export function ConsignmentDetail() {
 
           {payoutFields.rate && (
             <Input required label="COMMISSION RATE (%)" type="number" disabled={payoutLock.locked}
-              value={form.commissionRate}
+              data-testid="pe-rate" value={form.commissionRate}
               onChange={e => setForm({ ...form, commissionRate: e.target.value })} />
           )}
           {payoutFields.split && (
             <Input required label="SHOP'S SHARE OF PROFIT (%)" type="number" placeholder="50"
               disabled={payoutLock.locked}
-              value={form.excessSplitPct}
+              data-testid="pe-split" value={form.excessSplitPct}
               onChange={e => setForm({ ...form, excessSplitPct: e.target.value })} />
           )}
 
@@ -1093,7 +1096,7 @@ export function ConsignmentDetail() {
               </div>
               <div className="flex justify-between" style={{ marginTop: 6 }}>
                 <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
-                <span style={{ color: '#7EAA6E' }}><Bhd v={editEcon.result.payout}/> BHD</span>
+                <span data-payout-preview={String(editEcon.result.payout)} style={{ color: '#7EAA6E' }}><Bhd v={editEcon.result.payout}/> BHD</span>
               </div>
             </div>
           )}
@@ -1105,6 +1108,7 @@ export function ConsignmentDetail() {
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES</span>
             <textarea
+              data-testid="pe-notes"
               value={form.notes}
               onChange={e => setForm({ ...form, notes: e.target.value })}
               rows={3}
