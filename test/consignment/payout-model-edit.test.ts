@@ -36,9 +36,9 @@ registerHooks({
 
 const {
   payoutModelLock, buildPayoutPatch, payoutFieldsFor, normalizePayoutModel,
-  PayoutPatchError, PAYOUT_MODELS, PAYOUT_EDITABLE_SQL,
+  PayoutPatchError, PAYOUT_MODELS, PAYOUT_EDITABLE_SQL, bookedCommissionInput, HISTORICAL_MARGIN_LABEL,
 } = await import('../../src/core/consignment/payout-edit.ts');
-const { computeConsignmentSale } = await import('../../src/core/consignment/economics.ts');
+const { computeConsignmentSale, commissionLineLabel } = await import('../../src/core/consignment/economics.ts');
 
 let pass = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) pass++; else { fails.push(m); console.log('  x ' + m); } };
@@ -73,10 +73,10 @@ for (const [what, over] of [
 ok(payoutModelLock(free({ payoutPaidAmount: 500 })).locked, 'LOCK a partial payout locks it');
 ok(payoutModelLock(free({ payoutStatus: 'partial' })).locked, 'LOCK a partial payout status locks it');
 ok(payoutModelLock(free({ payoutStatus: 'paid' })).locked, 'LOCK a completed payout locks it');
-ok(payoutModelLock(free({ payoutStatus: 'returned' })).locked, 'LOCK a returned payout locks it');
 
-// Der Lebenszyklus.
-for (const status of ['sold', 'paid_out', 'returned', 'expired'] as const) {
+// Der Lebenszyklus — nur die Verkaufs-Familie. Warum genau diese und keine andere, steht in
+// Abschnitt F, wo jeder reale Statuswert einzeln begruendet wird.
+for (const status of ['sold', 'paid_out'] as const) {
   ok(payoutModelLock(free({ status })).locked, `LOCK status "${status}" locks the payout model`);
 }
 
@@ -353,6 +353,112 @@ ok(guardedUpdate('c-ok', buildPayoutPatch({ model: 'cost_split', excessSplitPct:
   const throwAt = fn.lastIndexOf('throw new PayoutPatchError');
   ok(throwAt > 0 && saveAt > throwAt,
     'STORE nothing is persisted, tracked or reloaded before that read-back agreed');
+}
+
+// ── F) Die Statuswerte der Domaene, einzeln begruendet ────────────────────
+//
+// Nicht "alles ausser active ist Geschichte" — das war zu grob. `expired` setzt der Tageslauf
+// allein wegen eines abgelaufenen Datums, ohne Verkauf; `returned` gibt es mit und ohne
+// vorherigen Verkauf. Gesperrt wird deshalb nur die Verkaufs-Familie, und alles andere
+// entscheiden die Buchungsfelder.
+for (const [status, why] of [
+  ['active', 'the normal case'],
+  ['IN_STOCK', 'the canonical spelling of the same thing'],
+  ['expired', 'set by the daily sweep from an expiry date alone — no sale, no booking'],
+  ['returned', 'a plain return never went through a sale'],
+  ['RETURNED', 'the canonical spelling of that'],
+  ['RETURNED_TO_OWNER', 'and its explicit form'],
+] as Array<[string, string]>) {
+  ok(!payoutModelLock(free({ status: status as Consignment['status'] })).locked,
+    `STATUS "${status}" alone does not lock — ${why}`);
+}
+for (const status of ['sold', 'paid_out', 'SOLD'] as const) {
+  ok(payoutModelLock(free({ status: status as Consignment['status'] })).locked,
+    `STATUS "${status}" locks — it means a sale happened`);
+}
+// Der zweideutige Fall wird von den Feldern entschieden, nicht vom Status: ein Return NACH einem
+// Verkauf traegt die Verkaufsfelder weiter und bleibt deshalb gesperrt.
+ok(payoutModelLock(free({ status: 'returned', invoiceId: 'inv-1', salePrice: 1200, payoutAmount: 1020 })).locked,
+  'STATUS a return AFTER a sale stays locked — through its booked fields, not its status');
+// Und ein stornierter Verkauf ist wieder frei, weil `cancelSale` alle Felder zuruecksetzt.
+ok(!payoutModelLock(free({ status: 'active', payoutStatus: 'pending', payoutPaidAmount: 0 })).locked,
+  'STATUS a cancelled sale is editable again — cancelSale clears every booked field');
+// `payout_status = 'returned'` ist kein geflossenes Geld.
+ok(!payoutModelLock(free({ payoutStatus: 'returned' })).locked,
+  'STATUS a "returned" payout status alone is not a booking');
+
+// Dieselben Faelle gegen das SQL — beide Formulierungen muessen weiterhin deckungsgleich sein.
+const statusCases: Array<[string, Partial<Consignment>, Record<string, unknown>]> = [
+  ['expired', { status: 'expired' as Consignment['status'] }, { status: 'expired' }],
+  ['IN_STOCK', { status: 'IN_STOCK' as Consignment['status'] }, { status: 'IN_STOCK' }],
+  ['returned', { status: 'returned' as Consignment['status'] }, { status: 'returned' }],
+  ['RETURNED_TO_OWNER', { status: 'RETURNED_TO_OWNER' as Consignment['status'] }, { status: 'RETURNED_TO_OWNER' }],
+  ['SOLD upper', { status: 'SOLD' as Consignment['status'] }, { status: 'SOLD' }],
+  ['payout returned', { payoutStatus: 'returned' }, { payout_status: 'returned' }],
+  ['returned after sale', { status: 'returned' as Consignment['status'], invoiceId: 'i', salePrice: 1 }, { status: 'returned', invoice_id: 'i', sale_price: 1 }],
+];
+statusCases.forEach(([label, tsOver, sqlOver], i) => {
+  const id = 'st-' + i;
+  insert(id, sqlOver);
+  ok(sqlSaysEditable(id) === !payoutModelLock(free(tsOver)).locked,
+    `STATUS-SQL the rule and the SQL agree on "${label}"`);
+});
+
+// ── G) Die Beschriftung einer GEBUCHTEN Marge ─────────────────────────────
+//
+// `consignor_fixed` beschriftet die Marge mit dem Agreed Price. Der bleibt nach dem Verkauf
+// aenderbar, die Buchung daneben nicht — also darf die Beschriftung nicht den heutigen Wert
+// nennen. Der eingefrorene Wert ist die ausgezahlte Summe: bei diesem Modell IST der Payout der
+// damalige Agreed Price.
+{
+  const soldFixed = free({
+    commissionType: 'consignor_fixed', agreedPrice: 1000, status: 'sold',
+    salePrice: 1200, invoiceId: 'inv-1', commissionAmount: 200, payoutAmount: 1000,
+  });
+  const bookedInput = bookedCommissionInput(soldFixed);
+  ok(bookedInput !== null && bookedInput.agreedPrice === 1000,
+    'LABEL a booked consignor_fixed is labelled from the frozen payout, not from today');
+  ok(commissionLineLabel(bookedInput as Consignment).includes('1,000.000'),
+    `LABEL …which reads as the amount it was booked on (${commissionLineLabel(bookedInput as Consignment)})`);
+
+  // Jetzt wird der Agreed Price nachtraeglich geaendert — erlaubt, aber ohne Wirkung auf die
+  // Beschriftung der Buchung.
+  const edited = { ...soldFixed, agreedPrice: 7777 };
+  const afterEdit = bookedCommissionInput(edited);
+  ok(afterEdit !== null && afterEdit.agreedPrice === 1000,
+    'LABEL …and it stays that amount after the agreed price is edited');
+  ok(!commissionLineLabel(afterEdit as Consignment).includes('7,777'),
+    'LABEL …the new price never appears as the historical basis');
+  // Die gebuchten Betraege selbst ruehrt das nicht an.
+  ok(edited.commissionAmount === 200 && edited.payoutAmount === 1000 && edited.salePrice === 1200,
+    'LABEL …and no booked amount was touched by any of this');
+
+  // Ohne belastbaren eingefrorenen Wert wird gar keine Basis behauptet.
+  const noPayout = free({
+    commissionType: 'consignor_fixed', agreedPrice: 1000, status: 'sold', salePrice: 1200, invoiceId: 'inv-2',
+  });
+  ok(bookedCommissionInput(noPayout) === null, 'LABEL without a frozen payout no basis is claimed at all');
+  ok(!/\d/.test(HISTORICAL_MARGIN_LABEL), `LABEL …the neutral wording carries no number ("${HISTORICAL_MARGIN_LABEL}")`);
+
+  // Ein noch freies Consignment beschriftet weiterhin mit dem heutigen Stand — dort IST er die
+  // Wahrheit, und die Vorschau soll der Eingabe folgen.
+  const stillFree = free({ commissionType: 'consignor_fixed', agreedPrice: 1500 });
+  ok(bookedCommissionInput(stillFree)?.agreedPrice === 1500,
+    'LABEL an unsold consignment is still labelled from its current agreed price');
+
+  // Die anderen beiden Modelle nennen keinen Preis — ihre Parameter sind ohnehin gesperrt.
+  const soldSplit = free({
+    commissionType: 'cost_split', excessSplitPct: 60, status: 'sold', salePrice: 1200,
+    invoiceId: 'inv-3', commissionAmount: 120, payoutAmount: 1080,
+  });
+  ok(bookedCommissionInput(soldSplit)?.excessSplitPct === 60 && commissionLineLabel(soldSplit).includes('60%'),
+    'LABEL cost_split keeps its own share in the label');
+  const soldPercent = free({
+    commissionType: 'percent', commissionRate: 15, status: 'sold', salePrice: 1200,
+    invoiceId: 'inv-4', commissionAmount: 180, payoutAmount: 1020,
+  });
+  ok(commissionLineLabel(bookedCommissionInput(soldPercent) as Consignment).includes('15'),
+    'LABEL percent keeps its rate — which is locked as soon as anything is booked');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment payout model edit: ${pass} passed, ${fails.length} failed`);

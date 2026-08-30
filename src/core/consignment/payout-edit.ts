@@ -13,6 +13,7 @@
 // einer gepflegten Liste von Zustaenden. Fail-closed: was nicht zweifelsfrei unbenutzt ist, ist
 // gesperrt.
 import type { Consignment } from '@/core/models/types';
+import { canonicalConsignmentStatus } from '@/core/models/types';
 import { DEFAULT_COST_SPLIT_PCT } from './economics';
 
 /** Die drei real unterstuetzten Modelle. Kein viertes wird hier erfunden. */
@@ -61,12 +62,23 @@ export function payoutModelLock(con: Consignment | null | undefined): PayoutLock
   if (booked(con.payoutPaidAmount) && (con.payoutPaidAmount as number) > 0) {
     return NOT_EDITABLE('a payout has already been made');
   }
-  if (con.payoutStatus && con.payoutStatus !== 'pending') {
+  // NUR `partial` und `paid` bedeuten geflossenes Geld. `returned` setzt auch `markReturned` bei
+  // einem Artikel, der NIE verkauft wurde — das ist ein Abschluss ohne jede Buchung.
+  if (con.payoutStatus === 'partial' || con.payoutStatus === 'paid') {
     return NOT_EDITABLE(`the payout is already "${con.payoutStatus}"`);
   }
 
-  // Der Lebenszyklus: alles ausser `active` hat die Vereinbarungsphase verlassen.
-  if (con.status !== 'active') return NOT_EDITABLE(`the consignment is "${con.status}"`);
+  // Der Lebenszyklus — aber nur der Teil, der wirklich einen Verkauf bedeutet.
+  //
+  // `expired` sieht nach Ende aus, ist aber eine reine Verwaltungsangelegenheit: der Tageslauf
+  // setzt ihn allein wegen eines abgelaufenen Datums (`daily-sweep.ts`), ohne Verkauf, ohne
+  // Rechnung, ohne Buchung — die Domaene selbst rechnet ihn deshalb zu IN_STOCK. Ein `returned`
+  // wiederum entsteht auf ZWEI Wegen: mit vorherigem Verkauf (dann sperren bereits die Felder
+  // oben) und ohne (dann gibt es nichts zu schuetzen). Deshalb sperrt hier ausschliesslich die
+  // Verkaufs-Familie, und die wird in der Sprache der Domaene gefragt.
+  if (canonicalConsignmentStatus(con.status) === 'SOLD') {
+    return NOT_EDITABLE(`the consignment is "${con.status}"`);
+  }
 
   return { locked: false, reason: null };
 }
@@ -89,8 +101,10 @@ export const PAYOUT_EDITABLE_SQL = [
   'commission_amount IS NULL',
   'payout_amount IS NULL',
   'COALESCE(payout_paid_amount, 0) <= 0',
-  "COALESCE(payout_status, 'pending') = 'pending'",
-  "status = 'active'",
+  "COALESCE(payout_status, 'pending') NOT IN ('partial', 'paid')",
+  // Wortgleich zu `canonicalConsignmentStatus(...) === 'SOLD'`: nur diese beiden Schreibweisen
+  // (in jeder Gross-/Kleinschreibung) bedeuten einen Verkauf.
+  "LOWER(COALESCE(status, '')) NOT IN ('sold', 'paid_out')",
 ].join(' AND ');
 
 /** Die Spalten, die ein Payout-Patch IMMER vollstaendig setzt. */
@@ -149,6 +163,38 @@ export function buildPayoutPatch(input: PayoutInput): PayoutPatch {
   }
 
   return { commissionType: 'consignor_fixed', commissionRate: num(input.commissionRate) ?? 0, excessSplitPct: null };
+}
+
+/**
+ * Wenn kein belastbarer historischer Wert existiert, wird die Marge OHNE Basis beschriftet —
+ * lieber unbestimmt als mit einer Zahl, die zur Buchung nicht passt.
+ */
+export const HISTORICAL_MARGIN_LABEL = 'Our margin (above the agreed price at the time of sale)';
+
+/**
+ * Womit die Marge-Zeile eines BEREITS GEBUCHTEN Verkaufs beschriftet werden darf.
+ *
+ * Das Problem: die Beschriftung fuer `consignor_fixed` nennt den Agreed Price — und den liest sie
+ * aus dem Datensatz, also aus dem HEUTIGEN Wert. Der Preis bleibt nach dem Verkauf aenderbar
+ * (er ist danach nur noch eine Notiz), die Buchung daneben nicht. Damit koennte neben einer
+ * gebuchten Marge eine Basis stehen, mit der nie gerechnet wurde.
+ *
+ * Die Loesung braucht keine neue Formel und keine Migration: bei `consignor_fixed` IST die
+ * ausgezahlte Summe der damalige Agreed Price (`economics`: `payout = agreed`, auch beim
+ * Fehlbetrag). Dieser Wert ist mit dem Verkauf eingefroren. Er wird eingesetzt, und die
+ * bestehende zentrale Beschriftung rechnet unveraendert weiter.
+ *
+ * Rueckgabe `null` heisst: nimm `HISTORICAL_MARGIN_LABEL`.
+ */
+export function bookedCommissionInput<T extends Consignment>(con: T): T | null {
+  // Nichts gebucht → der heutige Stand IST die Wahrheit, es gibt nichts einzufrieren.
+  if (!payoutModelLock(con).locked) return con;
+  // Nur diese eine Beschriftung nennt ueberhaupt einen Preis; Rate und Split gehoeren zum Modell
+  // und sind bei einem gebuchten Datensatz ohnehin gesperrt.
+  if (normalizePayoutModel(con.commissionType) !== 'consignor_fixed') return con;
+  const frozen = con.payoutAmount;
+  if (typeof frozen !== 'number' || !Number.isFinite(frozen)) return null;
+  return { ...con, agreedPrice: frozen };
 }
 
 /** Die Felder, die die Oberflaeche fuer ein Modell anzeigen muss — Anlegen wie Bearbeiten. */

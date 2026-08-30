@@ -24,7 +24,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
-import { PAYOUT_MODELS, payoutModelLock, payoutFieldsFor, normalizePayoutModel } from '@/core/consignment/payout-edit';
+import { PAYOUT_MODELS, payoutModelLock, payoutFieldsFor, normalizePayoutModel, bookedCommissionInput, HISTORICAL_MARGIN_LABEL } from '@/core/consignment/payout-edit';
 
 function daysUntil(dateStr: string): number {
   const now = new Date();
@@ -175,6 +175,8 @@ export function ConsignmentDetail() {
   // Store vor dem Schreiben fragt.
   const payoutLock = payoutModelLock(consignment);
   const payoutFields = payoutFieldsFor(form.payoutModel);
+  // Fuer eine bereits gebuchte Marge: der eingefrorene Stand, sonst der heutige.
+  const bookedLabelInput = bookedCommissionInput(consignment);
 
   // Sale modal calculations — SSOT economics (percent/consignor_fixed/cost_split).
   const salePriceNum = Number(soldPrice) || 0;
@@ -603,8 +605,10 @@ export function ConsignmentDetail() {
               <span className="font-display" style={{ fontSize: 22, color: '#0F0F10' }}><Bhd v={consignment.salePrice}/> BHD</span>
             </div>
             <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 6 }}>
+              {/* Die Beschriftung eines GEBUCHTEN Verkaufs nennt die damalige Basis, nicht die
+                  heutige: der Agreed Price bleibt danach aenderbar, die Buchung daneben nicht. */}
               <span style={{ color: '#6B7280' }}>
-                {commissionLineLabel(consignment)}
+                {bookedLabelInput ? commissionLineLabel(bookedLabelInput) : HISTORICAL_MARGIN_LABEL}
               </span>
               <span className="font-mono" style={{ color: (consignment.commissionAmount || 0) < 0 ? '#DC2626' : '#0F0F10' }}>
                 <Bhd v={consignment.commissionAmount || 0}/> BHD
