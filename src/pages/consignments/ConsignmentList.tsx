@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { PrintItemsFilterModal } from '@/components/print/PrintItemsFilterModal';
@@ -109,6 +110,10 @@ export function ConsignmentList() {
   useEffect(() => { aiMountedRef.current = true; return () => { aiMountedRef.current = false; }; }, []);
   const aiImgRef = useRef<string | undefined>(undefined);
   aiImgRef.current = productForm.images?.[0];
+  // Ein bewusster Klick darf genau EINE Anlage ausloesen. React-State taugt dafuer nicht: drei
+  // Klicks in einem Tick lesen alle denselben Wert aus ihrem Render und laufen alle drei. Ein Ref
+  // aendert sich bei der Zuweisung — dieselbe Loesung wie in der Collection (`createInFlight`).
+  const createInFlight = useRef(false);
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
 
@@ -121,12 +126,7 @@ export function ConsignmentList() {
   }, [loadConsignments, loadCustomers, loadProducts, loadCategories, loadEmployees]);
 
   // Live Duplicate Detection für Consignment-Produkt — siehe WatchList.
-  const consignAttrs = productForm.attributes || {};
-  const consignFp = [
-    productForm.brand, productForm.name, productForm.sku,
-    consignAttrs.reference_number, consignAttrs.serial_number,
-    consignAttrs.weight, consignAttrs.karat, consignAttrs.item_type,
-  ].map(v => String(v ?? '').trim().toUpperCase()).join('|');
+  const consignFp = duplicateFingerprint(productForm);
   useEffect(() => {
     if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
     if (duplicateMatches.length > 0) return;
@@ -330,6 +330,10 @@ export function ConsignmentList() {
   }
 
   function doCreate() {
+    // Die Anlage laeuft gleich in einem eigenen Tick — bis dahin darf kein zweiter Klick
+    // (Doppelklick auf "Create" oder auf "Create anyway") einen zweiten Auftrag einreihen.
+    if (createInFlight.current) return;
+    createInFlight.current = true;
     // Snapshot der Form-Daten BEVOR React was reseted — die DB-Saves laufen
     // gleich in einem Defer-Tick, da darf das Form schon weg sein.
     const snapshot = {
@@ -400,6 +404,10 @@ export function ConsignmentList() {
       } catch (err) {
         console.error('[Consignment] create failed:', err);
         alert(`Failed to create consignment: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        // Auch nach einem Fehlschlag wieder freigeben — sonst bliebe der Bildschirm fuer immer
+        // gesperrt und ein zweiter Versuch waere unmoeglich.
+        createInFlight.current = false;
       }
     }, 0);
   }
@@ -784,6 +792,7 @@ export function ConsignmentList() {
               <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
                 {categories.map(cat => (
                   <button key={cat.id}
+                    data-cn-cat={cat.id}
                     onClick={() => {
                       setSelectedCat(cat);
                       setProductForm(p => ({ ...p, categoryId: cat.id, condition: cat.conditionOptions?.[0] || '', attributes: {} }));
@@ -1218,6 +1227,7 @@ export function ConsignmentList() {
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}
+              data-cn-create
               disabled={!form.consignorId || !productForm.categoryId}
             >Create Consignment</Button>
           </div>
@@ -1446,8 +1456,7 @@ export function ConsignmentList() {
         onCopyDetails={(id) => {
           const src = products.find(p => p.id === id);
           if (!src) return;
-          const srcAttrs = { ...(src.attributes || {}) } as Record<string, unknown>;
-          delete srcAttrs.serial_number; delete srcAttrs.serialNo;
+          const srcAttrs = copiedAttributes(src);
           setProductForm(f => ({
             ...f,
             brand: src.brand,
@@ -1464,7 +1473,10 @@ export function ConsignmentList() {
             attributes: { ...(f.attributes || {}), ...srcAttrs } as typeof f.attributes,
           }));
           setSelectedCat(categories.find(c => c.id === src.categoryId) || null);
-          lastDismissedFp.current = consignFp;
+          // Der Merker gilt dem Zustand, den das Formular JETZT bekommt — nicht dem von vorher.
+          // Sonst laeuft die Pruefung sofort wieder an und findet genau den Artikel, von dem
+          // gerade kopiert wurde.
+          lastDismissedFp.current = fingerprintAfterCopy(productForm, src);
           setDuplicateMatches([]);
         }}
       />

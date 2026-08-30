@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
@@ -243,12 +244,7 @@ export function WatchList() {
   // Live Duplicate Detection — sobald Brand/Name/SKU/Ref/Serial sich
   // stabilisieren (800ms ohne Eingabe), öffnet das Side-by-Side automatisch.
   // Reset wenn das Modal gar nicht offen ist (showNew = false).
-  const attrs = form.attributes || {};
-  const fp = [
-    form.brand, form.name, form.sku,
-    attrs.reference_number, attrs.serial_number,
-    attrs.weight, attrs.karat, attrs.item_type,
-  ].map(v => String(v ?? '').trim().toUpperCase()).join('|');
+  const fp = duplicateFingerprint(form);
   useEffect(() => {
     if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
     if (duplicateMatches.length > 0) return;
@@ -1109,8 +1105,7 @@ export function WatchList() {
           // Stamm-Daten übernehmen — SKU/Serial/Purchase bleiben leer,
           // weil das physisch ein anderes Stück ist. Bild nur kopieren, wenn
           // der User noch keins selbst hochgeladen hat (Quick-Capture-Pfad).
-          const srcAttrs = { ...(src.attributes || {}) } as Record<string, unknown>;
-          delete srcAttrs.serial_number; delete srcAttrs.serialNo;
+          const srcAttrs = copiedAttributes(src);
           setForm(f => ({
             ...f,
             brand: src.brand,
@@ -1128,7 +1123,8 @@ export function WatchList() {
             attributes: { ...(f.attributes || {}), ...srcAttrs } as typeof f.attributes,
           }));
           setSelectedCat(categories.find(c => c.id === src.categoryId) || null);
-          lastDismissedFp.current = fp;
+          // Der Merker gilt dem Zustand, den das Formular JETZT bekommt — nicht dem von vorher.
+          lastDismissedFp.current = fingerprintAfterCopy(form, src);
           setDuplicateMatches([]);
         }}
       />

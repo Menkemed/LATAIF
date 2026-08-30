@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { useProductStore } from '@/stores/productStore';
 import type { Product, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
@@ -63,12 +64,7 @@ export function NewProductModal({
   useEffect(() => { loadCategories(); }, [loadCategories]);
 
   // Live Duplicate Detection — siehe WatchList für die Mechanik.
-  const attrs = form.attributes || {};
-  const fp = [
-    form.brand, form.name, form.sku,
-    attrs.reference_number, attrs.serial_number,
-    attrs.weight, attrs.karat, attrs.item_type,
-  ].map(v => String(v ?? '').trim().toUpperCase()).join('|');
+  const fp = duplicateFingerprint(form);
   useEffect(() => {
     if (!open) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
     if (duplicateMatches.length > 0) return;
@@ -507,8 +503,7 @@ export function NewProductModal({
         onCopyDetails={(id) => {
           const src = products.find(p => p.id === id);
           if (!src) return;
-          const srcAttrs = { ...(src.attributes || {}) } as Record<string, unknown>;
-          delete srcAttrs.serial_number; delete srcAttrs.serialNo;
+          const srcAttrs = copiedAttributes(src);
           setForm(f => ({
             ...f,
             brand: src.brand,
@@ -526,7 +521,8 @@ export function NewProductModal({
             attributes: { ...(f.attributes || {}), ...srcAttrs } as typeof f.attributes,
           }));
           setSelectedCat(categories.find(c => c.id === src.categoryId) || null);
-          lastDismissedFp.current = fp;
+          // Der Merker gilt dem Zustand, den das Formular JETZT bekommt — nicht dem von vorher.
+          lastDismissedFp.current = fingerprintAfterCopy(form, src);
           setDuplicateMatches([]);
         }}
       />

@@ -111,6 +111,7 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
       {/* Trigger */}
       <div
         ref={triggerRef}
+        data-ss-trigger={placeholder || label || ""}
         className="flex items-center justify-between cursor-pointer transition-colors"
         style={{
           padding: '9px 12px',
@@ -176,6 +177,7 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
             {filtered.map(opt => (
               <div
                 key={opt.id}
+                data-ss-option={opt.id}
                 className="cursor-pointer transition-colors"
                 style={{
                   padding: '8px 12px',
