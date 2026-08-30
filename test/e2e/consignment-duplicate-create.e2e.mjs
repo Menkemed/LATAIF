@@ -42,6 +42,16 @@ function dbQ(sql, params = []) {
   finally { try { db?.close(); } catch {} }
 }
 const productsNamed = (name) => dbQ('SELECT id, sku, brand, name FROM products WHERE name = ?', [name]);
+/** Die Anlage laeuft in einem eigenen Tick, und die Datei wird danach geschrieben — also warten,
+ *  bis die Zeile wirklich da ist, statt eine feste Zeit zu raten. */
+const waitRows = async (name, n, ms = 15000) => {
+  const end = Date.now() + ms;
+  // Und die gelesenen Zeilen zurueckgeben: ein zweiter Lesevorgang koennte genau in einen
+  // Schreibvorgang der Anwendung fallen und leer zurueckkommen.
+  let rows = productsNamed(name);
+  while (Date.now() < end && rows.length < n) { await sleep(400); rows = productsNamed(name); }
+  return rows;
+};
 const consignmentsFor = (ids) => ids.length === 0 ? []
   : dbQ(`SELECT id, product_id, consignment_number FROM consignments WHERE product_id IN (${ids.map(() => '?').join(',')})`, ids);
 
@@ -163,6 +173,15 @@ function seedFixtures() {
          images, attributes, source_type, created_at, updated_at)
        VALUES (?,?, 'cat-watch', 'Dupebrand', 'Twin Model', 'DUP-WCH-001', 'Pre-Owned','[]',100,'BHD','in_stock','MARGIN',0,1,'[]',?, 'OWN',?,?)`
     ).run('dup-existing', branchId, JSON.stringify({ reference_number: 'TWIN-1', dial: 'Blue' }), now, now);
+    // Ein EIGENER vorhandener Artikel fuer den Kopier-Fall. Sonst ist der naechste Treffer der
+    // Artikel, den Fall A gerade selbst angelegt hat — dessen Merkmale sind mit der Eingabe
+    // identisch, und nach dem Kopieren waere nichts zu sehen, obwohl kopiert wurde.
+    db.prepare(
+      `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
+         purchase_price, purchase_currency, stock_status, tax_scheme, days_in_stock, quantity,
+         images, attributes, source_type, created_at, updated_at)
+       VALUES (?,?, 'cat-watch', 'Copybrand', 'Copy Model', 'CPY-WCH-001', 'Pre-Owned','[]',100,'BHD','in_stock','MARGIN',0,1,'[]',?, 'OWN',?,?)`
+    ).run('dup-copy-src', branchId, JSON.stringify({ reference_number: 'COPY-1', dial: 'Green', material: 'Steel' }), now, now);
     return branchId;
   } finally { try { db.close(); } catch {} }
 }
@@ -231,6 +250,7 @@ await sleep(2500);
 c.close(); killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
 seedFixtures();
 ok(productsNamed('Twin Model').length === 1, 'the existing item is staged');
+ok(productsNamed('Copy Model').length === 1, 'and so is the one the copy case works on');
 
 c = await startApp();
 await ensureSignedIn(c);
@@ -247,7 +267,7 @@ ok(productsNamed('Twin Model').length === 1, 'A …and nothing was created while
 await clickText(c, 'Create anyway');
 await sleep(2500);
 {
-  const made = productsNamed('Twin Model').filter((p) => p.id !== 'dup-existing');
+  const made = (await waitRows('Copy Model', 2)).filter((p) => p.id !== 'dup-copy-src');
   ok(made.length === 1, `A one deliberate "Create anyway" creates exactly ONE item (${made.length})`);
   const cons = consignmentsFor(made.map((p) => p.id));
   ok(cons.length === 1, `A …and exactly one consignment for it (${cons.length})`);
@@ -257,27 +277,28 @@ await sleep(2500);
 
 // ── B) Copy details: uebernimmt, legt NICHTS an, und springt nicht wieder auf ─
 await openNewConsignment(c);
-await fillForm(c, { brand: 'Dupebrand', name: 'Twin Model' });
+await fillForm(c, { brand: 'Copybrand', name: 'Copy Model' });
 await captureAlerts(c);
 await clickSel(c, '[data-cn-create]');
 await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   alert:', al); }
 await sleep(1200);
-ok(await dupOpen(c) === true, 'B the hint appears again for a new, equally similar entry');
-const beforeCopy = productsNamed('Twin Model').length;
-const copyClick = await clickText(c, 'Copy details'); console.log('   copy click:', copyClick);
+ok(await dupOpen(c) === true, 'B the hint appears for an entry that resembles an existing item');
+const beforeCopy = productsNamed('Copy Model').length;
+ok(await clickText(c, 'Copy details') === 'OK', 'B the copy control is there and is clicked');
 {
   // Erst beweisen, dass die Uebernahme ueberhaupt stattgefunden hat — sonst waere alles danach
   // ein leeres Gruen.
-  await sleep(600);
-  const vals = await c.ev("return [...document.querySelectorAll('input')].map(e=>e.value).join('|');");
-  console.log('   inputs after copy:', String(vals).slice(0, 300));
-  ok(String(vals).includes('TWIN-1'), 'B the details of the found item really landed in the form');
+  await sleep(800);
+  const vals = String(await c.ev("return [...document.querySelectorAll('input')].map(e=>e.value).join('|');"));
+  ok(vals.includes('COPY-1'), `B the details of the found item really landed in the visible form (${vals.slice(0, 200)})`);
+  ok(vals.includes('Copybrand') && vals.includes('Copy Model'), 'B …its brand and name among them');
+  ok(!vals.includes('CPY-WCH-001'), 'B …but never its SKU — every piece keeps its own number');
 }
 // Deutlich laenger als der Entprellwert der Live-Pruefung (800 ms) — genau darin sprang der
 // Hinweis vorher ein zweites Mal auf.
 await sleep(3000);
 ok(await dupOpen(c) === false, 'B "Copy details" does not bring the hint straight back');
-ok(productsNamed('Twin Model').length === beforeCopy, 'B …and it creates nothing by itself');
+ok(productsNamed('Copy Model').length === beforeCopy, 'B …and it creates nothing by itself');
 ok(await exists(c, '[data-cn-create]') === true, 'B …the dialog stays open for the deliberate save');
 // Der bewusste Save danach legt genau einmal an.
 await captureAlerts(c);
@@ -286,9 +307,9 @@ await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   ale
 await sleep(1500);
 if (await dupOpen(c)) { await clickText(c, 'Create anyway'); await sleep(2500); }
 {
-  const made = productsNamed('Twin Model').filter((p) => p.id !== 'dup-existing');
-  ok(made.length === 2, `B the deliberate save after a copy adds exactly one more (${made.length})`);
-  ok(consignmentsFor(made.map((p) => p.id)).length === 2, 'B …with one consignment each');
+  const made = (await waitRows('Twin Model', 2)).filter((p) => p.id !== 'dup-existing');
+  ok(made.length === 1, `B the deliberate save after a copy adds exactly one item (${made.length})`);
+  ok(consignmentsFor(made.map((p) => p.id)).length === 1, 'B …with exactly one consignment');
 }
 
 // ── C) Ohne Duplikat: ein Klick, eine Anlage ────────────────────────────────
@@ -300,7 +321,7 @@ await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   ale
 await sleep(2500);
 ok(await dupOpen(c) === false, 'C an entry that resembles nothing shows no hint');
 {
-  const made = productsNamed('Solo Model');
+  const made = await waitRows('Solo Model', 1);
   ok(made.length === 1, `C …and creates exactly one item (${made.length})`);
   ok(consignmentsFor(made.map((p) => p.id)).length === 1, 'C …with exactly one consignment');
 }
@@ -318,7 +339,7 @@ await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   ale
 await sleep(2500);
 if (await dupOpen(c)) { await clickText(c, 'Create anyway'); await sleep(2500); }
 {
-  const made = productsNamed('Fast Model');
+  const made = await waitRows('Fast Model', 1);
   ok(made.length === 1, `D three clicks in one tick still create exactly ONE item (${made.length})`);
   ok(consignmentsFor(made.map((p) => p.id)).length === 1, 'D …and exactly one consignment');
 }
@@ -330,7 +351,7 @@ await clickSel(c, '[data-cn-create]');
 await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   alert:', al); }
 await sleep(2500);
 if (await dupOpen(c)) { await clickText(c, 'Create anyway'); await sleep(2500); }
-ok(productsNamed('Next Model').length === 1, 'D a later, separate create still works — the guard is not a one-way door');
+ok((await waitRows('Next Model', 1)).length === 1, 'D a later, separate create still works — the guard is not a one-way door');
 
 c.close(); killAllApp(); await waitProcessGone();
 rmSync(RUN, { recursive: true, force: true });
