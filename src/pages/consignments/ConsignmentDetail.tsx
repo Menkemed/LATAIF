@@ -24,10 +24,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
-
-function fmtPct(v: number | null | undefined): string {
-  return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-}
+import { PAYOUT_MODELS, payoutModelLock, payoutFieldsFor, normalizePayoutModel } from '@/core/consignment/payout-edit';
 
 function daysUntil(dateStr: string): number {
   const now = new Date();
@@ -42,7 +39,7 @@ export function ConsignmentDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/consignments');
   const {
-    consignments, loadConsignments, updateConsignment,
+    consignments, loadConsignments, updateConsignment, updateConsignmentPayoutModel,
     recordSale, cancelSale, markPaidOut, markReturned, markReturnedAfterSale, deleteConsignment,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -58,9 +55,12 @@ export function ConsignmentDetail() {
     agreedPrice: string;
     minimumPrice: string;
     commissionRate: string;
+    payoutModel: 'percent' | 'consignor_fixed' | 'cost_split';
+    excessSplitPct: string;
     expiryDate: string;
     notes: string;
-  }>({ agreedPrice: '', minimumPrice: '', commissionRate: '', expiryDate: '', notes: '' });
+  }>({ agreedPrice: '', minimumPrice: '', commissionRate: '', payoutModel: 'percent', excessSplitPct: '', expiryDate: '', notes: '' });
+  const [editError, setEditError] = useState('');
 
   // Modals
   const [soldModal, setSoldModal] = useState(false);
@@ -137,6 +137,8 @@ export function ConsignmentDetail() {
         agreedPrice: String(consignment.agreedPrice),
         minimumPrice: consignment.minimumPrice != null ? String(consignment.minimumPrice) : '',
         commissionRate: String(consignment.commissionRate),
+        payoutModel: normalizePayoutModel(consignment.commissionType),
+        excessSplitPct: consignment.excessSplitPct != null ? String(consignment.excessSplitPct) : '',
         expiryDate: consignment.expiryDate || '',
         notes: consignment.notes || '',
       });
@@ -157,9 +159,22 @@ export function ConsignmentDetail() {
 
   // Live edit calculations
   const editAgreed = Number(form.agreedPrice) || 0;
-  const editRate = Number(form.commissionRate) || 0;
-  const editCommission = editAgreed * (editRate / 100);
-  const editPayout = editAgreed - editCommission;
+  // Die Vorschau rechnet mit der ECHTEN Oekonomie des gewaehlten Modells statt mit der
+  // Prozentformel — sonst zeigte sie fuer "Agreed + Excess" und "Cost + Split" Zahlen, die beim
+  // Verkauf nie entstehen. Verkaufspreis = Agreed Price (bei cost_split der Kost) = Breakeven.
+  const editEcon = (() => {
+    const input = {
+      commissionType: form.payoutModel,
+      commissionRate: Number(form.commissionRate) || 0,
+      agreedPrice: editAgreed,
+      excessSplitPct: form.excessSplitPct === '' ? undefined : Number(form.excessSplitPct),
+    };
+    return { input, result: computeConsignmentSale(input, editAgreed) };
+  })();
+  // Die Sperre entscheidet der Kern, nicht dieser Bildschirm — dieselbe Funktion, die auch der
+  // Store vor dem Schreiben fragt.
+  const payoutLock = payoutModelLock(consignment);
+  const payoutFields = payoutFieldsFor(form.payoutModel);
 
   // Sale modal calculations — SSOT economics (percent/consignor_fixed/cost_split).
   const salePriceNum = Number(soldPrice) || 0;
@@ -176,10 +191,25 @@ export function ConsignmentDetail() {
 
   function handleSave() {
     if (!id) return;
+    setEditError('');
+    // Zwei getrennte Vertraege, bewusst in dieser Reihenfolge: das Payout-Modell zuerst, weil es
+    // scheitern DARF (gesperrt oder ungueltiger Parameter). Scheitert es, wird auch der Rest nicht
+    // geschrieben — der Benutzer soll nicht die Haelfte seiner Eingabe gespeichert vorfinden.
+    if (!payoutLock.locked) {
+      try {
+        updateConsignmentPayoutModel(id, {
+          model: form.payoutModel,
+          commissionRate: form.commissionRate,
+          excessSplitPct: form.excessSplitPct,
+        });
+      } catch (e) {
+        setEditError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
     updateConsignment(id, {
       agreedPrice: Number(form.agreedPrice) || consignment!.agreedPrice,
       minimumPrice: form.minimumPrice ? Number(form.minimumPrice) : undefined,
-      commissionRate: Number(form.commissionRate) || consignment!.commissionRate,
       expiryDate: form.expiryDate || undefined,
       notes: form.notes || undefined,
     });
@@ -283,9 +313,14 @@ export function ConsignmentDetail() {
       agreedPrice: String(consignment!.agreedPrice),
       minimumPrice: consignment!.minimumPrice != null ? String(consignment!.minimumPrice) : '',
       commissionRate: String(consignment!.commissionRate),
+      // Das GESPEICHERTE Modell ist vorausgewaehlt, samt seinem Parameter — sonst begaenne jeder
+      // Edit stillschweigend bei "percent" und schriebe das beim Speichern fest.
+      payoutModel: normalizePayoutModel(consignment!.commissionType),
+      excessSplitPct: consignment!.excessSplitPct != null ? String(consignment!.excessSplitPct) : '',
       expiryDate: consignment!.expiryDate || '',
       notes: consignment!.notes || '',
     });
+    setEditError('');
     setEditing(true);
   }
 
@@ -985,28 +1020,82 @@ export function ConsignmentDetail() {
             onChange={e => setForm({ ...form, agreedPrice: e.target.value })} />
           <Input label="MINIMUM PRICE (BHD)" type="number" placeholder="Optional" value={form.minimumPrice}
             onChange={e => setForm({ ...form, minimumPrice: e.target.value })} />
-          <Input required label="COMMISSION RATE (%)" type="number" value={form.commissionRate}
-            onChange={e => setForm({ ...form, commissionRate: e.target.value })} />
+
+          {/* Payout-Modell — dieselbe Auswahl wie beim Anlegen, gespeist aus derselben SSOT.
+              Gesperrt, sobald aus dem Modell bereits gebuchte Zahlen entstanden sind; dann bleibt
+              es sichtbar, aber unveraenderlich, und der Grund steht darunter. Alle uebrigen Felder
+              dieses Dialogs bleiben in beiden Faellen benutzbar. */}
+          <div>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>PAYOUT MODEL</span>
+            <div className="flex flex-wrap gap-2">
+              {PAYOUT_MODELS.map(t => (
+                <button key={t} type="button"
+                  disabled={payoutLock.locked}
+                  onClick={() => setForm({ ...form, payoutModel: t })}
+                  className="rounded transition-all duration-200"
+                  style={{
+                    padding: '7px 12px', fontSize: 12,
+                    cursor: payoutLock.locked ? 'not-allowed' : 'pointer',
+                    opacity: payoutLock.locked && form.payoutModel !== t ? 0.45 : 1,
+                    border: `1px solid ${form.payoutModel === t ? '#0F0F10' : '#D5D9DE'}`,
+                    color: form.payoutModel === t ? '#0F0F10' : '#6B7280',
+                    background: form.payoutModel === t ? 'rgba(15,15,16,0.06)' : 'transparent',
+                  }}>
+                  {t === 'percent'
+                    ? 'Commission % to us'
+                    : t === 'consignor_fixed'
+                    ? 'Agreed Price + Excess to us'
+                    : 'Cost + Split with Consignor'}
+                </button>
+              ))}
+            </div>
+            <p style={{ fontSize: 11, color: payoutLock.locked ? '#B54708' : '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+              {payoutLock.locked
+                ? payoutLock.reason
+                : form.payoutModel === 'consignor_fixed'
+                ? 'Consignor gets the Agreed Price guaranteed — anything we sell above goes to us. Below agreed creates a Consignor-Loss expense.'
+                : form.payoutModel === 'cost_split'
+                ? "Consignor names his cost (= Agreed Price). Profit above his cost is split with him — by default 50/50."
+                : 'We keep a percentage of the actual sale price — consignor gets the rest.'}
+            </p>
+          </div>
+
+          {payoutFields.rate && (
+            <Input required label="COMMISSION RATE (%)" type="number" disabled={payoutLock.locked}
+              value={form.commissionRate}
+              onChange={e => setForm({ ...form, commissionRate: e.target.value })} />
+          )}
+          {payoutFields.split && (
+            <Input required label="SHOP'S SHARE OF PROFIT (%)" type="number" placeholder="50"
+              disabled={payoutLock.locked}
+              value={form.excessSplitPct}
+              onChange={e => setForm({ ...form, excessSplitPct: e.target.value })} />
+          )}
+
           <Input label="EXPIRY DATE" type="date" value={form.expiryDate}
             onChange={e => setForm({ ...form, expiryDate: e.target.value })} />
 
-          {editAgreed > 0 && editRate > 0 && (
+          {editAgreed > 0 && (
             <div className="rounded font-mono" style={{
               padding: 12, background: '#F2F7FA',
               border: '1px solid #E5E9EE', fontSize: 12,
             }}>
               <div style={{ marginBottom: 4, color: '#6B7280', fontSize: 10, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-                If Sold at Agreed Price
+                {form.payoutModel === 'cost_split' ? 'If Sold at Cost (Breakeven)' : 'If Sold at Agreed Price'}
               </div>
               <div className="flex justify-between" style={{ marginTop: 8 }}>
-                <span style={{ color: '#6B7280' }}>Commission ({fmtPct(editRate)}%)</span>
-                <span style={{ color: '#0F0F10' }}><Bhd v={editCommission}/> BHD</span>
+                <span style={{ color: '#6B7280' }}>{commissionLineLabel(editEcon.input)}</span>
+                <span style={{ color: '#0F0F10' }}><Bhd v={editEcon.result.commission}/> BHD</span>
               </div>
               <div className="flex justify-between" style={{ marginTop: 6 }}>
                 <span style={{ color: '#6B7280' }}>Payout to Consignor</span>
-                <span style={{ color: '#7EAA6E' }}><Bhd v={editPayout}/> BHD</span>
+                <span style={{ color: '#7EAA6E' }}><Bhd v={editEcon.result.payout}/> BHD</span>
               </div>
             </div>
+          )}
+
+          {editError && (
+            <p style={{ fontSize: 12, color: '#AA6E6E' }}>{editError}</p>
           )}
 
           <div>

@@ -15,6 +15,7 @@ import { usePurchaseStore } from './purchaseStore';
 import { useExpenseStore } from './expenseStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { computeConsignmentSale } from '@/core/consignment/economics';
+import { payoutModelLock, buildPayoutPatch, PayoutPatchError, type PayoutInput } from '@/core/consignment/payout-edit';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -101,6 +102,8 @@ interface ConsignmentStore {
   getConsignment: (id: string) => Consignment | undefined;
   createConsignment: (data: Partial<Consignment> & { productData?: Record<string, unknown> }) => Consignment;
   updateConsignment: (id: string, data: Partial<Consignment>) => void;
+  /** Das Payout-Modell eines bestehenden Consignments aendern — wirft, wenn bereits etwas gebucht ist. */
+  updateConsignmentPayoutModel: (id: string, input: PayoutInput) => void;
   // Legacy single-step Sold (DEPRECATED — wird durch recordSale ersetzt).
   // Bleibt vorerst funktional, damit alte UIs nicht brechen. Entfernen sobald
   // alle Call-Sites migriert sind.
@@ -248,6 +251,10 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     const map: Record<string, string> = {
       consignorId: 'consignor_id', agreedPrice: 'agreed_price', minimumPrice: 'minimum_price',
       commissionRate: 'commission_rate', commissionType: 'commission_type', commissionValue: 'commission_value',
+      // Der Shop-Anteil gehoert zum Modell. Ohne diese Zuordnung liesse sich `cost_split` zwar
+      // speichern, sein einziger Parameter aber nicht — der Datensatz truege dann den Anteil des
+      // vorigen Modells weiter.
+      excessSplitPct: 'excess_split_pct',
       expiryDate: 'expiry_date', notes: 'notes',
       status: 'status', salePrice: 'sale_price', commissionAmount: 'commission_amount',
       payoutAmount: 'payout_amount', payoutStatus: 'payout_status',
@@ -268,6 +275,28 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     saveDatabase();
     trackUpdate('consignments', id, data);
     get().loadConsignments();
+  },
+
+  // Das Payout-Modell eines BESTEHENDEN Consignments aendern.
+  //
+  // Bewusst ein eigener Weg statt eines weiteren Feldes in `updateConsignment`: hier haengt eine
+  // Bedingung dran, die kein anderer Aufrufer haben darf. Ist schon etwas gebucht, wird NICHT
+  // geschrieben — und zwar hier, nicht erst in der Oberflaeche, damit die Sperre auch dann gilt,
+  // wenn ein Bildschirm veraltet ist. Der Feldsatz kommt vollstaendig aus der SSOT, also wird
+  // Modell und Parameter in EINEM Update geschrieben; ein Zwischenzustand existiert nicht.
+  updateConsignmentPayoutModel: (id, input) => {
+    const con = get().getConsignment(id);
+    const lock = payoutModelLock(con ?? null);
+    if (lock.locked) throw new PayoutPatchError(lock.reason ?? 'The payout model can no longer be changed.');
+    const patch = buildPayoutPatch(input);
+    // Der Schluessel bleibt im Objekt, auch wenn der Wert leer ist — `updateConsignment` bindet
+    // ihn dann als SQL-NULL. Genau so wird der Parameter des alten Modells geloescht statt
+    // uebersehen.
+    get().updateConsignment(id, {
+      commissionType: patch.commissionType,
+      commissionRate: patch.commissionRate,
+      excessSplitPct: patch.excessSplitPct ?? undefined,
+    });
   },
 
   markSold: (id, salePrice, buyerId, saleMethod) => {
