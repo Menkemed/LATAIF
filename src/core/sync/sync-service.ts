@@ -28,6 +28,19 @@ const STORAGE_KEY_LAST = 'lataif_sync_last_id';
 // naechste Anfrage gleich beim richtigen Stand beginnt; massgeblich ist die Zeile in der
 // Business-DB (`cursor-store.ts`). Geht dieser Wert verloren, kostet das einen Umlauf, sonst nichts.
 const STORAGE_KEY_FP = 'lataif_sync_server_fp';
+/**
+ * SYNC-SAFETY-A1 — der eine Zustand, den ein Benutzer sehen muss: der Pull kann nicht sicher
+ * fortgesetzt werden. Das ist KEIN Netzfehler und kein Wiederholungsfall — er bleibt bei jedem
+ * Lauf gleich, bis jemand ihn aufloest. Deshalb hat er einen eigenen, erkennbaren Namen.
+ */
+export const RECOVERY_REQUIRED = 'sync-recovery-required';
+
+/** Der Pull kann nicht sicher fortgesetzt werden — als eigener Fehlertyp, damit ein erfolgreicher
+ *  Push ihn nicht verdeckt und die Oberflaeche ihn von einer Stoerung unterscheiden kann. */
+export class SyncRecoveryRequiredError extends Error {
+  readonly code = RECOVERY_REQUIRED;
+  constructor(message: string) { super(message); this.name = 'SyncRecoveryRequiredError'; }
+}
 
 // M6-B2DE4 §5 — the control-plane denylist, the identifier charset/gates and applyUpsert moved to
 // the node-safe `apply-change.ts` (imported above) so the behavioral gate can drive the REAL
@@ -191,44 +204,59 @@ async function pullChanges(): Promise<number> {
   const token = localStorage.getItem(STORAGE_KEY_TOKEN);
   if (!url || !token) return 0;
 
-  // SYNC-SAFETY-A1 — gefragt wird ab dem Stand, den wir dem zuletzt gesehenen Server zuordnen.
-  // Ist dieser Zwischenspeicher weg (frisches C:), wird ab 0 gefragt und die Antwort danach mit
-  // dem DAUERHAFTEN Stand gefiltert — mehr zu holen kostet einen Umlauf, wiederholt aber nichts.
+  // SYNC-SAFETY-A1 — ein servergebundener Stand darf NIE in eine Anfrage gehen, bevor feststeht,
+  // wer antwortet. Der gemerkte Name ist nur ein Zwischenspeicher; er kann zu einem anderen Server
+  // gehoeren als dem, der jetzt unter dieser Adresse laeuft. Deshalb: fragen, den Namen aus der
+  // Antwort lesen, und falls er ein anderer ist als angenommen, die Antwort VERWERFEN und mit dem
+  // Stand DIESES Servers neu fragen. So kann kein fremder Stand jemals ein Fenster beschneiden.
   const db = getDatabase();
+  const ask = async (since: number): Promise<{ fingerprint: string; changes: import('./durable-cursor').SyncChangeRef[]; lastSyncId: number }> => {
+    const r = await fetch(`${url}/api/sync/pull?since=${since}`, { headers: { 'Authorization': `Bearer ${token}` } });
+    if (!r.ok) throw new Error(`Pull failed: ${r.status}`);
+    const b = await r.json();
+    return {
+      fingerprint: typeof b.server_fingerprint === 'string' ? b.server_fingerprint : '',
+      changes: (b.changes || []) as import('./durable-cursor').SyncChangeRef[],
+      lastSyncId: Number(b.last_sync_id) || 0,
+    };
+  };
+
   const cachedFp = localStorage.getItem(STORAGE_KEY_FP) || '';
-  const legacyRaw = localStorage.getItem(STORAGE_KEY_LAST);
-  const legacyCursor = legacyRaw === null ? null : parseInt(legacyRaw) || 0;
-  const cachedCursor = isServerFingerprint(cachedFp) ? readCursor(db, cachedFp) : null;
-  const lastId = cachedCursor ?? legacyCursor ?? 0;
+  const assumedCursor = isServerFingerprint(cachedFp) ? readCursor(db, cachedFp) : null;
+  let asked = assumedCursor ?? 0;
+  let answer = await ask(asked);
 
-  const res = await fetch(`${url}/api/sync/pull?since=${lastId}`, {
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
+  if (isServerFingerprint(answer.fingerprint) && answer.fingerprint !== cachedFp) {
+    // Ein anderer Server als angenommen. Was gerade geholt wurde, ist ab einem fremden Stand
+    // geschnitten — es wird nicht benutzt. Stattdessen wird mit dem Stand gefragt, den DIESER
+    // Server bei uns hat (oder ab 0, wenn wir ihn noch nicht kennen).
+    const its = readCursor(db, answer.fingerprint) ?? 0;
+    if (its !== asked) { asked = its; answer = await ask(asked); }
+  }
 
-  if (!res.ok) throw new Error(`Pull failed: ${res.status}`);
+  const fingerprint = answer.fingerprint;
+  let { changes } = answer;
+  const last_sync_id = answer.lastSyncId;
 
-  const body = await res.json();
-  const fingerprint: string = typeof body.server_fingerprint === 'string' ? body.server_fingerprint : '';
-  let { changes } = body as { changes: import('./durable-cursor').SyncChangeRef[] };
-  const { last_sync_id } = body as { last_sync_id: number };
-
-  // SYNC-SAFETY-A1 — der Server nennt sich. Tut er es nicht, ist er aelter als dieser Vertrag:
-  // dann bleibt alles beim Alten (localStorage-Stand), damit ein gemischter Stand nicht bricht —
-  // es entsteht kein dauerhafter Stand fuer einen Server, den wir nicht benennen koennen.
+  // Der Server nennt sich. Tut er es nicht, ist er aelter als dieser Vertrag: dann bleibt alles
+  // beim Alten (localStorage-Stand), damit ein gemischter Stand nicht bricht — es entsteht kein
+  // dauerhafter Stand fuer einen Server, den wir nicht benennen koennen.
   let durable: { fingerprint: string; cursor: number } | null = null;
   if (isServerFingerprint(fingerprint)) {
     localStorage.setItem(STORAGE_KEY_FP, fingerprint);
-    const start = resolveCursorStart(db, fingerprint, legacyCursor, Number(last_sync_id) || 0, new Date().toISOString());
+    const start = resolveCursorStart(db, fingerprint, changes, last_sync_id, new Date().toISOString());
     if (start.kind === 'recovery-required') {
-      // Kein rekonstruierbarer Stand, aber der Server hat Historie. Weder von vorne anfangen
-      // (spielt alles erneut ein) noch ans Ende springen (ueberspringt womoeglich Echtes) waere
-      // zu verantworten — also wird nichts angewendet und der Zustand benannt.
-      setStatus('error');
-      console.error('[Sync] pull stopped: no recorded progress for this server and its log is not empty — recovery required');
-      return 0;
+      // Kein gespeicherter Stand, und die Historie beginnt mit etwas, das nicht als eigener
+      // Ursprung belegt ist. Weder von vorne anfangen (spielt alles erneut ein) noch ans Ende
+      // springen (ueberspringt womoeglich Echtes) waere zu verantworten — also wird nichts
+      // angewendet, nichts uebersprungen, und der Zustand wird benannt statt als Netzfehler
+      // ausgegeben.
+      // Geworfen, nicht zurueckgegeben: ein erfolgreicher Push darf einen blockierten Pull nicht
+      // als 'Synced' erscheinen lassen.
+      throw new SyncRecoveryRequiredError(`no recorded progress for this server, and its history does not start with changes this database provably pushed itself`);
     }
-    if (start.kind === 'adopted') {
-      console.warn(`[Sync] took over the previous progress (${start.cursor}) for this server`);
+    if (start.kind === 'reconstructed') {
+      console.warn(`[Sync] the first ${start.ownPrefix} changes were pushed by this database itself — progress set to ${start.cursor} instead of replaying them`);
     }
     durable = { fingerprint, cursor: start.cursor };
     // Was schon angewendet wurde, wird nicht erneut angewendet — unabhaengig davon, ab wo der
@@ -435,7 +463,10 @@ export function syncNow(): Promise<void> {
       setStatus('synced', `Pushed ${pushed}, pulled ${pulled}, ops ${opsApplied}`);
     } catch (err) {
       console.warn('[Sync] Error:', err);
-      setStatus('error', String(err));
+      // SYNC-SAFETY-A1 — der Wiederherstellungsfall bekommt seinen eigenen, stabilen Namen; jede
+      // andere Stoerung (auch ein Apply-Konflikt mit Change-Id, Tabelle und Datensatz) meldet sich
+      // weiterhin im Klartext. Beides ist ausdruecklich KEIN 'Synced'.
+      setStatus('error', err instanceof SyncRecoveryRequiredError ? RECOVERY_REQUIRED : String(err));
     } finally {
       syncing = false;
       inFlightSync = null;

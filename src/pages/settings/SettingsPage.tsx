@@ -1905,7 +1905,16 @@ function SyncTab() {
       setServerUrl(sync.getSyncUrl() || 'http://localhost:3001');
       setStatus(sync.isSyncConfigured() ? 'Connected' : 'Not connected');
       sync.onSyncStatus((s, msg) => {
-        setStatus(s === 'synced' ? `Synced${msg ? ` (${msg})` : ''}` : s === 'syncing' ? 'Syncing...' : s === 'error' ? `Error: ${msg}` : 'Offline');
+        // SYNC-SAFETY-A1 — der Wiederherstellungsfall ist kein Netzfehler: er verschwindet nicht
+        // beim naechsten Versuch, sondern bleibt, bis jemand ihn aufloest. Also wird er als das
+        // benannt, was er ist, statt als "Error: …" unter allen anderen Stoerungen zu verschwinden.
+        setStatus(
+          s === 'synced' ? `Synced${msg ? ` (${msg})` : ''}`
+            : s === 'syncing' ? 'Syncing...'
+              : s === 'error' ? (msg === sync.RECOVERY_REQUIRED
+                ? 'Stopped — this device cannot safely resume syncing with that server (recovery required)'
+                : `Error: ${msg}`)
+                : 'Offline');
       });
     });
     import('@/core/sync/auto-lan').then(lan => setLanModeUi(lan.getLanMode()));

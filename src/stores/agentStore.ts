@@ -210,7 +210,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // sie dann zweimal, und ein spaeteres Wiedereinspielen lief in den eindeutigen Index. Der
     // Zaehler wird vor der ersten Ausgabe einmalig auf die hoechste je vergebene Nummer gehoben
     // (auch nach geloeschten Transfers), danach zaehlt er nur noch hoch.
-    ensureTransferSequence(db as unknown as import('@/core/sync/apply-change').SqlDb, now);
+    ensureTransferSequence(db as unknown as import('@/core/sync/apply-change').SqlDb, now, new Date().getFullYear());
     const transferNumber = getNextDocumentNumber(TRANSFER_DOC_TYPE);
 
     // Update product status

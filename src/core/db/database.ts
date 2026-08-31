@@ -237,6 +237,11 @@ export function categoryAttributesSql(categoryId: string): string {
 function runMigrations(database: Database): void {
   // Each migration wrapped: ignore "duplicate column" errors on re-run.
   const migrations: string[] = [
+    // SYNC-SAFETY-A1 — zu welchem Jahr der Zaehler gehoert. Transfernummern zaehlen pro Jahr
+    // (`TRF-2026-00020`), der durable Zaehler aber ist eine einzige Zahl. Ohne dieses Jahr koennte
+    // er beim Jahreswechsel nicht neu beginnen, ohne dabei den Schutz gegen ein Zuruecksetzen
+    // INNERHALB eines Jahres aufzugeben. Nur der Transfer-Zaehler benutzt die Spalte.
+    `ALTER TABLE document_sequences ADD COLUMN seq_year INTEGER`,
     `ALTER TABLE consignments ADD COLUMN commission_type TEXT DEFAULT 'percent'`,
     `ALTER TABLE consignments ADD COLUMN commission_value REAL`,
     `CREATE TABLE IF NOT EXISTS order_payments (
@@ -608,7 +613,9 @@ function runMigrations(database: Database): void {
       next_number INTEGER NOT NULL DEFAULT 1,
       include_year INTEGER NOT NULL DEFAULT 1,
       padding INTEGER NOT NULL DEFAULT 6,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      -- SYNC-SAFETY-A1 — das Jahr, zu dem next_number gehoert (nur der Transfer-Zaehler nutzt es).
+      seq_year INTEGER
     )`,
     // Seed all document types from Plan
     `INSERT OR IGNORE INTO document_sequences (doc_type, prefix, next_number, include_year, padding, updated_at) VALUES

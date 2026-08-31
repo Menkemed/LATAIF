@@ -31,7 +31,7 @@ for (const r of vectors.reject) {
 }
 check(vectors.accept.length >= 10 && vectors.reject.length >= 20, 'the shared vector set is substantial');
 
-// ── 2. Live frontend schema coverage (49 tables / 192 columns) ──────────────
+// ── 2. Live frontend schema coverage (49 tables / 193 columns) ──────────────
 const schemaSrc =
   readFileSync(join(repo, 'src/core/db/database.ts'), 'utf8') +
   '\n' +
@@ -51,14 +51,17 @@ for (const m of schemaSrc.matchAll(
 for (const t of tables) check(isValidSyncIdentifier(t), `frontend table ${JSON.stringify(t)} must be canonical`);
 for (const c of columns) check(isValidSyncIdentifier(c), `frontend column ${JSON.stringify(c)} must be canonical`);
 
-// The measured counts (bash-verified): 49 frontend tables, 192 distinct columns. (The directive's
+// The measured counts (bash-verified): 49 frontend tables, 193 distinct columns. (The directive's
 // "22 tables" is the EMBEDDED server schema, checked Rust-side by the exhaustive inventory test;
 // the frontend the sql.js apply path writes to has 49 tables — all also canonical.)
 // MOBILE-04B2A2: the +1 table is the local-only `mobile_upload_receipts`; its +5 previously-unseen
 // distinct column identifiers are authenticated_user_id, upload_event_id, create_batch_id,
 // canonical_product_metadata_hash, prepared_manifest_hash (the other 6 already existed elsewhere).
+// SYNC-SAFETY-A1: the +1 column is `seq_year` on document_sequences — the year a document counter
+// belongs to, so transfer numbers keep restarting per year while the counter can never be pulled
+// back down inside a year.
 check(tables.size === 49, `frontend table count is 49 (got ${tables.size})`);
-check(columns.size === 192, `frontend distinct column count is 192 (got ${columns.size})`);
+check(columns.size === 193, `frontend distinct column count is 193 (got ${columns.size})`);
 
 console.log(
   `M6-B2DE4 identifier-grammar: ${pass}/${pass + fails.length} checks passed ` +
