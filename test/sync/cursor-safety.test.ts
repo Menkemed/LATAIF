@@ -33,11 +33,13 @@ registerHooks({
 const initSqlJs = (await import('sql.js')).default;
 const {
   readCursor, writeCursor, resolveCursorStart, isServerFingerprint, CURSOR_DDL, ownPushedKeys, provenOwnPrefix,
+  serverLogBehind,
 } = await import('../../src/core/sync/cursor-store.ts');
 const {
   ensureTransferSequence, highestIssuedTransferSeq, parseTransferNumber, TRANSFER_DOC_TYPE, TRANSFER_PADDING,
 } = await import('../../src/core/agents/transfer-sequence.ts');
 const { applyUpsert } = await import('../../src/core/sync/apply-change.ts');
+const { A1_UPGRADE_SQL, applyA1Upgrade } = await import('../../src/core/db/a1-upgrade.ts');
 
 let pass = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) pass++; else { fails.push(m); console.log('  x ' + m); } };
@@ -111,6 +113,27 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
   ok(p2.count === 0 && p2.lastId === 0, 'OWN …and the first foreign change ends the run — nothing behind it is skipped');
   const changed = provenOwnPrefix([{ ...a, id: 1, data: JSON.stringify({ id: 'p1', name: 'Altered' }) }], own);
   ok(changed.count === 0, 'OWN a payload that differs by one byte is not ours');
+}
+{
+  // Zwei aufeinanderfolgende Aenderungen DERSELBEN Zeile duerfen nicht miteinander verwechselt
+  // werden: der Beweis haengt an der vollstaendigen Nutzlast, nicht an Tabelle+Datensatz+Operation.
+  const db = fresh();
+  const first = pushed(db, 'products', 'p1', 'update', { id: 'p1', name: 'One' });
+  const own = ownPushedKeys(db);
+  const second = { id: 2, table_name: 'products', record_id: 'p1', action: 'update', data: JSON.stringify({ id: 'p1', name: 'Two' }) };
+  ok(provenOwnPrefix([{ ...first, id: 1 }], own).count === 1, 'OWN the update we really sent is ours');
+  ok(provenOwnPrefix([second], own).count === 0,
+    'OWN a second update of the SAME row with a different payload is NOT covered by the first');
+  ok(provenOwnPrefix([{ ...first, id: 1 }, second], own).count === 1,
+    'OWN …so the run ends at it instead of swallowing it');
+  // Und nach einer Luecke wird nichts vorab uebersprungen, auch wenn spaeter wieder Eigenes kommt.
+  const later = pushed(db, 'products', 'p2', 'insert', { id: 'p2' });
+  const own2 = ownPushedKeys(db);
+  ok(provenOwnPrefix([second, { ...later, id: 3 }], own2).count === 0,
+    'OWN a gap at the front means nothing behind it is skipped');
+  // Die Korrelation muss die Nutzlast wirklich enthalten — sonst waeren die beiden Updates gleich.
+  ok([...own2].some((k) => k.includes('"name":"One"')),
+    'OWN the proof carries the payload, not just the row and the operation');
 }
 
 // ── C) Der Startpunkt — vier Faelle, keiner geraten ────────────────────────
@@ -216,7 +239,69 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
   ok(seqOf(db) === 5, 'TRF …and that is what the counter holds');
 }
 
-// ── F) Die Verdrahtung ─────────────────────────────────────────────────────
+// ── F) Eine BESTEHENDE Datenbank aus v0.8.51 ──────────────────────────────
+//
+// Nicht die frische, sondern die, die es schon gibt: ohne `sync_cursor`, ohne `seq_year`, mit
+// gefuellten Zaehlern, Transfers und Historie. Genau die Anweisungen, die die Anwendung beim
+// Start ausfuehrt, werden hier ausgefuehrt.
+{
+  const db = new SQL.Database() as unknown as Db;
+  // v0.8.51-Schema: document_sequences OHNE seq_year, kein sync_cursor.
+  db.run('CREATE TABLE document_sequences (doc_type TEXT PRIMARY KEY, prefix TEXT NOT NULL, '
+    + 'next_number INTEGER NOT NULL DEFAULT 1, include_year INTEGER NOT NULL DEFAULT 1, '
+    + 'padding INTEGER NOT NULL DEFAULT 6, updated_at TEXT NOT NULL)');
+  db.run("INSERT INTO document_sequences (doc_type, prefix, next_number, include_year, padding, updated_at) "
+    + "VALUES ('INV','INV',42,1,6,'old'), ('TRF','TRF',1,1,6,'old')");
+  db.run('CREATE TABLE agent_transfers (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, '
+    + 'transfer_number TEXT NOT NULL, status TEXT, created_at TEXT)');
+  db.run('CREATE UNIQUE INDEX ux_transfer_number ON agent_transfers (branch_id, transfer_number)');
+  db.run('CREATE TABLE sync_changelog (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, '
+    + 'record_id TEXT, branch_id TEXT, action TEXT, data TEXT, synced INTEGER DEFAULT 0, created_at TEXT)');
+  db.run("INSERT INTO agent_transfers (id, branch_id, transfer_number, status, created_at) "
+    + "VALUES ('t30','branch-main','TRF-2026-00030','transferred','x')");
+  pushed(db, 'agent_transfers', 'gone', 'insert', { id: 'gone', transfer_number: 'TRF-2026-00031' });
+
+  const has = (t: string): boolean => db.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", [t]).length > 0;
+  const hasCol = (t: string, c: string): boolean =>
+    db.exec(`PRAGMA table_info(${t})`)[0].values.some((r) => String(r[1]) === c);
+  ok(!has('sync_cursor') && !hasCol('document_sequences', 'seq_year'), 'UPGRADE the fixture really is a pre-A1 database');
+
+  applyA1Upgrade(db);
+  ok(has('sync_cursor'), 'UPGRADE the cursor table exists afterwards');
+  ok(hasCol('document_sequences', 'seq_year'), 'UPGRADE …and the counter carries its year');
+  ok(A1_UPGRADE_SQL.length === 2, 'UPGRADE the whole upgrade is those two statements — nothing that touches data');
+  ok(!A1_UPGRADE_SQL.some((sql) => /\b(INSERT|UPDATE|DELETE|DROP)\b/i.test(sql)), 'UPGRADE …and none of them writes a row');
+
+  // Die Werte, die schon dastanden, sind unberuehrt.
+  const inv = db.exec("SELECT next_number FROM document_sequences WHERE doc_type = 'INV'")[0].values[0][0];
+  ok(Number(inv) === 42, 'UPGRADE an existing counter keeps its value');
+  ok(db.exec('SELECT COUNT(*) FROM agent_transfers')[0].values[0][0] === 1, 'UPGRADE …and the business rows are untouched');
+
+  // Zweiter Start: nichts passiert, nichts wirft.
+  let threw = false; try { applyA1Upgrade(db); } catch { threw = true; }
+  ok(!threw, 'UPGRADE a second start neither fails…');
+  ok(Number(db.exec("SELECT next_number FROM document_sequences WHERE doc_type = 'INV'")[0].values[0][0]) === 42,
+    'UPGRADE …nor changes anything');
+
+  // Und der Transfer-Zaehler startet auf dieser Alt-DB dort, wo die Historie aufhoert — inklusive
+  // der Nummer, die es nur noch im Log gibt.
+  ok(ensureTransferSequence(db, NOW, YEAR) === 32, 'UPGRADE the transfer counter starts past every number ever issued (30 live, 31 in the log)');
+  ok(readCursor(db, FP_A) === null, 'UPGRADE …and no progress is invented for any server');
+}
+
+// ── G) Derselbe Server, aber hinter uns ────────────────────────────────────
+{
+  const db = fresh();
+  writeCursor(db, FP_A, 850, NOW);
+  ok(serverLogBehind(db, FP_A, 850) === null, 'BEHIND a server exactly at our progress is fine');
+  ok(serverLogBehind(db, FP_A, 900) === null, 'BEHIND …and one ahead of us is the normal case');
+  const b = serverLogBehind(db, FP_A, 700);
+  ok(b !== null && b.cursor === 850 && b.head === 700, 'BEHIND a server whose log ends before our progress is reported');
+  ok(readCursor(db, FP_A) === 850, 'BEHIND …and nothing is lowered to its end');
+  ok(serverLogBehind(db, FP_B, 0) === null, 'BEHIND a server we have no progress with cannot be behind us');
+}
+
+// ── H) Die Verdrahtung ─────────────────────────────────────────────────────
 {
   const svc = readFileSync(resolvePath(repo, 'src/core/sync/sync-service.ts'), 'utf8');
   ok(/writeCursor\(db, durable\.fingerprint, Number\(last_sync_id\)[\s\S]{0,80}db\.run\('COMMIT'\)/.test(svc),
@@ -243,20 +328,36 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
     ok(at > 0 && thrown > at && thrown < apply,
       'WIRED an unreconstructable progress THROWS before anything is applied — a successful push cannot hide it');
   }
-  ok(/setStatus\('error', err instanceof SyncRecoveryRequiredError \? RECOVERY_REQUIRED : String\(err\)\)/.test(svc),
+  ok(svc.includes("setStatus('error', err instanceof SyncRecoveryRequiredError ? RECOVERY_REQUIRED"),
     'WIRED …and the run reports that state by its own name, never as "synced"');
   ok(/export const RECOVERY_REQUIRED/.test(svc), 'WIRED the state has a stable name the UI can recognise');
+  {
+    // Der Rueckwaerts-Schutz muss VOR dem Startpunkt und vor jedem Anwenden greifen.
+    const behindAt = svc.indexOf('serverLogBehind(db, fingerprint, answer.logHead)');
+    const thrown = svc.indexOf('throw new SyncServerBehindError', behindAt);
+    const startAt = svc.indexOf('resolveCursorStart(db, fingerprint, changes');
+    const applyAt = svc.indexOf('await commitPulledBatch(');
+    ok(behindAt > 0 && thrown > behindAt && thrown < startAt && startAt < applyAt,
+      'WIRED a server behind our progress stops the pull before the start point and before any apply');
+  }
+  ok(svc.includes('logHead: Number(b.log_head)'), 'WIRED the head of the log is read from the authenticated pull answer');
+  ok(svc.includes('err instanceof SyncServerBehindError ? SERVER_LOG_BEHIND'),
+    'WIRED …and that state is reported by its own name too, never as "synced"');
   const ui = readFileSync(resolvePath(repo, 'src/pages/settings/SettingsPage.tsx'), 'utf8');
+  ok(ui.includes('sync.SERVER_LOG_BEHIND') && /is behind this device/i.test(ui),
+    'WIRED the screen tells the two stopped states apart');
   ok(/sync\.RECOVERY_REQUIRED/.test(ui) && /recovery required/i.test(ui),
     'WIRED the screen says a recovery is needed instead of showing a generic error');
   const store = readFileSync(resolvePath(repo, 'src/stores/agentStore.ts'), 'utf8');
   ok(/getNextDocumentNumber\(TRANSFER_DOC_TYPE\)/.test(store), 'WIRED a transfer takes its number from the durable counter');
   ok(!/getNextNumber\('agent_transfers'/.test(store), 'WIRED …and no longer from MAX(rows)+1');
   ok(/ensureTransferSequence\([\s\S]{0,120}getFullYear\(\)\)/.test(store), 'WIRED …with the counter lifted for the current year first');
+  const rs = readFileSync(resolvePath(repo, 'src-tauri/src/sync/routes.rs'), 'utf8');
+  ok(rs.includes('SELECT COALESCE(MAX(id), 0) FROM sync_changelog WHERE tenant_id'),
+    'WIRED the server answers with the real head of its log, not the end of the window');
   const dbSrc = readFileSync(resolvePath(repo, 'src/core/db/database.ts'), 'utf8');
-  ok(/CURSOR_DDL/.test(dbSrc), 'WIRED the cursor table is created with the database');
-  ok(/ALTER TABLE document_sequences ADD COLUMN seq_year INTEGER/.test(dbSrc) && /seq_year INTEGER\r?\n\s*\)/.test(dbSrc),
-    'WIRED the counter year exists on fresh and on existing databases alike');
+  ok(dbSrc.includes('...A1_UPGRADE_SQL,'), 'WIRED the upgrade runs through the house migration list — the same statements the test drives');
+  ok(/seq_year INTEGER\r?\n\s*\)/.test(dbSrc), 'WIRED …and a fresh database gets the counter year with its schema');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — sync cursor safety: ${pass} passed, ${fails.length} failed`);

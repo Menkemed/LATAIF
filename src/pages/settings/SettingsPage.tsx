@@ -1913,7 +1913,9 @@ function SyncTab() {
             : s === 'syncing' ? 'Syncing...'
               : s === 'error' ? (msg === sync.RECOVERY_REQUIRED
                 ? 'Stopped — this device cannot safely resume syncing with that server (recovery required)'
-                : `Error: ${msg}`)
+                : msg === sync.SERVER_LOG_BEHIND
+                  ? 'Stopped — that server is behind this device (its change log ends before the progress recorded here)'
+                  : `Error: ${msg}`)
                 : 'Offline');
       });
     });

@@ -77,6 +77,13 @@ pub struct SyncPullResponse {
     /// unauthenticated surface exists; it is a one-way digest, never the install id.
     #[serde(default)]
     pub server_fingerprint: String,
+    /// SYNC-SAFETY-A1 — die hoechste Id, die der Aenderungslog dieses Servers ueberhaupt hat.
+    ///
+    /// `last_sync_id` ist nur das Ende des betrachteten Fensters und faellt bei leerem Fenster auf
+    /// `since` zurueck — daran laesst sich nicht erkennen, ob der Server HINTER dem Stand des
+    /// Clients liegt (etwa nach einem halben Restore seiner Server-DB). Diese Zahl kann es.
+    #[serde(default)]
+    pub log_head: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

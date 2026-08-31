@@ -18,7 +18,7 @@ import { recordClientQuarantine, quarantineStatus, type QuarantineStatus } from 
 // Re-exported so existing import paths (`from '.../sync-service'`) keep working.
 export { isControlPlaneTable, isValidSyncIdentifier } from './apply-change';
 // SYNC-SAFETY-A1 — der dauerhafte, an den Server gebundene Pull-Wasserstand.
-import { readCursor, writeCursor, resolveCursorStart, isServerFingerprint } from './cursor-store';
+import { readCursor, writeCursor, resolveCursorStart, isServerFingerprint, serverLogBehind } from './cursor-store';
 
 const SYNC_INTERVAL = 30_000; // 30 seconds
 const STORAGE_KEY_URL = 'lataif_sync_url';
@@ -34,6 +34,16 @@ const STORAGE_KEY_FP = 'lataif_sync_server_fp';
  * Lauf gleich, bis jemand ihn aufloest. Deshalb hat er einen eigenen, erkennbaren Namen.
  */
 export const RECOVERY_REQUIRED = 'sync-recovery-required';
+
+/** Der Server liegt hinter dem Stand, den dieses Geraet von ihm hat — ebenfalls ein eigener,
+ *  stabiler Zustand und ausdruecklich kein Netzfehler. */
+export const SERVER_LOG_BEHIND = 'sync-server-log-behind';
+
+/** Wie der Wiederherstellungsfall: ein eigener Typ, damit ein erfolgreicher Push ihn nicht verdeckt. */
+export class SyncServerBehindError extends Error {
+  readonly code = SERVER_LOG_BEHIND;
+  constructor(message: string) { super(message); this.name = 'SyncServerBehindError'; }
+}
 
 /** Der Pull kann nicht sicher fortgesetzt werden — als eigener Fehlertyp, damit ein erfolgreicher
  *  Push ihn nicht verdeckt und die Oberflaeche ihn von einer Stoerung unterscheiden kann. */
@@ -210,7 +220,7 @@ async function pullChanges(): Promise<number> {
   // Antwort lesen, und falls er ein anderer ist als angenommen, die Antwort VERWERFEN und mit dem
   // Stand DIESES Servers neu fragen. So kann kein fremder Stand jemals ein Fenster beschneiden.
   const db = getDatabase();
-  const ask = async (since: number): Promise<{ fingerprint: string; changes: import('./durable-cursor').SyncChangeRef[]; lastSyncId: number }> => {
+  const ask = async (since: number): Promise<{ fingerprint: string; changes: import('./durable-cursor').SyncChangeRef[]; lastSyncId: number; logHead: number }> => {
     const r = await fetch(`${url}/api/sync/pull?since=${since}`, { headers: { 'Authorization': `Bearer ${token}` } });
     if (!r.ok) throw new Error(`Pull failed: ${r.status}`);
     const b = await r.json();
@@ -218,6 +228,7 @@ async function pullChanges(): Promise<number> {
       fingerprint: typeof b.server_fingerprint === 'string' ? b.server_fingerprint : '',
       changes: (b.changes || []) as import('./durable-cursor').SyncChangeRef[],
       lastSyncId: Number(b.last_sync_id) || 0,
+      logHead: Number(b.log_head) || 0,
     };
   };
 
@@ -244,6 +255,20 @@ async function pullChanges(): Promise<number> {
   let durable: { fingerprint: string; cursor: number } | null = null;
   if (isServerFingerprint(fingerprint)) {
     localStorage.setItem(STORAGE_KEY_FP, fingerprint);
+
+    // SYNC-SAFETY-A1 — derselbe Server, aber er ist HINTER uns. Das kann kein normaler Zustand
+    // sein: sein Log endet vor einem Stand, den wir von ihm haben. So sieht ein halber Restore
+    // seiner Server-DB aus, oder ein Zuruecksetzen. Beide moeglichen Reaktionen waeren falsch —
+    // den Stand auf sein Ende senken hiesse, alles dazwischen ein zweites Mal anzuwenden, und
+    // weiterzumachen hiesse, seine kuenftigen Aenderungen zu ueberspringen. Also nichts von
+    // beidem: anhalten und es sagen.
+    const behind = serverLogBehind(db, fingerprint, answer.logHead);
+    if (behind !== null) {
+      throw new SyncServerBehindError(
+        `this device recorded progress ${behind.cursor} with that server, but its change log ends at ${behind.head}`
+      );
+    }
+
     const start = resolveCursorStart(db, fingerprint, changes, last_sync_id, new Date().toISOString());
     if (start.kind === 'recovery-required') {
       // Kein gespeicherter Stand, und die Historie beginnt mit etwas, das nicht als eigener
@@ -466,7 +491,8 @@ export function syncNow(): Promise<void> {
       // SYNC-SAFETY-A1 — der Wiederherstellungsfall bekommt seinen eigenen, stabilen Namen; jede
       // andere Stoerung (auch ein Apply-Konflikt mit Change-Id, Tabelle und Datensatz) meldet sich
       // weiterhin im Klartext. Beides ist ausdruecklich KEIN 'Synced'.
-      setStatus('error', err instanceof SyncRecoveryRequiredError ? RECOVERY_REQUIRED : String(err));
+      setStatus('error', err instanceof SyncRecoveryRequiredError ? RECOVERY_REQUIRED
+        : err instanceof SyncServerBehindError ? SERVER_LOG_BEHIND : String(err));
     } finally {
       syncing = false;
       inFlightSync = null;

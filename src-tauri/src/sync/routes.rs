@@ -881,6 +881,18 @@ async fn sync_pull(
     }
     let (delivered, scanned_max) = (filtered.delivered, filtered.scanned_max);
 
+    // SYNC-SAFETY-A1 — das tatsaechliche Ende des Logs, unabhaengig vom betrachteten Fenster.
+    // `scanned_max` faellt bei leerem Fenster auf `since` zurueck; daran kann ein Client nicht
+    // erkennen, dass er WEITER ist als dieser Server (etwa nach einem halben Restore der
+    // Server-DB). Diese Zahl kann er dagegen mit seinem Stand vergleichen.
+    let log_head: i64 = db
+        .query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM sync_changelog WHERE tenant_id = ?1",
+            rusqlite::params![claims.tenant_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(scanned_max);
+
     // §10/§11/§7 — a successful, authenticated legacy pull is legacy activity. After an
     // attestation, an un-enrolled device still pulling means the "everything is enrolled" claim is
     // stale. The marking is persisted BEFORE the response is returned, and a failure to persist it
@@ -901,6 +913,7 @@ async fn sync_pull(
         // SYNC-SAFETY-A1 — the answer names its server, so the client can tell "same server,
         // new address" from "a different server" before it applies anything.
         server_fingerprint: state.server_fingerprint.clone(),
+        log_head,
     }))
 }
 

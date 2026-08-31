@@ -15,7 +15,7 @@ import { applyMediaSchema } from './media-schema';
 import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
 import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
-import { CURSOR_DDL } from '../sync/cursor-store';
+import { A1_UPGRADE_SQL } from './a1-upgrade';
 import {
   INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
@@ -237,11 +237,6 @@ export function categoryAttributesSql(categoryId: string): string {
 function runMigrations(database: Database): void {
   // Each migration wrapped: ignore "duplicate column" errors on re-run.
   const migrations: string[] = [
-    // SYNC-SAFETY-A1 — zu welchem Jahr der Zaehler gehoert. Transfernummern zaehlen pro Jahr
-    // (`TRF-2026-00020`), der durable Zaehler aber ist eine einzige Zahl. Ohne dieses Jahr koennte
-    // er beim Jahreswechsel nicht neu beginnen, ohne dabei den Schutz gegen ein Zuruecksetzen
-    // INNERHALB eines Jahres aufzugeben. Nur der Transfer-Zaehler benutzt die Spalte.
-    `ALTER TABLE document_sequences ADD COLUMN seq_year INTEGER`,
     `ALTER TABLE consignments ADD COLUMN commission_type TEXT DEFAULT 'percent'`,
     `ALTER TABLE consignments ADD COLUMN commission_value REAL`,
     `CREATE TABLE IF NOT EXISTS order_payments (
@@ -642,11 +637,10 @@ function runMigrations(database: Database): void {
     // No seed rows — a stem's counter is created on first use and initialised from history.
     SKU_SEQUENCES_DDL,
 
-    // SYNC-SAFETY-A1 — der Pull-Wasserstand, gebunden an den Server, von dem er stammt. Er lag
-    // bisher im localStorage der WebView und war damit das einzige Stueck Sync-Zustand, das einen
-    // Verlust von C: nicht ueberlebt. Hier steht er bei den Daten, die er beschreibt, und wird in
-    // derselben Transaktion fortgeschrieben wie das Anwenden. Siehe `core/sync/cursor-store.ts`.
-    CURSOR_DDL,
+    // SYNC-SAFETY-A1 — was eine BESTEHENDE Datenbank braucht: die Tabelle mit dem Pull-Wasserstand
+    // und die Jahresangabe am Dokumentzaehler. Beides steht in `a1-upgrade.ts`, damit genau diese
+    // Anweisungen auch ein Test gegen eine echte Alt-Datenbank ausfuehren kann.
+    ...A1_UPGRADE_SQL,
 
     // INVENTORY-SESSION — the worksheet of a stock-check run, so an inventory survives Save, closing
     // the window and restarting the app. Deliberately separate from `stock_checks`: that table is the
