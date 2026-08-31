@@ -898,6 +898,9 @@ async fn sync_pull(
         // were control-plane rows, `delivered` is empty but the cursor still moves — otherwise
         // the client would re-request the same forbidden rows forever.
         last_sync_id: scanned_max,
+        // SYNC-SAFETY-A1 — the answer names its server, so the client can tell "same server,
+        // new address" from "a different server" before it applies anything.
+        server_fingerprint: state.server_fingerprint.clone(),
     }))
 }
 
@@ -2548,6 +2551,7 @@ mod legacy_push_tests {
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,
+                server_fingerprint: "testfingerprint00000000000000000".to_string(),
                 mobile_staging_root: std::env::temp_dir().join("lataif-routes-test-staging"),
             })
         }
@@ -2611,6 +2615,7 @@ mod legacy_push_tests {
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,
+                server_fingerprint: "testfingerprint00000000000000000".to_string(),
                 mobile_staging_root: std::env::temp_dir().join("lataif-routes-test-staging"),
             })
         }

@@ -39,6 +39,7 @@ fn state() -> Arc<AppState> {
         frontend_db_path: PathBuf::from("delivery-test-frontend.db"),
         data_root: crate::data_root::DataRoot::for_test(dir.clone()),
         primary_state: primary::State::Primary,
+        server_fingerprint: "testfingerprint00000000000000000".to_string(),
         mobile_staging_root: dir,
     })
 }

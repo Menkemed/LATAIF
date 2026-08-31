@@ -50,6 +50,7 @@ fn state_with(primary: primary::State, stg: &Stg) -> Arc<AppState> {
         // The staging root IS this fixture's data root, so the ingress writes where the test looks.
         data_root: crate::data_root::DataRoot::for_test(stg.0.clone()),
         primary_state: primary,
+        server_fingerprint: "testfingerprint00000000000000000".to_string(),
         mobile_staging_root: stg.0.clone(),
     })
 }

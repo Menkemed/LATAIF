@@ -17,11 +17,17 @@ import { applySyncChange, assertSyncIdentifier } from './apply-change';
 import { recordClientQuarantine, quarantineStatus, type QuarantineStatus } from './quarantine';
 // Re-exported so existing import paths (`from '.../sync-service'`) keep working.
 export { isControlPlaneTable, isValidSyncIdentifier } from './apply-change';
+// SYNC-SAFETY-A1 — der dauerhafte, an den Server gebundene Pull-Wasserstand.
+import { readCursor, writeCursor, resolveCursorStart, isServerFingerprint } from './cursor-store';
 
 const SYNC_INTERVAL = 30_000; // 30 seconds
 const STORAGE_KEY_URL = 'lataif_sync_url';
 const STORAGE_KEY_TOKEN = 'lataif_sync_token';
 const STORAGE_KEY_LAST = 'lataif_sync_last_id';
+// SYNC-SAFETY-A1 — welcher Server zuletzt geantwortet hat. Nur ein Zwischenspeicher, damit die
+// naechste Anfrage gleich beim richtigen Stand beginnt; massgeblich ist die Zeile in der
+// Business-DB (`cursor-store.ts`). Geht dieser Wert verloren, kostet das einen Umlauf, sonst nichts.
+const STORAGE_KEY_FP = 'lataif_sync_server_fp';
 
 // M6-B2DE4 §5 — the control-plane denylist, the identifier charset/gates and applyUpsert moved to
 // the node-safe `apply-change.ts` (imported above) so the behavioral gate can drive the REAL
@@ -78,10 +84,21 @@ export function setSyncConfig(url: string, token: string) {
   localStorage.setItem(STORAGE_KEY_TOKEN, token);
 }
 
+/**
+ * Die Verbindung trennen.
+ *
+ * SYNC-SAFETY-A1 — was hier faellt, ist die VERBINDUNG: Adresse und Token. Was NICHT faellt, ist
+ * der erreichte Stand. Genau daran hing der Vorfall: Trennen loeschte den Wasserstand, das
+ * naechste Verbinden begann wieder bei 0, und die gesamte Historie wurde erneut eingespielt.
+ * Der dauerhafte Stand steht in der Business-DB, an den Server gebunden, und ueberlebt das
+ * Trennen — verbindet man sich mit demselben Server erneut, geht es weiter, wo es aufhoerte;
+ * verbindet man sich mit einem anderen, wird dessen eigener Stand benutzt (oder eben keiner).
+ */
 export function clearSyncConfig() {
   localStorage.removeItem(STORAGE_KEY_URL);
   localStorage.removeItem(STORAGE_KEY_TOKEN);
   localStorage.removeItem(STORAGE_KEY_LAST);
+  localStorage.removeItem(STORAGE_KEY_FP);
   setStatus('offline');
 }
 
@@ -174,7 +191,15 @@ async function pullChanges(): Promise<number> {
   const token = localStorage.getItem(STORAGE_KEY_TOKEN);
   if (!url || !token) return 0;
 
-  const lastId = parseInt(localStorage.getItem(STORAGE_KEY_LAST) || '0');
+  // SYNC-SAFETY-A1 — gefragt wird ab dem Stand, den wir dem zuletzt gesehenen Server zuordnen.
+  // Ist dieser Zwischenspeicher weg (frisches C:), wird ab 0 gefragt und die Antwort danach mit
+  // dem DAUERHAFTEN Stand gefiltert — mehr zu holen kostet einen Umlauf, wiederholt aber nichts.
+  const db = getDatabase();
+  const cachedFp = localStorage.getItem(STORAGE_KEY_FP) || '';
+  const legacyRaw = localStorage.getItem(STORAGE_KEY_LAST);
+  const legacyCursor = legacyRaw === null ? null : parseInt(legacyRaw) || 0;
+  const cachedCursor = isServerFingerprint(cachedFp) ? readCursor(db, cachedFp) : null;
+  const lastId = cachedCursor ?? legacyCursor ?? 0;
 
   const res = await fetch(`${url}/api/sync/pull?since=${lastId}`, {
     headers: { 'Authorization': `Bearer ${token}` },
@@ -182,12 +207,47 @@ async function pullChanges(): Promise<number> {
 
   if (!res.ok) throw new Error(`Pull failed: ${res.status}`);
 
-  const { changes, last_sync_id } = await res.json();
+  const body = await res.json();
+  const fingerprint: string = typeof body.server_fingerprint === 'string' ? body.server_fingerprint : '';
+  let { changes } = body as { changes: import('./durable-cursor').SyncChangeRef[] };
+  const { last_sync_id } = body as { last_sync_id: number };
 
-  if (changes.length === 0) return 0;
+  // SYNC-SAFETY-A1 — der Server nennt sich. Tut er es nicht, ist er aelter als dieser Vertrag:
+  // dann bleibt alles beim Alten (localStorage-Stand), damit ein gemischter Stand nicht bricht —
+  // es entsteht kein dauerhafter Stand fuer einen Server, den wir nicht benennen koennen.
+  let durable: { fingerprint: string; cursor: number } | null = null;
+  if (isServerFingerprint(fingerprint)) {
+    localStorage.setItem(STORAGE_KEY_FP, fingerprint);
+    const start = resolveCursorStart(db, fingerprint, legacyCursor, Number(last_sync_id) || 0, new Date().toISOString());
+    if (start.kind === 'recovery-required') {
+      // Kein rekonstruierbarer Stand, aber der Server hat Historie. Weder von vorne anfangen
+      // (spielt alles erneut ein) noch ans Ende springen (ueberspringt womoeglich Echtes) waere
+      // zu verantworten — also wird nichts angewendet und der Zustand benannt.
+      setStatus('error');
+      console.error('[Sync] pull stopped: no recorded progress for this server and its log is not empty — recovery required');
+      return 0;
+    }
+    if (start.kind === 'adopted') {
+      console.warn(`[Sync] took over the previous progress (${start.cursor}) for this server`);
+    }
+    durable = { fingerprint, cursor: start.cursor };
+    // Was schon angewendet wurde, wird nicht erneut angewendet — unabhaengig davon, ab wo der
+    // Server geantwortet hat.
+    changes = changes.filter((c) => Number(c.id ?? 0) > start.cursor);
+  }
+
+  if (changes.length === 0) {
+    // Nichts anzuwenden, aber der Server hat weitergezaehlt (nur Control-Plane-Zeilen im Fenster):
+    // dann darf der Stand trotzdem mit — sonst wird dasselbe Fenster ewig neu geholt.
+    if (durable && Number(last_sync_id) > durable.cursor) {
+      writeCursor(db, durable.fingerprint, Number(last_sync_id), new Date().toISOString());
+      await saveDatabaseDurably();
+      localStorage.setItem(STORAGE_KEY_LAST, String(last_sync_id));
+    }
+    return 0;
+  }
 
   // Apply remote changes to local DB
-  const db = getDatabase();
   // Plan §Sync-Duplicate-Detection: track IDs of products freshly inserted
   // via Sync (z.B. Foto-Upload vom Handy), damit der SyncDuplicateGuard
   // sie nach dem Reload gegen die DB scoren und ein Side-by-Side-Review
@@ -239,7 +299,14 @@ async function pullChanges(): Promise<number> {
             now: new Date().toISOString(),
           });
         },
-        commit: () => db.run('COMMIT'),
+        // SYNC-SAFETY-A1 — der Stand wird IN dieser Transaktion fortgeschrieben, unmittelbar vor
+        // dem COMMIT. Damit teilen Anwenden und Fortschritt ein Schicksal: ein Rollback verwirft
+        // beides, und es kann keinen dauerhaften Stand geben, hinter dem keine Daten stehen.
+        // `writeCursor` geht nie rueckwaerts — ein kleineres Fenster senkt den Stand nicht.
+        commit: () => {
+          if (durable) writeCursor(db, durable.fingerprint, Number(last_sync_id), new Date().toISOString());
+          db.run('COMMIT');
+        },
         rollback: () => { db.run('ROLLBACK'); insertedProductIds.length = 0; },
       });
     },

@@ -15,6 +15,7 @@ import { applyMediaSchema } from './media-schema';
 import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
 import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
+import { CURSOR_DDL } from '../sync/cursor-store';
 import {
   INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
@@ -633,6 +634,12 @@ function runMigrations(database: Database): void {
     // and because the counter does not live in `products`, deleting a product cannot lower it.
     // No seed rows — a stem's counter is created on first use and initialised from history.
     SKU_SEQUENCES_DDL,
+
+    // SYNC-SAFETY-A1 — der Pull-Wasserstand, gebunden an den Server, von dem er stammt. Er lag
+    // bisher im localStorage der WebView und war damit das einzige Stueck Sync-Zustand, das einen
+    // Verlust von C: nicht ueberlebt. Hier steht er bei den Daten, die er beschreibt, und wird in
+    // derselben Transaktion fortgeschrieben wie das Anwenden. Siehe `core/sync/cursor-store.ts`.
+    CURSOR_DDL,
 
     // INVENTORY-SESSION — the worksheet of a stock-check run, so an inventory survives Save, closing
     // the window and restarting the app. Deliberately separate from `stock_checks`: that table is the

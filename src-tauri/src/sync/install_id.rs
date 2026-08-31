@@ -71,6 +71,33 @@ pub fn parse_install_id(raw: &str) -> Result<String, InstallIdError> {
     Ok(parsed.hyphenated().to_string())
 }
 
+/// Domain separation for the public fingerprint. A label plus a NUL, so no other hash in the
+/// house can ever be made to collide with this one by choosing its input.
+const FINGERPRINT_DOMAIN: &[u8] = b"lataif/server-identity/v1\0";
+
+/// The PUBLIC name of this server installation.
+///
+/// A client has to be able to ask "is this still the same server I recorded progress against?"
+/// without the server handing out anything that identifies it further. The install id itself
+/// must never leave the machine: it is not a key, but it is the device identity that custody,
+/// authority and the primary-host binding compare against, and `redact()` is a truncation, so
+/// it discloses part of the real value.
+///
+/// So the answer is a one-way name derived from it: SHA-256 over a domain label and the id,
+/// rendered as 32 hex characters (128 bits). The id is a cryptographically random UUIDv4 with
+/// 122 bits of entropy, so the digest cannot be walked back to it, and two different installs
+/// cannot share a name by accident. It is stable for the life of the install — a new WLAN, a
+/// new IP, a new URL do not touch it — and it changes exactly when the identity does: a fresh
+/// install, or a different data root.
+pub fn public_fingerprint(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(FINGERPRINT_DOMAIN);
+    h.update(id.as_bytes());
+    let d = h.finalize();
+    d.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
 /// Short, log-safe form. The full id never belongs in ordinary logs — it is a stable
 /// device identifier, so a leaked log line would make installs correlatable.
 pub fn redact(id: &str) -> String {
@@ -302,6 +329,52 @@ mod tests {
         // The error type must not carry the id either.
         let e = InstallIdError::Invalid { reason: "nil UUID".into() };
         assert!(!format!("{e}").contains(id));
+    }
+
+    // ── the public fingerprint ──────────────────────────────────────────────
+    #[test]
+    fn fingerprint_is_stable_and_never_carries_the_id() {
+        let id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+        let f = public_fingerprint(id);
+        assert_eq!(f, public_fingerprint(id), "the same install always has the same name");
+        assert_eq!(f.len(), 32, "128 bits, hex");
+        assert!(f.chars().all(|c| c.is_ascii_hexdigit()));
+        // Nothing of the id survives — not the whole, not the head `redact()` would show.
+        assert!(!f.contains(id));
+        assert!(!f.contains("3f2504e0"));
+        for part in id.split('-') {
+            assert!(!f.contains(part), "a chunk of the id leaked into the fingerprint: {part}");
+        }
+    }
+
+    #[test]
+    fn fingerprint_separates_two_installs() {
+        let a = public_fingerprint(&uuid::Uuid::new_v4().hyphenated().to_string());
+        let b = public_fingerprint(&uuid::Uuid::new_v4().hyphenated().to_string());
+        assert_ne!(a, b, "two installs must not share a name");
+    }
+
+    #[test]
+    fn fingerprint_is_domain_separated() {
+        // The bare digest of the id must NOT be the fingerprint: a hash taken elsewhere in the
+        // house over the same value may not be usable as this identity.
+        let id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+        use sha2::{Digest, Sha256};
+        let bare: String = Sha256::digest(id.as_bytes()).iter().take(16).map(|b| format!("{b:02x}")).collect();
+        assert_ne!(public_fingerprint(id), bare);
+    }
+
+    #[test]
+    fn fingerprint_survives_a_restart_of_the_same_install() {
+        // The identity lives in the data root, so the same directory yields the same name —
+        // this is what makes an address change (new WLAN, new IP) invisible to a client.
+        let d = tmp_dir();
+        let first = public_fingerprint(&load_or_create_in_dir(&d).unwrap());
+        let second = public_fingerprint(&load_or_create_in_dir(&d).unwrap());
+        assert_eq!(first, second);
+        // A different root is a different install and must be a different name.
+        let other = public_fingerprint(&load_or_create_in_dir(&tmp_dir()).unwrap());
+        assert_ne!(first, other);
     }
 
     // ── parse contract ──────────────────────────────────────────────────────

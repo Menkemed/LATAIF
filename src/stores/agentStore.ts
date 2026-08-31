@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { Agent, AgentTransfer, AgentTransferStatus, Invoice, TaxScheme } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
+import { ensureTransferSequence, TRANSFER_DOC_TYPE } from '@/core/agents/transfer-sequence';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackProductRow } from '@/core/lots/lot-queries';
@@ -204,7 +205,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
-    const transferNumber = getNextNumber('agent_transfers', 'transfer.number_prefix', 'TRF');
+    // SYNC-SAFETY-A1 — die Nummer kommt aus dem durablen Zaehler, nicht aus MAX(Bestand)+1.
+    // Der alte Weg gab die Nummer eines geloeschten Transfers erneut aus; im Aenderungslog stand
+    // sie dann zweimal, und ein spaeteres Wiedereinspielen lief in den eindeutigen Index. Der
+    // Zaehler wird vor der ersten Ausgabe einmalig auf die hoechste je vergebene Nummer gehoben
+    // (auch nach geloeschten Transfers), danach zaehlt er nur noch hoch.
+    ensureTransferSequence(db as unknown as import('@/core/sync/apply-change').SqlDb, now);
+    const transferNumber = getNextDocumentNumber(TRANSFER_DOC_TYPE);
 
     // Update product status
     if (data.productId) {

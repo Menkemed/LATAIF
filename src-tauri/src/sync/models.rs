@@ -71,6 +71,12 @@ pub struct SyncPushChange {
 pub struct SyncPullResponse {
     pub changes: Vec<SyncChange>,
     pub last_sync_id: i64,
+    /// SYNC-SAFETY-A1 — who answered. The client stores its progress against this name and
+    /// applies nothing when the answer comes from a different installation than the one the
+    /// cursor belongs to. It rides on the authenticated pull, so no new route and no
+    /// unauthenticated surface exists; it is a one-way digest, never the install id.
+    #[serde(default)]
+    pub server_fingerprint: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

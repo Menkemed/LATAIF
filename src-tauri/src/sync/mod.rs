@@ -156,6 +156,11 @@ pub struct AppState {
     /// media route and the AI-key lookup used to derive it as `frontend_db_path.parent()`: correct
     /// today, but a second answer that would not follow the root if the definition ever changed.
     pub data_root: crate::data_root::DataRoot,
+    /// SYNC-SAFETY-A1 — the PUBLIC name of this installation, derived once at start from the
+    /// install id (never the id itself). A client records its pull progress against this name,
+    /// so a changed address is not mistaken for a changed server — and a genuinely different
+    /// server can never be handed a foreign cursor.
+    pub server_fingerprint: String,
     /// MOBILE-04B2A8-I1 — the controlled staging root the authenticated mobile upload ingress
     /// (`/api/mobile/upload` → `accept_upload`) publishes image bytes into. MUST be the SAME directory
     /// the desktop worker's claim/prepare reads from (`AppHandleState.mobile_staging_root`), so a job
@@ -283,6 +288,7 @@ impl SyncServer {
             frontend_db_path,
             data_root: self.data_root.clone(),
             primary_state: state,
+            server_fingerprint: install_id::public_fingerprint(&install_id),
             mobile_staging_root,
         });
         let state = app_state;
