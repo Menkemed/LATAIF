@@ -22,6 +22,18 @@ registerHooks({
     if (specifier.startsWith('@/')) {
       return { url: pathToFileURL(withTs(resolvePath(repo, 'src', specifier.slice(2)))).href, shortCircuit: true };
     }
+    // `helpers.ts` haengt an der Datenbank und an der Anmeldung; beides wird gestellt, damit der
+    // ECHTE Nummerngeber laufen kann (er selbst braucht nur die Datenbank).
+    if ((specifier === './database' || specifier === '../db/database') && context.parentURL) {
+      return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
+    }
+    if (specifier === '../auth/auth' && context.parentURL && context.parentURL.includes('/db/helpers')) {
+      return { url: pathToFileURL(resolvePath(repo, 'test/sync/_auth-shim.ts')).href, shortCircuit: true };
+    }
+    if (false) {
+      // Der ECHTE Allocator wird getestet; nur seine Datenbankquelle wird gestellt.
+      return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
+    }
     if (specifier.startsWith('.') && context.parentURL) {
       const p = resolvePath(dirname(fileURLToPath(context.parentURL)), specifier);
       if (!existsSync(p) && existsSync(p + '.ts')) return { url: pathToFileURL(p + '.ts').href, shortCircuit: true };
@@ -32,7 +44,7 @@ registerHooks({
 
 const initSqlJs = (await import('sql.js')).default;
 const {
-  readCursor, writeCursor, resolveCursorStart, isServerFingerprint, CURSOR_DDL, ownPushedKeys, provenOwnPrefix,
+  readCursor, writeCursor, resolveCursorStart, isServerFingerprint, CURSOR_DDL, ownPushedCounts, provenOwnPrefix,
   serverLogBehind,
 } = await import('../../src/core/sync/cursor-store.ts');
 const {
@@ -40,6 +52,8 @@ const {
 } = await import('../../src/core/agents/transfer-sequence.ts');
 const { applyUpsert } = await import('../../src/core/sync/apply-change.ts');
 const { A1_UPGRADE_SQL, applyA1Upgrade } = await import('../../src/core/db/a1-upgrade.ts');
+const { setTestDatabase } = await import('./_db-shim.ts');
+const { getNextDocumentNumber } = await import('../../src/core/db/helpers.ts');
 
 let pass = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) pass++; else { fails.push(m); console.log('  x ' + m); } };
@@ -104,7 +118,7 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
   const db = fresh();
   const a = pushed(db, 'products', 'p1', 'insert', { id: 'p1', name: 'Mine' });
   const b = pushed(db, 'products', 'p1', 'delete', {});
-  const own = ownPushedKeys(db);
+  const own = ownPushedCounts(db);
   ok(own.size === 2, 'OWN the outbox is what this database provably sent');
   const foreign = { id: 3, table_name: 'products', record_id: 'p9', action: 'insert', data: JSON.stringify({ id: 'p9' }) };
   const p1 = provenOwnPrefix([{ ...a, id: 1 }, { ...b, id: 2 }, foreign], own);
@@ -119,7 +133,7 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
   // werden: der Beweis haengt an der vollstaendigen Nutzlast, nicht an Tabelle+Datensatz+Operation.
   const db = fresh();
   const first = pushed(db, 'products', 'p1', 'update', { id: 'p1', name: 'One' });
-  const own = ownPushedKeys(db);
+  const own = ownPushedCounts(db);
   const second = { id: 2, table_name: 'products', record_id: 'p1', action: 'update', data: JSON.stringify({ id: 'p1', name: 'Two' }) };
   ok(provenOwnPrefix([{ ...first, id: 1 }], own).count === 1, 'OWN the update we really sent is ours');
   ok(provenOwnPrefix([second], own).count === 0,
@@ -128,12 +142,78 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
     'OWN …so the run ends at it instead of swallowing it');
   // Und nach einer Luecke wird nichts vorab uebersprungen, auch wenn spaeter wieder Eigenes kommt.
   const later = pushed(db, 'products', 'p2', 'insert', { id: 'p2' });
-  const own2 = ownPushedKeys(db);
+  const own2 = ownPushedCounts(db);
   ok(provenOwnPrefix([second, { ...later, id: 3 }], own2).count === 0,
     'OWN a gap at the front means nothing behind it is skipped');
   // Die Korrelation muss die Nutzlast wirklich enthalten — sonst waeren die beiden Updates gleich.
-  ok([...own2].some((k) => k.includes('"name":"One"')),
+  ok([...own2.keys()].some((k) => k.includes('"name":"One"')),
     'OWN the proof carries the payload, not just the row and the operation');
+}
+
+// ── B2) Ein Beleg deckt genau eine Kopie ──────────────────────────────────
+//
+// Der Push waehlt ungesendete Zeilen, schickt sie und markiert sie ERST NACH der Antwort als
+// gesendet. Bricht die Verbindung nach der Annahme und vor der Antwort ab, schickt der naechste
+// Lauf dieselben Zeilen erneut — und der Server nimmt sie wieder an (die Push-Route fuegt ohne
+// Idempotenzschluessel ein). Dieselbe lokale Zeile kann also zwei Server-Ids bekommen.
+{
+  const db = fresh();
+  const a = pushed(db, 'products', 'p1', 'insert', { id: 'p1', name: 'Mine' });
+  const own = ownPushedCounts(db);
+  ok(provenOwnPrefix([{ ...a, id: 1 }], own).count === 1, 'ONE one server change and one matching local row: proven');
+  const twice = provenOwnPrefix([{ ...a, id: 1 }, { ...a, id: 2 }], own);
+  ok(twice.count === 1 && twice.lastId === 1,
+    'ONE the SAME change accepted twice needs two local rows — one proof never covers both');
+  ok(twice.count === 1, 'ONE …so the run ends at the second copy instead of skipping it');
+
+  // Zwei echte Sendungen derselben Zeile (der Wiederholungsfall) — dann sind beide belegt.
+  pushed(db, 'products', 'p1', 'insert', { id: 'p1', name: 'Mine' });
+  const own2 = ownPushedCounts(db);
+  const key = [...own2.keys()][0];
+  ok(own2.get(key) === 2, 'ONE the outbox counts how often a row really went out');
+  const both = provenOwnPrefix([{ ...a, id: 1 }, { ...a, id: 2 }], own2);
+  ok(both.count === 2 && both.lastId === 2, 'ONE …and then both copies are covered');
+  const third = provenOwnPrefix([{ ...a, id: 1 }, { ...a, id: 2 }, { ...a, id: 3 }], own2);
+  ok(third.count === 2, 'ONE …but never more copies than there are proofs');
+  ok(own2.get(key) === 2, 'ONE and asking does not consume the proofs themselves');
+}
+
+// ── B3) Der geteilte Dokumentzaehler bleibt fuer alle anderen, wie er war ──
+{
+  // Eine echte Alt-Datenbank: INV steht auf 42, EXP auf 7, nichts kennt `seq_year`.
+  const db = new SQL.Database() as unknown as Db;
+  db.run('CREATE TABLE document_sequences (doc_type TEXT PRIMARY KEY, prefix TEXT NOT NULL, '
+    + 'next_number INTEGER NOT NULL DEFAULT 1, include_year INTEGER NOT NULL DEFAULT 1, '
+    + 'padding INTEGER NOT NULL DEFAULT 6, updated_at TEXT NOT NULL)');
+  db.run("INSERT INTO document_sequences (doc_type, prefix, next_number, include_year, padding, updated_at) "
+    + "VALUES ('INV','INV',42,1,6,'old'), ('EXP','EXP',7,1,6,'old'), ('TRF','TRF',1,1,6,'old')");
+  applyA1Upgrade(db);
+  setTestDatabase(db);
+
+  const numberOf = (t: string): number =>
+    Number(db.exec('SELECT next_number FROM document_sequences WHERE doc_type = ?', [t])[0].values[0][0]);
+  const yearOf = (t: string): unknown =>
+    db.exec('SELECT seq_year FROM document_sequences WHERE doc_type = ?', [t])[0].values[0][0];
+
+  ok(numberOf('INV') === 42, 'SHARED the upgrade alone leaves an existing counter where it was');
+  const year = new Date().getFullYear();
+  // Der ECHTE Allocator, gegen eine echte Datenbank — nicht nachgebaut.
+  ok(getNextDocumentNumber('INV') === `INV-${year}-000042`,
+    'SHARED the real allocator hands out exactly the number the row was standing on');
+  ok(numberOf('INV') === 43, 'SHARED …and leaves it one further, exactly as before A1');
+  ok(getNextDocumentNumber('EXP') === `EXP-${year}-000007`, 'SHARED another type keeps its own value and format too');
+  ok(yearOf('INV') === null && yearOf('EXP') === null, 'SHARED the new year column stays empty for every other type');
+
+  // Erst der Transfer-Zaehler setzt sie — und nur bei sich.
+  db.run('CREATE TABLE agent_transfers (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, transfer_number TEXT NOT NULL)');
+  db.run('CREATE TABLE sync_changelog (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT, '
+    + 'branch_id TEXT, action TEXT, data TEXT, synced INTEGER DEFAULT 0, created_at TEXT)');
+  ensureTransferSequence(db, NOW, year);
+  ok(Number(yearOf('TRF')) === year, 'SHARED …and it is set only for the transfer counter');
+  ok(yearOf('INV') === null && numberOf('INV') === 43, 'SHARED …without touching anyone else');
+  ok(getNextDocumentNumber('INV') === `INV-${year}-000043`, 'SHARED the next invoice still follows the old contract');
+  ok(numberOf('TRF') === 1 && Number(padOf(db)) === TRANSFER_PADDING,
+    'SHARED a transfer counter with no history starts at 1, five digits');
 }
 
 // ── C) Der Startpunkt — vier Faelle, keiner geraten ────────────────────────

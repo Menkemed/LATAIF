@@ -117,31 +117,35 @@ const ownKey = (c: { table_name: string; record_id: string; action: string; data
   [c.table_name, c.record_id, c.action, c.data ?? ''].join('\u0000');
 
 /**
- * Alles, was DIESE Datenbank selbst schon einmal an den Server geschickt hat.
+ * Alles, was DIESE Datenbank selbst schon einmal an den Server geschickt hat — MIT ANZAHL.
  *
  * Der eigene Ausgangskorb (`sync_changelog` in der Business-DB) ist die Aufzeichnung der eigenen
  * Schreibvorgaenge: eine Zeile entsteht NACH dem lokalen Schreiben und wird erst nach der Annahme
  * durch den Server als gesendet markiert. Kommt genau diese Zeile spaeter beim Pull zurueck, dann
  * beschreibt sie einen Schreibvorgang, der hier entstanden ist — und dessen weitere Geschichte
- * (auch ein spaeteres Loeschen) diese Datenbank bereits kennt. Sie erneut anzuwenden kann nichts
- * hinzufuegen und im schlimmsten Fall einen laengst geloeschten Datensatz zurueckholen.
+ * (auch ein spaeteres Loeschen) diese Datenbank bereits kennt.
+ *
+ * Gezaehlt wird, weil einmal gesendet nicht einmal angekommen heisst: bricht die Verbindung NACH
+ * der Annahme und VOR der Antwort ab, bleibt die Zeile hier ungesendet und wird erneut geschickt —
+ * der Server hat sie dann zweimal, unter zwei Ids. Ein blosses "so eine Zeile gibt es" wuerde
+ * beide Kopien mit demselben einen Beleg decken. Also deckt jeder Beleg genau eine Kopie.
  */
-export function ownPushedKeys(db: SqlDb): Set<string> {
-  const out = new Set<string>();
+export function ownPushedCounts(db: SqlDb): Map<string, number> {
+  const out = new Map<string, number>();
   try {
     const r = db.exec('SELECT table_name, record_id, action, data FROM sync_changelog');
     if (r.length > 0) {
       for (const v of r[0].values) {
-        out.add(ownKey({
+        const k = ownKey({
           table_name: String(v[0] ?? ''), record_id: String(v[1] ?? ''),
           action: String(v[2] ?? ''), data: v[3] === null || v[3] === undefined ? '' : String(v[3]),
-        }));
+        });
+        out.set(k, (out.get(k) ?? 0) + 1);
       }
     }
   } catch { /* kein Ausgangskorb → nichts ist als eigener Ursprung belegt */ }
   return out;
 }
-
 /**
  * Wie weit der Anfang der gelieferten Historie NACHWEISLICH eigener Ursprung ist.
  *
@@ -149,18 +153,22 @@ export function ownPushedKeys(db: SqlDb): Set<string> {
  * kann, beendet die Reihe. Alles danach wird ganz normal angewendet — hier wird nichts
  * uebersprungen, was fremd sein koennte.
  */
-export function provenOwnPrefix(changes: PulledChange[], own: Set<string>): { count: number; lastId: number } {
+export function provenOwnPrefix(changes: PulledChange[], own: Map<string, number>): { count: number; lastId: number } {
+  // Auf einer Kopie gearbeitet: der Aufrufer bekommt seine Belege unveraendert zurueck.
+  const left = new Map(own);
   let count = 0;
   let lastId = 0;
   for (const c of changes) {
-    if (!own.has(ownKey(c))) break;
+    const k = ownKey(c);
+    const n = left.get(k) ?? 0;
+    if (n <= 0) break;
+    left.set(k, n - 1);
     count++;
     const id = Number(c.id ?? 0);
     if (Number.isFinite(id) && id > lastId) lastId = id;
   }
   return { count, lastId };
 }
-
 /**
  * Den Startpunkt bestimmen — die eine Stelle, an der ueber Wiedereinspielen entschieden wird.
  *
@@ -195,7 +203,7 @@ export function resolveCursorStart(
     return { kind: 'fresh', cursor };
   }
 
-  const prefix = provenOwnPrefix(changes, ownPushedKeys(db));
+  const prefix = provenOwnPrefix(changes, ownPushedCounts(db));
   if (prefix.count > 0) {
     const cursor = writeCursor(db, fingerprint, prefix.lastId, now);
     return { kind: 'reconstructed', cursor, ownPrefix: prefix.count };
