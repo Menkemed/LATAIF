@@ -82,6 +82,16 @@ pub enum DataRootError {
     RootIdMismatch,
     /// The root was adopted WITH a business database, and that database is now gone.
     BusinessDbMissing,
+    /// DATA-ROOT-B1 — nothing is registered here yet, and nobody has said what that means.
+    ///
+    /// An empty control directory has two possible histories, and from `C:` alone they look the
+    /// same: a genuinely first start, or a machine that was reinstalled while the data lives on
+    /// another drive. Adopting the empty directory would answer that question by itself — and it
+    /// used to: the resolver bootstrapped a fresh root here, with a fresh `rootId` and an empty
+    /// database, which is exactly the wrong answer for the second history and cannot be taken back.
+    /// So the resolver stops and hands the question to the person who knows: set up a new
+    /// installation, or recover an existing data location.
+    FirstRunUndecided,
     Io(String),
 }
 
@@ -97,6 +107,7 @@ impl DataRootError {
             DataRootError::MarkerCorrupt => "DATA_ROOT_MARKER_CORRUPT",
             DataRootError::RootIdMismatch => "DATA_ROOT_ID_MISMATCH",
             DataRootError::BusinessDbMissing => "DATA_ROOT_BUSINESS_DB_MISSING",
+            DataRootError::FirstRunUndecided => "DATA_ROOT_FIRST_RUN_UNDECIDED",
             DataRootError::Io(_) => "DATA_ROOT_IO",
         }
     }
@@ -333,8 +344,71 @@ fn resolve_without_locator(app_data_dir: &Path) -> Result<DataRoot, DataRootErro
         Some(m) if !m.bootstrap_pending => Err(DataRootError::LocatorMissingAfterRegistration),
         // An interrupted bootstrap in this very directory — safe to complete, same id.
         Some(m) => finish_bootstrap(app_data_dir, m),
+        // No marker at all. Two very different situations look the same from here, and the
+        // difference is whether there is DATA in this directory:
+        //
+        //   • A legacy install upgrading to the locator contract: `lataif.db` is right here, and
+        //     adopting the folder in place is the only correct answer — it is the data.
+        //   • A control directory with nothing in it: that is either a genuinely first start or a
+        //     machine that was reinstalled while the data sits on another drive. Bootstrapping
+        //     would answer that question by itself, with a fresh id and an empty database, and it
+        //     could not be taken back. So it is handed to the person who knows.
+        None if app_data_dir.join(BUSINESS_DB_FILENAME).exists() => bootstrap(app_data_dir),
+        // DATA-ROOT-B1 — `resolve` keeps bootstrapping here for now, because the window that would
+        // ask the question does not exist yet; switching this line before there is a gate would
+        // turn a first start into a dead end. The decision itself is already implemented and proven
+        // one level up, in `resolve_or_first_run`, and that is what the gate will call.
         None => bootstrap(app_data_dir),
     }
+}
+
+/// What a start finds before anything has been decided.
+///
+/// DATA-ROOT-B1 — noch ruft niemand das hier auf: die Weiche, die die Frage stellt, wird als
+/// naechstes gebaut. Bis dahin ist der Vertrag hier implementiert und bewiesen, aber nicht aktiv —
+/// `resolve` verhaelt sich unveraendert, damit ein Erststart nicht in eine Sackgasse laeuft.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum Resolution {
+    /// A root this installation is registered with — the normal case.
+    Root(DataRoot),
+    /// Nothing is registered here and there is no data either. Nobody may answer this but a person.
+    FirstRunUndecided,
+}
+
+/// Resolve the active data root, or report that the question is still open.
+///
+/// The difference to `resolve` is one directory: an EMPTY control directory. `resolve` adopts it —
+/// it has to, because every caller today expects a root back. This entry point does not: it looks,
+/// finds nothing, writes nothing, and says so. A machine that was reinstalled while its data sits
+/// on another drive gets a question instead of a fresh empty installation it can never take back.
+///
+/// Everything else is the resolver's own contract, unchanged: a valid pair resolves, a lost locator
+/// after registration fails closed, a legacy folder WITH a database is still adopted in place.
+#[allow(dead_code)]
+pub fn resolve_or_first_run(app_data_dir: &Path) -> Result<Resolution, DataRootError> {
+    if read_locator(app_data_dir)?.is_none()
+        && read_marker(app_data_dir)?.is_none()
+        && !app_data_dir.join(BUSINESS_DB_FILENAME).exists()
+    {
+        return Ok(Resolution::FirstRunUndecided);
+    }
+    resolve(app_data_dir).map(Resolution::Root)
+}
+
+/// Set up a NEW installation in `app_data_dir` — the deliberate answer to `FirstRunUndecided`.
+///
+/// This is the bootstrap the resolver used to run by itself. It is unchanged in what it does: a new
+/// `rootId`, the marker/locator pair written in the safe order, nothing moved, copied or opened.
+/// What changed is who asks for it — a person, once, instead of a start that found an empty folder.
+#[allow(dead_code)]
+pub fn setup_new_installation(app_data_dir: &Path) -> Result<DataRoot, DataRootError> {
+    // Never over an existing registration: if anything is already here, the normal resolver owns
+    // this directory and this call has no business writing a second identity into it.
+    if read_locator(app_data_dir)?.is_some() || read_marker(app_data_dir)?.is_some() {
+        return resolve(app_data_dir);
+    }
+    bootstrap(app_data_dir)
 }
 
 /// First start after the upgrade (or the very first start ever): adopt `app_data_dir` in place.

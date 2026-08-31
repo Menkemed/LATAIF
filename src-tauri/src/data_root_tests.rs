@@ -58,14 +58,79 @@ fn bootstrap_records_that_a_business_db_is_expected() {
     assert!(!m.bootstrap_pending, "a completed bootstrap leaves no pending flag");
 }
 
+// ── DATA-ROOT-B1: an empty control directory is a QUESTION, not a first start ───────────────
+//
+// It used to be answered on the spot: an empty folder became a new root with a new id and an empty
+// database. For a machine that was reinstalled while the data sits on another drive that is the
+// wrong answer, and it cannot be taken back — the real data is then orphaned beside a working,
+// empty installation. So the resolver stops and asks.
+
 #[test]
-fn first_ever_start_bootstraps_an_empty_folder_without_claiming_a_database() {
-    let dir = tmp("fresh");
-    let root = resolve(&dir).unwrap();
-    assert_eq!(root.path(), dir.as_path());
+fn an_empty_control_directory_asks_instead_of_claiming_itself() {
+    let dir = tmp("undecided");
+    assert!(matches!(resolve_or_first_run(&dir).unwrap(), Resolution::FirstRunUndecided));
+    // And it really asked: nothing at all was written.
+    let entries: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(entries.is_empty(), "the resolver wrote something while it had no answer: {entries:?}");
+    assert!(!dir.join(MARKER_FILENAME).exists(), "no marker");
+    assert!(!dir.join(LOCATOR_FILENAME).exists(), "no locator");
+    assert!(!dir.join(BUSINESS_DB_FILENAME).exists(), "no database");
+    assert!(!dir.join(SYNC_SERVER_DB_FILENAME).exists(), "no server database");
+    // Asking twice changes nothing either — a person who closes the window has mutated nothing.
+    assert!(matches!(resolve_or_first_run(&dir).unwrap(), Resolution::FirstRunUndecided));
+    assert!(fs::read_dir(&dir).unwrap().next().is_none(), "still empty after a second start");
+}
+
+#[test]
+fn setting_up_a_new_installation_is_the_deliberate_answer() {
+    let dir = tmp("newinstall");
+    assert!(matches!(resolve_or_first_run(&dir).unwrap(), Resolution::FirstRunUndecided));
+
+    let root = setup_new_installation(&dir).unwrap();
+    assert_eq!(root.path(), dir.as_path(), "the chosen default root is the control directory");
+    assert!(!root.root_id().trim().is_empty(), "one new id");
     let m = read_marker(&dir).unwrap().unwrap();
+    assert_eq!(m.root_id, root.root_id(), "marker and root agree");
+    assert!(!m.bootstrap_pending, "a completed bootstrap leaves no pending flag");
     assert!(!m.business_db_expected, "there was never a database here — do not demand one later");
     assert!(!root.business_db().exists(), "and none was created");
+    let loc = read_locator(&dir).unwrap().unwrap();
+    assert_eq!(loc.root_id, root.root_id(), "the locator commits to the same id");
+
+    // From here on the normal resolver owns the directory, and the id never changes again.
+    let again = resolve(&dir).unwrap();
+    assert_eq!(again.root_id(), root.root_id());
+}
+
+#[test]
+fn setting_up_a_new_installation_never_overwrites_an_existing_one() {
+    let dir = tmp("newinstall-twice");
+    let first = setup_new_installation(&dir).unwrap();
+    // A second call must not mint a second identity into the same directory.
+    let second = setup_new_installation(&dir).unwrap();
+    assert_eq!(second.root_id(), first.root_id(), "the same installation, not a new one");
+    // Nor may it walk over a legacy dataset that the normal resolver would adopt in place.
+    let legacy = tmp("newinstall-legacy");
+    with_dataset(&legacy);
+    let adopted = setup_new_installation(&legacy).unwrap();
+    assert_eq!(adopted.path(), legacy.as_path());
+    assert_eq!(
+        fs::read(legacy.join(BUSINESS_DB_FILENAME)).unwrap(),
+        b"not-a-real-sqlite-file",
+        "the existing database is untouched"
+    );
+}
+
+#[test]
+fn a_legacy_folder_with_data_is_still_adopted_in_place_and_never_asks() {
+    // The upgrade path from before the locator contract: the data IS here, so there is nothing to
+    // ask about. Only an EMPTY directory is a question.
+    let dir = tmp("legacy-no-question");
+    with_dataset(&dir);
+    let root = resolve(&dir).unwrap();
+    assert_eq!(root.path(), dir.as_path());
+    assert!(root.is_legacy_in_place());
+    assert!(read_marker(&dir).unwrap().unwrap().business_db_expected);
 }
 
 #[test]
