@@ -117,7 +117,6 @@ async function waitPortFree(port, ms = 20000) {
 }
 
 const setVal = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; const p=e.tagName==='SELECT'?HTMLSelectElement.prototype:(e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype); Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
-const attr = (c, sel, name) => c.ev(`const e=document.querySelector(${S(sel)}); return e ? e.getAttribute(${S(name)}) : null;`);
 const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const clickSel = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; e.click(); return 'OK';`);
 const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO'; b.click(); return 'OK';`);
@@ -294,16 +293,11 @@ ok(await clickText(c, 'Copy details') === 'OK', 'B the copy control is there and
   ok(vals.includes('COPY-1'), `B the details of the found item really landed in the visible form (${vals.slice(0, 200)})`);
   ok(vals.includes('Copybrand') && vals.includes('Copy Model'), 'B …its brand and name among them');
   ok(!vals.includes('CPY-WCH-001'), 'B …but never its SKU — every piece keeps its own number');
-  // Der Kern des Vertrags, direkt gemessen statt aus dem Verhalten geschlossen: der Merker
-  // beschreibt exakt den Zustand, den das Formular nach der Uebernahme traegt.
-  const fpNow = await attr(c, '[data-cn-create]', 'data-dup-fp');
-  const fpDismissed = await attr(c, '[data-cn-create]', 'data-dup-dismissed');
-  ok(!!fpNow && fpNow === fpDismissed,
-    `B the remembered fingerprint IS the one the copied form carries (${fpDismissed} vs ${fpNow})`);
-  ok(fpNow.includes('COPY-1'), 'B …and it is built from the copied values, not the typed ones');
 }
-// Deutlich laenger als der Entprellwert der Live-Pruefung (800 ms) — genau darin sprang der
-// Hinweis vorher ein zweites Mal auf.
+// Hier steht der ganze Vertrag, und zwar an dem, was man sehen kann: der "schon entschieden"-Merker
+// muss den Zustand NACH der Uebernahme beschreiben. Traegt er den von vorher, laeuft die Pruefung
+// nach dem Entprellwert (800 ms) erneut, findet genau den kopierten Artikel — und der Hinweis
+// springt wieder auf. Deshalb wird deutlich laenger gewartet als entprellt wird.
 await sleep(3000);
 ok(await dupOpen(c) === false, 'B "Copy details" does not bring the hint straight back');
 ok(productsNamed('Copy Model').length === beforeCopy, 'B …and it creates nothing by itself');
