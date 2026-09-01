@@ -54,6 +54,31 @@ function dbQ(file, sql, params = []) {
   catch { return []; }
   finally { try { db?.close(); } catch {} }
 }
+/** Eine echte fremde Aenderung im Log des Servers — nur schreiben, waehrend die App STEHT. */
+function serverChange(id) {
+  const db = new DatabaseSync(join(DATA_ROOT, 'lataif_sync_server.db'));
+  try {
+    const row = db.prepare('SELECT tenant_id, branch_id FROM sync_changelog ORDER BY id DESC LIMIT 1').get();
+    const tenant = row?.tenant_id ?? 'tenant-1';
+    const branch = row?.branch_id ?? 'branch-main';
+    db.prepare(`INSERT INTO sync_changelog (tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at)
+                VALUES (?,?,?,?,?,?,?,?)`).run(
+      tenant, branch, 'customers', id, 'insert',
+      JSON.stringify({ id, branch_id: branch, first_name: 'Recovered', last_name: 'Customer', created_at: 'x', updated_at: 'x' }),
+      'self-desktop', new Date().toISOString(),
+    );
+  } finally { try { db.close(); } catch {} }
+  return id;
+}
+const serverHead = () => Number(dbQ(join(DATA_ROOT, "lataif_sync_server.db"), "SELECT COALESCE(MAX(id),0) m FROM sync_changelog")[0]?.m ?? 0);
+const cursorOnDisk = () => dbQ(join(DATA_ROOT, "lataif.db"), "SELECT server_fingerprint, last_sync_id FROM sync_cursor");
+/** Ein sauberes Ende: erst das kontrollierte Schliessen, dann der Prozess. */
+async function stopApp(x) {
+  try { await x.ev('window.close(); return 1;'); } catch {}
+  await sleep(2500);
+  try { x.close(); } catch {}
+  killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
+}
 const bizCount = (t) => dbQ(join(DATA_ROOT, 'lataif.db'), `SELECT COUNT(*) c FROM ${t}`)[0]?.c ?? -1;
 
 class CDP {
@@ -198,7 +223,9 @@ c.close(); killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
   });
 }
 
-const before = {
+let before = {
+  cursor: 0,
+  fingerprint: "",
   rootId: rootIdBefore,
   products: bizCount('products'),
   settings: bizCount('settings'),
@@ -208,6 +235,51 @@ const before = {
 ok(before.products >= 0 && before.settings > 0, `the business database really lives out there (products=${before.products}, settings=${before.settings})`);
 ok(before.serverDb && before.installId.length === 36, 'and so do the server database and the installation identity');
 ok(existsSync(join(APP_DATA_DIR, 'data-location.json')), 'the locator is on C:, pointing at it');
+
+// Einen echten Wasserstand herstellen: Rolle setzen, Server starten, Sync auf den eigenen Server
+// richten, den Erstkontakt abwarten und dann EINE echte Aenderung anwenden lassen.
+{
+  c = await startApp();
+  await ensureSignedIn(c);
+  const role = await invokeErr(c, 'primary_configure', { mode: 'primary', email: OWNER_EMAIL, password: OWNER_PW });
+  ok(role === 'NO-ERROR', `this machine becomes the primary (${role})`);
+  const started = await invokeErr(c, 'sync_server_start', {});
+  ok(started === 'NO-ERROR', `and runs its server (${started})`);
+  const st = await invoke(c, 'sync_server_status', {});
+  await c.ev(`localStorage.setItem('lataif_sync_url', ${S(`http://127.0.0.1:${PORT}`)}); localStorage.setItem('lataif_sync_token', ${S(st.selfToken)}); return 1;`);
+  await c.ev('location.reload(); return 1;');
+  await sleep(2500);
+  c.close(); c = await attach(); await ensureSignedIn(c);
+  {
+    const end = Date.now() + 90000;
+    while (Date.now() < end) { if (cursorOnDisk().length > 0) break; await sleep(1500); }
+  }
+  ok(cursorOnDisk().length === 1, "the first contact recorded a durable progress");
+  await stopApp(c);
+
+  // Jetzt eine echte Aenderung, damit der Stand ueber 0 steigt.
+  const preId = serverChange('pre-loss-' + Date.now());
+  const head = serverHead();
+  c = await startApp();
+  await ensureSignedIn(c);
+  {
+    const end = Date.now() + 120000;
+    while (Date.now() < end) {
+      if (Number(cursorOnDisk()[0]?.last_sync_id ?? 0) >= head) break;
+      await sleep(1500);
+    }
+  }
+  await stopApp(c);
+  ok(Number(dbQ(join(DATA_ROOT, "lataif.db"), "SELECT COUNT(*) c FROM customers WHERE id = ?", [preId])[0]?.c ?? 0) === 1,
+    "the pre-loss change was applied");
+}
+
+// Der Stand VOR dem Verlust, von der Platte gelesen.
+const cur0 = cursorOnDisk();
+before.cursor = Number(cur0[0]?.last_sync_id ?? 0);
+before.fingerprint = String(cur0[0]?.server_fingerprint ?? "");
+ok(before.cursor > 0 && before.fingerprint.length === 32,
+  `a real progress N=${before.cursor} for server ${before.fingerprint.slice(0, 8)}… is on disk before the loss`);
 
 // ── 2) C: ist weg ───────────────────────────────────────────────────────────
 rmSync(APP_DATA_DIR, { recursive: true, force: true });
@@ -278,20 +350,51 @@ ok(readFileSync(join(DATA_ROOT, 'sync_install_id.key'), 'utf8').trim() === befor
 ok(!existsSync(join(APP_DATA_DIR, 'lataif.db')), 'and still no business database on C:');
 ok(existsSync(join(DATA_ROOT, 'lataif_sync_server.db')), 'the server database is the one out there');
 
-// ── 7) Der Anschluss an A1: kein Wiedereinspielen ───────────────────────────
+// ── 7) Der Anschluss an A1: mit echten Zahlen ───────────────────────────────
 {
-  // Das WebView2-Profil war mit C: weg, der localStorage ist also leer — der Wasserstand liegt in
-  // der uebernommenen Datenbank. Er darf nicht auf 0 fallen und nicht rueckwaerts gehen.
+  // Das WebView2-Profil war mit C: weg, der localStorage ist also leer. Der Wasserstand liegt in
+  // der uebernommenen Datenbank — und genau von dort muss weitergemacht werden.
   await sleep(4000);
-  const cursor = dbQ(join(DATA_ROOT, 'lataif.db'), 'SELECT server_fingerprint, last_sync_id FROM sync_cursor');
-  ok(cursor.length <= 1, 'there is at most one recorded progress — one server, one cursor');
-  const replay = c.logs.filter((l) => /recovery required|took over the previous progress/i.test(l));
-  ok(replay.length === 0, `the sync did not fall back to a recovery or a takeover (${replay.slice(0, 1).join('')})`);
-  const behind = c.logs.filter((l) => /sync-server-log-behind/i.test(l));
-  ok(behind.length === 0, 'and the server is not behind the adopted database');
-}
+  const cur = cursorOnDisk();
+  ok(cur.length === 1, `exactly one recorded progress — one server, one cursor (${cur.length})`);
+  const N = Number(cur[0]?.last_sync_id ?? -1);
+  ok(N === before.cursor, `the progress is unchanged by the adoption (${N} vs ${before.cursor})`);
+  ok(String(cur[0]?.server_fingerprint) === before.fingerprint, "and it still belongs to the same server");
+  ok(!(await c.ev("return !!localStorage.getItem('lataif_sync_last_id');")),
+    "the fresh browser holds no authoritative cursor of its own");
 
-c.close(); killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
+  // Jetzt bekommt der Pull echte Arbeit: EINE Aenderung hinter N.
+  await stopApp(c);
+  const newId = serverChange('after-adopt-' + Date.now());
+  const head = serverHead();
+  ok(head === N + 1, `the server has exactly one change beyond the progress (${N} → ${head})`);
+  c = await startApp();
+  await ensureSignedIn(c);
+  {
+    const end2 = Date.now() + 120000;
+    while (Date.now() < end2) {
+      if (Number(cursorOnDisk()[0]?.last_sync_id ?? 0) >= head) break;
+      await sleep(1500);
+    }
+  }
+  await stopApp(c);
+  const applied = Number(dbQ(join(DATA_ROOT, "lataif.db"), "SELECT COUNT(*) c FROM customers WHERE id = ?", [newId])[0]?.c ?? 0);
+  ok(applied === 1, `the one change beyond N was applied exactly once (${applied})`);
+  const after = cursorOnDisk();
+  ok(after.length === 1 && Number(after[0].last_sync_id) === head,
+    `and the progress moved forward to it, on disk (${N} → ${after[0]?.last_sync_id})`);
+  ok(Number(after[0].last_sync_id) > N, "never backwards");
+
+  // Und der Weg dorthin war der normale: kein Wiedereinspielen, keine Rekonstruktion, kein Raten.
+  const replay = c.logs.filter((l) => /recovery required|were pushed by this database itself/i.test(l));
+  ok(replay.length === 0, `no replay, no reconstruction (${replay.slice(0, 1).join("")})`);
+  const behind = c.logs.filter((l) => /sync-server-log-behind/i.test(l));
+  ok(behind.length === 0, "and the server is not behind the adopted database");
+  // Die Zeilen von vor dem Verlust wurden NICHT erneut angewendet: sonst gaebe es sie doppelt.
+  const dupes = dbQ(join(DATA_ROOT, "lataif.db"), "SELECT id, COUNT(*) n FROM customers GROUP BY id HAVING n > 1");
+  ok(dupes.length === 0, `no customer was created twice (${dupes.length})`);
+}
+killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — data root recovery e2e: ${PASS} passed, ${FAIL} failed`);
 if (FAIL) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('DATA_ROOT_C_LOSS_RECOVERY_E2E_PROVED');

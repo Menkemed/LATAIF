@@ -283,6 +283,18 @@ async function pullChanges(): Promise<number> {
     if (start.kind === 'reconstructed') {
       console.warn(`[Sync] the first ${start.ownPrefix} changes were pushed by this database itself — progress set to ${start.cursor} instead of replaying them`);
     }
+    // SYNC-SAFETY-A1-F1 — ein Stand, den dieser Lauf ERST ANGELEGT hat, muss auf die Platte,
+    // bevor der Lauf sich als erfolgreich meldet. Sonst lebt er nur im Speicher: die
+    // Business-Datenbank wird als Ganzes gespeichert, und ohne einen Save waere die Zeile beim
+    // naechsten Start wieder weg. Das ist kein Schoenheitsfehler — "kein Stand" bedeutet etwas
+    // anderes als "bewiesener Stand 0": beim naechsten Start koennte der Server inzwischen
+    // Historie haben, und dann entscheidet genau diese Zeile ueber Weitermachen statt Nachfragen.
+    //
+    // Der Weg mit Aenderungen braucht das nicht: dort schreibt der Apply den Stand in derselben
+    // Transaktion, und `commitPulledBatch` speichert durabel, BEVOR es Erfolg meldet.
+    if (start.kind === 'fresh' || start.kind === 'reconstructed') {
+      await saveDatabaseDurably();
+    }
     durable = { fingerprint, cursor: start.cursor };
     // Was schon angewendet wurde, wird nicht erneut angewendet — unabhaengig davon, ab wo der
     // Server geantwortet hat.

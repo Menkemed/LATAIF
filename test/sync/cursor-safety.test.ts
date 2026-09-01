@@ -319,6 +319,36 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
   ok(seqOf(db) === 5, 'TRF …and that is what the counter holds');
 }
 
+// ── E2) Wenn das Speichern scheitert, gilt der Lauf nicht ──────────────────
+//
+// Der Stand wird in derselben Transaktion geschrieben wie das Anwenden; auf die Platte kommt beides
+// erst mit dem durablen Speichern. Scheitert genau das, darf der Lauf sich nicht als erfolgreich
+// melden — und der Zwischenspeicher darf nicht vorruecken, sonst wuerde der naechste Pull hinter
+// einem Stand ansetzen, den keine Datei kennt.
+{
+  const { commitPulledBatch } = await import('../../src/core/sync/durable-cursor.ts');
+  const order: string[] = [];
+  let threw: string | null = null;
+  try {
+    await commitPulledBatch({
+      applyBatch: () => { order.push('apply'); },
+      durableSave: async () => { order.push('save'); throw new Error('disk full'); },
+      setCursor: () => { order.push('cursor'); },
+    });
+  } catch (e) { threw = String(e); }
+  ok(threw !== null && /disk full/.test(threw), 'PERSIST a failing save makes the run fail, loudly');
+  ok(order.join('>') === 'apply>save', `PERSIST …and the cursor cache never advanced (${order.join('>')})`);
+
+  // Und der gute Fall haelt die Reihenfolge ein: erst anwenden, dann durabel speichern, dann merken.
+  const good: string[] = [];
+  await commitPulledBatch({
+    applyBatch: () => { good.push('apply'); },
+    durableSave: async () => { good.push('save'); },
+    setCursor: () => { good.push('cursor'); },
+  });
+  ok(good.join('>') === 'apply>save>cursor', `PERSIST the successful order is apply → disk → remember (${good.join('>')})`);
+}
+
 // ── F) Eine BESTEHENDE Datenbank aus v0.8.51 ──────────────────────────────
 //
 // Nicht die frische, sondern die, die es schon gibt: ohne `sync_cursor`, ohne `seq_year`, mit
@@ -419,6 +449,17 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
     const applyAt = svc.indexOf('await commitPulledBatch(');
     ok(behindAt > 0 && thrown > behindAt && thrown < startAt && startAt < applyAt,
       'WIRED a server behind our progress stops the pull before the start point and before any apply');
+  }
+  {
+    // Ein Stand, den der Lauf selbst angelegt hat, muss auf die Platte, BEVOR er Erfolg meldet —
+    // sonst lebt er nur im Speicher und ist beim naechsten Start weg. Der Weg mit Aenderungen
+    // braucht das nicht: dort speichert `commitPulledBatch` durabel, bevor es weitergeht.
+    const at = svc.indexOf("start.kind === 'fresh' || start.kind === 'reconstructed'");
+    const save = svc.indexOf('await saveDatabaseDurably();', at);
+    const ret = svc.indexOf('return 0;', at);
+    const apply = svc.indexOf('await commitPulledBatch(', at);
+    ok(at > 0 && save > at && save < ret && save < apply,
+      'WIRED a progress this run created is written to disk before the run can report success');
   }
   ok(svc.includes('logHead: Number(b.log_head)'), 'WIRED the head of the log is read from the authenticated pull answer');
   ok(svc.includes('err instanceof SyncServerBehindError ? SERVER_LOG_BEHIND'),
