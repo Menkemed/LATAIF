@@ -39,3 +39,30 @@ export async function isFirstRunPending(): Promise<boolean> {
 export async function setUpNewInstallation(): Promise<string> {
   return invoke<string>('first_run_setup_new');
 }
+
+/** Was ein geprueter Datenort ueber sich sagt. */
+export interface CandidateFacts {
+  path: string;
+  rootId: string;
+  serverFingerprint: string;
+  hasMedia: boolean;
+}
+
+/**
+ * Einen gewaehlten Ordner ansehen — ohne ihn anzufassen.
+ *
+ * Das Ergebnis ist eine Auskunft fuer den Bildschirm, keine Erlaubnis: die Uebernahme prueft alles
+ * selbst noch einmal, unmittelbar bevor sie schreibt.
+ */
+export async function validateCandidate(path: string): Promise<CandidateFacts> {
+  return invoke<CandidateFacts>('first_run_validate_candidate', { path });
+}
+
+/**
+ * Den Ordner uebernehmen — die einzige Mutation dieses Weges, und sie steht auf dem neuen C:.
+ *
+ * Die Anmeldung geht gegen die Server-Datenbank genau dieses Ordners; ohne sie geschieht nichts.
+ */
+export async function adoptDataLocation(path: string, email: string, password: string): Promise<CandidateFacts> {
+  return invoke<CandidateFacts>('first_run_adopt', { path, email, password });
+}

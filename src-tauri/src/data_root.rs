@@ -251,7 +251,7 @@ pub(crate) fn read_locator(app_data_dir: &Path) -> Result<Option<Locator>, DataR
     Ok(Some(loc))
 }
 
-pub(crate) fn read_marker(root: &Path) -> Result<Option<RootMarker>, DataRootError> {
+pub fn read_marker(root: &Path) -> Result<Option<RootMarker>, DataRootError> {
     let p = root.join(MARKER_FILENAME);
     if !p.exists() {
         return Ok(None);
@@ -280,7 +280,7 @@ pub(crate) fn now_iso() -> String {
 
 /// Point the locator at `root` with `root_id`. The ONLY way the active root ever changes, and the
 /// commit point of a move. Atomic (temp → fsync → rename).
-pub(crate) fn set_locator(app_data_dir: &Path, root: &Path, root_id: &str) -> Result<(), DataRootError> {
+pub fn set_locator(app_data_dir: &Path, root: &Path, root_id: &str) -> Result<(), DataRootError> {
     write_locator(
         app_data_dir,
         &Locator {

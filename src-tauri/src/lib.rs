@@ -5,6 +5,8 @@ mod printing;
 mod data_root;
 /// DATA-ROOT-I1 / B2 — the boot-time move engine (copy → verify → locator switch).
 mod data_root_move;
+// DATA-ROOT-B1b — einen bestehenden Datenort pruefen und uebernehmen.
+mod data_root_adopt;
 mod media;
 mod sync;
 
@@ -2073,6 +2075,52 @@ fn first_run_setup_new(state: tauri::State<'_, FirstRunState>) -> Result<String,
     out
 }
 
+/// `Recover existing data location` — den gewaehlten Ordner ansehen, ohne ihn anzufassen.
+///
+/// Reine Auskunft fuer den Bildschirm: was stimmt, was fehlt. Was hier herauskommt, ist KEINE
+/// Erlaubnis — die Uebernahme prueft alles selbst noch einmal.
+#[tauri::command]
+fn first_run_validate_candidate(
+    state: tauri::State<'_, FirstRunState>,
+    path: String,
+) -> Result<data_root_adopt::CandidateFacts, String> {
+    data_root_adopt::validate_candidate(std::path::Path::new(&path), &state.control_dir)
+        .map_err(|e| e.code())
+}
+
+/// Den gewaehlten Ordner uebernehmen.
+///
+/// Prueft ihn vollstaendig NOCH EINMAL, verlangt die echte Anmeldung des Eigentuemers gegen die
+/// Server-Datenbank genau dieses Ordners und schreibt erst dann den Locator — die einzige Mutation
+/// dieses Weges, und sie liegt auf dem neuen C:, nicht im Datenort. Danach muss der Prozess neu
+/// starten.
+///
+/// Einfachausfuehrung teilt sich denselben Wachposten wie die Neuinstallation: aus einem leeren
+/// Rechner wird genau einmal etwas — entweder eine neue Installation oder eine uebernommene, nie
+/// beides und nie zwei.
+#[tauri::command]
+fn first_run_adopt(
+    state: tauri::State<'_, FirstRunState>,
+    path: String,
+    email: String,
+    password: String,
+) -> Result<data_root_adopt::CandidateFacts, String> {
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Err("FIRST_RUN_SETUP_ALREADY_RUNNING".to_string());
+    }
+    let out = data_root_adopt::adopt(
+        std::path::Path::new(&path),
+        &state.control_dir,
+        &email,
+        &password,
+    )
+    .map_err(|e| e.code());
+    if out.is_err() {
+        state.busy.store(false, Ordering::SeqCst);
+    }
+    out
+}
+
 #[tauri::command]
 fn storage_free_bytes(state: tauri::State<'_, AppHandleState>) -> Result<u64, String> {
     // DATA-ROOT-I1 — the data root itself, where `lataif.db` and its temp file live. Free space is a
@@ -3110,6 +3158,8 @@ pub fn run() {
             // AppHandleState, den es dort nicht gibt.
             first_run_pending,
             first_run_setup_new,
+            first_run_validate_candidate,
+            first_run_adopt,
             // MOBILE-I1 — the desktop half of the shared stock-check contract. Same module and
             // same table as /api/stock-checks, so neither surface needs to know the other exists.
             create_stock_check,

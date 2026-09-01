@@ -59,6 +59,8 @@ const FIRST_RUN_SAFE: &[&str] = &[
     // Die Weiche selbst.
     "first_run_pending",
     "first_run_setup_new",
+    "first_run_validate_candidate",
+    "first_run_adopt",
     // Reine Auskunft ueber das Kontrollverzeichnis; schreibt nichts.
     "pending_data_root_move",
     // Beruehren keine Daten dieser Installation: ein Netzwerksuchlauf und ein Etikettendruck.
