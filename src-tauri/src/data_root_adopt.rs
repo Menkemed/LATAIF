@@ -63,6 +63,10 @@ pub enum AdoptError {
     OwnerRejected(&'static str),
     /// Der Locator liess sich nicht schreiben.
     LocatorWriteFailed(String),
+    /// Zwischen Pruefung und Uebernahme hat sich der Ordner veraendert.
+    CandidateChanged,
+    /// Dieser Rechner hat seine Entscheidung bereits getroffen — ein zweiter Aufruf gewinnt nie.
+    AlreadyDecided,
 }
 
 impl AdoptError {
@@ -84,6 +88,8 @@ impl AdoptError {
             AdoptError::MaintenancePending(f) => format!("ADOPT_MAINTENANCE_PENDING:{f}"),
             AdoptError::OwnerRejected(c) => format!("ADOPT_OWNER_REJECTED:{c}"),
             AdoptError::LocatorWriteFailed(_) => "ADOPT_LOCATOR_WRITE_FAILED".into(),
+            AdoptError::CandidateChanged => "ADOPT_CANDIDATE_CHANGED".into(),
+            AdoptError::AlreadyDecided => "ADOPT_ALREADY_DECIDED".into(),
         }
     }
 }
@@ -304,9 +310,47 @@ pub fn adopt(
     email: &str,
     password: &str,
 ) -> Result<CandidateFacts, AdoptError> {
+    adopt_with_hook(candidate, control_dir, email, password, &|| {})
+}
+
+/// Dieselbe Uebernahme, mit einem Punkt zum Hineingreifen — genau zwischen der Anmeldung des
+/// Eigentuemers und der abschliessenden Nachpruefung.
+///
+/// Das Fenster ist echt: die bcrypt-Pruefung dauert, und in dieser Zeit kann ein Ordner sich
+/// aendern. Ohne einen solchen Punkt liesse sich nicht beweisen, dass die Nachpruefung wirklich
+/// greift — mit ihm ist es ein Test statt einer Behauptung. Die oeffentliche `adopt` uebergibt
+/// nichts; es gibt keinen Weg, von aussen etwas anderes einzuhaengen.
+pub fn adopt_with_hook(
+    candidate: &Path,
+    control_dir: &Path,
+    email: &str,
+    password: &str,
+    after_owner: &dyn Fn(),
+) -> Result<CandidateFacts, AdoptError> {
+    // Eine Entscheidung je Rechner, prozessweit. Zwei gleichzeitige Aufrufe — aus zwei Fenstern,
+    // aus zwei Kommandos, aus zwei Fäden — koennen nicht beide gewinnen: der zweite findet den
+    // Locator des ersten und faellt fail-closed heraus, statt ihn zu ueberschreiben.
+    static ADOPT_ONCE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ADOPT_ONCE.lock().unwrap_or_else(|e| e.into_inner());
+
+    if data_root::read_locator(control_dir).ok().flatten().is_some() {
+        return Err(AdoptError::AlreadyDecided);
+    }
+
     let facts = validate_candidate(candidate, control_dir)?;
     let root = PathBuf::from(&facts.path);
     check_owner(&root.join(SYNC_SERVER_DB_FILENAME), email, password)?;
+
+    after_owner();
+
+    // Die abschliessende Nachpruefung, unmittelbar vor dem Schreiben. Sie liest ALLES noch einmal
+    // vom Datentraeger — Pfad, Marker, beide Datenbanken, Identitaet, Wartungslage — und vergleicht
+    // es mit dem, was vorhin galt. Vom Aufrufer stammt dabei nichts ausser dem Pfad: die Kennung
+    // kommt aus dem Marker, der Name der Installation aus ihrer Schluesseldatei.
+    let again = validate_candidate(candidate, control_dir)?;
+    if again != facts {
+        return Err(AdoptError::CandidateChanged);
+    }
 
     // Auf einem frisch aufgesetzten Rechner gibt es das Kontrollverzeichnis noch gar nicht — es
     // entsteht sonst erst beim Bootstrap, den es hier ja gerade nicht gibt. Es anzulegen ist keine
@@ -314,7 +358,7 @@ pub fn adopt(
     std::fs::create_dir_all(control_dir)
         .map_err(|e| AdoptError::LocatorWriteFailed(e.to_string()))?;
     // Der Commit-Punkt: eine Datei, atomar geschrieben (temp → fsync → rename), mit der BESTEHENDEN
-    // Kennung. Schlaegt das fehl, bleibt kein halber Locator liegen und der Ordner ist unberuehrt.
+    // Kennung. Schlaegt das fehl, bleibt kein gueltiger Locator liegen und der Ordner ist unberuehrt.
     data_root::set_locator(control_dir, &root, &facts.root_id)
         .map_err(|e| AdoptError::LocatorWriteFailed(e.code().to_string()))?;
     Ok(facts)

@@ -115,13 +115,16 @@ fn a_complete_root_is_adopted_and_only_the_locator_is_written() {
 }
 
 #[test]
-fn adopting_the_same_root_twice_is_the_same_installation() {
+fn a_second_adoption_never_happens_at_all() {
+    // Ein Rechner entscheidet sich einmal. Ein zweiter Aufruf — Doppelklick, zweites Fenster,
+    // direkter Aufruf — findet die Entscheidung vor und faellt heraus, statt sie zu wiederholen.
     let root = good_root("twice");
     let ctrl = control();
     let a = adopt(&root, &ctrl, OWNER_EMAIL, OWNER_PW).unwrap();
-    let b = adopt(&root, &ctrl, OWNER_EMAIL, OWNER_PW).unwrap();
-    assert_eq!(a.root_id, b.root_id, "no second identity, no second root");
-    assert_eq!(fs::read_dir(&ctrl).unwrap().count(), 1);
+    let again = adopt(&root, &ctrl, OWNER_EMAIL, OWNER_PW).unwrap_err();
+    assert_eq!(again.code(), "ADOPT_ALREADY_DECIDED");
+    assert_eq!(fs::read_dir(&ctrl).unwrap().count(), 1, "one locator, and it was not rewritten");
+    assert_eq!(data_root::read_locator(&ctrl).unwrap().unwrap().root_id, a.root_id);
 }
 
 // ── jede Art, falsch zu sein ────────────────────────────────────────────────
@@ -322,6 +325,127 @@ fn a_candidate_that_changes_after_the_check_is_caught_at_the_commit() {
     let err = adopt(&root, &ctrl, OWNER_EMAIL, OWNER_PW).unwrap_err();
     assert_eq!(err.code(), "ADOPT_BUSINESS_DB_MISSING", "the commit re-checks everything itself");
     assert!(!locator_exists(&ctrl));
+}
+
+#[test]
+fn a_candidate_that_changes_while_the_owner_types_is_caught_before_the_commit() {
+    // Das echte Zeitfenster: zwischen der Anmeldung des Eigentuemers (bcrypt braucht spuerbar Zeit)
+    // und dem Schreiben des Locators. Genau dort wird hineingegriffen.
+    for (name, plant) in [
+        ("maintenance", ".gc-intent"),
+        ("marker", data_root::MARKER_FILENAME),
+    ] {
+        let root = good_root(&format!("window-{name}"));
+        let ctrl = control();
+        let before = snapshot(&root);
+        let target = root.join(plant);
+        let err = adopt_with_hook(&root, &ctrl, OWNER_EMAIL, OWNER_PW, &|| {
+            if plant == data_root::MARKER_FILENAME {
+                // Ein ANDERER Datenbestand wird untergeschoben — dieselbe Datei, neue Kennung.
+                fs::write(&target, br#"{"schemaVersion":1,"rootId":"99999999-9999-4999-8999-999999999999","createdAt":"x","bootstrapPending":false,"businessDbExpected":true}"#).unwrap();
+            } else {
+                fs::write(&target, b"{}").unwrap();
+            }
+        })
+        .unwrap_err();
+        let code = err.code();
+        assert!(
+            code == "ADOPT_CANDIDATE_CHANGED" || code.starts_with("ADOPT_MAINTENANCE_PENDING"),
+            "the final re-check must catch the change ({name}), got {code}"
+        );
+        assert!(!locator_exists(&ctrl), "and nothing is committed ({name})");
+        // Der Ordner bleibt, wie der Eingriff ihn hinterlassen hat — die Uebernahme raeumt nicht auf.
+        assert_ne!(snapshot(&root), before, "the fixture really did change the folder ({name})");
+    }
+}
+
+#[test]
+fn only_one_of_two_concurrent_adoptions_can_win() {
+    // Gleicher Kandidat, zwei Faeden: einer schreibt, der andere findet die Entscheidung vor.
+    let root = good_root("race-same");
+    let ctrl = control();
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let r = root.clone();
+                let c = ctrl.clone();
+                s.spawn(move || adopt(&r, &c, OWNER_EMAIL, OWNER_PW))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let ok_count = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(ok_count, 1, "exactly one adoption may commit: {results:?}");
+    let refused = results.iter().find(|r| r.is_err()).unwrap().clone().unwrap_err();
+    assert_eq!(refused.code(), "ADOPT_ALREADY_DECIDED", "and the other one says why");
+    assert_eq!(fs::read_dir(&ctrl).unwrap().count(), 1, "one locator, not two");
+    let winner = results.iter().find(|r| r.is_ok()).unwrap().clone().unwrap();
+    let loc = data_root::read_locator(&ctrl).unwrap().unwrap();
+    assert_eq!(loc.root_id, winner.root_id);
+}
+
+#[test]
+fn two_different_candidates_can_never_both_be_adopted() {
+    // Zwei vollstaendig gueltige, verschiedene Datenorte gleichzeitig. Der Locator darf danach
+    // GENAU einen davon nennen — und zwar vollstaendig: Pfad und Kennung desselben Ordners.
+    let a = good_root("race-a");
+    let b = good_root("race-b");
+    let ctrl = control();
+    assert_ne!(
+        data_root::read_marker(&a).unwrap().unwrap().root_id,
+        data_root::read_marker(&b).unwrap().unwrap().root_id,
+        "the two candidates are genuinely different data sets"
+    );
+
+    let (ra, rb) = std::thread::scope(|s| {
+        let ca = ctrl.clone();
+        let cb = ctrl.clone();
+        let aa = a.clone();
+        let bb = b.clone();
+        let ha = s.spawn(move || adopt(&aa, &ca, OWNER_EMAIL, OWNER_PW));
+        let hb = s.spawn(move || adopt(&bb, &cb, OWNER_EMAIL, OWNER_PW));
+        (ha.join().unwrap(), hb.join().unwrap())
+    });
+    assert_eq!(
+        [ra.is_ok(), rb.is_ok()].iter().filter(|x| **x).count(),
+        1,
+        "never both: a={ra:?} b={rb:?}"
+    );
+    let winner = if ra.is_ok() { ra.clone().unwrap() } else { rb.clone().unwrap() };
+    let loc = data_root::read_locator(&ctrl).unwrap().unwrap();
+    // Keine Mischung: Pfad UND Kennung stammen aus demselben Ordner.
+    assert_eq!(loc.root_id, winner.root_id);
+    assert_eq!(PathBuf::from(&loc.data_root), PathBuf::from(&winner.path));
+    let marker_of_winner = data_root::read_marker(&PathBuf::from(&winner.path)).unwrap().unwrap();
+    assert_eq!(marker_of_winner.root_id, loc.root_id, "path and id belong to each other");
+}
+
+#[test]
+fn a_failing_locator_write_leaves_no_half_decision() {
+    let root = good_root("locatorfail");
+    let ctrl = control();
+    let before = snapshot(&root);
+    // Der Platz des Locators ist belegt — und zwar durch etwas, worauf kein Umbenennen zielen kann.
+    // Damit scheitert genau der letzte Schritt, nachdem alles andere schon gut ging.
+    fs::create_dir_all(ctrl.join(data_root::LOCATOR_FILENAME)).unwrap();
+
+    let err = adopt(&root, &ctrl, OWNER_EMAIL, OWNER_PW).unwrap_err();
+    assert_eq!(err.code(), "ADOPT_LOCATOR_WRITE_FAILED");
+    // Kein gueltiger Locator — und was `write_atomic` an Bruchstuecken hinterlaesst, ist keiner:
+    // gelesen wird ausschliesslich `data-location.json`, und das ist hier kein lesbarer Locator.
+    assert!(data_root::read_locator(&ctrl).is_err() || data_root::read_locator(&ctrl).unwrap().is_none());
+    assert!(!ctrl.join(BUSINESS_DB_FILENAME).exists(), "and no business root was started on C:");
+    assert!(!ctrl.join(data_root::MARKER_FILENAME).exists(), "no second data root either");
+    assert_eq!(snapshot(&root), before, "the candidate is untouched");
+
+    // Und der Rechner bleibt entscheidungsfaehig: raeumt man das Hindernis weg, ist es wieder ein
+    // erster Start — nicht eine halb uebernommene Installation.
+    fs::remove_dir_all(ctrl.join(data_root::LOCATOR_FILENAME)).unwrap();
+    assert!(matches!(
+        data_root::resolve_or_first_run(&ctrl).unwrap(),
+        data_root::Resolution::FirstRunUndecided
+    ));
+    assert!(adopt(&root, &ctrl, OWNER_EMAIL, OWNER_PW).is_ok(), "and a later attempt still works");
 }
 
 #[test]
