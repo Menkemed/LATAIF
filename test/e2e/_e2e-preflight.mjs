@@ -25,8 +25,9 @@
 // customer's database was the single-instance plugin noticing that production happened to be
 // running — which is luck, not a guarantee.
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { existsSync, readFileSync, statSync, mkdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 /** The isolated identity every E2E app must run under. */
 export const E2E_IDENT = 'com.lataif.app.e2e';
@@ -123,8 +124,40 @@ export function assertE2eScope({ appDataDir, port, env }) {
  * The single call a suite makes immediately before its first spawn. Verifies the artefact AND the
  * scope, and returns a one-line summary the suite can print.
  */
-export function e2ePreflight({ appPath, appDataDir, port, env }) {
+export function e2ePreflight({ appPath, appDataDir, port, env, firstRun = false }) {
   const bin = assertE2eBinary(appPath);
   assertE2eScope({ appDataDir, port, env });
-  return `e2e preflight ok — isolated binary (${bin.verified.length} markers), ${E2E_IDENT}, port ${port}`;
+  // DATA-ROOT-B1a — ein leeres Kontrollverzeichnis richtet sich nicht mehr von selbst ein: die App
+  // fragt. Fuer eine Suite, deren Thema das nicht ist, wird die Installation vorher angelegt — mit
+  // GENAU der Primitive, die auch der Knopf in der Oberflaeche aufruft. Eine Suite, die die Weiche
+  // selbst pruefen will, setzt `firstRun: true` und bekommt ein wirklich leeres Verzeichnis.
+  const seeded = firstRun ? null : preseedInstallation(appDataDir);
+  const tail = firstRun ? ', first-run (no preseed)' : `, preseeded root ${seeded}`;
+  return `e2e preflight ok — isolated binary (${bin.verified.length} markers), ${E2E_IDENT}, port ${port}${tail}`;
+}
+
+/**
+ * Richte eine isolierte Installation ein, falls dort noch keine steht.
+ *
+ * Ruft das `examples/`-Werkzeug auf, das seinerseits `data_root::setup_new_installation` aufruft —
+ * dieselbe Funktion wie die Oberflaeche. Kein von Hand geschriebener Locator, kein nachgebauter
+ * Bootstrap, kein Schalter am ausgelieferten Programm.
+ */
+export function preseedInstallation(appDataDir) {
+  assertE2eScope({ appDataDir });
+  const existing = join(appDataDir, 'data-location.json');
+  if (existsSync(existing)) {
+    try { return JSON.parse(readFileSync(existing, 'utf8')).rootId; } catch { return 'unreadable'; }
+  }
+  const helper = join(process.cwd(), 'src-tauri/target/debug/examples/e2e_first_run_preseed.exe');
+  if (!existsSync(helper)) {
+    throw new E2eIdentityError(
+      'the first-run preseed helper is missing — build it with:\n'
+      + '  cargo build --manifest-path src-tauri/Cargo.toml --example e2e_first_run_preseed --features e2e'
+    );
+  }
+  mkdirSync(appDataDir, { recursive: true });
+  const out = execFileSync(helper, [appDataDir], { encoding: 'utf8' }).trim();
+  if (!existsSync(existing)) throw new E2eIdentityError('the preseed helper produced no locator');
+  return out;
 }

@@ -26,6 +26,9 @@ static E2E_BUILD_MARKER: [u8; 26] = *b"LATAIF_E2E_BUILD_MARKER_V1";
 pub mod e2e_support {
     pub use crate::sync::credentials::{provision_owner, PROVISION_CONFIRMATION};
     pub use crate::sync::db::init_database;
+    // DATA-ROOT-B1a — die kanonische Erstlauf-Primitive, damit der Testvorbereiter GENAU das
+    // aufruft, was auch der Knopf in der Oberflaeche aufruft. Kein zweiter Bootstrap.
+    pub use crate::data_root::setup_new_installation;
     // MOBILE-04B2A8-I3 — test-only Primary provisioning for the live ingress→worker smoke. These are the
     // REAL production primitives (owner authorization + the owner-authorized primary transition + the
     // install-id loader) exposed for the e2e seeder; the adoption CONTRACT is unchanged (an Unconfigured
@@ -54,6 +57,18 @@ pub mod e2e_support {
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
+
+/// DATA-ROOT-B1a — der Zustand eines Starts, der noch keine Antwort hat.
+///
+/// Er existiert nur, solange das Kontrollverzeichnis leer ist. Sein Vorhandensein IST die Aussage
+/// "hier laeuft nichts": es gibt in diesem Prozess keinen `AppHandleState`, also auch keine
+/// Datenbank, keinen Server und keinen Worker, die ein Kommando aus Versehen benutzen koennte.
+struct FirstRunState {
+    /// Das identifikator-eigene AppData-Verzeichnis — der Ort des Locators, sonst nichts.
+    control_dir: std::path::PathBuf,
+    /// Ein Klick, eine Installation. Zwei schnelle Klicks duerfen nicht zwei Wurzeln anlegen.
+    busy: AtomicBool,
+}
 
 struct AppHandleState {
     server: Arc<sync::SyncServer>,
@@ -2009,6 +2024,43 @@ fn verify_owner_credentials(
         .map_err(|code| code.to_string())
 }
 
+// ── DATA-ROOT-B1a — die Erstlauf-Weiche ─────────────────────────────────────
+
+/// Steht dieser Start noch vor der Entscheidung?
+///
+/// Reine Auskunft: liest den verwalteten Zustand, fasst nichts an. Der Renderer fragt das, BEVOR er
+/// seine Datenbank anlegt — genau deshalb darf diese Antwort nichts erzeugen.
+#[tauri::command]
+fn first_run_pending(app: tauri::AppHandle) -> bool {
+    app.try_state::<FirstRunState>().is_some()
+}
+
+/// `Set up new installation` — die bewusste Antwort auf die Weiche.
+///
+/// Ruft die kanonische Bootstrap-Primitive auf (dieselbe, die der Resolver immer benutzt hat) und
+/// sonst nichts: eine neue Kennung, Marker und Locator in der bewaehrten Reihenfolge. Danach muss
+/// der Prozess neu starten — erst der naechste Start ist eine gewoehnliche Installation und bringt
+/// Datenbank, Server und Worker hoch.
+///
+/// Einfachausfuehrung: zwei schnelle Klicks duerfen keine zweite Wurzel anlegen. Der Wachposten ist
+/// hier, im Kern, nicht in der Oberflaeche — und die Primitive selbst schreibt ohnehin nie ueber
+/// eine bestehende Registrierung.
+#[tauri::command]
+fn first_run_setup_new(state: tauri::State<'_, FirstRunState>) -> Result<String, String> {
+    if state.busy.swap(true, Ordering::SeqCst) {
+        return Err("FIRST_RUN_SETUP_ALREADY_RUNNING".to_string());
+    }
+    let out = data_root::setup_new_installation(&state.control_dir)
+        .map(|r| r.root_id().to_string())
+        .map_err(|e| format!("{}: {}", e.code(), e.message(None)));
+    // Erfolg heisst: dieser Prozess ist fertig, der naechste uebernimmt. Bei einem Fehlschlag darf
+    // es der Benutzer noch einmal versuchen.
+    if out.is_err() {
+        state.busy.store(false, Ordering::SeqCst);
+    }
+    out
+}
+
 #[tauri::command]
 fn storage_free_bytes(state: tauri::State<'_, AppHandleState>) -> Result<u64, String> {
     // DATA-ROOT-I1 — the data root itself, where `lataif.db` and its temp file live. Free space is a
@@ -2838,6 +2890,25 @@ pub fn run() {
             // "where is the data" and "is a move half-done" cannot be answered independently, because
             // after the locator write the honest answer to the first is the target and only the intent
             // knows whether that target was ever proven.
+            // DATA-ROOT-B1a — drei Zustaende, nicht zwei. Bevor irgendetwas geoeffnet wird, wird
+            // der eine Fall abgetrennt, den niemand ausser einem Menschen beantworten darf: ein
+            // vollstaendig leeres Kontrollverzeichnis. Es kann ein echter Erststart sein oder ein
+            // neu aufgesetzter Rechner, dessen Daten auf einem anderen Laufwerk liegen — und ein
+            // Bootstrap waere fuer den zweiten Fall die eine Antwort, die niemand zuruecknehmen
+            // kann. Ein Verzeichnis MIT Daten ist keine Frage (Altbestand), ein registrierter oder
+            // widerspruechlicher Zustand auch nicht (der faellt weiter unten fail-closed).
+            //
+            // In diesem Zustand startet NICHTS: keine Business-DB, kein LAN-Server, kein Mobile-
+            // Server, keine Backup-/Restore-/GC-Wege, kein Drain, kein Timer. Nur das Fenster und
+            // die zwei Kommandos, die die Weiche braucht.
+            if matches!(
+                data_root::resolve_or_first_run(&locator_dir),
+                Ok(data_root::Resolution::FirstRunUndecided)
+            ) {
+                eprintln!("[data-root] first run undecided — nothing was created; asking the user");
+                app.manage(FirstRunState { control_dir: locator_dir.clone(), busy: AtomicBool::new(false) });
+                return Ok(());
+            }
             let root = match data_root_move::resolve_with_pending_move(&locator_dir) {
                 Ok((r, outcome)) => {
                     if outcome != data_root_move::MoveOutcome::None {
@@ -3022,6 +3093,11 @@ pub fn run() {
             media_prepare_stock_image,
             storage_free_bytes,
             verify_owner_credentials,
+            // DATA-ROOT-B1a — die zwei Kommandos der Erstlauf-Weiche. Sie sind die EINZIGEN, die in
+            // einem Prozess ohne Datenwurzel etwas tun koennen; alle anderen verlangen den
+            // AppHandleState, den es dort nicht gibt.
+            first_run_pending,
+            first_run_setup_new,
             // MOBILE-I1 — the desktop half of the shared stock-check contract. Same module and
             // same table as /api/stock-checks, so neither surface needs to know the other exists.
             create_stock_check,

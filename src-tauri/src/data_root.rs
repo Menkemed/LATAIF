@@ -401,7 +401,6 @@ pub fn resolve_or_first_run(app_data_dir: &Path) -> Result<Resolution, DataRootE
 /// This is the bootstrap the resolver used to run by itself. It is unchanged in what it does: a new
 /// `rootId`, the marker/locator pair written in the safe order, nothing moved, copied or opened.
 /// What changed is who asks for it — a person, once, instead of a start that found an empty folder.
-#[allow(dead_code)]
 pub fn setup_new_installation(app_data_dir: &Path) -> Result<DataRoot, DataRootError> {
     // Never over an existing registration: if anything is already here, the normal resolver owns
     // this directory and this call has no business writing a second identity into it.

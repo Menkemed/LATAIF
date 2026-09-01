@@ -62,6 +62,9 @@ import { UpdateBanner } from '@/components/shared/UpdateBanner';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
+// DATA-ROOT-B1a — die Erstlauf-Weiche und ihre eine, nichts veraendernde Frage.
+import { isFirstRunPending } from '@/core/lifecycle/first-run';
+import { FirstRunGate } from '@/components/startup/FirstRunGate';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
 import { isRelaunchApproved, withTimeout, SYNC_IDLE_TIMEOUT_MS, FLUSH_TIMEOUT_MS } from '@/core/lifecycle/relaunch-coordinator';
 import { prepareAndReloadApplication, createSingleFlight as createReloadSingleFlight, type ReloadStatus } from '@/core/lifecycle/reload-orchestration';
@@ -111,6 +114,10 @@ function CloseOverlay({ status, mode = 'close' }: { status: CloseStatus | null; 
 
 export default function App() {
   const [dbReady, setDbReady] = useState(false);
+  // DATA-ROOT-B1a — bevor irgendetwas geoeffnet wird: steht die Entscheidung ueber den Datenort
+  // noch aus? `null` heisst "noch nicht gefragt" und haelt den Start an — sonst liefe
+  // `initDatabase()` los und legte genau die leere Datenbank an, die die Frage beantworten wuerde.
+  const [firstRun, setFirstRun] = useState<boolean | null>(null);
   const [dbError, setDbError] = useState<string | null>(null);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [closeStatus, setCloseStatus] = useState<CloseStatus | null>(null); // M4-A: App-Close-Overlay
@@ -118,6 +125,19 @@ export default function App() {
   const { session, initialize } = useAuthStore();
 
   useEffect(() => {
+    let cancelled = false;
+    // DATA-ROOT-B1a — zuerst die Frage, dann erst irgendetwas oeffnen. Steht die Entscheidung ueber
+    // den Datenort noch aus, passiert hier NICHTS weiter: keine Datenbank, keine Stores, keine
+    // Automatisierung, kein Sync. `initDatabase()` wuerde sonst die leere Datenbank anlegen, die
+    // die Frage stillschweigend beantwortet.
+    isFirstRunPending().then((pending) => {
+      if (cancelled) return;
+      setFirstRun(pending);
+      if (!pending) bootDatabase();
+    });
+    return () => { cancelled = true; };
+
+    function bootDatabase() {
     initDatabase()
       .then(async () => {
         setDbReady(true);
@@ -145,6 +165,7 @@ export default function App() {
         }
       })
       .catch(err => { console.error('DB init failed:', err); setDbError(String(err)); });
+    }
   }, [initialize]);
 
   // Persistence-Flush vor App-Close. Ohne diesen Hook kann der OS-Kill
@@ -283,6 +304,10 @@ export default function App() {
       catch (e) { console.warn('[recurring-expense] startup generator failed:', e); }
     });
   }, [dbReady, session?.branchId]);
+
+  // Solange die Frage offen ist — oder noch gestellt wird — gibt es keine App, nur die Weiche.
+  if (firstRun === null) return null;
+  if (firstRun) return <FirstRunGate />;
 
   if (!dbReady) {
     return (

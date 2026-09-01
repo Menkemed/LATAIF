@@ -122,6 +122,36 @@ fn setting_up_a_new_installation_never_overwrites_an_existing_one() {
 }
 
 #[test]
+fn the_startup_routing_tells_the_three_states_apart() {
+    // Genau die Weiche, die der Start faehrt: nur der leere Fall ist eine Frage.
+    // A — eingerichtet: ein Root, keine Frage.
+    let installed = tmp("routing-installed");
+    let root = setup_new_installation(&installed).unwrap();
+    match resolve_or_first_run(&installed).unwrap() {
+        Resolution::Root(r) => assert_eq!(r.root_id(), root.root_id()),
+        Resolution::FirstRunUndecided => panic!("an installed machine must never be asked again"),
+    }
+
+    // B — wirklich leer: die Frage.
+    let empty = tmp("routing-empty");
+    assert!(matches!(resolve_or_first_run(&empty).unwrap(), Resolution::FirstRunUndecided));
+
+    // C — registriert, aber widerspruechlich: fail-closed, und ausdruecklich KEINE neue
+    // Installation. Der Locator ist weg, der finale Marker steht noch da.
+    let broken = tmp("routing-broken");
+    with_dataset(&broken);
+    resolve(&broken).unwrap();
+    fs::remove_file(broken.join(LOCATOR_FILENAME)).unwrap();
+    let err = resolve_or_first_run(&broken).unwrap_err();
+    assert_eq!(err.code(), "DATA_ROOT_LOCATOR_MISSING", "an inconsistent state is not a first run");
+
+    // D — ein Altbestand ohne Locator: Daten liegen hier, also keine Frage.
+    let legacy = tmp("routing-legacy");
+    with_dataset(&legacy);
+    assert!(matches!(resolve_or_first_run(&legacy).unwrap(), Resolution::Root(_)));
+}
+
+#[test]
 fn a_legacy_folder_with_data_is_still_adopted_in_place_and_never_asks() {
     // The upgrade path from before the locator contract: the data IS here, so there is nothing to
     // ask about. Only an EMPTY directory is a question.

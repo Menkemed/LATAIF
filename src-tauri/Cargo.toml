@@ -97,3 +97,7 @@ e2e = []
 [[example]]
 name = "e2e_scope_seed"
 required-features = ["e2e"]
+
+[[example]]
+name = "e2e_first_run_preseed"
+required-features = ["e2e"]
