@@ -202,6 +202,13 @@ fn schedule_data_root_move(
 #[tauri::command]
 fn clear_pending_data_root_move(app_handle: tauri::AppHandle) -> Result<(), String> {
     let locator_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    // DATA-ROOT-B1a — dieses Kommando findet sein Verzeichnis selbst, also traegt es seinen Schutz
+    // auch selbst: solange die Erstlauf-Frage offen ist, wird im Kontrollverzeichnis nichts
+    // geloescht. Alle anderen schreibenden Kommandos haengen am `AppHandleState`, den es in diesem
+    // Zustand gar nicht gibt — dieses hier ist das einzige, das ihn nicht braucht.
+    if app_handle.try_state::<FirstRunState>().is_some() {
+        return Err("DATA_ROOT_FIRST_RUN_UNDECIDED".to_string());
+    }
     data_root_move::clear_intent(&locator_dir);
     Ok(())
 }
@@ -1599,6 +1606,11 @@ mod mobile_runtime_gate_tests {
         assert!(super::mobile_runtime_gate(&c, &exp(2, "tenant-acme", "branch-acme")).is_ok(), "only the new binding opens");
     }
 }
+
+// DATA-ROOT-B1a — die vollstaendige Fernbedienungs-Oberflaeche eines Starts ohne Datenwurzel.
+#[cfg(test)]
+#[path = "first_run_ipc_tests.rs"]
+mod first_run_ipc_tests;
 
 #[cfg(test)]
 mod shutdown_tests {
