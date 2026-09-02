@@ -349,6 +349,110 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
   ok(good.join('>') === 'apply>save>cursor', `PERSIST the successful order is apply → disk → remember (${good.join('>')})`);
 }
 
+// ── E3) Was nach einem gescheiterten Speichern WIRKLICH im Speicher steht ──
+//
+// Die Frage ist nicht theoretisch. Die Geschaeftsdatenbank liegt vollstaendig im Speicher und wird
+// als EIN Abbild auf die Platte geschrieben. Scheitert genau dieses Schreiben, laeuft der Prozess
+// weiter — mit welchem Stand? Hier wird der Produktionsweg exakt nachgefahren: dieselbe eine
+// Transaktion, derselbe Cursor-Write unmittelbar vor dem COMMIT, dieselbe Reihenfolge aus
+// `commitPulledBatch`, dieselbe echte `applyUpsert`. Danach wird gelesen, was im Speicher steht,
+// und was ein Abbild dieses Speichers enthielte.
+{
+  const { commitPulledBatch, applyChangesAtomic } = await import('../../src/core/sync/durable-cursor.ts');
+  type Img = { export(): Uint8Array };
+  const effect = (d: Db): number => Number(d.exec("SELECT COUNT(*) FROM customers WHERE id = 'c41'")[0].values[0][0]);
+  const withCustomers = (d: Db): Db => {
+    d.run('CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, first_name TEXT, updated_at TEXT)');
+    return d;
+  };
+  const change = {
+    id: 41, table_name: 'customers', record_id: 'c41', action: 'insert',
+    data: JSON.stringify({ id: 'c41', first_name: 'Neu', updated_at: NOW }),
+  };
+  // Genau die Produktions-Verdrahtung aus pullChanges: Stand IN der Transaktion, direkt vor COMMIT.
+  const productionApply = (d: Db, to: number) => (): void => applyChangesAtomic([change], {
+    begin: () => d.run('BEGIN'),
+    applyChange: (c) => applyUpsert(d, c.table_name, c.record_id, JSON.parse(String(c.data))),
+    commit: () => { writeCursor(d, FP_A, to, NOW); d.run('COMMIT'); },
+    rollback: () => d.run('ROLLBACK'),
+  });
+
+  const db = withCustomers(fresh());
+  writeCursor(db, FP_A, 40, NOW);                                  // Stand N = 40
+  const imageAtN = (db as unknown as Img).export();                // …und das, was so auf der Platte laege
+
+  let cache = 40;                                                  // der localStorage-Zwischenspeicher
+  let threw: string | null = null;
+  try {
+    await commitPulledBatch({
+      applyBatch: productionApply(db, 41),
+      durableSave: async () => { throw new Error('disk full'); },
+      setCursor: () => { cache = 41; },
+    });
+  } catch (e) { threw = String(e); }
+  ok(threw !== null && /disk full/.test(threw), 'MEMORY a failing save makes the run fail');
+
+  // 1. Der Speicherzustand, unmittelbar nach dem Fehler.
+  ok(effect(db) === 1, 'MEMORY the business effect of change 41 IS in memory — nothing rolled it back');
+  ok(readCursor(db, FP_A) === 41, 'MEMORY …and in that same memory the durable cursor says 41 as well');
+  ok(cache === 40, 'MEMORY only the cache stayed behind — and no request is ever built from it');
+
+  // 2. Fall B — ein spaeterer, voellig anderer erfolgreicher Save darf diesen Speicher schreiben.
+  //    Er ist konsistent: Wirkung und Stand stammen aus DERSELBEN Transaktion und koennen nur
+  //    gemeinsam in ein Abbild geraten. Kein kuenstliches Rollback noetig.
+  const later = new SQL.Database((db as unknown as Img).export()) as unknown as Db;
+  ok(effect(later) === 1 && readCursor(later, FP_A) === 41,
+    'LATER any later save persists effect AND cursor together — one without the other cannot be written');
+
+  // 3. Fall A — sofortiger Neustart. Die Platte haelt weiterhin den ALTEN Zustand, ebenfalls gemeinsam.
+  const restarted = new SQL.Database(imageAtN) as unknown as Db;
+  ok(effect(restarted) === 0, 'RESTART on an immediate restart the effect of 41 is nowhere on disk');
+  ok(readCursor(restarted, FP_A) === 40, 'RESTART …and the cursor is still 40 — the pair moved nowhere');
+
+  // 4. Der Retry nach dem Neustart verarbeitet 41 GENAU EINMAL und speichert beides gemeinsam.
+  let saved = 0; let cache2 = 40;
+  await commitPulledBatch({
+    applyBatch: productionApply(restarted, 41),
+    durableSave: async () => { saved++; },
+    setCursor: () => { cache2 = 41; },
+  });
+  ok(effect(restarted) === 1 && saved === 1 && cache2 === 41, 'RETRY the restarted run applies 41 and saves it');
+  ok(readCursor(restarted, FP_A) === 41, 'RETRY …and the cursor follows it, in the same image');
+  const rows = Number(restarted.exec('SELECT COUNT(*) FROM customers')[0].values[0][0]);
+  ok(rows === 1, 'RETRY …exactly once — the replay did not create a second customer');
+  await commitPulledBatch({ applyBatch: productionApply(restarted, 41), durableSave: async () => {}, setCursor: () => {} });
+  ok(Number(restarted.exec('SELECT COUNT(*) FROM customers')[0].values[0][0]) === 1,
+    'RETRY …and applying it a third time still leaves one row — the apply is idempotent');
+
+  // 5. Scheitert schon das Anwenden, wird der Stand gar nicht erst geschrieben. Das ist der echte
+  //    Vorfall: das Wiedereinspielen einer alten Zeile laeuft in den eindeutigen Index.
+  const db2 = fresh();
+  db2.run("INSERT INTO agent_transfers (id, branch_id, transfer_number, status, created_at) VALUES ('t-new','branch-main','TRF-2026-00020','open','x')");
+  writeCursor(db2, FP_A, 40, NOW);
+  const bad = {
+    id: 41, table_name: 'agent_transfers', record_id: 't-old', action: 'insert',
+    data: JSON.stringify({ id: 't-old', branch_id: 'branch-main', transfer_number: 'TRF-2026-00020', status: 'open', created_at: NOW }),
+  };
+  let offered = 0; let cache3 = 40; let threw2: string | null = null;
+  try {
+    await commitPulledBatch({
+      applyBatch: () => applyChangesAtomic([bad], {
+        begin: () => db2.run('BEGIN'),
+        applyChange: (c) => applyUpsert(db2, c.table_name, c.record_id, JSON.parse(String(c.data))),
+        commit: () => { writeCursor(db2, FP_A, 41, NOW); db2.run('COMMIT'); },
+        rollback: () => db2.run('ROLLBACK'),
+      }),
+      durableSave: async () => { offered++; },
+      setCursor: () => { cache3 = 41; },
+    });
+  } catch (e) { threw2 = String(e); }
+  ok(threw2 !== null, 'CONFLICT the unique index stops the replay — loudly, not silently');
+  ok(offered === 0 && cache3 === 40, 'CONFLICT …nothing was even offered to the disk, and no cursor moved');
+  ok(readCursor(db2, FP_A) === 40, 'CONFLICT …the recorded progress is untouched');
+  ok(Number(db2.exec('SELECT COUNT(*) FROM agent_transfers')[0].values[0][0]) === 1,
+    'CONFLICT …and no second transfer was created');
+}
+
 // ── F) Eine BESTEHENDE Datenbank aus v0.8.51 ──────────────────────────────
 //
 // Nicht die frische, sondern die, die es schon gibt: ohne `sync_cursor`, ohne `seq_year`, mit
@@ -440,6 +544,16 @@ const pushed = (db: Db, table: string, id: string, action: string, data: unknown
   }
   ok(svc.includes("setStatus('error', err instanceof SyncRecoveryRequiredError ? RECOVERY_REQUIRED"),
     'WIRED …and the run reports that state by its own name, never as "synced"');
+  // Der Save, der im Produktionsweg wirklich injiziert wird — und der Weg, den sein Fehler nimmt:
+  // er verlaesst pullChanges, das in syncNow VOR jeder Erfolgsmeldung abgewartet wird.
+  ok(/durableSave: saveDatabaseDurably,/.test(svc), 'WIRED the injected save is the real durable one');
+  {
+    const pulled = svc.indexOf('const pulled = await pullChanges();');
+    const synced = svc.indexOf("setStatus('synced'");
+    ok(pulled > 0 && synced > pulled, 'WIRED …and the pull is awaited before anything is called Synced');
+    ok(/\} catch \(err\) \{[\s\S]{0,400}setStatus\('error'/.test(svc),
+      'WIRED …so a failed save reports an error, never Synced');
+  }
   ok(/export const RECOVERY_REQUIRED/.test(svc), 'WIRED the state has a stable name the UI can recognise');
   {
     // Der Rueckwaerts-Schutz muss VOR dem Startpunkt und vor jedem Anwenden greifen.

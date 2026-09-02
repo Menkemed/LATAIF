@@ -70,6 +70,22 @@ function serverChange(id) {
   } finally { try { db.close(); } catch {} }
   return id;
 }
+/** Eine beliebige fremde Zeile im Log des Servers — nur schreiben, waehrend die App STEHT. */
+function serverRow(table, recordId, action, payload) {
+  const db = new DatabaseSync(join(DATA_ROOT, 'lataif_sync_server.db'));
+  try {
+    const row = db.prepare('SELECT tenant_id, branch_id FROM sync_changelog ORDER BY id DESC LIMIT 1').get();
+    const tenant = row?.tenant_id ?? 'tenant-1';
+    const branch = row?.branch_id ?? 'branch-main';
+    db.prepare(`INSERT INTO sync_changelog (tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at)
+                VALUES (?,?,?,?,?,?,?,?)`).run(
+      tenant, branch, table, recordId, action,
+      JSON.stringify(typeof payload === 'function' ? payload(branch) : payload),
+      'self-desktop', new Date().toISOString(),
+    );
+  } finally { try { db.close(); } catch {} }
+  return recordId;
+}
 const serverHead = () => Number(dbQ(join(DATA_ROOT, "lataif_sync_server.db"), "SELECT COALESCE(MAX(id),0) m FROM sync_changelog")[0]?.m ?? 0);
 const cursorOnDisk = () => dbQ(join(DATA_ROOT, "lataif.db"), "SELECT server_fingerprint, last_sync_id FROM sync_cursor");
 /** Ein sauberes Ende: erst das kontrollierte Schliessen, dann der Prozess. */
@@ -257,8 +273,30 @@ ok(existsSync(join(APP_DATA_DIR, 'data-location.json')), 'the locator is on C:, 
   ok(cursorOnDisk().length === 1, "the first contact recorded a durable progress");
   await stopApp(c);
 
-  // Jetzt eine echte Aenderung, damit der Stand ueber 0 steigt.
-  const preId = serverChange('pre-loss-' + Date.now());
+  // Jetzt eine ECHTE, WIEDEREINSPIEL-EMPFINDLICHE Historie — genau die Form des Vorfalls: eine
+  // Position wird belegt, wieder freigegeben und von einer ANDEREN Zeile erneut belegt. In der
+  // richtigen Reihenfolge einmal angewandt ergibt das genau eine Zeile. Wird dieselbe Historie
+  // spaeter von vorne wiederholt, laeuft der erste Schritt in `UNIQUE(repair_id, position)` —
+  // der Batch faellt zurueck, der Stand bleibt stehen, und ab da stirbt jeder Pull an derselben
+  // Stelle. Das ist der Fehler, den A1 verhindert.
+  const R = 'rep-' + Date.now();
+  const NOW_S = new Date().toISOString();
+  const line = (id, extra) => (branch) => ({
+    id, branch_id: branch, repair_id: R, position: 1, cost_amount: 0,
+    status: 'OPEN', created_at: NOW_S, updated_at: NOW_S, ...extra,
+  });
+  const CUST = 'cust-' + R;
+  serverRow('customers', CUST, 'insert', (branch) => ({
+    id: CUST, branch_id: branch, first_name: 'Repair', last_name: 'Owner', created_at: NOW_S, updated_at: NOW_S,
+  }));
+  serverRow('repairs', R, 'insert', (branch) => ({
+    id: R, branch_id: branch, repair_number: 'RPR-' + R, status: 'RECEIVED',
+    customer_id: CUST, issue_description: 'replay-sensitive fixture', received_at: NOW_S,
+    created_at: NOW_S, updated_at: NOW_S,
+  }));
+  serverRow('repair_lines', R + '-A', 'insert', line(R + '-A', { description: 'first holder' }));
+  serverRow('repair_lines', R + '-A', 'delete', {});
+  serverRow('repair_lines', R + '-B', 'insert', line(R + '-B', { description: 'took the freed position' }));
   const head = serverHead();
   c = await startApp();
   await ensureSignedIn(c);
@@ -270,8 +308,10 @@ ok(existsSync(join(APP_DATA_DIR, 'data-location.json')), 'the locator is on C:, 
     }
   }
   await stopApp(c);
-  ok(Number(dbQ(join(DATA_ROOT, "lataif.db"), "SELECT COUNT(*) c FROM customers WHERE id = ?", [preId])[0]?.c ?? 0) === 1,
-    "the pre-loss change was applied");
+  const held = dbQ(join(DATA_ROOT, "lataif.db"), "SELECT id FROM repair_lines WHERE repair_id = ?", [R]);
+  ok(held.length === 1 && held[0].id === R + '-B',
+    `the replay-sensitive history applied in order leaves exactly one line, the later one (${held.map((h) => h.id).join(',')})`);
+  before.repair = R;
 }
 
 // Der Stand VOR dem Verlust, von der Platte gelesen.
@@ -393,6 +433,14 @@ ok(existsSync(join(DATA_ROOT, 'lataif_sync_server.db')), 'the server database is
   // Die Zeilen von vor dem Verlust wurden NICHT erneut angewendet: sonst gaebe es sie doppelt.
   const dupes = dbQ(join(DATA_ROOT, "lataif.db"), "SELECT id, COUNT(*) n FROM customers GROUP BY id HAVING n > 1");
   ok(dupes.length === 0, `no customer was created twice (${dupes.length})`);
+  // Und die wiedereinspiel-empfindliche Historie von vor dem Verlust blieb, wie sie war: haette
+  // der Pull sie noch einmal von vorne angeboten, waere der erste Schritt in den eindeutigen
+  // Index gelaufen — der Batch zurueck, der Stand stehen, die neue Aenderung nie angewandt.
+  const lines = dbQ(join(DATA_ROOT, "lataif.db"), "SELECT id FROM repair_lines WHERE repair_id = ?", [before.repair]);
+  ok(lines.length === 1 && lines[0].id === before.repair + '-B',
+    `the pre-loss history was not replayed — its one line still stands (${lines.map((l) => l.id).join(',')})`);
+  const stall = c.logs.filter((l) => /apply failed at change/i.test(l));
+  ok(stall.length === 0, `and no batch died on the unique index (${stall.slice(0, 1).join("")})`);
 }
 killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — data root recovery e2e: ${PASS} passed, ${FAIL} failed`);
