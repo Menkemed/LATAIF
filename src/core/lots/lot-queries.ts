@@ -9,6 +9,10 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
 import { firstUnavailableLot, STOCK_UNAVAILABLE_MESSAGE, type LotSnapshot } from './lot-availability';
+// Die beiden reinen Bestandsregeln liegen datenbankfrei nebenan (der Excel-Export braucht sie ohne
+// die Datenschicht) und werden hier weitergereicht, damit bestehende Aufrufer nichts aendern muessen.
+import { pieceCount } from './stock-metrics';
+export { pieceCount, isOwnStockAsset } from './stock-metrics';
 import { firstProductWithAgent, WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
 
 // LAN-Sync (Phase 1a): jede stock_lots-Mutation als Full-Row-Snapshot an Geraet B.
@@ -403,7 +407,7 @@ export function getStockAggregates(productIds?: string[]): Map<string, LotAggreg
 export interface StockItem {
   id: string;
   purchasePrice?: number;
-  quantity?: number;
+  quantity?: number | null;
   plannedSalePrice?: number;
 }
 
@@ -421,7 +425,9 @@ export function computeStockValuation(
   let cost = 0, plannedSale = 0, count = 0;
   for (const p of items) {
     const lot = a.get(p.id);
-    const qty = p.quantity || 1;
+    // Wo Lots existieren, IST deren Restmenge die Stueckzahl — auch fuer den geplanten
+    // Verkaufswert, damit beide Zahlen dieselben Stuecke meinen.
+    const qty = lot ? lot.totalQty : pieceCount(p.quantity);
     if (lot) { cost += lot.totalValue; count += lot.totalQty; }
     else     { cost += (p.purchasePrice || 0) * qty; count += qty; }
     plannedSale += (p.plannedSalePrice || 0) * qty;
@@ -454,10 +460,3 @@ export function summarizeInventory(
   return { records: items.length, units: v.count, cost: v.cost, plannedSale: v.plannedSale };
 }
 
-// Die bestehende Regel, welche Zeile eigenes Bestandsvermoegen ist — unveraendert aus dem
-// ProductStore hierher gezogen, damit Collection, Dashboard und Reports nicht drei Fassungen davon
-// pflegen. Kommissionsware ist kein eigenes Asset, und nur was im Bestand liegt zaehlt.
-export function isOwnStockAsset(p: { stockStatus?: string | null; sourceType?: string | null }): boolean {
-  const s = p.stockStatus || '';
-  return (s === 'in_stock' || s === 'IN_STOCK') && p.sourceType === 'OWN';
-}

@@ -243,7 +243,8 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
   ).map(r => ({
     id: r.id as string,
     purchasePrice: num(r, 'purchase_price'),
-    quantity: num(r, 'quantity') || 1,
+    // ROH weiterreichen: `num` macht aus NULL eine 0, und eine 0 heisst hier "nichts mehr da".
+    quantity: (r.quantity ?? null) as number | null,
     plannedSalePrice: num(r, 'planned_sale_price'),
     catName: r.cat_name as string,
   }));

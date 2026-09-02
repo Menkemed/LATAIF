@@ -13,6 +13,7 @@
 
 import ExcelJS from 'exceljs';
 import type { Product } from '@/core/models/types';
+import { pieceCount } from '@/core/lots/stock-metrics';
 import type { LotAggregate } from '@/core/lots/lot-queries';
 import type { ExportImage, ExportMediaScope } from '@/core/media/product-image-export-core';
 
@@ -89,11 +90,11 @@ export async function buildCollectionWorkbookBuffer(
       brand:    p.brand,
       name:     p.name,
       category: categoryName(p.categoryId),
-      qty:      a ? a.totalQty : (p.quantity || 1),
+      qty:      a ? a.totalQty : pieceCount(p.quantity),
       cond:     p.condition || '',
       pp:       a ? a.weightedAvg : p.purchasePrice,
       ppRange:  a && a.lotCount > 1 ? `${fmt3(a.minCost)}–${fmt3(a.maxCost)}` : '',
-      stockVal: a ? a.totalValue : p.purchasePrice * (p.quantity || 1),
+      stockVal: a ? a.totalValue : p.purchasePrice * pieceCount(p.quantity),
       lots:     a ? a.lotCount : 1,
       spp:      p.plannedSalePrice ?? '',
       min:      p.minSalePrice ?? '',
@@ -142,9 +143,9 @@ export async function buildCollectionWorkbookBuffer(
   for (const p of ownInStock) {
     const a = lotAgg.get(p.id);
     if (a) { totalQty += a.totalQty; totalEK += a.totalValue; }
-    else   { totalQty += p.quantity || 1; totalEK += p.purchasePrice * (p.quantity || 1); }
+    else   { totalQty += p.quantity || 1; totalEK += p.purchasePrice * pieceCount(p.quantity); }
   }
-  const totalVK = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * (p.quantity || 1), 0);
+  const totalVK = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * pieceCount(p.quantity), 0);
 
   const totalRow = ws.addRow({
     image: '', sku: '', brand: '', name: 'TOTAL (OWN · In Stock)', category: '',
