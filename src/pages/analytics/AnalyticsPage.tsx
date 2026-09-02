@@ -1295,7 +1295,7 @@ export function AnalyticsPage() {
               <KPICard
                 label="ITEMS IN STOCK"
                 value={stock.totalItems}
-                unit="products"
+                unit="items"
                 icon={<Package size={16} />}
               />
               <KPICard

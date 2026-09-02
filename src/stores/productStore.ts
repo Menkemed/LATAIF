@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type { Product, Category, StockStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
+import { getStockAggregates, computeStockValuation, isOwnStockAsset } from '@/core/lots/lot-queries';
 import { nextSkuFrom } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
@@ -1330,9 +1330,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // damit Multi-Lot-Produkte nicht den irreführenden single product.purchase_price benutzen.
     // Fallback auf p.purchase_price * quantity nur wenn das Produkt keine aktiven Lots hat
     // (Legacy-Daten vor Backfill / Produkte ohne Purchase-History).
-    const inStock = get().products.filter(p =>
-      (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
-    );
+    const inStock = get().products.filter(isOwnStockAsset);
     // L-18 — zentrale Bewertung via computeStockValuation (Lot, sonst pp×qty).
     const v = computeStockValuation(inStock);
     return { purchaseTotal: v.cost, saleTotal: v.plannedSale, count: v.count };
@@ -1340,9 +1338,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
   getStockByCategory: () => {
     const { products, categories } = get();
-    const inStock = products.filter(p =>
-      (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
-    );
+    const inStock = products.filter(isOwnStockAsset);
     const agg = getStockAggregates(inStock.map(p => p.id));
     return categories.map(cat => {
       const items = inStock.filter(p => p.categoryId === cat.id);

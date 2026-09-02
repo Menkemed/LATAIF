@@ -428,3 +428,36 @@ export function computeStockValuation(
   }
   return { cost, plannedSale, count };
 }
+
+// ── Datensaetze und Stueck sind zwei Zahlen ────────────────────────────────
+//
+// Der Anlass: ein Regal mit zehn gleichen Armbaendern ist EINE Produktzeile mit `quantity = 10`.
+// Wer Zeilen zaehlt und "Items" darunter schreibt, meldet eins. Beide Zahlen werden gebraucht — die
+// Zeilen fuer "wie viele verschiedene Artikel fuehren wir", die Stueckzahl fuer "was liegt im
+// Regal" — also stehen sie hier nebeneinander statt jede Oberflaeche selbst rechnen zu lassen.
+//
+// Die Bewertung selbst wird NICHT neu erfunden: sie kommt aus `computeStockValuation` (Lot-Wert wo
+// es Lots gibt, sonst Stueckpreis × Menge). Welche Zeilen ueberhaupt hineingehoeren, entscheidet
+// weiterhin der Aufrufer mit seinem eigenen, bestehenden Filter.
+export interface InventorySummary {
+  records: number;     // Produktdatensaetze (Zeilen) — `quantity = 5` ist EINER
+  units: number;       // tatsaechliche Stueckzahl — dieselbe Zeile ist FUENF
+  cost: number;        // Bestandswert zu Einkauf
+  plannedSale: number; // geplanter Verkaufswert
+}
+
+export function summarizeInventory(
+  items: StockItem[],
+  agg?: Map<string, LotAggregate>,
+): InventorySummary {
+  const v = computeStockValuation(items, agg);
+  return { records: items.length, units: v.count, cost: v.cost, plannedSale: v.plannedSale };
+}
+
+// Die bestehende Regel, welche Zeile eigenes Bestandsvermoegen ist — unveraendert aus dem
+// ProductStore hierher gezogen, damit Collection, Dashboard und Reports nicht drei Fassungen davon
+// pflegen. Kommissionsware ist kein eigenes Asset, und nur was im Bestand liegt zaehlt.
+export function isOwnStockAsset(p: { stockStatus?: string | null; sourceType?: string | null }): boolean {
+  const s = p.stockStatus || '';
+  return (s === 'in_stock' || s === 'IN_STOCK') && p.sourceType === 'OWN';
+}

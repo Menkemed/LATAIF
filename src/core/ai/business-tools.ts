@@ -12,7 +12,7 @@ import { useOfferStore } from '@/stores/offerStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { canonicalStockStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
-import { computeStockValuation } from '@/core/lots/lot-queries';
+import { computeStockValuation, summarizeInventory } from '@/core/lots/lot-queries';
 import type { Invoice, Customer, Product } from '@/core/models/types';
 
 // ── Renderable block types (return shape) ───────────────────
@@ -189,11 +189,15 @@ function toolInventoryAtRisk(args: { min_days_idle?: number; min_value?: number;
 
   if (at.length === 0) return { type: 'text', markdown: `_No inventory idle for ≥ ${minDays} days above ${fmt(minValue)} BHD._` };
 
-  const totalCapital = at.reduce((s, p) => s + (p.purchasePrice || 0), 0);
+  // Das gebundene Kapital ist der Bestandswert dieser Zeilen — Stueckpreis MAL Menge, und wo es
+  // Lots gibt deren eigener Wert. Vorher wurden hier Stueckpreise addiert: ein Datensatz mit zehn
+  // Stueck zaehlte einfach, und die Zahl war zu klein.
+  const risk = summarizeInventory(at);
+  const totalCapital = risk.cost;
 
   return {
     type: 'table',
-    title: `Slow-moving stock — ${at.length} items · Capital tied up ${fmt(totalCapital)} BHD`,
+    title: `Slow-moving stock — ${risk.records} product${risk.records === 1 ? '' : 's'} · ${risk.units} item${risk.units === 1 ? '' : 's'} · Capital tied up ${fmt(totalCapital)} BHD`,
     columns: ['Product', 'SKU', 'Days idle', 'Purchase (BHD)', 'Asking (BHD)'],
     align: ['left', 'left', 'right', 'right', 'right'],
     rows: at

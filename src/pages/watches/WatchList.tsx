@@ -25,7 +25,7 @@ import { buildCollectionWorkbookBuffer } from '@/core/media/collection-workbook'
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { decideProductCreateUi } from '@/core/media/product-media-create';
 import { matchesDeep } from '@/core/utils/deep-search';
-import { getStockAggregates, type LotAggregate } from '@/core/lots/lot-queries';
+import { getStockAggregates, summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
 import type { Product, TaxScheme, StockStatus, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
@@ -128,7 +128,7 @@ export function WatchList() {
   const {
     products, categories, loadProducts, loadCategories, createProductWithMedia,
     searchQuery, setSearchQuery, filterCategory, setFilterCategory,
-    filterStatus, setFilterStatus, getStockValue, allocateSkuOnCreate,
+    filterStatus, setFilterStatus, allocateSkuOnCreate,
     isSkuTaken, findPossibleDuplicates, getProductLinks, deleteProducts,
   } = useProductStore();
   // MOBILE-04B2A10 — authorised media scope for the collection thumbnails,
@@ -288,9 +288,16 @@ export function WatchList() {
     return r;
   }, [products, searchQuery, filterCategory, filterStatus, filterOwnership, categories]);
 
-  const stock = useMemo(() => getStockValue(), [products, getStockValue]);
   // Phase 7 — Lot-Aggregat einmal pro Render fuer alle sichtbaren Produkte.
   const lotAgg = useMemo(() => getStockAggregates(filtered.map(p => p.id)), [filtered]);
+  // Die Kopfzeile beschreibt, was GERADE AUF DER SEITE STEHT — also wird sie aus derselben Menge
+  // gerechnet, die die Liste zeigt, und folgt jedem Filter. Datensaetze und Stueck sind dabei zwei
+  // Zahlen: eine Zeile mit `quantity = 10` ist EIN Artikel und ZEHN Stueck; frueher stand hier die
+  // Zeilenzahl unter dem Wort "items". Der Wert folgt weiter der bestehenden Regel — nur eigene
+  // Ware im Bestand ist ein eigenes Asset, Kommissionsware nicht.
+  const shown = useMemo(() => summarizeInventory(filtered, lotAgg), [filtered, lotAgg]);
+  const owned = useMemo(() => summarizeInventory(filtered.filter(isOwnStockAsset), lotAgg), [filtered, lotAgg]);
+  const s = (n: number): string => (n === 1 ? '' : 's');
   const getCat = (id: string) => categories.find(c => c.id === id);
 
   function openNew(cat?: Category) {
@@ -438,10 +445,10 @@ export function WatchList() {
       title="Collection"
       subtitle={
         filterOwnership === 'consignment'
-          ? `${filtered.length} consignment item${filtered.length === 1 ? '' : 's'}`
+          ? `${shown.records} consignment product${s(shown.records)} \u00b7 ${shown.units} item${s(shown.units)}`
           : filterOwnership === 'all'
-            ? `${filtered.length} item${filtered.length === 1 ? '' : 's'} (own + consignment)`
-            : `${stock.count} items in stock \u00b7 ${fmt(stock.purchaseTotal)} BHD`
+            ? `${shown.records} product${s(shown.records)} \u00b7 ${shown.units} item${s(shown.units)} (own + consignment) \u00b7 ${fmt(owned.cost)} BHD own stock`
+            : `${shown.records} product${s(shown.records)} \u00b7 ${shown.units} item${s(shown.units)} \u00b7 ${fmt(owned.cost)} BHD stock value`
       }
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by brand, name, SKU..."
       actions={
