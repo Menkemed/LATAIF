@@ -5,9 +5,29 @@
 // image (failure isolation — one bad image never aborts the workbook), all rows + the total present.
 // The media→bytes resolution itself is proven by the shared resolver (thumbnails) + export-core test.
 // Run: node test/media-export/workbook.test.ts
-import ExcelJS from 'exceljs';
-import { buildCollectionWorkbookBuffer } from '../../src/core/media/collection-workbook.ts';
-import { decodeImageDataUrl } from '../../src/core/media/product-image-export-core.ts';
+import { registerHooks } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { existsSync } from 'node:fs';
+import { dirname, resolve as resolvePath } from 'node:path';
+
+// Der Builder holt sich die eine Stueckzahl-Regel aus `@/core/lots/stock-metrics` — ein echter
+// Laufzeit-Import (die uebrigen `@/`-Zeilen dort sind reine Typen und verschwinden beim Uebersetzen).
+// Unter `node` gibt es kein `@/`, also wird es hier auf denselben Pfad gelegt, den auch Vite benutzt.
+const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
+registerHooks({
+  resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
+    if (specifier.startsWith('@/')) {
+      const p = resolvePath(repo, 'src', specifier.slice(2));
+      return { url: pathToFileURL(existsSync(p) ? p : p + '.ts').href, shortCircuit: true };
+    }
+    return nextResolve(specifier, context);
+  },
+} as never);
+
+// Nach dem Haken geladen — statische Importe laufen sonst, bevor er greift.
+const ExcelJS = (await import('exceljs')).default;
+const { buildCollectionWorkbookBuffer } = await import('../../src/core/media/collection-workbook.ts');
+const { decodeImageDataUrl } = await import('../../src/core/media/product-image-export-core.ts');
 
 let pass = 0; const fail: string[] = [];
 const check = (c: unknown, m: string) => { if (c) pass++; else fail.push(m); };

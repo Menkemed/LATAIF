@@ -120,13 +120,14 @@ const NO_LOTS = new Map();
 // ── 5) Fehlende, leere und unmoegliche Mengen ──────────────────────────────
 //
 // Die Spalte hat den Standardwert 1 und ist ganzzahlig; Altdatensaetze koennen sie leer haben. Der
-// bestehende Vertrag im Haus ist `quantity || 1` — der wird hier festgehalten, nicht neu erfunden.
+// Der Hausvertrag gilt fuer eine FEHLENDE Angabe: die bedeutet ein Stueck. Eine ausdrueckliche
+// Null bedeutet dagegen nichts mehr da — siehe Abschnitt 7, wo die Schreibwege dafuer stehen.
 {
   const legacy = { id: 'L', purchasePrice: 70, stockStatus: 'in_stock', sourceType: 'OWN' };
   const zero = { id: 'Z', purchasePrice: 70, quantity: 0, stockStatus: 'in_stock', sourceType: 'OWN' };
   ok(summarizeInventory([legacy], NO_LOTS).units === 1, 'LEGACY a row without a quantity counts as one piece');
   ok(round(summarizeInventory([legacy], NO_LOTS).cost) === 70, 'LEGACY …and is worth its one price');
-  ok(summarizeInventory([zero], NO_LOTS).units === 1, 'LEGACY a stored zero follows the same house rule');
+  ok(summarizeInventory([zero], NO_LOTS).units === 0, 'LEGACY a stored zero is nothing, not one');
   ok(summarizeInventory([], NO_LOTS).records === 0 && summarizeInventory([], NO_LOTS).units === 0,
     'LEGACY an empty shelf is zero of both');
 }
@@ -138,6 +139,11 @@ const NO_LOTS = new Map();
 {
   const lots = src('src/core/lots/lot-queries.ts');
   ok(/export function summarizeInventory/.test(lots), 'WIRED there is ONE place that answers records/units/value');
+  const pure = src('src/core/lots/stock-metrics.ts');
+  ok(/export function pieceCount/.test(pure) && /export function isOwnStockAsset/.test(pure),
+    'WIRED the two pure rules live in ONE database-free module…');
+  ok(!pure.includes("@/core/db") && !pure.includes("@/core/sync"), 'WIRED …so the Excel export can use them without the data layer');
+  ok(lots.includes("export { pieceCount, isOwnStockAsset } from './stock-metrics';"), 'WIRED …and lot-queries passes them on unchanged');
   ok(/records: items\.length/.test(lots), 'WIRED …records are rows');
   ok(/units: v\.count/.test(lots) && /cost: v\.cost/.test(lots),
     'WIRED …and pieces and value come from the existing valuation, not from a second formula');
@@ -156,6 +162,92 @@ const NO_LOTS = new Map();
   ok(/isOwnStockAsset/.test(store), 'WIRED the store shares the one eligibility rule');
   const an = src('src/pages/analytics/AnalyticsPage.tsx');
   ok(/ITEMS IN STOCK[\s\S]{0,200}unit="items"/.test(an), 'WIRED Analytics labels a piece count as pieces');
+}
+
+
+// ── 7) Was eine Menge von Null bedeutet ────────────────────────────────────
+//
+// `quantity` hat `DEFAULT 1` und KEINE Constraint — und zwei autoritative Schreibwege setzen
+// bewusst eine Null: der Verkauf einer lot-losen Zeile zaehlt herunter und endet bei 0, und der
+// Lot-Abgleich schreibt `COALESCE(SUM(qty_remaining), 0)`. Eine Null ist also eine echte Aussage
+// ("nichts mehr da") und keine fehlende Angabe. `quantity || 1` konnte beides nicht unterscheiden.
+{
+  const { pieceCount } = await import('../../src/core/lots/stock-metrics.ts');
+  ok(pieceCount(undefined) === 1, 'DOMAIN a missing quantity is the house default of one');
+  ok(pieceCount(null) === 1, 'DOMAIN …a NULL column too');
+  ok(pieceCount(Number.NaN) === 1 && pieceCount('x' as never) === 1, 'DOMAIN …and anything unreadable');
+  ok(pieceCount(0) === 0, 'DOMAIN but an explicit zero stays zero — nothing is left');
+  ok(pieceCount(-3) === 0, 'DOMAIN …and a negative counts as nothing, never as a deduction');
+  ok(pieceCount(5) === 5, 'DOMAIN a real count is itself');
+
+  // Der Fall, der in echten Daten entstehen kann: der Lot-Abgleich schreibt die 0, den Status
+  // fasst er nicht an. Frueher zaehlte diese Zeile ein Stueck und einen Stueckpreis zu viel.
+  const emptied = { id: 'X', purchasePrice: 400, quantity: 0, plannedSalePrice: 600, stockStatus: 'in_stock', sourceType: 'OWN' };
+  const s = summarizeInventory([A, emptied], NO_LOTS);
+  ok(s.records === 2, `DOMAIN the emptied row is still a product record (${s.records})`);
+  ok(s.units === 1, `DOMAIN …but it is no pieces (${s.units})`);
+  ok(round(s.cost) === 100, `DOMAIN …and no value (${round(s.cost)})`);
+  ok(round(s.plannedSale) === 150, `DOMAIN …and no planned sale either (${round(s.plannedSale)})`);
+
+  // Die Schreibwege, die diese Null erzeugen — an den echten Quellen, damit die Begruendung
+  // nachpruefbar bleibt und nicht von den heutigen Daten des Kollegen abhaengt.
+  const auto = src('src/core/automation/automation-handlers.ts');
+  ok(/quantity = CASE WHEN COALESCE\(quantity,1\) > 1 THEN COALESCE\(quantity,1\) - 1 ELSE 0 END/.test(auto),
+    'DOMAIN the legacy sale really writes a zero when the last piece goes');
+  const dbs = src('src/core/db/database.ts');
+  ok(/SET quantity = \(\s*\r?\n?\s*SELECT COALESCE\(SUM\(qty_remaining\), 0\)/.test(dbs),
+    'DOMAIN and the lot reconciliation writes a zero without touching the status');
+  const schema = src('src/core/db/database.ts');
+  ok(/quantity\s+INTEGER\s+DEFAULT 1/.test(schema), 'DOMAIN the column only defaults to one…');
+  ok(!/quantity\s+INTEGER[^,\n]*CHECK/.test(schema), 'DOMAIN …it does not constrain it, so a zero is reachable');
+
+  // Und die Oberflaechen-Eingabe erzwingt weiterhin mindestens eins — die Null kommt nie von Hand.
+  const modal = src('src/components/products/NewProductModal.tsx');
+  ok(/quantity: Math\.max\(1, Number\(e\.target\.value\) \|\| 1\)/.test(modal), 'DOMAIN typing a quantity cannot go below one');
+  const list = src('src/pages/watches/WatchList.tsx');
+  ok(/quantity: Math\.max\(1, Number\(e\.target\.value\) \|\| 1\)/.test(list), 'DOMAIN …in the collection form either');
+  const imp = src('src/core/import/product-import.ts');
+  ok(/if \(qtyP\.empty\) quantity = 1;/.test(imp), 'DOMAIN an import without a quantity column means one');
+}
+
+// ── 8) Eine Kennzahl, eine Berechtigungsregel ──────────────────────────────
+//
+// Der zweite, getrennt gemeldete Fehler: die KI-Monatsuebersicht bewertete ueber
+// `canonicalStockStatus`. Das ist ein STATUS-Normalisierer — er fasst `in_stock`, `consignment` und
+// `offered` zusammen, weil sie fuer Verkauf und Suche dasselbe bedeuten. Als Vermoegensregel
+// benutzt, zaehlte er Zeilen mit, die jede andere Oberflaeche ausschliesst.
+{
+  const { canonicalStockStatus } = await import('../../src/core/models/types.ts');
+  // Der Helfer selbst bleibt, wie er ist — andere Aufrufer brauchen genau dieses Zusammenfassen.
+  ok(canonicalStockStatus('consignment') === 'IN_STOCK', 'HELPER the status normaliser still folds consignment in…');
+  ok(canonicalStockStatus('offered') === 'IN_STOCK', 'HELPER …and offered too — unchanged');
+
+  const OWN_IN = { id: 'v1', purchasePrice: 200, quantity: 5, stockStatus: 'in_stock',    sourceType: 'OWN' };
+  const OWN_CO = { id: 'v2', purchasePrice: 999, quantity: 7, stockStatus: 'consignment', sourceType: 'OWN' };
+  const OWN_OF = { id: 'v3', purchasePrice: 500, quantity: 2, stockStatus: 'offered',     sourceType: 'OWN' };
+  const SET = [OWN_IN, OWN_CO, OWN_OF];
+
+  // Die kanonische Regel — die von Dashboard, Collection, Analytics und Reports.
+  const canonical = summarizeInventory(SET.filter(isOwnStockAsset), NO_LOTS);
+  ok(round(canonical.cost) === 1000, `AI-SCOPE the canonical own stock value is 5 x 200 = 1000 (${round(canonical.cost)})`);
+  ok(canonical.units === 5, `AI-SCOPE …five pieces (${canonical.units})`);
+
+  // Die Regel, die die KI-Uebersicht benutzt HAT — derselbe echte Helfer, dieselben Zeilen.
+  const aiOld = summarizeInventory(
+    SET.filter((p) => canonicalStockStatus(p.stockStatus) === 'IN_STOCK' && p.sourceType === 'OWN'), NO_LOTS);
+  ok(round(aiOld.cost) === 8993, `AI-SCOPE the old rule reported 8993 instead — 6993 and 1000 too much (${round(aiOld.cost)})`);
+  ok(round(aiOld.cost) !== round(canonical.cost), 'AI-SCOPE …so the same metric had two different answers');
+
+  // Und der Fix: dieselbe Regel, derselbe Bewertungsweg, also dieselbe Zahl.
+  const ai = src('src/core/ai/business-tools.ts');
+  ok(/const inventoryValue = computeStockValuation\(products\.filter\(isOwnStockAsset\)\)\.cost;/.test(ai),
+    'AI-SCOPE the monthly review now uses the one asset rule');
+  ok(!/canonicalStockStatus\(p\.stockStatus\) === 'IN_STOCK' && p\.sourceType === 'OWN'/.test(ai),
+    'AI-SCOPE …and the status normaliser is no longer used as an eligibility filter');
+  // Die andere Verwendung bleibt: "gebundenes Kapital" ist ausdruecklich eine WEITERE Population
+  // (auch reservierte Ware) und keine Bestandswert-Kennzahl.
+  ok(/cs !== 'IN_STOCK' && cs !== 'RESERVED'/.test(ai),
+    'AI-SCOPE the slow-moving tool keeps its own, deliberately wider population');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — inventory metrics: ${PASS} passed, ${fails.length} failed`);
