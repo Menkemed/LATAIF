@@ -143,7 +143,7 @@ export async function buildCollectionWorkbookBuffer(
   for (const p of ownInStock) {
     const a = lotAgg.get(p.id);
     if (a) { totalQty += a.totalQty; totalEK += a.totalValue; }
-    else   { totalQty += p.quantity || 1; totalEK += p.purchasePrice * pieceCount(p.quantity); }
+    else   { totalQty += pieceCount(p.quantity); totalEK += p.purchasePrice * pieceCount(p.quantity); }
   }
   const totalVK = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * pieceCount(p.quantity), 0);
 

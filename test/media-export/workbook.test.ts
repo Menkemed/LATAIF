@@ -50,6 +50,9 @@ const items = [
   mk('LEGACYP', [PNG_URL]), // legacy data-url
   mk('MISSINGP', []),       // no media → resolver returns null
   mk('CORRUPTP', []),       // resolver throws → must be isolated
+  // Eine Zeile, deren letztes Stueck verkauft wurde: der Lot-Abgleich schreibt die 0, den Status
+  // fasst er nicht an. Sie gehoert in die Liste, aber sie ist kein Stueck und kein Wert mehr.
+  mk('EMPTIEDP', [], { quantity: 0 }),
 ];
 
 const resolveImage = async (product: { id: string; images?: string[] }) => {
@@ -85,6 +88,14 @@ check(names.includes('MISSINGP'), 'missing product row present (kept, no image)'
 check(names.includes('CORRUPTP'), 'corrupt-image product row present (failure isolated, row kept)');
 check(names.some(n => /TOTAL/.test(n)), 'total row present');
 check(ws!.rowCount >= 6, `header + 4 products + total (rowCount=${ws!.rowCount})`);
+
+// Die Summenzeile zaehlt Stueck, nicht Zeilen: die geleerte Zeile steht drin und traegt nichts bei.
+// Vorher stand hier eine 5 neben einem Wert von 40 — Menge und Wert widersprachen sich.
+check(names.includes('EMPTIEDP'), 'the emptied product keeps its row');
+let totalQty = null, totalVal = null;
+ws!.eachRow(r => { if (/TOTAL/.test(String(r.getCell(4).value || ''))) { totalQty = r.getCell(6).value; totalVal = r.getCell(10).value; } });
+check(Number(totalQty) === 4, `the total counts four pieces, not five rows (got ${totalQty})`);
+check(Number(totalVal) === 40, `and the value agrees with it (got ${totalVal})`);
 
 // images anchored to the media + legacy rows only (rows 1 and 2, 0-based after header)
 const imgs = ws!.getImages();
