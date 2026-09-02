@@ -12,7 +12,7 @@ import { useOfferStore } from '@/stores/offerStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { canonicalStockStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
-import { computeStockValuation, summarizeInventory } from '@/core/lots/lot-queries';
+import { computeStockValuation, summarizeInventory, isOwnStockAsset } from '@/core/lots/lot-queries';
 import type { Invoice, Customer, Product } from '@/core/models/types';
 
 // ── Renderable block types (return shape) ───────────────────
@@ -268,9 +268,14 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
 
   // L-18 — zentrale Hybrid-Bewertung (Lot, sonst pp×qty) + nur OWN (Consignment ist
   // kein eigenes Asset) — konsistent mit Dashboard/BusinessReports/Analytics.
-  const inventoryValue = computeStockValuation(
-    products.filter(p => canonicalStockStatus(p.stockStatus) === 'IN_STOCK' && p.sourceType === 'OWN')
-  ).cost;
+  //
+  // Die Zeile darunter stand frueher auf `canonicalStockStatus(...) === 'IN_STOCK'`. Das ist ein
+  // STATUS-Normalisierer und keine Vermoegensregel: er fasst `in_stock`, `consignment` und
+  // `offered` zu einem Zustand zusammen, weil sie fuer Verkauf und Suche dasselbe bedeuten. Als
+  // Bewertungsfilter benutzt, zaehlte er Kommissions- und angebotene Zeilen zum eigenen
+  // Bestandswert — dieselbe Kennzahl, andere Regel als auf jeder anderen Oberflaeche. Also die
+  // eine Vermoegensregel, die auch Dashboard, Collection, Analytics und Reports benutzen.
+  const inventoryValue = computeStockValuation(products.filter(isOwnStockAsset)).cost;
 
   // Top 3 customers by revenue this month
   const custAgg = new Map<string, number>();
