@@ -80,11 +80,28 @@ async function startApp(timeoutMs = 60000) {
   throw new Error('app CDP page did not come up');
 }
 
+/** Kein Fenster mehr da? Erst dann sagt "kein Fenster" etwas ueber DIESEN Start aus. */
+async function waitNoWindow(maxMs = 30000) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
+      if (!list.find((t) => t.type === 'page' && /tauri\.localhost/.test(t.url))) return true;
+    } catch { return true; }
+    await sleep(400);
+  }
+  return false;
+}
+
 /**
  * Start the app EXPECTING it to refuse. Returns true when no window ever appeared.
  * A refusal that merely takes a long time is not a refusal, so the window is generous but finite.
  */
 async function startExpectingRefusal(waitMs = 22000) {
+  // Ein WebView2 des VORIGEN Starts kann den Debug-Zugang noch bedienen. Wer dann nachsieht,
+  // sieht ein fremdes Fenster und haelt die Verweigerung faelschlich fuer einen Start.
+  const clear = await waitNoWindow();
+  if (!clear) throw new Error('a previous window is still up — the refusal check would be meaningless');
   e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: isoEnv() });
   appProc = spawn(APP, [], { env: isoEnv(), stdio: 'ignore' });
   let exited = false;

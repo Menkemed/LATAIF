@@ -149,6 +149,16 @@ export function preseedInstallation(appDataDir) {
   if (existsSync(existing)) {
     try { return JSON.parse(readFileSync(existing, 'utf8')).rootId; } catch { return 'unreadable'; }
   }
+  // Ein Verzeichnis, in dem schon eine Kennung steht, gehoert nicht uns: dort eine zweite
+  // Installation einrichten zu wollen ist genau der Fall, den  ablehnt.
+  // Suiten, die einen widerspruechlichen Zustand ABSICHTLICH herstellen (Locator geloescht,
+  // Kennung veraendert), pruefen die Verweigerung der App — das Vorbereiten haelt sich da heraus,
+  // statt den Lauf mit demselben Fehler abzubrechen, den die Suite gerade beweisen will.
+  if (existsSync(join(appDataDir, '.lataif-data-root.json'))) return 'already registered';
+  // Und ein Verzeichnis mit einer Alt-Datenbank ist ebenfalls keine leere Maschine: dort ist der
+  // Aufstiegsweg der App zustaendig (`resolve_or_first_run` fragt dort gar nicht erst). Wer hier
+  // vorbereitet, ersetzt genau den Vorgang, den solche Suiten pruefen wollen.
+  if (existsSync(join(appDataDir, 'lataif.db'))) return 'legacy data present';
   const helper = join(process.cwd(), 'src-tauri/target/debug/examples/e2e_first_run_preseed.exe');
   if (!existsSync(helper)) {
     throw new E2eIdentityError(
