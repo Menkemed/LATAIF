@@ -475,6 +475,7 @@ fn identity(id: &str, op: &str, user: &str) -> CommandIdentity {
         branch_id: "branch-main".into(),
         user_id: user.into(),
         op: op.to_string(),
+        payload_hash: payload_fingerprint(&serde_json::Value::Null),
     }
 }
 
@@ -542,5 +543,109 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !REMOTE_MUTATIONS_ENABLED)"),
         "eine KLASSE, kein Namensverbot — ein neu benanntes invoice.save faellt genauso"
+    );
+}
+
+// ── 15) Die Kennung benennt eine Absicht, nicht nur einen Absender ────────
+//
+// Ohne den Rumpf wäre die Kennung ein bloßes Etikett: derselbe Name könnte zweimal etwas ANDERES
+// bedeuten. Wenn später ein durabler Nachweis fragt „ist das hier schon gelaufen?", muss die
+// Antwort sich auf DIESELBE Buchung beziehen — sonst gilt eine fremde Buchung als erledigt und die
+// echte fällt aus. Deshalb gehört der semantische Rumpf zur Identität.
+fn identity_with(id: &str, op: &str, user: &str, payload: &serde_json::Value) -> CommandIdentity {
+    CommandIdentity {
+        command_id: id.to_string(),
+        tenant_id: "tenant-1".into(),
+        branch_id: "branch-main".into(),
+        user_id: user.into(),
+        op: op.to_string(),
+        payload_hash: payload_fingerprint(payload),
+    }
+}
+
+#[tokio::test]
+async fn the_same_id_with_the_same_payload_is_a_retry() {
+    let (bridge, sink) = bridge_with_sink();
+    bridge.announce_generation();
+    const ID: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    let body = serde_json::json!({ "amount": 100, "customer": "c-1" });
+
+    let first = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), body.clone(), SHORT)
+        .await;
+    assert_eq!(first.unwrap_err(), BridgeError::Timeout, "gesendet");
+    // Dieselbe Absicht, noch einmal — und bewusst mit ANDERER Feldreihenfolge geschrieben.
+    let same_meaning = serde_json::json!({ "customer": "c-1", "amount": 100 });
+    assert_eq!(
+        payload_fingerprint(&body),
+        payload_fingerprint(&same_meaning),
+        "die Reihenfolge der Felder aendert die Bedeutung nicht"
+    );
+    let retry = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &same_meaning), same_meaning, SHORT)
+        .await;
+    assert_eq!(retry.unwrap_err(), BridgeError::Timeout, "eine Wiederholung ist erlaubt");
+    assert_eq!(sink.count(), 2, "und wurde auch wirklich gesendet");
+}
+
+#[tokio::test]
+async fn the_same_id_with_a_different_payload_is_refused_before_dispatch() {
+    let (bridge, sink) = bridge_with_sink();
+    bridge.announce_generation();
+    const ID: &str = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e";
+    let body = serde_json::json!({ "amount": 100, "customer": "c-1" });
+
+    let first = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), body.clone(), SHORT)
+        .await;
+    assert_eq!(first.unwrap_err(), BridgeError::Timeout);
+    assert_eq!(sink.count(), 1);
+
+    // Ein einziger geänderter Betrag ist eine ANDERE Buchung.
+    let changed = serde_json::json!({ "amount": 100_000, "customer": "c-1" });
+    let err = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), changed, SHORT)
+        .await
+        .expect_err("derselbe Name fuer etwas anderes");
+    assert_eq!(err, BridgeError::CommandIdConflict);
+    assert_eq!(err.http_status(), 409);
+    assert_eq!(err.outcome(), Outcome::NotExecuted, "sicher nicht passiert");
+    assert_eq!(sink.count(), 1, "und er wurde GAR NICHT zugestellt");
+}
+
+#[tokio::test]
+async fn a_changed_identity_still_conflicts_even_with_the_same_payload() {
+    let (bridge, sink) = bridge_with_sink();
+    bridge.announce_generation();
+    const ID: &str = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
+    let body = serde_json::json!({ "amount": 7 });
+
+    assert_eq!(
+        bridge
+            .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), body.clone(), SHORT)
+            .await
+            .unwrap_err(),
+        BridgeError::Timeout
+    );
+    // Gleicher Rumpf, anderer Benutzer — die bisherige Bindung gilt weiter.
+    let err = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-b", &body), body.clone(), SHORT)
+        .await
+        .expect_err("fremder Absender");
+    assert_eq!(err, BridgeError::CommandIdConflict);
+    assert_eq!(sink.count(), 1, "nicht zugestellt");
+
+    // Und der Fingerabdruck unterscheidet wirklich: zwei verschiedene Ruempfe, zwei Werte.
+    assert_ne!(
+        payload_fingerprint(&serde_json::json!({ "amount": 7 })),
+        payload_fingerprint(&serde_json::json!({ "amount": 8 })),
+        "ein anderer Inhalt ergibt einen anderen Fingerabdruck"
+    );
+
+    // Die Route bindet den Rumpf des CLIENTS, nicht die Huelle mit dem Absender darin.
+    let routes = include_str!("sync/routes.rs");
+    assert!(
+        routes.contains("payload_hash: crate::bridge::payload_fingerprint(&req.payload)"),
+        "gebunden wird der semantische Rumpf"
     );
 }

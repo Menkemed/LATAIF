@@ -185,6 +185,18 @@ pub struct CommandIdentity {
     pub branch_id: String,
     pub user_id: String,
     pub op: String,
+    /// Der Fingerabdruck des semantischen Rumpfs. Ohne ihn waere eine Kennung nur ein Etikett:
+    /// derselbe Name koennte zweimal etwas ANDERES bedeuten, und eine spaetere Wiederholung
+    /// koennte eine fremde Buchung als "schon erledigt" ausgeben.
+    pub payload_hash: String,
+}
+
+/// Der Fingerabdruck eines Rumpfs — deterministisch, unabhaengig von der Feldreihenfolge des
+/// Clients:  haelt Objektschluessel sortiert (kein ), also ergibt
+/// derselbe Inhalt immer denselben Text und damit denselben Hash. Kein neuer Kanonisierungsapparat;
+/// es ist die Hash-Funktion, die das Haus ohnehin benutzt.
+pub fn payload_fingerprint(payload: &serde_json::Value) -> String {
+    crate::media::sha256_hex(serde_json::to_string(payload).unwrap_or_default().as_bytes())
 }
 
 /// Ein UUID in der kanonischen Schreibweise — nichts anderes wird angenommen. Damit kann die

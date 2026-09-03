@@ -157,6 +157,9 @@ async fn command_execute(
         branch_id: claims.branch_id.clone(),
         user_id: claims.sub.clone(),
         op: req.op.clone(),
+        // Gebunden wird der SEMANTISCHE Rumpf des Clients, nicht die Huelle: der Absender steckt
+        // schon in den Feldern darueber und kommt aus dem geprueften Token.
+        payload_hash: crate::bridge::payload_fingerprint(&req.payload),
     };
 
     match bridge
