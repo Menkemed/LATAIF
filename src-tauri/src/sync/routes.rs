@@ -109,6 +109,11 @@ pub fn build_api_router(state: Arc<AppState>, body_limit: usize) -> Router<Arc<A
 #[derive(serde::Deserialize)]
 struct CommandRequest {
     op: String,
+    /// Die logische Kennung DIESES Speicherversuchs, vom Client vergeben. Eine Wiederholung
+    /// benutzt dieselbe; nur so kann ein spaeterer durabler Nachweis zwei Anfragen als eine
+    /// Absicht erkennen. Sie benennt, sie entscheidet nichts.
+    #[serde(rename = "commandId")]
+    command_id: String,
     #[serde(default)]
     payload: serde_json::Value,
 }
@@ -146,7 +151,18 @@ async fn command_execute(
         "input": req.payload,
     });
 
-    match bridge.submit(&req.op, payload).await {
+    let identity = crate::bridge::CommandIdentity {
+        command_id: req.command_id.clone(),
+        tenant_id: claims.tenant_id.clone(),
+        branch_id: claims.branch_id.clone(),
+        user_id: claims.sub.clone(),
+        op: req.op.clone(),
+    };
+
+    match bridge
+        .submit_as(&identity, payload, crate::bridge::DEFAULT_TIMEOUT)
+        .await
+    {
         Ok(crate::bridge::Reply::Ok { value }) => {
             (StatusCode::OK, Json(serde_json::json!({ "ok": true, "value": value }))).into_response()
         }
@@ -169,7 +185,12 @@ async fn command_execute(
 fn error_response(e: crate::bridge::BridgeError) -> axum::response::Response {
     use axum::response::IntoResponse;
     let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
-    (status, Json(serde_json::json!({ "ok": false, "error": e.code() }))).into_response()
+    // Der Client MUSS wissen, ob er wiederholen darf: "not_executed" ist sicher, "unknown" nicht.
+    (
+        status,
+        Json(serde_json::json!({ "ok": false, "error": e.code(), "outcome": e.outcome().as_str() })),
+    )
+        .into_response()
 }
 
 async fn health() -> &'static str {

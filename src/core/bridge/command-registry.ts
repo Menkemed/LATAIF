@@ -27,9 +27,28 @@ export class BusinessError extends Error {
 
 export type CommandHandler = (payload: unknown) => Promise<CommandResult> | CommandResult;
 
+/**
+ * Welche Art von Auftrag das ist. Absichtlich eine KLASSE und kein Name: eine Sperre gegen fünf
+ * bekannte Namen hätte ein später hinzugefügtes `invoice.save` einfach durchgelassen.
+ *
+ *   • `probe` — beweist den Weg, rührt nichts an.
+ *   • `read`  — liest, läuft parallel.
+ *   • `mutation` — verändert Geschäftsdaten.
+ */
+export type CommandClass = 'probe' | 'read' | 'mutation';
+
+/**
+ * Verändernde Fernaufträge sind gesperrt, bis der durable Nachweis steht: ein Ledger-Eintrag mit
+ * der logischen Kennung des Clients, geschrieben in DERSELBEN sql.js-Transaktion wie die Buchung
+ * und die Belegnummer. Ohne den kann eine Wiederholung nach einem verlorenen Antwortweg nicht
+ * erkennen, dass die Buchung längst passiert ist — und ein zweites Mal buchen ist schlimmer als
+ * gar nicht. Die Sperre steht hier im Code, nicht nur in einem Test, damit sie beim Registrieren
+ * zuschlägt und nicht erst beim Prüfen.
+ */
+export const REMOTE_MUTATIONS_ENABLED = false;
+
 export interface CommandSpec {
-  /** Verändert dieser Auftrag Geschäftsdaten? Dann läuft er durch die eine Warteschlange. */
-  readonly mutates: boolean;
+  readonly kind: CommandClass;
   readonly handler: CommandHandler;
 }
 
@@ -40,6 +59,13 @@ const REGISTRY = new Map<string, CommandSpec>();
 
 export function registerCommand(op: string, spec: CommandSpec): void {
   if (REGISTRY.has(op)) throw new Error(`[bridge] duplicate command: ${op}`);
+  // Der Riegel: keine verändernde Fernoperation, solange der durable Nachweis fehlt.
+  if (spec.kind === 'mutation' && !REMOTE_MUTATIONS_ENABLED) {
+    throw new Error(
+      `[bridge] refusing to register a mutating remote command (${op}): remote writes stay closed `
+      + 'until a durable command ledger commits in the same transaction as the business effect.'
+    );
+  }
   REGISTRY.set(op, spec);
 }
 
@@ -64,7 +90,7 @@ export async function executeCommand(op: string, payload: unknown): Promise<Repl
   try {
     // Verändernde Aufträge werden gereiht, lesende nicht — sonst würde eine lange Liste die
     // Schreibvorgänge aufhalten, ohne dass es dafür einen Grund gäbe.
-    const value = spec.mutates
+    const value = spec.kind !== 'read'
       ? await runExclusive(() => spec.handler(payload))
       : await spec.handler(payload);
     return { kind: 'ok', value };
@@ -84,7 +110,7 @@ export async function executeCommand(op: string, payload: unknown): Promise<Repl
 registerCommand(OP_PROBE, {
   // Die Probe läuft durch die Warteschlange, obwohl sie nichts ändert: nur so beweist der
   // Ende-zu-Ende-Test, dass der Weg tatsächlich durch die Reihung führt.
-  mutates: true,
+  kind: 'probe',
   handler: (payload) => ({
     ok: true,
     echo: (payload as { echo?: unknown } | null)?.echo ?? null,

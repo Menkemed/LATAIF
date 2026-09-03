@@ -70,6 +70,10 @@ pub enum BridgeError {
     Timeout,
     /// Das Ereignis konnte nicht zugestellt werden (kein Fenster, Kanal tot).
     DeliveryFailed,
+    /// Die mitgeschickte logische Kennung ist kein UUID.
+    BadCommandId,
+    /// Dieselbe Kennung wurde schon fuer etwas anderes benutzt (anderer Absender/Operation).
+    CommandIdConflict,
 }
 
 impl BridgeError {
@@ -81,6 +85,24 @@ impl BridgeError {
             BridgeError::Reloaded => "BRIDGE_RENDERER_RELOADED",
             BridgeError::Timeout => "BRIDGE_TIMEOUT",
             BridgeError::DeliveryFailed => "BRIDGE_DELIVERY_FAILED",
+            BridgeError::BadCommandId => "BRIDGE_BAD_COMMAND_ID",
+            BridgeError::CommandIdConflict => "BRIDGE_COMMAND_ID_CONFLICT",
+        }
+    }
+
+    /// Sagt dieser Fehler etwas ueber die Ausfuehrung? Die Grenze ist die Zustellung: alles, was
+    /// VOR dem Senden scheitert, ist sicher nicht passiert; alles danach ist offen.
+    pub fn outcome(&self) -> Outcome {
+        match self {
+            // Nie gesendet.
+            BridgeError::NotReady
+            | BridgeError::ShuttingDown
+            | BridgeError::OpNotAllowed
+            | BridgeError::BadCommandId
+            | BridgeError::CommandIdConflict
+            | BridgeError::DeliveryFailed => Outcome::NotExecuted,
+            // War unterwegs — der Renderer kann ihn ausgefuehrt haben.
+            BridgeError::Timeout | BridgeError::Reloaded => Outcome::Unknown,
         }
     }
 
@@ -89,10 +111,39 @@ impl BridgeError {
     /// sie nicht zu einem gemeinsamen Fehler verschmolzen.
     pub fn http_status(&self) -> u16 {
         match self {
-            BridgeError::OpNotAllowed => 400,
+            BridgeError::OpNotAllowed | BridgeError::BadCommandId => 400,
+            // Ein Widerspruch, kein Serverfehler: derselbe Name fuer zwei verschiedene Dinge.
+            BridgeError::CommandIdConflict => 409,
             BridgeError::Timeout => 504,
             BridgeError::NotReady | BridgeError::ShuttingDown => 503,
             BridgeError::Reloaded | BridgeError::DeliveryFailed => 503,
+        }
+    }
+}
+
+/// Was ein Fehler über die AUSFÜHRUNG aussagt — und das ist etwas anderes als sein Code.
+///
+/// Der Unterschied ist der wichtigste in dieser Datei. „Zeitgrenze" hieß bisher stillschweigend
+/// „nicht passiert". Das ist falsch: der Auftrag WAR beim Renderer, der kann ihn vollständig
+/// ausgeführt und gespeichert haben, und nur die Antwort ging verloren. Ein Client, der daraufhin
+/// wiederholt, bucht ein zweites Mal.
+///
+/// Deshalb zwei Klassen, und die Grenze liegt exakt bei der Zustellung:
+///   • **NotExecuted** — es wurde gar nicht erst gesendet. Sicher nichts passiert, gefahrlos
+///     wiederholbar.
+///   • **Unknown** — es war unterwegs. Ob es lief, weiß niemand. Wiederholen NUR mit derselben
+///     logischen Kennung und einem durablen Nachweis; den gibt es in C1 noch nicht.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    NotExecuted,
+    Unknown,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::NotExecuted => "not_executed",
+            Outcome::Unknown => "unknown",
         }
     }
 }
@@ -118,6 +169,43 @@ pub enum Reply {
     InfrastructureError { code: String },
 }
 
+/// Wem eine logische Kennung gehört. Der Client vergibt sie EINMAL pro Speicherversuch und
+/// benutzt sie bei jeder Wiederholung erneut — nur so kann ein späterer, durabler Nachweis
+/// erkennen, dass zwei Anfragen dieselbe Absicht sind.
+///
+/// Übernommen wird sie nicht ungeprüft: sie muss ein UUID sein, und sie wird an den
+/// AUTHENTIFIZIERTEN Absender und die Operation gebunden. Dieselbe Kennung mit anderem Mandanten,
+/// anderer Filiale, anderem Benutzer oder anderer Operation ist ein Widerspruch und wird
+/// abgewiesen — sonst könnte ein Client mit einer geratenen Kennung an einem fremden Vorgang
+/// mitschreiben. Über den Inhalt einer Buchung entscheidet die Kennung nie; sie benennt nur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandIdentity {
+    pub command_id: String,
+    pub tenant_id: String,
+    pub branch_id: String,
+    pub user_id: String,
+    pub op: String,
+}
+
+/// Ein UUID in der kanonischen Schreibweise — nichts anderes wird angenommen. Damit kann die
+/// Kennung kein Pfad, kein SQL-Fragment und kein Bezeichner sein.
+pub fn is_valid_command_id(id: &str) -> bool {
+    let b = id.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, c) in b.iter().enumerate() {
+        let ok = match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 /// Wie ein Auftrag den Renderer erreicht. Als Merkmal ausgeführt, damit die Tests den echten
 /// Registerablauf ohne Fenster fahren können — und damit diese Datei nichts von Tauri wissen muss.
 pub trait CommandSink: Send + Sync {
@@ -135,6 +223,9 @@ pub struct Bridge {
     generation: AtomicU64,
     accepting: AtomicBool,
     pending: Mutex<HashMap<String, PendingEntry>>,
+    /// Welche logische Kennung zu wem gehoert. NUR prozessweit — der durable Nachweis fehlt und
+    /// gehoert nach C3 in dieselbe Transaktion wie die Buchung.
+    identities: Mutex<HashMap<String, CommandIdentity>>,
 }
 
 impl Bridge {
@@ -144,6 +235,7 @@ impl Bridge {
             generation: AtomicU64::new(0),
             accepting: AtomicBool::new(true),
             pending: Mutex::new(HashMap::new()),
+            identities: Mutex::new(HashMap::new()),
         }
     }
 
@@ -184,6 +276,33 @@ impl Bridge {
 
     pub async fn submit(&self, op: &str, payload: serde_json::Value) -> Result<Reply, BridgeError> {
         self.submit_with_timeout(op, payload, DEFAULT_TIMEOUT).await
+    }
+
+    /// Wie `submit`, aber mit der logischen Kennung des Clients. Die Bindung ist in C1 bewusst nur
+    /// prozessweit: sie beweist die REGEL (dieselbe Kennung heißt dieselbe Absicht), ersetzt aber
+    /// keinen durablen Nachweis. Genau deshalb ist in C1 auch keine verändernde Operation
+    /// registrierbar — ohne Ledger in derselben Transaktion wie die Buchung wäre jede
+    /// „genau einmal"-Behauptung unbelegt.
+    pub async fn submit_as(
+        &self,
+        identity: &CommandIdentity,
+        payload: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Reply, BridgeError> {
+        if !is_valid_command_id(&identity.command_id) {
+            return Err(BridgeError::BadCommandId);
+        }
+        {
+            let mut map = self.identities.lock().unwrap_or_else(|e| e.into_inner());
+            match map.get(&identity.command_id) {
+                // Dieselbe Kennung, derselbe Absender, dieselbe Operation → eine Wiederholung.
+                Some(prev) if prev == identity => {}
+                // Dieselbe Kennung, etwas anderes dahinter → fail-closed.
+                Some(_) => return Err(BridgeError::CommandIdConflict),
+                None => { map.insert(identity.command_id.clone(), identity.clone()); }
+            }
+        }
+        self.submit_with_timeout(&identity.op, payload, timeout).await
     }
 
     pub async fn submit_with_timeout(
