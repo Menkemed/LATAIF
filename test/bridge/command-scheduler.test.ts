@@ -147,11 +147,11 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 // denselben Ausgang benutzen — und die Innereien einer Störung bleiben beim Betreiber.
 {
   registerCommand('test.business', {
-    mutates: true,
+    kind: 'probe',
     handler: () => { throw new BusinessError('STOCK_UNAVAILABLE', 'nichts mehr da'); },
   });
   registerCommand('test.broken', {
-    mutates: true,
+    kind: 'probe',
     handler: () => { throw new Error('SELECT * FROM secrets failed at line 42'); },
   });
 
@@ -174,12 +174,12 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 {
   let inside = 0, peak = 0;
   const busy = async () => { inside += 1; peak = Math.max(peak, inside); await tick(10); inside -= 1; return { ok: true }; };
-  registerCommand('test.reads', { mutates: false, handler: busy });
+  registerCommand('test.reads', { kind: 'read', handler: busy });
   await Promise.all([executeCommand('test.reads', {}), executeCommand('test.reads', {}), executeCommand('test.reads', {})]);
   ok(peak > 1, `READ Lesen darf gleichzeitig laufen — eine Liste haelt keinen Verkauf auf (Spitze ${peak})`);
 
   inside = 0; peak = 0;
-  registerCommand('test.writes', { mutates: true, handler: busy });
+  registerCommand('test.writes', { kind: 'probe', handler: busy });
   await Promise.all([executeCommand('test.writes', {}), executeCommand('test.writes', {}), executeCommand('test.writes', {})]);
   ok(peak === 1, `WRITE Schreiben nie (Spitze ${peak})`);
 }
@@ -241,8 +241,8 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
     'WIRED jede Antwort traegt die Generation ihres Auftrags');
 
   const registry = src('src/core/bridge/command-registry.ts');
-  ok(/spec\.mutates\s*\r?\n?\s*\? await runExclusive/.test(registry),
-    'WIRED verändernde Aufträge gehen durch die Warteschlange');
+  ok(/spec\.kind !== 'read'\s*\r?\n?\s*\? await runExclusive/.test(registry),
+    'WIRED alles, was nicht nur liest, geht durch die Warteschlange');
   // C1 gibt ausdrücklich keinen produktiven Schreibvorgang frei.
   for (const forbidden of ['createInvoice', 'createProduct', 'createPurchase', 'sellProduct', 'createConsignment']) {
     ok(!registry.includes(forbidden), `WIRED C1 registriert keinen produktiven Schreibvorgang (${forbidden})`);
@@ -344,6 +344,70 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
   const upd = h.indexOf('SET next_number = next_number + 1');
   const sel = h.indexOf('SELECT', upd);
   ok(upd > 0 && sel > upd, 'SEQ und er erhoeht ZUERST und liest danach — keine Luecke zwischen Lesen und Schreiben');
+}
+
+// ── 12) Die Sperre ist eine Klasse, kein Namensverbot ─────────────────────
+//
+// Ein Verbot von fünf bekannten Namen hätte ein später hinzugefügtes `invoice.save` durchgelassen.
+// Deshalb entscheidet die KLASSE, und der Riegel steht im Code, nicht nur hier.
+{
+  const { REMOTE_MUTATIONS_ENABLED } = await import('../../src/core/bridge/command-registry.ts');
+  ok(REMOTE_MUTATIONS_ENABLED === false, 'GATE veraendernde Fernauftraege sind gesperrt');
+
+  for (const name of ['invoice.save', 'sale.commit', 'irgendwas.ganz.neu']) {
+    let threw: string | null = null;
+    try {
+      registerCommand(name, { kind: 'mutation', handler: () => ({ ok: true }) });
+    } catch (e) { threw = (e as Error).message; }
+    ok(threw !== null && /durable command ledger/.test(threw),
+      `GATE ein neuer Name mit Mutations-Klasse wird abgewiesen (${name}: ${threw ? 'refused' : 'ACCEPTED'})`);
+    ok(!knownCommands().includes(name), `GATE …und ist nicht registriert (${name})`);
+  }
+
+  // Und der Riegel steht im Produktcode, nicht nur in diesem Test.
+  const registry = src('src/core/bridge/command-registry.ts');
+  ok(/if \(spec\.kind === 'mutation' && !REMOTE_MUTATIONS_ENABLED\)/.test(registry),
+    'GATE der Riegel greift beim Registrieren');
+  // Im PRODUKTCODE wird genau eine Operation registriert — die Testhelfer oben zaehlen nicht mit.
+  const prod = registry.split(/\r?\n/).filter((l) => l.startsWith('registerCommand(')).length;
+  ok(prod === 1, `GATE der Produktcode registriert genau eine Operation (${prod})`);
+  ok(registry.includes('registerCommand(OP_PROBE, {'), 'GATE …und das ist die Probe');
+}
+
+// ── 13) Ein verlorener Antwortweg heisst NICHT „nicht passiert" ───────────
+//
+// Der gefährlichste Irrtum in dieser Schicht: 504 als „fehlgeschlagen" zu lesen. Der Auftrag war
+// beim Renderer; der kann ihn ausgeführt UND gespeichert haben, und nur die Antwort ging verloren.
+// Wer daraufhin wiederholt, bucht zweimal. Hier wird genau dieser Ablauf nachgestellt.
+{
+  const s = new CommandScheduler();
+  let domainExecutions = 0;
+  // Die „Buchung": zählt genau einmal hoch und ist danach dauerhaft.
+  const commit = () => s.run(async () => { await tick(2); domainExecutions += 1; return { committed: true }; });
+
+  // 1) Auftrag zugestellt, 2) Buchung läuft durch, 3) Antwort geht verloren.
+  const result = await commit();
+  ok(result.committed === true && domainExecutions === 1,
+    `UNKNOWN die Buchung ist passiert (${domainExecutions}x)`);
+
+  // Der Aufrufer draussen sieht davon nichts — er bekam eine Zeitgrenze.
+  const seenByCaller = { ok: false, error: 'BRIDGE_TIMEOUT', outcome: 'unknown' };
+  ok(seenByCaller.outcome === 'unknown',
+    'UNKNOWN …aber der Client sieht nur, dass er es NICHT weiss');
+  ok(seenByCaller.outcome !== 'not_executed',
+    'UNKNOWN und ausdruecklich NICHT \"ist nicht passiert\"');
+
+  // Eine blinde Wiederholung wuerde ein zweites Mal buchen — genau deshalb ist sie gesperrt.
+  await commit();
+  ok(domainExecutions === 2,
+    `UNKNOWN eine blinde Wiederholung bucht wirklich ein zweites Mal (${domainExecutions}x) — deshalb`
+    + ' bleibt jede veraendernde Fernoperation zu, bis der durable Nachweis steht');
+
+  // Und das ist der Grund, warum C1 nichts Veraenderndes registrieren kann.
+  let refused = false;
+  try { registerCommand('sale.retryable', { kind: 'mutation', handler: () => ({ ok: true }) }); }
+  catch { refused = true; }
+  ok(refused, 'UNKNOWN …und genau das erzwingt die Registrierungssperre');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c1 bridge: ${PASS} passed, ${fails.length} failed`);

@@ -381,3 +381,166 @@ fn the_wiring_is_what_it_claims_to_be() {
         "und dieselbe Operation"
     );
 }
+
+// ── 12) Ein verlorener Antwortweg ist kein „nicht passiert" ───────────────
+//
+// Die gefährlichste Fehlannahme dieser Schicht. Der Auftrag WAR beim Renderer; der kann ihn
+// vollständig ausgeführt und gespeichert haben, und nur die Antwort ging verloren. Wer daraufhin
+// wiederholt, bucht zweimal. Deshalb sagt jeder Fehler jetzt zusätzlich, was er über die
+// AUSFÜHRUNG weiß — und die Grenze liegt exakt bei der Zustellung.
+#[tokio::test]
+async fn a_lost_reply_is_unknown_not_failed() {
+    let (bridge, sink) = bridge_with_sink();
+    bridge.announce_generation();
+
+    let err = bridge
+        .submit_with_timeout(OP_PROBE, serde_json::Value::Null, SHORT)
+        .await
+        .expect_err("keine Antwort");
+    assert_eq!(err, BridgeError::Timeout);
+    assert_eq!(sink.count(), 1, "er war unterwegs");
+    assert_eq!(
+        err.outcome(),
+        Outcome::Unknown,
+        "also ist offen, ob er lief — NICHT 'ist nicht passiert'"
+    );
+    assert_eq!(err.outcome().as_str(), "unknown");
+}
+
+#[tokio::test]
+async fn everything_that_never_left_is_safe_to_retry() {
+    // Diese vier scheitern VOR dem Senden. Nur bei ihnen darf ein Client bedenkenlos wiederholen.
+    for e in [
+        BridgeError::NotReady,
+        BridgeError::ShuttingDown,
+        BridgeError::OpNotAllowed,
+        BridgeError::DeliveryFailed,
+    ] {
+        assert_eq!(e.outcome(), Outcome::NotExecuted, "{} ist sicher", e.code());
+    }
+    // Diese beiden waren unterwegs.
+    for e in [BridgeError::Timeout, BridgeError::Reloaded] {
+        assert_eq!(e.outcome(), Outcome::Unknown, "{} ist offen", e.code());
+    }
+    // Und die Prüfung ist wirklich am Zustand festgemacht, nicht am Statuscode: 503 gibt es in
+    // beiden Klassen.
+    assert_eq!(BridgeError::ShuttingDown.http_status(), 503);
+    assert_eq!(BridgeError::Reloaded.http_status(), 503);
+    assert_ne!(
+        BridgeError::ShuttingDown.outcome(),
+        BridgeError::Reloaded.outcome(),
+        "derselbe Statuscode, verschiedene Gewissheit"
+    );
+}
+
+#[tokio::test]
+async fn a_reload_after_dispatch_is_also_unknown() {
+    let (bridge, _sink) = bridge_with_sink();
+    let bridge = Arc::new(bridge);
+    bridge.announce_generation();
+    let b = bridge.clone();
+    let pending = tokio::spawn(async move {
+        b.submit_with_timeout(OP_PROBE, serde_json::Value::Null, Duration::from_secs(30))
+            .await
+    });
+    for _ in 0..200 {
+        if bridge.pending_count() == 1 { break; }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    bridge.announce_generation();
+    let err = pending.await.unwrap().expect_err("aufgeloest");
+    assert_eq!(err.outcome(), Outcome::Unknown, "auch ein Neuladen sagt nichts ueber die Ausfuehrung");
+}
+
+// ── 13) Die logische Kennung gehört dem Client — geprüft und gebunden ─────
+#[tokio::test]
+async fn a_command_id_must_be_a_uuid() {
+    assert!(is_valid_command_id("4f8b1a2c-9d3e-4a5b-8c7d-0e1f2a3b4c5d"));
+    for bad in [
+        "",
+        "nope",
+        "4F8B1A2C-9D3E-4A5B-8C7D-0E1F2A3B4C5D", // Grossschreibung: eine zweite Schreibweise waere eine zweite Kennung
+        "4f8b1a2c9d3e4a5b8c7d0e1f2a3b4c5d",
+        "../../etc/passwd",
+        "'; DROP TABLE products; --",
+    ] {
+        assert!(!is_valid_command_id(bad), "abgelehnt: {bad}");
+    }
+}
+
+fn identity(id: &str, op: &str, user: &str) -> CommandIdentity {
+    CommandIdentity {
+        command_id: id.to_string(),
+        tenant_id: "tenant-1".into(),
+        branch_id: "branch-main".into(),
+        user_id: user.into(),
+        op: op.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn the_same_id_for_something_else_is_refused() {
+    let (bridge, sink) = bridge_with_sink();
+    bridge.announce_generation();
+    const ID: &str = "4f8b1a2c-9d3e-4a5b-8c7d-0e1f2a3b4c5d";
+
+    // Erster Versuch: laeuft (und laeuft in die Zeitgrenze, das reicht — er wurde gesendet).
+    let first = bridge
+        .submit_as(&identity(ID, OP_PROBE, "user-a"), serde_json::Value::Null, SHORT)
+        .await;
+    assert_eq!(first.unwrap_err(), BridgeError::Timeout);
+    assert_eq!(sink.count(), 1);
+
+    // Dieselbe Kennung, derselbe Absender, dieselbe Operation: das ist eine Wiederholung.
+    let retry = bridge
+        .submit_as(&identity(ID, OP_PROBE, "user-a"), serde_json::Value::Null, SHORT)
+        .await;
+    assert_eq!(retry.unwrap_err(), BridgeError::Timeout, "eine Wiederholung ist erlaubt");
+    assert_eq!(sink.count(), 2);
+
+    // Dieselbe Kennung, ANDERER Benutzer: ein Widerspruch.
+    let stolen = bridge
+        .submit_as(&identity(ID, OP_PROBE, "user-b"), serde_json::Value::Null, SHORT)
+        .await;
+    assert_eq!(stolen.unwrap_err(), BridgeError::CommandIdConflict);
+    assert_eq!(sink.count(), 2, "und er wurde GAR NICHT gesendet");
+    assert_eq!(
+        BridgeError::CommandIdConflict.outcome(),
+        Outcome::NotExecuted,
+        "ein abgewiesener Widerspruch ist sicher nicht passiert"
+    );
+    assert_eq!(BridgeError::CommandIdConflict.http_status(), 409);
+
+    // Und eine kaputte Kennung erreicht ebenfalls nichts.
+    let bad = bridge
+        .submit_as(&identity("nope", OP_PROBE, "user-a"), serde_json::Value::Null, SHORT)
+        .await;
+    assert_eq!(bad.unwrap_err(), BridgeError::BadCommandId);
+    assert_eq!(sink.count(), 2);
+}
+
+// ── 14) Wo der durable Nachweis fehlt, wird nichts Veraenderndes registriert ─
+#[test]
+fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
+    let routes = include_str!("sync/routes.rs");
+    assert!(routes.contains("rename = \"commandId\""), "die logische Kennung kommt vom Client");
+    assert!(routes.contains("submit_as(&identity"), "und wird gebunden, nicht bloss weitergereicht");
+    assert!(
+        routes.contains("command_id: req.command_id.clone()")
+            && routes.contains("tenant_id: claims.tenant_id.clone()")
+            && routes.contains("user_id: claims.sub.clone()"),
+        "gebunden an den GEPRUEFTEN Absender, nicht an den Rumpf"
+    );
+    assert!(
+        routes.contains("\"outcome\": e.outcome().as_str()"),
+        "jede Fehlerantwort sagt, ob wiederholt werden darf"
+    );
+
+    // Und der Riegel gegen veraendernde Fernoperationen steht im Renderer-Code.
+    let registry = include_str!("../../src/core/bridge/command-registry.ts");
+    assert!(registry.contains("export const REMOTE_MUTATIONS_ENABLED = false;"));
+    assert!(
+        registry.contains("if (spec.kind === 'mutation' && !REMOTE_MUTATIONS_ENABLED)"),
+        "eine KLASSE, kein Namensverbot — ein neu benanntes invoice.save faellt genauso"
+    );
+}
