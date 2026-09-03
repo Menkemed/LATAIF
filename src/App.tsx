@@ -153,6 +153,14 @@ export default function App() {
           }
         } catch { /* ignore */ }
         initialize();
+        // CENTRAL-C1 — erst HIER meldet sich die Kommandobruecke als bereit: die Datenbank ist
+        // offen und die Stores sind geladen. Vorher weist Rust jede Anfrage mit einer Begruendung
+        // ab, statt ein Ereignis an ein Fenster zu schicken, das noch nichts ausfuehren kann.
+        // Nach einem Neuladen laeuft das erneut und meldet eine NEUE Generation an; alles, was
+        // fuer das vorige Fenster offen war, hat Rust dann bereits abgeschlossen.
+        import('@/core/bridge/bridge-listener')
+          .then((m) => m.startBridgeWithTauri())
+          .catch((e) => console.warn('[bridge] not started:', e));
         if (!automationsRegistered) {
           initAutomation();
           // Auto-configure LAN sync on Tauri desktop (become server if first, else client)

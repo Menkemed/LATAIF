@@ -7,6 +7,8 @@ mod data_root;
 mod data_root_move;
 // DATA-ROOT-B1b — einen bestehenden Datenort pruefen und uebernehmen.
 mod data_root_adopt;
+// CENTRAL-C1 — Netzanfrage -> Primary-Renderer -> Antwort, mit Lebenszyklus-Vertrag.
+mod bridge;
 mod media;
 mod sync;
 
@@ -1481,6 +1483,10 @@ async fn finalize_application_shutdown(
     let proceed = SHUTDOWN_STARTED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok();
+    // CENTRAL-C1 — ab hier nimmt die Bruecke nichts mehr an, und wer noch wartet, bekommt eine
+    // Begruendung statt einer Antwort, die niemand mehr geben kann. Vor dem Serverstop, damit
+    // zwischen "Server laeuft noch" und "Renderer ist weg" kein Auftrag mehr eingeht.
+    if let Some(b) = bridge::global() { b.stop_accepting(); }
     // Arc/Handle vor dem await klonen — kein State-Borrow ueber den await-Punkt.
     let server = state.server.clone();
     let app_handle = app.clone();
@@ -1496,6 +1502,53 @@ async fn finalize_application_shutdown(
     )
     .await;
     Ok(())
+}
+
+// ── CENTRAL-C1 — die Renderer-Seite der Kommandobrücke ────────────────────
+//
+// Zwei Kommandos, und beide sind bewusst schmal: der Renderer sagt „ich bin bereit" und bekommt
+// dafür seine Generationsnummer, und er liefert Antworten unter der Kennung ab, die Rust vergeben
+// hat. Er kann keine Kennung erfinden, die niemand angefordert hat — dann findet die Antwort
+// keinen Wartenden und verfällt.
+
+/// Wie ein Auftrag das Fenster erreicht. Der einzige Ort, an dem die Brücke Tauri kennt.
+struct WindowSink {
+    app: tauri::AppHandle,
+}
+
+impl bridge::CommandSink for WindowSink {
+    fn deliver(&self, envelope: &bridge::Envelope) -> Result<(), String> {
+        use tauri::Emitter;
+        // camelCase nach draußen — der Renderer liest `opId`.
+        let payload = serde_json::json!({
+            "opId": envelope.op_id,
+            "op": envelope.op,
+            "generation": envelope.generation,
+            "payload": envelope.payload,
+        });
+        self.app
+            .emit(bridge::EVENT_COMMAND, payload)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Der Renderer meldet, dass seine Geschäftsmaschine läuft. Gibt die Nummer dieses
+/// Renderer-Lebens zurück; alles, was für ein früheres Leben offen war, ist damit beendet.
+#[tauri::command]
+fn bridge_announce_ready() -> Result<u64, String> {
+    match bridge::global() {
+        Some(b) => Ok(b.announce_generation()),
+        None => Err("BRIDGE_NOT_INSTALLED".to_string()),
+    }
+}
+
+/// Die Antwort auf genau einen Auftrag.
+#[tauri::command]
+fn bridge_reply(op_id: String, generation: u64, reply: bridge::Reply) -> Result<(), String> {
+    match bridge::global() {
+        Some(b) => b.reply(&op_id, generation, reply).map_err(|e| e.code().to_string()),
+        None => Err("BRIDGE_NOT_INSTALLED".to_string()),
+    }
 }
 
 // POST-RELEASE-SHUTDOWN — stop the LAN server and CONFIRM the listener is actually released before a
@@ -1608,6 +1661,11 @@ mod mobile_runtime_gate_tests {
         assert!(super::mobile_runtime_gate(&c, &exp(2, "tenant-acme", "branch-acme")).is_ok(), "only the new binding opens");
     }
 }
+
+// CENTRAL-C1 — die Kommandobruecke an ihren vier Lebenszyklusfaellen.
+#[cfg(test)]
+#[path = "bridge_tests.rs"]
+mod bridge_tests;
 
 // DATA-ROOT-B1a — die vollstaendige Fernbedienungs-Oberflaeche eines Starts ohne Datenwurzel.
 #[cfg(test)]
@@ -2969,6 +3027,11 @@ pub fn run() {
                 app.manage(FirstRunState { control_dir: locator_dir.clone(), busy: AtomicBool::new(false) });
                 return Ok(());
             }
+            // CENTRAL-C1 — die eine Kommandobruecke des Prozesses. Sie steht ERST hier: ein Start,
+            // der noch nach seinem Datenort fragt, hat keine Geschaeftsmaschine, die etwas
+            // ausfuehren koennte. Bereit ist sie damit noch nicht — das meldet der Renderer selbst.
+            bridge::install(bridge::Bridge::new(Box::new(WindowSink { app: app.handle().clone() })));
+
             let root = match data_root_move::resolve_with_pending_move(&locator_dir) {
                 Ok((r, outcome)) => {
                     if outcome != data_root_move::MoveOutcome::None {
@@ -3103,6 +3166,9 @@ pub fn run() {
             preflight_data_root_move,
             schedule_data_root_move,
             clear_pending_data_root_move,
+            // CENTRAL-C1 — die Renderer-Seite der Kommandobruecke.
+            bridge_announce_ready,
+            bridge_reply,
             pending_data_root_move,
             sync_server_start,
             primary_status,

@@ -64,6 +64,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // MOBILE-04B2A8-I1 — authenticated mobile upload ingress. Separate route; `/sync/push` above is
         // untouched. Same JWT auth layer + the same 50 MB body limit (build_api_router) as every /api route.
         .route("/mobile/upload", post(mobile_upload_ingress))
+        // CENTRAL-C1 — der EINZIGE Weg fuer einen Auftrag von einem anderen Rechner. Feste
+        // Namensliste, keine SQL-Uebergabe, kein generisches Ausfuehren; hinter derselben Anmeldung.
+        .route("/command", post(command_execute))
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
     Router::new()
@@ -89,6 +92,84 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// quarantine write or an activity mark.
 pub fn build_api_router(state: Arc<AppState>, body_limit: usize) -> Router<Arc<AppState>> {
     api_routes(state).layer(DefaultBodyLimit::max(body_limit))
+}
+
+// ── CENTRAL-C1 — ein Auftrag von einem anderen Rechner ────────────────────
+//
+// Der einzige Weg, auf dem ein Client eine Geschäftsoperation auslösen kann. Absichtlich KEIN
+// allgemeiner „führe aus"-Endpunkt: der Aufrufer nennt einen Namen aus einer festen Liste, und
+// die Nutzlast ist Daten. Es gibt keinen Parameter, in dem SQL, ein Funktionsname oder ein Pfad
+// stehen könnte. Die Anmeldung liegt davor (dieselbe `auth_middleware` wie bei jeder /api-Route).
+//
+// Ausgeführt wird nichts hier: der Auftrag geht an den Primary-Renderer, der die
+// Geschäftsdatenbank hält, und dessen Antwort wird zu dieser HTTP-Antwort. Die Zustände
+// „Renderer nicht bereit", „neu geladen", „wird beendet" und „Zeitgrenze" sind unterschiedliche
+// Codes, weil sie unterschiedliche Handlungen bedeuten.
+
+#[derive(serde::Deserialize)]
+struct CommandRequest {
+    op: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+async fn command_execute(
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<CommandRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let bridge = match crate::bridge::global() {
+        Some(b) => b,
+        // Kein Fenster, keine Geschäftsmaschine — das ist kein Fehler des Clients.
+        None => {
+            return error_response(crate::bridge::BridgeError::NotReady);
+        }
+    };
+
+    // Die Zulassungsliste wird HIER schon geprüft, damit ein unbekannter Name nicht einmal in die
+    // Warteschlange gerät; `submit` prüft sie ein zweites Mal (der Renderer ein drittes Mal).
+    if !crate::bridge::REMOTE_OPS.contains(&req.op.as_str()) {
+        return error_response(crate::bridge::BridgeError::OpNotAllowed);
+    }
+
+    // Wer fragt, gehört in die Nutzlast — nicht, weil der Renderer es glauben soll, sondern damit
+    // eine Buchung später zuordenbar ist. Der Client kann diese Felder nicht setzen: sie kommen
+    // aus dem geprüften Token, nicht aus dem Rumpf.
+    let payload = serde_json::json!({
+        "actor": {
+            "userId": claims.sub,
+            "tenantId": claims.tenant_id,
+            "branchId": claims.branch_id,
+            "role": claims.role,
+        },
+        "input": req.payload,
+    });
+
+    match bridge.submit(&req.op, payload).await {
+        Ok(crate::bridge::Reply::Ok { value }) => {
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "value": value }))).into_response()
+        }
+        // Ein fachliches Nein ist eine Antwort, kein Serverfehler: 409, damit ein Client es nicht
+        // blind wiederholt.
+        Ok(crate::bridge::Reply::BusinessError { code, message }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "ok": false, "error": code, "message": message })),
+        )
+            .into_response(),
+        Ok(crate::bridge::Reply::InfrastructureError { code }) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": code })),
+        )
+            .into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+fn error_response(e: crate::bridge::BridgeError) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    (status, Json(serde_json::json!({ "ok": false, "error": e.code() }))).into_response()
 }
 
 async fn health() -> &'static str {
