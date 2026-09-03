@@ -32,7 +32,7 @@
 //! Die Reihenfolge der Geschäftsschreibvorgänge wird NICHT hier hergestellt. Ein Mutex um sql.js
 //! wäre eine zweite Autorität; die Serialisierung gehört in den Renderer, der die Datenbank hält.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -224,6 +224,82 @@ pub trait CommandSink: Send + Sync {
     fn deliver(&self, envelope: &Envelope) -> Result<(), String>;
 }
 
+/// Wie viele kürzlich benutzte Kennungen behalten werden.
+///
+/// Der Zweck ist eng: eine versehentliche sofortige Wiederverwendung derselben Kennung für einen
+/// ANDEREN Rumpf soll auffallen. Dafür reichen die letzten paar hundert; ein Client, der eine
+/// Kennung nach tausend anderen Aufträgen mit neuem Inhalt erneut benutzt, ist kein Versehen mehr.
+/// Bewusst begrenzt: eine Struktur, die nur wächst, ist in einem Programm, das monatelang läuft,
+/// ein Leck — und dieser Schutz ist ohnehin nur prozessweit.
+pub const IDENTITY_RETENTION: usize = 1024;
+
+/// Eine gemerkte Kennung. `in_flight` zählt die Aufträge, die gerade darauf laufen: solange einer
+/// offen ist, darf der Eintrag NICHT verdrängt werden, sonst könnte seine eigene Wiederholung
+/// mitten im Lauf plötzlich als etwas Neues gelten.
+struct IdentityEntry {
+    identity: CommandIdentity,
+    in_flight: usize,
+}
+
+/// Begrenzter Speicher mit Verdrängung in Ankunftsreihenfolge. Kein LRU-Apparat: der Zweck ist
+/// „kürzlich", nicht „häufig", und die Reihenfolge der Ankunft beantwortet genau das.
+struct IdentityStore {
+    map: HashMap<String, IdentityEntry>,
+    order: VecDeque<String>,
+}
+
+impl IdentityStore {
+    fn new() -> Self {
+        Self { map: HashMap::new(), order: VecDeque::new() }
+    }
+
+    /// Meldet einen Auftrag an. `Err` heißt: dieselbe Kennung steht schon für etwas anderes.
+    fn begin(&mut self, identity: &CommandIdentity) -> Result<(), BridgeError> {
+        match self.map.get_mut(&identity.command_id) {
+            Some(e) if e.identity == *identity => {
+                e.in_flight += 1;
+                return Ok(());
+            }
+            Some(_) => return Err(BridgeError::CommandIdConflict),
+            None => {}
+        }
+        self.map.insert(
+            identity.command_id.clone(),
+            IdentityEntry { identity: identity.clone(), in_flight: 1 },
+        );
+        self.order.push_back(identity.command_id.clone());
+        self.evict();
+        Ok(())
+    }
+
+    fn finish(&mut self, command_id: &str) {
+        if let Some(e) = self.map.get_mut(command_id) {
+            e.in_flight = e.in_flight.saturating_sub(1);
+        }
+        self.evict();
+    }
+
+    /// Verdrängt die ältesten, ÜBERSPRINGT aber alles, was gerade läuft. Die Schleife ist durch die
+    /// Länge begrenzt: sind ausnahmsweise alle Einträge offen, wird nichts verdrängt und der
+    /// Speicher wächst vorübergehend, statt einen laufenden Auftrag zu verlieren.
+    fn evict(&mut self) {
+        let mut checked = 0usize;
+        while self.map.len() > IDENTITY_RETENTION && checked < self.order.len() {
+            checked += 1;
+            let Some(key) = self.order.pop_front() else { break };
+            match self.map.get(&key) {
+                Some(e) if e.in_flight > 0 => self.order.push_back(key), // laeuft noch — hinten anstellen
+                Some(_) => { self.map.remove(&key); }
+                None => {}
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
 struct PendingEntry {
     generation: u64,
     tx: oneshot::Sender<Reply>,
@@ -237,7 +313,7 @@ pub struct Bridge {
     pending: Mutex<HashMap<String, PendingEntry>>,
     /// Welche logische Kennung zu wem gehoert. NUR prozessweit — der durable Nachweis fehlt und
     /// gehoert nach C3 in dieselbe Transaktion wie die Buchung.
-    identities: Mutex<HashMap<String, CommandIdentity>>,
+    identities: Mutex<IdentityStore>,
 }
 
 impl Bridge {
@@ -247,7 +323,7 @@ impl Bridge {
             generation: AtomicU64::new(0),
             accepting: AtomicBool::new(true),
             pending: Mutex::new(HashMap::new()),
-            identities: Mutex::new(HashMap::new()),
+            identities: Mutex::new(IdentityStore::new()),
         }
     }
 
@@ -305,16 +381,21 @@ impl Bridge {
             return Err(BridgeError::BadCommandId);
         }
         {
-            let mut map = self.identities.lock().unwrap_or_else(|e| e.into_inner());
-            match map.get(&identity.command_id) {
-                // Dieselbe Kennung, derselbe Absender, dieselbe Operation → eine Wiederholung.
-                Some(prev) if prev == identity => {}
-                // Dieselbe Kennung, etwas anderes dahinter → fail-closed.
-                Some(_) => return Err(BridgeError::CommandIdConflict),
-                None => { map.insert(identity.command_id.clone(), identity.clone()); }
-            }
+            let mut store = self.identities.lock().unwrap_or_else(|e| e.into_inner());
+            store.begin(identity)?;
         }
-        self.submit_with_timeout(&identity.op, payload, timeout).await
+        // Der Eintrag bleibt geschuetzt, bis DIESER Auftrag durch ist — auch wenn er scheitert.
+        let out = self.submit_with_timeout(&identity.op, payload, timeout).await;
+        {
+            let mut store = self.identities.lock().unwrap_or_else(|e| e.into_inner());
+            store.finish(&identity.command_id);
+        }
+        out
+    }
+
+    /// Nur zur Pruefung: wie viele Kennungen gerade gemerkt sind.
+    pub fn remembered_identities(&self) -> usize {
+        self.identities.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub async fn submit_with_timeout(

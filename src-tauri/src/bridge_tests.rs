@@ -56,6 +56,8 @@ fn bridge_with_sink() -> (Bridge, Arc<TestSink>) {
 }
 
 const SHORT: Duration = Duration::from_millis(250);
+/// Fuer Fuellauftraege, die nur einen Eintrag erzeugen sollen: so kurz wie moeglich.
+const TINY: Duration = Duration::from_millis(1);
 
 // ── 1) Der gute Tag ────────────────────────────────────────────────────────
 #[tokio::test]
@@ -647,5 +649,128 @@ async fn a_changed_identity_still_conflicts_even_with_the_same_payload() {
     assert!(
         routes.contains("payload_hash: crate::bridge::payload_fingerprint(&req.payload)"),
         "gebunden wird der semantische Rumpf"
+    );
+}
+
+// ── 16) Der Schutz merkt sich nur, was kürzlich war ───────────────────────
+//
+// Die Bindung von Kennung zu Absicht war eine Landkarte, die nur wuchs: jede neue Kennung blieb bis
+// zum Prozessende liegen. In einem Programm, das monatelang läuft, ist das ein Leck. Der Zweck ist
+// aber eng — eine versehentliche SOFORTIGE Wiederverwendung mit anderem Inhalt soll auffallen —
+// also reicht ein begrenzter Vorrat der letzten Kennungen.
+//
+// Was dabei nicht passieren darf: einen Eintrag verdrängen, auf dem gerade ein Auftrag läuft.
+// Seine eigene Wiederholung würde dann mitten im Lauf plötzlich als etwas Neues gelten.
+#[tokio::test]
+async fn the_identity_store_stays_bounded() {
+    let (bridge, _sink) = bridge_with_sink();
+    bridge.announce_generation();
+    let body = serde_json::json!({ "n": 1 });
+
+    // Deutlich mehr Kennungen als der Vorrat fasst — jede genau einmal.
+    for i in 0..(IDENTITY_RETENTION + 200) {
+        let id = format!("{:08x}-0000-4000-8000-000000000000", i);
+        let _ = bridge
+            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &body), body.clone(), TINY)
+            .await;
+    }
+    let kept = bridge.remembered_identities();
+    assert!(
+        kept <= IDENTITY_RETENTION,
+        "der Vorrat bleibt begrenzt ({kept} <= {IDENTITY_RETENTION})"
+    );
+    assert!(kept > 0, "…und er ist nicht einfach leer");
+}
+
+#[tokio::test]
+async fn a_running_command_is_never_evicted() {
+    let (bridge, _sink) = bridge_with_sink();
+    let bridge = Arc::new(bridge);
+    bridge.announce_generation();
+    const ID: &str = "aaaaaaaa-0000-4000-8000-00000000ffff";
+    let body = serde_json::json!({ "amount": 1 });
+
+    // Ein Auftrag, der lange offen bleibt.
+    let b = bridge.clone();
+    let held = tokio::spawn({
+        let body = body.clone();
+        async move {
+            b.submit_as(
+                &identity_with(ID, OP_PROBE, "user-a", &body),
+                body,
+                Duration::from_secs(30),
+            )
+            .await
+        }
+    });
+    for _ in 0..200 {
+        if bridge.pending_count() == 1 { break; }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // Genug andere Kennungen, um den Vorrat mehrfach zu fuellen.
+    let other = serde_json::json!({ "n": 2 });
+    for i in 0..(IDENTITY_RETENTION + 50) {
+        let id = format!("{:08x}-1111-4000-8000-000000000000", i);
+        let _ = bridge
+            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &other), other.clone(), TINY)
+            .await;
+    }
+
+    // Der laufende Auftrag ist noch geschuetzt: dieselbe Kennung mit ANDEREM Inhalt faellt auf.
+    let changed = serde_json::json!({ "amount": 999 });
+    let err = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), changed, SHORT)
+        .await
+        .expect_err("die laufende Kennung darf nicht verdraengt worden sein");
+    assert_eq!(err, BridgeError::CommandIdConflict);
+
+    bridge.stop_accepting();
+    let _ = held.await.unwrap();
+}
+
+#[tokio::test]
+async fn within_the_retention_a_changed_payload_still_conflicts() {
+    let (bridge, _sink) = bridge_with_sink();
+    bridge.announce_generation();
+    const ID: &str = "bbbbbbbb-0000-4000-8000-000000000001";
+    let first = serde_json::json!({ "amount": 100 });
+    let _ = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &first), first, SHORT)
+        .await;
+
+    // Ein paar andere dazwischen — weit unterhalb der Grenze, also bleibt die Bindung erhalten.
+    let filler = serde_json::json!({ "n": 3 });
+    for i in 0..10 {
+        let id = format!("{:08x}-2222-4000-8000-000000000000", i);
+        let _ = bridge
+            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &filler), filler.clone(), TINY)
+            .await;
+    }
+
+    let changed = serde_json::json!({ "amount": 101 });
+    let err = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), changed, SHORT)
+        .await
+        .expect_err("innerhalb des Vorrats faellt das auf");
+    assert_eq!(err, BridgeError::CommandIdConflict);
+}
+
+#[test]
+fn the_retention_is_not_an_exactly_once_claim() {
+    // Was hier steht, ist ein Schutz gegen ein Versehen — kein Geschaeftsversprechen. Faellt eine
+    // alte Kennung aus dem Vorrat, wuerde dieselbe Kennung mit neuem Inhalt wieder durchgehen. Das
+    // ist genau so lange hinnehmbar, wie ueberhaupt nichts Veraenderndes fern ausgefuehrt werden
+    // kann — und dafuer sorgt der Riegel im Renderer.
+    let registry = include_str!("../../src/core/bridge/command-registry.ts");
+    assert!(
+        registry.contains("export const REMOTE_MUTATIONS_ENABLED = false;"),
+        "solange nichts Veraenderndes registrierbar ist, ist eine Verdraengung folgenlos"
+    );
+    let bridge_src = include_str!("bridge.rs");
+    assert!(
+        bridge_src.contains("nur prozessweit") || bridge_src.contains("nicht-durable")
+            || bridge_src.contains("prozessweite"),
+        "und die Datei sagt selbst, dass dieser Schutz nicht durable ist"
     );
 }
