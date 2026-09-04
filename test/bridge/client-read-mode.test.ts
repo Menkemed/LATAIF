@@ -43,6 +43,16 @@ const code = (p: string): string => src(p)
     return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
   })
   .join('\n');
+/** Läuft einen Baum ab und übergibt jede TypeScript-Datei mit ihrem Inhalt. */
+function walk(dir: string, visit: (p: string, text: string) => void): void {
+  for (const name of readdirSync(dir)) {
+    const p = resolvePath(dir, name);
+    if (statSync(p).isDirectory()) { walk(p, visit); continue; }
+    if (!/\.(ts|tsx)$/.test(name)) continue;
+    visit(p, readFileSync(p, 'utf8'));
+  }
+}
+
 const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // Ein Browser-Ersatz, damit `client-mode` unter node laeuft. Nur Schluessel und Werte, kein Zauber.
@@ -314,6 +324,138 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   ok(!/base64|dataUrl|imageBytes/.test(reads), 'MEDIA …und schickt keine Bilddaten durch den Lesebefehl');
 }
 
+// ── 10) Der ECHTE Schreibweg, nicht nur der der Brücke ────────────────────
+//
+// Der Befund, der diesen Abschnitt nötig machte: die Leser-Schreiber-Ordnung schützte zunächst nur
+// Aufträge, die durch `executeCommand` kamen. Ein Klick auf dem Primary rief `createProductWithMedia`
+// direkt — an der Schranke vorbei. Genau dieser Weg ist mehrphasig, also war er der einzige, der
+// sie gebraucht hätte.
+//
+// Der Umfang des Riegels folgt aus einer Zählung, nicht aus einem Gefühl: NUR `async` Aktionen
+// können überhaupt unterbrochen werden, weil ein Lesevorgang erst an einem `await` drankommt. Von
+// allen 28 Stores haben genau drei überhaupt `async` Aktionen, und nur vier davon fassen
+// Geschäftsdaten an.
+{
+  const store = code('src/stores/productStore.ts');
+  const docs = code('src/stores/documentStore.ts');
+
+  for (const [file, text, name] of [
+    ['productStore', store, 'createProductWithMedia'],
+    ['productStore', store, 'editProductWithMedia'],
+    ['productStore', store, 'editProductTextDurably'],
+    ['documentStore', docs, 'uploadDocument'],
+    ['documentStore', docs, 'extractOcr'],
+  ]) {
+    ok(new RegExp(`${name}: \\([^)]*\\) => runExclusive\\(async`).test(text),
+      `REALWRITE ${file}.${name} betritt die Spur`);
+    ok(!new RegExp(`${name}: async \\(`).test(text), `REALWRITE …und nicht mehr daran vorbei (${name})`);
+  }
+
+  // Und es gibt keinen weiteren mehrphasigen Geschaeftsschreiber, der uebersehen waere.
+  let asyncActions = [];
+  walk(resolvePath(repo, 'src/stores'), (p, text) => {
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^\s{2}([A-Za-z][A-Za-z0-9_]*): async \(/);
+      if (m) asyncActions.push(p.slice(repo.length + 1).split('\\').join('/') + ':' + m[1]);
+    }
+  });
+  ok(asyncActions.length === 1 && asyncActions[0].endsWith('authStore.ts:login'),
+    `REALWRITE die einzige verbleibende async-Aktion ist die Anmeldung (${asyncActions.join(', ') || 'keine'})`);
+
+  // Die Automatisierung schreibt eigenes SQL — aber SYNCHRON, also unteilbar.
+  for (const f of ['src/core/automation/automation-handlers.ts', 'src/core/automation/daily-sweep.ts']) {
+    ok((src(f).match(/await /g) || []).length === 0,
+      `REALWRITE ${f} laeuft synchron durch — ein Lesen kann dort nicht hinein`);
+  }
+}
+
+// ── 11) Der Ablauf, den §1 verlangt — an der echten Warteschlange ─────────
+//
+// Schreiber betritt die Spur → hält an einem kontrollierten Punkt → ein ECHTER Lesebefehl trifft
+// ein → er darf sein SQL noch nicht ausführen → Schreiber endet → erst dann liest er, und sieht
+// ausschließlich den Endzustand.
+{
+  const { registerCommand: reg, executeCommand: exec } =
+    await import('../../src/core/bridge/command-registry.ts');
+  const { businessWriteScheduler: lane, runExclusive: enter } =
+    await import('../../src/core/bridge/command-scheduler.ts');
+
+  const events = [];
+  let phase = 'before';                 // der beobachtbare Zwischenzustand des Schreibers
+  let readSawPhase = null;
+  let release;
+  const held = new Promise((r) => { release = r; });
+
+  reg('test.c2read', {
+    kind: 'read',
+    handler: () => {
+      events.push('read:sql');
+      readSawPhase = phase;             // was der Lesevorgang WIRKLICH sieht
+      return { phase };
+    },
+  });
+
+  // 1./2. Der Schreiber betritt dieselbe Spur wie die echten Aktionen und haelt an.
+  const writer = enter(async () => {
+    events.push('write:start');
+    phase = 'half';                     // Produkt geschrieben, Galerie noch nicht
+    await held;                         // genau die Luecke, die der Medienweg wirklich hat
+    phase = 'done';
+    events.push('write:end');
+  });
+
+  await tick(5);
+  ok(events.join(',') === 'write:start', `BARRIER der Schreiber haelt mitten drin (${events.join(',')})`);
+
+  // 3./4. Der Lesebefehl trifft ein — und darf sein SQL NICHT ausfuehren.
+  const read = exec('test.c2read', {});
+  await tick(20);
+  ok(!events.includes('read:sql'),
+    `BARRIER der Lesebefehl wartet, statt den Zwischenzustand zu sehen (${events.join(',')})`);
+
+  // 5./6. Der Schreiber endet, erst danach liest der Befehl — und sieht nur den Endzustand.
+  release();
+  const answer = await read;
+  await writer;
+  ok(events.join(',') === 'write:start,write:end,read:sql',
+    `BARRIER die Reihenfolge stimmt (${events.join(',')})`);
+  ok(readSawPhase === 'done', `BARRIER und gelesen wurde ausschliesslich der Endzustand (${readSawPhase})`);
+  ok(answer.kind === 'ok' && answer.value.phase === 'done', 'BARRIER …auch in der Antwort an den Client');
+  ok(lane.stats().depth === 0, 'BARRIER danach ist die Spur leer');
+}
+
+// ── 12) Die Zulassungsliste, Name für Name ────────────────────────────────
+//
+// Die frühere Rechnung „Produkte 3 + Kunden 2 + Rechnungen 2 = 7 Lesevorgänge" ging von einer
+// eigenen Suchoperation aus. Die gibt es nicht: die Suche ist ein PARAMETER von `products.list`.
+// Es sind sechs Lesevorgänge plus die Probe.
+{
+  const bridgeRs = src('src-tauri/src/bridge.rs');
+  const list = bridgeRs.slice(
+    bridgeRs.indexOf('pub const REMOTE_OPS'),
+    bridgeRs.indexOf('];', bridgeRs.indexOf('pub const REMOTE_OPS')),
+  );
+  const names = (list.match(/OP_[A-Z_]+/g) || []).filter((n) => n !== 'REMOTE_OPS');
+  const resolved = names.map((n) => {
+    const m = bridgeRs.match(new RegExp(`${n}: &str = "([^"]+)"`));
+    return m ? m[1] : `?${n}`;
+  });
+
+  const probes = resolved.filter((o) => o === 'bridge.probe');
+  const reads = resolved.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
+  const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
+
+  ok(resolved.length === 7, `ALLOWLIST sieben Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
+  ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
+  ok(reads.length === 6, `ALLOWLIST genau sechs Lesevorgaenge (${reads.length}: ${reads.join(', ')})`);
+  ok(mutations.length === 0, `ALLOWLIST und NULL veraendernde (${mutations.join(', ') || 'keine'})`);
+  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get',
+    `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
+  // Es gibt keine eigene Suchoperation — die Suche ist ein Parameter.
+  ok(!resolved.some((o) => /search/.test(o)), 'ALLOWLIST keine eigene Suchoperation');
+  ok(/searchOf\(p\)/.test(src('src/core/bridge/read-commands.ts')), 'ALLOWLIST …die Suche ist ein Parameter von products.list');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c2 client read mode: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_C2_CLIENT_DBLESS_STARTUP_PROVED');
@@ -323,3 +465,5 @@ console.log('CENTRAL_C2_CORE_READS_PROVED');
 console.log('CENTRAL_C2_READ_ONLY_ENFORCEMENT_PROVED');
 console.log('CENTRAL_C2_REMOTE_MEDIA_PROVED');
 console.log('CENTRAL_C2_OFFLINE_FAIL_CLOSED_PROVED');
+console.log('CENTRAL_C2_REAL_PRIMARY_WRITE_READ_BARRIER_PROVED');
+console.log('CENTRAL_C2_REMOTE_OP_ALLOWLIST_EXACT_PROVED');
