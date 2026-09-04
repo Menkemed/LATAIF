@@ -18,6 +18,7 @@
 //     entscheidet bei „Menge 1, zwei Verkäufe", wer gewinnt, und macht es nachvollziehbar.
 
 import { requireDurableOrFail } from './durability-state';
+import { assertTransactionHealthy } from '../db/transaction-health';
 
 /** Ein Auftrag: irgendetwas, das etwas zurückgibt. Die Warteschlange kennt seinen Inhalt nicht. */
 export type Task<T> = () => Promise<T> | T;
@@ -171,6 +172,10 @@ export const businessWriteScheduler = new CommandScheduler();
  */
 export function runExclusive<T>(task: Task<T>): Promise<T> {
   return businessWriteScheduler.run(async () => {
+    // Ein verlorener Transaktionszustand lässt sich nicht nachholen — hier wird deshalb nicht
+    // erst gespeichert, sondern sofort abgewiesen. Ein Speichern wäre sogar schädlich: es würde
+    // die offene Transaktion still beenden.
+    assertTransactionHealthy();
     await requireDurableOrFail();
     return task();
   });

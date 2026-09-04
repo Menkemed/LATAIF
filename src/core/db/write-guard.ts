@@ -24,6 +24,18 @@
 // unbemerkten Verlust, keine Sicherheitsgrenze gegen absichtlich getarntes SQL.
 
 import { assertDurable } from '@/core/bridge/durability-state';
+import { assertTransactionHealthy } from './transaction-health';
+
+/**
+ * Die beiden Gründe, aus denen dieser Prozess gerade nichts mehr ändern darf — in der Reihenfolge
+ * ihrer Endgültigkeit. Ein verlorener Transaktionszustand lässt sich nicht nachholen, eine
+ * Speicherschuld schon; deshalb wird zuerst auf ihn geprüft (und dann gar kein Speichern mehr
+ * angestoßen, das die offene Transaktion still beenden würde).
+ */
+function assertWritable(): void {
+  assertTransactionHealthy();
+  assertDurable();
+}
 
 /**
  * Eine Anweisung, die Geschäftsdaten verändert. Geprüft wird an jeder Anweisungsgrenze, weil
@@ -48,10 +60,10 @@ interface Runner {
  * Ersatzobjekt): alles andere — `export()`, `prepare()`, `close()`, die Lebenszyklus-Leases —
  * bleibt bitgleich dasselbe Objekt, und `this` zeigt weiter auf die echte Datenbank.
  *
- * `check` ist standardmäßig die Speicherschuld; als Parameter, damit die Prüfung selbst ohne
- * Prozesszustand testbar bleibt.
+ * `check` ist standardmäßig Transaktionszustand + Speicherschuld; als Parameter, damit die Prüfung
+ * selbst ohne Prozesszustand testbar bleibt.
  */
-export function installWriteGuard<T extends Runner>(db: T, check: () => void = assertDurable): T {
+export function installWriteGuard<T extends Runner>(db: T, check: () => void = assertWritable): T {
   if (db[GUARDED]) return db;
   const raw = db.run.bind(db);
   db.run = (sql: string, params?: unknown[]): unknown => {

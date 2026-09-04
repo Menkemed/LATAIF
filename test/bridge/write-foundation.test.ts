@@ -54,6 +54,8 @@ const { resetDurabilityStateForTest, setDurableSaver, isDurabilityDegraded, dura
   markDurabilityDegraded, DURABILITY_DEGRADED } =
   await import('../../src/core/bridge/durability-state.ts');
 const { installWriteGuard, isDataMutation } = await import('../../src/core/db/write-guard.ts');
+const { resetTransactionHealthForTest, isTransactionUnhealthy, transactionFault, TRANSACTION_UNHEALTHY } =
+  await import('../../src/core/db/transaction-health.ts');
 const { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } =
   await import('../../src/core/ledger/posting.ts');
 const { registerCommand, executeCommand, OP_PROBE } = await import('../../src/core/bridge/command-registry.ts');
@@ -793,13 +795,98 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
       throw new CommandRejected('CUSTOMER_REQUIRED', 'no customer');
     });
   } catch (e) { refused = String(e); }
-  ok(refused !== null && /refusing to freeze a partial effect/.test(refused),
+  ok(refused !== null && /unsound database/.test(refused),
     `ZEROEFFECT eine gescheiterte Ruecknahme friert nichts ein (${refused})`);
   ok(lookupCommand(db2 as never, identity(ID('19'))).kind === 'fresh',
     'ZEROEFFECT …die Kennung bleibt frei, der Ausgang offen');
 }
 
-// ── 16) Vier Gegenproben: haetten die Pruefungen ueberhaupt Rot zeigen koennen? ──
+// ── 16) Wenn selbst die Ruecknahme scheitert ──────────────────────────────
+//
+// An einer echten sql.js-Datenbank gemessen (siehe Kopf von `transaction-health.ts`): die
+// Transaktion bleibt offen, die Teilwirkung ist im Speicher SICHTBAR, weitere Schreibvorgaenge
+// haengen sich an — und `export()` beendet die Transaktion still und schreibt den Stand VOR ihr.
+// Ein Speichern repariert hier also nichts, es verwischt die Spur. Deshalb: gar nichts mehr.
+{
+  resetDurabilityStateForTest();
+  resetTransactionHealthForTest();
+  const db = fresh();
+  installWriteGuard(db as never);
+  db.run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('seed','branch-main','INV-SEED',100)");
+  const { deps: d, state } = deps(db);
+  // Ein sauberer Auftrag zuerst: er beschreibt den Stand, den ein Neustart faende.
+  await runRemoteCommand(d, identity(ID('23')), () => ({ seed: true }));
+  const lastGood = state.disk as Uint8Array;
+
+  // Test A — Teilwrite, definitive Ablehnung, und die Ruecknahme erreicht die Datenbank nie.
+  let domainRuns = 0;
+  const writesThenRejects = (x: unknown): never => {
+    domainRuns += 1;
+    (x as Db).run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('row-A','branch-main','INV-A',1)");
+    throw new CommandRejected('STOCK_UNAVAILABLE', 'reserved elsewhere');
+  };
+  const brokenRollback = { ...d, rollback: () => { throw new Error('rollback failed'); } };
+  let outcome: string | null = null;
+  try { await runRemoteCommand(brokenRollback, identity(ID('24')), writesThenRejects); }
+  catch (e) { outcome = String(e); }
+  ok(outcome !== null && /unsound database/.test(outcome),
+    `HEALTH A kein Ergebnis, sondern ein offener Ausgang (${outcome})`);
+  ok(commandCount(db as never) === 1 && lookupCommand(db as never, identity(ID('24'))).kind === 'fresh',
+    'HEALTH A keine eingefrorene Ablehnung — nur der eine saubere Auftrag steht im Nachweis');
+  ok(isTransactionUnhealthy() && transactionFault()?.since === NOW,
+    `HEALTH A der Prozess weiss, dass sein Transaktionszustand hinueber ist (${JSON.stringify(transactionFault())})`);
+
+  // Nachfolgende Schreibvorgaenge: geschlossen. Und zwar BEVOR sie etwas anfassen.
+  let laterWrite: string | null = null;
+  try { db.run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('later','branch-main','INV-L',7)"); }
+  catch (e) { laterWrite = String(e); }
+  ok(laterWrite !== null && /restart required/.test(laterWrite),
+    `HEALTH A jeder weitere Schreibvorgang wird abgewiesen (${laterWrite})`);
+  const localWrite = await runExclusive(() => 1).then(() => null, (e) => String(e));
+  ok(localWrite !== null, 'HEALTH A auch die lokale Schreibreihenfolge nimmt nichts mehr an');
+
+  // Nachfolgende Fernlesevorgaenge: ebenfalls geschlossen — und ausdruecklich kein fachliches Nein.
+  const read = await executeCommand('test.read', null);
+  ok(read.kind === 'infrastructure_error' && read.code === TRANSACTION_UNHEALTHY,
+    `HEALTH A ein Fernlesen bestaetigt nichts mehr (${JSON.stringify(read)})`);
+  const probe = await executeCommand(OP_PROBE, { echo: 'alive' });
+  ok(probe.kind === 'ok', 'HEALTH A die Probe bleibt erreichbar — der Rechner darf nicht stumm werden');
+
+  // Test B — dieselbe Kennung im selben Prozess: die Domaene laeuft NICHT erneut.
+  let retryErr: string | null = null;
+  try { await runRemoteCommand(d, identity(ID('24')), writesThenRejects); } catch (e) { retryErr = String(e); }
+  ok(domainRuns === 1, `HEALTH B die Domaene laeuft nicht erneut, solange der Zustand unsicher ist (${domainRuns})`);
+  ok(retryErr !== null && /restart required/.test(retryErr), `HEALTH B …die Wiederholung wird abgewiesen (${retryErr})`);
+
+  // Test C — Neustart aus der letzten durablen Datei: dort ist weder Teilwirkung noch Nachweis.
+  const restarted = new SQL.Database(lastGood) as unknown as Db;
+  setTestDatabase(restarted as never);
+  resetDurabilityStateForTest();
+  resetTransactionHealthForTest();
+  installWriteGuard(restarted as never);
+  ok(Number(restarted.exec("SELECT COUNT(*) FROM invoices WHERE id='row-A'")[0].values[0][0]) === 0
+    && Number(restarted.exec("SELECT gross FROM invoices WHERE id='seed'")[0].values[0][0]) === 100,
+    'HEALTH C nach dem Neustart ist von der Teilwirkung nichts da');
+  ok(lookupCommand(restarted as never, identity(ID('24'))).kind === 'fresh',
+    'HEALTH C …und kein Nachweis: die Kennung ist wieder bewertbar');
+  const { deps: d2 } = deps(restarted);
+  const after = await runRemoteCommand(d2, identity(ID('24')), (x) => {
+    domainRuns += 1;
+    (x as Db).run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('row-A','branch-main','INV-A',1)");
+    return { invoiceId: 'row-A' };
+  });
+  ok(after.kind === 'ok' && domainRuns === 2, `HEALTH C und sie laeuft GENAU EINMAL (${domainRuns})`);
+  ok(Number(restarted.exec("SELECT COUNT(*) FROM invoices WHERE id='row-A'")[0].values[0][0]) === 1,
+    'HEALTH C genau eine Zeile, nicht zwei');
+
+  // Und die Verdrahtung: ein Speichern in diesem Zustand waere schaedlich, nicht nur nutzlos.
+  const dbSrc = src('src/core/db/database.ts');
+  ok(/if \(isTransactionUnhealthy\(\)\) \{/.test(dbSrc), 'HEALTH das feuernde Speichern verweigert sich…');
+  ok(/assertTransactionHealthy\(\);\s*\r?\n\s*if \(isTransactionActive\(\)\)/.test(dbSrc),
+    'HEALTH …und das durable Speichern sagt es laut');
+}
+
+// ── 17) Fuenf Gegenproben: haetten die Pruefungen ueberhaupt Rot zeigen koennen? ──
 //
 // Eine gruene Pruefung beweist nichts, wenn sie beim falschen Verhalten ebenfalls gruen waere.
 // Also wird das falsche Verhalten hier ABSICHTLICH nachgebaut — beide Male genau das Verhalten,
@@ -862,6 +949,32 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
     && Number(db3.exec("SELECT gross FROM invoices WHERE id='seed'")[0].values[0][0]) === 999
     && commandCount(db3 as never) === 1,
     'CONTROL d der alte Weg committet Teilwirkung UND abgelehntes Ergebnis zusammen — genau das faengt §15');
+
+  // (e) Und wenn ein gescheitertes ROLLBACK die Kennung sofort wieder freigaebe: dieselbe
+  //     Wiederholung liefe im selben Prozess ein zweites Mal durch die Domaene — auf einer
+  //     Datenbank, in der die Teilwirkung des ersten Versuchs noch offen steht.
+  resetDurabilityStateForTest();
+  resetTransactionHealthForTest();
+  const db4 = fresh();
+  const { deps: d4 } = deps(db4);
+  let runs = 0;
+  const halfWay = (x: unknown): never => {
+    runs += 1;
+    (x as Db).run(`INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('r${runs}','branch-main','INV-R${runs}',1)`);
+    throw new CommandRejected('STOCK_UNAVAILABLE', 'nothing left');
+  };
+  // Der luecke Fall, an dem sich die Sperre wirklich messen laesst: die Ruecknahme SELBST lief
+  // durch, nur ihre Meldung scheiterte. Von aussen ist das nicht zu unterscheiden — die Datenbank
+  // waere hier sogar wieder benutzbar, und genau deshalb wuerde der alte Weg einfach weitermachen.
+  const broken = { ...d4, rollback: () => { db4.run('ROLLBACK'); throw new Error('rollback bookkeeping failed'); } };
+  try { await runRemoteCommand(broken, identity(ID('25')), halfWay); } catch { /* offener Ausgang */ }
+  ok(runs === 1 && isTransactionUnhealthy(), 'CONTROL e erster Versuch: Ruecknahme gemeldet als gescheitert');
+  // Der alte Weg: keine Zustandsmarkierung — die Kennung sieht frei aus, also wird erneut bewertet.
+  resetTransactionHealthForTest();
+  try { await runRemoteCommand(broken, identity(ID('25')), halfWay); } catch { /* dito */ }
+  ok(runs === 2,
+    `CONTROL e ohne die Zustandssperre laeuft dieselbe Kennung ein zweites Mal durch die Domaene (${runs}) — genau das faengt §16 B`);
+  resetTransactionHealthForTest();
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3a write foundation: ${PASS} passed, ${fails.length} failed`);
@@ -876,3 +989,4 @@ console.log('CENTRAL_C3_REMOTE_WRITE_DURABILITY_PROVED');
 console.log('CENTRAL_C3_POST_COMMIT_DURABILITY_FAILURE_PROVED');
 console.log('CENTRAL_C3_DEGRADED_ALL_WRITERS_PROVED');
 console.log('CENTRAL_C3_REJECTED_COMMAND_ZERO_EFFECT_PROVED');
+console.log('CENTRAL_C3_TRANSACTION_HEALTH_FAIL_CLOSED_PROVED');

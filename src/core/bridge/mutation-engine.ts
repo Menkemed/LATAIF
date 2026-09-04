@@ -39,6 +39,7 @@
 import type { SqlDb } from '../sync/apply-change';
 import { lookupCommand, recordCommand, type CommandIdentity, type CommandRecord } from './command-ledger';
 import { ensureDurable, requireDurable } from './durability-state';
+import { assertTransactionHealthy, markTransactionUnhealthy } from '../db/transaction-health';
 
 /**
  * Das endgültige fachliche Nein der Domäne: die Operation wurde ausgewertet und beurteilt.
@@ -107,6 +108,12 @@ export async function runRemoteCommand(
   let record: CommandRecord | null = null;
   let replayed = false;
 
+  // Noch vor der Speicherschuld: ist der Transaktionszustand überhaupt noch vertrauenswürdig?
+  // Nach einem gescheiterten ROLLBACK ist er es nicht — dann darf auch dieselbe Kennung nicht
+  // erneut bewertet werden, obwohl sie im Nachweis „frei" aussieht. Sie IST frei; nur diese
+  // Datenbank kann die Frage nicht mehr beantworten.
+  assertTransactionHealthy();
+
   // Zuerst die Schuld gegenüber der Platte. Ein Auftrag auf einem Stand, der nicht geschrieben
   // werden konnte, vergrößert nur den Schaden eines Absturzes — und sein Nachweis läge auf
   // demselben ungeschriebenen Abbild. Gelingt das Nachholen nicht, wirft es: offener Ausgang.
@@ -137,13 +144,23 @@ export async function runRemoteCommand(
     // der heutigen Operationen, kein Vertrag. Ein späterer Auftrag darf schreiben und danach
     // ablehnen; dann ist genau dieser ROLLBACK der Grund, warum kein Rest zurückbleibt.
     let undone = true;
-    try { deps.rollback(); } catch (rbErr) { undone = false; console.error('[bridge] rollback failed:', rbErr); }
+    try {
+      deps.rollback();
+    } catch (rbErr) {
+      undone = false;
+      console.error('[bridge] rollback failed:', rbErr);
+      // Gemessen: die Transaktion bleibt offen, die Teilwirkung ist im Speicher sichtbar, weitere
+      // Schreibvorgänge hängen sich an, und ein `export()` beendet die Transaktion still. Es gibt
+      // hier nichts mehr zu retten — ab jetzt wird nichts mehr verändert und nichts mehr als
+      // verbindlich ausgegeben, bis der Prozess neu startet.
+      markTransactionUnhealthy(String(rbErr), deps.now());
+    }
 
-    if (err instanceof CommandRejected && !undone) {
-      // Die Rücknahme selbst ist gescheitert — eine Teilwirkung könnte stehen geblieben sein.
-      // Ein „endgültig abgelehnt" wäre jetzt eine Lüge, und einzufrieren wäre die teuerste
-      // Variante davon: der Client bekommt einen offenen Ausgang, die Kennung bleibt frei.
-      throw new Error(`could not undo a rejected command (${err.code}): refusing to freeze a partial effect`);
+    if (!undone) {
+      // Kein eingefrorenes Ergebnis, kein fachliches Urteil, keine Zeile: der Ausgang ist offen.
+      // Die Kennung bleibt zwar frei, aber die Sperre oben verhindert, dass sie in DIESEM Prozess
+      // noch einmal bewertet wird — erst ein Neustart aus der letzten durablen Datei gibt sie frei.
+      throw new Error(`could not undo a failed command: refusing to report on an unsound database (${String(err)})`);
     }
 
     if (err instanceof CommandRejected) {

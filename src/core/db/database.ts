@@ -19,6 +19,7 @@ import { A1_UPGRADE_SQL } from './a1-upgrade';
 import { COMMAND_LEDGER_DDL, COMMAND_LEDGER_INDEX } from '@/core/bridge/command-ledger';
 import { setDurableSaver, markDurabilityDegraded, noteDurableWrite } from '@/core/bridge/durability-state';
 import { installWriteGuard } from './write-guard';
+import { assertTransactionHealthy, isTransactionUnhealthy } from './transaction-health';
 import {
   INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
@@ -2840,6 +2841,14 @@ const saver = createSaveCoalescer({
 
 export function saveDatabase(): Promise<void> {
   if (!db) return Promise.resolve();
+  // CENTRAL-C3A: Nach einem gescheiterten ROLLBACK ist die Transaktion noch offen — und `export()`
+  // beendet sie in sql.js STILL. Ein Speichern wuerde hier also nicht retten, sondern die Spur
+  // verwischen: geschrieben wuerde der Stand VOR der Transaktion, waehrend der Aufrufer glaubt,
+  // seine Transaktion laufe noch. Also gar nicht erst speichern.
+  if (isTransactionUnhealthy()) {
+    console.error('[DB] refusing to save: unresolved transaction, restart required');
+    return Promise.resolve();
+  }
   // Ambient-Transaktion aktiv → NIEMALS db.export() ausführen: das beendet in sql.js
   // die offene SQL-Transaktion und macht den späteren COMMIT unmöglich. Stattdessen den
   // Save aufschieben — commitLedgerTransaction persistiert nach dem äußeren COMMIT genau
@@ -2861,6 +2870,10 @@ export function saveDatabase(): Promise<void> {
 // (M1-Root-Cause: Cursor-Advance vor bestaetigtem Disk-Write → permanenter Item-Verlust).
 export async function saveDatabaseDurably(): Promise<void> {
   if (!db) return;
+  // Dieselbe Sperre wie oben, hier aber laut: wer auf ein durables Speichern wartet, darf kein
+  // stilles „ist gespeichert" bekommen. Der Tiefenzaehler unten hilft hier nicht — nach einem
+  // gescheiterten ROLLBACK ist er zurueckgesetzt, waehrend sql.js die Transaktion noch haelt.
+  assertTransactionHealthy();
   if (isTransactionActive()) {
     // Durability laesst sich in einer offenen Ambient-Tx nicht synchron garantieren
     // (db.export() wuerde die Tx beenden). Der Sync-Pull laeuft NIE in einer Tx; ein

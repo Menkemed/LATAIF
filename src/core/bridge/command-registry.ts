@@ -12,6 +12,7 @@
 
 import { runExclusive, businessWriteScheduler } from './command-scheduler';
 import { DURABILITY_DEGRADED, DurabilityError, requireDurableOrFail } from './durability-state';
+import { TRANSACTION_UNHEALTHY, TransactionUnhealthyError, assertTransactionHealthy } from '../db/transaction-health';
 
 /** Was ein Auftrag zurückgeben darf. */
 export type CommandResult = { readonly [k: string]: unknown };
@@ -98,6 +99,9 @@ export async function executeCommand(op: string, payload: unknown): Promise<Repl
       // einen anderen Rechner ist eine Bestätigung — „diese Rechnung existiert". Verschwände sie
       // beim nächsten Absturz, hätte der Client sie trotzdem gesehen und danach gehandelt.
       value = await businessWriteScheduler.runShared(async () => {
+        // Eine Auskunft aus einer Datenbank mit offener, nicht zurueckgenommener Transaktion waere
+        // schmutzig: die Teilwirkung ist dort sichtbar. Also gar keine Auskunft.
+        assertTransactionHealthy();
         await requireDurableOrFail();
         return spec.handler(payload);
       });
@@ -112,6 +116,12 @@ export async function executeCommand(op: string, payload: unknown): Promise<Repl
   } catch (err) {
     if (err instanceof BusinessError) {
       return { kind: 'business_error', code: err.code, message: err.message };
+    }
+    if (err instanceof TransactionUnhealthyError) {
+      // Auch das ist KEIN fachliches Nein: dieser Rechner kann nichts mehr bestaetigen, bis er
+      // neu startet. Der Ausgang eines laufenden Auftrags bleibt offen.
+      console.error('[bridge] refusing on an unsound database:', op, err.message);
+      return { kind: 'infrastructure_error', code: TRANSACTION_UNHEALTHY };
     }
     if (err instanceof DurabilityError) {
       // KEIN fachliches Nein: der Ausgang ist offen. Der Client darf daraus nicht schließen, dass
