@@ -284,67 +284,62 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ── 11) Die Alt-Nummernkreise, genau gezählt ──────────────────────────────
 //
-// Der vorige Bericht sprach von „fünf" und nannte vier Präfixe — das war falsch gezählt. Hier
-// steht die Zahl, die im Baum steht, und sie wird mitgeprüft, damit sie nicht wieder auseinanderläuft.
-//
-// Der Unterschied ist nicht kosmetisch: `getNextNumber` rechnet `MAX(Bestand des Jahres) + 1`.
-// Wird eine Zeile gelöscht, ist ihre Nummer wieder frei — und genau daran ist beim Kollegen der
-// Pull hängengeblieben (`TRF-2026-00020` zweimal vergeben → UNIQUE → Batch-Rollback → Stillstand).
-// Mit zwei Rechnern, die gleichzeitig speichern, wird aus dem seltenen Fall der Regelfall.
+// C1 fand hier vier produktive Aufrufstellen von `getNextNumber` — `MAX(Bestand des Jahres) + 1`,
+// genau die Bauart, an der der Pull des Kollegen hängenblieb (`TRF-2026-00020` zweimal vergeben →
+// UNIQUE → Batch-Rollback → Stillstand). C3A hat sie umgestellt. Was hier steht, ist deshalb
+// nicht mehr „noch offen", sondern „nachweislich keine mehr" — und dieselbe Zählung fällt wieder
+// auf, wenn jemand den alten Weg zurückholt.
 {
   const helpers = src('src/core/db/helpers.ts');
-  ok(/SELECT \$\{col\} FROM \$\{table\} WHERE branch_id = \?/.test(helpers)
-    || /MAX|max/.test(helpers.slice(helpers.indexOf('export function getNextNumber'), helpers.indexOf('export function getNextNumber') + 1400)),
-    'SEQ der Altweg rechnet ueber den Bestand, nicht ueber einen Zaehler');
+  ok(/export function getNextNumber/.test(helpers), 'SEQ der Altweg existiert noch als Funktion…');
 
-  // Alle produktiven Aufrufstellen. Kommentare zaehlen nicht mit.
-  const files = [
-    'src/stores/consignmentStore.ts',
-    'src/stores/offerStore.ts',
-    'src/stores/orderStore.ts',
-    'src/stores/repairStore.ts',
-  ];
-  const expected = [
-    { file: 'src/stores/consignmentStore.ts', entity: 'consignments', prefix: 'CON' },
-    { file: 'src/stores/offerStore.ts', entity: 'offers', prefix: 'OFF' },
-    { file: 'src/stores/orderStore.ts', entity: 'orders', prefix: 'ORD' },
-    { file: 'src/stores/repairStore.ts', entity: 'repairs', prefix: 'REP' },
-  ];
-  for (const e of expected) {
-    const text = src(e.file);
-    const re = new RegExp(`getNextNumber\\('${e.entity}', '[^']+', '${e.prefix}'\\)`);
-    ok(re.test(text), `SEQ ${e.entity} -> ${e.prefix} laeuft noch ueber den Altweg (${e.file})`);
-  }
-
-  // Und niemand sonst — vier Aufrufstellen, vier fachliche Nummernkreise.
-  const all: string[] = [];
-  for (const f of ['src/stores', 'src/core', 'src/pages', 'src/components']) {
-    walk(resolvePath(repo, f), (p, text) => {
+  // …aber ohne produktive Aufrufer. Kommentare zählen nicht mit.
+  const callers: string[] = [];
+  for (const dir of ['src/stores', 'src/core', 'src/pages', 'src/components']) {
+    walk(resolvePath(repo, dir), (p, text) => {
       for (const line of text.split(/\r?\n/)) {
-        // Nur echte Aufrufe: eine Zeile, die mit `//` beginnt, beschreibt nur.
         const t = line.trim();
         if (t.startsWith('//') || t.startsWith('*')) continue;
         if (/getNextNumber\(/.test(line) && !/export function getNextNumber/.test(line)) {
-          all.push(p.slice(repo.length + 1).split('\\').join('/'));
+          callers.push(p.slice(repo.length + 1).split('\\').join('/'));
         }
       }
     });
   }
-  const unique = [...new Set(all)].sort();
-  ok(all.length === 4, `SEQ genau VIER produktive Aufrufstellen, nicht fuenf (${all.length}: ${unique.join(', ')})`);
-  ok(unique.length === 4, `SEQ …in vier verschiedenen Dateien (${unique.length})`);
-  ok(unique.join(',') === files.sort().join(','), `SEQ …und zwar genau diesen (${unique.join(',')})`);
+  ok(callers.length === 0, `SEQ und KEINEN produktiven Aufrufer mehr (${[...new Set(callers)].join(', ') || 'keiner'})`);
 
-  // Der neue Weg ist der Zaehler, und der ist deutlich verbreiteter.
+  // Die vier Kreise stehen jetzt im durablen Zähler, mit ihrem alten Format.
+  const legacy = src('src/core/db/legacy-sequences.ts');
+  for (const [type, table, column] of [
+    ['CON', 'consignments', 'consignment_number'],
+    ['OFF', 'offers', 'offer_number'],
+    ['ORD', 'orders', 'order_number'],
+    ['REP', 'repairs', 'repair_number'],
+  ]) {
+    ok(legacy.includes(`docType: '${type}', table: '${table}', column: '${column}'`),
+      `SEQ ${type} ist als durabler Kreis beschrieben (${table}.${column})`);
+  }
+  ok(/export const LEGACY_PADDING = 5;/.test(legacy), 'SEQ …fuenfstellig wie bisher');
+  ok(!legacy.includes("docType: 'TRF'"), 'SEQ und der bereits migrierte Transfer bleibt bei sich');
+
+  for (const [file, type] of [
+    ['src/stores/consignmentStore.ts', 'CON'], ['src/stores/offerStore.ts', 'OFF'],
+    ['src/stores/orderStore.ts', 'ORD'], ['src/stores/repairStore.ts', 'REP'],
+  ]) {
+    const t = src(file);
+    ok(t.includes(`legacySpec('${type}')`) && t.includes(`getNextDocumentNumber('${type}')`),
+      `SEQ ${file} zieht ${type} aus dem Zaehler`);
+  }
+
+  // Der Zähler selbst: erhöht ZUERST und liest danach — keine Lücke zwischen Lesen und Schreiben.
+  const upd = helpers.indexOf('SET next_number = next_number + 1');
+  const sel = helpers.indexOf('SELECT', upd);
+  ok(upd > 0 && sel > upd, 'SEQ der durable Zaehler erhoeht vor dem Lesen');
   let durable = 0;
   walk(resolvePath(repo, 'src'), (_p, text) => {
     durable += (text.match(/getNextDocumentNumber\(/g) || []).length;
   });
-  ok(durable >= 20, `SEQ der durable Zaehler ist schon der Regelfall (${durable} Aufrufe)`);
-  const h = src('src/core/db/helpers.ts');
-  const upd = h.indexOf('SET next_number = next_number + 1');
-  const sel = h.indexOf('SELECT', upd);
-  ok(upd > 0 && sel > upd, 'SEQ und er erhoeht ZUERST und liest danach — keine Luecke zwischen Lesen und Schreiben');
+  ok(durable >= 24, `SEQ und er ist der einzige Weg zu einer Belegnummer (${durable} Aufrufe)`);
 }
 
 // ── 12) Die Sperre ist eine Klasse, kein Namensverbot ─────────────────────
