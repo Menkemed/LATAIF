@@ -60,6 +60,11 @@ pub const OP_CUSTOMERS_GET: &str = "customers.get";
 pub const OP_INVOICES_LIST: &str = "invoices.list";
 pub const OP_INVOICES_GET: &str = "invoices.get";
 
+/// CENTRAL-C3B — die ERSTE veraendernde Fernoperation. Sie steht hier neben den Lesevorgaengen,
+/// weil Rust dieselbe Liste ein zweites Mal prueft; die Entscheidung, ob eine Mutation ueberhaupt
+/// registriert werden darf, faellt zusaetzlich im Renderer (Zulassungsliste, fail-closed).
+pub const OP_INVOICES_CREATE: &str = "invoices.create";
+
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
     OP_PROBE,
@@ -69,6 +74,7 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_CUSTOMERS_GET,
     OP_INVOICES_LIST,
     OP_INVOICES_GET,
+    OP_INVOICES_CREATE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.
@@ -174,6 +180,34 @@ pub struct Envelope {
     pub op: String,
     pub generation: u64,
     pub payload: serde_json::Value,
+    /// CENTRAL-C3B — wer diesen Auftrag verantwortet. Fuer eine Auskunft ist das entbehrlich; fuer
+    /// eine Buchung nicht: der durable Nachweis im Renderer wird auf genau diese Kennung
+    /// geschluesselt. Sie kommt aus den geprueften Anmeldedaten, NIE aus dem Rumpf des Clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<EnvelopeIdentity>,
+}
+
+/// Die Identitaet, wie der Renderer sie sieht. `op` steht schon im Umschlag.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvelopeIdentity {
+    pub command_id: String,
+    pub tenant_id: String,
+    pub branch_id: String,
+    pub user_id: String,
+    pub payload_hash: String,
+}
+
+impl From<&CommandIdentity> for EnvelopeIdentity {
+    fn from(i: &CommandIdentity) -> Self {
+        Self {
+            command_id: i.command_id.clone(),
+            tenant_id: i.tenant_id.clone(),
+            branch_id: i.branch_id.clone(),
+            user_id: i.user_id.clone(),
+            payload_hash: i.payload_hash.clone(),
+        }
+    }
 }
 
 /// Was zurückkommt. Drei Ausgänge, ausdrücklich getrennt: ein Ergebnis, ein fachliches Nein (der
@@ -403,7 +437,7 @@ impl Bridge {
             store.begin(identity)?;
         }
         // Der Eintrag bleibt geschuetzt, bis DIESER Auftrag durch ist — auch wenn er scheitert.
-        let out = self.submit_with_timeout(&identity.op, payload, timeout).await;
+        let out = self.dispatch(&identity.op, payload, Some(identity.into()), timeout).await;
         {
             let mut store = self.identities.lock().unwrap_or_else(|e| e.into_inner());
             store.finish(&identity.command_id);
@@ -420,6 +454,18 @@ impl Bridge {
         &self,
         op: &str,
         payload: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Reply, BridgeError> {
+        self.dispatch(op, payload, None, timeout).await
+    }
+
+    /// Der gemeinsame Weg. Die Identitaet ist optional, weil eine Auskunft keine braucht — eine
+    /// Buchung schon, und der Renderer weist eine Mutation ohne Identitaet ab.
+    async fn dispatch(
+        &self,
+        op: &str,
+        payload: serde_json::Value,
+        identity: Option<EnvelopeIdentity>,
         timeout: Duration,
     ) -> Result<Reply, BridgeError> {
         // Reihenfolge der Prüfungen ist Absicht: erst der Name (der darf nie zum Renderer),
@@ -441,6 +487,7 @@ impl Bridge {
             op: op.to_string(),
             generation,
             payload,
+            identity,
         };
 
         let rx = {

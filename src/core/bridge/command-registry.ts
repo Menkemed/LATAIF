@@ -13,6 +13,7 @@
 import { runExclusive, businessWriteScheduler } from './command-scheduler';
 import { DURABILITY_DEGRADED, DurabilityError, requireDurableOrFail } from './durability-state';
 import { TRANSACTION_UNHEALTHY, TransactionUnhealthyError, assertTransactionHealthy } from '../db/transaction-health';
+import { CommandNotEvaluated, CommandRejected } from './mutation-engine';
 
 /** Was ein Auftrag zurückgeben darf. */
 export type CommandResult = { readonly [k: string]: unknown };
@@ -27,7 +28,30 @@ export class BusinessError extends Error {
   }
 }
 
-export type CommandHandler = (payload: unknown) => Promise<CommandResult> | CommandResult;
+/**
+ * Wer einen Auftrag verantwortet — vom AUTHENTIFIZIERTEN Absender, durch Rust gereicht, nie aus
+ * dem Rumpf. Eine Auskunft braucht sie nicht; eine Buchung schon: der durable Nachweis wird auf
+ * genau diese Kennung geschlüsselt.
+ */
+export interface CommandActor {
+  commandId: string;
+  tenantId: string;
+  branchId: string;
+  userId: string;
+  payloadHash: string;
+}
+
+export type CommandHandler = (payload: unknown, actor?: CommandActor) => Promise<CommandResult> | CommandResult;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Rust prüft die Kennung bereits, bevor es sendet. Hier steht der zweite Riegel — dieselbe
+ * Begründung wie bei der Namensliste: was über das Netz kommt, wird zweimal geprüft.
+ */
+export function isUsableActor(a: CommandActor | undefined): a is CommandActor {
+  return !!a && UUID.test(a.commandId) && !!a.tenantId && !!a.branchId && !!a.userId && !!a.payloadHash;
+}
 
 /**
  * Welche Art von Auftrag das ist. Absichtlich eine KLASSE und kein Name: eine Sperre gegen fünf
@@ -40,14 +64,19 @@ export type CommandHandler = (payload: unknown) => Promise<CommandResult> | Comm
 export type CommandClass = 'probe' | 'read' | 'mutation';
 
 /**
- * Verändernde Fernaufträge sind gesperrt, bis der durable Nachweis steht: ein Ledger-Eintrag mit
- * der logischen Kennung des Clients, geschrieben in DERSELBEN sql.js-Transaktion wie die Buchung
- * und die Belegnummer. Ohne den kann eine Wiederholung nach einem verlorenen Antwortweg nicht
- * erkennen, dass die Buchung längst passiert ist — und ein zweites Mal buchen ist schlimmer als
- * gar nicht. Die Sperre steht hier im Code, nicht nur in einem Test, damit sie beim Registrieren
- * zuschlägt und nicht erst beim Prüfen.
+ * CENTRAL-C3B — welche verändernden Fernaufträge es gibt. NAMENTLICH, nicht als Schalter.
+ *
+ * In C3A stand hier ein `REMOTE_MUTATIONS_ENABLED = false`. Dieses Tor auf `true` zu drehen wäre
+ * bequem und falsch gewesen: es hätte in einem Zug JEDE künftige `kind: 'mutation'` registrierbar
+ * gemacht — auch ein später hinzugefügtes `products.create` oder `invoice.delete`, das nie
+ * jemand geprüft hat. Freigegeben wird deshalb ein NAME, und die Liste ist so lang wie die Zahl
+ * der Operationen, die wirklich durchdacht sind.
+ *
+ * Wer eine weitere Mutation freischalten will, kommt an dieser Liste vorbei — und damit an der
+ * Frage, ob ihr Weg dieselben Beweise hat wie dieser: durabler Nachweis in derselben Transaktion,
+ * Bestandsprüfung vor der Wirkung, eingefrorenes Urteil, Wiederholung ohne zweite Wirkung.
  */
-export const REMOTE_MUTATIONS_ENABLED = false;
+export const ALLOWED_MUTATIONS: readonly string[] = ['invoices.create'];
 
 export interface CommandSpec {
   readonly kind: CommandClass;
@@ -61,11 +90,11 @@ const REGISTRY = new Map<string, CommandSpec>();
 
 export function registerCommand(op: string, spec: CommandSpec): void {
   if (REGISTRY.has(op)) throw new Error(`[bridge] duplicate command: ${op}`);
-  // Der Riegel: keine verändernde Fernoperation, solange der durable Nachweis fehlt.
-  if (spec.kind === 'mutation' && !REMOTE_MUTATIONS_ENABLED) {
+  // Der Riegel: eine verändernde Fernoperation gibt es nur, wenn ihr Name ausdrücklich freigegeben ist.
+  if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op)) {
     throw new Error(
-      `[bridge] refusing to register a mutating remote command (${op}): remote writes stay closed `
-      + 'until a durable command ledger commits in the same transaction as the business effect.'
+      `[bridge] refusing to register a mutating remote command (${op}): only ${ALLOWED_MUTATIONS.join(', ')} `
+      + 'may change business data from another machine.'
     );
   }
   REGISTRY.set(op, spec);
@@ -86,9 +115,15 @@ export type Reply =
  * ein Auftrag, der niemanden erreicht, ist eine offene Anfrage auf der anderen Seite, und die
  * läuft dann in eine Zeitgrenze statt in eine Begründung.
  */
-export async function executeCommand(op: string, payload: unknown): Promise<Reply> {
+export async function executeCommand(op: string, payload: unknown, actor?: CommandActor): Promise<Reply> {
   const spec = REGISTRY.get(op);
   if (!spec) return { kind: 'infrastructure_error', code: 'BRIDGE_OP_NOT_REGISTERED' };
+  // Eine Buchung ohne Absender gibt es nicht: ohne Kennung könnte der durable Nachweis nicht
+  // geschrieben werden, und ohne ihn wäre jede Wiederholung ein zweites Mal buchen.
+  if (spec.kind === 'mutation' && !isUsableActor(actor)) {
+    console.error('[bridge] refusing a mutation without an authenticated identity:', op);
+    return { kind: 'infrastructure_error', code: 'BRIDGE_IDENTITY_MISSING' };
+  }
   try {
     let value: CommandResult;
     if (spec.kind === 'read') {
@@ -110,12 +145,22 @@ export async function executeCommand(op: string, payload: unknown): Promise<Repl
       // Speichern klemmt, muss man von außen noch feststellen können, dass der Weg lebt.
       value = await businessWriteScheduler.run(() => spec.handler(payload));
     } else {
-      value = await runExclusive(() => spec.handler(payload));
+      value = await runExclusive(() => spec.handler(payload, actor));
     }
     return { kind: 'ok', value };
   } catch (err) {
     if (err instanceof BusinessError) {
       return { kind: 'business_error', code: err.code, message: err.message };
+    }
+    // Das endgültige Urteil der Domäne — genau das, was der durable Nachweis eingefroren hat.
+    // Der Client darf es als Antwort nehmen und NICHT einfach wiederholen.
+    if (err instanceof CommandRejected) {
+      return { kind: 'business_error', code: err.code, message: err.message };
+    }
+    // Kein Urteil, sondern ein Nicht-Zustandekommen (dieselbe Kennung, anderer Rumpf). Das ist
+    // ausdrücklich KEIN fachliches Nein: der Vorgang wurde nie bewertet.
+    if (err instanceof CommandNotEvaluated) {
+      return { kind: 'infrastructure_error', code: err.code };
     }
     if (err instanceof TransactionUnhealthyError) {
       // Auch das ist KEIN fachliches Nein: dieser Rechner kann nichts mehr bestaetigen, bis er

@@ -14,6 +14,9 @@ import { executeCommand, type Reply } from './command-registry';
 // Die Leseoperationen registrieren sich beim Laden — ohne diesen Import kennt der Renderer nur
 // die Probe, und jeder Auftrag vom zweiten Rechner liefe in BRIDGE_OP_NOT_REGISTERED.
 import './read-commands';
+// CENTRAL-C3B — und die eine veraendernde Operation. Ohne diesen Import kennt der Renderer sie
+// nicht, und ein Auftrag vom zweiten Rechner liefe in BRIDGE_OP_NOT_REGISTERED.
+import './invoice-command';
 
 /** Muss mit `bridge::EVENT_COMMAND` in Rust übereinstimmen. */
 export const BRIDGE_COMMAND_EVENT = 'central-c1-bridge-command';
@@ -23,6 +26,14 @@ interface Envelope {
   op: string;
   generation: number;
   payload: unknown;
+  /**
+   * CENTRAL-C3B — wer den Auftrag verantwortet. Kommt aus den geprueften Anmeldedaten in Rust,
+   * niemals aus dem Rumpf des Clients. Fuer eine Auskunft fehlt sie; eine Buchung ohne sie wird
+   * abgewiesen (der durable Nachweis haette sonst keinen Schluessel).
+   */
+  identity?: {
+    commandId: string; tenantId: string; branchId: string; userId: string; payloadHash: string;
+  };
 }
 
 /** Die Nummer dieses Renderer-Lebens. `null` = noch nicht angemeldet. */
@@ -70,7 +81,7 @@ export async function startBridge(w: Wiring): Promise<void> {
 async function handle(w: Wiring, env: Envelope): Promise<void> {
   let reply: Reply;
   try {
-    reply = await executeCommand(env.op, env.payload);
+    reply = await executeCommand(env.op, env.payload, env.identity);
   } catch {
     // `executeCommand` wirft nicht; das hier ist der Gürtel zum Hosenträger. Eine unbeantwortete
     // Anfrage wäre das einzige wirklich schlechte Ergebnis.

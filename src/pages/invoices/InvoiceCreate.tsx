@@ -19,7 +19,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
-import { vatEngine } from '@/core/tax/vat-engine';
+import { calcInvoiceLine, toInvoiceLine } from '@/core/invoices/line-derivation';
 import { getLotsWithPurchaseNumbers, formatLotLabel, getStockAggregates, type StockLot } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
@@ -40,11 +40,9 @@ function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
-function calcLine(unitPrice: number, qty: number, purchasePrice: number, scheme: 'VAT_10' | 'ZERO' | 'MARGIN', vatRate: number) {
-  // calculateNet erwartet Netto pro Position — multiplizieren mit qty
-  const calc = vatEngine.calculateNet(unitPrice * qty, purchasePrice * qty, scheme, vatRate);
-  return calc;
-}
+// CENTRAL-C3B — die Ableitung liegt jetzt in der SSOT (`core/invoices/line-derivation`), damit
+// der Fernauftrag GENAU dieselbe benutzt. Hier bleibt nur der Name, den die Anzeige schon ruft.
+const calcLine = calcInvoiceLine;
 
 // Inverse: vom Gesamt-Brutto auf Netto-pro-Einheit zurückrechnen.
 // VAT_10  → net = gross / 1.10
@@ -260,26 +258,19 @@ export function InvoiceCreate() {
   }
 
   function performSave(thenPrint: boolean, specialMark: boolean) {
+    // CENTRAL-C3B — dieselbe Ableitung, die der Fernauftrag benutzt. Phase 3 (Cost-Snapshot aus
+    // dem gewaehlten Lot, Fallback auf products.purchase_price) und die v0.7.1-Regel fuer MARGIN
+    // (internalVat persistieren) stecken jetzt in `toInvoiceLine` — eine Stelle, zwei Aufrufer.
     const payload = lines.map((l, i) => {
       const c = computed[i];
-      // Phase 3 — Cost-Snapshot kommt vom ausgewaehlten Lot, NICHT mehr vom
-      // (potentiell veralteten) products.purchase_price. Fallback fuer Legacy-
-      // Produkte ohne Lot bleibt das Produkt-Feld.
-      const costSnapshot = c.selectedLot ? c.selectedLot.unitCost : (c.product?.purchasePrice || 0);
-      return {
+      return toInvoiceLine({
         productId: l.productId,
         lotId: c.selectedLot?.id,
-        quantity: Math.max(1, l.quantity),
-        unitPrice: c.net / Math.max(1, l.quantity), // Netto pro Stück (für Detail-View)
-        purchasePrice: costSnapshot,
-        taxScheme: c.scheme,
-        vatRate: c.vatRate,
-        // v0.7.1 — NBR: MARGIN persistiert internalVat (= margin × rate/(100+rate))
-        // damit MARGIN_VAT-Ledger + invoice.vatAmount-Hero korrekt. Customer-Receipt
-        // versteckt VAT bei MARGIN weiterhin (Differenzbesteuerung).
-        vatAmount: c.internalVat || c.vat,
-        lineTotal: c.gross,
-      };
+        quantity: l.quantity,
+        unitPrice: l.unitPrice,
+        costBasis: c.selectedLot ? c.selectedLot.unitCost : (c.product?.purchasePrice || 0),
+        scheme: c.scheme,
+      });
     });
 
     if (isEditMode && editInvoice) {

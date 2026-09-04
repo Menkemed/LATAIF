@@ -33,8 +33,9 @@
 //     das A1 beim Pull-Stand schon einmal gebrochen hat — und es gilt auch für die WIEDERHOLUNG:
 //     ein eingefrorenes Ergebnis, das nur im Speicher steht, wird nicht herausgegeben.
 //
-// C3A registriert bewusst NOCH KEINE produktive Operation: `REMOTE_MUTATIONS_ENABLED` bleibt
-// zu. Diese Maschine ist gebaut und geprüft, aber sie hat noch keinen Kunden.
+// C3B hat dieser Maschine ihren ersten Kunden gegeben: `invoices.create`. Freigegeben ist ein
+// NAME (`ALLOWED_MUTATIONS`), kein Schalter — jede weitere Mutation muss dort einzeln hinein und
+// dieselben Beweise mitbringen.
 
 import type { SqlDb } from '../sync/apply-change';
 import { lookupCommand, recordCommand, type CommandIdentity, type CommandRecord } from './command-ledger';

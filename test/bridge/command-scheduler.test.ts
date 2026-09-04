@@ -346,27 +346,29 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
   ok(durable >= 24, `SEQ und er ist der einzige Weg zu einer Belegnummer (${durable} Aufrufe)`);
 }
 
-// ── 12) Die Sperre ist eine Klasse, kein Namensverbot ─────────────────────
+// ── 12) Die Sperre ist eine Klasse PLUS eine namentliche Zulassung ────────
 //
 // Ein Verbot von fünf bekannten Namen hätte ein später hinzugefügtes `invoice.save` durchgelassen.
-// Deshalb entscheidet die KLASSE, und der Riegel steht im Code, nicht nur hier.
+// Deshalb entscheidet zuerst die KLASSE — und seit C3B zusätzlich der NAME: freigegeben ist
+// `invoices.create` und sonst nichts. Ein Schalter hätte in einem Zug alles mitgenommen.
 {
-  const { REMOTE_MUTATIONS_ENABLED } = await import('../../src/core/bridge/command-registry.ts');
-  ok(REMOTE_MUTATIONS_ENABLED === false, 'GATE veraendernde Fernauftraege sind gesperrt');
+  const { ALLOWED_MUTATIONS } = await import('../../src/core/bridge/command-registry.ts');
+  ok(ALLOWED_MUTATIONS.length === 1 && ALLOWED_MUTATIONS[0] === 'invoices.create',
+    `GATE genau ein veraendernder Name ist freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
 
   for (const name of ['invoice.save', 'sale.commit', 'irgendwas.ganz.neu']) {
     let threw: string | null = null;
     try {
       registerCommand(name, { kind: 'mutation', handler: () => ({ ok: true }) });
     } catch (e) { threw = (e as Error).message; }
-    ok(threw !== null && /durable command ledger/.test(threw),
+    ok(threw !== null && /refusing to register/.test(threw),
       `GATE ein neuer Name mit Mutations-Klasse wird abgewiesen (${name}: ${threw ? 'refused' : 'ACCEPTED'})`);
     ok(!knownCommands().includes(name), `GATE …und ist nicht registriert (${name})`);
   }
 
   // Und der Riegel steht im Produktcode, nicht nur in diesem Test.
   const registry = src('src/core/bridge/command-registry.ts');
-  ok(/if \(spec\.kind === 'mutation' && !REMOTE_MUTATIONS_ENABLED\)/.test(registry),
+  ok(/if \(spec\.kind === 'mutation' && !ALLOWED_MUTATIONS\.includes\(op\)\)/.test(registry),
     'GATE der Riegel greift beim Registrieren');
   // Im PRODUKTCODE wird genau eine Operation registriert — die Testhelfer oben zaehlen nicht mit.
   const prod = registry.split(/\r?\n/).filter((l) => l.startsWith('registerCommand(')).length;

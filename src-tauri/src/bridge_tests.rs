@@ -252,14 +252,19 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         assert_eq!(err.http_status(), 400, "das ist ein Fehler des Aufrufers");
     }
     assert_eq!(sink.count(), 0, "und nichts davon wurde zugestellt");
-    // C2 hat sechs LESEVORGAENGE dazugelegt. Was zaehlt, ist nicht die Anzahl, sondern dass kein
-    // Name darunter etwas veraendert — und dass die Probe weiter dabei ist.
+    // C2 hat sechs LESEVORGAENGE dazugelegt, C3B genau EINE veraendernde Operation. Was zaehlt,
+    // ist nicht die Anzahl, sondern dass jeder Name darauf einzeln durchdacht ist — und dass die
+    // Probe weiter dabei ist.
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
-    assert_eq!(REMOTE_OPS.len(), 7, "Probe plus sechs Lesevorgaenge");
+    assert_eq!(REMOTE_OPS.len(), 8, "Probe, sechs Lesevorgaenge, eine Rechnung");
+    assert!(
+        REMOTE_OPS.contains(&OP_INVOICES_CREATE),
+        "und die eine veraendernde Operation, die C3B freigegeben hat"
+    );
     for op in REMOTE_OPS {
         assert!(
-            op.ends_with(".list") || op.ends_with(".get") || *op == OP_PROBE,
-            "nur Auskunft steht auf der Liste: {op}"
+            op.ends_with(".list") || op.ends_with(".get") || *op == OP_PROBE || *op == OP_INVOICES_CREATE,
+            "nur Auskunft und die eine freigegebene Buchung stehen auf der Liste: {op}"
         );
     }
 }
@@ -548,12 +553,17 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
         "jede Fehlerantwort sagt, ob wiederholt werden darf"
     );
 
-    // Und der Riegel gegen veraendernde Fernoperationen steht im Renderer-Code.
+    // Und der Riegel gegen veraendernde Fernoperationen steht im Renderer-Code. Seit C3B ist er
+    // eine namentliche Zulassung statt eines Schalters: ein Schalter haette in einem Zug JEDE
+    // kuenftige Mutation registrierbar gemacht.
     let registry = include_str!("../../src/core/bridge/command-registry.ts");
-    assert!(registry.contains("export const REMOTE_MUTATIONS_ENABLED = false;"));
     assert!(
-        registry.contains("if (spec.kind === 'mutation' && !REMOTE_MUTATIONS_ENABLED)"),
-        "eine KLASSE, kein Namensverbot — ein neu benanntes invoice.save faellt genauso"
+        registry.contains("export const ALLOWED_MUTATIONS: readonly string[] = ['invoices.create'];"),
+        "genau ein veraendernder Name ist freigegeben"
+    );
+    assert!(
+        registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),
+        "erst die KLASSE, dann der NAME — ein neu benanntes invoice.save faellt an beidem"
     );
 }
 
@@ -768,13 +778,19 @@ async fn within_the_retention_a_changed_payload_still_conflicts() {
 #[test]
 fn the_retention_is_not_an_exactly_once_claim() {
     // Was hier steht, ist ein Schutz gegen ein Versehen — kein Geschaeftsversprechen. Faellt eine
-    // alte Kennung aus dem Vorrat, wuerde dieselbe Kennung mit neuem Inhalt wieder durchgehen. Das
-    // ist genau so lange hinnehmbar, wie ueberhaupt nichts Veraenderndes fern ausgefuehrt werden
-    // kann — und dafuer sorgt der Riegel im Renderer.
-    let registry = include_str!("../../src/core/bridge/command-registry.ts");
+    // alte Kennung aus dem Vorrat, wuerde Rust dieselbe Kennung mit neuem Inhalt wieder
+    // durchlassen. In C1 war das folgenlos, weil nichts Veraenderndes lief. Seit C3B laeuft etwas,
+    // und die Zusage haengt nicht mehr an diesem Vorrat, sondern am DURABLEN Nachweis im Renderer:
+    // er ist auf die Kennung geschluesselt, traegt den Rumpf-Fingerabdruck und ueberlebt jeden
+    // Neustart — eine verdraengte Kennung mit neuem Inhalt laeuft dort in einen Konflikt.
+    let ledger = include_str!("../../src/core/bridge/command-ledger.ts");
     assert!(
-        registry.contains("export const REMOTE_MUTATIONS_ENABLED = false;"),
-        "solange nichts Veraenderndes registrierbar ist, ist eine Verdraengung folgenlos"
+        ledger.contains("remote_command_ledger") && ledger.contains("command_id"),
+        "der durable Nachweis liegt in der Geschaeftsdatenbank und ist auf die Kennung geschluesselt"
+    );
+    assert!(
+        ledger.contains("payload_hash"),
+        "und er haelt den Fingerabdruck des Rumpfs — sonst waere die Kennung nur ein Etikett"
     );
     let bridge_src = include_str!("bridge.rs");
     assert!(

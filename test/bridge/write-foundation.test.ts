@@ -574,18 +574,22 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   }
   ok(legacyCalls.length === 0, `WIRED kein produktiver MAX()+1-Aufruf mehr (${legacyCalls.join(' | ') || 'keiner'})`);
 
-  // Das Tor bleibt zu: C3A registriert keine produktive Mutation.
+  // C3B hat das Tor NICHT aufgemacht, sondern EINEN Namen freigegeben. Der Unterschied ist der
+  // ganze Punkt: ein Schalter haette jede kuenftige Mutation mitgenommen.
   const registry = src('src/core/bridge/command-registry.ts');
-  ok(/export const REMOTE_MUTATIONS_ENABLED = false;/.test(registry), 'WIRED veraendernde Fernauftraege bleiben gesperrt');
+  ok(!/export const REMOTE_MUTATIONS_ENABLED/.test(registry), 'WIRED der globale Schalter ist weg…');
+  ok(/export const ALLOWED_MUTATIONS: readonly string\[\] = \['invoices\.create'\];/.test(registry),
+    'WIRED …und an seiner Stelle steht genau ein freigegebener Name');
   const bridgeRs = src('src-tauri/src/bridge.rs');
   const list = bridgeRs.slice(bridgeRs.indexOf('pub const REMOTE_OPS'), bridgeRs.indexOf('];', bridgeRs.indexOf('pub const REMOTE_OPS')));
   const ops = (list.match(/OP_[A-Z_]+/g) || []).map((n) => {
     const m = bridgeRs.match(new RegExp(`${n}: &str = "([^"]+)"`));
     return m ? m[1] : n;
   });
-  ok(ops.length === 7, `WIRED die Liste ist unveraendert: 7 Namen (${ops.length})`);
-  ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 6 && ops.includes('bridge.probe'),
-    'WIRED eine Probe, sechs Lesevorgaenge, null Mutationen');
+  ok(ops.length === 8, `WIRED die Liste ist um GENAU einen Namen gewachsen: 8 (${ops.length})`);
+  ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 6
+    && ops.includes('bridge.probe') && ops.includes('invoices.create'),
+    'WIRED eine Probe, sechs Lesevorgaenge, EINE Mutation');
   const engine = src('src/core/bridge/mutation-engine.ts');
   ok(!/registerCommand/.test(engine), 'WIRED die Maschine registriert selbst nichts');
 }

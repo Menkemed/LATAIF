@@ -234,10 +234,13 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
 
 // ── 6) Nichts Veraenderndes, auch nicht spaeter ───────────────────────────
 {
-  const { registerCommand, knownCommands, REMOTE_MUTATIONS_ENABLED } =
+  const { registerCommand, knownCommands, ALLOWED_MUTATIONS } =
     await import('../../src/core/bridge/command-registry.ts');
 
-  ok(REMOTE_MUTATIONS_ENABLED === false, 'READONLY veraendernde Fernauftraege bleiben gesperrt');
+  // C3B hat GENAU einen veraendernden Namen freigegeben. Fuer den Clientmodus aendert das nichts:
+  // er liest weiter, und alles andere bleibt unregistrierbar.
+  ok(ALLOWED_MUTATIONS.length === 1 && ALLOWED_MUTATIONS[0] === 'invoices.create',
+    `READONLY genau eine freigegebene Mutation (${ALLOWED_MUTATIONS.join(', ')})`);
   // Die Lesebefehle ziehen die ganze Datenschicht mit; hier zaehlt ihre Registrierung im Quelltext.
   const readSrc = code('src/core/bridge/read-commands.ts');
   const registeredReads = readSrc.split('\n').filter((l) => l.startsWith('registerCommand(')).length;
@@ -447,11 +450,12 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const reads = resolved.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
-  ok(resolved.length === 7, `ALLOWLIST sieben Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
+  ok(resolved.length === 8, `ALLOWLIST acht Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
   ok(reads.length === 6, `ALLOWLIST genau sechs Lesevorgaenge (${reads.length}: ${reads.join(', ')})`);
-  ok(mutations.length === 0, `ALLOWLIST und NULL veraendernde (${mutations.join(', ') || 'keine'})`);
-  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get',
+  ok(mutations.length === 1 && mutations[0] === 'invoices.create',
+    `ALLOWLIST und GENAU eine veraendernde (${mutations.join(', ') || 'keine'})`);
+  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Es gibt keine eigene Suchoperation — die Suche ist ein Parameter.
   ok(!resolved.some((o) => /search/.test(o)), 'ALLOWLIST keine eigene Suchoperation');
