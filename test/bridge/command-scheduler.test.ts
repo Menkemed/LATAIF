@@ -241,8 +241,9 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
     'WIRED jede Antwort traegt die Generation ihres Auftrags');
 
   const registry = src('src/core/bridge/command-registry.ts');
-  ok(/spec\.kind !== 'read'\s*\r?\n?\s*\? await runExclusive/.test(registry),
-    'WIRED alles, was nicht nur liest, geht durch die Warteschlange');
+  const shared = registry.replace(/\s+/g, ' ');
+  ok(shared.includes("kind === 'read' ? await businessWriteScheduler.runShared"),
+    'WIRED Lesen laeuft in der geteilten Spur, alles andere ausschliesslich');
   // C1 gibt ausdrücklich keinen produktiven Schreibvorgang frei.
   for (const forbidden of ['createInvoice', 'createProduct', 'createPurchase', 'sellProduct', 'createConsignment']) {
     ok(!registry.includes(forbidden), `WIRED C1 registriert keinen produktiven Schreibvorgang (${forbidden})`);

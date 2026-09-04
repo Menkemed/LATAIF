@@ -252,7 +252,16 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         assert_eq!(err.http_status(), 400, "das ist ein Fehler des Aufrufers");
     }
     assert_eq!(sink.count(), 0, "und nichts davon wurde zugestellt");
-    assert_eq!(REMOTE_OPS, &[OP_PROBE], "C1 gibt genau eine Operation frei");
+    // C2 hat sechs LESEVORGAENGE dazugelegt. Was zaehlt, ist nicht die Anzahl, sondern dass kein
+    // Name darunter etwas veraendert — und dass die Probe weiter dabei ist.
+    assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
+    assert_eq!(REMOTE_OPS.len(), 7, "Probe plus sechs Lesevorgaenge");
+    for op in REMOTE_OPS {
+        assert!(
+            op.ends_with(".list") || op.ends_with(".get") || *op == OP_PROBE,
+            "nur Auskunft steht auf der Liste: {op}"
+        );
+    }
 }
 
 // ── 7) Zustellung scheitert ────────────────────────────────────────────────
