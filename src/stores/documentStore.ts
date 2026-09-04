@@ -1,4 +1,7 @@
 import { create } from 'zustand';
+// CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
+// Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
+import { runExclusive } from '@/core/bridge/command-scheduler';
 import { v4 as uuid } from 'uuid';
 import type { Document, DocumentClass, LinkedEntityType } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
@@ -74,7 +77,7 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     );
   },
 
-  uploadDocument: async (file, docClass, linkedEntityType, linkedEntityId) => {
+  uploadDocument: (file, docClass, linkedEntityType, linkedEntityId) => runExclusive(async () => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -111,7 +114,7 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     trackInsert('documents', id, { fileName: file.name, docClass, linkedEntityType, linkedEntityId });
     get().loadDocuments();
     return doc;
-  },
+  }),
 
   deleteDocument: (id) => {
     const db = getDatabase();
@@ -121,7 +124,7 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     get().loadDocuments();
   },
 
-  extractOcr: async (id) => {
+  extractOcr: (id) => runExclusive(async () => {
     const doc = get().documents.find(d => d.id === id);
     if (!doc || !doc.fileType?.startsWith('image/')) {
       return { text: '', confidence: 0 };
@@ -138,7 +141,7 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
       get().loadDocuments();
     }
     return result;
-  },
+  }),
 
   updateDocument: (id, data) => {
     const db = getDatabase();

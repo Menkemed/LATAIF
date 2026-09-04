@@ -4,6 +4,9 @@ import type { Product, Category, StockStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getStockAggregates, computeStockValuation, isOwnStockAsset } from '@/core/lots/lot-queries';
+// CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
+// Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
+import { runExclusive } from '@/core/bridge/command-scheduler';
 import { nextSkuFrom } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
@@ -781,7 +784,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     return product;
   },
 
-  createProductWithMedia: async (data, retryProductId, receiptIntent, source) => {
+  createProductWithMedia: (data, retryProductId, receiptIntent, source) => runExclusive(async () => {
     // Stable id across retries — reusing it is what keeps a retry from creating
     // a second product.
     const id = retryProductId ?? uuid();
@@ -970,10 +973,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
     get().loadProducts();
     return result;
-  },
+  }),
 
   // ── MEDIA-04A-3B2C2 — durable existing-product edit (text + media atomic) ──
-  editProductWithMedia: async (id, data, editImages, retryEditId) => {
+  editProductWithMedia: (id, data, editImages, retryEditId) => runExclusive(async () => {
     // Fail closed: image editing only on a fully-resolved, valid gallery.
     if (!canEditImages(editImages.status)) {
       return { status: 'blocked', errorCode: 'MEDIA_EDIT_GALLERY_NOT_READY' };
@@ -1076,9 +1079,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     eventBus.emit('product.updated', 'product', id, data);
     get().loadProducts();
     return { status: 'edited', batchId };
-  },
+  }),
 
-  editProductTextDurably: async (id, data, opts) => {
+  editProductTextDurably: (id, data, opts) => runExclusive(async () => {
     // MEDIA-EDIT-PRESERVE — the save path when the user changed NO image. It
     // diffs only the whitelisted product columns and applies them through the
     // durable coordinator WITHOUT any gallery reconciliation, so a mobile
@@ -1121,7 +1124,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     eventBus.emit('product.updated', 'product', id, data);
     get().loadProducts();
     return { status: 'edited', batchId };
-  },
+  }),
 
   updateProduct: (id, data) => {
     const db = getDatabase();
