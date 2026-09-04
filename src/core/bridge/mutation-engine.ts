@@ -131,7 +131,20 @@ export async function runRemoteCommand(
     }
     deps.commit();
   } catch (err) {
-    try { deps.rollback(); } catch { /* der ursprüngliche Fehler zählt */ }
+    // Der Rücknahme kommt hier eine tragende Rolle zu: ein fachliches Nein darf erst dann als
+    // endgültig festgehalten werden, wenn von dem abgebrochenen Versuch NICHTS übrig ist. Heute
+    // entscheidet die Bestandsprüfung vor dem ersten Schreiben — aber das ist eine Eigenschaft
+    // der heutigen Operationen, kein Vertrag. Ein späterer Auftrag darf schreiben und danach
+    // ablehnen; dann ist genau dieser ROLLBACK der Grund, warum kein Rest zurückbleibt.
+    let undone = true;
+    try { deps.rollback(); } catch (rbErr) { undone = false; console.error('[bridge] rollback failed:', rbErr); }
+
+    if (err instanceof CommandRejected && !undone) {
+      // Die Rücknahme selbst ist gescheitert — eine Teilwirkung könnte stehen geblieben sein.
+      // Ein „endgültig abgelehnt" wäre jetzt eine Lüge, und einzufrieren wäre die teuerste
+      // Variante davon: der Client bekommt einen offenen Ausgang, die Kennung bleibt frei.
+      throw new Error(`could not undo a rejected command (${err.code}): refusing to freeze a partial effect`);
+    }
 
     if (err instanceof CommandRejected) {
       // Ein Urteil. Es wird festgehalten — in einer EIGENEN Transaktion, weil die erste verworfen

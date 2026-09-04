@@ -16,5 +16,8 @@ export function getDatabase(): Db {
   return current;
 }
 
-export function saveDatabase(): void { /* im Test nicht noetig */ }
+// Wie in der Produktion ein Promise (dort feuert-und-vergisst; `posting.ts` haengt ein `.catch`
+// daran). Ein `void` hier liesse den echten Buchungsweg im Test an einer Stelle scheitern, die in
+// der Produktion in Ordnung ist.
+export function saveDatabase(): Promise<void> { return Promise.resolve(); }
 export function saveDatabaseDurably(): Promise<void> { return Promise.resolve(); }

@@ -17,7 +17,8 @@ import { B1_MIGRATION_SQL } from '../operations/migration';
 import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
 import { A1_UPGRADE_SQL } from './a1-upgrade';
 import { COMMAND_LEDGER_DDL, COMMAND_LEDGER_INDEX } from '@/core/bridge/command-ledger';
-import { setDurableSaver } from '@/core/bridge/durability-state';
+import { setDurableSaver, markDurabilityDegraded, noteDurableWrite } from '@/core/bridge/durability-state';
+import { installWriteGuard } from './write-guard';
 import {
   INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
@@ -2812,9 +2813,15 @@ async function seedFreshDatabase(database: Database): Promise<void> {
 // Puffer), getLastSaveError() macht sie abfragbar, flushDatabase() wirft sie nach außen.
 const saver = createSaveCoalescer({
   snapshot: () => getDatabase().export(),
-  persist: (data) => persistDb(data),
+  // CENTRAL-C3A: Hier — und NUR hier — wird die Geschäftsdatenbank geschrieben. Also ist das auch
+  // die einzige Stelle, an der sich ehrlich sagen lässt, ob der Speicher der Platte etwas schuldet.
+  // Vorher wusste das nur der Fernauftrag (er wartete auf sein eigenes Speichern); ein lokaler
+  // Vorgang, dessen Save nach dem COMMIT scheiterte, wurde nur geloggt — die Sperre unten hätte
+  // nie ausgelöst. Jetzt setzt JEDER fehlgeschlagene Persist die Schuld und jeder gelungene löscht sie.
+  persist: async (data) => { await persistDb(data); noteDurableWrite(); },
   isReady: () => db !== null,
   onError: (err) => {
+    markDurabilityDegraded(err instanceof Error ? err.message : String(err), new Date().toISOString());
     if (err instanceof StaleWriteError) {
       console.error(
         '[DB] STALE-WRITE: neuerer/fremder Disk-Stand erkannt — Save verweigert, KEIN Overwrite.',
@@ -2910,7 +2917,11 @@ export function flushDatabaseSync(): void {
 
 export function getDatabase(): Database {
   if (!db) throw new Error('Database not initialized');
-  return db;
+  // CENTRAL-C3A — die Bremse sitzt an der Ausgabe, nicht in 28 Stores. Wer die Datenbank holt, um
+  // zu schreiben, kommt hier vorbei; der Bootvorgang benutzt die lokale Variable `db` direkt und
+  // legt sein Schema deshalb unbehelligt an. `installWriteGuard` gibt dieselbe Instanz zurück und
+  // patcht sie nur beim ersten Mal.
+  return installWriteGuard(db);
 }
 
 // ── MEDIA-04A-2B2-R3/R4 — DB-lifecycle lease + exclusive swap gate ─────

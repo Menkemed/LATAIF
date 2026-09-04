@@ -83,6 +83,31 @@ export async function ensureDurable(save: () => Promise<void>, now: string): Pro
   }
 }
 
+/**
+ * Ein gelungener Schreibvorgang auf die Platte — egal wer ihn ausgelöst hat. Die Schuld gilt für
+ * das ganze Abbild, also begleicht JEDES gelungene Speichern sie, nicht nur das des Auftrags, der
+ * sie verursacht hat.
+ */
+export function noteDurableWrite(): void {
+  debt = null;
+}
+
+/**
+ * Die synchrone Bremse für Schreibvorgänge, die nicht warten können.
+ *
+ * Rechnung, Einkauf, Auftragszeile, Reparatur und der Automatiklauf schreiben synchron; sie haben
+ * keinen Punkt, an dem sie auf ein Speichern warten könnten. Für sie gibt es nur zwei ehrliche
+ * Antworten, und „weiterschreiben" ist keine davon: Sie werden abgewiesen, BEVOR sie ihre erste
+ * Zeile ändern. Gleichzeitig wird ein neuer Speicherversuch angestoßen — sonst bliebe die Sperre
+ * stehen, auch wenn die Platte längst zurück ist, denn niemand sonst würde es noch einmal
+ * probieren. Der nächste Versuch des Benutzers läuft dann normal durch.
+ */
+export function assertDurable(): void {
+  if (!debt) return;
+  if (saver) void saver().then(noteDurableWrite, () => { /* die Schuld bleibt stehen */ });
+  throw new DurabilityError(`the business database is unsaved since ${debt.since}: ${debt.reason}`);
+}
+
 /** Vor einem Fernauftrag: erst die Schuld begleichen, sonst gar nicht anfangen. */
 export async function requireDurable(save: () => Promise<void>, now: string): Promise<void> {
   if (!debt) return;

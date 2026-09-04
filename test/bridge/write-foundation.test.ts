@@ -11,7 +11,7 @@
 // `ensureLegacySequence`, `getNextDocumentNumber`. Gestellt sind nur `BEGIN`/`COMMIT` (damit der
 // Test die Transaktion selbst kontrollieren kann) und das Speichern.
 // ════════════════════════════════════════════════════════════════════════════
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve as resolvePath } from 'node:path';
@@ -20,6 +20,12 @@ const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const withTs = (p: string): string => (existsSync(p) ? p : existsSync(p + '.ts') ? p + '.ts' : p);
 registerHooks({
   resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
+    // Der ECHTE Buchungs-/Transaktionseinstieg (`posting.ts`) wird gefahren, nicht nachgebaut —
+    // nur seine Datenbankquelle wird gestellt. Er holt sie ueber den Alias, daher diese Regel VOR
+    // der allgemeinen `@/`-Regel.
+    if (specifier === '@/core/db/database') {
+      return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
+    }
     if (specifier.startsWith('@/')) {
       return { url: pathToFileURL(withTs(resolvePath(repo, 'src', specifier.slice(2)))).href, shortCircuit: true };
     }
@@ -44,8 +50,12 @@ const { COMMAND_LEDGER_DDL, COMMAND_LEDGER_INDEX, lookupCommand, recordCommand, 
   await import('../../src/core/bridge/command-ledger.ts');
 const { runRemoteCommand, CommandRejected, CommandNotEvaluated } =
   await import('../../src/core/bridge/mutation-engine.ts');
-const { resetDurabilityStateForTest, setDurableSaver, isDurabilityDegraded, durabilityDebt, DURABILITY_DEGRADED } =
+const { resetDurabilityStateForTest, setDurableSaver, isDurabilityDegraded, durabilityDebt,
+  markDurabilityDegraded, DURABILITY_DEGRADED } =
   await import('../../src/core/bridge/durability-state.ts');
+const { installWriteGuard, isDataMutation } = await import('../../src/core/db/write-guard.ts');
+const { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } =
+  await import('../../src/core/ledger/posting.ts');
 const { registerCommand, executeCommand, OP_PROBE } = await import('../../src/core/bridge/command-registry.ts');
 const { runExclusive } = await import('../../src/core/bridge/command-scheduler.ts');
 const { ensureLegacySequence, legacySpec, LEGACY_SEQUENCES, LEGACY_PADDING, highestIssuedSeq } =
@@ -620,7 +630,176 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
     'TXAUDIT …ohne den Tiefenzaehler zu fragen — Produkt-mit-Medien ist damit NICHT C3B-tauglich');
 }
 
-// ── 14) Zwei Gegenproben: haetten die Pruefungen ueberhaupt Rot zeigen koennen? ──
+// ── 14) Die Speicherschuld erreicht JEDEN Geschaeftsschreiber ─────────────
+//
+// `runExclusive` deckte nur die Wege ab, die tatsaechlich durch die Warteschlange gehen: Produkt,
+// Dokument, Mobile-Drain. Rechnung, Einkauf, Auftragszeile, Reparatur und der taegliche
+// Automatiklauf schreiben synchron ueber `getDatabase().run(...)` — die teuersten Vorgaenge liefen
+// also an der Sperre vorbei. Die Bremse sitzt deshalb jetzt dort, wo die Datenbank AUSGEGEBEN wird.
+{
+  resetDurabilityStateForTest();
+  const db = fresh();
+  installWriteGuard(db as never); // genau das, was `getDatabase()` in database.ts tut
+  db.run("INSERT INTO offers (id, branch_id, offer_number) VALUES ('o1','branch-main','OFF-2026-00001')");
+
+  // Die Schuld entsteht ECHT: ein Fernauftrag committet, sein Speichern scheitert.
+  const { deps: d, state } = deps(db, { failSave: true });
+  try { await runRemoteCommand(d, identity(ID('17')), () => ({ ok: true })); } catch { /* offener Ausgang */ }
+  ok(isDurabilityDegraded() && state.disk === null,
+    'WRITERS Ausgangslage: Remote A ist committet, die Persistenz von A ist gescheitert');
+
+  // (a) Rechnung/Einkauf — der ECHTE aeussere Klammergriff aus `posting.ts`, nicht nachgebaut.
+  const INSERT_B = "INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('B','branch-main','INV-B',10)";
+  let rows = 0; let localErr: string | null = null;
+  try {
+    beginLedgerTransaction();
+    db.run(INSERT_B);
+    rows += 1;
+    commitLedgerTransaction();
+  } catch (e) { localErr = String(e); rollbackLedgerTransaction(); }
+  ok(rows === 0, `WRITERS die lokale Rechnung B fuehrt keinen Businesswrite aus (${rows})`);
+  ok(localErr !== null && /unsaved since/.test(localErr), `WRITERS …sie wird vorher abgewiesen (${localErr})`);
+  ok(Number(db.exec("SELECT COUNT(*) FROM invoices WHERE id='B'")[0].values[0][0]) === 0,
+    'WRITERS und in der Tabelle steht nichts');
+
+  // Die Klammer selbst, das Lesen und das Schema bleiben frei — sonst kaeme eine offene
+  // Transaktion nicht mehr zurueck und ein Neustart koennte sein Schema nicht herstellen.
+  let stillUsable = true;
+  try {
+    db.run('BEGIN'); db.run('ROLLBACK');
+    db.exec('SELECT COUNT(*) FROM invoices');
+    db.run('CREATE TABLE IF NOT EXISTS probe_t (id TEXT)');
+  } catch { stillUsable = false; }
+  ok(stillUsable, 'WRITERS Klammer, Lesen und Schema bleiben frei — die Bremse sperrt sich nicht selbst aus');
+
+  // (b) Der taegliche Automatiklauf. Die Anweisung steht woertlich so in `daily-sweep.ts`.
+  let sweepErr: string | null = null;
+  try { db.run("UPDATE offers SET status = 'expired', updated_at = ? WHERE id = ?", [NOW, 'o1']); }
+  catch (e) { sweepErr = String(e); }
+  ok(sweepErr !== null, 'WRITERS auch die Automatik kommt nicht durch — sie hat keine Warteschlange');
+
+  // (c) Produkt/Mobile: der asynchrone Weg kann warten, also holt er zuerst nach.
+  let flushes = 0; let productRan = 0;
+  setDurableSaver(async () => { flushes += 1; throw new Error('disk still full'); });
+  let asyncErr: string | null = null;
+  try { await runExclusive(() => { productRan += 1; return 1; }); } catch (e) { asyncErr = String(e); }
+  ok(productRan === 0 && asyncErr !== null && flushes === 1,
+    `WRITERS der Produkt-/Mobile-Weg versucht zu speichern und faellt dann geschlossen aus (${flushes}/${productRan})`);
+
+  // (d) Die Platte kommt zurueck — beide Wege laufen wieder.
+  setDurableSaver(async () => { flushes += 1; });
+  const healed = await runExclusive(() => { productRan += 1; return 1; });
+  ok(healed === 1 && productRan === 1 && !isDurabilityDegraded(),
+    'WRITERS nach gelungenem Nachholen laeuft der asynchrone Weg normal');
+  let postHeal: string | null = null;
+  try { beginLedgerTransaction(); db.run(INSERT_B); commitLedgerTransaction(); }
+  catch (e) { postHeal = String(e); rollbackLedgerTransaction(); }
+  ok(postHeal === null && Number(db.exec("SELECT COUNT(*) FROM invoices WHERE id='B'")[0].values[0][0]) === 1,
+    `WRITERS und die lokale Rechnung B danach ebenfalls (${postHeal})`);
+
+  // (e) Der synchrone Weg kann nicht warten — aber er stoesst das Nachholen an, sonst bliebe die
+  //     Sperre stehen, auch wenn die Platte laengst zurueck ist.
+  markDurabilityDegraded('disk hiccup', NOW);
+  let healFlushes = 0;
+  setDurableSaver(async () => { healFlushes += 1; });
+  const INSERT_C = "INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('C','branch-main','INV-C',5)";
+  let firstTry: string | null = null;
+  try { db.run(INSERT_C); } catch (e) { firstTry = String(e); }
+  ok(firstTry !== null, 'WRITERS ein synchroner Schreiber wird abgewiesen…');
+  await new Promise((r) => setTimeout(r, 0));
+  ok(healFlushes === 1 && !isDurabilityDegraded(),
+    `WRITERS …stoesst dabei aber selbst das Nachholen an (${healFlushes})`);
+  let secondTry: string | null = null;
+  try { db.run(INSERT_C); } catch (e) { secondTry = String(e); }
+  ok(secondTry === null && Number(db.exec("SELECT COUNT(*) FROM invoices WHERE id='C'")[0].values[0][0]) === 1,
+    `WRITERS der naechste Versuch des Benutzers laeuft durch (${secondTry})`);
+
+  // (f) Was die Bremse greift, ist eng gefasst — und sie sitzt an EINER Stelle, nicht in 28 Stores.
+  for (const [sql, mutating] of [
+    ["INSERT INTO invoices (id) VALUES ('x')", true],
+    ['   update invoices set gross = 1', true],
+    ['DELETE FROM invoices', true],
+    ["BEGIN; INSERT INTO invoices (id) VALUES ('x')", true],
+    ['SELECT * FROM invoices', false],
+    ['BEGIN', false], ['COMMIT', false], ['ROLLBACK', false],
+    ['CREATE TABLE x (id TEXT)', false],
+    ['PRAGMA foreign_keys = ON', false],
+  ] as const) {
+    ok(isDataMutation(sql) === mutating, `WRITERS Bremse greift richtig bei „${sql.slice(0, 30)}"`);
+  }
+  const dbSrc = src('src/core/db/database.ts');
+  ok(/return installWriteGuard\(db\);/.test(dbSrc), 'WRITERS die Bremse sitzt an der Ausgabe der Datenbank');
+  ok(/await persistDb\(data\); noteDurableWrite\(\);/.test(dbSrc), 'WRITERS ein gelungenes Speichern loescht die Schuld…');
+  ok(/onError: \(err\) => \{\s*\r?\n\s*markDurabilityDegraded\(/.test(dbSrc),
+    'WRITERS …und ein gescheitertes setzt sie, an der einzigen Stelle, die wirklich schreibt');
+  const patchedStores = readdirSync(resolvePath(repo, 'src/stores'))
+    .filter((f) => /assertDurable|requireDurableOrFail/.test(src(`src/stores/${f}`)));
+  ok(patchedStores.length === 0, `WRITERS und KEIN Store musste einzeln angefasst werden (${patchedStores.join(', ') || 'keiner'})`);
+}
+
+// ── 15) Ein eingefrorenes Nein hinterlaesst keine halbe Wirkung ───────────
+//
+// Heute prueft `STOCK_UNAVAILABLE` vor dem ersten Schreiben — aber das ist eine Eigenschaft der
+// heutigen Operationen, kein Vertrag. Ein spaeterer Auftrag darf schreiben und danach ablehnen.
+// Dann muss die Rueckabwicklung vollstaendig sein, BEVOR das Nein eingefroren wird: eine halbe
+// Wirkung zusammen mit einem „endgueltig abgelehnt" waere der schlimmste aller Ausgaenge.
+{
+  resetDurabilityStateForTest();
+  const db = fresh();
+  const { deps: d, state } = deps(db);
+  db.run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('seed','branch-main','INV-SEED',100)");
+
+  let domainRuns = 0;
+  const writesThenRejects = (x: unknown): never => {
+    domainRuns += 1;
+    (x as Db).run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('row-A','branch-main','INV-A',1)");
+    (x as Db).run("UPDATE invoices SET gross = 999 WHERE id = 'seed'");
+    throw new CommandRejected('STOCK_UNAVAILABLE', 'reserved elsewhere while the lines were written');
+  };
+
+  let out: Awaited<ReturnType<typeof runRemoteCommand>> | { kind: 'threw' } = { kind: 'threw' };
+  try { out = await runRemoteCommand(d, identity(ID('18')), writesThenRejects); } catch { out = { kind: 'threw' }; }
+  ok(out.kind === 'rejected' && out.code === 'STOCK_UNAVAILABLE' && out.frozen === true,
+    `ZEROEFFECT das Nein kommt zurueck und ist endgueltig (${JSON.stringify(out)})`);
+  ok(Number(db.exec("SELECT COUNT(*) FROM invoices WHERE id='row-A'")[0].values[0][0]) === 0,
+    'ZEROEFFECT die halb geschriebene Zeile ist zurueckgenommen');
+  ok(Number(db.exec("SELECT gross FROM invoices WHERE id='seed'")[0].values[0][0]) === 100,
+    'ZEROEFFECT und die geaenderte Menge steht wieder auf ihrem alten Wert');
+  ok(commandCount(db as never) === 1 && lookupCommand(db as never, identity(ID('18'))).kind === 'replay',
+    'ZEROEFFECT das Nein selbst ist eingefroren');
+
+  // Und genau so — Nein ohne Wirkung — steht es auf der Platte.
+  const image = new SQL.Database(state.disk as Uint8Array) as unknown as Db;
+  ok(Number(image.exec("SELECT COUNT(*) FROM invoices WHERE id='row-A'")[0].values[0][0]) === 0
+    && Number(image.exec("SELECT gross FROM invoices WHERE id='seed'")[0].values[0][0]) === 100
+    && Number(image.exec('SELECT COUNT(*) FROM remote_command_ledger')[0].values[0][0]) === 1,
+    'ZEROEFFECT …und das Abbild auf der Platte zeigt dasselbe');
+
+  const again = await runRemoteCommand(d, identity(ID('18')), writesThenRejects);
+  ok(domainRuns === 1, `ZEROEFFECT die Wiederholung laesst die Domaene nicht noch einmal laufen (${domainRuns})`);
+  ok(again.kind === 'rejected' && again.code === 'STOCK_UNAVAILABLE' && again.replayed === true,
+    'ZEROEFFECT …und liefert dasselbe eingefrorene Nein');
+  ok(Number(db.exec("SELECT COUNT(*) FROM invoices WHERE id='row-A'")[0].values[0][0]) === 0,
+    'ZEROEFFECT auch nach der Wiederholung keine Wirkung');
+
+  // Und wenn die Ruecknahme selbst scheitert, wird gar nichts eingefroren: dann laesst sich
+  // „ohne Wirkung" nicht mehr behaupten.
+  const db2 = fresh();
+  const { deps: d2 } = deps(db2);
+  const broken = { ...d2, rollback: () => { throw new Error('rollback failed'); } };
+  let refused: string | null = null;
+  try {
+    await runRemoteCommand(broken, identity(ID('19')), () => {
+      throw new CommandRejected('CUSTOMER_REQUIRED', 'no customer');
+    });
+  } catch (e) { refused = String(e); }
+  ok(refused !== null && /refusing to freeze a partial effect/.test(refused),
+    `ZEROEFFECT eine gescheiterte Ruecknahme friert nichts ein (${refused})`);
+  ok(lookupCommand(db2 as never, identity(ID('19'))).kind === 'fresh',
+    'ZEROEFFECT …die Kennung bleibt frei, der Ausgang offen');
+}
+
+// ── 16) Vier Gegenproben: haetten die Pruefungen ueberhaupt Rot zeigen koennen? ──
 //
 // Eine gruene Pruefung beweist nichts, wenn sie beim falschen Verhalten ebenfalls gruen waere.
 // Also wird das falsche Verhalten hier ABSICHTLICH nachgebaut — beide Male genau das Verhalten,
@@ -660,6 +839,29 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   const drifted = await runRemoteCommand(d2, identity(ID('21')), sellUnfrozen);
   ok(drifted.kind === 'ok' && stock === 0,
     'CONTROL b …und dieselbe Wiederholung verkauft ploetzlich doch — genau der Fehler, den §6 und §10 fangen');
+
+  // (c) Ohne die Bremse an der Ausgabe: derselbe synchrone Einstieg schreibt trotz offener Schuld
+  //     einfach weiter. Genau so war es vor §14.
+  const naked = fresh(); // NICHT ueber `installWriteGuard` ausgegeben
+  markDurabilityDegraded('disk full', NOW);
+  naked.run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('D','branch-main','INV-D',1)");
+  ok(Number(naked.exec("SELECT COUNT(*) FROM invoices WHERE id='D'")[0].values[0][0]) === 1,
+    'CONTROL c ohne die Bremse schreibt der synchrone Weg weiter — genau das faengt §14');
+
+  // (d) Der alte Weg fuer eine Ablehnung nach einem Teilwrite: im selben, halb mutierten
+  //     Vorgang einfrieren, ohne zurueckzunehmen.
+  resetDurabilityStateForTest();
+  const db3 = fresh();
+  db3.run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('seed','branch-main','INV-SEED',100)");
+  db3.run('BEGIN');
+  db3.run("INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES ('row-A','branch-main','INV-A',1)");
+  db3.run("UPDATE invoices SET gross = 999 WHERE id = 'seed'");
+  recordCommand(db3 as never, { status: 'rejected', identity: identity(ID('22')), code: 'STOCK_UNAVAILABLE', message: 'x' }, NOW);
+  db3.run('COMMIT');
+  ok(Number(db3.exec("SELECT COUNT(*) FROM invoices WHERE id='row-A'")[0].values[0][0]) === 1
+    && Number(db3.exec("SELECT gross FROM invoices WHERE id='seed'")[0].values[0][0]) === 999
+    && commandCount(db3 as never) === 1,
+    'CONTROL d der alte Weg committet Teilwirkung UND abgelehntes Ergebnis zusammen — genau das faengt §15');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3a write foundation: ${PASS} passed, ${fails.length} failed`);
@@ -672,3 +874,5 @@ console.log('CENTRAL_C3_UNKNOWN_OUTCOME_RETRY_PROVED');
 console.log('CENTRAL_C3_RESULT_CLASSIFICATION_PROVED');
 console.log('CENTRAL_C3_REMOTE_WRITE_DURABILITY_PROVED');
 console.log('CENTRAL_C3_POST_COMMIT_DURABILITY_FAILURE_PROVED');
+console.log('CENTRAL_C3_DEGRADED_ALL_WRITERS_PROVED');
+console.log('CENTRAL_C3_REJECTED_COMMAND_ZERO_EFFECT_PROVED');
