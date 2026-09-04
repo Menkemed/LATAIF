@@ -17,6 +17,7 @@ import { B1_MIGRATION_SQL } from '../operations/migration';
 import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
 import { A1_UPGRADE_SQL } from './a1-upgrade';
 import { COMMAND_LEDGER_DDL, COMMAND_LEDGER_INDEX } from '@/core/bridge/command-ledger';
+import { setDurableSaver } from '@/core/bridge/durability-state';
 import {
   INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
@@ -2863,6 +2864,11 @@ export async function saveDatabaseDurably(): Promise<void> {
   const err = saver.getLastError(); // Coalescer resolved auch bei Fehler → hier pruefen
   if (err) throw err instanceof Error ? err : new Error(String(err));
 }
+
+// CENTRAL-C3A — die Sperren gegen ein ungeschriebenes Abbild (Warteschlange, Fernlesevorgänge)
+// brauchen einen Speicherweg, aber nicht dieses Modul: sie bekommen ihn hier einmal gereicht.
+// Andersherum zöge jeder Test der Warteschlange sql.js und die WASM-Datei nach.
+setDurableSaver(saveDatabaseDurably);
 
 // D2: Letzter Persist-Fehler (Stale-Konflikt oder transient) für Diagnose/UI. null = alles ok.
 export function getLastSaveError(): unknown {

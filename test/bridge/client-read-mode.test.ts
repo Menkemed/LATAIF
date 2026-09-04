@@ -226,7 +226,9 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   ok(writeDuringRead === 0, `CONSISTENCY und eine Buchung beginnt nie waehrend eines Lesens (${writeDuringRead})`);
 
   const registry = src('src/core/bridge/command-registry.ts');
-  ok(/kind === 'read'\s*\r?\n?\s*\? await businessWriteScheduler\.runShared/.test(registry),
+  const flat = registry.replace(/\s+/g, ' ');
+  const readBranch = flat.slice(flat.indexOf("if (spec.kind === 'read')"), flat.indexOf("else if (spec.kind === 'probe')"));
+  ok(readBranch.length > 0 && readBranch.includes('await businessWriteScheduler.runShared('),
     'CONSISTENCY die Lesebefehle nehmen wirklich diese Spur');
 }
 

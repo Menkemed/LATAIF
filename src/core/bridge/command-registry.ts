@@ -11,6 +11,7 @@
 // Alt-Nummernkreise stehen.
 
 import { runExclusive, businessWriteScheduler } from './command-scheduler';
+import { DURABILITY_DEGRADED, DurabilityError, requireDurableOrFail } from './durability-state';
 
 /** Was ein Auftrag zurückgeben darf. */
 export type CommandResult = { readonly [k: string]: unknown };
@@ -88,15 +89,35 @@ export async function executeCommand(op: string, payload: unknown): Promise<Repl
   const spec = REGISTRY.get(op);
   if (!spec) return { kind: 'infrastructure_error', code: 'BRIDGE_OP_NOT_REGISTERED' };
   try {
-    // Lesevorgänge laufen nebeneinander, aber nicht MITTEN in einer Buchung: der Produktweg mit
-    // Medien hat mehrere Phasen, und ein Lesen dazwischen sähe ein Produkt ohne seine Bilder.
-    const value = spec.kind === 'read'
-      ? await businessWriteScheduler.runShared(() => spec.handler(payload))
-      : await runExclusive(() => spec.handler(payload));
+    let value: CommandResult;
+    if (spec.kind === 'read') {
+      // Lesevorgänge laufen nebeneinander, aber nicht MITTEN in einer Buchung: der Produktweg mit
+      // Medien hat mehrere Phasen, und ein Lesen dazwischen sähe ein Produkt ohne seine Bilder.
+      //
+      // CENTRAL-C3A: und nicht auf einem Stand, der nicht auf der Platte steht. Eine Auskunft an
+      // einen anderen Rechner ist eine Bestätigung — „diese Rechnung existiert". Verschwände sie
+      // beim nächsten Absturz, hätte der Client sie trotzdem gesehen und danach gehandelt.
+      value = await businessWriteScheduler.runShared(async () => {
+        await requireDurableOrFail();
+        return spec.handler(payload);
+      });
+    } else if (spec.kind === 'probe') {
+      // Die Probe bleibt ungesperrt: sie liest nichts und bestätigt nichts. Gerade wenn das
+      // Speichern klemmt, muss man von außen noch feststellen können, dass der Weg lebt.
+      value = await businessWriteScheduler.run(() => spec.handler(payload));
+    } else {
+      value = await runExclusive(() => spec.handler(payload));
+    }
     return { kind: 'ok', value };
   } catch (err) {
     if (err instanceof BusinessError) {
       return { kind: 'business_error', code: err.code, message: err.message };
+    }
+    if (err instanceof DurabilityError) {
+      // KEIN fachliches Nein: der Ausgang ist offen. Der Client darf daraus nicht schließen, dass
+      // nichts passiert ist — nur, dass dieser Rechner gerade nichts bestätigen kann.
+      console.warn('[bridge] refusing while unsaved:', op, err.message);
+      return { kind: 'infrastructure_error', code: DURABILITY_DEGRADED };
     }
     // Alles andere ist eine Störung, und ihr Text bleibt beim Betreiber: eine fremde Anfrage
     // bekommt einen Code, keine Innereien.

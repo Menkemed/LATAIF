@@ -2,12 +2,13 @@
 //
 // Der Ablauf ist eine einzige Transaktion, und die Reihenfolge darin ist der ganze Vertrag:
 //
+//   durabel sein                  — offene Speicherschuld zuerst begleichen, sonst gar nicht erst anfangen
 //   BEGIN
 //     Kennung nachschlagen        — ist das hier schon gelaufen?
 //     Geschäftswirkung ausführen  — Belegnummer, Domänenschreibvorgänge, Buchungen
 //     Ergebnis einfrieren         — dieselbe Transaktion, nicht die nächste
 //   COMMIT
-//   durabel speichern             — erst danach darf „erfolgreich" gemeldet werden
+//   durabel speichern             — erst danach darf ein Ergebnis herausgegeben werden
 //
 // Was daran wichtig ist, in der Reihenfolge der Gefahren:
 //
@@ -17,43 +18,69 @@
 //  2. **Ein verlorener Antwortweg ist kein Fehlschlag.** Der Auftrag kann vollständig gelaufen
 //     sein. Beim zweiten Versuch mit derselben Kennung wird der Geschäftscode NICHT erneut
 //     ausgeführt; es kommt die eingefrorene Antwort zurück.
-//  3. **Eine Störung wird nicht als Erfolg festgehalten.** Nur ein Ergebnis oder eine endgültige
-//     fachliche Ablehnung wird eingefroren. Alles andere hinterlässt keine Zeile — die Kennung
-//     bleibt frei, und der Client darf es erneut versuchen.
-//  4. **Gespeichert wird vor der Erfolgsmeldung.** Die Geschäftsdatenbank liegt im Speicher und
-//     wird als ganzes Abbild geschrieben. Ein „erfolgreich" ohne bestätigtes Speichern wäre
-//     dasselbe Versprechen, das A1 beim Pull-Stand schon einmal gebrochen hat.
+//  3. **Eingefroren wird das Urteil der Domäne — und nur das.** Dieselbe Kennung ist eine
+//     WIEDERHOLUNG, kein neuer Versuch. Wer wirklich neu fragen will („ist die Ware jetzt da?"),
+//     schickt eine neue Kennung. Deshalb friert auch ein `STOCK_UNAVAILABLE` ein: es war die
+//     Antwort auf genau diese Frage zu genau diesem Zeitpunkt. Täte es das nicht, hinge das
+//     Ergebnis einer Wiederholung davon ab, wann sie ankommt — bei zwei Wiederholungen derselben
+//     Anfrage könnte einmal „nein" und einmal „verkauft" herauskommen, und niemand wüsste, welche
+//     der beiden Antworten der Client gesehen hat.
+//  4. **Eine Störung wird nicht als Urteil festgehalten.** Was nie bis zu einer fachlichen
+//     Entscheidung kam — Kennungskonflikt, Bruch in der Brücke, Persistenzfehler — hinterlässt
+//     keine Zeile. Die Kennung bleibt frei, und der Client darf es erneut versuchen.
+//  5. **Gespeichert wird vor der Antwort.** Die Geschäftsdatenbank liegt im Speicher und wird als
+//     ganzes Abbild geschrieben. Ein Ergebnis ohne bestätigtes Speichern wäre dasselbe Versprechen,
+//     das A1 beim Pull-Stand schon einmal gebrochen hat — und es gilt auch für die WIEDERHOLUNG:
+//     ein eingefrorenes Ergebnis, das nur im Speicher steht, wird nicht herausgegeben.
 //
 // C3A registriert bewusst NOCH KEINE produktive Operation: `REMOTE_MUTATIONS_ENABLED` bleibt
 // zu. Diese Maschine ist gebaut und geprüft, aber sie hat noch keinen Kunden.
 
 import type { SqlDb } from '../sync/apply-change';
 import { lookupCommand, recordCommand, type CommandIdentity, type CommandRecord } from './command-ledger';
+import { ensureDurable, requireDurable } from './durability-state';
 
 /**
- * Eine fachliche Ablehnung. `terminal` entscheidet, ob sie eingefroren wird:
+ * Das endgültige fachliche Nein der Domäne: die Operation wurde ausgewertet und beurteilt.
+ * Es wird EINGEFROREN — für diese Kennung ist die Frage beantwortet.
  *
- *   • `true`  — sie hängt an der EINGABE und fällt jedes Mal gleich aus (Pflichtfeld fehlt,
- *               fremde Filiale, unbekannte Kennung). Einfrieren ist richtig und spart dem Client
- *               eine sinnlose Wiederholung.
- *   • `false` — sie hängt am ZUSTAND (`STOCK_UNAVAILABLE`, „schon bezahlt"). Morgen kann dieselbe
- *               Anfrage zu Recht gelingen. Sie einzufrieren wäre eine falsche Endgültigkeit.
+ * Dazu gehört ausdrücklich auch, was vom Zustand abhängt (`STOCK_UNAVAILABLE`, „schon bezahlt"):
+ * die Domäne hat entschieden, und dieselbe Kennung fragt nicht neu, sie wiederholt. Ein neuer
+ * Versuch ist ein neuer Auftrag mit einer neuen Kennung.
  */
 export class CommandRejected extends Error {
   readonly code: string;
-  readonly terminal: boolean;
-  constructor(code: string, message: string, terminal: boolean) {
+  constructor(code: string, message: string) {
     super(message);
     this.name = 'CommandRejected';
     this.code = code;
-    this.terminal = terminal;
   }
 }
 
-/** Was der Aufrufer zurückbekommt — dieselben drei Ausgänge wie an der Brücke. */
+/**
+ * Kein Urteil, sondern ein Nicht-Zustandekommen: die Operation wurde nie bis zu einer fachlichen
+ * Entscheidung ausgewertet (Kennungskonflikt, fehlende Voraussetzung des Transports). Der Client
+ * bekommt eine Begründung, aber NICHTS wird eingefroren — die Kennung bleibt frei.
+ */
+export class CommandNotEvaluated extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'CommandNotEvaluated';
+    this.code = code;
+  }
+}
+
+/** Was der Aufrufer zurückbekommt. `frozen` sagt, ob dieses Nein für die Kennung endgültig ist. */
 export type CommandOutcome =
   | { readonly kind: 'ok'; readonly value: unknown; readonly replayed: boolean }
-  | { readonly kind: 'rejected'; readonly code: string; readonly message: string; readonly replayed: boolean };
+  | {
+      readonly kind: 'rejected';
+      readonly code: string;
+      readonly message: string;
+      readonly frozen: boolean;
+      readonly replayed: boolean;
+    };
 
 export interface EngineDeps {
   readonly db: SqlDb;
@@ -80,14 +107,19 @@ export async function runRemoteCommand(
   let record: CommandRecord | null = null;
   let replayed = false;
 
+  // Zuerst die Schuld gegenüber der Platte. Ein Auftrag auf einem Stand, der nicht geschrieben
+  // werden konnte, vergrößert nur den Schaden eines Absturzes — und sein Nachweis läge auf
+  // demselben ungeschriebenen Abbild. Gelingt das Nachholen nicht, wirft es: offener Ausgang.
+  await requireDurable(deps.durableSave, deps.now());
+
   deps.begin();
   try {
     // Nachschlagen INNERHALB der Transaktion: sonst könnte zwischen Frage und Buchung ein
     // zweiter Auftrag dieselbe Kennung belegen.
     const seen = lookupCommand(db, identity);
     if (seen.kind === 'conflict') {
-      // Kein Geschäftscode, keine Zeile — nur ein Nein. Die Transaktion wird verworfen.
-      throw new CommandRejected('COMMAND_ID_CONFLICT', seen.reason, false);
+      // Dieselbe Kennung, andere Anfrage. Kein Geschäftscode, keine Zeile — nur ein Nein.
+      throw new CommandNotEvaluated('COMMAND_ID_CONFLICT', seen.reason);
     }
     if (seen.kind === 'replay') {
       replayed = true;
@@ -101,9 +133,9 @@ export async function runRemoteCommand(
   } catch (err) {
     try { deps.rollback(); } catch { /* der ursprüngliche Fehler zählt */ }
 
-    if (err instanceof CommandRejected && err.terminal) {
-      // Eine endgültige Ablehnung wird festgehalten — in einer EIGENEN Transaktion, weil die
-      // erste verworfen wurde. Sie beschreibt keine Wirkung, also braucht sie keine.
+    if (err instanceof CommandRejected) {
+      // Ein Urteil. Es wird festgehalten — in einer EIGENEN Transaktion, weil die erste verworfen
+      // wurde. Es beschreibt keine Wirkung, also braucht es keine.
       const rejected: CommandRecord = {
         status: 'rejected', identity, code: err.code, message: err.message,
       };
@@ -111,25 +143,32 @@ export async function runRemoteCommand(
       try {
         if (lookupCommand(db, identity).kind === 'fresh') recordCommand(db, rejected, deps.now());
         deps.commit();
-      } catch { try { deps.rollback(); } catch { /* ignore */ } }
-      await deps.durableSave();
-      return { kind: 'rejected', code: err.code, message: err.message, replayed: false };
+      } catch (freezeErr) {
+        // Ohne Nachweis darf das Nein nicht als endgültig gemeldet werden: eine Wiederholung
+        // würde die Domäne erneut fragen und könnte etwas anderes bekommen.
+        try { deps.rollback(); } catch { /* ignore */ }
+        throw freezeErr;
+      }
+      // Auch ein eingefrorenes Nein gilt erst, wenn es auf der Platte steht.
+      await ensureDurable(deps.durableSave, deps.now());
+      return { kind: 'rejected', code: err.code, message: err.message, frozen: true, replayed: false };
     }
-    if (err instanceof CommandRejected) {
-      // Zustandsabhängig — nichts wird eingefroren, die Kennung bleibt frei.
-      return { kind: 'rejected', code: err.code, message: err.message, replayed: false };
+    if (err instanceof CommandNotEvaluated) {
+      // Kein Urteil, keine Zeile — die Kennung bleibt frei.
+      return { kind: 'rejected', code: err.code, message: err.message, frozen: false, replayed: false };
     }
-    // Eine Störung. KEINE Zeile: ein Auftrag, der nie lief, darf nicht als gelaufen gelten.
+    // Eine Störung. KEINE Zeile: ein Auftrag, der nie zu Ende ausgewertet wurde, darf nicht als
+    // beantwortet gelten.
     throw err;
   }
 
-  // Erst nach bestätigtem Speichern gilt der Auftrag als erfolgreich. Schlägt es fehl, wirft es —
-  // der Client bekommt dann kein „erfolgreich", sondern einen offenen Ausgang, und die
-  // Wiederholung mit derselben Kennung findet den Nachweis nur, wenn er wirklich auf der Platte ist.
-  await deps.durableSave();
+  // Erst nach bestätigtem Speichern wird ein Ergebnis herausgegeben — beim ersten Lauf UND bei der
+  // Wiederholung. Schlägt es fehl, wirft es: der Client bekommt keinen Erfolg, sondern einen
+  // offenen Ausgang, und der Prozess merkt sich die Schuld.
+  await ensureDurable(deps.durableSave, deps.now());
 
   if (record.status === 'completed') {
     return { kind: 'ok', value: record.result, replayed };
   }
-  return { kind: 'rejected', code: record.code, message: record.message, replayed };
+  return { kind: 'rejected', code: record.code, message: record.message, frozen: true, replayed };
 }

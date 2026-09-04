@@ -17,6 +17,8 @@
 //   • Die Reihenfolge ist die der Annahme (FIFO). Wer zuerst kam, wird zuerst ausgeführt; das
 //     entscheidet bei „Menge 1, zwei Verkäufe", wer gewinnt, und macht es nachvollziehbar.
 
+import { requireDurableOrFail } from './durability-state';
+
 /** Ein Auftrag: irgendetwas, das etwas zurückgibt. Die Warteschlange kennt seinen Inhalt nicht. */
 export type Task<T> = () => Promise<T> | T;
 
@@ -157,7 +159,19 @@ export class CommandScheduler {
  */
 export const businessWriteScheduler = new CommandScheduler();
 
-/** Kurzform für den Regelfall. */
+/**
+ * Kurzform für den Regelfall — und die Stelle, an der die Speicherschuld eingelöst wird.
+ *
+ * CENTRAL-C3A: Konnte ein früherer Stand nicht auf die Platte geschrieben werden, wird hier zuerst
+ * nachgeholt. Gelingt das, läuft der Auftrag ganz normal; gelingt es nicht, wird er GAR NICHT
+ * begonnen. Das ist die unangenehme, aber richtige Antwort: eine Stunde weiterarbeiten in einen
+ * Speicher, der beim nächsten Absturz leer ist, kostet mehr als ein sofortiger Stopp mit klarer
+ * Ursache. Die Prüfung liegt INNERHALB des exklusiven Platzes — so schreibt niemand nebenher,
+ * während das Abbild gezogen wird.
+ */
 export function runExclusive<T>(task: Task<T>): Promise<T> {
-  return businessWriteScheduler.run(task);
+  return businessWriteScheduler.run(async () => {
+    await requireDurableOrFail();
+    return task();
+  });
 }

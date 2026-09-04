@@ -242,7 +242,11 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   const registry = src('src/core/bridge/command-registry.ts');
   const shared = registry.replace(/\s+/g, ' ');
-  ok(shared.includes("kind === 'read' ? await businessWriteScheduler.runShared"),
+  const readAt = shared.indexOf("if (spec.kind === 'read')");
+  const sharedAt = shared.indexOf('businessWriteScheduler.runShared');
+  const probeAt = shared.indexOf("else if (spec.kind === 'probe')");
+  const exclusiveAt = shared.indexOf('await runExclusive(');
+  ok(readAt > 0 && sharedAt > readAt && sharedAt < probeAt && exclusiveAt > probeAt,
     'WIRED Lesen laeuft in der geteilten Spur, alles andere ausschliesslich');
   // C1 gibt ausdrücklich keinen produktiven Schreibvorgang frei.
   for (const forbidden of ['createInvoice', 'createProduct', 'createPurchase', 'sellProduct', 'createConsignment']) {

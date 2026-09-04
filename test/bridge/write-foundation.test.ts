@@ -42,7 +42,12 @@ const SQL = await initSqlJs({ locateFile: (f: string) => resolvePath(repo, 'node
 
 const { COMMAND_LEDGER_DDL, COMMAND_LEDGER_INDEX, lookupCommand, recordCommand, commandCount } =
   await import('../../src/core/bridge/command-ledger.ts');
-const { runRemoteCommand, CommandRejected } = await import('../../src/core/bridge/mutation-engine.ts');
+const { runRemoteCommand, CommandRejected, CommandNotEvaluated } =
+  await import('../../src/core/bridge/mutation-engine.ts');
+const { resetDurabilityStateForTest, setDurableSaver, isDurabilityDegraded, durabilityDebt, DURABILITY_DEGRADED } =
+  await import('../../src/core/bridge/durability-state.ts');
+const { registerCommand, executeCommand, OP_PROBE } = await import('../../src/core/bridge/command-registry.ts');
+const { runExclusive } = await import('../../src/core/bridge/command-scheduler.ts');
 const { ensureLegacySequence, legacySpec, LEGACY_SEQUENCES, LEGACY_PADDING, highestIssuedSeq } =
   await import('../../src/core/db/legacy-sequences.ts');
 const { setTestDatabase } = await import('../sync/_db-shim.ts');
@@ -80,9 +85,13 @@ const identity = (commandId: string, op = 'invoice.create', hash = 'h1', user = 
   commandId, tenantId: 'tenant-1', branchId: 'branch-main', userId: user, op, payloadHash: hash,
 });
 
-/** Die echten Transaktionsklammern einer sql.js-Datenbank, plus ein zaehlendes Speichern. */
+/**
+ * Die echten Transaktionsklammern einer sql.js-Datenbank, plus ein Speichern mit einer PLATTE:
+ * `state.disk` haelt genau das, was ein gelungenes Speichern hinterlassen hat. Damit laesst sich
+ * ein Neustart ehrlich nachstellen — nicht „was im Speicher steht", sondern „was geschrieben wurde".
+ */
 function deps(db: Db, opts: { failSave?: boolean } = {}) {
-  const state = { saves: 0, commits: 0, rollbacks: 0 };
+  const state = { saves: 0, commits: 0, rollbacks: 0, failSave: opts.failSave === true, disk: null as Uint8Array | null };
   return {
     state,
     deps: {
@@ -91,7 +100,8 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
       commit: () => { db.run('COMMIT'); state.commits += 1; },
       rollback: () => { db.run('ROLLBACK'); state.rollbacks += 1; },
       durableSave: async () => {
-        if (opts.failSave) throw new Error('disk full');
+        if (state.failSave) throw new Error('disk full');
+        state.disk = db.export();
         state.saves += 1;
       },
       now: () => NOW,
@@ -234,47 +244,71 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   ok(commandCount(db as never) === 1, 'CONFLICT es bleibt bei einem Nachweis');
 }
 
-// ── 6) Welche Ablehnung eingefroren wird — und welche nicht ───────────────
+// ── 6) Was eingefroren wird: das Urteil der Domaene — und nur das ─────────
 //
-// Eine Ablehnung, die an der EINGABE haengt, faellt jedes Mal gleich aus: einfrieren spart dem
-// Client eine sinnlose Wiederholung. Eine Ablehnung, die am ZUSTAND haengt, darf morgen anders
-// ausfallen — sie einzufrieren waere eine falsche Endgueltigkeit.
+// Dieselbe Kennung ist eine WIEDERHOLUNG, kein neuer Versuch. Deshalb friert JEDES definitive
+// fachliche Urteil ein, auch das zustandsabhaengige: `STOCK_UNAVAILABLE` war die Antwort auf genau
+// diese Frage zu genau diesem Zeitpunkt. Waere es nicht eingefroren, haenge das Ergebnis einer
+// Wiederholung davon ab, WANN sie ankommt — und niemand wuesste hinterher, welche der beiden
+// Antworten der Client gesehen hat. Wer wirklich neu fragen will, schickt eine neue Kennung.
 {
+  resetDurabilityStateForTest();
   const db = fresh();
   const { deps: d } = deps(db);
 
-  const terminal = await runRemoteCommand(d, identity(ID('5')), () => {
-    throw new CommandRejected('CUSTOMER_REQUIRED', 'no customer in the request', true);
+  const input = await runRemoteCommand(d, identity(ID('5')), () => {
+    throw new CommandRejected('CUSTOMER_REQUIRED', 'no customer in the request');
   });
-  ok(terminal.kind === 'rejected' && terminal.code === 'CUSTOMER_REQUIRED', 'CLASS eine Eingabe-Ablehnung kommt zurueck');
+  ok(input.kind === 'rejected' && input.code === 'CUSTOMER_REQUIRED' && input.frozen === true,
+    `CLASS ein Eingabe-Urteil kommt zurueck und ist endgueltig (${JSON.stringify(input)})`);
   ok(commandCount(db as never) === 1, 'CLASS …und wird eingefroren');
   let againRuns = 0;
   const again = await runRemoteCommand(d, identity(ID('5')), () => { againRuns += 1; return { ok: true }; });
   ok(again.kind === 'rejected' && again.replayed === true && againRuns === 0,
     'CLASS die Wiederholung bekommt dieselbe Ablehnung, ohne den Code auszufuehren');
 
-  const transient = await runRemoteCommand(d, identity(ID('6')), () => {
-    throw new CommandRejected('STOCK_UNAVAILABLE', 'nothing left', false);
-  });
-  ok(transient.kind === 'rejected' && transient.code === 'STOCK_UNAVAILABLE', 'CLASS eine Zustands-Ablehnung kommt zurueck');
-  ok(lookupCommand(db as never, identity(ID('6'))).kind === 'fresh',
-    'CLASS …wird aber NICHT eingefroren — morgen kann dieselbe Anfrage zu Recht gelingen');
+  // Das ZUSTANDSABHAENGIGE Urteil — der Fall, der frueher falsch eingeordnet war. Bewusst
+  // abgefangen: wird es wieder als Stoerung behandelt, soll das ein rotes Ergebnis sein und kein
+  // Abbruch, der den Rest des Gates verschluckt.
+  let stock: Awaited<ReturnType<typeof runRemoteCommand>> | { kind: 'threw'; code: string } =
+    { kind: 'threw', code: 'never ran' };
+  try {
+    stock = await runRemoteCommand(d, identity(ID('6')), () => {
+      throw new CommandRejected('STOCK_UNAVAILABLE', 'nothing left');
+    });
+  } catch (e) { stock = { kind: 'threw', code: String(e) }; }
+  ok(stock.kind === 'rejected' && stock.code === 'STOCK_UNAVAILABLE' && stock.frozen === true,
+    `CLASS auch STOCK_UNAVAILABLE ist ein Urteil (${JSON.stringify(stock)})`);
+  ok(lookupCommand(db as never, identity(ID('6'))).kind === 'replay',
+    'CLASS …und wird eingefroren — dieselbe Kennung fragt nicht neu, sie wiederholt');
 
   let later = 0;
   const retry = await runRemoteCommand(d, identity(ID('6')), () => { later += 1; return { sold: true }; });
-  ok(retry.kind === 'ok' && later === 1, 'CLASS und ein spaeterer Versuch darf gelingen');
+  ok(retry.kind === 'rejected' && retry.code === 'STOCK_UNAVAILABLE' && retry.replayed === true && later === 0,
+    `CLASS die Wiederholung bekommt dasselbe Nein, ohne die Domaene zu fragen (${later})`);
 
-  // Eine Stoerung ist keine Ablehnung: sie hinterlaesst nichts.
+  // Ein bewusst NEUER Versuch braucht eine NEUE Kennung — und darf gelingen.
+  const deliberate = await runRemoteCommand(d, identity(ID('9')), () => { later += 1; return { sold: true }; });
+  ok(deliberate.kind === 'ok' && later === 1,
+    `CLASS ein neuer Versuch mit neuer Kennung darf gelingen (${later})`);
+
+  // Kein Urteil: der Kennungskonflikt kam nie zur Domaene.
+  const conflict = await runRemoteCommand(d, identity(ID('5'), 'invoice.create', 'ANDERS'), () => ({ ok: true }));
+  ok(conflict.kind === 'rejected' && conflict.code === 'COMMAND_ID_CONFLICT' && conflict.frozen === false,
+    `CLASS ein Kennungskonflikt ist KEIN Urteil und wird nicht eingefroren (${JSON.stringify(conflict)})`);
+
+  // Eine Stoerung ist erst recht keine Ablehnung: sie hinterlaesst nichts.
   let boom: string | null = null;
   try { await runRemoteCommand(d, identity(ID('7')), () => { throw new Error('database is on fire'); }); }
   catch (e) { boom = String(e); }
   ok(boom !== null, 'CLASS eine Stoerung wird geworfen');
   ok(lookupCommand(db as never, identity(ID('7'))).kind === 'fresh',
-    'CLASS …und NIE als erledigter Geschaeftsvorgang festgehalten');
+    'CLASS …und NIE als beantworteter Geschaeftsvorgang festgehalten');
 }
 
-// ── 7) Speichern gehoert zum Erfolg ───────────────────────────────────────
+// ── 7) Speichern gehoert zur Antwort — und ein Fehlschlag hinterlaesst Spuren ──
 {
+  resetDurabilityStateForTest();
   const db = fresh();
   const { deps: d, state } = deps(db, { failSave: true });
   let threw: string | null = null;
@@ -287,20 +321,179 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   } catch (e) { threw = String(e); }
   ok(threw !== null && /disk full/.test(threw), 'DURABILITY ein gescheitertes Speichern meldet keinen Erfolg');
   ok(state.commits === 1, 'DURABILITY der Commit war schon durch — Wirkung und Nachweis stehen gemeinsam im Speicher');
+  ok(state.disk === null, 'DURABILITY …und auf der Platte steht davon nichts');
   const image = new SQL.Database(db.export()) as unknown as Db;
   ok(Number(image.exec('SELECT COUNT(*) FROM invoices')[0].values[0][0])
     === Number(image.exec('SELECT COUNT(*) FROM remote_command_ledger')[0].values[0][0]),
     'DURABILITY beide gemeinsam — nie eines ohne das andere');
 
+  // Der Prozess merkt sich die Schuld. Das ist der ganze Unterschied zu vorher: ohne diesen
+  // Zustand saehe die naechste Wiederholung nur den Nachweis im Speicher und meldete Erfolg.
+  ok(isDurabilityDegraded() === true, 'DURABILITY der Prozess merkt sich, dass er der Platte etwas schuldet');
+  ok(durabilityDebt()?.since === NOW && /disk full/.test(String(durabilityDebt()?.reason)),
+    `DURABILITY …mit Zeitpunkt und Grund (${JSON.stringify(durabilityDebt())})`);
+
   const engine = src('src/core/bridge/mutation-engine.ts');
+  const requireAt = engine.indexOf('await requireDurable(deps.durableSave');
+  const beginAt = engine.indexOf('deps.begin();');
   const commitAt = engine.indexOf('deps.commit();');
-  const saveAt = engine.indexOf('await deps.durableSave();\n\n  if (record.status');
+  const saveAt = engine.lastIndexOf('await ensureDurable(deps.durableSave');
   const returnAt = engine.indexOf("return { kind: 'ok', value: record.result");
-  ok(commitAt > 0 && saveAt > commitAt && returnAt > saveAt,
-    'DURABILITY die Reihenfolge im Code ist commit → speichern → Erfolg melden');
+  ok(requireAt > 0 && requireAt < beginAt && beginAt < commitAt && commitAt < saveAt && saveAt < returnAt,
+    'DURABILITY die Reihenfolge im Code ist durabel sein → commit → speichern → antworten');
 }
 
-// ── 8) Die vier Alt-Nummernkreise ─────────────────────────────────────────
+// ── 8) Solange die Schuld offen ist, wird nichts bestaetigt ───────────────
+//
+// Der Zustand ist prozessweit, weil die Geschaeftsdatenbank EIN Abbild ist: ein fehlgeschlagenes
+// Speichern gefaehrdet nicht den einen Auftrag, sondern alles seit dem letzten Schreiben.
+{
+  resetDurabilityStateForTest();
+  const db = fresh();
+  const { deps: d } = deps(db, { failSave: true });
+  try { await runRemoteCommand(d, identity(ID('10')), () => ({ ok: true })); } catch { /* offener Ausgang */ }
+  ok(isDurabilityDegraded(), 'GATE die Ausgangslage: eine offene Speicherschuld');
+
+  // (a) Kein NEUER Fernschreibvorgang — er wuerde die Schuld nur vergroessern.
+  let ranNew = 0; let gateErr: string | null = null;
+  try { await runRemoteCommand(d, identity(ID('11')), () => { ranNew += 1; return { ok: true }; }); }
+  catch (e) { gateErr = String(e); }
+  ok(ranNew === 0, `GATE eine neue Fernmutation beginnt gar nicht erst (${ranNew} Laeufe)`);
+  ok(gateErr !== null && /could not be written/.test(gateErr), `GATE …und meldet einen offenen Ausgang (${gateErr})`);
+  ok(commandCount(db as never) === 1, 'GATE es kommt kein zweiter Nachweis dazu');
+
+  // (b) Auch die LOKALE Schreibreihenfolge: erst speichern, sonst gar nicht anfangen.
+  setDurableSaver(async () => { throw new Error('disk still full'); });
+  let localRan = 0; let localErr: string | null = null;
+  try { await runExclusive(() => { localRan += 1; return 1; }); } catch (e) { localErr = String(e); }
+  ok(localRan === 0 && localErr !== null,
+    `GATE eine lokale Geschaeftsmutation beginnt nicht auf einem ungeschriebenen Stand (${localRan})`);
+
+  // (c) Fernlesen bestaetigt nichts, was ein Absturz wegnehmen wuerde.
+  registerCommand('test.read', { kind: 'read', handler: () => ({ rows: 0 }) });
+  const read = await executeCommand('test.read', null);
+  ok(read.kind === 'infrastructure_error' && read.code === DURABILITY_DEGRADED,
+    `GATE ein Fernlesen wird abgewiesen statt bestaetigt (${JSON.stringify(read)})`);
+  ok(read.kind !== 'business_error', 'GATE …und ausdruecklich NICHT als fachliches Nein');
+
+  // (d) Die Probe bleibt erreichbar: sie liest nichts und bestaetigt nichts.
+  const probe = await executeCommand(OP_PROBE, { echo: 'alive' });
+  ok(probe.kind === 'ok', 'GATE die Probe antwortet weiter — sonst waere der Rechner von aussen einfach stumm');
+
+  // (e) Gelingt das Speichern wieder, ist die Schuld beglichen und alles laeuft weiter.
+  let flushes = 0;
+  setDurableSaver(async () => { flushes += 1; });
+  const after = await executeCommand('test.read', null);
+  ok(after.kind === 'ok' && flushes === 1, `GATE nach gelungenem Nachholen wird wieder gelesen (${flushes})`);
+  ok(!isDurabilityDegraded(), 'GATE …und die Schuld ist beglichen');
+  const afterAgain = await executeCommand('test.read', null);
+  ok(afterAgain.kind === 'ok' && flushes === 1, `GATE im Normalfall kostet die Sperre nichts (${flushes})`);
+}
+
+// ── 9) Neustart: was auf der Platte steht, entscheidet ────────────────────
+{
+  resetDurabilityStateForTest();
+  const db = fresh();
+  const { deps: d, state } = deps(db);
+  // Ein sauber gespeicherter Auftrag beschreibt den Stand, den ein Neustart faende.
+  await runRemoteCommand(d, identity(ID('12')), () => ({ seed: true }));
+  ok(state.disk !== null, 'RESTART ein gelungener Auftrag hinterlaesst ein Abbild auf der Platte');
+
+  // Szenario A: Speichern scheitert, dann stirbt der Prozess.
+  state.failSave = true;
+  let domainRuns = 0;
+  const sell = (x: unknown) => {
+    domainRuns += 1;
+    (x as Db).run('INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES (?,?,?,?)',
+      ['inv-13', 'branch-main', 'ORD-2026-00013', 13]);
+    return { invoiceId: 'inv-13' };
+  };
+  try { await runRemoteCommand(d, identity(ID('13')), sell); } catch { /* offener Ausgang */ }
+  ok(domainRuns === 1 && isDurabilityDegraded(), 'RESTART A der Auftrag lief, das Speichern nicht');
+
+  // Der Prozess stirbt. Was der Neustart findet, ist das LETZTE gespeicherte Abbild.
+  const restarted = new SQL.Database(state.disk as Uint8Array) as unknown as Db;
+  setTestDatabase(restarted as never);
+  resetDurabilityStateForTest();
+  ok(Number(restarted.exec("SELECT COUNT(*) FROM invoices WHERE id='inv-13'")[0].values[0][0]) === 0,
+    'RESTART A nach dem Neustart ist von der Wirkung nichts da…');
+  ok(lookupCommand(restarted as never, identity(ID('13'))).kind === 'fresh',
+    'RESTART A …und auch kein Nachweis — kein Phantom-Erfolg');
+
+  const { deps: d2, state: s2 } = deps(restarted);
+  const again = await runRemoteCommand(d2, identity(ID('13')), sell);
+  ok(again.kind === 'ok' && again.replayed === false && domainRuns === 2,
+    `RESTART A die Wiederholung fuehrt aus — und zwar genau einmal (${domainRuns})`);
+  ok(Number(restarted.exec("SELECT COUNT(*) FROM invoices WHERE id='inv-13'")[0].values[0][0]) === 1,
+    'RESTART A es gibt genau eine Rechnung, nicht zwei');
+  ok(s2.saves === 1 && s2.disk !== null, 'RESTART A …die diesmal auch geschrieben wurde');
+
+  // Szenario B: derselbe Prozess, kein Neustart.
+  resetDurabilityStateForTest();
+  const db3 = fresh();
+  const { deps: d3, state: s3 } = deps(db3);
+  let runsB = 0;
+  s3.failSave = true;
+  const count = () => { runsB += 1; return { n: runsB }; };
+  try { await runRemoteCommand(d3, identity(ID('14')), count); } catch { /* offener Ausgang */ }
+  ok(runsB === 1 && isDurabilityDegraded(), 'RESTART B erster Lauf: Wirkung im Speicher, Schuld offen');
+
+  let blocked: string | null = null;
+  try { await runRemoteCommand(d3, identity(ID('14')), count); } catch (e) { blocked = String(e); }
+  ok(runsB === 1, `RESTART B die Wiederholung fuehrt KEINEN zweiten Domainlauf aus (${runsB})`);
+  ok(blocked !== null, 'RESTART B …und meldet keinen Erfolg, solange nichts auf der Platte steht');
+
+  // Die Platte kommt zurueck: erst speichern, DANN darf das eingefrorene Ergebnis heraus.
+  s3.failSave = false;
+  const settled = await runRemoteCommand(d3, identity(ID('14')), count);
+  ok(settled.kind === 'ok' && settled.replayed === true && runsB === 1,
+    `RESTART B danach kommt das eingefrorene Ergebnis des EINEN Laufs (${runsB})`);
+  ok(JSON.stringify((settled as { value: unknown }).value) === JSON.stringify({ n: 1 }),
+    `RESTART B genau dieses Ergebnis (${JSON.stringify((settled as { value: unknown }).value)})`);
+  ok(!isDurabilityDegraded() && s3.disk !== null, 'RESTART B …und der Stand steht jetzt auf der Platte');
+}
+
+// ── 10) Verlorene Antwort auf ein fachliches Nein ─────────────────────────
+//
+// Der teure Fall: Der Client fragt „verkauf mir das Stueck", die Ware ist weg, die Antwort geht
+// verloren. Inzwischen kommt die Ware zurueck. Die Wiederholung DERSELBEN Kennung muss weiterhin
+// „nicht verfuegbar" sagen — sonst entscheidet die Laufzeit des Netzes, was gekauft wurde.
+{
+  resetDurabilityStateForTest();
+  const db = fresh();
+  const { deps: d } = deps(db);
+  let stock = 0;
+  const sell = (x: unknown) => {
+    if (stock <= 0) throw new CommandRejected('STOCK_UNAVAILABLE', 'nothing left');
+    stock -= 1;
+    (x as Db).run('INSERT INTO invoices (id, branch_id, invoice_number, gross) VALUES (?,?,?,?)',
+      ['inv-' + stock, 'branch-main', 'ORD-2026-0002' + stock, 20]);
+    return { sold: true };
+  };
+
+  // Abgefangen wie in §6: eine falsche Einordnung soll rot leuchten, nicht abbrechen.
+  let first: Awaited<ReturnType<typeof runRemoteCommand>> | { kind: 'threw' } = { kind: 'threw' };
+  try { first = await runRemoteCommand(d, identity(ID('15')), sell); } catch { first = { kind: 'threw' }; }
+  ok(first.kind === 'rejected' && first.code === 'STOCK_UNAVAILABLE' && first.frozen === true,
+    'LOST die Ware ist weg — das Nein wird eingefroren');
+
+  stock = 5; // die Ware kommt zurueck, waehrend der Client auf seine verlorene Antwort wartet
+
+  let repeat: Awaited<ReturnType<typeof runRemoteCommand>> | { kind: 'threw' } = { kind: 'threw' };
+  try { repeat = await runRemoteCommand(d, identity(ID('15')), sell); } catch { repeat = { kind: 'threw' }; }
+  ok(repeat.kind === 'rejected' && repeat.code === 'STOCK_UNAVAILABLE' && repeat.replayed === true,
+    `LOST die Wiederholung bekommt dasselbe Nein (${JSON.stringify(repeat)})`);
+  ok(stock === 5, `LOST …und es wurde nichts verkauft (${stock})`);
+  ok(Number(db.exec('SELECT COUNT(*) FROM invoices')[0].values[0][0]) === 0, 'LOST keine Rechnung entstanden');
+
+  // Der bewusste neue Versuch: neue Kennung, neue Frage — und jetzt darf er gelingen.
+  const deliberate = await runRemoteCommand(d, identity(ID('16')), sell);
+  ok(deliberate.kind === 'ok' && stock === 4,
+    `LOST ein neuer Versuch mit neuer Kennung verkauft (${stock})`);
+  ok(Number(db.exec('SELECT COUNT(*) FROM invoices')[0].values[0][0]) === 1, 'LOST …genau einmal');
+}
+
+// ── 11) Die vier Alt-Nummernkreise ─────────────────────────────────────────
 {
   const db = fresh();
   // Bestand aus der Zeit vor der Umstellung — inklusive einer Nummer, die nur noch im Log steht.
@@ -354,7 +547,7 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   ok(!LEGACY_SEQUENCES.some((s) => s.docType === 'TRF'), 'SEQ …und wird hier nicht zweitverwaltet');
 }
 
-// ── 9) Die Verdrahtung: kein alter Nummerngeber mehr, kein offenes Tor ────
+// ── 12) Die Verdrahtung: kein alter Nummerngeber mehr, kein offenes Tor ────
 {
   let legacyCalls: string[] = [];
   for (const f of ['consignmentStore', 'offerStore', 'orderStore', 'repairStore']) {
@@ -385,7 +578,7 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   ok(!/registerCommand/.test(engine), 'WIRED die Maschine registriert selbst nichts');
 }
 
-// ── 10) Wer darf in eine äußere Transaktion — und wer noch nicht ──────────
+// ── 13) Wer darf in eine äußere Transaktion — und wer noch nicht ──────────
 //
 // Die Frage war nicht, ob man außen ein `BEGIN` legen KANN, sondern ob die inneren Funktionen eine
 // bereits offene Transaktion respektieren. Das Haus hat den Mechanismus: `transaction-context`
@@ -427,6 +620,48 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
     'TXAUDIT …ohne den Tiefenzaehler zu fragen — Produkt-mit-Medien ist damit NICHT C3B-tauglich');
 }
 
+// ── 14) Zwei Gegenproben: haetten die Pruefungen ueberhaupt Rot zeigen koennen? ──
+//
+// Eine gruene Pruefung beweist nichts, wenn sie beim falschen Verhalten ebenfalls gruen waere.
+// Also wird das falsche Verhalten hier ABSICHTLICH nachgebaut — beide Male genau das Verhalten,
+// das dieser Schritt korrigiert hat — und dieselbe Frage darauf angewendet.
+{
+  // (a) Der alte Weg: die Wiederholung reicht das eingefrorene Ergebnis aus dem SPEICHER heraus,
+  //     ohne vorher zu speichern. Genau das war der Defekt — ein Erfolg, den ein Absturz wegnimmt.
+  resetDurabilityStateForTest();
+  const db = fresh();
+  const { deps: d } = deps(db, { failSave: true });
+  try { await runRemoteCommand(d, identity(ID('20')), () => ({ ok: true })); } catch { /* Schuld offen */ }
+
+  const oldWay = (): string => (lookupCommand(db as never, identity(ID('20'))).kind === 'replay' ? 'ok' : 'refused');
+  ok(oldWay() === 'ok',
+    'CONTROL a der alte Weg findet den Nachweis im Speicher und wuerde Erfolg melden…');
+  let newWay = 'ok';
+  try { await runRemoteCommand(d, identity(ID('20')), () => ({ ok: true })); } catch { newWay = 'refused'; }
+  ok(newWay === 'refused',
+    'CONTROL a …der echte Weg verweigert ihn, solange nichts auf der Platte steht — die Pruefung trennt beide');
+
+  // (b) Die alte Einordnung: `STOCK_UNAVAILABLE` NICHT einfrieren. Dann entscheidet die Ankunftszeit
+  //     der Wiederholung, was passiert — dieselbe Kennung verkauft ploetzlich doch.
+  resetDurabilityStateForTest();
+  const db2 = fresh();
+  const { deps: d2 } = deps(db2);
+  let stock = 0;
+  const sellUnfrozen = (): { sold: boolean } => {
+    // Die falsche Klasse: „nie zu einem Urteil gekommen" statt „Urteil der Domaene".
+    if (stock <= 0) throw new CommandNotEvaluated('STOCK_UNAVAILABLE', 'nothing left');
+    stock -= 1;
+    return { sold: true };
+  };
+  await runRemoteCommand(d2, identity(ID('21')), sellUnfrozen);
+  ok(lookupCommand(db2 as never, identity(ID('21'))).kind === 'fresh',
+    'CONTROL b unter der alten Einordnung bleibt die Kennung frei…');
+  stock = 1;
+  const drifted = await runRemoteCommand(d2, identity(ID('21')), sellUnfrozen);
+  ok(drifted.kind === 'ok' && stock === 0,
+    'CONTROL b …und dieselbe Wiederholung verkauft ploetzlich doch — genau der Fehler, den §6 und §10 fangen');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3a write foundation: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_C3_DURABLE_IDEMPOTENCY_SCHEMA_PROVED');
@@ -436,3 +671,4 @@ console.log('CENTRAL_C3_LEGACY_SEQUENCES_MIGRATED_PROVED');
 console.log('CENTRAL_C3_UNKNOWN_OUTCOME_RETRY_PROVED');
 console.log('CENTRAL_C3_RESULT_CLASSIFICATION_PROVED');
 console.log('CENTRAL_C3_REMOTE_WRITE_DURABILITY_PROVED');
+console.log('CENTRAL_C3_POST_COMMIT_DURABILITY_FAILURE_PROVED');
