@@ -11,6 +11,9 @@
 // schicken und den Client in eine Zeitgrenze laufen zu lassen.
 
 import { executeCommand, type Reply } from './command-registry';
+// Die Leseoperationen registrieren sich beim Laden — ohne diesen Import kennt der Renderer nur
+// die Probe, und jeder Auftrag vom zweiten Rechner liefe in BRIDGE_OP_NOT_REGISTERED.
+import './read-commands';
 
 /** Muss mit `bridge::EVENT_COMMAND` in Rust übereinstimmen. */
 export const BRIDGE_COMMAND_EVENT = 'central-c1-bridge-command';

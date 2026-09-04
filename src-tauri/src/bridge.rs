@@ -50,8 +50,26 @@ pub const EVENT_COMMAND: &str = "central-c1-bridge-command";
 /// Transaktionsgrenzen und Nummernkreise stehen.
 pub const OP_PROBE: &str = "bridge.probe";
 
+/// CENTRAL-C2 — die Lesevorgaenge, die ein zweiter Rechner ausloesen darf. Reine Auskunft: sie
+/// veraendern nichts und laufen im Primary-Renderer auf der AKTUELLEN Datenbank, nicht auf der
+/// Datei, die ihr hinterherhinkt.
+pub const OP_PRODUCTS_LIST: &str = "products.list";
+pub const OP_PRODUCTS_GET: &str = "products.get";
+pub const OP_CUSTOMERS_LIST: &str = "customers.list";
+pub const OP_CUSTOMERS_GET: &str = "customers.get";
+pub const OP_INVOICES_LIST: &str = "invoices.list";
+pub const OP_INVOICES_GET: &str = "invoices.get";
+
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
-pub const REMOTE_OPS: &[&str] = &[OP_PROBE];
+pub const REMOTE_OPS: &[&str] = &[
+    OP_PROBE,
+    OP_PRODUCTS_LIST,
+    OP_PRODUCTS_GET,
+    OP_CUSTOMERS_LIST,
+    OP_CUSTOMERS_GET,
+    OP_INVOICES_LIST,
+    OP_INVOICES_GET,
+];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);

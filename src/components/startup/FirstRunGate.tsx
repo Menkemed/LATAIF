@@ -8,6 +8,9 @@ import {
   setUpNewInstallation, validateCandidate, adoptDataLocation, type CandidateFacts,
 } from '@/core/lifecycle/first-run';
 import { approveRelaunch } from '@/core/lifecycle/relaunch-coordinator';
+// CENTRAL-C2 — der dritte Weg: dieser Rechner wird eine Oberflaeche an einem anderen Server und
+// legt hier NICHTS an; gemerkt wird nur die Adresse.
+import { enterClientMode } from '@/core/bridge/client-mode';
 
 /** Aus einem Fehlercode einen Satz machen, den jemand lesen kann, der seine Daten sucht. */
 function explain(e: unknown): string {
@@ -40,6 +43,9 @@ function explain(e: unknown): string {
 export function FirstRunGate() {
   const [busy, setBusy] = useState<'new' | 'adopt' | null>(null);
   const [recovering, setRecovering] = useState(false);
+  // CENTRAL-C2 — der dritte Weg: dieser Rechner wird eine Oberflaeche an einem anderen Server.
+  const [connecting, setConnecting] = useState(false);
+  const [serverUrl, setServerUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<CandidateFacts | null>(null);
   const [email, setEmail] = useState('');
@@ -139,6 +145,71 @@ export function FirstRunGate() {
                 Your data is already on this machine or on another drive — point LATAIF at it.
               </div>
             </button>
+            <button
+              data-first-run-connect
+              onClick={() => { setConnecting(true); setError(null); }}
+              disabled={busy !== null}
+              style={{
+                textAlign: 'left', padding: '16px 18px', borderRadius: 10, cursor: busy ? 'default' : 'pointer',
+                background: '#1B1C1F', border: '1px solid #2C2E33', color: '#FFFFFF',
+              }}
+            >
+              <div style={{ fontSize: 15, fontWeight: 600 }}>Connect to existing LATAIF server</div>
+              <div style={{ fontSize: 13, color: '#B9BDC4', marginTop: 4 }}>
+                This computer becomes a second screen. It keeps no data of its own and reads from
+                the machine that has it.
+              </div>
+            </button>
+          </div>
+        ) : connecting ? (
+          // CENTRAL-C2 — der dritte Weg. Er legt NICHTS an: kein Datenort, keine Datenbank, keine
+          // Kennung. Gespeichert wird nur die Adresse, damit dieser Rechner beim naechsten Start
+          // weiss, wen er fragen soll. Alles Fachliche kommt von dort.
+          <div data-first-run-connect-panel style={{
+            padding: '18px 20px', borderRadius: 10, background: '#1B1C1F', border: '1px solid #2C2E33',
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Connect to existing LATAIF server</div>
+            <p style={{ fontSize: 13, color: '#B9BDC4', marginBottom: 12 }}>
+              Enter the address of the computer that holds the data, for example
+              {' '}<code>192.168.1.5:3001</code>. Nothing is created on this machine.
+            </p>
+            <input
+              data-first-run-server
+              placeholder="192.168.1.5:3001"
+              value={serverUrl}
+              onChange={(e) => setServerUrl(e.target.value)}
+              style={{
+                width: '100%', padding: '10px 12px', borderRadius: 8, marginBottom: 10,
+                background: '#0F0F10', border: '1px solid #2C2E33', color: '#FFFFFF', fontSize: 13,
+              }}
+            />
+            {error && <p style={{ color: '#FCA5A5', fontSize: 13, marginBottom: 10 }}>{error}</p>}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                data-first-run-connect-go
+                disabled={serverUrl.trim().length === 0}
+                onClick={() => {
+                  try {
+                    enterClientMode(serverUrl);
+                    window.location.reload();
+                  } catch (e) {
+                    setError(String(e));
+                  }
+                }}
+                style={{
+                  padding: '10px 16px', borderRadius: 8, cursor: 'pointer',
+                  background: '#FFFFFF', border: 'none', color: '#0F0F10', fontSize: 13, fontWeight: 600,
+                }}
+              >Connect</button>
+              <button
+                data-first-run-connect-back
+                onClick={() => { setConnecting(false); setError(null); }}
+                style={{
+                  padding: '10px 16px', borderRadius: 8, cursor: 'pointer',
+                  background: 'transparent', border: '1px solid #2C2E33', color: '#B9BDC4', fontSize: 13,
+                }}
+              >Back</button>
+            </div>
           </div>
         ) : (
           // Der Wiederherstellungsweg. Nichts wird gesucht: der Benutzer zeigt selbst auf den

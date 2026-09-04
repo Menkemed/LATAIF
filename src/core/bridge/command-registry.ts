@@ -10,7 +10,7 @@
 // Verkauf, Einkauf, Transfer und Kommission kommen erst, wenn Transaktionsgrenzen und die vier
 // Alt-Nummernkreise stehen.
 
-import { runExclusive } from './command-scheduler';
+import { runExclusive, businessWriteScheduler } from './command-scheduler';
 
 /** Was ein Auftrag zurückgeben darf. */
 export type CommandResult = { readonly [k: string]: unknown };
@@ -88,11 +88,11 @@ export async function executeCommand(op: string, payload: unknown): Promise<Repl
   const spec = REGISTRY.get(op);
   if (!spec) return { kind: 'infrastructure_error', code: 'BRIDGE_OP_NOT_REGISTERED' };
   try {
-    // Verändernde Aufträge werden gereiht, lesende nicht — sonst würde eine lange Liste die
-    // Schreibvorgänge aufhalten, ohne dass es dafür einen Grund gäbe.
-    const value = spec.kind !== 'read'
-      ? await runExclusive(() => spec.handler(payload))
-      : await spec.handler(payload);
+    // Lesevorgänge laufen nebeneinander, aber nicht MITTEN in einer Buchung: der Produktweg mit
+    // Medien hat mehrere Phasen, und ein Lesen dazwischen sähe ein Produkt ohne seine Bilder.
+    const value = spec.kind === 'read'
+      ? await businessWriteScheduler.runShared(() => spec.handler(payload))
+      : await runExclusive(() => spec.handler(payload));
     return { kind: 'ok', value };
   } catch (err) {
     if (err instanceof BusinessError) {

@@ -52,7 +52,7 @@ export class CommandScheduler {
     // WICHTIG: die Kette wartet auf das VORHERIGE Ende, und was sie danach weitergibt, ist
     // absichtlich immer erfüllt. Würde der Fehler in der Kette bleiben, wäre jeder folgende
     // Auftrag mit demselben Fehler abgewiesen — die Warteschlange wäre dauerhaft vergiftet.
-    const result = this.tail.then(() => {
+    const result = this.tail.then(() => this.readersDrained()).then(() => {
       this.running = true;
       this.concurrent += 1;
       if (this.concurrent > this.peakConcurrent) this.peakConcurrent = this.concurrent;
@@ -73,6 +73,63 @@ export class CommandScheduler {
     this.completed += 1;
     if (didFail) this.failed += 1;
     if (this.concurrent === 0) this.running = false;
+  }
+
+  // ── Lesen: nebeneinander ja, aber nie mitten in einer Buchung ────────────
+  //
+  // C1 liess Lesevorgaenge einfach an der Warteschlange vorbei. Das war richtig, solange nur die
+  // Probe existierte, und wird falsch, sobald ein zweiter Rechner echte Listen abruft: nicht jede
+  // Geschaeftsoperation ist von aussen unteilbar. Rechnungen und Einkaeufe sind es (ihre Stores
+  // enthalten KEIN einziges `await`, die Wirkung passiert in einem Zug), aber der Produktweg mit
+  // Medien ist es nicht — `createProductWithMedia` und `editProductWithMedia` haben mehrere
+  // `await`-Punkte zwischen Vorbereiten und durablem Anwenden. Ein Lesen, das dort hineinfaellt,
+  // sieht ein Produkt ohne seine Bilder oder einen Text ohne seine Galerie.
+  //
+  // Deshalb eine Leser-Schreiber-Ordnung auf DERSELBEN Kette: Leser duerfen sich gegenseitig
+  // ueberholen, ein Schreiber wartet auf die laufenden Leser, und ein Leser beginnt nie waehrend
+  // eines Schreibers. Kein zweiter Planer, keine Store-Umbauten.
+  private readers = 0;
+  private readerWaiters: Array<() => void> = [];
+  private peakReaders = 0;
+
+  /** Wartet, bis kein Lesevorgang mehr laeuft. */
+  private readersDrained(): Promise<void> {
+    if (this.readers === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => { this.readerWaiters.push(resolve); });
+  }
+
+  private releaseReader(): void {
+    this.readers -= 1;
+    if (this.readers === 0) {
+      const waiting = this.readerWaiters;
+      this.readerWaiters = [];
+      for (const w of waiting) w();
+    }
+  }
+
+  /**
+   * Fuehrt `task` als LESEVORGANG aus: parallel zu anderen Lesevorgaengen, aber erst wenn die
+   * laufende Buchung fertig ist. Das zurueckgegebene Versprechen gehoert dem Aufrufer.
+   */
+  runShared<T>(task: Task<T>): Promise<T> {
+    this.depth += 1;
+    // An DERSELBEN Kette anstellen: das Ende der Kette ist das Ende der letzten Buchung.
+    const result = this.tail.then(() => {
+      this.readers += 1;
+      if (this.readers > this.peakReaders) this.peakReaders = this.readers;
+      return task();
+    });
+    // Leser verlaengern die Schreiber-Kette NICHT — sonst waeren sie untereinander seriell.
+    result.then(
+      () => { this.depth -= 1; this.completed += 1; this.releaseReader(); },
+      () => { this.depth -= 1; this.completed += 1; this.failed += 1; this.releaseReader(); },
+    );
+    return result;
+  }
+
+  /** Nur zur Pruefung: liefen je mehrere Lesevorgaenge gleichzeitig? */
+  peakConcurrentReaders(): number {
+    return this.peakReaders;
   }
 
   stats(): SchedulerStats {

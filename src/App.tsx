@@ -64,6 +64,8 @@ import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
 // DATA-ROOT-B1a — die Erstlauf-Weiche und ihre eine, nichts veraendernde Frage.
 import { isFirstRunPending } from '@/core/lifecycle/first-run';
+import { isClientMode } from '@/core/bridge/client-mode';
+import { ClientShell } from '@/components/startup/ClientShell';
 import { FirstRunGate } from '@/components/startup/FirstRunGate';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
 import { isRelaunchApproved, withTimeout, SYNC_IDLE_TIMEOUT_MS, FLUSH_TIMEOUT_MS } from '@/core/lifecycle/relaunch-coordinator';
@@ -118,6 +120,9 @@ export default function App() {
   // noch aus? `null` heisst "noch nicht gefragt" und haelt den Start an — sonst liefe
   // `initDatabase()` los und legte genau die leere Datenbank an, die die Frage beantworten wuerde.
   const [firstRun, setFirstRun] = useState<boolean | null>(null);
+  // CENTRAL-C2 — im Client-Modus gibt es keine lokale Datenbank, auf deren Bereitschaft man warten
+  // koennte; "bereit" heisst hier nur: die Weiche ist gefallen.
+  const [clientReady, setClientReady] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [closeStatus, setCloseStatus] = useState<CloseStatus | null>(null); // M4-A: App-Close-Overlay
@@ -130,6 +135,14 @@ export default function App() {
     // den Datenort noch aus, passiert hier NICHTS weiter: keine Datenbank, keine Stores, keine
     // Automatisierung, kein Sync. `initDatabase()` wuerde sonst die leere Datenbank anlegen, die
     // die Frage stillschweigend beantwortet.
+    // CENTRAL-C2 — die Client-Weiche kommt VOR der Erstlauf-Frage. Ein Rechner, der ausdruecklich
+    // eine Oberflaeche an einem anderen Server ist, hat keinen Datenort und braucht keinen: er
+    // darf weder gefragt werden noch etwas anlegen. `initDatabase()` wird hier nie erreicht.
+    if (isClientMode()) {
+      setFirstRun(false);
+      setClientReady(true);
+      return () => { cancelled = true; };
+    }
     isFirstRunPending().then((pending) => {
       if (cancelled) return;
       setFirstRun(pending);
@@ -312,6 +325,10 @@ export default function App() {
       catch (e) { console.warn('[recurring-expense] startup generator failed:', e); }
     });
   }, [dbReady, session?.branchId]);
+
+  // CENTRAL-C2 — im Client-Modus gibt es die gewohnte Anwendung nicht: keine lokale Datenbank,
+  // keine Stores, keine Automatisierung. Nur die Leseoberfläche am Server.
+  if (isClientMode()) return clientReady ? <ClientShell /> : null;
 
   // Solange die Frage offen ist — oder noch gestellt wird — gibt es keine App, nur die Weiche.
   if (firstRun === null) return null;
