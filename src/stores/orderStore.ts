@@ -1,9 +1,13 @@
 import { create } from 'zustand';
+// CENTRAL-C3A — der durable Nummerngeber. `getNextNumber` rechnete ueber den Bestand und gab
+// die Nummer einer geloeschten Zeile erneut aus.
+import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
+import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Order, OrderStatus, OrderLine, OrderType, OrderLineStatus, CustomOrderMeta, MaterialDetails, Expense, Product } from '@/core/models/types';
 import { deriveOrderType, deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — purchase_lines FK-Entkopplung
@@ -317,7 +321,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
-    const orderNumber = getNextNumber('orders', 'order.number_prefix', 'ORD');
+    // CENTRAL-C3A — durabler Zaehler statt MAX(Bestand)+1.
+    ensureLegacySequence(getDatabase() as unknown as SqlDb, legacySpec('ORD'), new Date().toISOString(), new Date().getFullYear());
+    const orderNumber = getNextDocumentNumber('ORD');
 
     // v0.3.0 — agreedPrice: falls Caller keinen liefert, aus den customer-facing
     // Lines ableiten (SUM unitPrice*qty). So funktioniert createOrder auch wenn

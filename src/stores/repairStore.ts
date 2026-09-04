@@ -1,9 +1,13 @@
 import { create } from 'zustand';
+// CENTRAL-C3A — der durable Nummerngeber. `getNextNumber` rechnete ueber den Bestand und gab
+// die Nummer einer geloeschten Zeile erneut aus.
+import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
+import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
 import { canonicalRepairStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { formatRepairLineNumber } from '@/core/repairs/line-numbering';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
@@ -609,7 +613,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   getRepairLines: (repairId) =>
     get().repairLines.filter(l => l.repairId === repairId).sort((a, b) => a.position - b.position),
 
-  getNextRepairNumber: () => getNextNumber('repairs', 'repair.number_prefix', 'REP'),
+  // CENTRAL-C3A — durabler Zaehler statt MAX(Bestand)+1.
+  getNextRepairNumber: () => {
+    ensureLegacySequence(getDatabase() as unknown as SqlDb, legacySpec('REP'), new Date().toISOString(), new Date().getFullYear());
+    return getNextDocumentNumber('REP');
+  },
 
   generateVoucherCode: () => {
     // 8-char alphanumeric

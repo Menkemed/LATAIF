@@ -1,8 +1,12 @@
 import { create } from 'zustand';
+// CENTRAL-C3A — der durable Nummerngeber. `getNextNumber` rechnete ueber den Bestand und gab
+// die Nummer einer geloeschten Zeile erneut aus.
+import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
+import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Offer, OfferLine, OfferStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextNumber } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
@@ -90,7 +94,11 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
 
   getOffer: (id) => get().offers.find(o => o.id === id),
 
-  getNextOfferNumber: () => getNextNumber('offers', 'offer.number_prefix', 'OFF'),
+  // CENTRAL-C3A — durabler Zaehler statt MAX(Bestand)+1.
+  getNextOfferNumber: () => {
+    ensureLegacySequence(getDatabase() as unknown as SqlDb, legacySpec('OFF'), new Date().toISOString(), new Date().getFullYear());
+    return getNextDocumentNumber('OFF');
+  },
 
   createOffer: (customerId, lines, notes, validUntil) => {
     const db = getDatabase();

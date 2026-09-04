@@ -16,6 +16,7 @@ import { isTransactionActive, markSavePending } from './transaction-context';
 import { B1_MIGRATION_SQL } from '../operations/migration';
 import { SKU_SEQUENCES_DDL } from '../products/sku-sequence';
 import { A1_UPGRADE_SQL } from './a1-upgrade';
+import { COMMAND_LEDGER_DDL, COMMAND_LEDGER_INDEX } from '@/core/bridge/command-ledger';
 import {
   INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
@@ -641,6 +642,10 @@ function runMigrations(database: Database): void {
     // und die Jahresangabe am Dokumentzaehler. Beides steht in `a1-upgrade.ts`, damit genau diese
     // Anweisungen auch ein Test gegen eine echte Alt-Datenbank ausfuehren kann.
     ...A1_UPGRADE_SQL,
+    // CENTRAL-C3A — der durable Nachweis fuer Fernauftraege. Additiv; er liegt bewusst in DIESER
+    // Datenbank, damit er mit der Buchung in einer Transaktion committen kann.
+    COMMAND_LEDGER_DDL,
+    COMMAND_LEDGER_INDEX,
 
     // INVENTORY-SESSION — the worksheet of a stock-check run, so an inventory survives Save, closing
     // the window and restarting the app. Deliberately separate from `stock_checks`: that table is the

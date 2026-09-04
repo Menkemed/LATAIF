@@ -1,8 +1,12 @@
 import { create } from 'zustand';
+// CENTRAL-C3A — der durable Nummerngeber. `getNextNumber` rechnete ueber den Bestand und gab
+// die Nummer einer geloeschten Zeile erneut aus.
+import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
+import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Consignment, ConsignmentStatus, TaxScheme } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextNumber, getNextDocumentNumber } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen + Invoice-Spiegel
@@ -181,7 +185,10 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
-    const consignmentNumber = getNextNumber('consignments', 'consignment.number_prefix', 'CON');
+    // CENTRAL-C3A — die Nummer kommt aus dem durablen Zaehler, nicht aus dem Bestand: ein
+    // geloeschter Datensatz darf seine Nummer nicht wieder freigeben.
+    ensureLegacySequence(db as unknown as SqlDb, legacySpec('CON'), new Date().toISOString(), new Date().getFullYear());
+    const consignmentNumber = getNextDocumentNumber('CON');
 
     // Update product status to consignment
     if (data.productId) {
