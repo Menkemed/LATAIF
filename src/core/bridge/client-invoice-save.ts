@@ -124,14 +124,21 @@ export class InvoiceSaveAttempt {
 
     const code = body.error || `HTTP_${res.status}`;
     const message = body.message || 'the primary refused this invoice';
-    // Der Server sagt selbst, ob der Auftrag nachweislich nicht ausgeführt wurde. Fehlt die
-    // Auskunft, gilt der teurere Fall: offen. Nie „ist nicht passiert" raten.
+
+    // Der Server sagt selbst, ob der Auftrag nachweislich nicht ausgeführt wurde. Nur die Brücke
+    // setzt dieses Feld — ein fachliches Nein hat es nicht. Fehlt es und ist die Lage unklar, gilt
+    // der teurere Fall: offen. Nie „ist nicht passiert" raten.
     if (body.outcome === 'not_executed') return { kind: 'not_executed', code, message };
     if (body.outcome === 'unknown') return { kind: 'unknown', code, message };
-    if (res.status === 409) return { kind: 'not_executed', code, message };
 
-    // Ein fachliches Nein kommt als Antwort des Primary, nicht als Störung des Transports.
-    if (res.ok || res.status === 422 || res.status === 400) {
+    // 409 heißt hier ZWEIERLEI, und der Unterschied ist teuer:
+    //   • mit `outcome` (oben behandelt): derselbe Name für zwei verschiedene Anfragen — der
+    //     Auftrag lief NIE, die Kennung ist verbrannt.
+    //   • ohne `outcome`: das fachliche Nein des Primary („die Ware ist weg"). Es ist eingefroren
+    //     und endgültig. Es als „sicher wiederholbar" auszugeben wäre falsch: der Benutzer würde
+    //     denselben Auftrag erneut schicken und für immer dieselbe Antwort bekommen, statt zu
+    //     merken, dass er eine neue Entscheidung treffen muss.
+    if (res.ok || res.status === 409 || res.status === 422 || res.status === 400) {
       this.settled = true;
       return { kind: 'business_error', code, message };
     }

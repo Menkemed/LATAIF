@@ -1520,11 +1520,17 @@ impl bridge::CommandSink for WindowSink {
     fn deliver(&self, envelope: &bridge::Envelope) -> Result<(), String> {
         use tauri::Emitter;
         // camelCase nach draußen — der Renderer liest `opId`.
+        //
+        // CENTRAL-C3B: die Identitaet gehoert MIT. Sie wird hier von Hand zusammengesetzt wie der
+        // Rest, und genau deshalb fiel sie beim ersten Versuch heraus: ein neues Feld am Umschlag
+        // erreicht den Renderer nicht, solange es hier nicht steht. Ohne sie weist der Renderer
+        // jede Buchung ab (`BRIDGE_IDENTITY_MISSING`) — fail-closed, aber eben auch: es geht nichts.
         let payload = serde_json::json!({
             "opId": envelope.op_id,
             "op": envelope.op,
             "generation": envelope.generation,
             "payload": envelope.payload,
+            "identity": envelope.identity,
         });
         self.app
             .emit(bridge::EVENT_COMMAND, payload)

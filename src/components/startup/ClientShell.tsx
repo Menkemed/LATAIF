@@ -1,9 +1,11 @@
-// CENTRAL-C2 — die Oberfläche des zweiten Rechners.
+// CENTRAL-C2/C3B — die Oberfläche des zweiten Rechners.
 //
-// Bewusst schmal: Anmeldung, drei Listen, drei Detailansichten. Sie zeigt, was der Primary sagt,
-// und sonst nichts. Es gibt hier keinen Knopf, der etwas anlegt, ändert oder löscht — und das ist
-// nicht nur ausgeblendet: die Gegenstelle kann keine verändernde Operation annehmen, weil keine
-// registriert werden kann.
+// Bewusst schmal: Anmeldung, drei Listen, drei Detailansichten — und seit C3B EIN Formular, das
+// etwas anlegt: eine Rechnung. Genau eines, weil genau eine verändernde Fernoperation freigegeben
+// ist (`ALLOWED_MUTATIONS`). Alles andere kann die Gegenstelle nach wie vor nicht annehmen.
+//
+// Auch das Formular legt hier nichts an: es schickt die Auswahl eines Menschen an den Primary und
+// zeigt, was von dort zurückkommt. Gerechnet, nummeriert und gebucht wird dort.
 //
 // Und es gibt keinen stillen Rückfall. Ist der Server weg, steht das da. Es wird keine lokale
 // Datenbank angelegt, um „wenigstens etwas" zu zeigen — das wäre eine zweite Wahrheit.
@@ -11,18 +13,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import { clientConfig, leaveClientMode } from '@/core/bridge/client-mode';
 import { remoteRead, clientLogin, RemoteReadError, ERR_UNAUTHENTICATED } from '@/core/bridge/remote-read';
+import { ClientInvoiceCreate } from '@/components/client/ClientInvoiceCreate';
 
-type Area = 'products' | 'customers' | 'invoices';
+type Area = 'products' | 'customers' | 'invoices' | 'new-invoice';
 
 interface ListState {
   items: Array<Record<string, unknown>>;
   stock?: { records: number; units: number; cost: number };
 }
 
-const AREAS: Array<{ key: Area; label: string; op: string }> = [
+// `op` ist die Leseoperation des Bereichs. Das Rechnungsformular hat keine — es lädt seine
+// Auswahllisten selbst über dieselben C2-Lesevorgänge und schickt beim Speichern einen Auftrag.
+const AREAS: Array<{ key: Area; label: string; op: string | null }> = [
   { key: 'products', label: 'Collection', op: 'products.list' },
   { key: 'customers', label: 'Clients', op: 'customers.list' },
   { key: 'invoices', label: 'Invoices', op: 'invoices.list' },
+  { key: 'new-invoice', label: 'New invoice', op: null },
 ];
 
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -40,8 +46,10 @@ export function ClientShell() {
   const [tick, setTick] = useState(0);
 
   const areaOp = AREAS.find((a) => a.key === area)!.op;
+  const isForm = areaOp === null;
 
   const load = useCallback(async () => {
+    if (areaOp === null) { setList(null); setError(null); return; }
     setBusy(true);
     setError(null);
     try {
@@ -83,12 +91,14 @@ export function ClientShell() {
           style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #D5D9DE', fontSize: 12 }} />
         <button data-client-refresh onClick={() => setTick((t) => t + 1)} style={chip(false)}>Refresh</button>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6B7280' }}>
-          read-only · {cfg.serverUrl}
+          reads + new invoice · {cfg.serverUrl}
         </span>
         <button onClick={() => { leaveClientMode(); window.location.reload(); }} style={chip(false)}>Disconnect</button>
       </div>
 
       {error && <p data-client-error style={{ color: '#B91C1C', fontSize: 13 }}>{error}</p>}
+
+      {isForm && <ClientInvoiceCreate />}
       {busy && !list && <p style={{ fontSize: 12, color: '#6B7280' }}>Loading…</p>}
 
       {list?.stock && (

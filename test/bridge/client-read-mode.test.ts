@@ -257,11 +257,16 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     ok(refused, `READONLY ${name} kann nicht registriert werden`);
   }
 
-  // Die Oberflaeche bietet nichts an, was schreibt.
+  // C3B: die Oberflaeche bietet GENAU EINEN schreibenden Weg an — das Rechnungsformular. Kein
+  // zweiter, und keiner, der an der Bruecke vorbei etwas anderes ruft.
   const shell = src('src/components/startup/ClientShell.tsx');
-  ok(!/products\.create|invoices\.create|customers\.create|\.update|\.delete/.test(shell),
-    'READONLY die Client-Oberflaeche ruft keinen schreibenden Befehl');
-  ok(/read-only/.test(shell), 'READONLY …und sagt selbst, dass sie nur liest');
+  ok(!/products\.create|customers\.create|\.update|\.delete/.test(shell),
+    'READONLY die Client-Oberflaeche ruft keinen anderen schreibenden Befehl');
+  ok(!/read-only/.test(shell), 'READONLY …und behauptet nicht mehr, sie sei nur lesend');
+  ok(/ClientInvoiceCreate/.test(shell), 'READONLY der eine schreibende Weg ist das Rechnungsformular');
+  const form = src('src/components/client/ClientInvoiceCreate.tsx');
+  ok(/InvoiceSaveController/.test(form) && !/remoteRead\(/.test(form),
+    'READONLY …und es speichert ueber den Vertrag, nicht mit einem eigenen Aufruf');
 }
 
 // ── 7) Server weg: sagen, nicht erfinden ──────────────────────────────────

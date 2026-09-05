@@ -204,6 +204,22 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
   ok((list.match(/OP_[A-Z_]+/g) || []).length === 8, 'ALLOWLIST …und seine Liste ist genau acht Namen lang');
+
+  // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
+  // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:
+  // die Identitaet fehlte, und jede Buchung wurde fail-closed abgewiesen.
+  const libRs = src('src-tauri/src/lib.rs');
+  const sink = libRs.slice(libRs.indexOf('fn deliver('), libRs.indexOf('fn deliver(') + 1200);
+  ok(/"identity": envelope.identity/.test(sink),
+    'ALLOWLIST und der Umschlag traegt die Identitaet wirklich nach draussen');
+  for (const f of ['"opId": envelope.op_id', '"op": envelope.op', '"generation": envelope.generation', '"payload": envelope.payload']) {
+    ok(sink.includes(f), `ALLOWLIST …zusammen mit allem anderen (${f})`);
+  }
+
+  // Und der Befehl packt den Rumpf aus derselben Huelle aus wie die Lesebefehle.
+  const cmdSrc = src('src/core/bridge/invoice-command.ts');
+  ok(cmdSrc.includes('const body = (payload as { input?: unknown } | null)?.input ?? payload;'),
+    'ALLOWLIST der Rumpf des Clients steckt in `input`, der Absender daneben');
 }
 
 // ── 2) Dieselbe Rechnungslogik wie das Formular ───────────────────────────
@@ -399,6 +415,62 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
     `LASTUNIT die Wiederholung bekommt dasselbe Nein (${JSON.stringify(again)})`);
   ok(Number(one(db, 'SELECT COUNT(*) FROM invoices')) === 1,
     'LASTUNIT …und schreibt keine zweite Rechnung, obwohl die Ware wieder da ist');
+}
+
+// ── 6b) Ohne Los im Rumpf: ein leergekauftes Produkt wird NICHT verkauft ──
+//
+// Die Luecke, die erst die Ende-zu-Ende-Pruefung zeigte: `createDirectInvoice` sucht sich ohne
+// `lotId` selbst ein Los, und wenn keines mehr offen ist, bucht es die Zeile OHNE Los weiter —
+// die Bestandspruefung ueberspringt eine loslose Zeile, weil es loslose Ware wirklich gibt
+// (Reparaturleistung, Kommission vor dem Auto-Einkauf). Am Formular faellt das nie auf: es gibt
+// immer ein Los mit. Ueber die Ferne hiesse es: das letzte Stueck wird zweimal verkauft, beim
+// zweiten Mal ohne Bestandsabzug.
+{
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  installWriteGuard(db as never);
+  const s = seed(db, { qty: 1 });
+  const { deps: d } = deps(db);
+
+  // Der Client nennt KEIN Los — genau das, was das Formular des Clients schickt.
+  const sold = await runInvoiceCreate(d, identity(ID('30')), {
+    customerId: s.customerId,
+    lines: [{ productId: s.productId, quantity: 1, unitPrice: 150, scheme: 'auto' }],
+  });
+  ok(sold.kind === 'ok', `EMPTY das eine Stueck wird verkauft (${JSON.stringify(sold)})`);
+  ok(Number(one(db, "SELECT qty_remaining FROM stock_lots WHERE id='lot-1'")) === 0,
+    'EMPTY …und der Bestand ist abgezogen — das Los wurde aufgeloest, nicht offen gelassen');
+  ok(String(one(db, "SELECT lot_id FROM invoice_lines LIMIT 1")) === s.lotId,
+    'EMPTY die Zeile haengt an ihrem Los');
+
+  // Und jetzt derselbe Wunsch noch einmal, mit einer NEUEN Kennung: die Ware ist weg.
+  const second = await runInvoiceCreate(d, identity(ID('31'), 'h2'), {
+    customerId: s.customerId,
+    lines: [{ productId: s.productId, quantity: 1, unitPrice: 150, scheme: 'auto' }],
+  });
+  ok(second.kind === 'rejected' && (second as { code: string }).code === 'STOCK_UNAVAILABLE',
+    `EMPTY der zweite Verkauf bekommt ein fachliches Nein (${JSON.stringify(second)})`);
+  ok((second as { frozen: boolean }).frozen === true, 'EMPTY …und es ist eingefroren');
+  ok(Number(one(db, 'SELECT COUNT(*) FROM invoices')) === 1, 'EMPTY es bleibt bei einer Rechnung');
+  ok(Number(one(db, "SELECT qty_remaining FROM stock_lots WHERE id='lot-1'")) === 0,
+    'EMPTY der Bestand ist 0 und nicht negativ');
+
+  // Ein ausdruecklich genanntes, leeres Los ebenfalls.
+  const named = await runInvoiceCreate(d, identity(ID('32'), 'h3'), {
+    customerId: s.customerId,
+    lines: [{ productId: s.productId, lotId: s.lotId, quantity: 1, unitPrice: 150, scheme: 'auto' }],
+  });
+  ok(named.kind === 'rejected' && (named as { code: string }).code === 'STOCK_UNAVAILABLE',
+    `EMPTY auch ein genanntes leeres Los wird abgewiesen (${JSON.stringify(named)})`);
+
+  // Ware ohne Lose bleibt, wie sie war: Reparaturleistungen haben keine und muessen weiter gehen.
+  db.run("INSERT INTO products (id, branch_id, category_id, brand, name, sku, purchase_price, tax_scheme, stock_status, created_at, updated_at)"
+    + " VALUES ('srv-1','branch-main','cat-repair-service','Service','Politur','SRV-1', 0, 'VAT_10', 'in_stock', ?, ?)", [NOW, NOW]);
+  const service = await runInvoiceCreate(d, identity(ID('33'), 'h4'), {
+    customerId: s.customerId,
+    lines: [{ productId: 'srv-1', quantity: 1, unitPrice: 20, scheme: 'auto' }],
+  });
+  ok(service.kind === 'ok', `EMPTY loslose Ware wird weiterhin verkauft (${JSON.stringify(service)})`);
 }
 
 // ── 7) Verlorene Antwort: dieselbe Kennung, keine zweite Wirkung ──────────

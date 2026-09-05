@@ -143,25 +143,50 @@ export function buildInvoiceLines(lines: RemoteLine[]): InvoiceLineInput[] {
     const product = rows[0];
     if (!product) throw new InvoicePayloadError(`line ${i + 1}: unknown product`);
 
+    // Das Los wird HIER aufgelöst und dann ausdrücklich mitgegeben — nicht offen gelassen.
+    //
+    // Der Grund ist eine Lücke, die erst die Ende-zu-Ende-Prüfung gezeigt hat: `createDirectInvoice`
+    // sucht sich ohne `lotId` selbst das älteste offene Los, und wenn KEINES mehr offen ist, bucht
+    // es die Zeile ohne Los weiter — die Bestandsprüfung überspringt eine Zeile ohne Los, weil es
+    // Ware ohne Lose wirklich gibt (Reparaturleistung, Kommission vor dem Auto-Einkauf). Am
+    // Formular fällt das nie auf: es gibt immer ein Los mit. Über die Ferne hieße es: das letzte
+    // Stück wird zweimal verkauft, beim zweiten Mal ohne Bestandsabzug.
+    //
+    // Also: Hat das Produkt Lose, MUSS eines davon offen sein. Hat es keine, bleibt alles wie
+    // bisher — dieser Befehl ändert die Regeln des Hauses nicht, er füllt nur eine Lücke, die
+    // vorher niemand erreichen konnte.
     let costBasis = Number(product.purchase_price) || 0;
+    let lotId: string | null = null;
     if (l.lotId) {
-      const lot = query('SELECT id, unit_cost FROM stock_lots WHERE id = ? AND product_id = ?', [l.lotId, l.productId]);
+      const lot = query(
+        'SELECT id, unit_cost, qty_remaining, status FROM stock_lots WHERE id = ? AND product_id = ?',
+        [l.lotId, l.productId],
+      );
       if (lot.length === 0) throw new InvoicePayloadError(`line ${i + 1}: that lot does not belong to this product`);
+      if (Number(lot[0].qty_remaining) <= 0 || lot[0].status === 'CANCELLED') {
+        throw new CommandRejected('STOCK_UNAVAILABLE', STOCK_UNAVAILABLE_MESSAGE);
+      }
+      lotId = String(lot[0].id);
       costBasis = Number(lot[0].unit_cost) || costBasis;
     } else {
-      // Dieselbe Reihenfolge wie im Formular und in `createDirectInvoice`: das älteste offene Los.
-      const fifo = query(
-        `SELECT id, unit_cost FROM stock_lots
-          WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
-          ORDER BY acquired_at ASC, id ASC LIMIT 1`,
-        [l.productId],
-      );
-      if (fifo[0]) costBasis = Number(fifo[0].unit_cost) || costBasis;
+      const all = query('SELECT id FROM stock_lots WHERE product_id = ?', [l.productId]);
+      if (all.length > 0) {
+        // Dieselbe Reihenfolge wie im Formular und in `createDirectInvoice`: das älteste offene Los.
+        const fifo = query(
+          `SELECT id, unit_cost FROM stock_lots
+            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
+          [l.productId],
+        );
+        if (!fifo[0]) throw new CommandRejected('STOCK_UNAVAILABLE', STOCK_UNAVAILABLE_MESSAGE);
+        lotId = String(fifo[0].id);
+        costBasis = Number(fifo[0].unit_cost) || costBasis;
+      }
     }
 
     return toInvoiceLine({
       productId: l.productId,
-      lotId: l.lotId,
+      lotId,
       quantity: l.quantity ?? 1,
       unitPrice: l.unitPrice,
       costBasis,
@@ -253,9 +278,13 @@ registerCommand(OP_INVOICES_CREATE, {
   kind: 'mutation',
   handler: async (payload, actor?: CommandActor) => {
     if (!actor) throw new Error('invoices.create needs an authenticated identity');
+    // Die Bruecke reicht `{ actor, input }` durch — dieselbe Huelle, die auch die Lesebefehle
+    // auspacken. Der Rumpf des Clients ist `input`; der Absender kommt NIE daraus, sondern aus
+    // dem geprueften Token daneben.
+    const body = (payload as { input?: unknown } | null)?.input ?? payload;
     let outcome;
     try {
-      outcome = await runInvoiceCreate(invoiceEngineDeps(), { ...actor, op: OP_INVOICES_CREATE }, payload);
+      outcome = await runInvoiceCreate(invoiceEngineDeps(), { ...actor, op: OP_INVOICES_CREATE }, body);
     } catch (err) {
       // Ein unbrauchbarer Rumpf ist eine Antwort, keine Störung: der Client soll ihn korrigieren
       // und mit einer NEUEN Kennung erneut schicken — nicht dieselbe Anfrage wiederholen.
