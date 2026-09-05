@@ -171,3 +171,44 @@ export function preseedInstallation(appDataDir) {
   if (!existsSync(existing)) throw new E2eIdentityError('the preseed helper produced no locator');
   return out;
 }
+
+// ── CENTRAL-C3B — die ZWEITE isolierte Identitaet: der Client ──────────────
+//
+// Fuer den echten Client-UI-Beweis muessen zwei Anwendungen gleichzeitig laufen. Der
+// Single-Instance-Riegel der Produktion bleibt dabei unangetastet — er wird nicht umgangen,
+// sondern gar nicht erst getroffen: der Client ist ein EIGENES Testartefakt mit eigener
+// Kennung (`com.lataif.app.e2e.client`), eigenem AppData, eigenem WebView2-Profil und eigenem
+// CDP-Port. Zwei Instanzen DERSELBEN Kennung sind damit weiterhin unmoeglich, in der Produktion
+// wie im Test.
+export const E2E_CLIENT_IDENT = 'com.lataif.app.e2e.client';
+
+const REQUIRED_CLIENT_MARKERS = [
+  { name: 'isolated client identifier', bytes: E2E_CLIENT_IDENT },
+  { name: 'e2e client productName', bytes: 'LATAIF-E2E-CLIENT' },
+  { name: 'client CDP browser args', bytes: '--remote-debugging-port=9224' },
+  { name: 'e2e feature build marker', bytes: 'LATAIF_E2E_BUILD_MARKER_V1' },
+];
+
+/** Dasselbe Versprechen wie `assertE2eBinary`, fuer das Client-Artefakt. */
+export function assertE2eClientBinary(appPath) {
+  if (!existsSync(appPath)) {
+    throw new E2eIdentityError(
+      `${basename(appPath)} does not exist. Build it with:\n`
+        + '  npx tauri build --debug --no-bundle --features e2e --config src-tauri/tauri.e2e-client.conf.json\n'
+        + '  cp src-tauri/target/debug/lataif.exe src-tauri/target/debug/lataif-e2e-client.exe',
+    );
+  }
+  const buf = readFileSync(appPath);
+  const missing = REQUIRED_CLIENT_MARKERS.filter((m) => !hasMarker(buf, m.bytes)).map((m) => m.name);
+  if (missing.length > 0) {
+    throw new E2eIdentityError(
+      `${basename(appPath)} is NOT the isolated E2E CLIENT build — missing: ${missing.join(', ')}.`,
+    );
+  }
+  // Und es ist NICHT dasselbe Artefakt wie der Primary: haette es dessen Kennung, liefen beide
+  // auf demselben AppData und derselben Single-Instance-Sperre.
+  if (hasMarker(buf, E2E_IDENT) && !hasMarker(buf, E2E_CLIENT_IDENT)) {
+    throw new E2eIdentityError(`${basename(appPath)} carries the primary identity — it is not a separate client artefact.`);
+  }
+  return { verified: REQUIRED_CLIENT_MARKERS.map((m) => m.name), sizeBytes: statSync(appPath).size };
+}

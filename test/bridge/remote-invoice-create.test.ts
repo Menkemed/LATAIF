@@ -101,6 +101,9 @@ const actor = (commandId: string, hash = 'h1', user = 'user-test') => ({
 
 const one = (db: Db, sql: string, p: unknown[] = []): unknown => db.exec(sql, p)[0]?.values?.[0]?.[0];
 
+/** Frische Abhaengigkeiten fuer dieselbe Datenbank — fuer Abschnitte mit mehreren Auftraegen. */
+const d0 = (db: Db) => deps(db).deps;
+
 /**
  * Eine echte Datenbank mit dem ECHTEN Schema des Hauses — kein nachgebautes Modell: `schema.sql`,
  * danach die ECHTEN Migrationen, wortgleich aus `database.ts` gelesen (dort stehen `stock_lots`,
@@ -471,6 +474,65 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
     lines: [{ productId: 'srv-1', quantity: 1, unitPrice: 20, scheme: 'auto' }],
   });
   ok(service.kind === 'ok', `EMPTY loslose Ware wird weiterhin verkauft (${JSON.stringify(service)})`);
+}
+
+// ── 6c) Dieselbe Zuteilungsregel wie das Formular ─────────────────────────
+//
+// Die Gefahr bei einer zweiten Schreibstelle ist nicht, dass sie falsch rechnet — sondern dass sie
+// ANDERS waehlt. Zwei Zuteilungsregeln fuer dasselbe Los heissen: derselbe Verkauf zieht je nach
+// Weg von einem anderen Einkauf ab, und die Marge stimmt nie wieder. Deshalb kommt die Liste der
+// konsumierbaren Lose aus DEM Helfer des Hauses, aus dem auch das Formular seine Auswahl baut.
+{
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  installWriteGuard(db as never);
+  const s = seed(db, { qty: 1 });
+  const lots = await import('../../src/core/lots/lot-queries.ts');
+
+  // Zwei weitere Lose desselben Produkts: eines aelter, eines juenger, beide offen.
+  db.run("INSERT INTO stock_lots (id, branch_id, product_id, qty_total, qty_remaining, unit_cost, status, acquired_at, created_at)"
+    + " VALUES ('lot-old','branch-main','prod-1', 2, 2, 80, 'ACTIVE', '2026-01-01T00:00:00.000Z', ?)", [NOW]);
+  db.run("INSERT INTO stock_lots (id, branch_id, product_id, qty_total, qty_remaining, unit_cost, status, acquired_at, created_at)"
+    + " VALUES ('lot-new','branch-main','prod-1', 5, 5, 120, 'ACTIVE', '2027-01-01T00:00:00.000Z', ?)", [NOW]);
+
+  // Die kanonische Reihenfolge des Hauses: nicht storniert, Restmenge > 0, aeltestes zuerst.
+  const house = lots.getLotsWithPurchaseNumbers(s.productId);
+  ok(house.map((x: { id: string }) => x.id).join(',') === 'lot-old,lot-1,lot-new',
+    `EQUIV der Helfer des Hauses ordnet FIFO (${house.map((x: { id: string }) => x.id).join(',')})`);
+
+  // Und der Fernauftrag waehlt GENAU dasselbe, ohne eigene Abfrage.
+  const built = buildInvoiceLines([{ productId: s.productId, quantity: 1, unitPrice: 150 }]);
+  ok(built[0].lotId === 'lot-old', `EQUIV der Fernauftrag nimmt dasselbe erste Los (${built[0].lotId})`);
+  ok(built[0].purchasePrice === 80, `EQUIV …samt seiner Einstandskosten (${built[0].purchasePrice})`);
+  const cmdSrc = src('src/core/bridge/invoice-command.ts');
+  ok(/getLotsWithPurchaseNumbers\(l\.productId\)/.test(cmdSrc),
+    'EQUIV weil er den Helfer benutzt und keine eigene Reihenfolge erfindet');
+  ok(!/ORDER BY acquired_at/.test(cmdSrc), 'EQUIV …im Befehl steht keine zweite FIFO-Abfrage');
+
+  // Eine Menge ueberspannt KEINE Lose — das ist das bestehende Modell (`consumeLot` nimmt EIN
+  // Los, `assertLotsConsumable` weist eine zu grosse Menge vorher ab). Der Fernauftrag erbt das.
+  const tooMany = await runInvoiceCreate(d0(db), identity(ID('40')), {
+    customerId: s.customerId,
+    lines: [{ productId: s.productId, lotId: 'lot-old', quantity: 3, unitPrice: 150, scheme: 'auto' }],
+  });
+  ok(tooMany.kind === 'rejected' && (tooMany as { code: string }).code === 'STOCK_UNAVAILABLE',
+    `EQUIV eine Menge ueber die Losgrenze wird abgewiesen, nicht aufgeteilt (${JSON.stringify(tooMany)})`);
+  ok(Number(one(db, "SELECT qty_remaining FROM stock_lots WHERE id='lot-old'")) === 2,
+    'EQUIV …und das Los bleibt unberuehrt');
+
+  // Genau die Menge des Loses geht.
+  const exact = await runInvoiceCreate(d0(db), identity(ID('41'), 'h41'), {
+    customerId: s.customerId,
+    lines: [{ productId: s.productId, lotId: 'lot-old', quantity: 2, unitPrice: 150, scheme: 'auto' }],
+  });
+  ok(exact.kind === 'ok', `EQUIV die volle Losmenge geht (${JSON.stringify(exact)})`);
+  ok(Number(one(db, "SELECT qty_remaining FROM stock_lots WHERE id='lot-old'")) === 0,
+    'EQUIV das Los ist leer');
+
+  // Danach waehlt der naechste Auftrag das naechste offene Los — wieder wie das Formular.
+  const next = buildInvoiceLines([{ productId: s.productId, quantity: 1, unitPrice: 150 }]);
+  ok(next[0].lotId === 'lot-1' && next[0].purchasePrice === 100,
+    `EQUIV das naechste offene Los rueckt nach (${next[0].lotId}/${next[0].purchasePrice})`);
 }
 
 // ── 7) Verlorene Antwort: dieselbe Kennung, keine zweite Wirkung ──────────

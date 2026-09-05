@@ -27,6 +27,7 @@ import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { STOCK_UNAVAILABLE_MESSAGE } from '@/core/lots/lot-availability';
+import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { resolveLineScheme, toInvoiceLine, type InvoiceLineInput, type RequestedScheme } from '@/core/invoices/line-derivation';
@@ -155,34 +156,34 @@ export function buildInvoiceLines(lines: RemoteLine[]): InvoiceLineInput[] {
     // Also: Hat das Produkt Lose, MUSS eines davon offen sein. Hat es keine, bleibt alles wie
     // bisher — dieser Befehl ändert die Regeln des Hauses nicht, er füllt nur eine Lücke, die
     // vorher niemand erreichen konnte.
+    // Die Liste der konsumierbaren Lose kommt aus DEM Helfer des Hauses — demselben, aus dem das
+    // Formular seine Auswahl baut. Damit gibt es keine zweite Zuteilungsregel: „nicht storniert,
+    // Restmenge > 0, älteste zuerst" steht an EINER Stelle, und das Formular belegt genauso vor
+    // (`lots[0]`), wie hier gewählt wird.
+    const open = getLotsWithPurchaseNumbers(l.productId);
     let costBasis = Number(product.purchase_price) || 0;
     let lotId: string | null = null;
+
     if (l.lotId) {
-      const lot = query(
-        'SELECT id, unit_cost, qty_remaining, status FROM stock_lots WHERE id = ? AND product_id = ?',
-        [l.lotId, l.productId],
-      );
-      if (lot.length === 0) throw new InvoicePayloadError(`line ${i + 1}: that lot does not belong to this product`);
-      if (Number(lot[0].qty_remaining) <= 0 || lot[0].status === 'CANCELLED') {
+      const chosen = open.find((x) => x.id === l.lotId);
+      if (!chosen) {
+        // Gehört das Los überhaupt zu diesem Produkt? Dann ist es leer oder storniert — ein
+        // fachliches Nein. Gehört es nicht dazu, ist der Rumpf falsch, und das ist kein Urteil.
+        const owned = query('SELECT id FROM stock_lots WHERE id = ? AND product_id = ?', [l.lotId, l.productId]);
+        if (owned.length === 0) throw new InvoicePayloadError(`line ${i + 1}: that lot does not belong to this product`);
         throw new CommandRejected('STOCK_UNAVAILABLE', STOCK_UNAVAILABLE_MESSAGE);
       }
-      lotId = String(lot[0].id);
-      costBasis = Number(lot[0].unit_cost) || costBasis;
-    } else {
-      const all = query('SELECT id FROM stock_lots WHERE product_id = ?', [l.productId]);
-      if (all.length > 0) {
-        // Dieselbe Reihenfolge wie im Formular und in `createDirectInvoice`: das älteste offene Los.
-        const fifo = query(
-          `SELECT id, unit_cost FROM stock_lots
-            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
-            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
-          [l.productId],
-        );
-        if (!fifo[0]) throw new CommandRejected('STOCK_UNAVAILABLE', STOCK_UNAVAILABLE_MESSAGE);
-        lotId = String(fifo[0].id);
-        costBasis = Number(fifo[0].unit_cost) || costBasis;
-      }
+      lotId = chosen.id;
+      costBasis = chosen.unitCost || costBasis;
+    } else if (query('SELECT id FROM stock_lots WHERE product_id = ? LIMIT 1', [l.productId]).length > 0) {
+      // Das Produkt WIRD über Lose geführt. Dann muss eines offen sein — sonst hinge die Zeile
+      // loslos in der Luft, und die Bestandsprüfung überspringt lose Zeilen (die es zu Recht gibt).
+      if (open.length === 0) throw new CommandRejected('STOCK_UNAVAILABLE', STOCK_UNAVAILABLE_MESSAGE);
+      lotId = open[0].id;
+      costBasis = open[0].unitCost || costBasis;
     }
+    // Ware ohne Lose (Reparaturleistung, Kommission vor dem Auto-Einkauf) bleibt wie bisher:
+    // kein Los, keine Bestandsprüfung, Einstandskosten aus dem Produkt.
 
     return toInvoiceLine({
       productId: l.productId,
