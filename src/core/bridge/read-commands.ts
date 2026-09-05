@@ -97,10 +97,18 @@ const str = (v: unknown): string => (v === null || v === undefined ? '' : String
  * bekommt (Primärbild zuerst, dann die Galerie). Der Client lädt die Bytes damit über die
  * bestehende, angemeldete Medienroute; hier reist KEIN Bild mit, nur ein Schlüssel.
  */
-function mediaKeysFor(tenantId: string, productId: string): string[] {
+/**
+ * CENTRAL-C3C FINAL — die Galerie mit ihren stabilen KENNUNGEN, in ihrer Reihenfolge.
+ *
+ * Ein Speicherschlüssel benennt Bytes; eine Medienkennung benennt einen PLATZ in der Galerie. Wer
+ * die Galerie ändern will, braucht die zweite: „behalte dieses Bild" ist eine Aussage über die
+ * Identität, nicht über den Inhalt. Deshalb liefert `products.get` beides — dieselbe Abfrage,
+ * dieselbe Ordnung, damit Bild i und Kennung i wirklich zusammengehören.
+ */
+function galleryOf(tenantId: string, productId: string): Array<{ mediaId: string; key: string }> {
   if (!tenantId) return [];
   return rows(
-    `SELECT g.storage_key AS k
+    `SELECT l.media_id AS m, g.storage_key AS k
        FROM media_links l
        JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
        JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id
@@ -111,8 +119,9 @@ function mediaKeysFor(tenantId: string, productId: string): string[] {
         AND o.ingest_status = 'ready' AND b.blob_status = 'present' AND g.gen_status = 'available'
       ORDER BY l.is_primary DESC, l.sort_order ASC, l.link_id ASC`,
     [tenantId, productId],
-  ).map((r) => str(r.k)).filter(Boolean);
+  ).map((r) => ({ mediaId: str(r.m), key: str(r.k) })).filter((x) => x.key !== '' && x.mediaId !== '');
 }
+
 
 // ── Bestand ────────────────────────────────────────────────────────────────
 //
@@ -202,13 +211,17 @@ registerCommand(OP_PRODUCTS_GET, {
     );
     if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such product in this branch');
     const r = found[0];
+    const gal = galleryOf(actorTenant(p), str(r.id));
     return {
       ...productDto(r),
       attributes: str(r.attributes) || '{}',
       notes: str(r.notes),
       storageLocation: str(r.storage_location),
       // Der Client holt die Bytes über die bestehende, angemeldete Medienroute — hier reist kein Bild.
-      mediaKeys: mediaKeysFor(actorTenant(p), str(r.id)),
+      mediaKeys: gal.map((g) => g.key),
+      // …und die Kennungen daneben, in DERSELBEN Reihenfolge: ohne sie kann ein zweiter Rechner
+      // keine Galerie planen, denn „behalte dieses Bild" braucht eine Identität, keinen Inhalt.
+      mediaIds: gal.map((g) => g.mediaId),
     };
   },
 });

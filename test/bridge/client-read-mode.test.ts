@@ -335,8 +335,15 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   ok(!/file:\/\/|\\\\\\\\|smb:/.test(shell), 'MEDIA kein Pfad, keine Netzfreigabe');
 
   const reads = src('src/core/bridge/read-commands.ts');
-  ok(/mediaKeys: mediaKeysFor\(/.test(reads), 'MEDIA der Primary nennt nur die Schluessel…');
-  ok(!/base64|dataUrl|imageBytes/.test(reads), 'MEDIA …und schickt keine Bilddaten durch den Lesebefehl');
+  // Seit C3C-FINAL nennt `products.get` neben dem Speicherschluessel auch die MEDIENKENNUNG:
+  // ohne sie kann ein zweiter Rechner keine Galerie planen („behalte dieses Bild" ist eine
+  // Aussage ueber eine Identitaet). Beides kommt aus DERSELBEN Abfrage in DERSELBEN Ordnung —
+  // zwei Abfragen waeren zwei Meinungen darueber, welches Bild an Platz i steht.
+  ok(/mediaKeys: gal\.map\(\(g\) => g\.key\)/.test(reads) && /mediaIds: gal\.map\(\(g\) => g\.mediaId\)/.test(reads),
+    'MEDIA der Primary nennt Schluessel UND Kennung, aus einer Abfrage…');
+  ok((reads.match(/FROM media_links l/g) || []).length === 1,
+    'MEDIA …und es gibt nur EINE Galerie-Abfrage im Lesebefehl');
+  ok(!/base64|dataUrl|imageBytes/.test(reads), 'MEDIA …und er schickt keine Bilddaten');
 }
 
 // ── 10) Der ECHTE Schreibweg, nicht nur der der Brücke ────────────────────

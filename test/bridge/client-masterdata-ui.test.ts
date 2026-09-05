@@ -303,11 +303,17 @@ const UPLOAD = 'src/core/bridge/client-staging-upload.ts';
     `MEDIA der Grund des Primary kommt beim Benutzer an (${refused?.code})`);
 
   const formCode = code(PRODUCT_FORM);
-  ok(/stagingIds: staged\.map\(\(s\) => s\.stagingId\)/.test(formCode),
+  ok(/stagingIds: slots\.map\(/.test(formCode) && /\{ stagingId: s\.stagingId \}/.test(formCode),
     'MEDIA der Auftrag traegt nur Kennungen, keine Bytes');
+  // Seit C3C-FINAL kann dasselbe Formular auch die Galerie eines BESTEHENDEN Artikels planen: eine
+  // Liste von Plaetzen, jeder entweder ein behaltenes Bild oder ein neues.
+  ok(/keep: s\.mediaId/.test(formCode) && /gallery: plan/.test(formCode),
+    'MEDIA …und beim Aendern eine geordnete Liste aus Behalten und Neu');
+  ok(/galleryTouched \? \{ gallery: plan \} : \{\}/.test(formCode),
+    'MEDIA ohne angefasste Galerie wird sie gar nicht erst mitgeschickt (MEDIA-EDIT-PRESERVE)');
   ok(!/dataBase64|data:image/.test(formCode),
     'MEDIA im Auftrag steht keine einzige Bild-Nutzlast');
-  ok(/prev\.some\(\(x\) => x\.stagingId === s\.stagingId\)/.test(formCode),
+  ok(/prev\.some\(\(x\) => x\.kind === 'new' && x\.stagingId === up\.stagingId\)/.test(formCode),
     'MEDIA dasselbe Bild zweimal bleibt EIN Bild — der Primary wuerde es sonst abweisen');
 }
 

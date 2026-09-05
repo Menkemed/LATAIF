@@ -377,6 +377,12 @@ interface ProductStore {
     editImages: { srcs: string[]; resolved: Array<{ url: string; mediaId: string }>; status: ResolverStatus },
     retryEditId?: string,
     ctx?: WriteContext,
+    /**
+     * CENTRAL-C3C — dieselbe Preissperre, die der text-only Weg schon kennt. Der Desktop laesst sie
+     * weg (ein Mensch am Primary aendert Preise bewusst); ein FERNAUFTRAG setzt sie, sonst waere
+     * „ein Bild mitschicken" der Weg, an der Sperre vorbeizukommen.
+     */
+    opts?: { priceEligibilityRequired?: boolean },
   ) => Promise<EditProductResult>;
   /**
    * MEDIA-EDIT-PRESERVE — durable PRODUCT-TEXT-ONLY edit that NEVER touches the
@@ -990,7 +996,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   }),
 
   // ── MEDIA-04A-3B2C2 — durable existing-product edit (text + media atomic) ──
-  editProductWithMedia: (id, data, editImages, retryEditId, ctx) => runExclusiveUnless(ctx?.alreadySerialised, async () => {
+  editProductWithMedia: (id, data, editImages, retryEditId, ctx, opts) => runExclusiveUnless(ctx?.alreadySerialised, async () => {
     // Fail closed: image editing only on a fully-resolved, valid gallery.
     if (!canEditImages(editImages.status)) {
       return { status: 'blocked', errorCode: 'MEDIA_EDIT_GALLERY_NOT_READY' };
@@ -1051,6 +1057,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       set: textDiff.set, baseline: textDiff.baseline,
       invalidateImageDerived: galleryChanged,
       withSync: isSyncConfigured(),
+      // Die Preisberechtigung wird DURCHGEREICHT, nicht hier entschieden: geprueft wird sie in
+      // derselben Transaktion, unmittelbar vor dem UPDATE (coordinator.applyProductEditInTx).
+      ...(opts?.priceEligibilityRequired === true ? { priceEligibilityRequired: true } : {}),
       audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify(Object.fromEntries(textDiff.set)) },
     };
 

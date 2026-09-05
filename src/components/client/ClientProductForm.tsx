@@ -11,10 +11,17 @@
 //     Zwischenablage und ist danach nur noch eine Kennung. Der Speichern-Knopf schickt eine
 //     Nachricht, keine Bytes — und eine Wiederholung schickt dieselbe Nachricht.
 //
-// Beim Ändern gilt dieselbe Regel wie beim Kunden: nur der Unterschied wird geschickt. Und die
-// Galerie wird hier NICHT geändert — das Ändern von Bildern hat am Primary einen eigenen,
-// mehrstufigen Weg (Plan, Batch, Wiederaufnahme), und den von außen halb nachzubauen wäre genau
-// der zweite Medienweg, den dieses ganze Kapitel vermeidet.
+// Beim Ändern gilt dieselbe Regel wie beim Kunden: nur der Unterschied wird geschickt.
+//
+// Die Galerie ist der dritte Punkt, und sie ist eine LISTE, kein Befehlssatz: das Formular schickt
+// die gewünschte Reihenfolge, Platz für Platz — jeder Platz entweder ein behaltenes Bild oder ein
+// neues aus der Zwischenablage. Was fehlt, geht; was dazukommt, kommt dazu; was sich verschiebt,
+// verschiebt sich. Der Primary rechnet daraus seinen Plan und wendet ihn mit dem Text in EINER
+// Transaktion an — genau der Weg, den auch sein eigenes Formular fährt.
+//
+// Und sie wird nur geschickt, wenn ein Mensch sie WIRKLICH angefasst hat: ein reiner Textsave
+// lässt `gallery` weg, und dann liest der Primary die Medien nicht einmal (MEDIA-EDIT-PRESERVE —
+// so ist im Haus schon einmal ein Handy-Foto gestorben).
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CommandSaveController, type SaveOutcome } from '@/core/bridge/client-command-save';
@@ -48,10 +55,10 @@ export const draftFromRemote = (row: Record<string, unknown>): Draft => draftFro
 export const changedFields = (base: Draft, now: Draft): Record<string, unknown> =>
   diffDraft(CLIENT_PRODUCT_FIELDS, PRODUCT_NUMERIC, base, now);
 
-interface Staged {
-  stagingId: string;
-  label: string;
-}
+/** Ein Platz in der Galerie: ein bestehendes Bild oder ein frisch abgelegtes. */
+type Slot =
+  | { kind: 'keep'; mediaId: string; key: string }
+  | { kind: 'new'; stagingId: string; label: string };
 
 export interface ClientProductFormProps {
   productId?: string;
@@ -69,7 +76,10 @@ export function ClientProductForm({
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [categoryId, setCategoryId] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
-  const [staged, setStaged] = useState<Staged[]>([]);
+  /** Die gewünschte Galerie in ihrer Reihenfolge. Beim Anlegen sind alle Plätze neu. */
+  const [slots, setSlots] = useState<Slot[]>([]);
+  /** Die Galerie, wie sie GELADEN wurde — nur so ist „angefasst?" beantwortbar. */
+  const [baseSlots, setBaseSlots] = useState<Slot[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -93,6 +103,13 @@ export function ClientProductForm({
           setBase(d);
           setDraft(d);
           setCategoryId(text(row.categoryId));
+          // Kennung UND Schlüssel kommen aus derselben Antwort in derselben Ordnung: die eine
+          // benennt den Platz, der andere holt das Bild zum Anschauen.
+          const ids = Array.isArray(row.mediaIds) ? (row.mediaIds as string[]) : [];
+          const keys = Array.isArray(row.mediaKeys) ? (row.mediaKeys as string[]) : [];
+          const loaded: Slot[] = ids.map((mediaId, i) => ({ kind: 'keep', mediaId, key: keys[i] ?? '' }));
+          setSlots(loaded);
+          setBaseSlots(loaded);
         } else {
           // Der Client kennt nur die Kategorien, die in der Sammlung VORKOMMEN: einen eigenen
           // Lesebefehl dafür gibt es nicht, und einen zu erfinden, nur damit dieses Formular
@@ -117,8 +134,15 @@ export function ClientProductForm({
   const set = (f: Field, v: string): void => setDraft((prev) => ({ ...prev, [f]: v }));
 
   const changes = changedFields(base, draft);
+  /** Wurde die Galerie angefasst? Reihenfolge zählt — ein Verschieben IST eine Änderung. */
+  const galleryTouched = editing
+    && (slots.length !== baseSlots.length
+      || slots.some((s, i) => {
+        const b = baseSlots[i];
+        return s.kind !== 'keep' || b === undefined || b.kind !== 'keep' || s.mediaId !== b.mediaId;
+      }));
   const complete = editing
-    ? Object.keys(changes).length > 0
+    ? Object.keys(changes).length > 0 || galleryTouched
     : draft.name.trim() !== '' && categoryId !== '';
 
   const pending = outcome?.kind === 'unknown';
@@ -132,11 +156,12 @@ export function ClientProductForm({
     try {
       for (const file of Array.from(files)) {
         try {
-          const s = await upload(file);
-          setStaged((prev) => (prev.some((x) => x.stagingId === s.stagingId)
-            // Derselbe Inhalt ergibt dieselbe Kennung — zweimal dasselbe Bild ist EIN Bild.
+          const up = await upload(file);
+          setSlots((prev) => (prev.some((x) => x.kind === 'new' && x.stagingId === up.stagingId)
+            // Derselbe Inhalt ergibt dieselbe Kennung — zweimal dasselbe Bild ist EIN Bild, und
+            // der Primary würde einen doppelten Platz ohnehin abweisen.
             ? prev
-            : [...prev, { stagingId: s.stagingId, label: `${file.name} · ${s.width}×${s.height}` }]));
+            : [...prev, { kind: 'new', stagingId: up.stagingId, label: `${file.name} · ${up.width}×${up.height}` }]));
         } catch (e) {
           const err = e as StagingUploadError;
           setImageError(err?.code ? `${file.name}: ${err.code}` : String(e));
@@ -151,21 +176,24 @@ export function ClientProductForm({
     setBusy(true);
     try {
       const attempt = controller.beginAttempt();
+      const plan = slots.map((s) => (s.kind === 'keep' ? { keep: s.mediaId } : { stagingId: s.stagingId }));
       const body = editing
-        ? { id: productId, ...changes }
+        // `gallery` NUR wenn wirklich angefasst: sonst bliebe die Galerie zwar gleich, würde aber
+        // gelesen und neu geplant — und das ist ein anderer Weg mit anderen Fehlermöglichkeiten.
+        ? { id: productId, ...changes, ...(galleryTouched ? { gallery: plan } : {}) }
         // Kein `sku`, keine `images`, keine `branchId`: was der Primary entscheidet, steht hier
         // nicht drin — und er würde es abweisen, stünde es doch drin.
-        : { categoryId, ...changedFields(EMPTY, draft), stagingIds: staged.map((s) => s.stagingId) };
+        : { categoryId, ...changedFields(EMPTY, draft), stagingIds: slots.map((s) => (s.kind === 'new' ? s.stagingId : '')) };
       setOutcome(await attempt.send(body));
     } finally {
       setBusy(false);
     }
-  }, [controller, editing, productId, changes, categoryId, draft, staged]);
+  }, [controller, editing, productId, changes, categoryId, draft, slots, galleryTouched]);
 
   function startOver(): void {
     controller.forget();
     setOutcome(null);
-    if (!editing) { setDraft(EMPTY); setStaged([]); }
+    if (!editing) { setDraft(EMPTY); setSlots([]); }
   }
 
   if (loading) return <div data-client-product-loading style={box}>Loading…</div>;
@@ -238,39 +266,53 @@ export function ClientProductForm({
       <input data-client-product-notes value={draft.notes} disabled={pending}
         onChange={(e) => set('notes', e.target.value)} style={field} />
 
-      {!editing && (
-        <div style={{ marginTop: 12 }}>
-          <label style={label}>Photos</label>
-          <input data-client-product-images type="file" multiple accept={ACCEPTED_IMAGE_TYPES.join(',')}
-            disabled={pending || uploading}
-            onChange={(e) => { void addFiles(e.target.files); e.target.value = ''; }} />
-          {uploading && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>Uploading…</span>}
-          {staged.length > 0 && (
-            <ul data-client-product-staged style={{ margin: '8px 0 0', paddingLeft: 18, fontSize: 12 }}>
-              {staged.map((s) => (
-                <li key={s.stagingId}>
-                  {s.label}
-                  {' '}
-                  <button data-client-product-drop style={{ ...btn(false), marginTop: 0, padding: '0 6px' }}
-                    onClick={() => setStaged((prev) => prev.filter((x) => x.stagingId !== s.stagingId))}>
-                    remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {imageError && <div data-client-product-imageerror style={warn}>{imageError}</div>}
+      <div style={{ marginTop: 12 }}>
+        <label style={label}>Photos</label>
+        <input data-client-product-images type="file" multiple accept={ACCEPTED_IMAGE_TYPES.join(',')}
+          disabled={pending || uploading}
+          onChange={(e) => { void addFiles(e.target.files); e.target.value = ''; }} />
+        {uploading && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>Uploading…</span>}
+        {/* Die Reihenfolge IST die Aussage: Platz 0 ist das Hauptbild. */}
+        {slots.length > 0 && (
+          <ol data-client-product-staged style={{ margin: '8px 0 0', paddingLeft: 22, fontSize: 12 }}>
+            {slots.map((slot, i) => (
+              <li key={slot.kind === 'keep' ? slot.mediaId : slot.stagingId}
+                data-client-product-slot={slot.kind === 'keep' ? slot.mediaId : slot.stagingId}>
+                {slot.kind === 'keep' ? `saved photo ${i + 1}` : slot.label}
+                {i === 0 && <span style={{ opacity: 0.6 }}> · main</span>}
+                {' '}
+                <button data-client-product-up disabled={pending || i === 0}
+                  style={{ ...btn(false), marginTop: 0, padding: '0 6px' }}
+                  onClick={() => setSlots((prev) => {
+                    const next = [...prev];
+                    [next[i - 1], next[i]] = [next[i], next[i - 1]];
+                    return next;
+                  })}>
+                  up
+                </button>
+                {' '}
+                <button data-client-product-drop disabled={pending}
+                  style={{ ...btn(false), marginTop: 0, padding: '0 6px' }}
+                  onClick={() => setSlots((prev) => prev.filter((_, j) => j !== i))}>
+                  remove
+                </button>
+              </li>
+            ))}
+          </ol>
+        )}
+        {imageError && <div data-client-product-imageerror style={warn}>{imageError}</div>}
+        {!editing && (
           <div style={{ marginTop: 6, fontSize: 12, opacity: 0.6 }}>
             The primary assigns the item number when it saves — there is no preview here on purpose.
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {editing && (
         <div data-client-product-changes style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-          {Object.keys(changes).length === 0
-            ? 'Nothing changed yet — only what you edit is sent. Photos are edited on the primary.'
-            : `Sending only: ${Object.keys(changes).join(', ')}`}
+          {Object.keys(changes).length === 0 && !galleryTouched
+            ? 'Nothing changed yet — only what you edit is sent.'
+            : `Sending only: ${[...Object.keys(changes), ...(galleryTouched ? ['gallery'] : [])].join(', ')}`}
         </div>
       )}
 

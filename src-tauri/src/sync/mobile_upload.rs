@@ -178,6 +178,7 @@ fn norm_declared(m: &str) -> &str {
 /// Eingangsstelle: der mobile Upload und die neutrale Staging-Route (`media_staging`) teilen sie
 /// sich. Zwei Definitionen wären zwei Meinungen darüber, was ein Bild ist — und die schwächere
 /// gewinnt dann immer, weil ein Angreifer sich seine Eingangsstelle aussuchen darf.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedImage {
     pub mime: &'static str,
     pub ext: &'static str,

@@ -26,6 +26,15 @@
 //  • **Ein unvollständiger Medienweg ist KEIN Erfolg.** Bleibt auch nur ein Bild aus, wird der
 //    ganze Auftrag zurückgenommen: kein halbes Produkt, kein eingefrorenes „ok". Dieselbe Kennung
 //    darf danach wiederholt werden, weil nichts durabel geworden ist.
+//  • **Die Galerie ist eine LISTE, kein Befehlssatz.** Ein Änderungsauftrag darf `gallery`
+//    mitschicken: die gewünschte Reihenfolge, Platz für Platz, jeder Platz entweder ein
+//    behaltenes Bild (`keep`) oder ein neues aus der Zwischenablage (`stagingId`). Genau so
+//    arbeitet auch das Formular am Primary — es schickt seine Bildliste, und das Haus rechnet
+//    daraus aus, was hinzukommt, was geht und was sich nur verschiebt. Hinzufügen, Entfernen und
+//    Umsortieren sind deshalb KEINE drei Operationen, sondern dieselbe.
+//  • **Text und Galerie in EINER Transaktion.** Der Weg dafür existiert (`editProductWithMedia`
+//    mit `productEdit`); ein zweiter Auftrag „erst Text, dann Bilder" hätte einen Zustand
+//    dazwischen, den niemand gewollt hat.
 //  • **Die Preissperre gilt auch von außen.** Ein Änderungsauftrag läuft mit
 //    `priceEligibilityRequired: true` — dieselbe Prüfung in derselben Transaktion wie beim Handy.
 //    Ein Artikel, der an einem Geschäftsvorgang hängt, ändert seinen Preis nicht, weil die Anfrage
@@ -37,6 +46,9 @@ import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { useProductStore } from '@/stores/productStore';
+import { ProductMediaResolver } from '@/core/media/product-media-resolver';
+import { TauriMediaGateway } from '@/core/media/gateway';
+import { currentBranchId } from '@/core/db/helpers';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
@@ -182,16 +194,65 @@ export function parseProductCreate(raw: unknown): ProductCreateRequest {
   return { categoryId, data, stagingIds: ids as string[] };
 }
 
-export function parseProductUpdate(raw: unknown): { id: string; fields: Record<string, unknown> } {
+/** Ein Platz in der gewünschten Galerie: ein behaltenes Bild oder ein neues aus der Ablage. */
+export type GallerySlot =
+  | { keep: string }
+  | { stagingId: string };
+
+export interface ProductUpdateRequest {
+  id: string;
+  fields: Record<string, unknown>;
+  /**
+   * `undefined` heißt AUSDRÜCKLICH „die Galerie nicht anfassen" — nicht „leeren". Das ist der
+   * Unterschied, an dem im Haus schon einmal ein Handy-Foto gestorben ist (MEDIA-EDIT-PRESERVE):
+   * ein reiner Textsave darf `media_links` nicht einmal lesen. Eine LEERE Liste dagegen ist eine
+   * Aussage: „diese Galerie soll leer sein".
+   */
+  gallery?: GallerySlot[];
+}
+
+export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
   if (!isPlain(raw)) throw new ProductPayloadError('payload must be an object');
-  const { id, ...rest } = raw as { id?: unknown };
+  const { id, gallery, ...rest } = raw as { id?: unknown; gallery?: unknown };
   if (typeof id !== 'string' || !id.trim()) throw new ProductPayloadError('id is required');
   for (const [k, why] of Object.entries(IMMUTABLE_ON_UPDATE)) {
     if (k in (rest as Record<string, unknown>)) throw new ProductPayloadError(why);
   }
   const out = fields(rest as Record<string, unknown>, UPDATE_FIELDS);
-  if (Object.keys(out).length === 0) throw new ProductPayloadError('nothing to change');
-  return { id, fields: out };
+
+  if (gallery === undefined || gallery === null) {
+    if (Object.keys(out).length === 0) throw new ProductPayloadError('nothing to change');
+    return { id, fields: out };
+  }
+  if (!Array.isArray(gallery)) throw new ProductPayloadError('gallery must be a list of slots');
+  if (gallery.length > MAX_REMOTE_IMAGES) throw new ProductPayloadError(`at most ${MAX_REMOTE_IMAGES} images`);
+  const slots: GallerySlot[] = [];
+  const seen = new Set<string>();
+  for (const raw of gallery) {
+    if (!isPlain(raw)) throw new ProductPayloadError('a gallery slot is an object');
+    const keys = Object.keys(raw).sort().join(',');
+    if (keys === 'keep') {
+      const keep = raw.keep;
+      // Eine Medienkennung wird NICHT auf ihre Form geprüft, sondern gegen die WIRKLICHE Galerie
+      // dieses Artikels — das passiert unten, gegen den gelesenen Stand. Eine Formprüfung hier
+      // wäre eine zweite, schwächere Meinung darüber, was es gibt.
+      if (typeof keep !== 'string' || keep.trim() === '') throw new ProductPayloadError('keep needs a media id');
+      if (seen.has('k:' + keep)) throw new ProductPayloadError('the same image twice is not an order');
+      seen.add('k:' + keep);
+      slots.push({ keep });
+      continue;
+    }
+    if (keys === 'stagingId') {
+      const sid = raw.stagingId;
+      if (!isStagingId(sid)) throw new ProductPayloadError('a staged image is named by its content hash');
+      if (seen.has('s:' + sid)) throw new ProductPayloadError('the same staged image twice is not an order');
+      seen.add('s:' + sid);
+      slots.push({ stagingId: sid });
+      continue;
+    }
+    throw new ProductPayloadError('a gallery slot is either { keep } or { stagingId }');
+  }
+  return { id, fields: out, gallery: slots };
 }
 
 /** Typ-Alias aus demselben Grund wie beim Kunden: als `CommandResult` herausgegeben. */
@@ -202,22 +263,78 @@ export type ProductCommandResult = {
   imageCount: number;
 };
 
-/** Wie der Primary an die abgelegten Bytes kommt. Injizierbar, damit ein Test ohne Tauri läuft. */
-export type StagedMediaReader = (stagingId: string) => Promise<{ mime: string; dataBase64: string }>;
-
-async function invokeReadStaged(stagingId: string): Promise<{ mime: string; dataBase64: string }> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke('staging_media_read', { stagingId });
+/**
+ * Wem eine Ablage gehört. Die drei Angaben kommen aus der GEPRÜFTEN Identität des Auftrags — nie
+ * aus seiner Nutzlast. Rust leitet daraus denselben Eigentümerschlüssel ab wie beim Ablegen; eine
+ * Ablage eines anderen Mandanten, einer anderen Filiale oder eines anderen Benutzers ist von hier
+ * aus schlicht nicht vorhanden.
+ *
+ * Der Inhaltshash allein wäre eine Berechtigung, die man erraten oder aus einem Protokoll ablesen
+ * kann. Er benennt die Bytes; er öffnet sie nicht.
+ */
+export interface StagingOwner {
+  tenantId: string;
+  branchId: string;
+  userId: string;
 }
 
-async function invokeDiscardStaged(stagingId: string): Promise<void> {
+/** Wie der Primary an die abgelegten Bytes kommt. Injizierbar, damit ein Test ohne Tauri läuft. */
+export type StagedMediaReader = (stagingId: string, owner: StagingOwner) => Promise<{ mime: string; dataBase64: string }>;
+
+async function invokeReadStaged(stagingId: string, owner: StagingOwner): Promise<{ mime: string; dataBase64: string }> {
   const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('staging_media_discard', { stagingId });
+  return invoke('staging_media_read', { stagingId, ...owner });
+}
+
+async function invokeDiscardStaged(stagingId: string, owner: StagingOwner): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('staging_media_discard', { stagingId, ...owner });
 }
 
 export interface ProductEngineExtras {
   readStaged?: StagedMediaReader;
-  discardStaged?: (stagingId: string) => Promise<void>;
+  discardStaged?: (stagingId: string, owner: StagingOwner) => Promise<void>;
+  /** Nur für Tests: der Blick auf die bestehende Galerie. Voreingestellt ist der echte Resolver. */
+  readGallery?: (productId: string) => Promise<GalleryBaseline>;
+}
+
+/** Was der Primary über die heutige Galerie eines Artikels weiß. */
+export interface GalleryBaseline {
+  /** Der Zustand des Resolvers — er entscheidet, ob überhaupt geplant werden darf. */
+  status: 'media' | 'legacy' | 'none' | 'pending' | 'conflict' | 'integrity_error';
+  /** Die aktiven Medien in ihrer Reihenfolge (Platz 0 ist das Hauptbild). */
+  mediaIds: string[];
+}
+
+/**
+ * Die bestehende Galerie lesen — mit DEM Leser, den auch die Oberfläche des Primary benutzt. Sein
+ * Urteil („noch im Fluss", „widersprüchlich", „Altbestand") ist Teil des Vertrags: auf einer
+ * halb geladenen Galerie wird nicht geplant.
+ */
+async function resolveGallery(productId: string): Promise<GalleryBaseline> {
+  let branchId: string;
+  try { branchId = currentBranchId(); } catch { branchId = ''; }
+  const rows = branchId ? query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]) : [];
+  const tenantId = rows.length > 0 ? String(rows[0].tenant_id ?? '') : '';
+  if (!branchId || !tenantId) return { status: 'conflict', mediaIds: [] };
+  const resolver = new ProductMediaResolver({
+    dbProvider: () => getDatabase() as never,
+    gateway: new TauriMediaGateway(),
+    tenantId,
+    branchId,
+  });
+  const res = await resolver.resolveProductMedia(productId);
+  if (res.kind === 'media') {
+    return {
+      status: 'media',
+      mediaIds: [...res.items].sort((a, b) => a.sortOrder - b.sortOrder).map((i) => i.mediaId),
+    };
+  }
+  if (res.kind === 'legacy') return { status: 'legacy', mediaIds: [] };
+  if (res.kind === 'none') return { status: 'none', mediaIds: [] };
+  if (res.kind === 'pending') return { status: 'pending', mediaIds: [] };
+  if (res.kind === 'integrity_error') return { status: 'integrity_error', mediaIds: [] };
+  return { status: 'conflict', mediaIds: [] };
 }
 
 export function productEngineDeps(): EngineDeps {
@@ -240,6 +357,9 @@ export async function runProductCreate(
   const req = parseProductCreate(raw);
   const readStaged = extras.readStaged ?? invokeReadStaged;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
+  const owner: StagingOwner = {
+    tenantId: identity.tenantId, branchId: identity.branchId, userId: identity.userId,
+  };
 
   const outcome = await runRemoteCommand(deps, identity, async () => {
     // Die Bytes werden INNERHALB des Auftrags geholt, und das ist keine Kleinigkeit: eine
@@ -251,7 +371,7 @@ export async function runProductCreate(
     for (const id of req.stagingIds) {
       let blob: { mime: string; dataBase64: string };
       try {
-        blob = await readStaged(id);
+        blob = await readStaged(id, owner);
       } catch (e) {
         // Kein Urteil der Domäne: es wird nichts festgehalten, die Transaktion geht zurück. Der
         // Client kann dieselben Bytes erneut ablegen — sie bekommen dieselbe Kennung, weil die
@@ -293,28 +413,108 @@ export async function runProductCreate(
   // Aufräumen, ist das kein Fehler des Auftrags: der Kehrbesen beim nächsten Start holt es nach.
   if (outcome.kind === 'ok') {
     for (const id of req.stagingIds) {
-      try { await discard(id); } catch { /* der Start räumt auf */ }
+      try { await discard(id, owner); } catch { /* der Start räumt auf */ }
     }
   }
   return outcome;
 }
 
-export function runProductUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
-  const { id, fields: patch } = parseProductUpdate(raw);
-  return runRemoteCommand(deps, identity, async () => {
+/**
+ * Der Galerie-Weg: aus der gewünschten Liste wird GENAU die Eingabe gebaut, die das Formular des
+ * Primary baut — eine flache Liste von Quellen plus die Auflösung „welche Quelle ist welches
+ * bestehende Medium". Alles Weitere (Plan, Baseline-Prüfung, eine Transaktion für Text UND
+ * Galerie, Wiederaufnahme) macht der bestehende Weg.
+ */
+async function buildEditImages(
+  id: string,
+  gallery: GallerySlot[],
+  readGallery: (productId: string) => Promise<GalleryBaseline>,
+  readStaged: StagedMediaReader,
+  owner: StagingOwner,
+  used: string[],
+): Promise<{ srcs: string[]; resolved: Array<{ url: string; mediaId: string }>; status: GalleryBaseline['status'] }> {
+  const baseline = await readGallery(id);
+  if (baseline.status === 'pending' || baseline.status === 'conflict' || baseline.status === 'integrity_error') {
+    // KEIN Urteil über die Anfrage: die Galerie ist gerade nicht lesbar. Ein Einfrieren wäre eine
+    // Lüge über einen Zustand, der sich von selbst auflöst.
+    throw new CommandNotEvaluated('PRODUCT_GALLERY_NOT_READY', baseline.status);
+  }
+  const known = new Set(baseline.mediaIds);
+  const srcs: string[] = [];
+  for (const slot of gallery) {
+    if ('keep' in slot) {
+      if (!known.has(slot.keep)) {
+        // Der Plan nennt ein Bild, das dieser Artikel nicht (mehr) hat. Das ist ein Urteil über
+        // DIESE Anfrage: sie wird nie wieder gültig. Der Client muss neu lesen und einen neuen
+        // Vorsatz fassen — mit einer neuen Kennung.
+        throw new CommandRejected('PRODUCT_GALLERY_BASELINE_STALE', 'this plan does not match the gallery');
+      }
+      // Der Schlüssel ist eine undurchsichtige Zeichenkette; die Oberfläche des Primary benutzt
+      // dafür ihre Objekt-URLs. Wichtig ist nur, dass sie eindeutig auf die Medienkennung zeigt.
+      srcs.push(`media:${slot.keep}`);
+      continue;
+    }
+    let blob: { mime: string; dataBase64: string };
+    try {
+      blob = await readStaged(slot.stagingId, owner);
+    } catch (e) {
+      throw new ProductPayloadError(`staged image is gone: ${slot.stagingId} (${String(e)})`);
+    }
+    used.push(slot.stagingId);
+    srcs.push(`data:${blob.mime};base64,${blob.dataBase64}`);
+  }
+  // Die Auflösung ist die GANZE bestehende Galerie in ihrer Reihenfolge — nicht nur das, was der
+  // Client behalten will. Genau daraus rechnet das Haus aus, was entfernt wird: was in der Baseline
+  // steht und im Wunsch fehlt, geht. Käme diese Liste vom Client, könnte er ein Bild „vergessen"
+  // und damit still behaupten, es habe nie existiert.
+  const resolved = baseline.mediaIds.map((mediaId) => ({ url: `media:${mediaId}`, mediaId }));
+  return { srcs, resolved, status: baseline.status };
+}
+
+export async function runProductUpdate(
+  deps: EngineDeps,
+  identity: CommandIdentity,
+  raw: unknown,
+  extras: ProductEngineExtras = {},
+): Promise<CommandOutcome> {
+  const { id, fields: patch, gallery } = parseProductUpdate(raw);
+  const readStaged = extras.readStaged ?? invokeReadStaged;
+  const discard = extras.discardStaged ?? invokeDiscardStaged;
+  const readGallery = extras.readGallery ?? resolveGallery;
+  const owner: StagingOwner = {
+    tenantId: identity.tenantId, branchId: identity.branchId, userId: identity.userId,
+  };
+  const usedStaging: string[] = [];
+
+  const outcome = await runRemoteCommand(deps, identity, async () => {
     const store = useProductStore.getState();
     // Den Artikel muss es geben — sonst liefe ein Edit still ins Leere und meldete Erfolg.
     if (query('SELECT id FROM products WHERE id = ?', [id]).length === 0) {
       throw new CommandRejected('PRODUCT_NOT_FOUND', 'no such product');
     }
-    const result = await store.editProductTextDurably(
-      id,
-      patch as never,
-      // Dieselbe Preissperre wie beim Handy, in derselben Transaktion geprüft. Ein Fernauftrag ist
-      // kein Grund, sie zu überspringen — im Gegenteil.
-      { priceEligibilityRequired: true },
-      { alreadySerialised: true },
-    );
+
+    // ZWEI Wege, und der Unterschied ist wichtig genug für eine Verzweigung: ohne `gallery` läuft
+    // der text-only Weg, der `media_links` nicht einmal LIEST (MEDIA-EDIT-PRESERVE). Mit
+    // `gallery` läuft der Weg, der Text und Bilder in EINER Transaktion anwendet.
+    const result = gallery === undefined
+      ? await store.editProductTextDurably(
+        id,
+        patch as never,
+        // Dieselbe Preissperre wie beim Handy, in derselben Transaktion geprüft. Ein Fernauftrag ist
+        // kein Grund, sie zu überspringen — im Gegenteil.
+        { priceEligibilityRequired: true },
+        { alreadySerialised: true },
+      )
+      : await store.editProductWithMedia(
+        id,
+        patch as never,
+        await buildEditImages(id, gallery, readGallery, readStaged, owner, usedStaging) as never,
+        undefined,
+        { alreadySerialised: true },
+        // …und dieselbe Preissperre. Ein Bild mitzuschicken darf kein Weg sein, an ihr vorbeizukommen.
+        { priceEligibilityRequired: true },
+      );
+
     if (result.status === 'blocked') {
       // Ein Urteil der Domäne über DIESE Anfrage — die Preissperre ist der Hauptfall. Es wird
       // eingefroren: der Client soll nicht ewig dasselbe erneut schicken, sondern etwas anderes
@@ -334,16 +534,26 @@ export function runProductUpdate(deps: EngineDeps, identity: CommandIdentity, ra
       productId: id,
       sku: String(after?.sku ?? ''),
       name: String(after?.name ?? ''),
-      imageCount: 0,
+      imageCount: gallery === undefined ? 0 : gallery.length,
     };
     return value;
   });
+
+  // Wie beim Anlegen: erst wenn der Auftrag durch ist, verlieren die benutzten Ablagen ihren Zweck.
+  // Bei einer WIEDERHOLUNG lief der Handler gar nicht — dann ist `usedStaging` leer, und es wird
+  // nichts geräumt, was ein späterer Lauf noch bräuchte.
+  if (outcome.kind === 'ok') {
+    for (const sid of usedStaging) {
+      try { await discard(sid, owner); } catch { /* der Start räumt auf */ }
+    }
+  }
+  return outcome;
 }
 
 // ── Die Anmeldung ─────────────────────────────────────────────────────────
 
 async function execute(
-  run: (deps: EngineDeps, identity: CommandIdentity, raw: unknown) => Promise<CommandOutcome>,
+  run: (deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras?: ProductEngineExtras) => Promise<CommandOutcome>,
   op: string,
   payload: unknown,
   actor?: CommandActor,

@@ -143,7 +143,7 @@ function deps(db: Db) {
 function image(seed: string): string {
   const bytes = new Uint8Array(32);
   for (let i = 0; i < 32; i++) bytes[i] = (seed.charCodeAt(i % seed.length) + i * 7) & 0xff;
-  return stageForTest(bytes);
+  return stageForTest(bytes, { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test' });
 }
 
 const WISH = { categoryId: 'cat-watch', brand: 'Rolex', name: 'Datejust', purchasePrice: 100, plannedSalePrice: 150 };
@@ -396,9 +396,14 @@ const links = (db: Db, pid: string): number =>
 // ── 8) Keine zweite Produktlogik, kein zweiter Medienweg ──────────────────
 {
   const cmd = src('src/core/bridge/product-commands.ts');
+  // Kommentare erklaeren auch, was NICHT passiert (`media_links` zum Beispiel) — geprueft wird
+  // deshalb der Code ohne sie.
+  const cmdCode = cmd.split(/\r?\n/)
+    .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); })
+    .join('\n');
   ok(/createProductWithMedia\(/.test(cmd) && /editProductTextDurably\(/.test(cmd),
     'REUSE der Befehl ruft die ECHTEN Store-Funktionen…');
-  ok(!/INSERT INTO products|UPDATE products SET|media_links/i.test(cmd),
+  ok(!/INSERT INTO products|UPDATE products SET|media_links/i.test(cmdCode),
     'REUSE …und schreibt keine einzige Produkt- oder Medienzeile selbst');
   ok(/runRemoteCommand\(/.test(cmd), 'REUSE er laeuft durch die C3A-Maschine');
   ok(/allocateSkuOnCreate\(undefined/.test(cmd),
@@ -407,9 +412,6 @@ const links = (db: Db, pid: string): number =>
     'REUSE und er reiht sich nicht ein zweites Mal ein — der Fernauftrag haelt den Platz schon');
 
   // Der mobile Produkt-Eingang wird NICHT missbraucht.
-  const cmdCode = cmd.split(/\r?\n/)
-    .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); })
-    .join('\n');
   ok(!/mobile\/upload|mobile_upload|prepared_media|mobileUpload/.test(cmdCode),
     'INGRESS der Produktbefehl fasst den mobilen Produkt-Eingang nicht an (der Kopf ERKLAERT nur, warum nicht)');
   ok(/mobile\/upload/.test(cmd) && /PRODUKT-EINGANG/.test(cmd),

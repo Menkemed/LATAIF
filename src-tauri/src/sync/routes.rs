@@ -156,7 +156,11 @@ async fn staging_media_put(
             .map_err(|_| StatusCode::BAD_REQUEST)?
     };
     let root = state.data_root.command_staging_root();
-    match super::media_staging::stage_image(&root, &req.mime, &bytes) {
+    // Der Eigentuemer kommt AUSSCHLIESSLICH aus dem geprueften Token. Der Rumpf hat kein Feld
+    // dafuer — und selbst wenn jemand eines mitschickte, wird es nie gelesen: `StagingMediaRequest`
+    // kennt genau zwei Felder, und serde verwirft den Rest.
+    let owner = super::media_staging::owner_key(&claims.tenant_id, &claims.branch_id, &claims.sub);
+    match super::media_staging::stage_image(&root, &owner, &req.mime, &bytes) {
         Ok(blob) => Ok((
             StatusCode::CREATED,
             Json(serde_json::json!({

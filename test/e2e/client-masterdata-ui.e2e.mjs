@@ -16,6 +16,8 @@
 //      einen Artikel mit einer Galerie, ueber seinen eigenen Medienweg.
 //   2. Die Artikelnummer entsteht auf dem Primary. Der Client hat kein Feld dafuer.
 //   3. Eine verschluckte Antwort erzeugt keinen zweiten Kunden.
+//   4. Und PC2 kann die GALERIE eines bestehenden Artikels aendern: ein Bild dazu, in einer
+//      Transaktion mit dem Text — und eine verschluckte Antwort haengt es kein zweites Mal an.
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eBinary, assertE2eClientBinary, assertE2eScope, e2ePreflight } from './_e2e-preflight.mjs';
@@ -145,6 +147,15 @@ const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const text = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return e ? e.textContent.trim() : null;`);
 const click = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; e.click(); return 'OK';`);
 const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO'; b.click(); return 'OK';`);
+async function waitForCount(c, sel, n, t = 45000) {
+  const end = Date.now() + t;
+  while (Date.now() < end) {
+    const have = await c.ev(`return document.querySelectorAll(${S(sel)}).length;`);
+    if (Number(have) >= n) return true;
+    await sleep(300);
+  }
+  throw new Error(`waitForCount ${sel} < ${n}`);
+}
 async function waitFor(c, sel, t = 45000) {
   const end = Date.now() + t;
   while (Date.now() < end) { if (await exists(c, sel)) return true; await sleep(300); }
@@ -396,9 +407,14 @@ try {
   ok(/64.?48/.test(String(stagedLabel).replace(/\s/g, '')) || /photo-40/.test(String(stagedLabel)),
     `MEDIA the primary accepted it and answered with its own facts (${stagedLabel})`);
   ok(seen.some((s) => s.op === 'staging'), 'MEDIA the bytes went to the neutral shelf, not to a command');
-  const stagedFiles = existsSync(STAGING_DIR) ? readdirSync(STAGING_DIR) : [];
+  // Die Ablage liegt im Fach ihres EIGENTUEMERS (aus den geprueften Claims abgeleitet), und dort
+  // unter ihrem Inhaltshash. Kein Pfad kommt vom Client.
+  const owners = existsSync(STAGING_DIR) ? readdirSync(STAGING_DIR) : [];
+  ok(owners.length === 1 && /^[0-9a-f]{64}$/.test(owners[0]),
+    `MEDIA it lies in the owner's own shelf (${owners.join(', ') || 'empty'})`);
+  const stagedFiles = owners.length ? readdirSync(join(STAGING_DIR, owners[0])) : [];
   ok(stagedFiles.length === 1 && /^[0-9a-f]{64}\.bin$/.test(stagedFiles[0]),
-    `MEDIA and it lies there under its own content hash (${stagedFiles.join(', ') || 'empty'})`);
+    `MEDIA …under its own content hash (${stagedFiles.join(', ') || 'empty'})`);
 
   const productsBefore = count('SELECT COUNT(*) c FROM products');
   await click(client, '[data-client-product-save]');
@@ -415,7 +431,9 @@ try {
   ok(String(prod?.images) === '[]', 'MEDIA the product row carries no image bytes');
   ok(count('SELECT COUNT(*) c FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [prod?.id]) === 1,
     'MEDIA the photo hangs in the gallery, through the primary’s own media path');
-  const afterStaging = existsSync(STAGING_DIR) ? readdirSync(STAGING_DIR).filter((f) => f.endsWith('.bin')) : [];
+  const afterStaging = owners.length && existsSync(join(STAGING_DIR, owners[0]))
+    ? readdirSync(join(STAGING_DIR, owners[0])).filter((f) => f.endsWith('.bin'))
+    : [];
   ok(afterStaging.length === 0, `MEDIA and the shelf was cleared afterwards (${afterStaging.join(', ') || 'empty'})`);
   ok(count('SELECT COUNT(*) c FROM remote_command_ledger') >= 2, 'PRODUCT the durable record exists');
 
@@ -437,6 +455,80 @@ try {
   ok(count('SELECT COUNT(*) c FROM products') === productsBefore + 1, 'EDIT and there is still one item');
   ok(count('SELECT COUNT(*) c FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [prod?.id]) === 1,
     'EDIT the gallery is untouched — the client never edits photos');
+
+  // ── Die Galerie desselben Artikels aendern ──────────────────────────────
+  //
+  // Der Artikel hat EIN Bild. Der Client haengt ein zweites an — als Liste: „behalte das erste,
+  // dann dieses neue". Genau so arbeitet auch das Formular am Primary.
+  await click(client, '[data-client-area="products"]');
+  await waitFor(client, '[data-client-list]', 30000);
+  await click(client, `[data-client-row="${prod.id}"]`);
+  await waitFor(client, '[data-client-edit-product]', 30000);
+  await click(client, '[data-client-edit-product]');
+  await waitFor(client, '[data-client-product-form]', 30000);
+  await waitFor(client, '[data-client-product-staged] li', 30000);
+
+  const shownSlots = await client.ev("return document.querySelectorAll('[data-client-product-slot]').length;");
+  ok(Number(shownSlots) === 1, `GALLERY der Client sieht das bestehende Bild (${shownSlots})`);
+  const keptId = await client.ev("return document.querySelector('[data-client-product-slot]')?.getAttribute('data-client-product-slot');");
+  ok(typeof keptId === 'string' && keptId.length > 0, `GALLERY …mit seiner Medienkennung (${keptId})`);
+
+  const second = await attachPhoto(client, 90);
+  ok(Number(second) > 100, `GALLERY und legt ein zweites Foto ab (${second} bytes)`);
+  await waitForCount(client, '[data-client-product-slot]', 2, 45000);
+
+  const galleryBefore = count('SELECT COUNT(*) c FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [prod.id]);
+  await click(client, '[data-client-product-save]');
+  await waitFor(client, '[data-client-product-done]', 90000);
+  await sleep(1500);
+
+  ok(count('SELECT COUNT(*) c FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [prod.id]) === galleryBefore + 1,
+    'GALLERY der Primary zeigt zwei aktive Bilder');
+  const links = dbQ(BIZ_DB,
+    'SELECT media_id, sort_order, is_primary FROM media_links WHERE entity_id = ? AND deleted_at IS NULL ORDER BY sort_order',
+    [prod.id]);
+  ok(String(links[0]?.media_id) === String(keptId),
+    'GALLERY das bestehende Bild ist DASSELBE geblieben — keine neue Kennung');
+  ok(Number(links[0]?.is_primary) === 1, 'GALLERY …und weiterhin das Hauptbild');
+  ok(count('SELECT COUNT(*) c FROM products') === productsBefore + 1, 'GALLERY es entstand kein zweiter Artikel');
+
+  // ── Verlorene Antwort beim Galerie-Save ─────────────────────────────────
+  await click(client, '[data-client-product-again]');
+  await waitFor(client, '[data-client-list]', 30000);
+  await click(client, `[data-client-row="${prod.id}"]`);
+  await waitFor(client, '[data-client-edit-product]', 30000);
+  await click(client, '[data-client-edit-product]');
+  await waitFor(client, '[data-client-product-form]', 30000);
+  await waitForCount(client, '[data-client-product-slot]', 2, 30000);
+
+  const third = await attachPhoto(client, 140);
+  ok(Number(third) > 100, 'GALLERY-UNKNOWN ein drittes Foto liegt bereit');
+  await waitForCount(client, '[data-client-product-slot]', 3, 45000);
+  const sentBeforeGallery = seen.filter((s) => s.op === 'products.update').length;
+  swallowOp = 'products.update';
+  await click(client, '[data-client-product-save]');
+  await waitFor(client, '[data-client-product-pending]', 90000);
+  ok(swallowed === 2, 'GALLERY-UNKNOWN die Antwort wurde verschluckt, nachdem der Primary fertig war');
+  await sleep(1500);
+  const afterSwallow = count('SELECT COUNT(*) c FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [prod.id]);
+  ok(afterSwallow === 3, `GALLERY-UNKNOWN der Primary HAT das dritte Bild (${afterSwallow})`);
+
+  await click(client, '[data-client-product-save]');
+  await waitFor(client, '[data-client-product-done]', 90000);
+  const galleryUpdates = seen.filter((s) => s.op === 'products.update');
+  ok(galleryUpdates.length === sentBeforeGallery + 2,
+    `GALLERY-UNKNOWN zwei Anfragen (${galleryUpdates.length - sentBeforeGallery})`);
+  ok(galleryUpdates[sentBeforeGallery].commandId === galleryUpdates[sentBeforeGallery + 1].commandId,
+    'GALLERY-UNKNOWN …mit DERSELBEN Kennung');
+  await sleep(1500);
+  ok(count('SELECT COUNT(*) c FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [prod.id]) === 3,
+    'GALLERY-UNKNOWN immer noch genau drei Bilder — nichts wurde ein zweites Mal angehaengt');
+  ok(count('SELECT COUNT(*) c FROM media_links WHERE entity_id = ? AND deleted_at IS NOT NULL', [prod.id]) === 0,
+    'GALLERY-UNKNOWN und nichts wurde ein zweites Mal entfernt');
+
+  // Die Ablage der verbrauchten Bilder ist geraeumt; die Galerie haengt nicht mehr daran.
+  const stagingLeft = existsSync(STAGING_DIR) ? readdirSync(STAGING_DIR).length : 0;
+  ok(stagingLeft <= 1, `LIFECYCLE die Zwischenablage traegt hoechstens noch leere Faecher (${stagingLeft})`);
 
   // ── Der Client hat immer noch nichts angelegt ───────────────────────────
   const after = existsSync(CLIENT_DATA_DIR) ? readdirSync(CLIENT_DATA_DIR) : [];
@@ -460,3 +552,4 @@ if (FAIL) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_C3C_CLIENT_UI_CUSTOMER_PROVED');
 console.log('CENTRAL_C3C_CLIENT_UI_PRODUCT_WITH_PHOTO_PROVED');
 console.log('CENTRAL_C3C_CLIENT_UI_SKU_IS_PRIMARY_PROVED');
+console.log('CENTRAL_C3C_CLIENT_UI_GALLERY_EDIT_PROVED');

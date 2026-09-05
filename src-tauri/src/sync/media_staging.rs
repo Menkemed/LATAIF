@@ -18,6 +18,14 @@
 //!  • **Sie nimmt keinen Pfad entgegen.** Der Name einer Ablage ist der SHA-256 ihres Inhalts, vom
 //!    Server berechnet. Es gibt kein Feld, in dem ein Client ein Ziel nennen könnte, und deshalb
 //!    auch nichts, was man mit `..` verlassen könnte.
+//!  • **Der Inhaltshash ist eine BENENNUNG, keine Berechtigung.** Er dient dem Wiedererkennen
+//!    derselben Bytes (kein zweites Hochladen) und der Unversehrtheit (beim Abholen wird
+//!    nachgerechnet) — aber er öffnet nichts. Jede Ablage liegt unter dem Schlüssel ihres
+//!    EIGENTÜMERS, und der wird ausschließlich aus den geprüften Anmeldedaten abgeleitet
+//!    (`owner_key`). Wer einen fremden Hash kennt, hat damit nichts: unter seinem eigenen
+//!    Eigentümerschlüssel gibt es die Ablage nicht. Ohne diese Bindung wäre der Hash ein
+//!    Passwort, das man erraten oder aus einem Protokoll ablesen kann — und ein zweiter Mandant
+//!    könnte fremde Bytes in sein eigenes Produkt hängen.
 //!  • **Sie entscheidet nichts.** Kein Produkt, keine SKU, keine Kategorie. Wer die Bytes später
 //!    verwendet, ist der Primary-Renderer über den ganz normalen Auftragsweg.
 //!  • **Sie vergisst.** Was niemand abholt, verschwindet nach einer Frist. Eine Ablage, die ewig
@@ -38,6 +46,7 @@ pub const STAGED_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub const MAX_STAGED_FILES: usize = 512;
 
 pub const ERR_TOO_MANY: &str = "STAGING_FULL";
+pub const ERR_BAD_OWNER: &str = "STAGING_BAD_OWNER";
 pub const ERR_BAD_ID: &str = "STAGING_BAD_ID";
 pub const ERR_NOT_FOUND: &str = "STAGING_NOT_FOUND";
 pub const ERR_IO: &str = "STAGING_IO";
@@ -60,21 +69,45 @@ pub fn is_staging_id(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-fn path_for(root: &Path, id: &str) -> PathBuf {
-    root.join(format!("{id}.bin"))
+/// Der Eigentümerschlüssel: SHA-256 über die drei Angaben aus dem GEPRÜFTEN Token. Nichts davon
+/// kommt aus dem Rumpf einer Anfrage, und das Ergebnis ist eine feste Folge aus 64 Hex-Zeichen —
+/// als Verzeichnisname ebenso undarstellbar-gefährlich wie die Inhaltskennung.
+///
+/// Bewusst auf (Mandant, Filiale, Benutzer) gebunden und nicht nur auf den Mandanten: eine Ablage
+/// gehört dem Menschen, der sie gerade hochgeladen hat, und sie wird Sekunden später von genau
+/// seinem Auftrag verbraucht. Eine weitere Reichweite wäre Bequemlichkeit ohne Not.
+pub fn owner_key(tenant_id: &str, branch_id: &str, user_id: &str) -> String {
+    super::canonical::sha256_hex(
+        format!("staging-owner\u{1}{tenant_id}\u{1}{branch_id}\u{1}{user_id}").as_bytes(),
+    )
+}
+
+/// Ein Eigentümerschlüssel ist immer selbst berechnet — geprüft wird trotzdem, damit ein späterer
+/// Aufrufer ihn nicht versehentlich aus einer fremden Quelle durchreicht.
+fn owner_dir(root: &Path, owner: &str) -> Result<PathBuf, &'static str> {
+    if !is_staging_id(owner) {
+        return Err(ERR_BAD_OWNER);
+    }
+    Ok(root.join(owner))
+}
+
+fn path_for(root: &Path, owner: &str, id: &str) -> Result<PathBuf, &'static str> {
+    Ok(owner_dir(root, owner)?.join(format!("{id}.bin")))
 }
 
 /// Legt Bytes ab und gibt ihre Kennung zurück. `declared_mime` wird gegen die Magic Bytes geprüft —
 /// dieselbe Prüfung wie beim mobilen Upload.
 pub fn stage_image(
     root: &Path,
+    owner: &str,
     declared_mime: &str,
     bytes: &[u8],
 ) -> Result<StagedBlob, &'static str> {
     let accepted = super::mobile_upload::accept_image_bytes(declared_mime, bytes)?;
-    std::fs::create_dir_all(root).map_err(|_| ERR_IO)?;
+    let dir = owner_dir(root, owner)?;
+    std::fs::create_dir_all(&dir).map_err(|_| ERR_IO)?;
 
-    let target = path_for(root, &accepted.content_hash);
+    let target = path_for(root, owner, &accepted.content_hash)?;
     // Dieselben Bytes ein zweites Mal: dieselbe Ablage. Kein zweites Schreiben, kein Zählen gegen
     // die Obergrenze — es entsteht nichts Neues.
     if target.exists() {
@@ -86,13 +119,14 @@ pub fn stage_image(
             height: accepted.height,
         });
     }
-    if count_staged(root) >= MAX_STAGED_FILES {
+    // Die Obergrenze zählt JE EIGENTÜMER: ein Client soll den nächsten nicht aussperren können.
+    if count_staged(&dir) >= MAX_STAGED_FILES {
         return Err(ERR_TOO_MANY);
     }
 
     // Erst vollständig schreiben, dann umbenennen: eine halbe Datei unter einer Kennung, die ihren
     // Inhalt behauptet, wäre eine Lüge, die später niemand mehr erkennt.
-    let tmp = root.join(format!("{}.tmp-{}", accepted.content_hash, uuid::Uuid::new_v4().as_simple()));
+    let tmp = dir.join(format!("{}.tmp-{}", accepted.content_hash, uuid::Uuid::new_v4().as_simple()));
     std::fs::write(&tmp, bytes).map_err(|_| ERR_IO)?;
     if std::fs::rename(&tmp, &target).is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -109,22 +143,24 @@ pub fn stage_image(
 
 /// Holt die Bytes zurück. Es wird NACHGERECHNET, dass sie ihre Kennung noch verdienen: eine
 /// veränderte Datei ist keine Ablage mehr, sondern ein Fund.
-pub fn read_staged(root: &Path, id: &str) -> Result<Vec<u8>, &'static str> {
+pub fn read_staged(root: &Path, owner: &str, id: &str) -> Result<Vec<u8>, &'static str> {
     if !is_staging_id(id) {
         return Err(ERR_BAD_ID);
     }
-    let bytes = std::fs::read(path_for(root, id)).map_err(|_| ERR_NOT_FOUND)?;
+    // Eine Ablage eines ANDEREN Eigentümers ist von hier aus nicht vorhanden — nicht „verboten",
+    // sondern schlicht nicht da. Es gibt keinen Pfad, der aus dem eigenen Verzeichnis herausführt.
+    let bytes = std::fs::read(path_for(root, owner, id)?).map_err(|_| ERR_NOT_FOUND)?;
     if super::canonical::sha256_hex(&bytes) != id {
         return Err(ERR_NOT_FOUND);
     }
     Ok(bytes)
 }
 
-pub fn discard_staged(root: &Path, id: &str) -> Result<(), &'static str> {
+pub fn discard_staged(root: &Path, owner: &str, id: &str) -> Result<(), &'static str> {
     if !is_staging_id(id) {
         return Err(ERR_BAD_ID);
     }
-    match std::fs::remove_file(path_for(root, id)) {
+    match std::fs::remove_file(path_for(root, owner, id)?) {
         Ok(()) => Ok(()),
         // Schon weg ist auch weg — ein Abräumen darf nicht daran scheitern, dass es zweimal läuft.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -147,7 +183,19 @@ fn count_staged(root: &Path) -> usize {
 /// erklären kann.
 pub fn sweep_expired(root: &Path, now: SystemTime, ttl: Duration) -> usize {
     let mut removed = 0;
-    let Ok(entries) = std::fs::read_dir(root) else { return 0 };
+    let Ok(owners) = std::fs::read_dir(root) else { return 0 };
+    for owner in owners.flatten() {
+        removed += sweep_dir(&owner.path(), now, ttl);
+    }
+    removed
+}
+
+/// Was der Kehrbesen NICHT anfasst: alles ausserhalb dieses Verzeichnisses. Ein Produkt, das schon
+/// gebucht ist, haengt an veroeffentlichten Medien im Medienspeicher — die Ablage ist dann nur noch
+/// ein Rest. Deshalb kann diese Frist niemals ein gebuchtes Produkt entkleiden.
+fn sweep_dir(dir: &Path, now: SystemTime, ttl: Duration) -> usize {
+    let mut removed = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };

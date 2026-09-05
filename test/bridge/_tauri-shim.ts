@@ -26,9 +26,20 @@ const desc = (hash: string, size: number, w: number, h: number) => ({
 
 interface Rend { main: string; thumb: string; mainB: Uint8Array; thumbB: Uint8Array }
 
+/**
+ * Der Eigentümerschlüssel — Zeichen für Zeichen dieselbe Ableitung wie in Rust
+ * (`media_staging::owner_key`). Zwei Formeln wären zwei Meinungen darüber, wem eine Ablage
+ * gehört, und der Test würde etwas beweisen, das die Produktion nicht tut.
+ */
+export function ownerKey(o: { tenantId: string; branchId: string; userId: string }): string {
+  return createHash('sha256')
+    .update(`staging-owner\u0001${o.tenantId}\u0001${o.branchId}\u0001${o.userId}`)
+    .digest('hex');
+}
+
 /** Der gestellte Rust-Zustand. Ein Test darf ihn anfassen, um einen Ausfall zu erzwingen. */
 export const tauriState = {
-  /** Die Zwischenablage: Kennung → Bytes. */
+  /** Die Zwischenablage: `<Eigentümer>/<Kennung>` → Bytes. Genau wie auf der Platte. */
   staged: new Map<string, Uint8Array>(),
   /** Welche Kennungen verworfen wurden — der Beweis, dass aufgeraeumt wird. */
   discarded: [] as string[],
@@ -49,10 +60,16 @@ export const tauriState = {
   },
 };
 
-/** Legt Bytes ab, wie es die echte Route taete: die Kennung IST ihr Inhalt. */
-export function stageForTest(bytes: Uint8Array): string {
+/**
+ * Legt Bytes ab, wie es die echte Route taete: die Kennung IST ihr Inhalt, und das Fach gehoert
+ * dem angemeldeten Absender.
+ */
+export function stageForTest(
+  bytes: Uint8Array,
+  owner: { tenantId: string; branchId: string; userId: string },
+): string {
   const id = sha(bytes);
-  tauriState.staged.set(id, bytes);
+  tauriState.staged.set(`${ownerKey(owner)}/${id}`, bytes);
   return id;
 }
 
@@ -84,14 +101,22 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
     case 'staging_media_read': {
       if (tauriState.readShouldThrow) throw new Error('STAGING_IO');
       const id = String(a.stagingId ?? '');
-      const bytes = tauriState.staged.get(id);
+      // Der Eigentuemer kommt als Teil des Aufrufs — in der Produktion aus der geprueften
+      // Identitaet des Auftrags. Ein fremdes Fach ist von hier aus nicht vorhanden.
+      const key = `${ownerKey({
+        tenantId: String(a.tenantId ?? ''), branchId: String(a.branchId ?? ''), userId: String(a.userId ?? ''),
+      })}/${id}`;
+      const bytes = tauriState.staged.get(key);
       // Genau wie in Rust: was seine Kennung nicht mehr traegt, gibt es nicht.
       if (!bytes || sha(bytes) !== id) throw new Error('STAGING_NOT_FOUND');
       return { mime: 'image/jpeg', bytes: bytes.length, dataBase64: Buffer.from(bytes).toString('base64') } as T;
     }
     case 'staging_media_discard': {
       const id = String(a.stagingId ?? '');
-      tauriState.staged.delete(id);
+      const key = `${ownerKey({
+        tenantId: String(a.tenantId ?? ''), branchId: String(a.branchId ?? ''), userId: String(a.userId ?? ''),
+      })}/${id}`;
+      tauriState.staged.delete(key);
       tauriState.discarded.push(id);
       return undefined as T;
     }

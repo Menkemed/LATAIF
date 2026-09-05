@@ -108,6 +108,9 @@ pub mod operation_protocol;
 pub mod mobile_upload;
 /// CENTRAL-C3C — die neutrale Zwischenablage fuer Bilder eines zweiten Rechners.
 pub mod media_staging;
+/// CENTRAL-C3C FINAL — die Ablage-Route ueber den ECHTEN Routenbaum: Anmeldung und Eigentum.
+#[cfg(test)]
+mod staging_route_tests;
 /// MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014): an explicit, owner-configured
 /// (tenant, branch) → install binding + the RuntimeScopeEvidence the JS gate checks against the
 /// active auth/DB scope. The read command is registered; the owner-gated configure command is NOT

@@ -2396,9 +2396,17 @@ fn mobile_upload_prepare_image(
 fn staging_media_read(
     state: tauri::State<'_, AppHandleState>,
     staging_id: String,
+    tenant_id: String,
+    branch_id: String,
+    user_id: String,
 ) -> Result<serde_json::Value, String> {
     let root = state.data_root.command_staging_root();
-    let bytes = sync::media_staging::read_staged(&root, &staging_id).map_err(|e| e.to_string())?;
+    // Die drei Angaben stammen aus der GEPRUEFTEN Identitaet des Auftrags (der Umschlag, den Rust
+    // selbst aus dem Token gebaut hat) — nicht aus der Nutzlast des Clients. Aus ihnen wird
+    // derselbe Eigentuemerschluessel abgeleitet wie beim Ablegen; eine fremde Ablage ist damit
+    // schlicht nicht vorhanden.
+    let owner = sync::media_staging::owner_key(&tenant_id, &branch_id, &user_id);
+    let bytes = sync::media_staging::read_staged(&root, &owner, &staging_id).map_err(|e| e.to_string())?;
     // Was ein Bild ist, entscheidet dieselbe Stelle wie ueberall — auch beim Herausgeben, denn
     // zwischen Ablegen und Abholen liegt eine Datei auf einer Platte.
     let accepted = sync::mobile_upload::accept_image_bytes_sniffed(&bytes)
@@ -2417,9 +2425,13 @@ fn staging_media_read(
 fn staging_media_discard(
     state: tauri::State<'_, AppHandleState>,
     staging_id: String,
+    tenant_id: String,
+    branch_id: String,
+    user_id: String,
 ) -> Result<(), String> {
     let root = state.data_root.command_staging_root();
-    sync::media_staging::discard_staged(&root, &staging_id).map_err(|e| e.to_string())
+    let owner = sync::media_staging::owner_key(&tenant_id, &branch_id, &user_id);
+    sync::media_staging::discard_staged(&root, &owner, &staging_id).map_err(|e| e.to_string())
 }
 
 #[allow(dead_code)]
