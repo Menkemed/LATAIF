@@ -60,6 +60,10 @@ pub const BUSINESS_DB_FILENAME: &str = "lataif.db";
 pub const SYNC_SERVER_DB_FILENAME: &str = "lataif_sync_server.db";
 pub const MEDIA_DIRNAME: &str = "media";
 pub const MOBILE_STAGING_DIRNAME: &str = "mobile-upload-staging";
+/// CENTRAL-C3C — die neutrale Zwischenablage der Fernauftraege. BEWUSST nicht dasselbe
+/// Verzeichnis wie `mobile-upload-staging`: dort liegen Bilder, die zu einer Inbox-Zeile und damit
+/// zu einem entstehenden Produkt gehoeren. Hier liegen Bytes, die noch gar nichts sind.
+pub const COMMAND_STAGING_DIRNAME: &str = "command-staging";
 pub const OPENAI_KEY_FILENAME: &str = "openai.key";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +210,9 @@ impl DataRoot {
     }
     pub fn mobile_staging_root(&self) -> PathBuf {
         self.root.join(MOBILE_STAGING_DIRNAME)
+    }
+    pub fn command_staging_root(&self) -> PathBuf {
+        self.root.join(COMMAND_STAGING_DIRNAME)
     }
     pub fn openai_key(&self) -> PathBuf {
         self.root.join(OPENAI_KEY_FILENAME)

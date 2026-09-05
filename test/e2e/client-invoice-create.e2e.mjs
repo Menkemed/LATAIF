@@ -81,8 +81,8 @@ async function waitPortFree(port) {
     await sleep(300);
   }
 }
-async function startApp() {
-  spawn(APP, [], { env: appEnv(), stdio: 'ignore', detached: true }).unref();
+async function startApp(exe = APP, env = appEnv()) {
+  spawn(exe, [], { env, stdio: 'ignore', detached: true }).unref();
   const end = Date.now() + 90000; let page = null;
   while (Date.now() < end) {
     try { const l = await (await fetch(`http://127.0.0.1:${APP_CDP}/json/list`)).json(); page = l.find((t) => t.type === 'page' && /tauri\.localhost/.test(t.url) && t.webSocketDebuggerUrl); if (page) break; } catch {}

@@ -252,21 +252,39 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         assert_eq!(err.http_status(), 400, "das ist ein Fehler des Aufrufers");
     }
     assert_eq!(sink.count(), 0, "und nichts davon wurde zugestellt");
-    // C2 hat sechs LESEVORGAENGE dazugelegt, C3B genau EINE veraendernde Operation. Was zaehlt,
-    // ist nicht die Anzahl, sondern dass jeder Name darauf einzeln durchdacht ist — und dass die
-    // Probe weiter dabei ist.
+    // C2 hat sechs LESEVORGAENGE dazugelegt, C3B eine veraendernde Operation, C3C zwei weitere.
+    // Was zaehlt, ist nicht die Anzahl, sondern dass jeder Name darauf einzeln durchdacht ist —
+    // und dass die Probe weiter dabei ist.
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
-    assert_eq!(REMOTE_OPS.len(), 8, "Probe, sechs Lesevorgaenge, eine Rechnung");
-    assert!(
-        REMOTE_OPS.contains(&OP_INVOICES_CREATE),
-        "und die eine veraendernde Operation, die C3B freigegeben hat"
+    assert_eq!(
+        REMOTE_OPS.len(),
+        12,
+        "Probe, sechs Lesevorgaenge, eine Rechnung, zwei Kunden-, zwei Produktoperationen"
     );
-    for op in REMOTE_OPS {
-        assert!(
-            op.ends_with(".list") || op.ends_with(".get") || *op == OP_PROBE || *op == OP_INVOICES_CREATE,
-            "nur Auskunft und die eine freigegebene Buchung stehen auf der Liste: {op}"
-        );
+    for op in [
+        OP_INVOICES_CREATE,
+        OP_CUSTOMERS_CREATE,
+        OP_CUSTOMERS_UPDATE,
+        OP_PRODUCTS_CREATE,
+        OP_PRODUCTS_UPDATE,
+    ] {
+        assert!(REMOTE_OPS.contains(&op), "die freigegebene Buchung {op} fehlt");
     }
+    let mutations: Vec<&&str> = REMOTE_OPS
+        .iter()
+        .filter(|op| !op.ends_with(".list") && !op.ends_with(".get") && ***op != *OP_PROBE)
+        .collect();
+    assert_eq!(
+        mutations,
+        vec![
+            &OP_INVOICES_CREATE,
+            &OP_CUSTOMERS_CREATE,
+            &OP_CUSTOMERS_UPDATE,
+            &OP_PRODUCTS_CREATE,
+            &OP_PRODUCTS_UPDATE,
+        ],
+        "und NUR diese fuenf veraendern etwas — kein Loeschen von aussen"
+    );
 }
 
 // ── 7) Zustellung scheitert ────────────────────────────────────────────────
@@ -558,8 +576,10 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     // kuenftige Mutation registrierbar gemacht.
     let registry = include_str!("../../src/core/bridge/command-registry.ts");
     assert!(
-        registry.contains("export const ALLOWED_MUTATIONS: readonly string[] = ['invoices.create'];"),
-        "genau ein veraendernder Name ist freigegeben"
+        registry.contains(
+            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n];"
+        ),
+        "genau diese fuenf veraendernden Namen sind freigegeben"
     );
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),

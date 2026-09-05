@@ -106,6 +106,8 @@ pub mod operation_protocol;
 /// MOBILE-04B2A1 — durable server-side mobile upload inbox + staging core. INACTIVE: no route
 /// registers it, `/mobile` does not call it, and it never hands off to createProductWithMedia.
 pub mod mobile_upload;
+/// CENTRAL-C3C — die neutrale Zwischenablage fuer Bilder eines zweiten Rechners.
+pub mod media_staging;
 /// MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014): an explicit, owner-configured
 /// (tenant, branch) → install binding + the RuntimeScopeEvidence the JS gate checks against the
 /// active auth/DB scope. The read command is registered; the owner-gated configure command is NOT

@@ -174,22 +174,53 @@ fn norm_declared(m: &str) -> &str {
     if m.eq_ignore_ascii_case("image/jpg") { "image/jpeg" } else { m }
 }
 
-fn validate_image(slot: usize, raw: &RawUploadImage) -> Result<ValidatedImage, UploadError> {
-    if raw.bytes.is_empty() { return Err(reject(ERR_TRUNCATED)); }
-    if raw.bytes.len() > MAX_UPLOAD_IMAGE_BYTES { return Err(reject(ERR_IMAGE_TOO_LARGE)); }
-    let (mime, ext) = sniff_format(&raw.bytes).ok_or_else(|| reject(ERR_UNSUPPORTED_MIME))?; // GIF/SVG/other → None
-    if !norm_declared(&raw.declared_mime).eq_ignore_ascii_case(mime) { return Err(reject(ERR_MIME_MISMATCH)); }
-    let insp = inspect_image_bytes(&raw.bytes);
-    if insp.kind != ContentKind::RasterImage { return Err(reject(ERR_UNSUPPORTED_MIME)); }
-    if insp.width == 0 || insp.height == 0 { return Err(reject(ERR_DIMENSIONS_UNKNOWN)); }
-    if insp.width > MAX_UPLOAD_IMAGE_DIM || insp.height > MAX_UPLOAD_IMAGE_DIM { return Err(reject(ERR_TOO_LARGE_DIMENSIONS)); }
-    if insp.width as u64 * insp.height as u64 > MAX_UPLOAD_IMAGE_PIXELS { return Err(reject(ERR_TOO_MANY_PIXELS)); }
+/// CENTRAL-C3C — was überhaupt als Bild ins Haus darf. Absichtlich EINE Antwort für JEDE
+/// Eingangsstelle: der mobile Upload und die neutrale Staging-Route (`media_staging`) teilen sie
+/// sich. Zwei Definitionen wären zwei Meinungen darüber, was ein Bild ist — und die schwächere
+/// gewinnt dann immer, weil ein Angreifer sich seine Eingangsstelle aussuchen darf.
+pub struct AcceptedImage {
+    pub mime: &'static str,
+    pub ext: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub content_hash: String,
+}
+
+/// Prüft Bytes gegen genau die Grenzen des mobilen Uploads und gibt die abgeleiteten Fakten
+/// zurück. Der Fehlercode ist der bekannte — auch dafür gibt es keinen zweiten Satz Namen.
+pub fn accept_image_bytes(declared_mime: &str, bytes: &[u8]) -> Result<AcceptedImage, &'static str> {
+    accept_image_inner(Some(declared_mime), bytes)
+}
+
+/// Dieselbe Prüfung OHNE den Abgleich gegen einen behaupteten Typ — für Bytes, die niemand mehr
+/// behauptet: eine Datei, die schon abgelegt wurde und beim Abholen erneut geprüft wird.
+pub fn accept_image_bytes_sniffed(bytes: &[u8]) -> Result<AcceptedImage, &'static str> {
+    accept_image_inner(None, bytes)
+}
+
+fn accept_image_inner(declared_mime: Option<&str>, bytes: &[u8]) -> Result<AcceptedImage, &'static str> {
+    if bytes.is_empty() { return Err(ERR_TRUNCATED); }
+    if bytes.len() > MAX_UPLOAD_IMAGE_BYTES { return Err(ERR_IMAGE_TOO_LARGE); }
+    let (mime, ext) = sniff_format(bytes).ok_or(ERR_UNSUPPORTED_MIME)?; // GIF/SVG/other → None
+    if let Some(d) = declared_mime {
+        if !norm_declared(d).eq_ignore_ascii_case(mime) { return Err(ERR_MIME_MISMATCH); }
+    }
+    let insp = inspect_image_bytes(bytes);
+    if insp.kind != ContentKind::RasterImage { return Err(ERR_UNSUPPORTED_MIME); }
+    if insp.width == 0 || insp.height == 0 { return Err(ERR_DIMENSIONS_UNKNOWN); }
+    if insp.width > MAX_UPLOAD_IMAGE_DIM || insp.height > MAX_UPLOAD_IMAGE_DIM { return Err(ERR_TOO_LARGE_DIMENSIONS); }
+    if insp.width as u64 * insp.height as u64 > MAX_UPLOAD_IMAGE_PIXELS { return Err(ERR_TOO_MANY_PIXELS); }
     // decode-integrity: a truncated/corrupt raster fails a real bounded decode.
     let limits = Limits { max_input_dim: MAX_UPLOAD_IMAGE_DIM, max_input_pixels: MAX_UPLOAD_IMAGE_PIXELS };
-    if normalize_stock_image(&raw.bytes, &limits).is_err() { return Err(reject(ERR_TRUNCATED)); }
+    if normalize_stock_image(bytes, &limits).is_err() { return Err(ERR_TRUNCATED); }
+    Ok(AcceptedImage { mime, ext, width: insp.width, height: insp.height, content_hash: sha256_hex(bytes) })
+}
+
+fn validate_image(slot: usize, raw: &RawUploadImage) -> Result<ValidatedImage, UploadError> {
+    let a = accept_image_bytes(&raw.declared_mime, &raw.bytes).map_err(reject)?;
     Ok(ValidatedImage {
-        slot, primary: slot == 0, mime, width: insp.width, height: insp.height,
-        byte_size: raw.bytes.len(), content_hash: sha256_hex(&raw.bytes), ext,
+        slot, primary: slot == 0, mime: a.mime, width: a.width, height: a.height,
+        byte_size: raw.bytes.len(), content_hash: a.content_hash, ext: a.ext,
     })
 }
 

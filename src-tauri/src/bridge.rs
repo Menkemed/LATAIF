@@ -65,6 +65,16 @@ pub const OP_INVOICES_GET: &str = "invoices.get";
 /// registriert werden darf, faellt zusaetzlich im Renderer (Zulassungsliste, fail-closed).
 pub const OP_INVOICES_CREATE: &str = "invoices.create";
 
+/// CENTRAL-C3C — Stammdaten. Zwei Namen, nicht ein generisches "speichere irgendetwas": jede
+/// veraendernde Operation steht einzeln hier und einzeln in der Zulassungsliste des Renderers.
+pub const OP_CUSTOMERS_CREATE: &str = "customers.create";
+pub const OP_CUSTOMERS_UPDATE: &str = "customers.update";
+/// CENTRAL-C3C — ein Artikel von einem zweiten Rechner. Die Bilder kommen NICHT hier durch: sie
+/// liegen vorher in der neutralen Zwischenablage (`/api/staging/media`), und der Auftrag nennt nur
+/// ihre Inhaltskennungen.
+pub const OP_PRODUCTS_CREATE: &str = "products.create";
+pub const OP_PRODUCTS_UPDATE: &str = "products.update";
+
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
     OP_PROBE,
@@ -75,6 +85,10 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_INVOICES_LIST,
     OP_INVOICES_GET,
     OP_INVOICES_CREATE,
+    OP_CUSTOMERS_CREATE,
+    OP_CUSTOMERS_UPDATE,
+    OP_PRODUCTS_CREATE,
+    OP_PRODUCTS_UPDATE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

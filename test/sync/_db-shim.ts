@@ -26,3 +26,19 @@ export function saveDatabaseDurably(): Promise<void> { return Promise.resolve();
 // Die ECHTE Regel („bei aktiver Klammer nicht speichern") wird dort geprueft, wo sie wirkt:
 // in `product-durability-ownership.test.ts` an der injizierten `saveDurably`.
 export function durableCheckpoint(): Promise<void> { return Promise.resolve(); }
+
+// CENTRAL-C3C — der Medien-Orchestrator nimmt pro Vorgang eine Leihe auf die aktuelle
+// Datenbankinstanz. In der Produktion wartet sie einen laufenden Reload ab; hier gibt es keinen,
+// also ist sie genau das, was sie im Vertrag ist: dieselbe Instanz, ein durabler Speicherpunkt,
+// und ein Freigeben. Der ECHTE Orchestrator laeuft darauf.
+export function acquireDbLease(): Promise<{
+  db: Db; epoch: number; saveDurably(): Promise<void>; release(): void;
+}> {
+  const leased = getDatabase();
+  return Promise.resolve({
+    db: leased,
+    epoch: 0,
+    saveDurably: () => durableCheckpoint(),
+    release: () => {},
+  });
+}

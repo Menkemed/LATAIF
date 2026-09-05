@@ -69,6 +69,17 @@ const FIRST_RUN_SAFE: &[&str] = &[
 
     // Findet sein Verzeichnis selbst und traegt deshalb seinen eigenen Erstlauf-Riegel.
     "clear_pending_data_root_move",
+
+    // CENTRAL-C1 — die zwei Antwortwege der Kommandobruecke. Sie nehmen absichtlich KEINEN
+    // `AppHandleState`: sie sprechen nur mit der prozessweiten Bruecke im Speicher.
+    //
+    // `bridge_announce_ready` sagt, welche Generation dieses Fenster hat; `bridge_reply` liefert
+    // die Antwort auf einen Auftrag, der schon in der Warteschlange steht. Beide oeffnen keine
+    // Datenbank, kein Verzeichnis und keine Datei — und ohne installierte Bruecke antworten sie
+    // mit `BRIDGE_NOT_INSTALLED`. Im wurzellosen Zustand gibt es keine Bruecke, also auch nichts
+    // zu beantworten.
+    "bridge_announce_ready",
+    "bridge_reply",
 ];
 
 #[test]

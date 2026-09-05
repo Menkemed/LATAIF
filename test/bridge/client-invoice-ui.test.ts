@@ -243,15 +243,24 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   ok(!/setTimeout|setInterval/.test(formCode), 'SAVE es gibt keinen automatischen zweiten Versuch');
 }
 
-// ── 5) Die Zulassungsliste ist unveraendert ───────────────────────────────
+// ── 5) Das Formular braucht genau EINEN Namen ─────────────────────────────
+//
+// Seit C3C stehen drei Namen auf der Zulassungsliste. Fuer dieses Formular aendert das nichts, und
+// genau das wird hier geprueft: es ruft `invoices.create` und sonst keine Mutation.
 {
+  await import('../../src/core/bridge/customer-commands.ts');
+  await import('../../src/core/bridge/product-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 8 && reads.length === 6
-    && known.includes('bridge.probe') && known.includes('invoices.create'),
-    `REGISTRY 1 Probe + 6 Reads + 1 Mutation (${known.join(', ')})`);
-  ok(registry.ALLOWED_MUTATIONS.length === 1,
-    `REGISTRY das Formular hat keine zweite Mutation gebraucht (${registry.ALLOWED_MUTATIONS.join(', ')})`);
+  ok(known.length === 12 && reads.length === 6 && known.includes('bridge.probe'),
+    `REGISTRY 1 Probe + 6 Reads + 5 Mutationen (${known.join(', ')})`);
+  ok(registry.ALLOWED_MUTATIONS.includes('invoices.create'),
+    `REGISTRY der Name des Formulars steht darauf (${registry.ALLOWED_MUTATIONS.join(', ')})`);
+  const form = code(FORM);
+  const foreign = registry.ALLOWED_MUTATIONS.filter((o: string) => o !== 'invoices.create')
+    .filter((o: string) => form.includes(o));
+  ok(foreign.length === 0,
+    `REGISTRY das Formular ruft keine fremde Mutation (${foreign.join(', ') || 'keine'})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3b client invoice ui: ${PASS} passed, ${fails.length} failed`);

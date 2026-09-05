@@ -406,13 +406,20 @@ const IMAGES = { kind: 'data_urls' as const, images: ['data:image/jpeg;base64,AA
   ok(!/INSERT INTO products|media_links/i.test(bridgeDir),
     'WIRED in der Bruecke liegt kein Produkt- und kein Medien-SQL');
 
-  // Und die Registry ist unveraendert: C3C hat noch keine Mutation freigegeben.
+  // Auf diesem Fundament steht seit C3C der Produkt-Fernauftrag: die Registry kennt ihn, und er
+  // laeuft durch dieselbe Maschine wie alles andere. Was hier geprueft wird, ist die Verdrahtung —
+  // seine Wirkung hat ihren eigenen Gate-Test (`product-remote-write`).
   const registry = await import('../../src/core/bridge/command-registry.ts');
   await import('../../src/core/bridge/read-commands.ts');
   await import('../../src/core/bridge/invoice-command.ts');
+  await import('../../src/core/bridge/customer-commands.ts');
+  await import('../../src/core/bridge/product-commands.ts');
   const known = registry.knownCommands();
-  ok(known.length === 8 && registry.ALLOWED_MUTATIONS.length === 1 && registry.ALLOWED_MUTATIONS[0] === 'invoices.create',
-    `WIRED Registry unveraendert: 1 Probe + 6 Reads + 1 Mutation (${known.length}: ${registry.ALLOWED_MUTATIONS.join(', ')})`);
+  ok(known.length === 12 && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
+    `WIRED 1 Probe + 6 Reads + 5 Mutationen (${known.length}: ${registry.ALLOWED_MUTATIONS.join(', ')})`);
+  const productCmd = src('src/core/bridge/product-commands.ts');
+  ok(/runRemoteCommand\(/.test(productCmd) && /alreadySerialised: true/.test(productCmd),
+    'WIRED der Produkt-Fernauftrag laeuft durch die Maschine und reiht sich nicht doppelt ein');
 }
 
 // ── 8) Der Medien-Koordinator klammert nur als aeusserste Ebene ───────────

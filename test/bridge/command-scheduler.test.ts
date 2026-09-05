@@ -349,12 +349,13 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 // ── 12) Die Sperre ist eine Klasse PLUS eine namentliche Zulassung ────────
 //
 // Ein Verbot von fünf bekannten Namen hätte ein später hinzugefügtes `invoice.save` durchgelassen.
-// Deshalb entscheidet zuerst die KLASSE — und seit C3B zusätzlich der NAME: freigegeben ist
-// `invoices.create` und sonst nichts. Ein Schalter hätte in einem Zug alles mitgenommen.
+// Deshalb entscheidet zuerst die KLASSE — und seit C3B zusätzlich der NAME: freigegeben sind die
+// drei einzeln durchdachten Operationen und sonst nichts. Ein Schalter hätte in einem Zug alles
+// mitgenommen.
 {
   const { ALLOWED_MUTATIONS } = await import('../../src/core/bridge/command-registry.ts');
-  ok(ALLOWED_MUTATIONS.length === 1 && ALLOWED_MUTATIONS[0] === 'invoices.create',
-    `GATE genau ein veraendernder Name ist freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
+  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
+    `GATE genau diese fuenf veraendernden Namen sind freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
 
   for (const name of ['invoice.save', 'sale.commit', 'irgendwas.ganz.neu']) {
     let threw: string | null = null;

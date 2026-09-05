@@ -2386,6 +2386,42 @@ fn mobile_upload_prepare_image(
     Ok(prepared)
 }
 
+// ── CENTRAL-C3C — die Bytes aus der neutralen Zwischenablage holen ─────────
+//
+// Nur der Primary-Renderer ruft das, und nur, waehrend er einen Fernauftrag ausfuehrt: er hat die
+// Kennungen aus der Auftragsnutzlast und braucht die Bytes, um denselben Medienweg zu fahren, den
+// ein Mensch an diesem Rechner faehrt. Es gibt hier keinen Pfad-Parameter: eine Kennung ist 64
+// Hex-Zeichen, und was das nicht ist, wird abgewiesen, bevor daraus ein Dateiname wird.
+#[tauri::command]
+fn staging_media_read(
+    state: tauri::State<'_, AppHandleState>,
+    staging_id: String,
+) -> Result<serde_json::Value, String> {
+    let root = state.data_root.command_staging_root();
+    let bytes = sync::media_staging::read_staged(&root, &staging_id).map_err(|e| e.to_string())?;
+    // Was ein Bild ist, entscheidet dieselbe Stelle wie ueberall — auch beim Herausgeben, denn
+    // zwischen Ablegen und Abholen liegt eine Datei auf einer Platte.
+    let accepted = sync::mobile_upload::accept_image_bytes_sniffed(&bytes)
+        .map_err(|e| e.to_string())?;
+    use base64::Engine;
+    Ok(serde_json::json!({
+        "mime": accepted.mime,
+        "bytes": bytes.len(),
+        "dataBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+/// Nach einem gelungenen Auftrag sind die Bytes im Medienspeicher — die Ablage darf weg. Sie MUSS
+/// es nicht: was liegen bleibt, verschwindet beim naechsten Start von selbst.
+#[tauri::command]
+fn staging_media_discard(
+    state: tauri::State<'_, AppHandleState>,
+    staging_id: String,
+) -> Result<(), String> {
+    let root = state.data_root.command_staging_root();
+    sync::media_staging::discard_staged(&root, &staging_id).map_err(|e| e.to_string())
+}
+
 #[allow(dead_code)]
 #[tauri::command]
 fn mobile_upload_renew(
@@ -3136,6 +3172,20 @@ pub fn run() {
                 Arc::new(media::ingest::MediaIngestService::new(root.media_root()));
             let mobile_staging_root = root.mobile_staging_root();
             let _ = std::fs::create_dir_all(&mobile_staging_root);
+            // CENTRAL-C3C — die neutrale Zwischenablage anlegen und beim Start aufraeumen: was
+            // niemand abgeholt hat, ist nach einem Tag kein Vorhaben mehr, sondern Muell. Der
+            // Kehrbesen laeuft NUR hier, nie im Betrieb: eine Ablage, die waehrend eines laufenden
+            // Auftrags verschwaende, waere ein Fehler, den niemand erklaeren kann.
+            let command_staging_root = root.command_staging_root();
+            let _ = std::fs::create_dir_all(&command_staging_root);
+            let swept = sync::media_staging::sweep_expired(
+                &command_staging_root,
+                std::time::SystemTime::now(),
+                sync::media_staging::STAGED_TTL,
+            );
+            if swept > 0 {
+                println!("[staging] removed {swept} expired command-staging blobs");
+            }
             app.manage(AppHandleState { server, media_ingest, mobile_staging_root, data_root: root });
 
             // M5-B — native WebView2-Reload-Bruecke (nur Windows) auf dem Main-Webview
@@ -3256,6 +3306,10 @@ pub fn run() {
             mobile_upload_mark_ready,
             //
             // MOBILE-04B2A3 — the runtime-scope EVIDENCE read (read-only, no secret).
+            // CENTRAL-C3C — die neutrale Zwischenablage: Bytes lesen und verwerfen. Kein Pfad,
+            // keine Geschaeftstabelle; die Kennung ist der Hash des Inhalts.
+            staging_media_read,
+            staging_media_discard,
             mobile_runtime_scope_evidence,
             // MOBILE-04B2A5 — the secure owner runtime-scope provisioning path: a non-secret OPTIONS
             // read + the owner-gated CONFIGURE (bcrypt via authorize_owner). These configure the

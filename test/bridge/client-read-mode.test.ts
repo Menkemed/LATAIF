@@ -237,10 +237,12 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const { registerCommand, knownCommands, ALLOWED_MUTATIONS } =
     await import('../../src/core/bridge/command-registry.ts');
 
-  // C3B hat GENAU einen veraendernden Namen freigegeben. Fuer den Clientmodus aendert das nichts:
-  // er liest weiter, und alles andere bleibt unregistrierbar.
-  ok(ALLOWED_MUTATIONS.length === 1 && ALLOWED_MUTATIONS[0] === 'invoices.create',
-    `READONLY genau eine freigegebene Mutation (${ALLOWED_MUTATIONS.join(', ')})`);
+  // C3B hat einen veraendernden Namen freigegeben, C3C zwei weitere. Fuer den Clientmodus aendert
+  // das nichts an der Sache, um die es hier geht: er schreibt nie SELBST, sondern schickt jeden
+  // dieser Namen an den Primary — und alles, was nicht namentlich darauf steht, bleibt
+  // unregistrierbar.
+  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
+    `READONLY fuenf namentlich freigegebene Mutationen (${ALLOWED_MUTATIONS.join(', ')})`);
   // Die Lesebefehle ziehen die ganze Datenschicht mit; hier zaehlt ihre Registrierung im Quelltext.
   const readSrc = code('src/core/bridge/read-commands.ts');
   const registeredReads = readSrc.split('\n').filter((l) => l.startsWith('registerCommand(')).length;
@@ -251,7 +253,10 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   ok(!/registerCommand\('[a-z.]*(create|edit|delete|sell|import|save|update)/i.test(readSrc),
     'READONLY und kein Name klingt nach Veraenderung');
 
-  for (const name of ['products.create', 'invoice.save', 'products.delete']) {
+  // Namen, die auf KEINER Liste stehen. `products.create` stand hier bis C3C — seit es
+  // namentlich freigegeben ist, waere es die falsche Probe: geprueft wird die Sperre, nicht die
+  // Liste.
+  for (const name of ['products.import', 'invoice.save', 'products.delete']) {
     let refused = false;
     try { registerCommand(name, { kind: 'mutation', handler: () => ({ ok: true }) }); } catch { refused = true; }
     ok(refused, `READONLY ${name} kann nicht registriert werden`);
@@ -460,12 +465,16 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const reads = resolved.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
-  ok(resolved.length === 8, `ALLOWLIST acht Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
+  ok(resolved.length === 12, `ALLOWLIST zwoelf Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
   ok(reads.length === 6, `ALLOWLIST genau sechs Lesevorgaenge (${reads.length}: ${reads.join(', ')})`);
-  ok(mutations.length === 1 && mutations[0] === 'invoices.create',
-    `ALLOWLIST und GENAU eine veraendernde (${mutations.join(', ') || 'keine'})`);
-  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create',
+  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
+    `ALLOWLIST und GENAU diese fuenf veraendernden (${mutations.join(', ') || 'keine'})`);
+  // Loeschen steht auf KEINER Liste: es hat einen eigenen Referenz-Vertrag, und der ist von aussen
+  // nicht durchdacht.
+  ok(!mutations.some((o) => o.endsWith('.delete')),
+    'ALLOWLIST und kein Loeschen — das hat einen eigenen Vertrag');
+  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Es gibt keine eigene Suchoperation — die Suche ist ein Parameter.
   ok(!resolved.some((o) => /search/.test(o)), 'ALLOWLIST keine eigene Suchoperation');

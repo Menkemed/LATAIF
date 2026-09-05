@@ -17,6 +17,9 @@ import './read-commands';
 // CENTRAL-C3B — und die eine veraendernde Operation. Ohne diesen Import kennt der Renderer sie
 // nicht, und ein Auftrag vom zweiten Rechner liefe in BRIDGE_OP_NOT_REGISTERED.
 import './invoice-command';
+// CENTRAL-C3C — Stammdaten: Kunde anlegen und aendern.
+import './customer-commands';
+import './product-commands';
 
 /** Muss mit `bridge::EVENT_COMMAND` in Rust übereinstimmen. */
 export const BRIDGE_COMMAND_EVENT = 'central-c1-bridge-command';

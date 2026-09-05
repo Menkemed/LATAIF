@@ -1,11 +1,12 @@
-// CENTRAL-C2/C3B — die Oberfläche des zweiten Rechners.
+// CENTRAL-C2/C3B/C3C — die Oberfläche des zweiten Rechners.
 //
-// Bewusst schmal: Anmeldung, drei Listen, drei Detailansichten — und seit C3B EIN Formular, das
-// etwas anlegt: eine Rechnung. Genau eines, weil genau eine verändernde Fernoperation freigegeben
-// ist (`ALLOWED_MUTATIONS`). Alles andere kann die Gegenstelle nach wie vor nicht annehmen.
+// Bewusst schmal: Anmeldung, drei Listen, drei Detailansichten — und Formulare für genau die
+// Operationen, die namentlich freigegeben sind (`ALLOWED_MUTATIONS`): eine Rechnung, ein neuer
+// Kunde, ein geänderter Kunde. Alles andere kann die Gegenstelle nach wie vor nicht annehmen —
+// ein Produkt zum Beispiel nicht, solange sein Medienweg nicht ehrlich gebaut ist.
 //
-// Auch das Formular legt hier nichts an: es schickt die Auswahl eines Menschen an den Primary und
-// zeigt, was von dort zurückkommt. Gerechnet, nummeriert und gebucht wird dort.
+// Auch die Formulare legen hier nichts an: sie schicken die Auswahl eines Menschen an den Primary
+// und zeigen, was von dort zurückkommt. Gerechnet, nummeriert und gebucht wird dort.
 //
 // Und es gibt keinen stillen Rückfall. Ist der Server weg, steht das da. Es wird keine lokale
 // Datenbank angelegt, um „wenigstens etwas" zu zeigen — das wäre eine zweite Wahrheit.
@@ -14,8 +15,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { clientConfig, leaveClientMode } from '@/core/bridge/client-mode';
 import { remoteRead, clientLogin, RemoteReadError, ERR_UNAUTHENTICATED } from '@/core/bridge/remote-read';
 import { ClientInvoiceCreate } from '@/components/client/ClientInvoiceCreate';
+import { ClientCustomerForm } from '@/components/client/ClientCustomerForm';
+import { ClientProductForm } from '@/components/client/ClientProductForm';
 
-type Area = 'products' | 'customers' | 'invoices' | 'new-invoice';
+type Area = 'products' | 'customers' | 'invoices' | 'new-invoice' | 'new-customer' | 'new-product';
 
 interface ListState {
   items: Array<Record<string, unknown>>;
@@ -29,6 +32,8 @@ const AREAS: Array<{ key: Area; label: string; op: string | null }> = [
   { key: 'customers', label: 'Clients', op: 'customers.list' },
   { key: 'invoices', label: 'Invoices', op: 'invoices.list' },
   { key: 'new-invoice', label: 'New invoice', op: null },
+  { key: 'new-customer', label: 'New client', op: null },
+  { key: 'new-product', label: 'New item', op: null },
 ];
 
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -44,9 +49,12 @@ export function ClientShell() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tick, setTick] = useState(0);
+  // Welchen Kunden gerade jemand ändert. Kein eigener Bereich: das Ändern beginnt IMMER an einem
+  // Kunden, den dieser Rechner vorher gelesen hat — eine frei eingetippte Kennung gäbe es sonst.
+  const [editCustomerId, setEditCustomerId] = useState<string | null>(null);
+  const [editProductId, setEditProductId] = useState<string | null>(null);
 
   const areaOp = AREAS.find((a) => a.key === area)!.op;
-  const isForm = areaOp === null;
 
   const load = useCallback(async () => {
     if (areaOp === null) { setList(null); setError(null); return; }
@@ -82,7 +90,10 @@ export function ClientShell() {
       <div data-client-mode style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
         {AREAS.map((a) => (
           <button key={a.key} data-client-area={a.key}
-            onClick={() => { setArea(a.key); setDetail(null); setQuery(''); }}
+            onClick={() => {
+              setArea(a.key); setDetail(null); setQuery('');
+              setEditCustomerId(null); setEditProductId(null);
+            }}
             style={chip(area === a.key)}>{a.label}</button>
         ))}
         <input data-client-search placeholder="Search…" value={query}
@@ -91,14 +102,34 @@ export function ClientShell() {
           style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #D5D9DE', fontSize: 12 }} />
         <button data-client-refresh onClick={() => setTick((t) => t + 1)} style={chip(false)}>Refresh</button>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6B7280' }}>
-          reads + new invoice · {cfg.serverUrl}
+          reads + invoice + clients + items · {cfg.serverUrl}
         </span>
         <button onClick={() => { leaveClientMode(); window.location.reload(); }} style={chip(false)}>Disconnect</button>
       </div>
 
       {error && <p data-client-error style={{ color: '#B91C1C', fontSize: 13 }}>{error}</p>}
 
-      {isForm && <ClientInvoiceCreate />}
+      {area === 'new-invoice' && <ClientInvoiceCreate />}
+      {area === 'new-customer' && (
+        <ClientCustomerForm onSaved={() => { setArea('customers'); setTick((t) => t + 1); }} />
+      )}
+      {editCustomerId && (
+        <ClientCustomerForm
+          customerId={editCustomerId}
+          onSaved={() => { setEditCustomerId(null); setDetail(null); setTick((t) => t + 1); }}
+          onCancel={() => setEditCustomerId(null)}
+        />
+      )}
+      {area === 'new-product' && (
+        <ClientProductForm onSaved={() => { setArea('products'); setTick((t) => t + 1); }} />
+      )}
+      {editProductId && (
+        <ClientProductForm
+          productId={editProductId}
+          onSaved={() => { setEditProductId(null); setDetail(null); setTick((t) => t + 1); }}
+          onCancel={() => setEditProductId(null)}
+        />
+      )}
       {busy && !list && <p style={{ fontSize: 12, color: '#6B7280' }}>Loading…</p>}
 
       {list?.stock && (
@@ -123,9 +154,17 @@ export function ClientShell() {
         </div>
       )}
 
-      {detail && (
+      {detail && !editCustomerId && !editProductId && (
         <div data-client-detail style={{ marginTop: 16, padding: 14, border: '1px solid #D5D9DE', borderRadius: 10 }}>
           <button onClick={() => setDetail(null)} style={chip(false)}>Close</button>
+          {area === 'customers' && (
+            <button data-client-edit-customer style={{ ...chip(true), marginLeft: 8 }}
+              onClick={() => setEditCustomerId(s(detail.id))}>Edit</button>
+          )}
+          {area === 'products' && (
+            <button data-client-edit-product style={{ ...chip(true), marginLeft: 8 }}
+              onClick={() => setEditProductId(s(detail.id))}>Edit</button>
+          )}
           <pre data-client-detail-json style={{ fontSize: 11, whiteSpace: 'pre-wrap', marginTop: 10 }}>
             {JSON.stringify(detail, null, 2)}
           </pre>

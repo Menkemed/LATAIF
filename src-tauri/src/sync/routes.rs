@@ -64,6 +64,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // MOBILE-04B2A8-I1 — authenticated mobile upload ingress. Separate route; `/sync/push` above is
         // untouched. Same JWT auth layer + the same 50 MB body limit (build_api_router) as every /api route.
         .route("/mobile/upload", post(mobile_upload_ingress))
+        // CENTRAL-C3C — die neutrale Zwischenablage. Sie nimmt Bytes und gibt eine Kennung zurueck,
+        // sonst nichts: keine Geschaeftstabelle, kein Produkt, kein Pfad vom Aufrufer. Sie ist
+        // ausdruecklich NICHT `/mobile/upload`: die ist ein Produkt-Eingang und wuerde einen zweiten
+        // Weg oeffnen, auf dem ein Produkt an `runRemoteCommand` vorbei entsteht.
+        .route("/staging/media", post(staging_media_put))
         // CENTRAL-C1 — der EINZIGE Weg fuer einen Auftrag von einem anderen Rechner. Feste
         // Namensliste, keine SQL-Uebergabe, kein generisches Ausfuehren; hinter derselben Anmeldung.
         .route("/command", post(command_execute))
@@ -105,6 +110,71 @@ pub fn build_api_router(state: Arc<AppState>, body_limit: usize) -> Router<Arc<A
 // Geschäftsdatenbank hält, und dessen Antwort wird zu dieser HTTP-Antwort. Die Zustände
 // „Renderer nicht bereit", „neu geladen", „wird beendet" und „Zeitgrenze" sind unterschiedliche
 // Codes, weil sie unterschiedliche Handlungen bedeuten.
+
+// ── CENTRAL-C3C — Bytes ablegen, mehr nicht ───────────────────────────────
+//
+// Der einzige Grund, warum es diese Route gibt: ein Auftrag ist eine Nachricht, kein Bildstapel.
+// Ein Produkt von einem zweiten Rechner braucht seine Fotos VOR dem Auftrag an einem Ort, den der
+// Primary lesen kann — und dieser Ort darf nichts entscheiden.
+//
+// Was hier NICHT passiert, ist der Punkt: keine Zeile in der Geschaeftsdatenbank, kein Inbox-Job,
+// kein Produkt, keine SKU. Wer die Bytes spaeter benutzt, ist der Auftrag `products.create`, und
+// der laeuft durch dieselbe Maschine wie jeder andere.
+
+#[derive(serde::Deserialize)]
+struct StagingMediaRequest {
+    /// Was der Aufrufer BEHAUPTET. Entschieden wird nach den Magic Bytes; stimmen die beiden nicht
+    /// ueberein, ist das eine Ablehnung und keine Korrektur.
+    mime: String,
+    #[serde(rename = "dataBase64")]
+    data_base64: String,
+}
+
+async fn staging_media_put(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    // Dieselben Riegel wie am mobilen Eingang: nur ein schreibfaehiger Primary nimmt ueberhaupt
+    // etwas an, und eine Anmeldung ohne Rolle ist keine.
+    if !state.primary_state.may_write_sync() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if claims.role.trim().is_empty() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if !is_json_content_type(&headers) {
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+    let raw = std::str::from_utf8(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let req: StagingMediaRequest = serde_json::from_str(raw).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bytes = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(req.data_base64.trim())
+            .map_err(|_| StatusCode::BAD_REQUEST)?
+    };
+    let root = state.data_root.command_staging_root();
+    match super::media_staging::stage_image(&root, &req.mime, &bytes) {
+        Ok(blob) => Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                // Die Kennung ist der Hash des Inhalts — vom Server berechnet. Der Aufrufer hat
+                // nirgends ein Feld, in dem er ein Ziel nennen koennte.
+                "stagingId": blob.staging_id,
+                "mime": blob.mime,
+                "bytes": blob.bytes,
+                "width": blob.width,
+                "height": blob.height,
+            })),
+        )),
+        Err(code) => Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "state": "rejected", "code": code })),
+        )),
+    }
+}
 
 #[derive(serde::Deserialize)]
 struct CommandRequest {
@@ -1548,7 +1618,17 @@ mod legacy_push_tests {
                 // filtered patch; it touches no database and no file. The client may send image
                 // bytes, never a path or a URL, so it cannot be turned into a fetch primitive.
                 "/ai/identify",
-                "/mobile/upload", "/auth/login", "/health",
+                "/mobile/upload",
+                // CENTRAL-C3C — /staging/media: die zweite Stelle, an der Bytes hereinkommen, und
+                // die einzige, die NICHTS entscheidet. Sie liegt in derselben JWT-geschuetzten
+                // Gruppe, hinter demselben `may_write_sync()`-Riegel wie /mobile/upload — und sie
+                // faellt bewusst NICHT unter die Schreibflaechen-Pruefung unten, weil sie keine
+                // Datenbank anfasst: kein INSERT, kein UPDATE, kein DELETE, keine Verbindung. Sie
+                // legt eine Datei unter dem SHA-256 ihres Inhalts ab, mehr nicht. Ein Produkt
+                // entsteht daraus erst durch `products.create` ueber /command — also durch
+                // dieselbe Maschine wie jede andere Fernbuchung.
+                "/staging/media",
+                "/command", "/auth/login", "/health",
             ],
             "Routenmenge geaendert — Modusmatrix und Gate neu bewerten"
         );

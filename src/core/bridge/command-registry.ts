@@ -76,7 +76,11 @@ export type CommandClass = 'probe' | 'read' | 'mutation';
  * Frage, ob ihr Weg dieselben Beweise hat wie dieser: durabler Nachweis in derselben Transaktion,
  * Bestandsprüfung vor der Wirkung, eingefrorenes Urteil, Wiederholung ohne zweite Wirkung.
  */
-export const ALLOWED_MUTATIONS: readonly string[] = ['invoices.create'];
+export const ALLOWED_MUTATIONS: readonly string[] = [
+  'invoices.create',
+  'customers.create', 'customers.update',
+  'products.create', 'products.update',
+];
 
 export interface CommandSpec {
   readonly kind: CommandClass;

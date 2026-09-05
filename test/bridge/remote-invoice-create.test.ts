@@ -185,11 +185,13 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
   ok(!('REMOTE_MUTATIONS_ENABLED' in registry),
     'ALLOWLIST der globale Schalter ist weg — er haette in einem Zug JEDE Mutation freigegeben');
-  ok(Array.isArray(registry.ALLOWED_MUTATIONS) && registry.ALLOWED_MUTATIONS.length === 1
-    && registry.ALLOWED_MUTATIONS[0] === 'invoices.create',
-    `ALLOWLIST genau ein Name steht darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
+  await import('../../src/core/bridge/customer-commands.ts');
+  await import('../../src/core/bridge/product-commands.ts');
+  ok(Array.isArray(registry.ALLOWED_MUTATIONS)
+    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
+    `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
 
-  for (const op of ['products.create', 'invoice.delete', 'purchase.create', 'anything.write']) {
+  for (const op of ['products.delete', 'invoice.delete', 'purchase.create', 'anything.write']) {
     let threw: string | null = null;
     try { registry.registerCommand(op, { kind: 'mutation', handler: () => ({ ok: true }) }); }
     catch (e) { threw = String(e); }
@@ -198,15 +200,15 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 8, `ALLOWLIST produktiv acht Namen (${known.length}: ${known.join(', ')})`);
+  ok(known.length === 12, `ALLOWLIST produktiv zwoelf Namen (${known.length}: ${known.join(', ')})`);
   ok(reads.length === 6 && known.includes('bridge.probe') && known.includes('invoices.create'),
-    'ALLOWLIST eine Probe, sechs Lesevorgaenge, EINE Mutation');
+    'ALLOWLIST eine Probe, sechs Lesevorgaenge, fuenf Mutationen');
 
   // Und Rust prueft dieselbe Liste ein zweites Mal.
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 8, 'ALLOWLIST …und seine Liste ist genau acht Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 12, 'ALLOWLIST …und seine Liste ist genau zwoelf Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:
@@ -690,9 +692,16 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   ok(gone.kind === 'unknown', `CLIENT ein Abbruch laesst den Ausgang offen (${JSON.stringify(gone)})`);
 
   // Und im Code steht nirgends ein automatischer zweiter Versuch mit neuer Kennung.
-  const clientSrc = src('src/core/bridge/client-invoice-save.ts');
-  ok(/if \(this\.attempt && !this\.attempt\.isSettled\(\)\) return this\.attempt;/.test(clientSrc),
+  // Seit C3C liegt der Vertrag im generischen Modul — er gilt fuer JEDEN schreibenden Auftrag,
+  // nicht nur fuer Rechnungen. Die Regel muss dort stehen, und das Rechnungsmodul muss sie
+  // BENUTZEN statt sie ein zweites Mal zu schreiben.
+  const genericSrc = src('src/core/bridge/client-command-save.ts');
+  ok(/if \(this\.attempt && !this\.attempt\.isSettled\(\)\) return this\.attempt;/.test(genericSrc),
     'CLIENT die Regel steht im Code, nicht nur im Test');
+  const clientSrc = src('src/core/bridge/client-invoice-save.ts');
+  ok(/new CommandSaveController<InvoiceSaveValue>\(OP_INVOICES_CREATE\)/.test(clientSrc)
+    && !/newCommandId\(\)/.test(clientSrc),
+    'CLIENT …und das Rechnungsformular erzeugt keine Kennung an ihm vorbei');
 }
 
 // ── 11) Der Primary schreibt weiter lokal ─────────────────────────────────

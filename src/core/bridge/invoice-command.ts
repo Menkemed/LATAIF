@@ -31,7 +31,7 @@ import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { resolveLineScheme, toInvoiceLine, type InvoiceLineInput, type RequestedScheme } from '@/core/invoices/line-derivation';
-import { CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
+import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 
@@ -293,6 +293,13 @@ registerCommand(OP_INVOICES_CREATE, {
       throw err;
     }
     if (outcome.kind === 'rejected') {
+    // NUR ein EINGEFRORENES Urteil ist ein fachliches Nein. Ein nicht eingefrorenes
+    // (`frozen: false`) heißt: der Vorgang wurde nie bewertet — eine Kennungskollision, ein
+    // abgebrochener Medienweg, ein Artikel, der erst umgezogen werden muss. Es als Nein zu
+    // melden wäre die teuerste Verwechslung dieses Systems: die Oberfläche beendet dann den
+    // Versuch, sagt dem Benutzer „abgelehnt" und lässt ihn eine NEUE Kennung nehmen — für einen
+    // Vorgang, der noch gar nicht stattgefunden hat. Also weiterreichen als das, was es ist.
+    if (!outcome.frozen) throw new CommandNotEvaluated(outcome.code, outcome.message);
       // Das eingefrorene Urteil wandert als fachliches Nein zurück — inklusive der Wiederholung,
       // die genau dasselbe Nein bekommt.
       throw new BusinessError(outcome.code, outcome.message);
