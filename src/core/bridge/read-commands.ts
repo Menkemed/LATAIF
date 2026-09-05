@@ -18,6 +18,11 @@ import { registerCommand, BusinessError, type CommandResult } from './command-re
 import { getDatabase } from '@/core/db/database';
 import { summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { getStockAggregates } from '@/core/lots/lot-queries';
+// Ob das Auszahlungsmodell einer Kommission noch geändert werden darf, ist eine Aussage der
+// DOMÄNE. Sie wird hier gelesen, damit der Client sie anzeigen kann — und beim Schreiben ein
+// zweites Mal gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
+import { payoutModelLock } from '@/core/consignment/payout-edit';
+import { rowToConsignment } from '@/stores/consignmentStore';
 
 export const OP_PRODUCTS_LIST = 'products.list';
 export const OP_PRODUCTS_GET = 'products.get';
@@ -26,11 +31,29 @@ export const OP_CUSTOMERS_GET = 'customers.get';
 export const OP_INVOICES_LIST = 'invoices.list';
 export const OP_INVOICES_GET = 'invoices.get';
 
+// CENTRAL-C3E — was ein zweiter Rechner braucht, um einen Einkauf, eine Kommission und einen
+// Auftrag anzulegen und wiederzufinden. Der Lieferant ist dabei die einzige NEUE Stammdatenquelle:
+// Kunden (und damit Einlieferer) und Artikel liest er bereits über C2.
+export const OP_SUPPLIERS_LIST = 'suppliers.list';
+// Eine Kommission legt ihren Artikel MIT an, und ein Artikel ohne Kategorie gibt es im Haus
+// nicht. Der Client hat keine Tabelle, aus der er sie nehmen könnte — also fragt er.
+export const OP_CATEGORIES_LIST = 'categories.list';
+export const OP_PURCHASES_LIST = 'purchases.list';
+export const OP_PURCHASES_GET = 'purchases.get';
+export const OP_CONSIGNMENTS_LIST = 'consignments.list';
+export const OP_CONSIGNMENTS_GET = 'consignments.get';
+export const OP_ORDERS_LIST = 'orders.list';
+export const OP_ORDERS_GET = 'orders.get';
+
 /** Jede Leseoperation, die C2 freischaltet — dieselbe Liste kennt auch Rust. */
 export const C2_READ_OPS = [
   OP_PRODUCTS_LIST, OP_PRODUCTS_GET,
   OP_CUSTOMERS_LIST, OP_CUSTOMERS_GET,
   OP_INVOICES_LIST, OP_INVOICES_GET,
+  OP_SUPPLIERS_LIST, OP_CATEGORIES_LIST,
+  OP_PURCHASES_LIST, OP_PURCHASES_GET,
+  OP_CONSIGNMENTS_LIST, OP_CONSIGNMENTS_GET,
+  OP_ORDERS_LIST, OP_ORDERS_GET,
 ] as const;
 
 /** Wie viele Zeilen eine Liste höchstens liefert, auch wenn jemand mehr verlangt. */
@@ -370,5 +393,284 @@ registerCommand(OP_INVOICES_GET, {
       lineTotal: num(l.line_total),
     }));
     return { ...invoiceDto(found[0]), notes: str(found[0].notes), lines };
+  },
+});
+
+// ── CENTRAL-C3E — Handelsbelege ────────────────────────────────────────────
+//
+// Dieselben drei Grundsätze wie oben, und ein vierter, der hier zum ersten Mal Geld kostet:
+// **was abgeleitet ist, rechnet der Primary.** Der offene Rest eines Einkaufs, das bezahlte
+// Geld eines Auftrags, die Sperre eines Auszahlungsmodells — nichts davon rechnet der Client
+// selbst nach, sonst gäbe es zwei Antworten auf dieselbe Frage.
+//
+// Und wo es einen Änderungsweg gibt (Auftrag, Kommission), reist die FASSUNG mit. Sie ist das
+// Einzige, womit ein Client später sagen kann, WORAUF sich seine Änderung bezieht.
+
+// ── Lieferanten ────────────────────────────────────────────────────────────
+
+const SUPPLIER_COLUMNS = 'id, name, phone, email, active';
+
+registerCommand(OP_SUPPLIERS_LIST, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const q = searchOf(p);
+    const like = `%${q.toLowerCase()}%`;
+    const list = q
+      ? rows(
+        `SELECT ${SUPPLIER_COLUMNS} FROM suppliers
+          WHERE branch_id = ? AND LOWER(name) LIKE ?
+          ORDER BY name ASC LIMIT ?`,
+        [branch, like, limitOf(p)],
+      )
+      : rows(`SELECT ${SUPPLIER_COLUMNS} FROM suppliers WHERE branch_id = ? ORDER BY name ASC LIMIT ?`,
+        [branch, limitOf(p)]);
+    return {
+      items: list.map((r) => ({
+        id: str(r.id),
+        name: str(r.name),
+        phone: str(r.phone),
+        email: str(r.email),
+        // Ein stillgelegter Lieferant wird nicht versteckt, sondern benannt: eine Lücke in der
+        // Liste sähe aus wie ein Fehler, die Kennzeichnung ist eine Auskunft.
+        active: Number(r.active ?? 1) === 1,
+      })),
+      truncated: list.length >= limitOf(p),
+    };
+  },
+});
+
+// ── Kategorien ─────────────────────────────────────────────────────────────
+
+registerCommand(OP_CATEGORIES_LIST, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const list = rows(
+      `SELECT id, name, icon FROM categories WHERE branch_id = ? ORDER BY name ASC LIMIT ?`,
+      [branch, limitOf(p)],
+    );
+    return {
+      items: list.map((r) => ({ id: str(r.id), name: str(r.name), icon: str(r.icon) })),
+      truncated: list.length >= limitOf(p),
+    };
+  },
+});
+
+// ── Einkäufe ───────────────────────────────────────────────────────────────
+
+const PURCHASE_COLUMNS =
+  'id, purchase_number, supplier_id, status, total_amount, paid_amount, '
+  + 'purchase_date, created_at, updated_at';
+
+function purchaseDto(r: Row): CommandResult {
+  const total = num(r.total_amount);
+  const paid = num(r.paid_amount);
+  return {
+    id: str(r.id),
+    purchaseNumber: str(r.purchase_number),
+    supplierId: str(r.supplier_id),
+    status: str(r.status),
+    totalAmount: total,
+    paidAmount: paid,
+    // Was noch offen ist, rechnet der Primary. Die gespeicherte Spalte reist ABSICHTLICH nicht
+    // mit: zwei Quellen für dieselbe Zahl sind eine zu viel.
+    openAmount: Math.max(0, total - paid),
+    purchaseDate: str(r.purchase_date),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+registerCommand(OP_PURCHASES_LIST, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const q = searchOf(p);
+    const like = `%${q.toLowerCase()}%`;
+    const list = q
+      ? rows(
+        `SELECT ${PURCHASE_COLUMNS} FROM purchases
+          WHERE branch_id = ? AND LOWER(purchase_number) LIKE ?
+          ORDER BY COALESCE(purchase_date, created_at) DESC LIMIT ?`,
+        [branch, like, limitOf(p)],
+      )
+      : rows(
+        `SELECT ${PURCHASE_COLUMNS} FROM purchases WHERE branch_id = ?
+          ORDER BY COALESCE(purchase_date, created_at) DESC LIMIT ?`,
+        [branch, limitOf(p)],
+      );
+    return { items: list.map(purchaseDto), truncated: list.length >= limitOf(p) };
+  },
+});
+
+registerCommand(OP_PURCHASES_GET, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const id = idOf(p);
+    const found = rows(`SELECT ${PURCHASE_COLUMNS}, notes FROM purchases WHERE id = ? AND branch_id = ?`, [id, branch]);
+    if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such purchase in this branch');
+    const lines = rows(
+      `SELECT id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_amount
+         FROM purchase_lines WHERE purchase_id = ? ORDER BY position ASC`,
+      [id],
+    ).map((l) => ({
+      id: str(l.id),
+      productId: str(l.product_id),
+      description: str(l.description),
+      quantity: l.quantity === null ? 1 : num(l.quantity),
+      unitPrice: num(l.unit_price),
+      lineTotal: num(l.line_total),
+      taxScheme: str(l.tax_scheme),
+      vatAmount: num(l.vat_amount),
+    }));
+    const payments = rows(
+      'SELECT id, amount, method, paid_at FROM purchase_payments WHERE purchase_id = ? ORDER BY paid_at ASC',
+      [id],
+    ).map((x) => ({ id: str(x.id), amount: num(x.amount), method: str(x.method), paidAt: str(x.paid_at) }));
+    return { ...purchaseDto(found[0]), notes: str(found[0].notes), lines, payments };
+  },
+});
+
+// ── Kommissionen ───────────────────────────────────────────────────────────
+
+const CONSIGNMENT_COLUMNS =
+  'id, consignment_number, consignor_id, product_id, agreed_price, minimum_price, commission_rate, '
+  + 'commission_type, commission_value, excess_split_pct, status, agreement_date, expiry_date, '
+  + 'payout_status, payout_paid_amount, sale_price, commission_amount, payout_amount, invoice_id, '
+  + 'updated_at, revision';
+
+function consignmentDto(r: Row): CommandResult {
+  return {
+    id: str(r.id),
+    consignmentNumber: str(r.consignment_number),
+    consignorId: str(r.consignor_id),
+    productId: str(r.product_id),
+    agreedPrice: num(r.agreed_price),
+    minimumPrice: r.minimum_price === null ? null : num(r.minimum_price),
+    // Modell und Parameter gehören zusammen — getrennt gelesen ergäben sie eine Abrechnung, die
+    // es so nie gab.
+    payoutModel: str(r.commission_type),
+    commissionRate: num(r.commission_rate),
+    excessSplitPct: r.excess_split_pct === null ? null : num(r.excess_split_pct),
+    status: str(r.status),
+    agreementDate: str(r.agreement_date),
+    expiryDate: str(r.expiry_date),
+    payoutStatus: str(r.payout_status),
+    // Die Sperre kommt aus der Domäne, nicht aus einer Nachbildung im Client.
+    payoutLocked: payoutModelLock(rowToConsignment(r)).locked,
+    revision: num(r.revision),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+registerCommand(OP_CONSIGNMENTS_LIST, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const q = searchOf(p);
+    const like = `%${q.toLowerCase()}%`;
+    const list = q
+      ? rows(
+        `SELECT ${CONSIGNMENT_COLUMNS} FROM consignments
+          WHERE branch_id = ? AND LOWER(consignment_number) LIKE ?
+          ORDER BY COALESCE(agreement_date, created_at) DESC LIMIT ?`,
+        [branch, like, limitOf(p)],
+      )
+      : rows(
+        `SELECT ${CONSIGNMENT_COLUMNS} FROM consignments WHERE branch_id = ?
+          ORDER BY COALESCE(agreement_date, created_at) DESC LIMIT ?`,
+        [branch, limitOf(p)],
+      );
+    return { items: list.map(consignmentDto), truncated: list.length >= limitOf(p) };
+  },
+});
+
+registerCommand(OP_CONSIGNMENTS_GET, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const found = rows(`SELECT ${CONSIGNMENT_COLUMNS}, notes FROM consignments WHERE id = ? AND branch_id = ?`, [idOf(p), branch]);
+    if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such consignment in this branch');
+    return { ...consignmentDto(found[0]), notes: str(found[0].notes) };
+  },
+});
+
+// ── Aufträge ───────────────────────────────────────────────────────────────
+
+const ORDER_COLUMNS =
+  'id, order_number, customer_id, status, type, agreed_price, deposit_amount, remaining_amount, '
+  + 'supplier_name, supplier_price, expected_margin, expected_delivery, requested_brand, '
+  + 'requested_model, created_at, updated_at, revision';
+
+function orderDto(r: Row): CommandResult {
+  return {
+    id: str(r.id),
+    orderNumber: str(r.order_number),
+    customerId: str(r.customer_id),
+    status: str(r.status),
+    type: str(r.type),
+    agreedPrice: r.agreed_price === null ? null : num(r.agreed_price),
+    depositAmount: num(r.deposit_amount),
+    remainingAmount: num(r.remaining_amount),
+    supplierName: str(r.supplier_name),
+    supplierPrice: r.supplier_price === null ? null : num(r.supplier_price),
+    expectedMargin: r.expected_margin === null ? null : num(r.expected_margin),
+    expectedDelivery: str(r.expected_delivery),
+    requestedBrand: str(r.requested_brand),
+    requestedModel: str(r.requested_model),
+    revision: num(r.revision),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+registerCommand(OP_ORDERS_LIST, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const q = searchOf(p);
+    const like = `%${q.toLowerCase()}%`;
+    const list = q
+      ? rows(
+        `SELECT ${ORDER_COLUMNS} FROM orders
+          WHERE branch_id = ? AND (LOWER(order_number) LIKE ? OR LOWER(COALESCE(requested_brand,'')) LIKE ?)
+          ORDER BY created_at DESC LIMIT ?`,
+        [branch, like, like, limitOf(p)],
+      )
+      : rows(`SELECT ${ORDER_COLUMNS} FROM orders WHERE branch_id = ? ORDER BY created_at DESC LIMIT ?`,
+        [branch, limitOf(p)]);
+    return { items: list.map(orderDto), truncated: list.length >= limitOf(p) };
+  },
+});
+
+registerCommand(OP_ORDERS_GET, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const id = idOf(p);
+    const found = rows(`SELECT ${ORDER_COLUMNS}, notes FROM orders WHERE id = ? AND branch_id = ?`, [id, branch]);
+    if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such order in this branch');
+    const lines = rows(
+      `SELECT id, product_id, description, quantity, unit_price, line_total, position, status, is_customer_facing
+         FROM order_lines WHERE order_id = ? ORDER BY position ASC`,
+      [id],
+    ).map((l) => ({
+      id: str(l.id),
+      productId: str(l.product_id),
+      description: str(l.description),
+      quantity: l.quantity === null ? 1 : num(l.quantity),
+      unitPrice: num(l.unit_price),
+      lineTotal: num(l.line_total),
+      status: str(l.status),
+      isCustomerFacing: Number(l.is_customer_facing ?? 1) === 1,
+    }));
+    const paid = rows('SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ?', [id]);
+    return {
+      ...orderDto(found[0]),
+      notes: str(found[0].notes),
+      lines,
+      // Auch hier summiert der Primary. Der Client zeigt nur.
+      paidAmount: num(paid[0]?.s),
+    };
   },
 });

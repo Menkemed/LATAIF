@@ -18,8 +18,14 @@ import { ClientInvoiceCreate } from '@/components/client/ClientInvoiceCreate';
 import { ClientCustomerForm } from '@/components/client/ClientCustomerForm';
 import { ClientProductForm } from '@/components/client/ClientProductForm';
 import { ClientInvoiceDetail } from '@/components/client/ClientInvoiceDetail';
+import { ClientPurchaseForm } from '@/components/client/ClientPurchaseForm';
+import { ClientConsignmentForm } from '@/components/client/ClientConsignmentForm';
+import { ClientOrderForm } from '@/components/client/ClientOrderForm';
 
-type Area = 'products' | 'customers' | 'invoices' | 'new-invoice' | 'new-customer' | 'new-product';
+type Area =
+  | 'products' | 'customers' | 'invoices' | 'purchases' | 'consignments' | 'orders'
+  | 'new-invoice' | 'new-customer' | 'new-product'
+  | 'new-purchase' | 'new-consignment' | 'new-order';
 
 interface ListState {
   items: Array<Record<string, unknown>>;
@@ -35,6 +41,14 @@ const AREAS: Array<{ key: Area; label: string; op: string | null }> = [
   { key: 'new-invoice', label: 'New invoice', op: null },
   { key: 'new-customer', label: 'New client', op: null },
   { key: 'new-product', label: 'New item', op: null },
+  // CENTRAL-C3E — die drei Handelsbelege. Lesen und Anlegen sind getrennte Bereiche, damit das
+  // Ändern IMMER an einer gelesenen Zeile beginnt: eine frei eingetippte Kennung gibt es nicht.
+  { key: 'purchases', label: 'Purchases', op: 'purchases.list' },
+  { key: 'consignments', label: 'Consignments', op: 'consignments.list' },
+  { key: 'orders', label: 'Orders', op: 'orders.list' },
+  { key: 'new-purchase', label: 'New purchase', op: null },
+  { key: 'new-consignment', label: 'New consignment', op: null },
+  { key: 'new-order', label: 'New order', op: null },
 ];
 
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -57,6 +71,9 @@ export function ClientShell() {
   // Welche Rechnung gerade offen ist. Sie beginnt IMMER an einer gelesenen Zeile — es gibt kein
   // Feld, in das jemand eine Kennung tippen koennte.
   const [openInvoiceId, setOpenInvoiceId] = useState<string | null>(null);
+  // Dieselbe Regel für Kommission und Auftrag: das Ändern beginnt an einer gelesenen Zeile.
+  const [editConsignmentId, setEditConsignmentId] = useState<string | null>(null);
+  const [editOrderId, setEditOrderId] = useState<string | null>(null);
 
   const areaOp = AREAS.find((a) => a.key === area)!.op;
 
@@ -97,6 +114,7 @@ export function ClientShell() {
             onClick={() => {
               setArea(a.key); setDetail(null); setQuery('');
               setEditCustomerId(null); setEditProductId(null); setOpenInvoiceId(null);
+              setEditConsignmentId(null); setEditOrderId(null);
             }}
             style={chip(area === a.key)}>{a.label}</button>
         ))}
@@ -106,7 +124,7 @@ export function ClientShell() {
           style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #D5D9DE', fontSize: 12 }} />
         <button data-client-refresh onClick={() => setTick((t) => t + 1)} style={chip(false)}>Refresh</button>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6B7280' }}>
-          reads + invoice + clients + items + payments · {cfg.serverUrl}
+          reads + invoice + clients + items + payments + purchases + consignments + orders · {cfg.serverUrl}
         </span>
         <button onClick={() => { leaveClientMode(); window.location.reload(); }} style={chip(false)}>Disconnect</button>
       </div>
@@ -140,6 +158,29 @@ export function ClientShell() {
           onClose={() => { setOpenInvoiceId(null); setDetail(null); setTick((t) => t + 1); }}
         />
       )}
+      {area === 'new-purchase' && (
+        <ClientPurchaseForm onSaved={() => { setArea('purchases'); setTick((t) => t + 1); }} />
+      )}
+      {area === 'new-consignment' && (
+        <ClientConsignmentForm onSaved={() => { setArea('consignments'); setTick((t) => t + 1); }} />
+      )}
+      {editConsignmentId && (
+        <ClientConsignmentForm
+          consignmentId={editConsignmentId}
+          onSaved={() => { setEditConsignmentId(null); setDetail(null); setTick((t) => t + 1); }}
+          onCancel={() => setEditConsignmentId(null)}
+        />
+      )}
+      {area === 'new-order' && (
+        <ClientOrderForm onSaved={() => { setArea('orders'); setTick((t) => t + 1); }} />
+      )}
+      {editOrderId && (
+        <ClientOrderForm
+          orderId={editOrderId}
+          onSaved={() => { setEditOrderId(null); setDetail(null); setTick((t) => t + 1); }}
+          onCancel={() => setEditOrderId(null)}
+        />
+      )}
       {busy && !list && <p style={{ fontSize: 12, color: '#6B7280' }}>Loading…</p>}
 
       {list?.stock && (
@@ -164,7 +205,8 @@ export function ClientShell() {
         </div>
       )}
 
-      {detail && !editCustomerId && !editProductId && !openInvoiceId && (
+      {detail && !editCustomerId && !editProductId && !openInvoiceId
+        && !editConsignmentId && !editOrderId && (
         <div data-client-detail style={{ marginTop: 16, padding: 14, border: '1px solid #D5D9DE', borderRadius: 10 }}>
           <button onClick={() => setDetail(null)} style={chip(false)}>Close</button>
           {area === 'customers' && (
@@ -179,6 +221,16 @@ export function ClientShell() {
             <button data-client-open-invoice style={{ ...chip(true), marginLeft: 8 }}
               onClick={() => setOpenInvoiceId(s(detail.id))}>Edit / pay</button>
           )}
+          {area === 'consignments' && (
+            <button data-client-edit-consignment style={{ ...chip(true), marginLeft: 8 }}
+              onClick={() => setEditConsignmentId(s(detail.id))}>Edit</button>
+          )}
+          {area === 'orders' && (
+            <button data-client-edit-order style={{ ...chip(true), marginLeft: 8 }}
+              onClick={() => setEditOrderId(s(detail.id))}>Edit</button>
+          )}
+          {/* Ein Einkauf hat KEINEN Ändern-Knopf: es gibt im Haus keine Bearbeitung eines
+              Einkaufs, und ein Knopf, der nichts kann, wäre ein Versprechen. */}
           <pre data-client-detail-json style={{ fontSize: 11, whiteSpace: 'pre-wrap', marginTop: 10 }}>
             {JSON.stringify(detail, null, 2)}
           </pre>
@@ -192,8 +244,27 @@ export function ClientShell() {
 function rowLabel(area: Area, r: Record<string, unknown>): string {
   if (area === 'products') return `${s(r.brand)} ${s(r.name)} · ${s(r.sku)} · x${s(r.quantity ?? 1)}`;
   if (area === 'customers') return `${s(r.firstName)} ${s(r.lastName)} ${s(r.company) ? '· ' + s(r.company) : ''}`;
+  if (area === 'purchases') {
+    return `${s(r.purchaseNumber)} · ${s(r.status)} · ${fmt(Number(r.totalAmount) || 0)} BHD · open ${fmt(Number(r.openAmount) || 0)}`;
+  }
+  if (area === 'consignments') {
+    return `${s(r.consignmentNumber)} · ${s(r.payoutModel)} · ${fmt(Number(r.agreedPrice) || 0)} BHD · ${s(r.status)}`;
+  }
+  if (area === 'orders') {
+    return `${s(r.orderNumber)} · ${s(r.status)} · ${fmt(Number(r.agreedPrice) || 0)} BHD · open ${fmt(Number(r.remainingAmount) || 0)}`;
+  }
   return `${s(r.invoiceNumber)} · ${s(r.status)} · ${fmt(Number(r.grossAmount) || 0)} BHD`;
 }
+
+/** Welcher Lesevorgang hinter einer Zeile steht. Fehlt einer, gibt es keine Detailansicht. */
+const DETAIL_OPS: Partial<Record<Area, string>> = {
+  products: 'products.get',
+  customers: 'customers.get',
+  invoices: 'invoices.get',
+  purchases: 'purchases.get',
+  consignments: 'consignments.get',
+  orders: 'orders.get',
+};
 
 async function openDetail(
   area: Area,
@@ -201,7 +272,9 @@ async function openDetail(
   setDetail: (v: Record<string, unknown> | null) => void,
   setError: (v: string | null) => void,
 ): Promise<void> {
-  const op = area === 'products' ? 'products.get' : area === 'customers' ? 'customers.get' : 'invoices.get';
+  const op = DETAIL_OPS[area];
+  // Ein Bereich ohne Lesevorgang hat auch keine Detailansicht — es wird nichts geraten.
+  if (!op) return;
   try {
     setDetail(await remoteRead<Record<string, unknown>>(op, { id }));
   } catch (e) {

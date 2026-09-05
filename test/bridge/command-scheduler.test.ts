@@ -354,8 +354,8 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 // mitgenommen.
 {
   const { ALLOWED_MUTATIONS } = await import('../../src/core/bridge/command-registry.ts');
-  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
-    `GATE genau diese sieben veraendernden Namen sind freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
+  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
+    `GATE genau diese zwoelf veraendernden Namen sind freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
 
   for (const name of ['invoice.save', 'sale.commit', 'irgendwas.ganz.neu']) {
     let threw: string | null = null;

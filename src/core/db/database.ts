@@ -1803,6 +1803,36 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE invoices SET revision = OLD.revision + 1 WHERE id = NEW.id;
        END`,
+
+    // ── CENTRAL-C3E — dieselbe Fassung fuer Auftrag und Kommission ────────────
+    //
+    // Beide bekommen einen Fern-Aenderungsweg, und beide hatten bisher GAR KEINE Absicherung
+    // gegen das Ueberschreiben einer fremden Aenderung: `updateOrder` und `updateConsignment`
+    // schreiben die genannten Spalten bedingungslos. Am Primary allein faellt das kaum auf — ein
+    // Mensch, ein Bildschirm. Mit einem zweiten Rechner ist es der Regelfall.
+    //
+    // Es wird bewusst DERSELBE Vertrag genommen wie bei der Rechnung und kein zweiter erfunden:
+    // eine Ganzzahl, von einem Trigger gefuehrt, streng steigend, unteilbar mit der Wirkung.
+    // `updated_at` waere auch hier untauglich — zwei `toISOString()` im selben Millisekundenfenster
+    // sind derselbe Wert, und genau im Rennen versagte die Sicherung.
+    `ALTER TABLE orders ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_orders_revision`,
+    `CREATE TRIGGER trg_orders_revision
+       AFTER UPDATE ON orders
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE orders SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE consignments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_consignments_revision`,
+    `CREATE TRIGGER trg_consignments_revision
+       AFTER UPDATE ON consignments
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE consignments SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

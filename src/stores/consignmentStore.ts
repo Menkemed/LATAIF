@@ -129,7 +129,10 @@ interface ConsignmentStore {
   deleteConsignment: (id: string) => void;
 }
 
-function rowToConsignment(row: Record<string, unknown>): Consignment {
+// CENTRAL-C3E — auch der Lesebefehl der Bruecke bildet eine Zeile auf einen Consignment ab. Er
+// tut es mit DIESER Funktion statt mit einer zweiten: die Sperre des Auszahlungsmodells wird gegen
+// dieselbe Form gefragt, die auch der Store benutzt.
+export function rowToConsignment(row: Record<string, unknown>): Consignment {
   return {
     id: row.id as string,
     consignmentNumber: row.consignment_number as string,

@@ -79,6 +79,27 @@ pub const OP_PRODUCTS_UPDATE: &str = "products.update";
 pub const OP_INVOICES_UPDATE: &str = "invoices.update";
 pub const OP_INVOICES_RECORD_PAYMENT: &str = "invoices.record_payment";
 
+/// CENTRAL-C3E — Handelsbelege lesen: Lieferant, Einkauf, Kommission, Auftrag. Ohne diese
+/// Auskuenfte koennte ein Client die drei Belege gar nicht anlegen — er haette keine Auswahl.
+pub const OP_SUPPLIERS_LIST: &str = "suppliers.list";
+pub const OP_CATEGORIES_LIST: &str = "categories.list";
+pub const OP_PURCHASES_LIST: &str = "purchases.list";
+pub const OP_PURCHASES_GET: &str = "purchases.get";
+pub const OP_CONSIGNMENTS_LIST: &str = "consignments.list";
+pub const OP_CONSIGNMENTS_GET: &str = "consignments.get";
+pub const OP_ORDERS_LIST: &str = "orders.list";
+pub const OP_ORDERS_GET: &str = "orders.get";
+
+/// CENTRAL-C3E — und die fuenf veraendernden. Der Einkauf hat nur ein Anlegen, weil es im Haus
+/// keine Bearbeitung eines Einkaufs GIBT; Kommission und Auftrag haben beides. Storno,
+/// Rueckgabe, Verkauf, Auszahlung und die Umwandlung eines Auftrags in eine Rechnung stehen
+/// ABSICHTLICH nicht hier: jede davon ist ein eigener Vorgang mit eigenen Beweisen.
+pub const OP_PURCHASES_CREATE: &str = "purchases.create";
+pub const OP_CONSIGNMENTS_CREATE: &str = "consignments.create";
+pub const OP_CONSIGNMENTS_UPDATE: &str = "consignments.update";
+pub const OP_ORDERS_CREATE: &str = "orders.create";
+pub const OP_ORDERS_UPDATE: &str = "orders.update";
+
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
     OP_PROBE,
@@ -95,6 +116,19 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PRODUCTS_UPDATE,
     OP_INVOICES_UPDATE,
     OP_INVOICES_RECORD_PAYMENT,
+    OP_SUPPLIERS_LIST,
+    OP_CATEGORIES_LIST,
+    OP_PURCHASES_LIST,
+    OP_PURCHASES_GET,
+    OP_CONSIGNMENTS_LIST,
+    OP_CONSIGNMENTS_GET,
+    OP_ORDERS_LIST,
+    OP_ORDERS_GET,
+    OP_PURCHASES_CREATE,
+    OP_CONSIGNMENTS_CREATE,
+    OP_CONSIGNMENTS_UPDATE,
+    OP_ORDERS_CREATE,
+    OP_ORDERS_UPDATE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

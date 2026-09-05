@@ -562,12 +562,13 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 // ── 10) Die Zulassungsliste: genau sieben Namen ───────────────────────────
 {
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+  await import('../../src/core/bridge/commercial-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
-  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
-    `ALLOWLIST genau diese sieben Mutationen (${mutations.join(', ')})`);
-  ok(known.length === 14 && reads.length === 6 && known.includes('bridge.probe'),
+  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
+    `ALLOWLIST genau diese zwoelf Mutationen (${mutations.join(', ')})`);
+  ok(known.length === 27 && reads.length === 14 && known.includes('bridge.probe'),
     `ALLOWLIST 1 Probe + 6 Reads + 7 Mutationen = 14 (${known.length}: ${known.join(', ')})`);
   ok(!mutations.some((o) => o.endsWith('.delete')), 'ALLOWLIST kein Loeschen');
 
@@ -580,7 +581,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 14, 'ALLOWLIST Rust kennt dieselben vierzehn Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 27, 'ALLOWLIST Rust kennt dieselben siebenundzwanzig Namen');
   ok(/OP_INVOICES_UPDATE: &str = "invoices.update"/.test(rs)
     && /OP_INVOICES_RECORD_PAYMENT: &str = "invoices.record_payment"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');

@@ -252,14 +252,14 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         assert_eq!(err.http_status(), 400, "das ist ein Fehler des Aufrufers");
     }
     assert_eq!(sink.count(), 0, "und nichts davon wurde zugestellt");
-    // C2 hat sechs LESEVORGAENGE dazugelegt, C3B eine veraendernde Operation, C3C zwei weitere.
-    // Was zaehlt, ist nicht die Anzahl, sondern dass jeder Name darauf einzeln durchdacht ist —
-    // und dass die Probe weiter dabei ist.
+    // C2 hat sechs LESEVORGAENGE dazugelegt, C3B eine veraendernde Operation, C3C zwei weitere,
+    // C3D zwei, C3E sieben Lesevorgaenge und fuenf Buchungen. Was zaehlt, ist nicht die Anzahl,
+    // sondern dass jeder Name darauf einzeln durchdacht ist — und dass die Probe weiter dabei ist.
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        14,
-        "Probe, sechs Lesevorgaenge, Rechnung anlegen/aendern/bezahlen, zwei Kunden-, zwei Produktoperationen"
+        27,
+        "Probe, dreizehn Lesevorgaenge und zwoelf Buchungen"
     );
     for op in [
         OP_INVOICES_CREATE,
@@ -269,6 +269,11 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         OP_PRODUCTS_UPDATE,
         OP_INVOICES_UPDATE,
         OP_INVOICES_RECORD_PAYMENT,
+        OP_PURCHASES_CREATE,
+        OP_CONSIGNMENTS_CREATE,
+        OP_CONSIGNMENTS_UPDATE,
+        OP_ORDERS_CREATE,
+        OP_ORDERS_UPDATE,
     ] {
         assert!(REMOTE_OPS.contains(&op), "die freigegebene Buchung {op} fehlt");
     }
@@ -286,8 +291,20 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
             &OP_PRODUCTS_UPDATE,
             &OP_INVOICES_UPDATE,
             &OP_INVOICES_RECORD_PAYMENT,
+            &OP_PURCHASES_CREATE,
+            &OP_CONSIGNMENTS_CREATE,
+            &OP_CONSIGNMENTS_UPDATE,
+            &OP_ORDERS_CREATE,
+            &OP_ORDERS_UPDATE,
         ],
-        "und NUR diese sieben veraendern etwas — kein Loeschen von aussen"
+        "und NUR diese zwoelf veraendern etwas — kein Loeschen von aussen, kein Storno, keine
+         Auszahlung, keine Umwandlung eines Auftrags in eine Rechnung"
+    );
+    // Der Einkauf hat KEIN Aendern — im Haus gibt es keine Bearbeitung eines Einkaufs, und eine
+    // aus der Ferne zu bauen hiesse, die Bewertung von Ware ein zweites Mal zu schreiben.
+    assert!(
+        !REMOTE_OPS.contains(&"purchases.update"),
+        "ein Einkauf wird nicht aus der Ferne bearbeitet"
     );
 }
 
@@ -581,9 +598,9 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     let registry = include_str!("../../src/core/bridge/command-registry.ts");
     assert!(
         registry.contains(
-            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n];"
+            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n];"
         ),
-        "genau diese sieben veraendernden Namen sind freigegeben"
+        "genau diese zwoelf veraendernden Namen sind freigegeben"
     );
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),

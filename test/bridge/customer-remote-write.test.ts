@@ -319,13 +319,14 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   await import('../../src/core/bridge/customer-commands.ts');
   await import('../../src/core/bridge/product-commands.ts');
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+  await import('../../src/core/bridge/commercial-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
-  ok(mutations.length === 7 && mutations.includes('invoices.create')
+  ok(mutations.length === 12 && mutations.includes('invoices.create')
     && mutations.includes('customers.create') && mutations.includes('customers.update'),
     `ALLOWLIST genau sieben Mutationen (${mutations.join(', ')})`);
-  ok(known.length === 14 && reads.length === 6 && known.includes('bridge.probe'),
+  ok(known.length === 27 && reads.length === 14 && known.includes('bridge.probe'),
     `ALLOWLIST 1 Probe + 6 Reads + 7 Mutationen = 14 (${known.length}: ${known.join(', ')})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
@@ -337,7 +338,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 14, 'ALLOWLIST Rust kennt dieselben vierzehn Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 27, 'ALLOWLIST Rust kennt dieselben siebenundzwanzig Namen');
   ok(/OP_CUSTOMERS_CREATE: &str = "customers.create"/.test(rs) && /OP_CUSTOMERS_UPDATE: &str = "customers.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

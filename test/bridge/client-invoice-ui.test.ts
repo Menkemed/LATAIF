@@ -143,10 +143,16 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   ok(customerLabel({ id: 'x' }) === 'x' && productLabel({ id: 'y' }) === 'y',
     'READS und ohne Namen bleibt wenigstens die Kennung stehen');
 
-  // Kein neuer Lesebefehl war noetig.
+  // C3E hat sieben Lesevorgaenge dazugelegt (Lieferant, Kategorie, Einkauf, Kommission,
+  // Auftrag). Fuer DIESES Formular aendert das nichts: es benutzt weiterhin nur die drei
+  // Auswahlquellen, die es schon hatte — genau das wird hier festgehalten.
   const reads = src('src/core/bridge/read-commands.ts');
-  ok((reads.match(/^registerCommand\(/gm) || []).length === 6,
-    'READS es sind weiterhin sechs Lesevorgaenge — das Formular brauchte keinen neuen');
+  ok((reads.match(/^registerCommand\(/gm) || []).length === 14,
+    'READS die Lesevorgaenge sind auf vierzehn gewachsen…');
+  const formSrc = src('src/components/client/ClientInvoiceCreate.tsx');
+  const usedByForm = [...formSrc.matchAll(/remoteRead[^(]*\(\s*'([a-z_.]+)'/g)].map((m) => m[1]);
+  ok(usedByForm.every((o) => ['products.list', 'customers.list', 'invoices.list', 'invoices.get'].includes(o)),
+    `READS …aber das Rechnungsformular brauchte keinen neuen (${usedByForm.join(', ') || 'keiner'})`);
 }
 
 // ── 3) Was das Formular schickt, ist genau das, was der Primary erlaubt ───
@@ -251,10 +257,11 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   await import('../../src/core/bridge/customer-commands.ts');
   await import('../../src/core/bridge/product-commands.ts');
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+  await import('../../src/core/bridge/commercial-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 14 && reads.length === 6 && known.includes('bridge.probe'),
-    `REGISTRY 1 Probe + 6 Reads + 7 Mutationen (${known.join(', ')})`);
+  ok(known.length === 27 && reads.length === 14 && known.includes('bridge.probe'),
+    `REGISTRY 1 Probe + 14 Reads + 12 Mutationen (${known.join(', ')})`);
   ok(registry.ALLOWED_MUTATIONS.includes('invoices.create'),
     `REGISTRY der Name des Formulars steht darauf (${registry.ALLOWED_MUTATIONS.join(', ')})`);
   const form = code(FORM);
