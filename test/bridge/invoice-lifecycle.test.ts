@@ -155,7 +155,7 @@ function deps(db: Db) {
 
 const remaining = (db: Db, lot: string): number => n(db, 'SELECT qty_remaining FROM stock_lots WHERE id = ?', [lot]);
 const invState = (db: Db, id: string) => db.exec(
-  'SELECT invoice_number, status, gross_amount, paid_amount, updated_at FROM invoices WHERE id = ?', [id],
+  'SELECT invoice_number, status, gross_amount, paid_amount, revision FROM invoices WHERE id = ?', [id],
 )[0]?.values?.[0] ?? [];
 
 async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, productId: string, qty = 1, price = 150) {
@@ -198,7 +198,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   ok(/restoreLot\(/.test(edit) && /consumeLot\(/.test(edit), 'SCOPE …Lose zurueckgibt und neu verbraucht');
   ok(/postInvoiceIssued\(/.test(edit), 'SCOPE …neu bucht');
   ok(/An edit reason is required/.test(edit), 'SCOPE …und einen Grund verlangt');
-  ok(!/updated_at\s*=\s*\?\s*AND\s*updated_at/.test(edit) && !/expectedUpdatedAt/.test(edit),
+  ok(!/updated_at\s*=\s*\?\s*AND\s*updated_at/.test(edit) && !/expectedRevision/.test(edit),
     'SCOPE lokal gibt es KEINE Stale-Sicherung — deshalb baut der Fernauftrag eine eigene');
 
   const pay = inv.slice(payAt, inv.indexOf('  applyCreditToInvoice: (invoiceId', payAt));
@@ -223,26 +223,26 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
     ['ledger', { ledger: [] }],
   ] as const) {
     let threw: string | null = null;
-    try { parseInvoiceUpdate({ id: 'i1', expectedUpdatedAt: NOW, reason: 'x', ...BODY, ...extra }); }
+    try { parseInvoiceUpdate({ id: 'i1', expectedRevision: 1, reason: 'x', ...BODY, ...extra }); }
     catch (e) { threw = String(e); }
     ok(threw !== null && new RegExp(field).test(threw), `AUTHORITY ${field} entscheidet der Primary (${threw})`);
   }
 
   for (const [what, raw] of [
-    ['ohne Kennung', { expectedUpdatedAt: NOW, reason: 'x', ...BODY }],
-    ['ohne gesehenen Stand', { id: 'i1', reason: 'x', ...BODY }],
-    ['ohne Grund', { id: 'i1', expectedUpdatedAt: NOW, ...BODY }],
-    ['leerer Grund', { id: 'i1', expectedUpdatedAt: NOW, reason: '   ', ...BODY }],
-    ['ohne Zeilen', { id: 'i1', expectedUpdatedAt: NOW, reason: 'x', customerId: 'cust-1', lines: [] }],
-    ['unbekanntes Feld', { id: 'i1', expectedUpdatedAt: NOW, reason: 'x', ...BODY, tip: 5 }],
-    ['Zahlung im Edit', { id: 'i1', expectedUpdatedAt: NOW, reason: 'x', ...BODY, deltaPayment: { amount: 5, method: 'cash' } }],
+    ['ohne Kennung', { expectedRevision: 1, reason: 'x', ...BODY }],
+    ['ohne gesehene Fassung', { id: 'i1', reason: 'x', ...BODY }],
+    ['ohne Grund', { id: 'i1', expectedRevision: 1, ...BODY }],
+    ['leerer Grund', { id: 'i1', expectedRevision: 1, reason: '   ', ...BODY }],
+    ['ohne Zeilen', { id: 'i1', expectedRevision: 1, reason: 'x', customerId: 'cust-1', lines: [] }],
+    ['unbekanntes Feld', { id: 'i1', expectedRevision: 1, reason: 'x', ...BODY, tip: 5 }],
+    ['Zahlung im Edit', { id: 'i1', expectedRevision: 1, reason: 'x', ...BODY, deltaPayment: { amount: 5, method: 'cash' } }],
   ] as const) {
     let threw: string | null = null;
     try { parseInvoiceUpdate(raw); } catch (e) { threw = String(e); }
     ok(threw !== null, `AUTHORITY ${what} wird abgewiesen (${threw})`);
   }
 
-  const good = parseInvoiceUpdate({ id: 'i1', expectedUpdatedAt: NOW, reason: '  Preis korrigiert  ', ...BODY });
+  const good = parseInvoiceUpdate({ id: 'i1', expectedRevision: 1, reason: '  Preis korrigiert  ', ...BODY });
   ok(good.reason === 'Preis korrigiert' && good.body.lines.length === 1,
     `AUTHORITY ein gueltiger Auftrag kommt durch (${JSON.stringify(good.reason)})`);
 
@@ -280,15 +280,15 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   const inv = await makeInvoice(d, '1', 'p1', 1, 150);
   ok(remaining(db, 'lot-p1') === 2, `SETUP ein Stueck ist verkauft (${remaining(db, 'lot-p1')})`);
   const before = invState(db, inv);
-  const seenAt = String(before[4]);
+  const seenAt = Number(before[4]);
   const savesBefore = state.saves;
 
   const edited = await runInvoiceUpdate(d, identity('2', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: seenAt, reason: 'Menge korrigiert',
+    id: inv, expectedRevision: seenAt, reason: 'Menge korrigiert',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 2, unitPrice: 150 }],
   });
   ok(edited.kind === 'ok', `EDIT die Aenderung geht durch (${JSON.stringify(edited)})`);
-  const v = (edited as { value: { grossAmount: number; updatedAt: string; status: string } }).value;
+  const v = (edited as { value: { grossAmount: number; revision: number; status: string } }).value;
 
   ok(n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [inv]) === v.grossAmount,
     'EDIT die Summe kommt vom Primary und steht so in der Datenbank');
@@ -301,11 +301,11 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
     'EDIT …mit genau dem Text des Menschen');
   ok(commandCount(db as never) === 2, 'EDIT der durable Nachweis steht');
   ok(state.saves > savesBefore, 'EDIT …und danach wurde gespeichert');
-  ok(v.updatedAt !== seenAt, 'EDIT der Stand ist ein neuer — der naechste Auftrag muss ihn nennen');
+  ok(v.revision > seenAt, 'EDIT die Fassung ist eine neue — der naechste Auftrag muss sie nennen');
 
   // Menge zurück: das Stück kommt in den Bestand.
   const back = await runInvoiceUpdate(d, identity('3', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: v.updatedAt, reason: 'Doch nur eines',
+    id: inv, expectedRevision: v.revision, reason: 'Doch nur eines',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, unitPrice: 150 }],
   });
   ok(back.kind === 'ok' && remaining(db, 'lot-p1') === 2,
@@ -313,7 +313,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   // Anderes Produkt: das alte Los wird frei, das neue verbraucht.
   const swapped = await runInvoiceUpdate(d, identity('4', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: String((back as { value: { updatedAt: string } }).value.updatedAt),
+    id: inv, expectedRevision: Number((back as { value: { revision: number } }).value.revision),
     reason: 'Falscher Artikel', customerId: 'cust-1',
     lines: [{ productId: 'p2', quantity: 1, unitPrice: 200 }],
   });
@@ -339,11 +339,11 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   seedProduct(db, 'p1', 5);
 
   const inv = await makeInvoice(d, '5', 'p1', 1, 150);
-  const seenAt = String(invState(db, inv)[4]);
+  const seenAt = Number(invState(db, inv)[4]);
 
   // Der Primary ändert die Rechnung — так wie es ein Mensch an PC1 täte.
   const first = await runInvoiceUpdate(d, identity('6', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: seenAt, reason: 'Primary korrigiert',
+    id: inv, expectedRevision: seenAt, reason: 'Primary korrigiert',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 2, unitPrice: 150 }],
   });
   ok(first.kind === 'ok', 'STALE der Primary aendert zuerst');
@@ -352,7 +352,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   // Der Client hatte den ALTEN Stand offen und speichert jetzt.
   const stale = await runInvoiceUpdate(d, identity('7', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: seenAt, reason: 'Client mit altem Stand',
+    id: inv, expectedRevision: seenAt, reason: 'Client mit altem Stand',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, unitPrice: 99 }],
   });
   ok(stale.kind === 'rejected' && (stale as { code: string }).code === 'INVOICE_CHANGED',
@@ -366,9 +366,9 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
     'STALE es wurde kein zweiter Aenderungsgrund geschrieben');
 
   // Mit dem FRISCHEN Stand geht derselbe Wunsch durch — der Mensch hat neu gelesen.
-  const fresh = String(invState(db, inv)[4]);
+  const fresh = Number(invState(db, inv)[4]);
   const retry = await runInvoiceUpdate(d, identity('8', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: fresh, reason: 'Client nach Neulesen',
+    id: inv, expectedRevision: fresh, reason: 'Client nach Neulesen',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, unitPrice: 99 }],
   });
   ok(retry.kind === 'ok', `STALE mit frischem Stand geht es (${JSON.stringify(retry)})`);
@@ -383,9 +383,9 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   const { deps: d } = deps(db);
   seedProduct(db, 'p1', 5);
   const inv = await makeInvoice(d, '9', 'p1', 1, 150);
-  const seenAt = String(invState(db, inv)[4]);
+  const seenAt = Number(invState(db, inv)[4]);
   const plan = {
-    id: inv, expectedUpdatedAt: seenAt, reason: 'Einmal',
+    id: inv, expectedRevision: seenAt, reason: 'Einmal',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 3, unitPrice: 150 }],
   };
 
@@ -508,7 +508,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   seedProduct(db, 'p1', 1);
 
   const missing = await runInvoiceUpdate(d, identity('18', 'invoices.update'), {
-    id: 'gibt-es-nicht', expectedUpdatedAt: NOW, reason: 'x',
+    id: 'gibt-es-nicht', expectedRevision: 1, reason: 'x',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, unitPrice: 10 }],
   });
   ok(missing.kind === 'rejected' && (missing as { code: string }).code === 'INVOICE_NOT_FOUND'
@@ -523,9 +523,9 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   // Bestand weg: das letzte Stueck ist verkauft, der Edit will ein zweites.
   const inv = await makeInvoice(d, '20', 'p1', 1, 150);
-  const seenAt = String(invState(db, inv)[4]);
+  const seenAt = Number(invState(db, inv)[4]);
   const noStock = await runInvoiceUpdate(d, identity('21', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: seenAt, reason: 'Mehr davon',
+    id: inv, expectedRevision: seenAt, reason: 'Mehr davon',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 2, unitPrice: 150 }],
   });
   ok(noStock.kind === 'rejected' && (noStock as { frozen: boolean }).frozen === true,
@@ -604,10 +604,10 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   // (b) Ohne die Stale-Pruefung KAEME der alte Stand durch: der Rumpf enthaelt ihn, und nur der
   //     Vergleich in der Transaktion faengt ihn.
-  const old = String(invState(db, inv)[4]);
+  const old = Number(invState(db, inv)[4]);
   store2.recordPayment(inv, 1, 'cash');            // der Primary aendert etwas → neuer Stand
   const blind = await runInvoiceUpdate(d, identity('23', 'invoices.update'), {
-    id: inv, expectedUpdatedAt: old, reason: 'blind',
+    id: inv, expectedRevision: old, reason: 'blind',
     customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, unitPrice: 1 }],
   });
   ok(blind.kind === 'rejected' && (blind as { code: string }).code === 'INVOICE_CHANGED',
@@ -617,7 +617,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   let forged = false;
   try {
     parseInvoiceUpdate({
-      id: inv, expectedUpdatedAt: NOW, reason: 'x', status: 'FINAL', paidAmount: 999,
+      id: inv, expectedRevision: 1, reason: 'x', status: 'FINAL', paidAmount: 999,
       customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, unitPrice: 1 }],
     });
   } catch { forged = true; }

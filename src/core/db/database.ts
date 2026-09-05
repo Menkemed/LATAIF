@@ -1776,6 +1776,33 @@ function runMigrations(database: Database): void {
       created_at TEXT NOT NULL,
       PRIMARY KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id)
     )`,
+
+    // ── CENTRAL-C3D FINAL — die Revision einer Rechnung ──────────────────────
+    //
+    // Der Zeitstempel taugt NICHT als Fassung. Gemessen: zwei aufeinanderfolgende
+    // `new Date().toISOString()` sind in 200 von 200 Fällen identisch — sql.js schreibt im
+    // Speicher, und zwei Vorgänge liegen mühelos in derselben Millisekunde. Ein optimistisches
+    // Sperren darauf wäre eine Sicherung, die genau dann versagt, wenn es eng wird.
+    //
+    // Also eine echte Fassung: eine Ganzzahl, die bei JEDER Änderung an der Rechnungszeile um
+    // eins steigt.
+    `ALTER TABLE invoices ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    // Der Zähler gehört der DATENBANK, nicht einem Aufrufer. Ein Trigger kann nicht vergessen
+    // werden — auch nicht von einem Schreibweg, den es heute noch nicht gibt —, und er läuft
+    // zwangsläufig in derselben SQL-Transaktion wie die Änderung, die ihn auslöst. Damit können
+    // Wirkung und Fassung nicht auseinanderfallen: was zurückgerollt wird, nimmt die Fassung mit.
+    `DROP TRIGGER IF EXISTS trg_invoices_revision`,
+    `CREATE TRIGGER trg_invoices_revision
+       AFTER UPDATE ON invoices
+       FOR EACH ROW
+       -- Die Bedingung schützt vor dem eigenen Nachschlag: der UPDATE im Rumpf ändert die
+       -- Fassung, und ohne sie könnte er sich (bei eingeschalteten rekursiven Triggern) selbst
+       -- erneut auslösen. Sie erlaubt außerdem einen Schreibweg, der die Fassung ausdrücklich
+       -- selbst setzt — heute gibt es keinen.
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE invoices SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

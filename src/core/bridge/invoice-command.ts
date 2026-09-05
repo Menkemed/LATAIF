@@ -138,7 +138,19 @@ export function parseInvoicePayload(raw: unknown): {
  * des HAUSES: das Steuerschema des Produkts, wenn der Client `auto` sagt, und die Einstandskosten
  * aus dem gewählten Los (sonst aus dem Produkt), niemals aus dem Rumpf.
  */
-export function buildInvoiceLines(lines: RemoteLine[]): InvoiceLineInput[] {
+export function buildInvoiceLines(
+  lines: RemoteLine[],
+  /**
+   * CENTRAL-C3D — Lose, die zusätzlich als verfügbar gelten, obwohl sie gerade leer sind.
+   *
+   * Beim ÄNDERN einer Rechnung hält SIE SELBST die Lose ihrer heutigen Zeilen; `editInvoice` legt
+   * sie zuerst zurück und nimmt sie dann neu. Ohne diese Ausnahme wäre die letzte Einheit eines
+   * Artikels nicht mehr editierbar — „nicht auf Lager", obwohl sie genau auf dieser Rechnung
+   * liegt. Beim ANLEGEN ist die Liste leer, und dort ändert sich damit nichts.
+   */
+  opts: { alsoConsumable?: string[] } = {},
+): InvoiceLineInput[] {
+  const alsoOk = new Set(opts.alsoConsumable ?? []);
   return lines.map((l, i) => {
     const rows = query('SELECT id, tax_scheme, purchase_price FROM products WHERE id = ?', [l.productId]);
     const product = rows[0];
@@ -161,11 +173,21 @@ export function buildInvoiceLines(lines: RemoteLine[]): InvoiceLineInput[] {
     // Restmenge > 0, älteste zuerst" steht an EINER Stelle, und das Formular belegt genauso vor
     // (`lots[0]`), wie hier gewählt wird.
     const open = getLotsWithPurchaseNumbers(l.productId);
+    // Ein Los, das DIESE Rechnung schon hält, zählt beim Ändern mit — mit seinen echten
+    // Einstandskosten aus der Datenbank, nicht mit einem gerateten Wert.
+    const heldRows = alsoOk.size > 0
+      ? (query(
+        `SELECT id, unit_cost FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED'`, [l.productId],
+      ) as Array<{ id?: unknown; unit_cost?: unknown }>)
+        .filter((r) => alsoOk.has(String(r.id ?? '')) && !open.some((o) => o.id === String(r.id ?? '')))
+        .map((r) => ({ id: String(r.id ?? ''), unitCost: Number(r.unit_cost) || 0 }))
+      : [];
+    const consumable = [...open, ...heldRows];
     let costBasis = Number(product.purchase_price) || 0;
     let lotId: string | null = null;
 
     if (l.lotId) {
-      const chosen = open.find((x) => x.id === l.lotId);
+      const chosen = consumable.find((x) => x.id === l.lotId);
       if (!chosen) {
         // Gehört das Los überhaupt zu diesem Produkt? Dann ist es leer oder storniert — ein
         // fachliches Nein. Gehört es nicht dazu, ist der Rumpf falsch, und das ist kein Urteil.
@@ -178,9 +200,9 @@ export function buildInvoiceLines(lines: RemoteLine[]): InvoiceLineInput[] {
     } else if (query('SELECT id FROM stock_lots WHERE product_id = ? LIMIT 1', [l.productId]).length > 0) {
       // Das Produkt WIRD über Lose geführt. Dann muss eines offen sein — sonst hinge die Zeile
       // loslos in der Luft, und die Bestandsprüfung überspringt lose Zeilen (die es zu Recht gibt).
-      if (open.length === 0) throw new CommandRejected('STOCK_UNAVAILABLE', STOCK_UNAVAILABLE_MESSAGE);
-      lotId = open[0].id;
-      costBasis = open[0].unitCost || costBasis;
+      if (consumable.length === 0) throw new CommandRejected('STOCK_UNAVAILABLE', STOCK_UNAVAILABLE_MESSAGE);
+      lotId = consumable[0].id;
+      costBasis = consumable[0].unitCost || costBasis;
     }
     // Ware ohne Lose (Reparaturleistung, Kommission vor dem Auto-Einkauf) bleibt wie bisher:
     // kein Los, keine Bestandsprüfung, Einstandskosten aus dem Produkt.

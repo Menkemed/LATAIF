@@ -296,7 +296,7 @@ registerCommand(OP_CUSTOMERS_GET, {
 // ── Rechnungen ─────────────────────────────────────────────────────────────
 const INVOICE_COLUMNS =
   'id, invoice_number, customer_id, status, currency, net_amount, vat_amount, gross_amount, '
-  + 'paid_amount, issued_at, due_at, created_at, updated_at';
+  + 'paid_amount, issued_at, due_at, created_at, updated_at, revision';
 
 function invoiceDto(r: Row): CommandResult {
   const gross = num(r.gross_amount);
@@ -315,8 +315,12 @@ function invoiceDto(r: Row): CommandResult {
     openAmount: Math.max(0, gross - paid),
     issuedAt: str(r.issued_at),
     dueAt: str(r.due_at),
-    // CENTRAL-C3D — der Stand, auf den sich eine Änderung bezieht. Ohne ihn könnte ein zweiter
-    // Rechner blind überschreiben, was der Primary inzwischen geändert hat.
+    // CENTRAL-C3D — die FASSUNG, auf die sich eine Änderung bezieht. Ohne sie könnte ein zweiter
+    // Rechner blind überschreiben, was der Primary inzwischen geändert hat. Ausdrücklich eine
+    // Ganzzahl und kein Zeitstempel: zwei Änderungen in derselben Millisekunde trügen denselben
+    // Zeitstempel, und die Sicherung versagte genau dann, wenn sie gebraucht wird.
+    revision: num(r.revision),
+    // Nur zur Anzeige.
     updatedAt: str(r.updated_at),
   };
 }

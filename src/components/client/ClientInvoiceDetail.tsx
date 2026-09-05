@@ -3,10 +3,10 @@
 // Das hier ist die erste Client-Oberfläche, die einen Vorgang MIT GESCHICHTE anfasst. Drei Dinge
 // stehen deshalb anders da als in den Anlege-Formularen:
 //
-//  1. **Der gesehene Stand fährt mit.** Was geladen wurde, trägt einen Zeitstempel
-//     (`updatedAt`), und der geht bei jeder Änderung mit. Hat der Primary die Rechnung
-//     inzwischen angefasst, weist er die Änderung ab — statt sie still zu überschreiben. Danach
-//     lädt diese Ansicht neu und der Mensch entscheidet noch einmal.
+//  1. **Die gesehene Fassung fährt mit.** Was geladen wurde, trägt eine Fassungsnummer
+//     (`revision`), und die geht bei jeder Änderung mit. Hat der Primary die Rechnung inzwischen
+//     angefasst, ist seine Fassung höher und er weist die Änderung ab — statt sie still zu
+//     überschreiben. Danach lädt diese Ansicht neu und der Mensch entscheidet noch einmal.
 //  2. **Ein Änderungsgrund ist Pflicht**, genau wie am Primary. Ohne ihn ist der Knopf aus; und
 //     der Primary würde ihn ohnehin abweisen.
 //  3. **Ändern und Bezahlen sind zwei Vorgänge**, jeder mit eigenem Vorsatz und eigener Kennung.
@@ -36,6 +36,8 @@ export interface InvoiceView {
   paidAmount: number;
   openAmount: number;
   issuedAt: string;
+  /** Die Fassung, gegen die eine Änderung gilt. */
+  revision: number;
   updatedAt: string;
   notes?: string;
   lines: Array<{ id: string; productId: string; description: string; quantity: number; unitPrice: number; lineTotal: number }>;
@@ -48,6 +50,7 @@ export interface LifecycleValue {
   grossAmount: number;
   paidAmount: number;
   openAmount: number;
+  revision: number;
   updatedAt: string;
   paymentId?: string;
   replayed?: boolean;
@@ -118,8 +121,8 @@ export function ClientInvoiceDetail({ invoiceId, onClose, read = remoteRead }: C
       const attempt = editCtl.beginAttempt();
       const out = await attempt.send(buildUpdateRequest({
         id: view.id,
-        // Der Stand, den DIESE Ansicht geladen hat — nicht der, den der Primary gerade hat.
-        expectedUpdatedAt: view.updatedAt,
+        // Die Fassung, die DIESE Ansicht geladen hat — nicht die, die der Primary gerade hat.
+        expectedRevision: view.revision,
         reason,
         customerId: view.customerId,
         lines,

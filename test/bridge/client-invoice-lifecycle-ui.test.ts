@@ -106,14 +106,15 @@ const { buildUpdateRequest } = await import('../../src/components/client/client-
 // ── 2) Was sie schickt, erlaubt der Primary — und mehr nicht ──────────────
 {
   const body = buildUpdateRequest({
-    id: 'inv-1', expectedUpdatedAt: '2026-09-06T09:00:00.000Z', reason: '  Preis korrigiert  ',
+    id: 'inv-1', expectedRevision: 7, reason: '  Preis korrigiert  ',
     customerId: 'cust-1',
     lines: [{ productId: 'p1', quantity: 2.9, unitPrice: 150 }],
     notes: '   ',
   });
   const keys = Object.keys(body).sort().join(',');
-  ok(keys === 'customerId,expectedUpdatedAt,id,lines,reason',
-    `REQUEST nur Auswahl, gesehener Stand und Grund (${keys})`);
+  ok(keys === 'customerId,expectedRevision,id,lines,reason',
+    `REQUEST nur Auswahl, gesehene Fassung und Grund (${keys})`);
+  ok(body.expectedRevision === 7, 'REQUEST …und zwar genau die gelesene Fassung, unveraendert');
   ok(body.reason === 'Preis korrigiert', 'REQUEST der Grund wird getrimmt, nicht erfunden');
   ok(!('notes' in body), 'REQUEST eine leere Notiz wird gar nicht erst mitgeschickt');
   const line = (body.lines as Array<Record<string, unknown>>)[0];
@@ -138,8 +139,8 @@ const { buildUpdateRequest } = await import('../../src/components/client/client-
   ok(!/grossAmount\s*=|vatRate|\* 1\.1|netAmount\s*=/.test(view), 'REQUEST die Ansicht rechnet keine Summe');
   ok(/view\.grossAmount/.test(view) && /view\.openAmount/.test(view),
     'REQUEST sie ZEIGT nur, was der Primary gerechnet hat');
-  ok(/expectedUpdatedAt: view\.updatedAt/.test(view),
-    'REQUEST und sie schickt genau den Stand mit, den sie geladen hat');
+  ok(/expectedRevision: view\.revision/.test(view),
+    'REQUEST und sie schickt genau die Fassung mit, die sie geladen hat');
 }
 
 // ── 3) Die Zahlung: nur Betrag und Art ────────────────────────────────────

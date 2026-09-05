@@ -18,10 +18,16 @@
 //  • **`deltaPayment` gibt es hier nicht.** `editInvoice` kann eine Zahlung mitnehmen; aus der
 //    Ferne wäre das ein zweiter Weg, Geld zu buchen — mit anderer Idempotenz. Zahlungen laufen
 //    über die Zahlungsoperation, und nur dort.
-//  • **Ein Änderungsauftrag braucht den Stand, den der Mensch gesehen hat** (`expectedUpdatedAt`).
+//  • **Ein Änderungsauftrag braucht die FASSUNG, die der Mensch gesehen hat** (`expectedRevision`).
 //    Ein Client, der eine Rechnung um 10:00 liest und um 10:05 speichert, würde sonst still
 //    überschreiben, was der Primary um 10:02 geändert hat. Der Vergleich läuft INNERHALB der
 //    Transaktion, gegen die Zeile selbst.
+//
+//    Es ist ausdrücklich KEIN Zeitstempel. `updated_at` sieht aus wie eine Fassung, ist aber
+//    keine: gemessen sind zwei aufeinanderfolgende `toISOString()` in 200 von 200 Fällen gleich.
+//    Zwei Vorgänge in derselben Millisekunde — im Speicher der Normalfall, nicht der Ausnahmefall —
+//    hätten denselben Wert, und die Sicherung versagte genau im Rennen, für das es sie gibt. Die
+//    Fassung ist deshalb eine Ganzzahl, die ein Trigger in derselben SQL-Transaktion erhöht.
 //  • **Eine Zahlung braucht diesen Stand NICHT.** Sie ist keine Überschreibung, sondern ein
 //    Zuwachs: zwei Rechner, die kurz nacheinander zahlen, haben beide recht. Der Primary rechnet
 //    jede Zahlung gegen den FRISCHEN Rest — die zweite wird dann eben eine Überzahlung und damit
@@ -56,22 +62,23 @@ const isPlain = (v: unknown): v is Record<string, unknown> =>
 
 export interface InvoiceUpdateRequest {
   id: string;
-  /** Der Stand, den der Mensch gesehen hat. Ohne ihn kein Ändern. */
-  expectedUpdatedAt: string;
+  /** Die Fassung, die der Mensch gesehen hat. Ohne sie kein Ändern. */
+  expectedRevision: number;
   reason: string;
   body: ReturnType<typeof parseInvoicePayload>;
 }
 
 export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
-  const { id, expectedUpdatedAt, reason, ...rest } = raw as {
-    id?: unknown; expectedUpdatedAt?: unknown; reason?: unknown;
+  const { id, expectedRevision, reason, ...rest } = raw as {
+    id?: unknown; expectedRevision?: unknown; reason?: unknown;
   };
   if (typeof id !== 'string' || !id.trim()) throw new InvoicePayloadError('id is required');
-  if (typeof expectedUpdatedAt !== 'string' || !expectedUpdatedAt.trim()) {
-    // Fail-closed: ohne den gesehenen Stand gibt es keine Aussage darüber, WORAUF sich diese
-    // Änderung bezieht — und damit keine Möglichkeit, eine fremde Änderung zu bemerken.
-    throw new InvoicePayloadError('expectedUpdatedAt is required — an edit must say which state it saw');
+  if (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
+    // Fail-closed: ohne die gesehene Fassung gibt es keine Aussage darüber, WORAUF sich diese
+    // Änderung bezieht — und damit keine Möglichkeit, eine fremde Änderung zu bemerken. Der
+    // Client darf sie nicht wählen, nur die zuvor GELESENE zurückreichen.
+    throw new InvoicePayloadError('expectedRevision is required — an edit must say which revision it saw');
   }
   if (typeof reason !== 'string' || !reason.trim()) {
     // Dieselbe Pflicht wie im Haus: ein stiller Edit an einer gebuchten Rechnung ist keiner.
@@ -83,7 +90,7 @@ export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
   }
   // Alles Übrige ist derselbe Rumpf wie beim Anlegen — inklusive seiner Verbotsliste.
   const body = parseInvoicePayload(rest);
-  return { id, expectedUpdatedAt, reason: reason.trim(), body };
+  return { id, expectedRevision, reason: reason.trim(), body };
 }
 
 /**
@@ -119,7 +126,9 @@ export type InvoiceLifecycleResult = {
   grossAmount: number;
   paidAmount: number;
   openAmount: number;
-  /** Der neue Stand — der nächste Änderungsauftrag muss ihn nennen. */
+  /** Die neue Fassung — der nächste Änderungsauftrag muss sie nennen. */
+  revision: number;
+  /** Nur zur Anzeige. Als Fassung taugt der Zeitstempel nicht (Millisekunden-Kollisionen). */
   updatedAt: string;
   /** Nur bei einer Zahlung gesetzt. */
   paymentId?: string;
@@ -127,7 +136,7 @@ export type InvoiceLifecycleResult = {
 
 function stateOf(id: string): InvoiceLifecycleResult {
   const r = query(
-    'SELECT id, invoice_number, status, gross_amount, paid_amount, updated_at FROM invoices WHERE id = ?',
+    'SELECT id, invoice_number, status, gross_amount, paid_amount, revision, updated_at FROM invoices WHERE id = ?',
     [id],
   )[0];
   const gross = Number(r?.gross_amount ?? 0);
@@ -140,6 +149,7 @@ function stateOf(id: string): InvoiceLifecycleResult {
     paidAmount: paid,
     // Was offen ist, rechnet der Primary — genau wie im Lesebefehl.
     openAmount: Math.max(0, gross - paid),
+    revision: Number(r?.revision ?? 0),
     updatedAt: String(r?.updated_at ?? ''),
   };
 }
@@ -158,20 +168,44 @@ export function invoiceLifecycleDeps(): EngineDeps {
 export function runInvoiceUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseInvoiceUpdate(raw);
   return runRemoteCommand(deps, identity, () => {
-    const live = query('SELECT id, updated_at FROM invoices WHERE id = ?', [req.id])[0];
+    const live = query('SELECT id, revision FROM invoices WHERE id = ?', [req.id])[0];
     if (!live) throw new CommandRejected('INVOICE_NOT_FOUND', 'no such invoice');
     // Der Vergleich läuft INNERHALB der Transaktion. Zwischen Lesen und Schreiben kann hier nichts
-    // mehr dazwischenkommen: die eine Schreibreihenfolge hält den Platz.
-    if (String(live.updated_at ?? '') !== req.expectedUpdatedAt) {
+    // mehr dazwischenkommen: die eine Schreibreihenfolge hält den Platz — und die Fassung steigt
+    // durch einen Trigger, also unteilbar mit der Wirkung, die sie beschreibt.
+    if (Number(live.revision ?? 0) !== req.expectedRevision) {
       // Ein Urteil über GENAU DIESE Anfrage: sie beschreibt einen Stand, den es nicht mehr gibt,
       // und sie wird nie wieder gültig. Der Mensch muss neu lesen und neu entscheiden — mit einer
       // neuen Auftragskennung.
-      throw new CommandRejected('INVOICE_CHANGED', 'this invoice changed since you opened it');
+      throw new CommandRejected(
+        'INVOICE_CHANGED',
+        `this invoice changed since you opened it (you saw ${req.expectedRevision}, it is now ${Number(live.revision ?? 0)})`,
+      );
     }
 
     // Die Zeilen entstehen mit den Werten des HAUSES: Steuerschema aus dem Produkt, Einstandskosten
     // aus dem gewählten Los, Los aufgelöst und ausdrücklich mitgegeben.
-    const lines = buildInvoiceLines(req.body.lines);
+    //
+    // Beim ÄNDERN gibt es dabei eine Besonderheit, die erst der Test gezeigt hat: die Lose dieser
+    // Rechnung sind gerade VERBRAUCHT — von ihr selbst. Fragte man wie beim Anlegen nur nach
+    // offenen Losen, wäre das letzte Stück eines Artikels nicht mehr editierbar („nicht auf
+    // Lager"), obwohl es genau auf dieser Rechnung liegt. `editInvoice` legt es zuerst zurück und
+    // nimmt es dann neu — deshalb zählt für eine Zeile, die auf DEMSELBEN Artikel bleibt, das Los,
+    // das diese Rechnung schon hält. Genau das reicht auch das Formular des Primary mit.
+    //
+    // Es ist keine zweite Zuteilungsregel: WELCHES Los, sagt hier die Rechnung selbst; OB es
+    // reicht, entscheidet weiterhin die Domäne beim Verbrauchen.
+    const held = new Map<string, string>();
+    for (const l of query(
+      'SELECT product_id, lot_id FROM invoice_lines WHERE invoice_id = ? ORDER BY position ASC', [req.id],
+    ) as Array<{ product_id?: unknown; lot_id?: unknown }>) {
+      const pid = String(l.product_id ?? '');
+      const lot = String(l.lot_id ?? '');
+      if (pid && lot && !held.has(pid)) held.set(pid, lot);
+    }
+    const lines = buildInvoiceLines(req.body.lines.map((l) => (
+      l.lotId || !held.has(l.productId) ? l : { ...l, lotId: held.get(l.productId)! }
+    )), { alsoConsumable: [...held.values()] });
     try {
       useInvoiceStore.getState().editInvoice(req.id, {
         lines,

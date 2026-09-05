@@ -5,8 +5,9 @@
 // Browser laden kann, ist nicht prüfbar.
 //
 // Drei Entscheidungen stecken darin:
-//   • Der GESEHENE Stand fährt mit (`expectedUpdatedAt`). Ohne ihn wäre jede Änderung ein blindes
-//     Überschreiben dessen, was der Primary inzwischen getan hat.
+//   • Die GESEHENE Fassung fährt mit (`expectedRevision`). Ohne sie wäre jede Änderung ein
+//     blindes Überschreiben dessen, was der Primary inzwischen getan hat. Eine Ganzzahl, kein
+//     Zeitstempel: zwei Änderungen in derselben Millisekunde trügen denselben Zeitstempel.
 //   • Eine Menge ist eine ganze Zahl ≥ 1, ein Preis ist nicht negativ — dieselbe Regel wie beim
 //     Anlegen, und der Primary weist beides ohnehin ab.
 //   • Eine leere Notiz wird gar nicht erst mitgeschickt: sie wäre eine Änderung, die niemand
@@ -20,7 +21,7 @@ export interface InvoiceDraftLine {
 
 export function buildUpdateRequest(args: {
   id: string;
-  expectedUpdatedAt: string;
+  expectedRevision: number;
   reason: string;
   customerId: string;
   lines: InvoiceDraftLine[];
@@ -28,7 +29,8 @@ export function buildUpdateRequest(args: {
 }): Record<string, unknown> {
   const body: Record<string, unknown> = {
     id: args.id,
-    expectedUpdatedAt: args.expectedUpdatedAt,
+    // Genau die Zahl, die `invoices.get` genannt hat — der Client wählt sie nicht.
+    expectedRevision: args.expectedRevision,
     reason: args.reason.trim(),
     customerId: args.customerId,
     lines: args.lines.map((l) => ({
