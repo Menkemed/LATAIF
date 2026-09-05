@@ -2885,6 +2885,27 @@ export async function saveDatabaseDurably(): Promise<void> {
   if (err) throw err instanceof Error ? err : new Error(String(err));
 }
 
+/**
+ * CENTRAL-C3C — ein Zwischenspeicherpunkt, der weiß, wem die Dauerhaftigkeit gerade gehört.
+ *
+ * Der Produktweg speichert absichtlich MITTENDRIN: erst die Produktzeile durabel, dann die Medien.
+ * Stürzt der Rechner dazwischen ab, findet die Wiederholung ein echtes Produkt und vervollständigt
+ * seine Bilder — statt ein zweites anzulegen. Das ist ein guter Vertrag, und er bleibt.
+ *
+ * Läuft derselbe Weg aber INNERHALB eines Fernauftrags, gehört die Dauerhaftigkeit der äußeren
+ * Klammer: dort wird einmal committet und einmal geschrieben, und vorher ist NICHTS durabel.
+ * Ein Zwischenspeichern wäre hier nicht nur sinnlos, sondern unmöglich — `db.export()` beendet
+ * eine offene sql.js-Transaktion, und `saveDatabaseDurably()` weist es deshalb hart ab.
+ *
+ * Also entscheidet der Weg selbst, wer speichert. Die harte Sperre in `saveDatabaseDurably()`
+ * bleibt unangetastet: ein NEUER, unbedachter Persist-Aufruf aus einer offenen Transaktion fällt
+ * weiterhin auf — nur die zwei Stellen, die es besser wissen müssen, fragen hier.
+ */
+export async function durableCheckpoint(): Promise<void> {
+  if (isTransactionActive()) return; // die äußere Klammer schreibt am Ende genau einmal
+  await saveDatabaseDurably();
+}
+
 // CENTRAL-C3A — die Sperren gegen ein ungeschriebenes Abbild (Warteschlange, Fernlesevorgänge)
 // brauchen einen Speicherweg, aber nicht dieses Modul: sie bekommen ihn hier einmal gereicht.
 // Andersherum zöge jeder Test der Warteschlange sql.js und die WASM-Datei nach.
@@ -3001,7 +3022,9 @@ export async function acquireDbLease(): Promise<DbLease> {
         // instance.
         throw new DbLeaseInvalidatedError('db instance drifted mid-lease');
       }
-      await saveDatabaseDurably();
+      // CENTRAL-C3C: derselbe Punkt, aber ambient-bewusst — innerhalb einer aeusseren Klammer
+      // besitzt DIESE die Dauerhaftigkeit, und ein Zwischen-Abbild waere hier toedlich.
+      await durableCheckpoint();
     },
     release() {
       if (released) return;

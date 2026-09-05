@@ -6,7 +6,7 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getStockAggregates, computeStockValuation, isOwnStockAsset } from '@/core/lots/lot-queries';
 // CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
-import { runExclusive } from '@/core/bridge/command-scheduler';
+import { runExclusiveUnless } from '@/core/bridge/command-scheduler';
 import { nextSkuFrom } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
@@ -16,7 +16,7 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // AI-Embedding + Text-Felder (SKU/Serial/Reference). image-hash.ts wird nicht
 // mehr importiert.
 import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBEDDING_SIMILAR_THRESHOLD, isAiConfigured } from '@/core/ai/ai-service';
-import { saveDatabaseDurably } from '@/core/db/database';
+import { durableCheckpoint } from '@/core/db/database';
 import { createProductWithDurableMedia, sameImageIntent, shouldStartEmbedding, type ProductCreateResult, type MediaSource } from '@/core/media/product-media-create';
 import { createRequestId, canonicalRequestHash, decodeDataUrl, ProductMediaCutoverService, type DecodedLegacyImage } from '@/core/media/product-media-cutover';
 import { getStockMediaOrchestrator, type IngestAndFinalizeInput, type EditScope, type EditNewImageInput } from '@/core/media/orchestrator';
@@ -325,6 +325,17 @@ function queryProductLinks(ids: string[]): Map<string, ProductLink[]> {
   return result;
 }
 
+/**
+ * CENTRAL-C3C — wer diese Aktion ruft, und ob er die Schreibreihenfolge schon haelt.
+ *
+ * Nur der Fernauftrag setzt das: er laeuft bereits im exklusiven Platz, und wuerde sich sonst
+ * hinter sich selbst anstellen. Ein Klick am Fenster, der Mobile-Drain und die Automatik lassen
+ * es weg und stellen sich normal an — deshalb ist es ein Parameter und kein Zustandsflag.
+ */
+export interface WriteContext {
+  alreadySerialised?: boolean;
+}
+
 interface ProductStore {
   products: Product[];
   /** Nur AKTIVE Kategorien — das ist die Auswahl fuer Anlegen und Bearbeiten. */
@@ -359,12 +370,13 @@ interface ProductStore {
    * (no duplicate). Used by the Collection create flow; every other caller keeps
    * the synchronous `createProduct`.
    */
-  createProductWithMedia: (data: Partial<Product>, retryProductId?: string, receiptIntent?: MobileUploadReceiptIntent, source?: MediaSource) => Promise<ProductCreateResult>;
+  createProductWithMedia: (data: Partial<Product>, retryProductId?: string, receiptIntent?: MobileUploadReceiptIntent, source?: MediaSource, ctx?: WriteContext) => Promise<ProductCreateResult>;
   editProductWithMedia: (
     id: string,
     data: Partial<Product>,
     editImages: { srcs: string[]; resolved: Array<{ url: string; mediaId: string }>; status: ResolverStatus },
     retryEditId?: string,
+    ctx?: WriteContext,
   ) => Promise<EditProductResult>;
   /**
    * MEDIA-EDIT-PRESERVE — durable PRODUCT-TEXT-ONLY edit that NEVER touches the
@@ -375,7 +387,7 @@ interface ProductStore {
    * cannot be lost by a pure text save. The gallery reconciliation lives ONLY in
    * editProductWithMedia and runs ONLY when the user actually edited images.
    */
-  editProductTextDurably: (id: string, data: Partial<Product>, opts?: { priceEligibilityRequired?: boolean }) => Promise<EditProductResult>;
+  editProductTextDurably: (id: string, data: Partial<Product>, opts?: { priceEligibilityRequired?: boolean }, ctx?: WriteContext) => Promise<EditProductResult>;
   updateProduct: (id: string, data: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
@@ -784,7 +796,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     return product;
   },
 
-  createProductWithMedia: (data, retryProductId, receiptIntent, source) => runExclusive(async () => {
+  createProductWithMedia: (data, retryProductId, receiptIntent, source, ctx) => runExclusiveUnless(ctx?.alreadySerialised, async () => {
     // Stable id across retries — reusing it is what keeps a retry from creating
     // a second product.
     const id = retryProductId ?? uuid();
@@ -839,7 +851,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
            (() => { try { return currentUserId(); } catch { return null; } })()],
         );
       },
-      saveDurably: () => saveDatabaseDurably(),
+      // CENTRAL-C3C: der Zwischencheckpoint des Produktwegs — lokal wie bisher, innerhalb eines
+      // Fernauftrags gehoert die Dauerhaftigkeit der aeusseren Klammer.
+      saveDurably: () => durableCheckpoint(),
       // Roll back a non-durable insert AND its in-memory batch job rows, so a
       // failed batch checkpoint leaves no ghost product and no orphan ingest
       // job in the in-memory DB (nothing was durable to begin with).
@@ -976,7 +990,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   }),
 
   // ── MEDIA-04A-3B2C2 — durable existing-product edit (text + media atomic) ──
-  editProductWithMedia: (id, data, editImages, retryEditId) => runExclusive(async () => {
+  editProductWithMedia: (id, data, editImages, retryEditId, ctx) => runExclusiveUnless(ctx?.alreadySerialised, async () => {
     // Fail closed: image editing only on a fully-resolved, valid gallery.
     if (!canEditImages(editImages.status)) {
       return { status: 'blocked', errorCode: 'MEDIA_EDIT_GALLERY_NOT_READY' };
@@ -999,7 +1013,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         const cutover = new ProductMediaCutoverService({
           dbProvider: cutoverDb,
           orchestrator,
-          commitLegacyCleared: async (pid: string) => { getDatabase().run(`UPDATE products SET images = '[]' WHERE id = ?`, [pid]); await saveDatabaseDurably(); },
+          commitLegacyCleared: async (pid: string) => { getDatabase().run(`UPDATE products SET images = '[]' WHERE id = ?`, [pid]); await durableCheckpoint(); },
           tenantId, branchId, role,
         });
         await cutover.ensureProductMediaCutover(id);
@@ -1081,7 +1095,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     return { status: 'edited', batchId };
   }),
 
-  editProductTextDurably: (id, data, opts) => runExclusive(async () => {
+  editProductTextDurably: (id, data, opts, ctx) => runExclusiveUnless(ctx?.alreadySerialised, async () => {
     // MEDIA-EDIT-PRESERVE — the save path when the user changed NO image. It
     // diffs only the whitelisted product columns and applies them through the
     // durable coordinator WITHOUT any gallery reconciliation, so a mobile

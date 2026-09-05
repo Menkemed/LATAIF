@@ -170,43 +170,32 @@ export const businessWriteScheduler = new CommandScheduler();
  * Ursache. Die Prüfung liegt INNERHALB des exklusiven Platzes — so schreibt niemand nebenher,
  * während das Abbild gezogen wird.
  */
-/**
- * Läuft gerade ein exklusiver Auftrag? Ein einfaches Flag genügt, und zwar aus einem Grund, der
- * hier ausdrücklich stehen soll: es ist zu jedem Zeitpunkt HÖCHSTENS EIN exklusiver Auftrag aktiv —
- * das ist genau die Zusage dieser Warteschlange. Wer also `runExclusive` erreicht, während das Flag
- * steht, kann nur von innerhalb dieses einen Auftrags kommen.
- */
-let insideExclusive = false;
-
-/** Nur zur Prüfung: ist gerade ein exklusiver Auftrag aktiv? */
-export function inExclusiveSlot(): boolean {
-  return insideExclusive;
-}
-
 export function runExclusive<T>(task: Task<T>): Promise<T> {
-  // CENTRAL-C3C — WIEDEREINTRITT. Ohne diesen Zweig verklemmt sich das Haus an sich selbst:
-  // ein Fernauftrag läuft bereits im exklusiven Platz, und die Domänenfunktion, die er ruft
-  // (`createProductWithMedia` und ihre Geschwister), stellt sich am ENDE derselben Kette erneut an —
-  // auf einen Platz, der erst frei wird, wenn sie selbst fertig ist. Das ist kein hypothetischer
-  // Fall, sondern der Normalfall, sobald ein zweiter Rechner ein Produkt anlegt.
-  //
-  // Der verschachtelte Aufruf läuft deshalb SOFORT, im selben Platz — nicht als zweiter. Die
-  // Zusage bleibt damit exakt dieselbe: höchstens ein Geschäftsauftrag zur selben Zeit. Die
-  // Durability-Prüfung entfällt hier bewusst; sie ist beim Betreten des äußeren Platzes gelaufen,
-  // und ein zweites Mal zu speichern, während die Transaktion offen ist, wäre schädlich.
-  if (insideExclusive) return Promise.resolve().then(task);
-
   return businessWriteScheduler.run(async () => {
     // Ein verlorener Transaktionszustand lässt sich nicht nachholen — hier wird deshalb nicht
     // erst gespeichert, sondern sofort abgewiesen. Ein Speichern wäre sogar schädlich: es würde
     // die offene Transaktion still beenden.
     assertTransactionHealthy();
     await requireDurableOrFail();
-    insideExclusive = true;
-    try {
-      return await task();
-    } finally {
-      insideExclusive = false;
-    }
+    return task();
   });
+}
+
+/**
+ * CENTRAL-C3C — der Ausweg für den einen Aufrufer, der BEWEISBAR schon im exklusiven Platz läuft.
+ *
+ * Das Problem, das er löst: Ein Fernauftrag hält den Platz und ruft eine Domänenfunktion, die sich
+ * ihrerseits über `runExclusive` anstellt — hinter sich selbst. Der zweite Platz wird erst frei,
+ * wenn der erste fertig ist, und der wartet auf den zweiten. Stillstand, ohne Fehlermeldung.
+ *
+ * Warum das ein PARAMETER ist und kein Zustandsflag: ein Flag „gerade läuft ein exklusiver Auftrag"
+ * kann nicht unterscheiden, WER fragt. Während ein Fernauftrag auf seine Medien wartet, könnte ein
+ * Klick am Fenster, der Mobile-Drain oder die Automatik denselben Weg betreten — und liefe dann
+ * mitten in der offenen Transaktion des Fernauftrags mit. Genau das soll die eine Reihenfolge
+ * verhindern. Der Aufrufer, der schon drin ist, weiß es; ein fremder Schreiber kann es nicht
+ * behaupten, weil er den Parameter nicht setzt.
+ */
+export function runExclusiveUnless<T>(alreadySerialised: boolean | undefined, task: Task<T>): Promise<T> {
+  if (!alreadySerialised) return runExclusive(task);
+  return Promise.resolve().then(task);
 }

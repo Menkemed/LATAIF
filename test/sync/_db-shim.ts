@@ -21,3 +21,8 @@ export function getDatabase(): Db {
 // der Produktion in Ordnung ist.
 export function saveDatabase(): Promise<void> { return Promise.resolve(); }
 export function saveDatabaseDurably(): Promise<void> { return Promise.resolve(); }
+
+// CENTRAL-C3C — derselbe Name wie in der Produktion, damit der Produktweg unter dem Test laedt.
+// Die ECHTE Regel („bei aktiver Klammer nicht speichern") wird dort geprueft, wo sie wirkt:
+// in `product-durability-ownership.test.ts` an der injizierten `saveDurably`.
+export function durableCheckpoint(): Promise<void> { return Promise.resolve(); }

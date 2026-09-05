@@ -84,7 +84,7 @@ function ok(c: unknown, m: string): void { if (c) PASS++; else { FAIL++; failure
   // Der Anker ist die IMPLEMENTIERUNG, nicht die Deklaration im Interface — und er muss etwas
   // Substantielles einschliessen: ein leerer Ausschnitt liesse die drei Verbote unten stumm
   // durchgehen (genau das passierte, als C1 die Aktion in `runExclusive` einwickelte).
-  const fn = store.slice(store.indexOf('editProductTextDurably: (id, data, opts)'), store.indexOf('updateProduct: (id, data) =>'));
+  const fn = store.slice(store.indexOf('editProductTextDurably: (id, data, opts, ctx)'), store.indexOf('updateProduct: (id, data) =>'));
   ok(fn.length > 200, `editProductTextDurably implementation found (${fn.length} Zeichen)`);
   ok(/applyProductTextEditDurably\(/.test(fn), 'text path calls the gallery-safe orchestrator method');
   // Forbid the RECONCILIATION call surface (function calls), not the word

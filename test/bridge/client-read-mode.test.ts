@@ -356,7 +356,12 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     ['documentStore', docs, 'uploadDocument'],
     ['documentStore', docs, 'extractOcr'],
   ]) {
-    ok(new RegExp(`${name}: \\([^)]*\\) => runExclusive\\(async`).test(text),
+    // CENTRAL-C3C: die Produktaktionen betreten die Spur jetzt ueber die ausdrueckliche Form
+    // (`runExclusiveUnless(ctx?.alreadySerialised, …)`) — dieselbe eine Reihenfolge, nur mit
+    // einem Weg fuer den Aufrufer, der BEWEISBAR schon drin ist. Die Dokumentaktionen haben
+    // ihn nicht und stellen sich weiterhin schlicht an.
+    ok(new RegExp(`${name}: \\([^)]*\\) => runExclusive(Unless\\(ctx\\?\\.alreadySerialised, )?\\(?async`).test(text)
+      || new RegExp(`${name}: \\([^)]*\\) => runExclusiveUnless\\(ctx\\?\\.alreadySerialised, async`).test(text),
       `REALWRITE ${file}.${name} betritt die Spur`);
     ok(!new RegExp(`${name}: async \\(`).test(text), `REALWRITE …und nicht mehr daran vorbei (${name})`);
   }

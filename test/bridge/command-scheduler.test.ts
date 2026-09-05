@@ -33,7 +33,7 @@ registerHooks({
   },
 } as never);
 
-const { CommandScheduler, businessWriteScheduler, runExclusive, inExclusiveSlot } =
+const { CommandScheduler, businessWriteScheduler, runExclusive, runExclusiveUnless } =
   await import('../../src/core/bridge/command-scheduler.ts');
 const { executeCommand, registerCommand, knownCommands, BusinessError, OP_PROBE } =
   await import('../../src/core/bridge/command-registry.ts');
@@ -412,39 +412,52 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
   ok(refused, 'UNKNOWN …und genau das erzwingt die Registrierungssperre');
 }
 
-// ── 13) Wiedereintritt: der Auftrag, der sich selbst anstellt ─────────────
+// ── 13) Wiedereintritt: nur derselbe Kontext, kein Freifahrtschein ────────
 //
-// Sobald ein Fernauftrag eine Store-Aktion ruft, die ihrerseits `runExclusive` benutzt (der
-// Produktweg tut das), stellt sich das Haus hinter sich selbst an: der innere Platz wird erst
-// frei, wenn der aeussere fertig ist — und der wartet auf den inneren. Ein Stillstand, der in
-// keinem Fehlerprotokoll auftaucht, weil nichts scheitert; es geht nur nie weiter.
+// Ein Fernauftrag haelt den exklusiven Platz und ruft eine Domaenenfunktion, die sich ihrerseits
+// anstellt — hinter sich selbst. Der zweite Platz wird erst frei, wenn der erste fertig ist, und
+// der wartet auf den zweiten: Stillstand ohne Fehlermeldung.
+//
+// Der Ausweg ist ein PARAMETER, kein Zustandsflag. Ein Flag „gerade laeuft ein exklusiver
+// Auftrag" kann nicht unterscheiden, WER fragt — waehrend der Fernauftrag auf seine Medien
+// wartet, wuerde ein Klick am Fenster genauso durchgelassen und liefe mitten in dessen offener
+// Transaktion mit. Genau das soll die eine Reihenfolge verhindern.
 {
   let inner = 0;
-  const before = businessWriteScheduler.peakConcurrency();
   const out = await Promise.race([
-    runExclusive(async () => {
-      // Genau der verschachtelte Aufruf, an dem es sich sonst verklemmt.
-      return await runExclusive(() => { inner += 1; return 42; });
-    }),
-    new Promise((r) => setTimeout(() => r('DEADLOCK'), 3000)),
+    runExclusive(async () => runExclusiveUnless(true, () => { inner += 1; return 42; })),
+    tick(3000).then(() => 'DEADLOCK'),
   ]);
-  ok(out === 42, `REENTRY der verschachtelte Auftrag laeuft durch (${out})`);
-  ok(inner === 1, `REENTRY genau einmal (${inner})`);
-  ok(businessWriteScheduler.peakConcurrency() === Math.max(1, before),
-    `REENTRY und die Zusage bleibt: hoechstens EIN Auftrag gleichzeitig (${businessWriteScheduler.peakConcurrency()})`);
-  ok(!inExclusiveSlot(), 'REENTRY nach dem Auftrag ist der Platz wieder frei');
+  ok(out === 42 && inner === 1, `REENTRY der angemeldete verschachtelte Aufruf laeuft durch (${out})`);
 
-  // Auch wenn er scheitert, bleibt kein Flag stehen — sonst liefe der naechste Auftrag
-  // ungeschuetzt an der Warteschlange vorbei.
+  // Der fremde Schreiber sagt es NICHT — und wartet, auch waehrend der andere wartet.
+  const order: string[] = [];
+  const long = runExclusive(async () => {
+    order.push('remote:start');
+    await tick(150);
+    order.push('remote:end');
+    return 'remote';
+  });
+  await tick(20);
+  const foreign = runExclusive(() => { order.push('foreign'); return 'foreign'; });
+  await Promise.all([long, foreign]);
+  ok(order.join(',') === 'remote:start,remote:end,foreign',
+    `REENTRY ein fremder Schreiber wartet (${order.join(',')})`);
+
   let threw = false;
   try { await runExclusive(() => { throw new Error('boom'); }); } catch { threw = true; }
-  ok(threw && !inExclusiveSlot(), 'REENTRY und ein Fehler laesst den Platz nicht als belegt zurueck');
+  const after = await runExclusive(() => 'weiter');
+  ok(threw && after === 'weiter', 'REENTRY ein Fehler haelt die Reihenfolge nicht auf');
+  ok(businessWriteScheduler.peakConcurrency() === 1,
+    `REENTRY und nie mehr als EIN Auftrag gleichzeitig (${businessWriteScheduler.peakConcurrency()})`);
 
-  // Und der Grund steht im Produktcode, nicht nur hier.
   const sched = src('src/core/bridge/command-scheduler.ts');
-  ok(/if \(insideExclusive\) return Promise\.resolve\(\)\.then\(task\);/.test(sched),
-    'REENTRY der verschachtelte Aufruf laeuft im selben Platz, nicht als zweiter');
+  ok(!/let insideExclusive/.test(sched),
+    'REENTRY es gibt KEIN Zustandsflag, das nicht unterscheiden koennte, wer fragt');
+  ok(/export function runExclusiveUnless<T>\(alreadySerialised: boolean \| undefined/.test(sched),
+    'REENTRY sondern einen Parameter, den ein fremder Schreiber nicht setzen kann');
 }
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c1 bridge: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_PRIMARY_COMMAND_SCHEDULER_PROVED');
