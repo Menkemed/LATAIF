@@ -74,6 +74,10 @@ pub const OP_CUSTOMERS_UPDATE: &str = "customers.update";
 /// ihre Inhaltskennungen.
 pub const OP_PRODUCTS_CREATE: &str = "products.create";
 pub const OP_PRODUCTS_UPDATE: &str = "products.update";
+/// CENTRAL-C3D — eine Rechnung NACH dem Anlegen: aendern und bezahlen. Zwei Namen, weil es im
+/// Haus zwei kanonische Wege sind (editInvoice / recordPayment) — kein generisches invoice.action.
+pub const OP_INVOICES_UPDATE: &str = "invoices.update";
+pub const OP_INVOICES_RECORD_PAYMENT: &str = "invoices.record_payment";
 
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
@@ -89,6 +93,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_CUSTOMERS_UPDATE,
     OP_PRODUCTS_CREATE,
     OP_PRODUCTS_UPDATE,
+    OP_INVOICES_UPDATE,
+    OP_INVOICES_RECORD_PAYMENT,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

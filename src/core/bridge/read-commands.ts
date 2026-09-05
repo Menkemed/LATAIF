@@ -315,6 +315,9 @@ function invoiceDto(r: Row): CommandResult {
     openAmount: Math.max(0, gross - paid),
     issuedAt: str(r.issued_at),
     dueAt: str(r.due_at),
+    // CENTRAL-C3D — der Stand, auf den sich eine Änderung bezieht. Ohne ihn könnte ein zweiter
+    // Rechner blind überschreiben, was der Primary inzwischen geändert hat.
+    updatedAt: str(r.updated_at),
   };
 }
 

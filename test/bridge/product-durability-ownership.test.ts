@@ -414,9 +414,10 @@ const IMAGES = { kind: 'data_urls' as const, images: ['data:image/jpeg;base64,AA
   await import('../../src/core/bridge/invoice-command.ts');
   await import('../../src/core/bridge/customer-commands.ts');
   await import('../../src/core/bridge/product-commands.ts');
+  await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   const known = registry.knownCommands();
-  ok(known.length === 12 && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
-    `WIRED 1 Probe + 6 Reads + 5 Mutationen (${known.length}: ${registry.ALLOWED_MUTATIONS.join(', ')})`);
+  ok(known.length === 14 && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
+    `WIRED 1 Probe + 6 Reads + 7 Mutationen (${known.length}: ${registry.ALLOWED_MUTATIONS.join(', ')})`);
   const productCmd = src('src/core/bridge/product-commands.ts');
   ok(/runRemoteCommand\(/.test(productCmd) && /alreadySerialised: true/.test(productCmd),
     'WIRED der Produkt-Fernauftrag laeuft durch die Maschine und reiht sich nicht doppelt ein');

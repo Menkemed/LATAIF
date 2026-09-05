@@ -250,13 +250,16 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
 {
   await import('../../src/core/bridge/customer-commands.ts');
   await import('../../src/core/bridge/product-commands.ts');
+  await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 12 && reads.length === 6 && known.includes('bridge.probe'),
-    `REGISTRY 1 Probe + 6 Reads + 5 Mutationen (${known.join(', ')})`);
+  ok(known.length === 14 && reads.length === 6 && known.includes('bridge.probe'),
+    `REGISTRY 1 Probe + 6 Reads + 7 Mutationen (${known.join(', ')})`);
   ok(registry.ALLOWED_MUTATIONS.includes('invoices.create'),
     `REGISTRY der Name des Formulars steht darauf (${registry.ALLOWED_MUTATIONS.join(', ')})`);
   const form = code(FORM);
+  // Das ANLEGE-Formular ruft weiterhin nur `invoices.create`. Aendern und Bezahlen sind seit C3D
+  // eigene Namen — und sie gehoeren in die Detailansicht, nicht hierher.
   const foreign = registry.ALLOWED_MUTATIONS.filter((o: string) => o !== 'invoices.create')
     .filter((o: string) => form.includes(o));
   ok(foreign.length === 0,

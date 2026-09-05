@@ -580,19 +580,19 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   const registry = src('src/core/bridge/command-registry.ts');
   ok(!/export const REMOTE_MUTATIONS_ENABLED/.test(registry), 'WIRED der globale Schalter ist weg…');
   const listed = registry.slice(registry.indexOf('export const ALLOWED_MUTATIONS'), registry.indexOf('];', registry.indexOf('export const ALLOWED_MUTATIONS')));
-  ok([...listed.matchAll(/'([a-z.]+)'/g)].map((m) => m[1]).join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
-    `WIRED …und an seiner Stelle stehen fuenf namentlich freigegebene (${listed.replace(/\s+/g, ' ')})`);
+  ok([...listed.matchAll(/'([a-z._]+)'/g)].map((m) => m[1]).join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
+    `WIRED …und an seiner Stelle stehen sieben namentlich freigegebene (${listed.replace(/\s+/g, ' ')})`);
   const bridgeRs = src('src-tauri/src/bridge.rs');
   const list = bridgeRs.slice(bridgeRs.indexOf('pub const REMOTE_OPS'), bridgeRs.indexOf('];', bridgeRs.indexOf('pub const REMOTE_OPS')));
   const ops = (list.match(/OP_[A-Z_]+/g) || []).map((n) => {
     const m = bridgeRs.match(new RegExp(`${n}: &str = "([^"]+)"`));
     return m ? m[1] : n;
   });
-  ok(ops.length === 12, `WIRED die Liste ist um GENAU zwei weitere Namen gewachsen: 12 (${ops.length})`);
+  ok(ops.length === 14, `WIRED die Liste ist um GENAU zwei weitere Namen gewachsen: 14 (${ops.length})`);
   const wiredMut = ops.filter((o) => o !== 'bridge.probe' && !o.endsWith('.list') && !o.endsWith('.get'));
   ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 6 && ops.includes('bridge.probe')
-    && wiredMut.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
-    `WIRED eine Probe, sechs Lesevorgaenge, FUENF Mutationen (${wiredMut.join(', ')})`);
+    && wiredMut.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
+    `WIRED eine Probe, sechs Lesevorgaenge, SIEBEN Mutationen (${wiredMut.join(', ')})`);
   const engine = src('src/core/bridge/mutation-engine.ts');
   ok(!/registerCommand/.test(engine), 'WIRED die Maschine registriert selbst nichts');
 }

@@ -258,8 +258,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        12,
-        "Probe, sechs Lesevorgaenge, eine Rechnung, zwei Kunden-, zwei Produktoperationen"
+        14,
+        "Probe, sechs Lesevorgaenge, Rechnung anlegen/aendern/bezahlen, zwei Kunden-, zwei Produktoperationen"
     );
     for op in [
         OP_INVOICES_CREATE,
@@ -267,6 +267,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         OP_CUSTOMERS_UPDATE,
         OP_PRODUCTS_CREATE,
         OP_PRODUCTS_UPDATE,
+        OP_INVOICES_UPDATE,
+        OP_INVOICES_RECORD_PAYMENT,
     ] {
         assert!(REMOTE_OPS.contains(&op), "die freigegebene Buchung {op} fehlt");
     }
@@ -282,8 +284,10 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
             &OP_CUSTOMERS_UPDATE,
             &OP_PRODUCTS_CREATE,
             &OP_PRODUCTS_UPDATE,
+            &OP_INVOICES_UPDATE,
+            &OP_INVOICES_RECORD_PAYMENT,
         ],
-        "und NUR diese fuenf veraendern etwas — kein Loeschen von aussen"
+        "und NUR diese sieben veraendern etwas — kein Loeschen von aussen"
     );
 }
 
@@ -577,9 +581,9 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     let registry = include_str!("../../src/core/bridge/command-registry.ts");
     assert!(
         registry.contains(
-            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n];"
+            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n];"
         ),
-        "genau diese fuenf veraendernden Namen sind freigegeben"
+        "genau diese sieben veraendernden Namen sind freigegeben"
     );
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),

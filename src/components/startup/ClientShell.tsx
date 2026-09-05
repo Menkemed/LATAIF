@@ -17,6 +17,7 @@ import { remoteRead, clientLogin, RemoteReadError, ERR_UNAUTHENTICATED } from '@
 import { ClientInvoiceCreate } from '@/components/client/ClientInvoiceCreate';
 import { ClientCustomerForm } from '@/components/client/ClientCustomerForm';
 import { ClientProductForm } from '@/components/client/ClientProductForm';
+import { ClientInvoiceDetail } from '@/components/client/ClientInvoiceDetail';
 
 type Area = 'products' | 'customers' | 'invoices' | 'new-invoice' | 'new-customer' | 'new-product';
 
@@ -53,6 +54,9 @@ export function ClientShell() {
   // Kunden, den dieser Rechner vorher gelesen hat — eine frei eingetippte Kennung gäbe es sonst.
   const [editCustomerId, setEditCustomerId] = useState<string | null>(null);
   const [editProductId, setEditProductId] = useState<string | null>(null);
+  // Welche Rechnung gerade offen ist. Sie beginnt IMMER an einer gelesenen Zeile — es gibt kein
+  // Feld, in das jemand eine Kennung tippen koennte.
+  const [openInvoiceId, setOpenInvoiceId] = useState<string | null>(null);
 
   const areaOp = AREAS.find((a) => a.key === area)!.op;
 
@@ -92,7 +96,7 @@ export function ClientShell() {
           <button key={a.key} data-client-area={a.key}
             onClick={() => {
               setArea(a.key); setDetail(null); setQuery('');
-              setEditCustomerId(null); setEditProductId(null);
+              setEditCustomerId(null); setEditProductId(null); setOpenInvoiceId(null);
             }}
             style={chip(area === a.key)}>{a.label}</button>
         ))}
@@ -102,7 +106,7 @@ export function ClientShell() {
           style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #D5D9DE', fontSize: 12 }} />
         <button data-client-refresh onClick={() => setTick((t) => t + 1)} style={chip(false)}>Refresh</button>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6B7280' }}>
-          reads + invoice + clients + items · {cfg.serverUrl}
+          reads + invoice + clients + items + payments · {cfg.serverUrl}
         </span>
         <button onClick={() => { leaveClientMode(); window.location.reload(); }} style={chip(false)}>Disconnect</button>
       </div>
@@ -130,6 +134,12 @@ export function ClientShell() {
           onCancel={() => setEditProductId(null)}
         />
       )}
+      {openInvoiceId && (
+        <ClientInvoiceDetail
+          invoiceId={openInvoiceId}
+          onClose={() => { setOpenInvoiceId(null); setDetail(null); setTick((t) => t + 1); }}
+        />
+      )}
       {busy && !list && <p style={{ fontSize: 12, color: '#6B7280' }}>Loading…</p>}
 
       {list?.stock && (
@@ -154,7 +164,7 @@ export function ClientShell() {
         </div>
       )}
 
-      {detail && !editCustomerId && !editProductId && (
+      {detail && !editCustomerId && !editProductId && !openInvoiceId && (
         <div data-client-detail style={{ marginTop: 16, padding: 14, border: '1px solid #D5D9DE', borderRadius: 10 }}>
           <button onClick={() => setDetail(null)} style={chip(false)}>Close</button>
           {area === 'customers' && (
@@ -164,6 +174,10 @@ export function ClientShell() {
           {area === 'products' && (
             <button data-client-edit-product style={{ ...chip(true), marginLeft: 8 }}
               onClick={() => setEditProductId(s(detail.id))}>Edit</button>
+          )}
+          {area === 'invoices' && (
+            <button data-client-open-invoice style={{ ...chip(true), marginLeft: 8 }}
+              onClick={() => setOpenInvoiceId(s(detail.id))}>Edit / pay</button>
           )}
           <pre data-client-detail-json style={{ fontSize: 11, whiteSpace: 'pre-wrap', marginTop: 10 }}>
             {JSON.stringify(detail, null, 2)}

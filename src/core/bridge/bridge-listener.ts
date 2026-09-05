@@ -20,6 +20,7 @@ import './invoice-command';
 // CENTRAL-C3C — Stammdaten: Kunde anlegen und aendern.
 import './customer-commands';
 import './product-commands';
+import './invoice-lifecycle-commands';
 
 /** Muss mit `bridge::EVENT_COMMAND` in Rust übereinstimmen. */
 export const BRIDGE_COMMAND_EVENT = 'central-c1-bridge-command';

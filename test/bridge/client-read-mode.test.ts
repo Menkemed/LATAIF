@@ -241,8 +241,8 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   // das nichts an der Sache, um die es hier geht: er schreibt nie SELBST, sondern schickt jeden
   // dieser Namen an den Primary — und alles, was nicht namentlich darauf steht, bleibt
   // unregistrierbar.
-  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
-    `READONLY fuenf namentlich freigegebene Mutationen (${ALLOWED_MUTATIONS.join(', ')})`);
+  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
+    `READONLY sieben namentlich freigegebene Mutationen (${ALLOWED_MUTATIONS.join(', ')})`);
   // Die Lesebefehle ziehen die ganze Datenschicht mit; hier zaehlt ihre Registrierung im Quelltext.
   const readSrc = code('src/core/bridge/read-commands.ts');
   const registeredReads = readSrc.split('\n').filter((l) => l.startsWith('registerCommand(')).length;
@@ -472,16 +472,16 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const reads = resolved.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
-  ok(resolved.length === 12, `ALLOWLIST zwoelf Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
+  ok(resolved.length === 14, `ALLOWLIST vierzehn Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
   ok(reads.length === 6, `ALLOWLIST genau sechs Lesevorgaenge (${reads.length}: ${reads.join(', ')})`);
-  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update',
-    `ALLOWLIST und GENAU diese fuenf veraendernden (${mutations.join(', ') || 'keine'})`);
+  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
+    `ALLOWLIST und GENAU diese sieben veraendernden (${mutations.join(', ') || 'keine'})`);
   // Loeschen steht auf KEINER Liste: es hat einen eigenen Referenz-Vertrag, und der ist von aussen
   // nicht durchdacht.
   ok(!mutations.some((o) => o.endsWith('.delete')),
     'ALLOWLIST und kein Loeschen — das hat einen eigenen Vertrag');
-  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update',
+  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Es gibt keine eigene Suchoperation — die Suche ist ein Parameter.
   ok(!resolved.some((o) => /search/.test(o)), 'ALLOWLIST keine eigene Suchoperation');

@@ -80,6 +80,7 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'invoices.create',
   'customers.create', 'customers.update',
   'products.create', 'products.update',
+  'invoices.update', 'invoices.record_payment',
 ];
 
 export interface CommandSpec {
