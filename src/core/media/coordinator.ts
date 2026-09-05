@@ -14,6 +14,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { evaluatePriceEligibility, touchesPriceColumns } from '../products/price-eligibility.ts';
+import { enterTransaction, leaveNestedTransaction, resetTransactionContext } from '../db/transaction-context.ts';
 import {
   blobIdFor,
   dedupTokenFor,
@@ -1863,18 +1864,34 @@ export class MediaDbCoordinator {
   // ── tx wrapper (autonomous BEGIN IMMEDIATE / COMMIT / ROLLBACK) ─────────
 
   private withTx<T>(fn: () => T): T {
-    this.db.run('BEGIN IMMEDIATE');
+    // CENTRAL-C3C — der Tiefenzähler des Hauses entscheidet, wer wirklich klammert.
+    //
+    // Bisher öffnete diese Stelle IMMER ihre eigene Transaktion. Solange nur der Mensch am Fenster
+    // Produkte anlegte, war das richtig und unauffällig. Läuft der Produktweg aber innerhalb eines
+    // Fernauftrags, hat der bereits eine Klammer offen — und sql.js kennt keine verschachtelten
+    // `BEGIN`: der zweite scheitert, und mit ihm der ganze Auftrag.
+    //
+    // Also dieselbe Mechanik wie in `posting.ts`: nur die ÄUSSERSTE Ebene klammert. Eine innere
+    // Ebene zählt mit und lässt Commit und Rollback dem, der die Klammer gesetzt hat. Ein Fehler
+    // im Inneren erreicht ihn ohnehin — er rollt dann alles zurück, nicht nur dieses Stück.
+    const outermost = enterTransaction();
+    if (outermost) this.db.run('BEGIN IMMEDIATE');
     try {
       const out = fn();
-      this.db.run('COMMIT');
+      if (leaveNestedTransaction() && outermost) this.db.run('COMMIT');
       return out;
     } catch (e) {
-      try {
-        this.db.run('ROLLBACK');
-      } catch {
-        // If sql.js already rolled back on a trigger abort, a manual
-        // ROLLBACK throws; swallow and re-raise the original error.
+      if (outermost) {
+        resetTransactionContext();
+        try {
+          this.db.run('ROLLBACK');
+        } catch {
+          // If sql.js already rolled back on a trigger abort, a manual
+          // ROLLBACK throws; swallow and re-raise the original error.
+        }
       }
+      // Innere Ebene: NICHT selbst zurückrollen. Der Fehler geht nach oben, und die äußere Klammer
+      // verwirft dort ALLES — ein Teilrollback hier wäre eine halbe Wahrheit.
       throw e;
     }
   }

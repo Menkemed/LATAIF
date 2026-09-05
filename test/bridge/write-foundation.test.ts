@@ -628,12 +628,19 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   // Angebote buchen gar nicht — reine Domaenenschreibvorgaenge, trivial einklammerbar.
   ok(!/post[A-Z]/.test(src('src/stores/offerStore.ts')), 'TXAUDIT Angebote buchen nichts');
 
-  // Und der eine, der es NICHT ist. Offen benannt statt uebersehen.
+  // Der eine, der es lange NICHT war — und der Grund, warum Produkt-mit-Medien in C3B noch nicht
+  // fernsteuerbar sein konnte. C3C hat ihn nachgezogen: er klammert weiterhin selbst, ABER nur,
+  // wenn er die aeusserste Ebene ist. Ohne das scheitert der zweite `BEGIN` in sql.js.
   const coordinator = src('src/core/media/coordinator.ts');
-  ok(/this\.db\.run\('BEGIN IMMEDIATE'\);/.test(coordinator),
-    'TXAUDIT der Medien-Koordinator oeffnet eine eigene Transaktion…');
-  ok(!/isTransactionActive|inLedgerTransaction|enterTransaction/.test(coordinator),
-    'TXAUDIT …ohne den Tiefenzaehler zu fragen — Produkt-mit-Medien ist damit NICHT C3B-tauglich');
+  ok(/const outermost = enterTransaction\(\);/.test(coordinator),
+    'TXAUDIT der Medien-Koordinator fragt jetzt den Tiefenzaehler…');
+  ok(/if \(outermost\) this\.db\.run\('BEGIN IMMEDIATE'\);/.test(coordinator),
+    'TXAUDIT …und oeffnet nur, wenn keine Klammer laeuft');
+  ok(/if \(leaveNestedTransaction\(\) && outermost\) this\.db\.run\('COMMIT'\);/.test(coordinator),
+    'TXAUDIT …committet nur die aeusserste Ebene');
+  const cErr = coordinator.slice(coordinator.indexOf('const outermost = enterTransaction();'));
+  ok(/if \(outermost\) \{\s*\r?\n\s*resetTransactionContext\(\);/.test(cErr),
+    'TXAUDIT und eine innere Ebene rollt NICHT selbst zurueck — das darf nur die aeussere Klammer');
 }
 
 // ── 14) Die Speicherschuld erreicht JEDEN Geschaeftsschreiber ─────────────

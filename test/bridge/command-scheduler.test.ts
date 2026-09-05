@@ -33,7 +33,7 @@ registerHooks({
   },
 } as never);
 
-const { CommandScheduler, businessWriteScheduler, runExclusive } =
+const { CommandScheduler, businessWriteScheduler, runExclusive, inExclusiveSlot } =
   await import('../../src/core/bridge/command-scheduler.ts');
 const { executeCommand, registerCommand, knownCommands, BusinessError, OP_PROBE } =
   await import('../../src/core/bridge/command-registry.ts');
@@ -412,6 +412,39 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
   ok(refused, 'UNKNOWN …und genau das erzwingt die Registrierungssperre');
 }
 
+// ── 13) Wiedereintritt: der Auftrag, der sich selbst anstellt ─────────────
+//
+// Sobald ein Fernauftrag eine Store-Aktion ruft, die ihrerseits `runExclusive` benutzt (der
+// Produktweg tut das), stellt sich das Haus hinter sich selbst an: der innere Platz wird erst
+// frei, wenn der aeussere fertig ist — und der wartet auf den inneren. Ein Stillstand, der in
+// keinem Fehlerprotokoll auftaucht, weil nichts scheitert; es geht nur nie weiter.
+{
+  let inner = 0;
+  const before = businessWriteScheduler.peakConcurrency();
+  const out = await Promise.race([
+    runExclusive(async () => {
+      // Genau der verschachtelte Aufruf, an dem es sich sonst verklemmt.
+      return await runExclusive(() => { inner += 1; return 42; });
+    }),
+    new Promise((r) => setTimeout(() => r('DEADLOCK'), 3000)),
+  ]);
+  ok(out === 42, `REENTRY der verschachtelte Auftrag laeuft durch (${out})`);
+  ok(inner === 1, `REENTRY genau einmal (${inner})`);
+  ok(businessWriteScheduler.peakConcurrency() === Math.max(1, before),
+    `REENTRY und die Zusage bleibt: hoechstens EIN Auftrag gleichzeitig (${businessWriteScheduler.peakConcurrency()})`);
+  ok(!inExclusiveSlot(), 'REENTRY nach dem Auftrag ist der Platz wieder frei');
+
+  // Auch wenn er scheitert, bleibt kein Flag stehen — sonst liefe der naechste Auftrag
+  // ungeschuetzt an der Warteschlange vorbei.
+  let threw = false;
+  try { await runExclusive(() => { throw new Error('boom'); }); } catch { threw = true; }
+  ok(threw && !inExclusiveSlot(), 'REENTRY und ein Fehler laesst den Platz nicht als belegt zurueck');
+
+  // Und der Grund steht im Produktcode, nicht nur hier.
+  const sched = src('src/core/bridge/command-scheduler.ts');
+  ok(/if \(insideExclusive\) return Promise\.resolve\(\)\.then\(task\);/.test(sched),
+    'REENTRY der verschachtelte Aufruf laeuft im selben Platz, nicht als zweiter');
+}
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c1 bridge: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_PRIMARY_COMMAND_SCHEDULER_PROVED');

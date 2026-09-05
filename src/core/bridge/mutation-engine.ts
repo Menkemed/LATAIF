@@ -103,7 +103,17 @@ export interface EngineDeps {
 export async function runRemoteCommand(
   deps: EngineDeps,
   identity: CommandIdentity,
-  handler: (db: SqlDb) => unknown,
+  /**
+   * CENTRAL-C3C — der Handler darf `await` benutzen. Das klingt harmlos und ist es nur unter zwei
+   * Bedingungen, die beide bereits gelten: Erstens läuft er im EXKLUSIVEN Platz der einen
+   * Schreibreihenfolge — solange er wartet, beginnt kein zweiter Geschäftsauftrag und kein Lesen.
+   * Zweitens schiebt `saveDatabase()` innerhalb einer offenen Transaktion den Export auf, statt ihn
+   * auszuführen; sonst würde das Speichern die Transaktion still beenden.
+   *
+   * Ohne das ginge der Produktweg gar nicht: er hat zwischen Vorbereiten und durablem Anwenden
+   * mehrere Wartepunkte, und ihn synchron nachzubauen wäre ein zweiter Medienweg.
+   */
+  handler: (db: SqlDb) => unknown | Promise<unknown>,
 ): Promise<CommandOutcome> {
   const { db } = deps;
   let record: CommandRecord | null = null;
@@ -133,7 +143,7 @@ export async function runRemoteCommand(
       replayed = true;
       record = seen.record;
     } else {
-      const value = handler(db);
+      const value = await handler(db);
       record = { status: 'completed', identity, result: value ?? null };
       recordCommand(db, record, deps.now());
     }
