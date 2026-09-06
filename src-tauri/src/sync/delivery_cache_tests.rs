@@ -36,6 +36,7 @@ fn state() -> Arc<AppState> {
     Arc::new(AppState {
         db: Mutex::new(conn),
         jwt_secret: "delivery-test-secret".to_string(),
+        self_token: None,
         frontend_db_path: PathBuf::from("delivery-test-frontend.db"),
         data_root: crate::data_root::DataRoot::for_test(dir.clone()),
         primary_state: primary::State::Primary,

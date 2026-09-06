@@ -60,6 +60,9 @@ fn state_with(primary: primary::State, stg: &Stg) -> Arc<AppState> {
     Arc::new(AppState {
         db: Mutex::new(conn),
         jwt_secret: SECRET.to_string(),
+        // Diese Testfundamente stellen kein Selbst-Token aus — der interne Bypass ist hier also
+        // schlicht nicht erreichbar, und genau so soll es sein.
+        self_token: None,
         frontend_db_path: PathBuf::from("ingress-test-frontend.db"),
         // The staging root IS this fixture's data root, so the ingress writes where the test looks.
         data_root: crate::data_root::DataRoot::for_test(stg.0.clone()),

@@ -149,6 +149,14 @@ pub const ERR_SERVER_BIND_FAILED: &str = "SYNC_SERVER_BIND_FAILED";
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     pub jwt_secret: String,
+    /// CENTRAL-C4 FINAL 2 — das EINE Selbst-Token, das dieser Serverlauf ausgestellt hat.
+    ///
+    /// `self-desktop` hat bewusst keine Zeile in `users`; ohne diese Bindung waere der Name
+    /// allein der Ausweis, und ein beliebiges gueltig signiertes Token mit `sub="self-desktop"`
+    /// (etwa aus einer `users`-Zeile, die jemand so benennt) bekaeme den internen Bypass.
+    /// Verglichen wird deshalb der WERT: ihn kann nur dieser Prozess erzeugen — er entsteht aus
+    /// dem Installationsgeheimnis und verlaesst ihn nur zum eigenen Renderer.
+    pub self_token: Option<String>,
     /// Pfad zur Frontend-DB (lataif.db) im selben app_data_dir. Der Mobile-"Check Item"-
     /// Lookup liest Produkte direkt aus deren `products`-Tabelle (read-only) — die ist die
     /// SSOT mit aktuellem, vollstaendigem Bild. Der Sync-Changelog verliert teils Bilder.
@@ -277,6 +285,7 @@ impl SyncServer {
             &jwt_secret,
         )
         .map_err(|_| "Self-token generation failed".to_string())?;
+        let self_token_value = self_token.clone();
         *self.self_token.lock().await = Some(self_token);
 
         // DATA-ROOT-I1 — both paths come from the one resolved root, exactly like the desktop
@@ -291,6 +300,7 @@ impl SyncServer {
         let app_state = Arc::new(AppState {
             db: Mutex::new(conn),
             jwt_secret,
+            self_token: Some(self_token_value),
             frontend_db_path,
             data_root: self.data_root.clone(),
             primary_state: state,

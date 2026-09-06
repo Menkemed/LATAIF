@@ -72,7 +72,11 @@ pub async fn auth_middleware(
         let db = state.db.lock().await;
         super::reauthorize::lookup_principal(&db, &claims.sub)
     };
-    let claims = super::reauthorize::reauthorize(claims, principal)?;
+    // Der Selbst-Absender hat keine Zeile in `users`. Sein Ausweis ist deshalb nicht sein NAME,
+    // sondern das Token selbst: genau der Wert, den dieser Serverlauf ausgestellt hat. Ein von
+    // aussen erlangtes Token mit demselben `sub` faellt hier durch.
+    let is_self_token = state.self_token.as_deref() == Some(token);
+    let claims = super::reauthorize::reauthorize(claims, principal, is_self_token)?;
 
     req.extensions_mut().insert(claims);
     Ok(next.run(req).await)

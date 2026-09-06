@@ -2775,6 +2775,9 @@ mod legacy_push_tests {
             Arc::new(AppState {
                 db: Mutex::new(db_q()), // sync_changelog + sync_cutover_state + sync_change_quarantine
                 jwt_secret: SECRET.to_string(),
+        // Diese Testfundamente stellen kein Selbst-Token aus — der interne Bypass ist hier also
+        // schlicht nicht erreichbar, und genau so soll es sein.
+        self_token: None,
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,
@@ -2839,6 +2842,9 @@ mod legacy_push_tests {
             Arc::new(AppState {
                 db: Mutex::new(conn),
                 jwt_secret: SECRET.to_string(),
+        // Diese Testfundamente stellen kein Selbst-Token aus — der interne Bypass ist hier also
+        // schlicht nicht erreichbar, und genau so soll es sein.
+        self_token: None,
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,

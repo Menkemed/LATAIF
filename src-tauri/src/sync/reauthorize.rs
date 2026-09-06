@@ -74,14 +74,21 @@ pub fn lookup_principal(conn: &Connection, user_id: &str) -> PrincipalState {
 /// * **Aktiv** → die Ansprüche laufen mit der AKTUELLEN Rolle weiter. Das Token bleibt gültig;
 ///   nur was es über Rechte behauptet, wird ersetzt.
 /// * **Widerrufen** → 401. Ein abgeschaltetes Konto arbeitet nicht bis zum Ablauf weiter.
-/// * **Unbekannt** → nur der ausdrücklich benannte Selbst-Absender darf so weiterlaufen; jeder
-///   andere unbekannte Benutzer ist ein gelöschtes Konto und wird abgewiesen.
-pub fn reauthorize(claims: Claims, state: PrincipalState) -> Result<Claims, StatusCode> {
+/// * **Unbekannt** → nur der Selbst-Absender darf so weiterlaufen, und auch er nur, wenn das
+///   vorgelegte Token DAS Selbst-Token dieses Serverlaufs IST (`is_self_token`). Der Name allein
+///   reicht ausdrücklich nicht: sonst wäre `sub="self-desktop"` ein Passwort, das jeder in eine
+///   `users`-Zeile schreiben und sich per Anmeldung ausstellen lassen könnte. Jeder andere
+///   unbekannte Benutzer ist ein gelöschtes Konto und wird abgewiesen.
+pub fn reauthorize(
+    claims: Claims,
+    state: PrincipalState,
+    is_self_token: bool,
+) -> Result<Claims, StatusCode> {
     match state {
         PrincipalState::Active { role } => Ok(Claims { role, ..claims }),
         PrincipalState::Revoked => Err(StatusCode::UNAUTHORIZED),
         PrincipalState::Unknown => {
-            if claims.sub == SELF_PRINCIPAL_ID {
+            if claims.sub == SELF_PRINCIPAL_ID && is_self_token {
                 Ok(claims)
             } else {
                 Err(StatusCode::UNAUTHORIZED)
@@ -109,6 +116,7 @@ mod tests {
         let out = reauthorize(
             claims("u1", "ADMIN"),
             PrincipalState::Active { role: "SALES".into() },
+            false,
         )
         .unwrap();
         assert_eq!(out.role, "SALES", "die Datenbank entscheidet, nicht der Abzug von vor drei Wochen");
@@ -122,6 +130,7 @@ mod tests {
         let out = reauthorize(
             claims("u1", "SALES"),
             PrincipalState::Active { role: "ADMIN".into() },
+            false,
         )
         .unwrap();
         assert_eq!(out.role, "ADMIN", "es wirkt in beide Richtungen — es ist keine Sperre, sondern die Wahrheit");
@@ -130,7 +139,7 @@ mod tests {
     #[test]
     fn a_revoked_account_does_not_work_until_the_token_expires() {
         assert_eq!(
-            reauthorize(claims("u1", "ADMIN"), PrincipalState::Revoked).err(),
+            reauthorize(claims("u1", "ADMIN"), PrincipalState::Revoked, true).err(),
             Some(StatusCode::UNAUTHORIZED)
         );
     }
@@ -139,12 +148,96 @@ mod tests {
     fn a_deleted_account_is_refused_and_the_self_principal_is_not() {
         // Ein geloeschtes Konto hat keine Zeile mehr — und darf gerade DESHALB nicht durch.
         assert_eq!(
-            reauthorize(claims("u-gone", "ADMIN"), PrincipalState::Unknown).err(),
+            reauthorize(claims("u-gone", "ADMIN"), PrincipalState::Unknown, false).err(),
             Some(StatusCode::UNAUTHORIZED)
         );
         // Der Selbst-Absender des Desktops hat nie eine gehabt.
-        let out = reauthorize(claims(SELF_PRINCIPAL_ID, "owner"), PrincipalState::Unknown).unwrap();
+        let out = reauthorize(claims(SELF_PRINCIPAL_ID, "owner"), PrincipalState::Unknown, true).unwrap();
         assert_eq!(out.role, "owner");
+    }
+
+    // ── CENTRAL-C4 FINAL 2 — der Name allein ist KEIN Ausweis ────────────────
+    //
+    // Der gefaehrliche Fall ist nicht das erfundene Token — das faellt schon an der Unterschrift.
+    // Er ist das GUELTIG signierte: eine `users`-Zeile, die jemand `self-desktop` nennt, und eine
+    // ganz normale Anmeldung darauf. Ihr Token traegt `sub="self-desktop"`, ist echt signiert —
+    // und bekaeme ohne diese Bindung den internen Bypass mit der Rolle, die es selbst behauptet.
+    //
+    // Gebunden wird deshalb an etwas, das von aussen nicht herstellbar ist: den WERT des einen
+    // Selbst-Tokens, das dieser Serverlauf ausgestellt hat.
+    #[test]
+    fn a_validly_signed_token_that_merely_claims_the_self_name_gets_nothing() {
+        // Es hat den richtigen Namen und eine echte Unterschrift — aber es IST nicht das Token
+        // dieses Laufs.
+        assert_eq!(
+            reauthorize(claims(SELF_PRINCIPAL_ID, "owner"), PrincipalState::Unknown, false).err(),
+            Some(StatusCode::UNAUTHORIZED),
+            "der Name allein oeffnet nichts"
+        );
+        // Auch nicht mit einer behaupteten hoeheren Rolle.
+        assert_eq!(
+            reauthorize(claims(SELF_PRINCIPAL_ID, "ADMIN"), PrincipalState::Unknown, false).err(),
+            Some(StatusCode::UNAUTHORIZED),
+            "…und eine erfundene Rolle daran aendert nichts"
+        );
+        // Und wenn es sogar eine echte Benutzerzeile mit diesem Namen gaebe: der Nachschlag
+        // kurzschliesst auf `Unknown`, und ohne den Nachweis ist das ein Nein.
+        assert_eq!(
+            reauthorize(claims(SELF_PRINCIPAL_ID, "owner"), PrincipalState::Active { role: "SALES".into() }, false)
+                .unwrap()
+                .role,
+            "SALES",
+            "…und existiert er doch als Konto, gilt genau dessen heutige Rolle — kein Bypass"
+        );
+    }
+
+    #[test]
+    fn only_the_token_this_run_minted_is_the_self_principal() {
+        let out = reauthorize(claims(SELF_PRINCIPAL_ID, "owner"), PrincipalState::Unknown, true).unwrap();
+        assert_eq!(out.role, "owner", "das echte Selbst-Token laeuft weiter");
+        // Der Nachweis gilt NUR zusammen mit dem Namen: ein fremder Unbekannter kommt auch mit
+        // ihm nicht durch (dieser Fall kann nicht entstehen, aber die Regel ist so formuliert).
+        assert_eq!(
+            reauthorize(claims("u-gone", "ADMIN"), PrincipalState::Unknown, true).err(),
+            Some(StatusCode::UNAUTHORIZED),
+            "der Nachweis ersetzt den Namen nicht"
+        );
+    }
+
+    // Und der Nachweis kommt aus dem Serverzustand, nicht aus der Anfrage.
+    #[test]
+    fn the_proof_is_the_servers_own_value_not_anything_from_the_request() {
+        let auth_rs = include_str!("auth.rs");
+        assert!(
+            auth_rs.contains("state.self_token.as_deref() == Some(token)"),
+            "verglichen wird gegen den Wert im Serverzustand"
+        );
+        // Nichts aus Kopfzeilen, Adresse oder Rumpf entscheidet darueber.
+        assert!(
+            !auth_rs.contains("headers().get(\"x-") && !auth_rs.contains("uri()"),
+            "keine Kopfzeile und kein Pfad taugt als Ausweis"
+        );
+        let mod_rs = include_str!("mod.rs");
+        assert!(
+            mod_rs.contains("self_token: Some(self_token_value)"),
+            "der Wert entsteht beim Start des Servers"
+        );
+        // Er wird aus dem Installationsgeheimnis gemuenzt — nicht aus etwas Erratbarem.
+        let minted = mod_rs.find("auth::create_token(").expect("self-token minted");
+        let secret_use = mod_rs[minted..minted + 260].contains("&jwt_secret");
+        assert!(secret_use, "…mit dem Geheimnis dieser Installation");
+        // Und die Routen bekommen ihn nie zu sehen: er reist nur ueber den Tauri-Befehl an den
+        // eigenen Renderer.
+        // Keine HTTP-Route liest ihn und keine gibt ihn heraus — die Testfundamente setzen ihn
+        // nur auf `None`, und genau das ist der Punkt.
+        let routes = include_str!("routes.rs");
+        assert!(
+            !routes.contains("state.self_token") && !routes.contains("selfToken"),
+            "keine HTTP-Route liest ihn oder gibt ihn heraus"
+        );
+        // Herausgegeben wird er ausschliesslich ueber den Tauri-Befehl an den eigenen Renderer.
+        let lib_rs = include_str!("../lib.rs");
+        assert!(lib_rs.contains("\"selfToken\": self_token"), "…nur ueber den Tauri-Befehl");
     }
 
     #[test]
@@ -190,7 +283,7 @@ mod tests {
         assert_eq!(lookup_principal(&conn, "someone-else"), PrincipalState::Unknown);
         // …und „unbekannt" ist fuer jeden ausser dem Selbst-Absender ein Nein.
         assert_eq!(
-            reauthorize(claims("someone-else", "ADMIN"), lookup_principal(&conn, "someone-else")).err(),
+            reauthorize(claims("someone-else", "ADMIN"), lookup_principal(&conn, "someone-else"), false).err(),
             Some(StatusCode::UNAUTHORIZED)
         );
     }

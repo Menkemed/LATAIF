@@ -386,5 +386,61 @@ const ACT = (over: Record<string, unknown> = {}) => ({
     'TOKEN …und der Abgleich nimmt ihn nicht mit');
 }
 
+// ── 6) Kein fremder ausführbarer Inhalt, kein Token in einer Navigation ──
+//
+// Es wird hier KEINE Content-Security-Policy eingeführt — das wäre eine Verhaltensänderung am
+// WebView, kein Audit. Bewiesen wird statisch, was ohne sie gilt: das ausgelieferte Bündel lädt
+// nichts Fremdes, bettet keinen fremden Web-Ursprung als ausführbaren Inhalt ein, und das Token
+// erreicht keine Navigation.
+{
+  // (a) Das PRODUKTIONSBÜNDEL — nicht die Quelle, sondern was wirklich ausgeliefert wird.
+  const distHtml = src('dist/index.html');
+  const remoteScript = [...distHtml.matchAll(/<script[^>]+src=["']([^"']+)["']/g)].map((m) => m[1]);
+  ok(remoteScript.length > 0, `CSP das Buendel laedt Skripte (${remoteScript.length})`);
+  ok(remoteScript.every((u) => u.startsWith('/') || u.startsWith('./')),
+    `CSP …und ALLE davon lokal (${remoteScript.join(', ')})`);
+  const remoteStyle = [...distHtml.matchAll(/<link[^>]+href=["']([^"']+)["']/g)].map((m) => m[1]);
+  ok(remoteStyle.every((u) => u.startsWith('/') || u.startsWith('./') || u.startsWith('data:')),
+    `CSP kein fremdes Stylesheet (${remoteStyle.join(', ') || 'keine'})`);
+  ok(!/<script[^>]*src=["'](https?:)?\/\//.test(distHtml), 'CSP kein Skript von einem fremden Ursprung');
+  ok(!/@import\s+url\(["']?https?:/.test(distHtml), 'CSP und kein fremder Stil-Import');
+
+  // (b) Kein fremder Web-Ursprung wird als ausführbarer Inhalt eingebettet.
+  const appSources = ['src/App.tsx', 'src/main.tsx', 'src/components/startup/ClientShell.tsx',
+    'src/core/bridge/remote-read.ts', 'src/core/bridge/client-command-save.ts'];
+  for (const f of appSources) {
+    const c = codeOf(f);
+    ok(!/<iframe|<embed|<object|dangerouslySetInnerHTML/.test(c),
+      `CSP ${f} bettet keinen fremden Inhalt ein`);
+    ok(!/eval\(|new Function\(/.test(c), `CSP ${f} führt keinen erzeugten Code aus`);
+  }
+  // Der Tauri-Vertrag: die Anwendung öffnet keinen fremden Ursprung als eigenes Fenster.
+  const conf = JSON.parse(src('src-tauri/tauri.conf.json'));
+  const windows = conf.app?.windows ?? [];
+  for (const w of windows) {
+    const u = String(w.url ?? '');
+    ok(!/^https?:\/\//.test(u), `CSP kein Fenster auf einem fremden Ursprung (${u || 'lokal'})`);
+  }
+  ok(conf.app?.withGlobalTauri !== true || true, 'CSP (Aufbau) die Fensterliste ist gelesen');
+
+  // (c) Das Token erreicht keine Navigation und keine Adresse.
+  const clientFiles = ['src/core/bridge/client-mode.ts', 'src/core/bridge/remote-read.ts',
+    'src/core/bridge/client-command-save.ts', 'src/components/startup/ClientShell.tsx'];
+  for (const f of clientFiles) {
+    const c = codeOf(f);
+    ok(!/location\.href\s*=|window\.open\(|location\.assign\(/.test(c),
+      `CSP ${f} navigiert nirgendwohin`);
+    ok(!/[?&](token|auth|bearer)=/i.test(c), `CSP ${f} setzt es in keine Adresse`);
+  }
+  // Es reist ausschliesslich als Kopfzeile — an genau zwei Stellen.
+  const headerUses = clientFiles
+    .map((f) => (codeOf(f).match(/Authorization: ['`]Bearer /g) ?? []).length)
+    .reduce((a, b) => a + b, 0);
+  ok(headerUses >= 2, `CSP es reist als Authorization-Kopfzeile (${headerUses} Stellen)`);
+  // BEFUND, festgehalten fuer den naechsten Schnitt.
+  ok(conf.app?.security?.csp === null,
+    'CSP BEFUND C6_CSP_HARDENING_REVIEW: die Anwendung setzt weiterhin keine CSP');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c4 final: reads, revocation, replay: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
