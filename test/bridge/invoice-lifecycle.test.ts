@@ -564,12 +564,13 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
+  await import('../../src/core/bridge/financial-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
-  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
-    `ALLOWLIST genau diese siebzehn Mutationen (${mutations.join(', ')})`);
-  ok(known.length === 36 && reads.length === 18 && known.includes('bridge.probe'),
+  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
+    `ALLOWLIST genau diese vierundzwanzig Mutationen (${mutations.join(', ')})`);
+  ok(known.length === 43 && reads.length === 18 && known.includes('bridge.probe'),
     `ALLOWLIST 1 Probe + 6 Reads + 7 Mutationen = 14 (${known.length}: ${known.join(', ')})`);
   ok(!mutations.some((o) => o.endsWith('.delete')), 'ALLOWLIST kein Loeschen');
 
@@ -582,7 +583,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 36, 'ALLOWLIST Rust kennt dieselben sechsunddreissig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 43, 'ALLOWLIST Rust kennt dieselben dreiundvierzig Namen');
   ok(/OP_INVOICES_UPDATE: &str = "invoices.update"/.test(rs)
     && /OP_INVOICES_RECORD_PAYMENT: &str = "invoices.record_payment"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');

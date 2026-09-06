@@ -57,6 +57,7 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const { SKU_SEQUENCES_DDL } = await import('../../src/core/products/sku-sequence.ts');
 const cmd = await import('../../src/core/bridge/service-commands.ts');
+await import('../../src/core/bridge/financial-commands.ts');
 const { executeCommand, ALLOWED_MUTATIONS, knownCommands } =
   await import('../../src/core/bridge/command-registry.ts');
 await import('../../src/core/bridge/read-commands.ts');
@@ -166,21 +167,21 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
 // ── 1) Umfang: was freigegeben ist — und was ausdrücklich nicht ───────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 17, `SCOPE genau 17 Mutationen (${list.length})`);
+  ok(list.length === 24, `SCOPE genau 24 Mutationen (${list.length})`);
   for (const op of ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich auf der Liste`);
   }
   for (const op of [
     'repairs.update_status', 'repairs.delete', 'repairs.create_invoice', 'repairs.add_line',
-    'transfers.mark_sold', 'transfers.mark_settled', 'transfers.convert_to_invoice', 'transfers.delete',
+    'transfers.convert_to_invoice', 'transfers.delete', 'transfers.undo_convert',
     'repairs.action', 'transfers.action',
   ]) {
     ok(!list.includes(op), `SCOPE ${op} bleibt fail-closed`);
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 36 && reads.length === 18,
-    `SCOPE 1 Probe + 18 Reads + 17 Mutationen = 36 (${known.length}/${reads.length})`);
+  ok(known.length === 43 && reads.length === 18,
+    `SCOPE 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of ['repairs.list', 'repairs.get', 'transfers.list', 'transfers.get',
     'repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {
@@ -618,21 +619,25 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   // (c) Eine fremde Mutation: solange ihr Name nicht auf der Liste steht, ist sie nicht
   //     registrierbar — und sobald er es tut, ist sie es. Die Liste IST der Riegel.
   const { registerCommand, ALLOWED_MUTATIONS: LIST } = await import('../../src/core/bridge/command-registry.ts');
+  // ZUERST prüfen, dass der echte Name nichts erreicht — DANACH die Liste anfassen. Umgekehrt
+  // bewiese die Gegenprobe am Ende das Gegenteil: sie hätte ihn selbst angemeldet.
+  const unknown = await executeCommand('transfers.delete', { input: {} }, identity('99', 'transfers.delete', 'u'));
+  ok(unknown.kind === 'infrastructure_error' && (unknown as { code: string }).code === 'BRIDGE_OP_NOT_REGISTERED',
+    'CONTROL-C ein unbekannter Name erreicht nichts');
   const before = LIST.length;
   let refused = '';
   try { registerCommand('transfers.delete', { kind: 'mutation', handler: () => ({ ok: true }) }); }
   catch (e) { refused = e instanceof Error ? e.message : String(e); }
   ok(/refusing to register/.test(refused), 'CONTROL-C eine fremde Mutation laesst sich nicht anmelden');
-  (LIST as string[]).push('transfers.delete');
+  // Dass die LISTE der Riegel ist, wird an einem Namen gezeigt, den es sonst nirgends gibt —
+  // sonst bliebe eine echte Operation angemeldet zurück.
+  (LIST as string[]).push('nur.fuer.die.gegenprobe.c3f');
   let registered = false;
-  try { registerCommand('transfers.delete', { kind: 'mutation', handler: () => ({ ok: true }) }); registered = true; } catch { /* */ }
-  ok(registered, 'CONTROL-C …und mit dem Namen darauf schon — die Liste ist der ganze Riegel');
+  try { registerCommand('nur.fuer.die.gegenprobe.c3f', { kind: 'mutation', handler: () => ({ ok: true }) }); registered = true; } catch { /* */ }
+  ok(registered, 'CONTROL-C …und mit einem Namen darauf schon — die Liste ist der ganze Riegel');
   (LIST as string[]).splice(before);
-  ok(LIST.length === before, 'CONTROL-C die Liste ist danach wieder genau so lang');
-
-  const unknown = await executeCommand('transfers.mark_sold', { input: {} }, identity('99', 'transfers.mark_sold', 'u'));
-  ok(unknown.kind === 'infrastructure_error' && (unknown as { code: string }).code === 'BRIDGE_OP_NOT_REGISTERED',
-    'CONTROL-C ein unbekannter Name erreicht nichts');
+  ok(LIST.length === before && !(LIST as string[]).includes('transfers.delete'),
+    'CONTROL-C die Liste ist danach wieder genau so lang, und der echte Name steht NICHT darauf');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3f service documents: ${PASS} passed, ${fails.length} failed`);

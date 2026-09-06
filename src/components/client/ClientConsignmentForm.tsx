@@ -21,11 +21,15 @@ import {
   consignmentCreateRequest, consignmentUpdateRequest, draftOf,
   type ConsignmentDraft, type Draft,
 } from '@/core/bridge/client-commercial-request';
+import { recordPayoutRequest } from '@/core/bridge/client-financial-request';
 import { Outcome, PickField, Row, TextField } from './client-form-atoms';
 import { box, btn, field, label, warn } from './client-form-style';
 
 export const OP_CONSIGNMENTS_CREATE = 'consignments.create';
 export const OP_CONSIGNMENTS_UPDATE = 'consignments.update';
+// CENTRAL-C3G - den Einlieferer auszahlen. Ein ausdruecklicher Betrag, kein Rest-Automatismus:
+// der Rest aendert sich zwischen Lesen und Ankommen, und wer Geld auszahlt, meint einen Betrag.
+export const OP_CONSIGNMENTS_RECORD_PAYOUT = 'consignments.record_payout';
 
 export interface ConsignmentSaveValue {
   consignmentId: string;
@@ -52,6 +56,12 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
   const [edit, setEdit] = useState<Draft>({});
   const [revision, setRevision] = useState(0);
   const [payoutLocked, setPayoutLocked] = useState(false);
+  const [payoutOpen, setPayoutOpen] = useState(0);
+  const [payoutStatus, setPayoutStatus] = useState('');
+  const [payoutAmount, setPayoutAmount] = useState('');
+  const [payoutMethod, setPayoutMethod] = useState('cash');
+  const [payoutOutcome, setPayoutOutcome] = useState<SaveOutcome<{ payoutPaidAmount: number; payoutOpenAmount: number; payoutStatus: string; replayed?: boolean }> | null>(null);
+  const [payoutBusy, setPayoutBusy] = useState(false);
   const [consignors, setConsignors] = useState<Array<Record<string, unknown>>>([]);
   const [categories, setCategories] = useState<Array<Record<string, unknown>>>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -67,6 +77,12 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
     () => new CommandSaveController<ConsignmentSaveValue>(editing ? OP_CONSIGNMENTS_UPDATE : OP_CONSIGNMENTS_CREATE),
     [editing],
   );
+  // Ein eigener Vorsatz mit eigenem Wächter: eine hängengebliebene Änderung darf niemals als
+  // Auszahlung weiterlaufen.
+  const payoutController = useMemo(
+    () => new CommandSaveController<{ payoutPaidAmount: number; payoutOpenAmount: number; payoutStatus: string; replayed?: boolean }>(OP_CONSIGNMENTS_RECORD_PAYOUT),
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +96,8 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
           setEdit(d);
           setRevision(Number(row.revision ?? 0));
           setPayoutLocked(row.payoutLocked === true);
+          setPayoutOpen(Number(row.payoutOpenAmount ?? 0));
+          setPayoutStatus(s(row.payoutStatus));
         }
         const people = await read<{ items: Array<Record<string, unknown>> }>('customers.list', { limit: 500 });
         if (!cancelled) setConsignors(people.items ?? []);
@@ -267,6 +285,68 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
         value={editing ? (edit.notes ?? '') : draft.notes} disabled={pending}
         onChange={(e) => (editing ? setE('notes', e.target.value) : set('notes', e.target.value))} style={field} />
 
+      {editing && (
+        <div data-client-consignment-payout style={{ marginTop: 16, borderTop: '1px solid rgba(128,128,128,0.3)', paddingTop: 12 }}>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>
+            Payout · {payoutStatus || 'pending'} · {payoutOpen.toFixed(3)} BHD open
+          </div>
+          {payoutOpen > 0 ? (
+            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+              <input data-client-consignment-payout-amount type="number" min={0} step="0.001"
+                value={payoutAmount} disabled={payoutOutcome?.kind === 'unknown'}
+                onChange={(e) => setPayoutAmount(e.target.value)} style={{ ...field, flex: 1 }} />
+              <select data-client-consignment-payout-method value={payoutMethod}
+                disabled={payoutOutcome?.kind === 'unknown'}
+                onChange={(e) => setPayoutMethod(e.target.value)} style={{ ...field, flex: 1 }}>
+                <option value="cash">cash</option>
+                <option value="bank">bank</option>
+                <option value="benefit">benefit</option>
+              </select>
+              <button data-client-consignment-payout-save
+                disabled={payoutBusy || payoutAmount.trim() === '' || payoutOutcome?.kind === 'business_error'}
+                onClick={async () => {
+                  setPayoutBusy(true);
+                  try {
+                    const attempt = payoutController.beginAttempt();
+                    const out = await attempt.send(
+                      recordPayoutRequest(consignmentId!, revision, payoutAmount, payoutMethod),
+                    );
+                    setPayoutOutcome(out);
+                    if (out.kind === 'ok') {
+                      setPayoutOpen(out.value.payoutOpenAmount);
+                      setPayoutStatus(out.value.payoutStatus);
+                      setPayoutAmount('');
+                    }
+                  } finally { setPayoutBusy(false); }
+                }}
+                style={{ ...btn(true), marginTop: 0 }}>
+                {payoutOutcome?.kind === 'unknown' ? 'Retry the same payout' : 'Pay out'}
+              </button>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, opacity: 0.6, marginTop: 6 }}>
+              Nothing to pay out — the amount appears once the item is sold.
+            </div>
+          )}
+          {payoutOutcome?.kind === 'unknown' && (
+            <div data-client-consignment-payout-pending style={warn}>
+              The outcome is not known — the money may already be out. Retrying checks the same
+              attempt instead of paying twice.
+            </div>
+          )}
+          {payoutOutcome?.kind === 'business_error' && (
+            <div data-client-consignment-payout-rejected style={warn}>
+              {payoutOutcome.code}: {payoutOutcome.message}
+            </div>
+          )}
+          {payoutOutcome?.kind === 'ok' && (
+            <div data-client-consignment-payout-done style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
+              Paid · {payoutOutcome.value.payoutPaidAmount.toFixed(3)} BHD total
+              {payoutOutcome.replayed && ' · this was the answer to the attempt that had already run'}
+            </div>
+          )}
+        </div>
+      )}
       {editing && (
         <div data-client-consignment-changes style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
           {changeCount(body) === 0

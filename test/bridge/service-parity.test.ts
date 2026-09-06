@@ -430,17 +430,18 @@ const REPAIR_COMPARE = [
 // ── 7) Umfang und Registry unveraendert ──────────────────────────────────
 {
   await import('../../src/core/bridge/service-commands.ts');
+  await import('../../src/core/bridge/financial-commands.ts');
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 36 && reads.length === 18 && ALLOWED_MUTATIONS.length === 17,
-    `SCOPE 1 Probe + 18 Reads + 17 Mutationen = 36 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
+  ok(known.length === 43 && reads.length === 18 && ALLOWED_MUTATIONS.length === 24,
+    `SCOPE 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   const c3f = ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned'];
   for (const op of c3f) ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} steht darauf`);
-  for (const op of ['transfers.mark_sold', 'transfers.mark_settled', 'transfers.convert_to_invoice',
+  for (const op of ['transfers.convert_to_invoice', 'transfers.undo_convert',
     'transfers.delete', 'repairs.update_status', 'repairs.delete']) {
     ok(!(ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} bleibt draussen`);
   }
-  const unknown = await executeCommand('transfers.mark_sold', { input: {} }, identity('90', 'transfers.mark_sold', 'z'));
+  const unknown = await executeCommand('transfers.delete', { input: {} }, identity('90', 'transfers.delete', 'z'));
   ok(unknown.kind === 'infrastructure_error', 'SCOPE …und erreicht nichts');
 }
 

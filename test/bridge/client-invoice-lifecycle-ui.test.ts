@@ -210,8 +210,13 @@ const { buildUpdateRequest } = await import('../../src/components/client/client-
   ok(/editCtl\.beginAttempt\(\)/.test(view) && /payCtl\.beginAttempt\(\)/.test(view),
     'UI beide Wege gehen ueber ihren Waechter…');
   ok(!/new CommandSaveAttempt\(/.test(view), 'UI …und keiner vergibt eine Kennung daran vorbei');
-  ok((view.match(/new CommandSaveController/g) || []).length === 2,
-    'UI es sind wirklich ZWEI Waechter');
+  // Seit C3G sind es fuenf: aendern, bezahlen, Guthaben anrechnen, Zahlung berichtigen,
+  // Zahlung zuruecknehmen. Die Zusage war nie „genau zwei", sondern EINER JE VORSATZ — und
+  // dass keiner davon geteilt wird, ist der Punkt.
+  const ctls = [...view.matchAll(/const (\w+) = useMemo\(\(\) => new CommandSaveController/g)].map((m) => m[1]);
+  ok((view.match(/new CommandSaveController/g) || []).length === 5,
+    `UI es sind fuenf Waechter — einer je Vorsatz (${ctls.join(', ')})`);
+  ok(new Set(ctls).size === ctls.length, 'UI …und keiner wird doppelt benutzt');
   ok(!/setTimeout|setInterval/.test(view), 'UI es gibt keinen automatischen zweiten Versuch');
   ok(/disabled=\{editPending\}/.test(view) && /disabled=\{payPending\}/.test(view),
     'UI waehrend ein Ausgang offen ist, wird die Eingabe nicht veraendert');

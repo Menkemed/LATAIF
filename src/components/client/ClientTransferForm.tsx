@@ -16,12 +16,16 @@ import {
   transferCreateRequest, transferReturnRequest, transferUpdateRequest,
   type Draft, type TransferDraft,
 } from '@/core/bridge/client-service-request';
+import { markSettledRequest, markSoldRequest } from '@/core/bridge/client-financial-request';
 import { Outcome, PickField, Row, TextField } from './client-form-atoms';
 import { box, btn, field, label, warn } from './client-form-style';
 
 export const OP_TRANSFERS_CREATE = 'transfers.create';
 export const OP_TRANSFERS_UPDATE = 'transfers.update';
 export const OP_TRANSFERS_MARK_RETURNED = 'transfers.mark_returned';
+// CENTRAL-C3G — der Agent hat verkauft, und er rechnet ab. Zwei Geldwege, zwei Vorsätze.
+export const OP_TRANSFERS_MARK_SOLD = 'transfers.mark_sold';
+export const OP_TRANSFERS_MARK_SETTLED = 'transfers.mark_settled';
 
 export interface TransferSaveValue {
   transferId: string;
@@ -47,6 +51,14 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
   const [edit, setEdit] = useState<Draft>({});
   const [revision, setRevision] = useState(0);
   const [status, setStatus] = useState('');
+  const [settlementOpen, setSettlementOpen] = useState(0);
+  const [salePrice, setSalePrice] = useState('');
+  const [ackBelow, setAckBelow] = useState(false);
+  const [settleAmount, setSettleAmount] = useState('');
+  const [settleMethod, setSettleMethod] = useState('cash');
+  const [moneyBusy, setMoneyBusy] = useState(false);
+  const [soldOutcome, setSoldOutcome] = useState<SaveOutcome<{ settlementAmount: number; status: string; replayed?: boolean }> | null>(null);
+  const [settleOutcome, setSettleOutcome] = useState<SaveOutcome<{ settlementPaidAmount: number; settlementOpenAmount: number; replayed?: boolean }> | null>(null);
   const [customers, setCustomers] = useState<Array<Record<string, unknown>>>([]);
   const [products, setProducts] = useState<Array<Record<string, unknown>>>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -61,6 +73,14 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
     [editing],
   );
   const returnController = useMemo(() => new CommandSaveController<TransferSaveValue>(OP_TRANSFERS_MARK_RETURNED), []);
+  // Vier Vorsätze, vier Wächter. Ein hängengebliebener Verkauf darf nie als Abrechnung
+  // weiterlaufen — und keiner von beiden als Rückgabe.
+  const soldController = useMemo(
+    () => new CommandSaveController<{ settlementAmount: number; status: string; replayed?: boolean }>(OP_TRANSFERS_MARK_SOLD), [],
+  );
+  const settleController = useMemo(
+    () => new CommandSaveController<{ settlementPaidAmount: number; settlementOpenAmount: number; replayed?: boolean }>(OP_TRANSFERS_MARK_SETTLED), [],
+  );
   const [returnOutcome, setReturnOutcome] = useState<SaveOutcome<TransferSaveValue> | null>(null);
 
   useEffect(() => {
@@ -75,6 +95,7 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
           setEdit(d);
           setRevision(Number(row.revision ?? 0));
           setStatus(s(row.status));
+          setSettlementOpen(Number(row.settlementOpenAmount ?? 0));
         } else {
           const [people, prod] = await Promise.all([
             read<{ items: Array<Record<string, unknown>> }>('customers.list', { limit: 500 }),
@@ -247,6 +268,108 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
         disabled={pending || closed}
         onChange={(e) => (editing ? setE('notes', e.target.value) : set('notes', e.target.value))} style={field} />
 
+      {editing && status === 'transferred' && (
+        <div data-client-transfer-sold-box style={{ marginTop: 16, borderTop: '1px solid rgba(128,128,128,0.3)', paddingTop: 12 }}>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>The agent sold it</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+            <input data-client-transfer-saleprice type="number" min={0} step="0.001" value={salePrice}
+              disabled={soldOutcome?.kind === 'unknown'} placeholder="sale price"
+              onChange={(e) => setSalePrice(e.target.value)} style={{ ...field, flex: 1 }} />
+            <button data-client-transfer-sold
+              disabled={moneyBusy || salePrice.trim() === '' || soldOutcome?.kind === 'business_error'}
+              onClick={async () => {
+                setMoneyBusy(true);
+                try {
+                  const attempt = soldController.beginAttempt();
+                  const out = await attempt.send(markSoldRequest(transferId!, revision, salePrice, '', ackBelow));
+                  setSoldOutcome(out);
+                  if (out.kind === 'ok') { setStatus(out.value.status); setSettlementOpen(out.value.settlementAmount); }
+                } finally { setMoneyBusy(false); }
+              }}
+              style={{ ...btn(true), marginTop: 0 }}>
+              {soldOutcome?.kind === 'unknown' ? 'Retry the same sale' : 'Mark sold'}
+            </button>
+          </div>
+          {soldOutcome?.kind === 'business_error' && soldOutcome.code === 'SALE_BELOW_OUR_PRICE' && (
+            <div data-client-transfer-below style={warn}>
+              {soldOutcome.message}
+              {' '}
+              <button data-client-transfer-sold-anyway disabled={moneyBusy}
+                onClick={async () => {
+                  // Eine bewusste Bestätigung ist ein NEUER Vorsatz: neuer Wächterlauf, neue
+                  // Kennung. Dieselbe Kennung mit erweitertem Rumpf wäre ein Kennungskonflikt.
+                  soldController.forget();
+                  setSoldOutcome(null);
+                  setAckBelow(true);
+                  setMoneyBusy(true);
+                  try {
+                    const attempt = soldController.beginAttempt();
+                    const out = await attempt.send(markSoldRequest(transferId!, revision, salePrice, '', true));
+                    setSoldOutcome(out);
+                    if (out.kind === 'ok') { setStatus(out.value.status); setSettlementOpen(out.value.settlementAmount); }
+                  } finally { setMoneyBusy(false); }
+                }}
+                style={{ ...btn(false), marginTop: 0 }}>Sell anyway</button>
+            </div>
+          )}
+          {soldOutcome?.kind === 'unknown' && (
+            <div data-client-transfer-sold-pending style={warn}>
+              The outcome is not known — it may already be booked. Retrying checks the same attempt.
+            </div>
+          )}
+          {soldOutcome?.kind === 'ok' && (
+            <div data-client-transfer-sold-done style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
+              Sold · we get {soldOutcome.value.settlementAmount.toFixed(3)} BHD
+              {soldOutcome.replayed && ' · this was the answer to the attempt that had already run'}
+            </div>
+          )}
+        </div>
+      )}
+      {editing && status === 'sold' && (
+        <div data-client-transfer-settle-box style={{ marginTop: 16, borderTop: '1px solid rgba(128,128,128,0.3)', paddingTop: 12 }}>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>Settle · {settlementOpen.toFixed(3)} BHD open</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+            <input data-client-transfer-settle-amount type="number" min={0} step="0.001" value={settleAmount}
+              disabled={settleOutcome?.kind === 'unknown'}
+              onChange={(e) => setSettleAmount(e.target.value)} style={{ ...field, flex: 1 }} />
+            <select data-client-transfer-settle-method value={settleMethod}
+              disabled={settleOutcome?.kind === 'unknown'}
+              onChange={(e) => setSettleMethod(e.target.value)} style={{ ...field, flex: 1 }}>
+              <option value="cash">cash</option>
+              <option value="bank">bank</option>
+            </select>
+            <button data-client-transfer-settle
+              disabled={moneyBusy || settleAmount.trim() === '' || settleOutcome?.kind === 'business_error'}
+              onClick={async () => {
+                setMoneyBusy(true);
+                try {
+                  const attempt = settleController.beginAttempt();
+                  const out = await attempt.send(markSettledRequest(transferId!, revision, settleAmount, settleMethod));
+                  setSettleOutcome(out);
+                  if (out.kind === 'ok') { setSettlementOpen(out.value.settlementOpenAmount); setSettleAmount(''); }
+                } finally { setMoneyBusy(false); }
+              }}
+              style={{ ...btn(true), marginTop: 0 }}>
+              {settleOutcome?.kind === 'unknown' ? 'Retry the same settlement' : 'Settle'}
+            </button>
+          </div>
+          {settleOutcome?.kind === 'unknown' && (
+            <div data-client-transfer-settle-pending style={warn}>
+              The outcome is not known — it may already be settled. Retrying checks the same attempt.
+            </div>
+          )}
+          {settleOutcome?.kind === 'business_error' && (
+            <div data-client-transfer-settle-rejected style={warn}>
+              {settleOutcome.code}: {settleOutcome.message}
+            </div>
+          )}
+          {settleOutcome?.kind === 'ok' && (
+            <div data-client-transfer-settle-done style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
+              Settled · {settleOutcome.value.settlementPaidAmount.toFixed(3)} BHD total
+            </div>
+          )}
+        </div>
+      )}
       {editing && (
         <div data-client-transfer-changes style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
           {changeCount(body) === 0

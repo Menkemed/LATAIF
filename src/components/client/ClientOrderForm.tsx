@@ -16,11 +16,16 @@ import {
   EMPTY_ORDER, ORDER_EDIT_FIELDS, changeCount, draftOf, orderComplete, orderCreateRequest,
   orderUpdateRequest, previewTotal, type Draft, type DraftLine, type OrderDraft,
 } from '@/core/bridge/client-commercial-request';
+import { convertOrderRequest } from '@/core/bridge/client-financial-request';
 import { LineEditor, Outcome, PickField, Row, TextField } from './client-form-atoms';
 import { box, btn, field, label, warn } from './client-form-style';
 
 export const OP_ORDERS_CREATE = 'orders.create';
 export const OP_ORDERS_UPDATE = 'orders.update';
+// CENTRAL-C3G — die Ware ist da, der Kunde zahlt: aus dem Auftrag wird eine Rechnung. WELCHE
+// Positionen berechnet werden, entscheidet der Primary — dieser Knopf trägt nur die Kennung
+// und die gelesene Fassung.
+export const OP_ORDERS_CONVERT_TO_INVOICE = 'orders.convert_to_invoice';
 
 export interface OrderSaveValue {
   orderId: string;
@@ -48,6 +53,9 @@ export function ClientOrderForm({ orderId, onSaved, onCancel, read = remoteRead 
   const [edit, setEdit] = useState<Draft>({});
   const [revision, setRevision] = useState(0);
   const [orderType, setOrderType] = useState('normal');
+  const [invoiceId, setInvoiceId] = useState('');
+  const [billable, setBillable] = useState(0);
+  const [convertOutcome, setConvertOutcome] = useState<SaveOutcome<{ invoiceNumber: string; grossAmount: number; invoicedLines: number; replayed?: boolean }> | null>(null);
   const [customers, setCustomers] = useState<Array<Record<string, unknown>>>([]);
   const [products, setProducts] = useState<Array<Record<string, unknown>>>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -58,6 +66,12 @@ export function ClientOrderForm({ orderId, onSaved, onCancel, read = remoteRead 
   const controller = useMemo(
     () => new CommandSaveController<OrderSaveValue>(editing ? OP_ORDERS_UPDATE : OP_ORDERS_CREATE),
     [editing],
+  );
+  // Ein eigener Vorsatz: eine hängengebliebene Änderung darf niemals als Rechnungserzeugung
+  // weiterlaufen.
+  const convertController = useMemo(
+    () => new CommandSaveController<{ invoiceNumber: string; grossAmount: number; invoicedLines: number; replayed?: boolean }>(OP_ORDERS_CONVERT_TO_INVOICE),
+    [],
   );
 
   useEffect(() => {
@@ -72,6 +86,8 @@ export function ClientOrderForm({ orderId, onSaved, onCancel, read = remoteRead 
           setEdit(d);
           setRevision(Number(row.revision ?? 0));
           setOrderType(s(row.type) || 'normal');
+          setInvoiceId(s(row.invoiceId));
+          setBillable(((row.lines ?? []) as Array<Record<string, unknown>>).filter((l) => l.billable === true).length);
         } else {
           const [people, prod] = await Promise.all([
             read<{ items: Array<Record<string, unknown>> }>('customers.list', { limit: 500 }),
@@ -228,6 +244,46 @@ export function ClientOrderForm({ orderId, onSaved, onCancel, read = remoteRead 
       {!editing && (
         <div data-client-order-preview style={{ marginTop: 12, fontSize: 13, opacity: 0.75 }}>
           {fmt(previewTotal(lines))} BHD — the primary calculates the real total, the remainder and the margin.
+        </div>
+      )}
+      {editing && (
+        <div data-client-order-convert-box style={{ marginTop: 16, borderTop: '1px solid rgba(128,128,128,0.3)', paddingTop: 12 }}>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>
+            {invoiceId
+              ? 'This order is already invoiced.'
+              : `${billable} ${billable === 1 ? 'item is' : 'items are'} ready to invoice.`}
+          </div>
+          {!invoiceId && (
+            <button data-client-order-convert
+              disabled={busy || billable === 0 || convertOutcome?.kind === 'business_error'}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const attempt = convertController.beginAttempt();
+                  setConvertOutcome(await attempt.send(convertOrderRequest(orderId!, revision)));
+                } finally { setBusy(false); }
+              }}
+              style={btn(true)}>
+              {convertOutcome?.kind === 'unknown' ? 'Retry the same invoice' : 'Create invoice'}
+            </button>
+          )}
+          {convertOutcome?.kind === 'unknown' && (
+            <div data-client-order-convert-pending style={warn}>
+              The outcome is not known — the invoice may already exist. Retrying checks the same
+              attempt instead of creating a second one.
+            </div>
+          )}
+          {convertOutcome?.kind === 'business_error' && (
+            <div data-client-order-convert-rejected style={warn}>
+              {convertOutcome.code}: {convertOutcome.message}
+            </div>
+          )}
+          {convertOutcome?.kind === 'ok' && (
+            <div data-client-order-convert-done style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
+              Invoiced · {convertOutcome.value.invoiceNumber} · {fmt(convertOutcome.value.grossAmount)} BHD
+              {convertOutcome.replayed && ' · this was the answer to the attempt that had already run'}
+            </div>
+          )}
         </div>
       )}
       {editing && (

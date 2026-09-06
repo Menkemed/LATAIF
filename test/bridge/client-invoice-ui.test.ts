@@ -259,10 +259,11 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
+  await import('../../src/core/bridge/financial-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 36 && reads.length === 18 && known.includes('bridge.probe'),
-    `REGISTRY 1 Probe + 18 Reads + 17 Mutationen (${known.join(', ')})`);
+  ok(known.length === 43 && reads.length === 18 && known.includes('bridge.probe'),
+    `REGISTRY 1 Probe + 18 Reads + 24 Mutationen (${known.join(', ')})`);
   ok(registry.ALLOWED_MUTATIONS.includes('invoices.create'),
     `REGISTRY der Name des Formulars steht darauf (${registry.ALLOWED_MUTATIONS.join(', ')})`);
   const form = code(FORM);

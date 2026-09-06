@@ -66,6 +66,7 @@ const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const { SKU_SEQUENCES_DDL } = await import('../../src/core/products/sku-sequence.ts');
 const cmd = await import('../../src/core/bridge/commercial-commands.ts');
 await import('../../src/core/bridge/service-commands.ts');
+await import('../../src/core/bridge/financial-commands.ts');
 const { executeCommand } = await import('../../src/core/bridge/command-registry.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
@@ -525,8 +526,8 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 36 && reads.length === 18 && ALLOWED_MUTATIONS.length === 17,
-    `SCOPE 1 Probe + 18 Reads + 17 Mutationen = 36 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
+  ok(known.length === 43 && reads.length === 18 && ALLOWED_MUTATIONS.length === 24,
+    `SCOPE 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   ok(!ALLOWED_MUTATIONS.includes('purchases.update'),
     'SCOPE der Einkauf bleibt Create-only — es gibt keinen lokalen Edit-Pfad');
 }

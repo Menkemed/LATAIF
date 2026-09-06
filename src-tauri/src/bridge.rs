@@ -115,6 +115,17 @@ pub const OP_TRANSFERS_UPDATE: &str = "transfers.update";
 /// Loeschen stehen ABSICHTLICH nicht hier: jedes ist ein eigener Geld- oder Zerstoerungsweg.
 pub const OP_TRANSFERS_MARK_RETURNED: &str = "transfers.mark_returned";
 
+/// CENTRAL-C3G — die Geldvorgaenge NACH dem Beleg. Sieben Namen aus einem Audit ueber
+/// fuenfundzwanzig Aktionen; zerstoerende, administrative und Wiederherstellungs-Aktionen
+/// (Beleg loeschen, Storno, Sondermarke, Undo) bleiben ABSICHTLICH Primary-only.
+pub const OP_INVOICES_APPLY_CREDIT: &str = "invoices.apply_credit";
+pub const OP_INVOICES_UPDATE_PAYMENT: &str = "invoices.update_payment";
+pub const OP_INVOICES_DELETE_PAYMENT: &str = "invoices.delete_payment";
+pub const OP_ORDERS_CONVERT_TO_INVOICE: &str = "orders.convert_to_invoice";
+pub const OP_CONSIGNMENTS_RECORD_PAYOUT: &str = "consignments.record_payout";
+pub const OP_TRANSFERS_MARK_SOLD: &str = "transfers.mark_sold";
+pub const OP_TRANSFERS_MARK_SETTLED: &str = "transfers.mark_settled";
+
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
     OP_PROBE,
@@ -153,6 +164,13 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_TRANSFERS_CREATE,
     OP_TRANSFERS_UPDATE,
     OP_TRANSFERS_MARK_RETURNED,
+    OP_INVOICES_APPLY_CREDIT,
+    OP_INVOICES_UPDATE_PAYMENT,
+    OP_INVOICES_DELETE_PAYMENT,
+    OP_ORDERS_CONVERT_TO_INVOICE,
+    OP_CONSIGNMENTS_RECORD_PAYOUT,
+    OP_TRANSFERS_MARK_SOLD,
+    OP_TRANSFERS_MARK_SETTLED,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

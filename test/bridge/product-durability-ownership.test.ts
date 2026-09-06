@@ -417,8 +417,9 @@ const IMAGES = { kind: 'data_urls' as const, images: ['data:image/jpeg;base64,AA
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
+  await import('../../src/core/bridge/financial-commands.ts');
   const known = registry.knownCommands();
-  ok(known.length === 36 && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
+  ok(known.length === 43 && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
     `WIRED 1 Probe + 6 Reads + 7 Mutationen (${known.length}: ${registry.ALLOWED_MUTATIONS.join(', ')})`);
   const productCmd = src('src/core/bridge/product-commands.ts');
   ok(/runRemoteCommand\(/.test(productCmd) && /alreadySerialised: true/.test(productCmd),

@@ -402,7 +402,36 @@ registerCommand(OP_INVOICES_GET, {
       vatAmount: num(l.vat_amount),
       lineTotal: num(l.line_total),
     }));
-    return { ...invoiceDto(found[0]), notes: str(found[0].notes), lines };
+    // CENTRAL-C3G — die Zahlungen gehören zur Rechnung, nicht in einen eigenen Lesebefehl. Wer
+    // eine berichtigen oder löschen will, muss sehen, welche es gibt.
+    const payments = rows(
+      `SELECT id, amount, method, card_brand, received_at, notes
+         FROM payments WHERE invoice_id = ? ORDER BY received_at ASC, id ASC`,
+      [id],
+    ).map((x) => ({
+      id: str(x.id),
+      amount: num(x.amount),
+      method: str(x.method),
+      cardBrand: str(x.card_brand),
+      receivedAt: str(x.received_at),
+      notes: str(x.notes),
+      // Eine Guthaben-Zahlung hängt an einer Guthabenzeile — der Client darf sie sehen, aber
+      // nicht anfassen. Der Primary weist sie ohnehin ab; hier steht der Grund sichtbar.
+      editable: str(x.method) !== 'credit',
+    }));
+    // Und was an offenem Guthaben dieses Kunden wirklich da ist — vom Primary summiert.
+    const credit = rows(
+      `SELECT COALESCE(SUM(amount - COALESCE(used_amount, 0)), 0) AS c
+         FROM customer_credits WHERE customer_id = ? AND status = 'OPEN'`,
+      [str(found[0].customer_id)],
+    );
+    return {
+      ...invoiceDto(found[0]),
+      notes: str(found[0].notes),
+      lines,
+      payments,
+      creditAvailable: Math.max(0, num(credit[0]?.c)),
+    };
   },
 });
 
@@ -567,6 +596,13 @@ function consignmentDto(r: Row): CommandResult {
     agreementDate: str(r.agreement_date),
     expiryDate: str(r.expiry_date),
     payoutStatus: str(r.payout_status),
+    // CENTRAL-C3G — was auszuzahlen ist, was schon geflossen ist und was offen bleibt. Der
+    // Primary rechnet den Rest; der Client zeigt ihn nur.
+    payoutAmount: r.payout_amount === null ? null : num(r.payout_amount),
+    payoutPaidAmount: num(r.payout_paid_amount),
+    payoutOpenAmount: Math.max(0, num(r.payout_amount) - num(r.payout_paid_amount)),
+    salePrice: r.sale_price === null ? null : num(r.sale_price),
+    commissionAmount: r.commission_amount === null ? null : num(r.commission_amount),
     // Die Sperre kommt aus der Domäne, nicht aus einer Nachbildung im Client.
     payoutLocked: payoutModelLock(rowToConsignment(r)).locked,
     revision: num(r.revision),
@@ -611,7 +647,7 @@ registerCommand(OP_CONSIGNMENTS_GET, {
 const ORDER_COLUMNS =
   'id, order_number, customer_id, status, type, agreed_price, deposit_amount, remaining_amount, '
   + 'supplier_name, supplier_price, expected_margin, expected_delivery, requested_brand, '
-  + 'requested_model, created_at, updated_at, revision';
+  + 'requested_model, invoice_id, created_at, updated_at, revision';
 
 function orderDto(r: Row): CommandResult {
   return {
@@ -629,6 +665,9 @@ function orderDto(r: Row): CommandResult {
     expectedDelivery: str(r.expected_delivery),
     requestedBrand: str(r.requested_brand),
     requestedModel: str(r.requested_model),
+    // CENTRAL-C3G — ist der Auftrag schon berechnet? Ohne diese Auskunft böte ein Client eine
+    // Umwandlung an, die der Primary sofort ablehnt.
+    invoiceId: str(r.invoice_id),
     revision: num(r.revision),
     updatedAt: str(r.updated_at),
   };
@@ -661,7 +700,8 @@ registerCommand(OP_ORDERS_GET, {
     const found = rows(`SELECT ${ORDER_COLUMNS}, notes FROM orders WHERE id = ? AND branch_id = ?`, [id, branch]);
     if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such order in this branch');
     const lines = rows(
-      `SELECT id, product_id, description, quantity, unit_price, line_total, position, status, is_customer_facing
+      `SELECT id, product_id, description, quantity, unit_price, line_total, position, status,
+              is_customer_facing, invoice_id
          FROM order_lines WHERE order_id = ? ORDER BY position ASC`,
       [id],
     ).map((l) => ({
@@ -673,6 +713,12 @@ registerCommand(OP_ORDERS_GET, {
       lineTotal: num(l.line_total),
       status: str(l.status),
       isCustomerFacing: Number(l.is_customer_facing ?? 1) === 1,
+      // Abrechenbar ist, was fertig, kundenseitig und noch nicht berechnet ist — dieselbe
+      // Bedingung wie `getBillableLines`. WELCHE Zeilen es am Ende sind, entscheidet trotzdem
+      // der Primary in der Transaktion; hier steht sie, damit der Client nichts Falsches anbietet.
+      invoiceId: str(l.invoice_id),
+      billable: str(l.invoice_id) === '' && Number(l.is_customer_facing ?? 1) === 1
+        && ['ARRIVED', 'DELIVERED'].includes(str(l.status)),
     }));
     const paid = rows('SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ?', [id]);
     return {
@@ -772,7 +818,8 @@ registerCommand(OP_REPAIRS_GET, {
 const TRANSFER_COLUMNS =
   'id, transfer_number, agent_id, product_id, agent_price, minimum_price, settlement_model, '
   + 'excess_split_pct, status, transferred_at, return_by, sold_at, returned_at, '
-  + 'actual_sale_price, settlement_status, updated_at, revision';
+  + 'actual_sale_price, settlement_amount, settlement_paid_amount, settlement_status, '
+  + 'updated_at, revision';
 
 function transferDto(r: Row): CommandResult {
   return {
@@ -790,6 +837,11 @@ function transferDto(r: Row): CommandResult {
     soldAt: str(r.sold_at),
     returnedAt: str(r.returned_at),
     actualSalePrice: r.actual_sale_price === null ? null : num(r.actual_sale_price),
+    // CENTRAL-C3G — was uns aus dem Verkauf zusteht, was der Agent schon abgerechnet hat und was
+    // offen bleibt. Alle drei vom Primary.
+    settlementAmount: r.settlement_amount === null ? null : num(r.settlement_amount),
+    settlementPaidAmount: num(r.settlement_paid_amount),
+    settlementOpenAmount: Math.max(0, num(r.settlement_amount) - num(r.settlement_paid_amount)),
     settlementStatus: str(r.settlement_status),
     revision: num(r.revision),
     updatedAt: str(r.updated_at),

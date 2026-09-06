@@ -86,6 +86,10 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'orders.create', 'orders.update',
   'repairs.create', 'repairs.update',
   'transfers.create', 'transfers.update', 'transfers.mark_returned',
+  'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',
+  'orders.convert_to_invoice',
+  'consignments.record_payout',
+  'transfers.mark_sold', 'transfers.mark_settled',
 ];
 
 export interface CommandSpec {

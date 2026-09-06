@@ -178,8 +178,12 @@ const FORMS = [REPAIR_FORM, TRANSFER_FORM];
 // ── 4) Kein Verkauf, keine Abrechnung, kein Status — auch nicht als Knopf ─
 {
   const tf = code(TRANSFER_FORM);
-  ok(!/mark_sold|markTransferSold|transfers\.delete|convert_to_invoice|mark_settled/.test(tf),
-    'SCOPE das Transferformular bietet weder Verkauf noch Abrechnung noch Loeschen an');
+  // Verkauf und Abrechnung sind seit C3G freigegeben und stehen deshalb hier. Was NICHT
+  // freigegeben ist, darf auch nicht auftauchen: Loeschen, Umwandeln, Ruecknahme.
+  ok(/transfers\.mark_sold/.test(tf) && /transfers\.mark_settled/.test(tf),
+    'SCOPE das Transferformular bietet Verkauf und Abrechnung an — beide sind freigegeben');
+  ok(!/transfers\.delete|transfers\.convert_to_invoice|transfers\.undo_convert/.test(tf),
+    'SCOPE …aber weder Loeschen noch Umwandeln noch Ruecknahme');
   const rf = code(REPAIR_FORM);
   ok(!/repairs\.update_status|updateStatus|repairs\.delete/.test(rf),
     'SCOPE das Reparaturformular wechselt keinen Status — der bucht Verbindlichkeiten');

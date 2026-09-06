@@ -63,6 +63,7 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const cmd = await import('../../src/core/bridge/commercial-commands.ts');
 await import('../../src/core/bridge/service-commands.ts');
+await import('../../src/core/bridge/financial-commands.ts');
 const { executeCommand, ALLOWED_MUTATIONS, knownCommands } =
   await import('../../src/core/bridge/command-registry.ts');
 await import('../../src/core/bridge/read-commands.ts');
@@ -156,7 +157,7 @@ const PURCHASE_BODY = {
 {
   const registry = src('src/core/bridge/command-registry.ts');
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 17, `SCOPE genau 17 Mutationen sind freigegeben (${list.length}: ${list.join(', ')})`);
+  ok(list.length === 24, `SCOPE genau 17 Mutationen sind freigegeben (${list.length}: ${list.join(', ')})`);
   for (const op of ['purchases.create', 'consignments.create', 'consignments.update', 'orders.create', 'orders.update']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich in der Zulassungsliste`);
   }
@@ -164,7 +165,7 @@ const PURCHASE_BODY = {
   for (const op of [
     'purchases.update', 'purchases.cancel', 'purchases.add_payment', 'purchases.create_return',
     'consignments.record_sale', 'consignments.mark_paid_out', 'consignments.delete',
-    'orders.delete', 'orders.update_status', 'orders.convert_to_invoice', 'orders.add_payment',
+    'orders.delete', 'orders.update_status', 'orders.add_payment', 'orders.cancel_with_money',
   ]) {
     ok(!list.includes(op), `SCOPE ${op} bleibt fail-closed`);
   }

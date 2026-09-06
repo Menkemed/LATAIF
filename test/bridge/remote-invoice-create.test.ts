@@ -190,8 +190,9 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
+  await import('../../src/core/bridge/financial-commands.ts');
   ok(Array.isArray(registry.ALLOWED_MUTATIONS)
-    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
+    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
     `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
 
   for (const op of ['products.delete', 'invoice.delete', 'purchase.create', 'anything.write']) {
@@ -203,7 +204,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 36, `ALLOWLIST produktiv sechsunddreissig Namen (${known.length}: ${known.join(', ')})`);
+  ok(known.length === 43, `ALLOWLIST produktiv dreiundvierzig Namen (${known.length}: ${known.join(', ')})`);
   ok(reads.length === 18 && known.includes('bridge.probe') && known.includes('invoices.create'),
     'ALLOWLIST eine Probe, sechs Lesevorgaenge, sieben Mutationen');
 
@@ -211,7 +212,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 36, 'ALLOWLIST …und seine Liste ist genau sechsunddreissig Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 43, 'ALLOWLIST …und seine Liste ist genau dreiundvierzig Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

@@ -23,6 +23,7 @@ import './product-commands';
 import './invoice-lifecycle-commands';
 import './commercial-commands';
 import './service-commands';
+import './financial-commands';
 
 /** Muss mit `bridge::EVENT_COMMAND` in Rust übereinstimmen. */
 export const BRIDGE_COMMAND_EVENT = 'central-c1-bridge-command';

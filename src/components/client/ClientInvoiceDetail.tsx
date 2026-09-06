@@ -20,9 +20,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CommandSaveController, type SaveOutcome } from '@/core/bridge/client-command-save';
 import { remoteRead, type RemoteReadError } from '@/core/bridge/remote-read';
 import { buildUpdateRequest, type InvoiceDraftLine } from './client-invoice-request';
+import {
+  applyCreditRequest, deletePaymentRequest, updatePaymentRequest, changeCount,
+} from '@/core/bridge/client-financial-request';
 
 export const OP_INVOICES_UPDATE = 'invoices.update';
 export const OP_INVOICES_RECORD_PAYMENT = 'invoices.record_payment';
+// CENTRAL-C3G — die drei Geldvorgänge NACH dem Bezahlen: ein Guthaben anrechnen, eine Zahlung
+// berichtigen, eine Zahlung zurücknehmen. Jeder ist ein eigener Vorsatz mit eigenem Wächter.
+export const OP_INVOICES_APPLY_CREDIT = 'invoices.apply_credit';
+export const OP_INVOICES_UPDATE_PAYMENT = 'invoices.update_payment';
+export const OP_INVOICES_DELETE_PAYMENT = 'invoices.delete_payment';
 
 /** Was der Primary über eine Rechnung sagt — und was er nach einem Auftrag zurückmeldet. */
 export interface InvoiceView {
@@ -41,6 +49,12 @@ export interface InvoiceView {
   updatedAt: string;
   notes?: string;
   lines: Array<{ id: string; productId: string; description: string; quantity: number; unitPrice: number; lineTotal: number }>;
+  /** Was der Kunde an offenem Guthaben hat — vom Primary summiert, nie hier gerechnet. */
+  creditAvailable?: number;
+  payments?: Array<{
+    id: string; amount: number; method: string; cardBrand: string;
+    receivedAt: string; notes: string; editable: boolean;
+  }>;
 }
 
 export interface LifecycleValue {
@@ -89,6 +103,20 @@ export function ClientInvoiceDetail({ invoiceId, onClose, read = remoteRead }: C
   // darf einen Änderungsversuch nicht blockieren — und vor allem nicht dessen Kennung erben.
   const editCtl = useMemo(() => new CommandSaveController<LifecycleValue>(OP_INVOICES_UPDATE), []);
   const payCtl = useMemo(() => new CommandSaveController<LifecycleValue>(OP_INVOICES_RECORD_PAYMENT), []);
+  // CENTRAL-C3G — und drei weitere. Fünf Vorsätze, fünf Wächter: eine offene Berichtigung darf
+  // niemals als Löschung weiterlaufen, und ein hängengebliebener Guthaben-Versuch nicht als
+  // Zahlung. Ein gemeinsamer Wächter wäre genau dieser Fehler.
+  const creditCtl = useMemo(() => new CommandSaveController<LifecycleValue>(OP_INVOICES_APPLY_CREDIT), []);
+  const payEditCtl = useMemo(() => new CommandSaveController<LifecycleValue>(OP_INVOICES_UPDATE_PAYMENT), []);
+  const payDelCtl = useMemo(() => new CommandSaveController<LifecycleValue>(OP_INVOICES_DELETE_PAYMENT), []);
+  const [creditAmount, setCreditAmount] = useState('');
+  const [creditOutcome, setCreditOutcome] = useState<SaveOutcome<LifecycleValue> | null>(null);
+  const [moneyBusy, setMoneyBusy] = useState(false);
+  const [editPayId, setEditPayId] = useState<string | null>(null);
+  const [payDraft, setPayDraft] = useState<Record<string, string>>({});
+  const [payBase, setPayBase] = useState<Record<string, string>>({});
+  const [payEditOutcome, setPayEditOutcome] = useState<SaveOutcome<LifecycleValue> | null>(null);
+  const [payDelOutcome, setPayDelOutcome] = useState<SaveOutcome<LifecycleValue> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,6 +141,41 @@ export function ClientInvoiceDetail({ invoiceId, onClose, read = remoteRead }: C
 
   const editPending = editOutcome?.kind === 'unknown';
   const payPending = payOutcome?.kind === 'unknown';
+  const creditPending = creditOutcome?.kind === 'unknown';
+  const payEditPending = payEditOutcome?.kind === 'unknown';
+  const payDelPending = payDelOutcome?.kind === 'unknown';
+
+  /** Der gemeinsame Ablauf: Versuch holen, schicken, danach die Ansicht neu laden. */
+  const send = useCallback(async (
+    ctl: CommandSaveController<LifecycleValue>,
+    body: Record<string, unknown>,
+    set: (o: SaveOutcome<LifecycleValue>) => void,
+  ) => {
+    setMoneyBusy(true);
+    try {
+      const attempt = ctl.beginAttempt();
+      const out = await attempt.send(body);
+      set(out);
+      // Nach einer Wirkung ist die Fassung eine andere — die Ansicht holt sie sich.
+      if (out.kind === 'ok') setTick((x) => x + 1);
+    } finally {
+      setMoneyBusy(false);
+    }
+  }, []);
+
+  function startPayEdit(pay: { id: string; amount: number; method: string; notes: string; receivedAt: string }): void {
+    const d = {
+      amount: String(pay.amount), method: pay.method,
+      notes: pay.notes ?? '', receivedAt: (pay.receivedAt ?? '').split('T')[0],
+    };
+    setEditPayId(pay.id);
+    setPayBase(d);
+    setPayDraft(d);
+    payEditCtl.forget();
+    payDelCtl.forget();
+    setPayEditOutcome(null);
+    setPayDelOutcome(null);
+  }
 
   const saveEdit = useCallback(async () => {
     if (!view) return;
@@ -255,6 +318,127 @@ export function ClientInvoiceDetail({ invoiceId, onClose, read = remoteRead }: C
           <div data-client-invoice-detail-paydone style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
             Booked · {payOutcome.value.status} · open {fmt(payOutcome.value.openAmount)} BHD
             {payOutcome.replayed && ' · this was the answer to the attempt that had already run'}
+          </div>
+        )}
+      </div>
+
+      {/* ── CENTRAL-C3G — Guthaben anrechnen ── */}
+      <div style={{ marginTop: 20, borderTop: '1px solid rgba(128,128,128,0.3)', paddingTop: 12 }}>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>
+          Store credit · {fmt(view.creditAvailable ?? 0)} BHD available
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+          <input data-client-invoice-detail-creditamount type="number" min={0} step="0.001"
+            value={creditAmount} disabled={creditPending} placeholder="0.000"
+            onChange={(e) => setCreditAmount(e.target.value)} style={{ ...field, flex: 1 }} />
+          <button data-client-invoice-detail-applycredit
+            disabled={moneyBusy || (view.creditAvailable ?? 0) <= 0 || creditAmount.trim() === ''
+              || creditOutcome?.kind === 'business_error'}
+            onClick={() => void send(creditCtl,
+              applyCreditRequest(view.id, view.revision, creditAmount), setCreditOutcome)}
+            style={{ ...btn(true), marginTop: 0 }}>
+            {creditPending ? 'Retry the same attempt' : 'Apply credit'}
+          </button>
+        </div>
+        <div style={{ marginTop: 6, fontSize: 11, opacity: 0.65 }}>
+          The primary caps this at what is really open and at the credit that really exists.
+        </div>
+        {creditPending && (
+          <div data-client-invoice-detail-creditpending style={warn}>
+            The outcome is not known — the credit may already be applied. Retrying checks the same
+            attempt instead of using the credit twice.
+          </div>
+        )}
+        {creditOutcome?.kind === 'business_error' && (
+          <div data-client-invoice-detail-creditrejected style={warn}>
+            {creditOutcome.code}: {creditOutcome.message}
+          </div>
+        )}
+        {creditOutcome?.kind === 'ok' && (
+          <div data-client-invoice-detail-creditdone style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
+            Applied · open {fmt(creditOutcome.value.openAmount)} BHD
+            {creditOutcome.replayed && ' · this was the answer to the attempt that had already run'}
+          </div>
+        )}
+      </div>
+
+      {/* ── CENTRAL-C3G — eine Zahlung berichtigen oder zurücknehmen ── */}
+      <div style={{ marginTop: 20, borderTop: '1px solid rgba(128,128,128,0.3)', paddingTop: 12 }}>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>Payments</div>
+        {(view.payments ?? []).length === 0 && (
+          <div style={{ fontSize: 12, opacity: 0.6, marginTop: 6 }}>Nothing booked yet.</div>
+        )}
+        {(view.payments ?? []).map((pmt) => (
+          <div key={pmt.id} data-client-invoice-payment={pmt.id}
+            style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, fontSize: 12 }}>
+            <span style={{ flex: 2 }}>{fmt(pmt.amount)} BHD · {pmt.method}</span>
+            <span style={{ flex: 1, opacity: 0.7 }}>{(pmt.receivedAt || '').split('T')[0]}</span>
+            {pmt.editable ? (
+              <button data-client-invoice-payment-edit={pmt.id} disabled={moneyBusy}
+                onClick={() => startPayEdit(pmt)} style={{ ...btn(false), marginTop: 0 }}>Correct</button>
+            ) : (
+              // Eine Guthaben-Zahlung hängt an einer Guthabenzeile. Der Primary weist sie ab —
+              // ein Knopf, der das nicht kann, wäre ein Versprechen.
+              <span data-client-invoice-payment-locked={pmt.id} style={{ flex: 1, opacity: 0.6 }}>
+                store credit — corrected on the primary
+              </span>
+            )}
+          </div>
+        ))}
+
+        {editPayId && (
+          <div data-client-invoice-payment-form style={{ marginTop: 10, padding: 10, border: '1px solid rgba(128,128,128,0.35)', borderRadius: 8 }}>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input data-client-invoice-payment-amount type="number" min={0} step="0.001"
+                value={payDraft.amount ?? ''} disabled={payEditPending || payDelPending}
+                onChange={(e) => setPayDraft((d) => ({ ...d, amount: e.target.value }))}
+                style={{ ...field, flex: 1 }} />
+              <select data-client-invoice-payment-method value={payDraft.method ?? 'cash'}
+                disabled={payEditPending || payDelPending}
+                onChange={(e) => setPayDraft((d) => ({ ...d, method: e.target.value }))}
+                style={{ ...field, flex: 1 }}>
+                {METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button data-client-invoice-payment-save
+                disabled={moneyBusy || payEditOutcome?.kind === 'business_error'
+                  || changeCount(updatePaymentRequest(view.id, editPayId, view.revision, payBase, payDraft)) === 0}
+                onClick={() => void send(payEditCtl,
+                  updatePaymentRequest(view.id, editPayId, view.revision, payBase, payDraft), setPayEditOutcome)}
+                style={{ ...btn(true), marginTop: 0 }}>
+                {payEditPending ? 'Retry the same correction' : 'Save correction'}
+              </button>
+              <button data-client-invoice-payment-delete
+                disabled={moneyBusy || payDelOutcome?.kind === 'business_error'}
+                onClick={() => void send(payDelCtl,
+                  deletePaymentRequest(view.id, editPayId, view.revision), setPayDelOutcome)}
+                style={{ ...btn(false), marginTop: 0 }}>
+                {payDelPending ? 'Retry the same removal' : 'Remove payment'}
+              </button>
+              <button data-client-invoice-payment-cancel disabled={payEditPending || payDelPending}
+                onClick={() => setEditPayId(null)} style={{ ...btn(false), marginTop: 0 }}>Cancel</button>
+            </div>
+            {(payEditPending || payDelPending) && (
+              <div data-client-invoice-payment-pending style={warn}>
+                The outcome is not known — it may already be done. Retrying checks the same attempt.
+              </div>
+            )}
+            {payEditOutcome?.kind === 'business_error' && (
+              <div data-client-invoice-payment-rejected style={warn}>
+                {payEditOutcome.code}: {payEditOutcome.message}
+              </div>
+            )}
+            {payDelOutcome?.kind === 'business_error' && (
+              <div data-client-invoice-payment-delrejected style={warn}>
+                {payDelOutcome.code}: {payDelOutcome.message}
+              </div>
+            )}
+            {(payEditOutcome?.kind === 'ok' || payDelOutcome?.kind === 'ok') && (
+              <div data-client-invoice-payment-done style={{ marginTop: 8, fontSize: 12, opacity: 0.8 }}>
+                Done · open {fmt((payEditOutcome?.kind === 'ok' ? payEditOutcome : payDelOutcome as { value: LifecycleValue }).value.openAmount)} BHD
+              </div>
+            )}
           </div>
         )}
       </div>
