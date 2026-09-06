@@ -36,13 +36,27 @@ fn seed_sql() -> &'static str {
      CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
      CREATE TABLE sync_changelog (id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id TEXT NOT NULL, branch_id TEXT NOT NULL, table_name TEXT NOT NULL, record_id TEXT NOT NULL, action TEXT NOT NULL, data TEXT NOT NULL, user_id TEXT, created_at TEXT NOT NULL);
      INSERT INTO tenants VALUES ('tenant-1','T','t','now','now');
-     INSERT INTO branches VALUES ('branch-main','tenant-1','B','now','now');"
+     INSERT INTO branches VALUES ('branch-main','tenant-1','B','now','now');
+     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, tenant_id TEXT, email TEXT, password_hash TEXT, name TEXT, active INTEGER, created_at TEXT, updated_at TEXT);
+     CREATE TABLE IF NOT EXISTS user_branches (user_id TEXT, branch_id TEXT, role TEXT, is_default INTEGER, created_at TEXT);
+     INSERT OR IGNORE INTO users (id, tenant_id, email, password_hash, name, active, created_at, updated_at) VALUES ('user-clerk','tenant-1','u@test','x','U',1,'now','now');
+     INSERT OR IGNORE INTO user_branches (user_id, branch_id, role, is_default, created_at) VALUES ('user-clerk','branch-main','owner',1,'now');
+"
 }
 
 fn state_with(primary: primary::State, stg: &Stg) -> Arc<AppState> {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(seed_sql()).unwrap();
     run_migrations(&conn, crate::sync::migrations::EMBEDDED_MIGRATIONS).unwrap();
+    // CENTRAL-C4 FINAL — der Absender wird bei JEDER Anfrage im heutigen Zustand nachgeschlagen
+    // (`reauthorize`), genau wie beim Anmelden. Ein angemeldeter Benutzer hat deshalb auch hier
+    // seine Berechtigungszeile — die Tabelle selbst legt die echte Migration an.
+    conn.execute(
+        "INSERT OR IGNORE INTO server_credentials (user_id, credential_state, password_changed_at, created_at, updated_at)
+         VALUES ('user-clerk','active','now','now','now')",
+        [],
+    )
+    .unwrap();
     Arc::new(AppState {
         db: Mutex::new(conn),
         jwt_secret: SECRET.to_string(),

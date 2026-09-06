@@ -121,9 +121,44 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'returns.record_refund_payment': RECORD_PAYMENTS,
 };
 
+/**
+ * CENTRAL-C4 FINAL — und die achtzehn AUSKÜNFTE.
+ *
+ * Der Befund zuerst, weil er das Ergebnis erklärt: **der Primary hat für Lesen kein einziges
+ * Rechte-Tor.** Es gibt keinen Routen-Wächter, die Seitenleiste filtert nichts, und die
+ * `.view`-Rechte der Rollentabelle (`products.view`, `invoices.view`, `kpi.view`) werden von
+ * KEINEM Bildschirm abgefragt — `hasPermission` wird im ganzen `src/pages` und
+ * `src/components` nie mit einem Leserecht aufgerufen. Wer sich am Primary anmeldet, sieht jedes
+ * Modul.
+ *
+ * Also bekommt der Fernweg dasselbe: `null` für alle achtzehn. Ein Leserecht hier zu erfinden,
+ * hieße, PC2 strenger zu machen als den Bildschirm daneben — und dann wäre die Zusage dieses
+ * Schnitts („nicht mehr, aber auch nicht weniger als lokal") in der anderen Richtung gebrochen.
+ * Der Befund steht im Bericht, nicht in einer stillen neuen Sperre.
+ *
+ * Was Auskünfte trotzdem begrenzt, und zwar hart: die FILIALE. Jede liest `actor.branchId` aus
+ * den geprüften Ansprüchen und weist ohne sie ab (`BRANCH_REQUIRED`) — kein Rumpf kommt daran.
+ */
+export const READ_PERMISSIONS: Readonly<Record<string, PermissionRule | null>> = {
+  'products.list': null, 'products.get': null,
+  'customers.list': null, 'customers.get': null,
+  'invoices.list': null, 'invoices.get': null,
+  'suppliers.list': null, 'categories.list': null,
+  'purchases.list': null, 'purchases.get': null,
+  'consignments.list': null, 'consignments.get': null,
+  'orders.list': null, 'orders.get': null,
+  'repairs.list': null, 'repairs.get': null,
+  'transfers.list': null, 'transfers.get': null,
+};
+
 /** Das Recht, das diese Operation verlangt — `null`, wenn der Primary keins verlangt. */
 export function permissionForOp(op: string): PermissionRule | null {
-  return OPERATION_PERMISSIONS[op] ?? null;
+  return OPERATION_PERMISSIONS[op] ?? READ_PERMISSIONS[op] ?? null;
+}
+
+/** Ist diese Operation überhaupt bedacht — als Buchung ODER als Auskunft? */
+export function isOperationCovered(op: string): boolean {
+  return op in OPERATION_PERMISSIONS || op in READ_PERMISSIONS;
 }
 
 /**

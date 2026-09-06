@@ -62,6 +62,18 @@ pub async fn auth_middleware(
     // Verify against the single validated secret held in AppState — no env re-read and
     // no implicit fallback. Same secret that mints the self-token and login tokens.
     let claims = verify_token(token, &state.jwt_secret)?;
+
+    // CENTRAL-C4 FINAL — und dann noch einmal gegen den HEUTIGEN Zustand. Ein Token gilt
+    // dreissig Tage; seine Rolle ist ein Abzug vom Moment der Anmeldung. Gefragt wird dieselbe
+    // Quelle mit derselben Bedingung wie beim Anmelden: aktiver Benutzer, Standardfiliale,
+    // Rolle von dort. Ein abgeschaltetes oder geloeschtes Konto arbeitet damit nicht bis zum
+    // Ablauf weiter, und eine geaenderte Rolle wirkt sofort — in beide Richtungen.
+    let principal = {
+        let db = state.db.lock().await;
+        super::reauthorize::lookup_principal(&db, &claims.sub)
+    };
+    let claims = super::reauthorize::reauthorize(claims, principal)?;
+
     req.extensions_mut().insert(claims);
     Ok(next.run(req).await)
 }

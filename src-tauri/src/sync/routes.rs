@@ -1427,6 +1427,30 @@ mod legacy_push_tests {
     use super::*;
     use rusqlite::Connection;
 
+    /// CENTRAL-C4 FINAL — jede geschuetzte Anfrage schlaegt ihren Absender jetzt im HEUTIGEN
+    /// Zustand nach (`reauthorize`), genau wie die Anmeldung es tut. Der Testfundus braucht
+    /// deshalb dieselben Zeilen, die jede echte Sync-Datenbank ohnehin hat (`sync::db` legt
+    /// `users`/`user_branches` an und seedet einen Eigentuemer). Ohne sie waere JEDE Anfrage
+    /// zu Recht 401 — und die Tests wuerden etwas anderes messen, als sie behaupten.
+    fn seed_principal(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, tenant_id TEXT, email TEXT,
+                 password_hash TEXT, name TEXT, active INTEGER, created_at TEXT, updated_at TEXT);
+             CREATE TABLE IF NOT EXISTS user_branches (user_id TEXT, branch_id TEXT, role TEXT,
+                 is_default INTEGER, created_at TEXT);
+             INSERT OR IGNORE INTO users (id, tenant_id, email, password_hash, name, active, created_at, updated_at)
+                 VALUES ('u','tenant-1','u@test','x','U',1,'t','t');
+             INSERT OR IGNORE INTO user_branches (user_id, branch_id, role, is_default, created_at)
+                 VALUES ('u','branch-main','owner',1,'t');
+             CREATE TABLE IF NOT EXISTS server_credentials (user_id TEXT PRIMARY KEY, credential_state TEXT NOT NULL,
+                 password_changed_at TEXT, provisioned_at TEXT, provisioned_by TEXT, classified_reason TEXT,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             INSERT OR IGNORE INTO server_credentials (user_id, credential_state, password_changed_at, created_at, updated_at)
+                 VALUES ('u','active','t','t','t');",
+        )
+        .unwrap();
+    }
+
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -1452,6 +1476,7 @@ mod legacy_push_tests {
             );",
         )
         .unwrap();
+        seed_principal(&conn);
         conn
     }
 

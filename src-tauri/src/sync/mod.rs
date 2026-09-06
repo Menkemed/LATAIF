@@ -74,6 +74,7 @@ pub mod models;
 /// M6-B2A — explicit static primary: role resolution, legacy migration, write gate.
 pub mod primary;
 /// M6-B2B — encrypted tenant-root recovery bundle (Argon2id + AES-256-GCM). INACTIVE.
+pub mod reauthorize;
 pub mod recovery;
 /// M6-B2BC1 §1 — audit of the recovery entry path. Tests only; no production code.
 /// MOBILE-I1 — read-only product lookup, relevance search and media-key resolution against the
