@@ -295,5 +295,59 @@ const FORMS = [PURCHASE_FORM, CONSIGN_FORM, ORDER_FORM];
     'SHELL ein Bereich ohne Lesevorgang hat keine Detailansicht');
 }
 
+// ── 8) „Create anyway" ist ein neuer Vorsatz, kein zweiter Versuch ────────
+//
+// Der Primary hat auf die erste Kennung ein ENDGUELTIGES Nein gegeben; es steht in seinem
+// Auftragsbuch. Dieselbe Kennung mit einem erweiterten Rumpf zu wiederholen waere gleich zweimal
+// falsch: gleiche Kennung + andere Anfrage ist ein Kennungskonflikt, und der Vorgang liefe nie.
+{
+  const d = {
+    ...ui.EMPTY_CONSIGNMENT, consignorId: 'cust-1', brand: 'Patek', name: 'Nautilus',
+    categoryId: 'cat-w', agreedPrice: '1000', payoutModel: 'percent', commissionRate: '20',
+  };
+  ok(!('acknowledgeDuplicate' in ui.consignmentCreateRequest(d)),
+    'DUP der normale Anlageauftrag traegt KEINE Bestaetigung');
+  const confirmed = ui.consignmentCreateRequest(d, true);
+  ok(confirmed.acknowledgeDuplicate === true, 'DUP …der bestaetigte schon');
+  cmd.parseConsignmentCreate(confirmed);
+  ok(!('acknowledgeDuplicate' in ui.EMPTY_CONSIGNMENT),
+    'DUP und sie ist kein FORMULARZUSTAND — sonst truege sie der naechste Versuch stillschweigend weiter');
+
+  // Der ganze Ablauf am echten Waechter: Nein → neuer Vorsatz → neue Kennung → derselbe Rumpf
+  // plus Bestaetigung.
+  const controller = new CommandSaveController('consignments.create');
+  const a = controller.beginAttempt();
+  const said = await a.send(ui.consignmentCreateRequest(d), (async () => ({
+    status: 422, ok: false,
+    json: async () => ({ error: 'POSSIBLE_DUPLICATE', message: 'this looks like an item we already have' }),
+  })) as never);
+  ok(said.kind === 'business_error' && said.code === 'POSSIBLE_DUPLICATE',
+    `DUP der Verdacht kommt als endgueltiges Nein an (${said.kind})`);
+  ok(controller.pendingAttempt() === null, 'DUP …und beendet den Versuch — er ist beantwortet');
+
+  controller.forget();
+  const b = controller.beginAttempt();
+  ok(b.commandId !== a.commandId, 'DUP „Create anyway" bekommt eine NEUE Kennung');
+  let sentTo = null;
+  const okRes = await b.send(ui.consignmentCreateRequest(d, true), (async (_u, init) => {
+    sentTo = JSON.parse(init.body);
+    return { status: 200, ok: true, json: async () => ({ ok: true, value: { consignmentId: 'c1', replayed: false } }) };
+  }) as never);
+  ok(okRes.kind === 'ok', 'DUP …und geht damit durch');
+  ok(sentTo.commandId === b.commandId && sentTo.commandId !== a.commandId,
+    'DUP …unter genau dieser neuen Kennung');
+  ok(sentTo.payload.acknowledgeDuplicate === true, 'DUP …mit der ausdruecklichen Bestaetigung im Rumpf');
+
+  // Der Knopf tut, was draufsteht: er verwirft den alten Versuch UND schickt.
+  const form = code(CONSIGN_FORM);
+  ok(/const createAnyway = useCallback\(async \(\) => \{\s*\n\s*controller\.forget\(\);/.test(form),
+    'DUP der Knopf verwirft den alten Versuch…');
+  ok(/await send\(consignmentCreateRequest\(draft, true\)\);/.test(form),
+    'DUP …und schickt selbst, statt auf einen zweiten Klick zu warten');
+  ok(/data-client-consignment-anyway[^>]*onClick=\{\(\) => void createAnyway\(\)\}/.test(form),
+    'DUP …und genau dieser Knopf haengt daran');
+  ok(!/setAckDuplicate/.test(form), 'DUP es gibt keinen Formularzustand mehr, der sie weitertruege');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3e client commercial ui: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

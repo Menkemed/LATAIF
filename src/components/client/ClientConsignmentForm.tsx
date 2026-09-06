@@ -59,7 +59,9 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<SaveOutcome<ConsignmentSaveValue> | null>(null);
   // Die bewusste Antwort auf einen Duplikatsverdacht. Sie gilt für GENAU den nächsten Versuch.
-  const [ackDuplicate, setAckDuplicate] = useState(false);
+  // Kein Formularzustand: die Bestätigung gehört zu GENAU EINEM Klick. Läge sie im Formular,
+  // trüge sie der nächste Speicherversuch stillschweigend weiter — und aus einer einmaligen
+  // Entscheidung würde eine Einstellung.
 
   const controller = useMemo(
     () => new CommandSaveController<ConsignmentSaveValue>(editing ? OP_CONSIGNMENTS_UPDATE : OP_CONSIGNMENTS_CREATE),
@@ -109,25 +111,43 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
 
   const body = editing
     ? consignmentUpdateRequest(consignmentId!, revision, base, edit, { payoutLocked })
-    : consignmentCreateRequest(draft, ackDuplicate);
+    : consignmentCreateRequest(draft);
   const complete = editing ? changeCount(body) > 0 : consignmentComplete(draft);
   const pending = outcome?.kind === 'unknown';
   const duplicateSuspect = outcome?.kind === 'business_error' && outcome.code === 'POSSIBLE_DUPLICATE';
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (payload: Record<string, unknown>) => {
     setBusy(true);
     try {
       const attempt = controller.beginAttempt();
-      setOutcome(await attempt.send(body));
+      setOutcome(await attempt.send(payload));
     } finally {
       setBusy(false);
     }
-  }, [controller, body]);
+  }, [controller]);
+
+  /**
+   * „Trotzdem anlegen" ist ein NEUER Vorsatz, kein zweiter Versuch desselben.
+   *
+   * Der Primary hat auf die alte Kennung ein endgültiges Nein gegeben — es steht in seinem
+   * Auftragsbuch, und dieselbe Kennung bekäme für immer dieselbe Antwort. Sie mit einem
+   * ERWEITERTEN Rumpf zu wiederholen wäre schlimmer: gleiche Kennung, andere Anfrage, also ein
+   * Kennungskonflikt — und der Vorgang liefe nie. Deshalb wird der alte Versuch verworfen
+   * (`forget`) und der nächste Klick holt sich eine neue Kennung.
+   *
+   * Und der Knopf SCHICKT auch. Ein Knopf mit der Aufschrift „Create anyway", der nur eine
+   * Einstellung setzt und auf einen zweiten Klick wartet, verspricht etwas, das er nicht tut.
+   */
+  const createAnyway = useCallback(async () => {
+    controller.forget();
+    setOutcome(null);
+    await send(consignmentCreateRequest(draft, true));
+  }, [controller, draft, send]);
 
   function startOver(keepDraft = false): void {
     controller.forget();
     setOutcome(null);
-    if (!editing && !keepDraft) { setDraft(EMPTY_CONSIGNMENT); setAckDuplicate(false); }
+    if (!editing && !keepDraft) setDraft(EMPTY_CONSIGNMENT);
   }
 
   if (loading) return <div data-client-consignment-loading style={box}>Loading…</div>;
@@ -266,11 +286,11 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
 
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <button data-client-consignment-save disabled={busy || !complete || outcome?.kind === 'business_error'}
-          onClick={send} style={btn(true)}>
+          onClick={() => void send(body)} style={btn(true)}>
           {pending ? 'Retry the same attempt' : busy ? 'Saving…' : 'Save'}
         </button>
         {duplicateSuspect && (
-          <button data-client-consignment-anyway onClick={() => { setAckDuplicate(true); startOver(true); }}
+          <button data-client-consignment-anyway disabled={busy} onClick={() => void createAnyway()}
             style={btn(false)}>Create anyway</button>
         )}
         {outcome?.kind === 'business_error' && !duplicateSuspect && (

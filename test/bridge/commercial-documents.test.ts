@@ -357,7 +357,9 @@ const CONSIGN_BODY = {
 
   ok(v.payoutModel === 'percent' && v.commissionRate === 20 && v.excessSplitPct === null,
     `CONSIGN das Modell steht vollstaendig (${v.payoutModel}/${v.commissionRate}/${v.excessSplitPct})`);
-  ok(v.revision === 1, `CONSIGN die erste Fassung ist 1 (${v.revision})`);
+  ok(Number.isInteger(v.revision) && v.revision >= 1
+    && v.revision === n(db, 'SELECT revision FROM consignments WHERE id = ?', [v.consignmentId]),
+  `CONSIGN die Antwort nennt die Fassung, die WIRKLICH in der Zeile steht (${v.revision})`);
 
   // Wiederholung: kein zweiter Artikel, keine zweite Kommission, keine zweite SKU.
   const again = await cmd.runConsignmentCreate(d, identity('10', 'consignments.create'), CONSIGN_BODY);
@@ -545,7 +547,10 @@ const ORDER_BODY = {
   ok(v.agreedPrice === 600, `ORDER die Summe rechnet der Primary aus den Positionen (${v.agreedPrice})`);
   ok(v.remainingAmount === 400, `ORDER …und den Rest ebenso (${v.remainingAmount})`);
   ok(v.paidAmount === 200, `ORDER die Anzahlung steht als ZAHLUNG, nicht nur im Kopf (${v.paidAmount})`);
-  ok(v.revision === 1, 'ORDER die erste Fassung ist 1');
+  ok(Number.isInteger(v.revision) && v.revision >= 1
+    && v.revision === n(db, 'SELECT revision FROM orders WHERE id = ?', [v.orderId]),
+  `ORDER die Antwort nennt die Fassung, die WIRKLICH in der Zeile steht (${v.revision}) —
+   nicht 1: eine Position und eine Anzahlung bewegen sie schon beim Anlegen`);
 
   ok(n(db, 'SELECT COUNT(*) FROM order_lines WHERE order_id = ?', [v.orderId]) === 1, 'ORDER die Position steht');
   ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'ORDER_PAYMENT'") > 0,

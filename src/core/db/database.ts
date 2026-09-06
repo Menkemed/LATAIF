@@ -1833,6 +1833,75 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE consignments SET revision = OLD.revision + 1 WHERE id = NEW.id;
        END`,
+
+    // ── CENTRAL-C3E FINAL — die Fassung eines Auftrags deckt auch seine Kinder ──
+    //
+    // Ein Auftrag ist nicht seine Kopfzeile. Seine Positionen und seine Zahlungen gehören dazu,
+    // und beide werden aus VIER Modulen geschrieben (orderStore, orderPaymentStore, invoiceStore,
+    // purchaseStore) — teils ohne die Kopfzeile überhaupt anzufassen: eine Position hinzufügen,
+    // löschen, ihren Fulfillment-Status setzen, sie als berechnet markieren, ihre Kosten buchen.
+    //
+    // Für einen Fernauftrag ist das die gefährlichste Lücke, die es gibt: der Client liest den
+    // Auftrag mit seinen Positionen, jemand am Primary ändert genau diese Positionen, und der
+    // Client speichert danach seinen Kopf — mit einer Fassung, die noch stimmt, obwohl der
+    // Vorgang darunter ein anderer geworden ist.
+    //
+    // Der Bump gehört deshalb NICHT in fünfzehn Aufrufer (die der sechzehnte vergisst), sondern an
+    // EINE Stelle, die keiner umgehen kann: in die Datenbank. Ein Trigger läuft zwangsläufig in
+    // derselben SQL-Transaktion wie die Änderung, die ihn auslöst — Wirkung und Fassung können
+    // nicht auseinanderfallen, auch nicht bei einem Schreibweg, den es heute noch nicht gibt.
+    //
+    // Der Wächter des Kopf-Triggers (`WHEN NEW.revision = OLD.revision`) verhindert dabei den
+    // Nachschlag: dieser Bump ändert die Fassung ausdrücklich, also feuert der Kopf-Trigger nicht
+    // noch einmal. Zugesagt ist weiterhin „streng steigend", nicht „genau +1" — eine Umschreibung
+    // aller Positionen bewegt sie mehrfach, und das ist ehrlicher als eine Zahl zu versprechen,
+    // die die Domäne nicht einhält.
+    `DROP TRIGGER IF EXISTS trg_order_lines_insert_order_revision`,
+    `CREATE TRIGGER trg_order_lines_insert_order_revision
+       AFTER INSERT ON order_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE orders SET revision = revision + 1 WHERE id = NEW.order_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_order_lines_update_order_revision`,
+    `CREATE TRIGGER trg_order_lines_update_order_revision
+       AFTER UPDATE ON order_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE orders SET revision = revision + 1 WHERE id = NEW.order_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_order_lines_delete_order_revision`,
+    `CREATE TRIGGER trg_order_lines_delete_order_revision
+       AFTER DELETE ON order_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE orders SET revision = revision + 1 WHERE id = OLD.order_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_order_payments_insert_order_revision`,
+    `CREATE TRIGGER trg_order_payments_insert_order_revision
+       AFTER INSERT ON order_payments
+       FOR EACH ROW
+       BEGIN
+         UPDATE orders SET revision = revision + 1 WHERE id = NEW.order_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_order_payments_update_order_revision`,
+    `CREATE TRIGGER trg_order_payments_update_order_revision
+       AFTER UPDATE ON order_payments
+       FOR EACH ROW
+       BEGIN
+         UPDATE orders SET revision = revision + 1 WHERE id = NEW.order_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_order_payments_delete_order_revision`,
+    `CREATE TRIGGER trg_order_payments_delete_order_revision
+       AFTER DELETE ON order_payments
+       FOR EACH ROW
+       BEGIN
+         UPDATE orders SET revision = revision + 1 WHERE id = OLD.order_id;
+       END`,
+    // Die Kommission braucht dasselbe NICHT, und das ist ein Befund, keine Auslassung: sie hat
+    // keine Kindtabelle. Verkauf, Provision, Auszahlung und Rückgabe stehen alle in Spalten der
+    // Zeile selbst (`consignment_payouts` existiert ausdrücklich nicht), und JEDER ihrer Schreiber
+    // geht über `UPDATE consignments` — der Trigger oben trifft sie damit vollständig.
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
