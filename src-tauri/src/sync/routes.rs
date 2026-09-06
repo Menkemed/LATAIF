@@ -237,7 +237,7 @@ async fn command_execute(
     };
 
     match bridge
-        .submit_as(&identity, payload, crate::bridge::DEFAULT_TIMEOUT)
+        .submit_as(&identity, &claims.role, payload, crate::bridge::DEFAULT_TIMEOUT)
         .await
     {
         Ok(crate::bridge::Reply::Ok { value }) => {
@@ -2957,6 +2957,140 @@ mod legacy_push_tests {
                 assert_ne!(r.status().as_u16(), 413, "{label}: body NOT buffered (auth precedes body limit)");
                 assert_eq!(snapshot(&s).await, before, "{label}: DB untouched (no write/quarantine/mark)");
             }
+        }
+
+        // ── CENTRAL-C4 — die Autorisierung des EINEN Auftragswegs, durch den ECHTEN Router ──
+        //
+        // `auth_matrix` oben beweist das fuer `/sync/push`. `/api/command` ist der Weg, ueber den
+        // ein zweiter Rechner GESCHAEFTSDATEN aendert; fuer ihn galt derselbe Riegel bisher nur
+        // per Konstruktion (dieselbe `route_layer`), nicht per Messung. Hier wird er gemessen.
+        //
+        // Der Beweis ist ein DOPPELTER: die Antwort ist 401 (bzw. 400 fuer einen unbekannten
+        // Namen), UND die Bruecke wurde nie gefragt. Letzteres ist der eigentliche Punkt: ohne
+        // registrierten Renderer antwortet `crate::bridge::global()` mit 503 — bekaeme der
+        // Handler die Anfrage ueberhaupt, saehen wir also 503 statt 401.
+        fn command_req(token: Option<&str>, op: &str) -> Request<Body> {
+            let body = format!(
+                r#"{{"op":"{op}","commandId":"11111111-1111-4111-8111-111111111111","payload":{{}}}}"#
+            );
+            let mut b = Request::builder()
+                .method("POST")
+                .uri("/api/command")
+                .header("content-type", "application/json");
+            if let Some(t) = token {
+                b = b.header("authorization", format!("Bearer {t}"));
+            }
+            b.body(Body::from(body)).unwrap()
+        }
+
+        #[tokio::test]
+        async fn command_route_auth_matrix() {
+            // Ein Token, das mit einem FREMDEN Geheimnis signiert wurde — die haeufigste echte
+            // Verwechslung (zweiter Server, alte Installation) und der gefaehrlichste Fall.
+            let foreign = auth::create_token("u", "tenant-1", "branch-main", "owner", "a-different-secret").unwrap();
+            // Ein Token, das bereits abgelaufen ist.
+            let expired = {
+                use jsonwebtoken::{encode, EncodingKey, Header};
+                #[derive(serde::Serialize)]
+                struct C<'a> { sub: &'a str, tenant_id: &'a str, branch_id: &'a str, role: &'a str, exp: usize }
+                let past = (chrono::Utc::now() - chrono::Duration::days(1)).timestamp() as usize;
+                encode(
+                    &Header::default(),
+                    &C { sub: "u", tenant_id: "tenant-1", branch_id: "branch-main", role: "owner", exp: past },
+                    &EncodingKey::from_secret(SECRET.as_bytes()),
+                )
+                .unwrap()
+            };
+
+            let cases: &[(&str, Option<String>)] = &[
+                ("C1 no authorization header at all", None),
+                ("C2 a token that is not a token", Some("not.a.valid.jwt".to_string())),
+                ("C3 a token signed with a foreign secret", Some(foreign)),
+                ("C4 an expired token", Some(expired)),
+                ("C5 an empty bearer value", Some(String::new())),
+            ];
+            for (label, tok) in cases {
+                let s = state(primary::State::Primary);
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), MAX)
+                    .oneshot(command_req(tok.as_deref(), "invoices.create"))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 401, "{label} → 401 at the auth layer");
+                assert_ne!(
+                    r.status().as_u16(),
+                    503,
+                    "{label}: the handler was NEVER reached (503 would mean it asked the bridge)"
+                );
+                assert_eq!(snapshot(&s).await, before, "{label}: DB untouched");
+            }
+        }
+
+        // Und mit GUELTIGER Anmeldung: kein Name — freigegeben oder nicht — erreicht ohne Renderer
+        // eine Geschaeftswirkung.
+        //
+        // GEMESSEN und hier festgehalten: `command_execute` fragt ZUERST, ob es ueberhaupt einen
+        // Renderer gibt (`bridge::global()`), und ERST DANN die Zulassungsliste. Ohne Renderer ist
+        // die Antwort deshalb 503 fuer jeden Namen. Das ist keine Luecke — ein unbekannter Name
+        // wird auf dem Weg zum Renderer noch zweimal abgewiesen (`dispatch` prueft `REMOTE_OPS`,
+        // der Renderer seine eigene Liste) —, aber es heisst, dass diese Schicht den Unterschied
+        // nicht zeigen kann. Der Beweis fuer die Liste steht deshalb dort, wo er hingehoert:
+        // `bridge_tests::a_name_that_is_not_allow_listed_never_reaches_the_renderer`.
+        #[tokio::test]
+        async fn command_route_never_lets_a_name_through_to_business_data() {
+            for op in [
+                "invoiceStore.createInvoice",
+                "repairs.delete",
+                "invoices.delete",
+                "transfers.undo_convert",
+                "consignments.cancel_sale",
+                "orders.cancel_with_money",
+                "invoices.set_special_mark",
+                "invoices.create",
+                "",
+            ] {
+                let s = state(primary::State::Primary);
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), MAX)
+                    .oneshot(command_req(Some(&token()), op))
+                    .await
+                    .unwrap();
+                assert_ne!(r.status().as_u16(), 200, "{op:?} never succeeds without a renderer");
+                assert_eq!(snapshot(&s).await, before, "{op:?}: DB untouched");
+            }
+            // Und die Reihenfolge, die diese Beobachtung erklaert, steht so im Quelltext.
+            let src = include_str!("routes.rs");
+            let ready = src.find("match crate::bridge::global()").expect("readiness check");
+            let allow = src.find("if !crate::bridge::REMOTE_OPS.contains(&req.op.as_str())").expect("allow-list check");
+            assert!(ready < allow, "die Bereitschaft wird vor der Namensliste geprueft");
+            assert!(
+                src.contains("return error_response(crate::bridge::BridgeError::OpNotAllowed)"),
+                "…und ein unbekannter Name faellt an der Liste, bevor er in die Warteschlange geraet"
+            );
+        }
+
+        // Die Rolle des Fragenden reist als EIGENES Argument zum Renderer — nicht im Rumpf, wo ein
+        // Client sie setzen koennte, und nicht in der Kennung, an der die Bindung des durablen
+        // Nachweises haengt.
+        #[test]
+        fn the_callers_role_travels_from_the_verified_claims() {
+            let src = include_str!("routes.rs");
+            assert!(
+                src.contains("submit_as(&identity, &claims.role"),
+                "die Rolle kommt aus den geprueften Anspruechen"
+            );
+            assert!(src.contains("\"role\": claims.role"), "…und steht auch im Actor des Umschlags");
+            let bridge = include_str!("../bridge.rs");
+            assert!(
+                bridge.contains("pub role: String"),
+                "der Umschlag traegt sie"
+            );
+            let identity_block = &bridge[bridge.find("pub struct CommandIdentity").unwrap()
+                ..bridge.find("pub struct CommandIdentity").unwrap() + 400];
+            assert!(
+                !identity_block.contains("role"),
+                "aber die Kennung NICHT — sonst waere dieselbe Kennung unter anderer Rolle ein anderer Vorgang"
+            );
         }
 
         // §6 — the primary/write-gate matrix. On a read-only (copied/restored) server EVERY push is 403,

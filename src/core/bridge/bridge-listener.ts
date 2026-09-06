@@ -42,6 +42,8 @@ interface Envelope {
    */
   identity?: {
     commandId: string; tenantId: string; branchId: string; userId: string; payloadHash: string;
+    /** CENTRAL-C4 — die Rolle aus denselben Anspruechen. Entscheidet, OB der Auftrag laufen darf. */
+    role?: string;
   };
 }
 

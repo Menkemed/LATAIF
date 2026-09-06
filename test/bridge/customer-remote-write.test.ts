@@ -107,7 +107,7 @@ function freshDb(): Db {
 
 const ID = (n: string): string => `${n.padStart(8, '0')}-0000-4000-8000-000000000000`;
 const identity = (n: string, op: string, hash = 'h1') => ({
-  commandId: ID(n), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', op, payloadHash: hash,
+  commandId: ID(n), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN', op, payloadHash: hash,
 });
 
 function deps(db: Db, opts: { failSave?: boolean } = {}) {

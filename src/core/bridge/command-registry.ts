@@ -14,6 +14,7 @@ import { runExclusive, businessWriteScheduler } from './command-scheduler';
 import { DURABILITY_DEGRADED, DurabilityError, requireDurableOrFail } from './durability-state';
 import { TRANSACTION_UNHEALTHY, TransactionUnhealthyError, assertTransactionHealthy } from '../db/transaction-health';
 import { CommandNotEvaluated, CommandRejected } from './mutation-engine';
+import { permissionForOp, requiredPermissionLabel, roleMayRunOp } from './command-permissions';
 
 /** Was ein Auftrag zurückgeben darf. */
 export type CommandResult = { readonly [k: string]: unknown };
@@ -39,6 +40,13 @@ export interface CommandActor {
   branchId: string;
   userId: string;
   payloadHash: string;
+  /**
+   * CENTRAL-C4 — die Rolle des Fragenden, aus denselben geprueften Anspruechen wie Mandant,
+   * Filiale und Benutzer. Sie ist ausdruecklich NICHT Teil der Bindung des durablen Nachweises
+   * (die bleibt Kennung + Mandant + Filiale + Benutzer + Operation + Rumpf-Fingerabdruck) —
+   * sie entscheidet nur, OB dieser Auftrag ueberhaupt laufen darf.
+   */
+  role?: string;
 }
 
 export type CommandHandler = (payload: unknown, actor?: CommandActor) => Promise<CommandResult> | CommandResult;
@@ -148,6 +156,19 @@ export async function executeCommand(op: string, payload: unknown, actor?: Comma
   if (spec.kind === 'mutation' && !isUsableActor(actor)) {
     console.error('[bridge] refusing a mutation without an authenticated identity:', op);
     return { kind: 'infrastructure_error', code: 'BRIDGE_IDENTITY_MISSING' };
+  }
+  // CENTRAL-C4 — und darf dieser Absender das ueberhaupt? Geprueft wird VOR dem Handler: ein
+  // Nein hier ist wie ein unbekannter Name — kein `runRemoteCommand`, kein Domaenenaufruf,
+  // keine Zeile im durablen Nachweis, keine Wirkung. Die Regel ist abgeschrieben von dem
+  // Bildschirm, der dieselbe Aktion am Primary bewacht (`command-permissions`); wo der Primary
+  // kein Tor hat, hat der Fernweg auch keins.
+  if (spec.kind === 'mutation' && permissionForOp(op) && !roleMayRunOp(actor?.role, op)) {
+    console.warn('[bridge] refusing an operation this account may not run:', op);
+    return {
+      kind: 'business_error',
+      code: 'PERMISSION_DENIED',
+      message: `this account may not run ${op} — it needs ${requiredPermissionLabel(op)}`,
+    };
   }
   try {
     let value: CommandResult;

@@ -94,7 +94,7 @@ function fresh(): Db {
 
 const ID = (n: string): string => `${n.padStart(8, '0')}-0000-4000-8000-000000000000`;
 const identity = (commandId: string, op = 'invoice.create', hash = 'h1', user = 'u1') => ({
-  commandId, tenantId: 'tenant-1', branchId: 'branch-main', userId: user, op, payloadHash: hash,
+  commandId, tenantId: 'tenant-1', branchId: 'branch-main', userId: user, role: 'ADMIN', op, payloadHash: hash,
 });
 
 /**

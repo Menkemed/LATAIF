@@ -311,7 +311,7 @@ const ACTIONS: Action[] = [
   };
   const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
   const identity = (x: string, op: string) => ({
-    commandId: ID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test',
+    commandId: ID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN',
     op, payloadHash: 'h' + x,
   });
   const created = await runInvoiceCreate(deps, identity('1', 'invoices.create'), {

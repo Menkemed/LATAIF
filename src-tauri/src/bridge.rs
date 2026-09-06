@@ -331,16 +331,23 @@ pub struct EnvelopeIdentity {
     pub branch_id: String,
     pub user_id: String,
     pub payload_hash: String,
+    /// CENTRAL-C4 — die Rolle des Fragenden, aus DENSELBEN geprueften Anspruechen. Sie steht
+    /// bewusst hier und NICHT in `CommandIdentity`: die Bindung des durablen Nachweises bleibt
+    /// Kennung + Mandant + Filiale + Benutzer + Operation + Rumpf-Fingerabdruck. Die Rolle
+    /// entscheidet nur, OB der Auftrag ueberhaupt laufen darf — das prueft der Renderer an
+    /// derselben Tabelle, die auch seine Bildschirme fragen.
+    pub role: String,
 }
 
-impl From<&CommandIdentity> for EnvelopeIdentity {
-    fn from(i: &CommandIdentity) -> Self {
+impl EnvelopeIdentity {
+    fn from_identity(i: &CommandIdentity, role: &str) -> Self {
         Self {
             command_id: i.command_id.clone(),
             tenant_id: i.tenant_id.clone(),
             branch_id: i.branch_id.clone(),
             user_id: i.user_id.clone(),
             payload_hash: i.payload_hash.clone(),
+            role: role.to_string(),
         }
     }
 }
@@ -561,6 +568,10 @@ impl Bridge {
     pub async fn submit_as(
         &self,
         identity: &CommandIdentity,
+        // CENTRAL-C4 — die Rolle aus den geprueften Anspruechen, als EIGENES Argument. Sie geht
+        // bewusst nicht durch `CommandIdentity`: dort wuerde sie die Gleichheit veraendern, an
+        // der die prozessweite Kennungsbindung haengt.
+        role: &str,
         payload: serde_json::Value,
         timeout: Duration,
     ) -> Result<Reply, BridgeError> {
@@ -572,7 +583,14 @@ impl Bridge {
             store.begin(identity)?;
         }
         // Der Eintrag bleibt geschuetzt, bis DIESER Auftrag durch ist — auch wenn er scheitert.
-        let out = self.dispatch(&identity.op, payload, Some(identity.into()), timeout).await;
+        let out = self
+            .dispatch(
+                &identity.op,
+                payload,
+                Some(EnvelopeIdentity::from_identity(identity, role)),
+                timeout,
+            )
+            .await;
         {
             let mut store = self.identities.lock().unwrap_or_else(|e| e.into_inner());
             store.finish(&identity.command_id);

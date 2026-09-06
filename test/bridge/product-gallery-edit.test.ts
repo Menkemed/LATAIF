@@ -114,7 +114,8 @@ function freshDb(): Db {
   return db;
 }
 
-const ACTOR = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test' };
+// CENTRAL-C4 — die Rolle gehoert zum Absender: der Fernweg prueft sie, bevor er etwas ausfuehrt.
+const ACTOR = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN' };
 const ID = (n: string): string => `${n.padStart(8, '0')}-0000-4000-8000-000000000000`;
 const identity = (n: string, op: string, hash = 'h1') => ({ commandId: ID(n), ...ACTOR, op, payloadHash: hash });
 

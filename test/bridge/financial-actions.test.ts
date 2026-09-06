@@ -155,7 +155,8 @@ function seedProduct(db: Db, id: string, qty = 3, cost = 100): void {
 }
 
 const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
-const ACTOR = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test' };
+// CENTRAL-C4 — die Rolle gehoert zum Absender: der Fernweg prueft sie, bevor er etwas ausfuehrt.
+const ACTOR = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN' };
 const identity = (x: string, op: string, hash = 'h' + x) => ({ commandId: ID(x), ...ACTOR, op, payloadHash: hash });
 const deps = (db: Db) => ({
   db: db as never,

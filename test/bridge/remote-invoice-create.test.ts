@@ -92,13 +92,13 @@ interface Db {
 const NOW = '2026-09-04T10:00:00.000Z';
 const ID = (n: string): string => `${n.padStart(8, '0')}-0000-4000-8000-000000000000`;
 const identity = (commandId: string, hash = 'h1', user = 'user-test') => ({
-  commandId, tenantId: 'tenant-1', branchId: 'branch-main', userId: user,
+  commandId, tenantId: 'tenant-1', branchId: 'branch-main', userId: user, role: 'ADMIN',
   op: 'invoices.create', payloadHash: hash,
 });
 
 /** Ein Absender, wie ihn Rust aus den geprueften Anmeldedaten reicht. */
 const actor = (commandId: string, hash = 'h1', user = 'user-test') => ({
-  commandId, tenantId: 'tenant-1', branchId: 'branch-main', userId: user, payloadHash: hash,
+  commandId, tenantId: 'tenant-1', branchId: 'branch-main', userId: user, role: 'ADMIN', payloadHash: hash,
 });
 
 const one = (db: Db, sql: string, p: unknown[] = []): unknown => db.exec(sql, p)[0]?.values?.[0]?.[0];

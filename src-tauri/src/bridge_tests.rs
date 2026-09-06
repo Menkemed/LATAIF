@@ -622,21 +622,21 @@ async fn the_same_id_for_something_else_is_refused() {
 
     // Erster Versuch: laeuft (und laeuft in die Zeitgrenze, das reicht — er wurde gesendet).
     let first = bridge
-        .submit_as(&identity(ID, OP_PROBE, "user-a"), serde_json::Value::Null, SHORT)
+        .submit_as(&identity(ID, OP_PROBE, "user-a"), "ADMIN", serde_json::Value::Null, SHORT)
         .await;
     assert_eq!(first.unwrap_err(), BridgeError::Timeout);
     assert_eq!(sink.count(), 1);
 
     // Dieselbe Kennung, derselbe Absender, dieselbe Operation: das ist eine Wiederholung.
     let retry = bridge
-        .submit_as(&identity(ID, OP_PROBE, "user-a"), serde_json::Value::Null, SHORT)
+        .submit_as(&identity(ID, OP_PROBE, "user-a"), "ADMIN", serde_json::Value::Null, SHORT)
         .await;
     assert_eq!(retry.unwrap_err(), BridgeError::Timeout, "eine Wiederholung ist erlaubt");
     assert_eq!(sink.count(), 2);
 
     // Dieselbe Kennung, ANDERER Benutzer: ein Widerspruch.
     let stolen = bridge
-        .submit_as(&identity(ID, OP_PROBE, "user-b"), serde_json::Value::Null, SHORT)
+        .submit_as(&identity(ID, OP_PROBE, "user-b"), "ADMIN", serde_json::Value::Null, SHORT)
         .await;
     assert_eq!(stolen.unwrap_err(), BridgeError::CommandIdConflict);
     assert_eq!(sink.count(), 2, "und er wurde GAR NICHT gesendet");
@@ -649,7 +649,7 @@ async fn the_same_id_for_something_else_is_refused() {
 
     // Und eine kaputte Kennung erreicht ebenfalls nichts.
     let bad = bridge
-        .submit_as(&identity("nope", OP_PROBE, "user-a"), serde_json::Value::Null, SHORT)
+        .submit_as(&identity("nope", OP_PROBE, "user-a"), "ADMIN", serde_json::Value::Null, SHORT)
         .await;
     assert_eq!(bad.unwrap_err(), BridgeError::BadCommandId);
     assert_eq!(sink.count(), 2);
@@ -724,7 +724,7 @@ async fn the_same_id_with_the_same_payload_is_a_retry() {
     let body = serde_json::json!({ "amount": 100, "customer": "c-1" });
 
     let first = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), body.clone(), SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), "ADMIN", body.clone(), SHORT)
         .await;
     assert_eq!(first.unwrap_err(), BridgeError::Timeout, "gesendet");
     // Dieselbe Absicht, noch einmal — und bewusst mit ANDERER Feldreihenfolge geschrieben.
@@ -735,7 +735,7 @@ async fn the_same_id_with_the_same_payload_is_a_retry() {
         "die Reihenfolge der Felder aendert die Bedeutung nicht"
     );
     let retry = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &same_meaning), same_meaning, SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &same_meaning), "ADMIN", same_meaning, SHORT)
         .await;
     assert_eq!(retry.unwrap_err(), BridgeError::Timeout, "eine Wiederholung ist erlaubt");
     assert_eq!(sink.count(), 2, "und wurde auch wirklich gesendet");
@@ -749,7 +749,7 @@ async fn the_same_id_with_a_different_payload_is_refused_before_dispatch() {
     let body = serde_json::json!({ "amount": 100, "customer": "c-1" });
 
     let first = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), body.clone(), SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), "ADMIN", body.clone(), SHORT)
         .await;
     assert_eq!(first.unwrap_err(), BridgeError::Timeout);
     assert_eq!(sink.count(), 1);
@@ -757,7 +757,7 @@ async fn the_same_id_with_a_different_payload_is_refused_before_dispatch() {
     // Ein einziger geänderter Betrag ist eine ANDERE Buchung.
     let changed = serde_json::json!({ "amount": 100_000, "customer": "c-1" });
     let err = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), changed, SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), "ADMIN", changed, SHORT)
         .await
         .expect_err("derselbe Name fuer etwas anderes");
     assert_eq!(err, BridgeError::CommandIdConflict);
@@ -775,14 +775,14 @@ async fn a_changed_identity_still_conflicts_even_with_the_same_payload() {
 
     assert_eq!(
         bridge
-            .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), body.clone(), SHORT)
+            .submit_as(&identity_with(ID, OP_PROBE, "user-a", &body), "ADMIN", body.clone(), SHORT)
             .await
             .unwrap_err(),
         BridgeError::Timeout
     );
     // Gleicher Rumpf, anderer Benutzer — die bisherige Bindung gilt weiter.
     let err = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-b", &body), body.clone(), SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-b", &body), "ADMIN", body.clone(), SHORT)
         .await
         .expect_err("fremder Absender");
     assert_eq!(err, BridgeError::CommandIdConflict);
@@ -822,7 +822,7 @@ async fn the_identity_store_stays_bounded() {
     for i in 0..(IDENTITY_RETENTION + 200) {
         let id = format!("{:08x}-0000-4000-8000-000000000000", i);
         let _ = bridge
-            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &body), body.clone(), TINY)
+            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &body), "ADMIN", body.clone(), TINY)
             .await;
     }
     let kept = bridge.remembered_identities();
@@ -848,6 +848,7 @@ async fn a_running_command_is_never_evicted() {
         async move {
             b.submit_as(
                 &identity_with(ID, OP_PROBE, "user-a", &body),
+                "ADMIN",
                 body,
                 Duration::from_secs(30),
             )
@@ -864,14 +865,14 @@ async fn a_running_command_is_never_evicted() {
     for i in 0..(IDENTITY_RETENTION + 50) {
         let id = format!("{:08x}-1111-4000-8000-000000000000", i);
         let _ = bridge
-            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &other), other.clone(), TINY)
+            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &other), "ADMIN", other.clone(), TINY)
             .await;
     }
 
     // Der laufende Auftrag ist noch geschuetzt: dieselbe Kennung mit ANDEREM Inhalt faellt auf.
     let changed = serde_json::json!({ "amount": 999 });
     let err = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), changed, SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), "ADMIN", changed, SHORT)
         .await
         .expect_err("die laufende Kennung darf nicht verdraengt worden sein");
     assert_eq!(err, BridgeError::CommandIdConflict);
@@ -887,7 +888,7 @@ async fn within_the_retention_a_changed_payload_still_conflicts() {
     const ID: &str = "bbbbbbbb-0000-4000-8000-000000000001";
     let first = serde_json::json!({ "amount": 100 });
     let _ = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &first), first, SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &first), "ADMIN", first, SHORT)
         .await;
 
     // Ein paar andere dazwischen — weit unterhalb der Grenze, also bleibt die Bindung erhalten.
@@ -895,13 +896,13 @@ async fn within_the_retention_a_changed_payload_still_conflicts() {
     for i in 0..10 {
         let id = format!("{:08x}-2222-4000-8000-000000000000", i);
         let _ = bridge
-            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &filler), filler.clone(), TINY)
+            .submit_as(&identity_with(&id, OP_PROBE, "user-a", &filler), "ADMIN", filler.clone(), TINY)
             .await;
     }
 
     let changed = serde_json::json!({ "amount": 101 });
     let err = bridge
-        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), changed, SHORT)
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &changed), "ADMIN", changed, SHORT)
         .await
         .expect_err("innerhalb des Vorrats faellt das auf");
     assert_eq!(err, BridgeError::CommandIdConflict);

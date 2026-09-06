@@ -5,8 +5,8 @@
 
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '../db/database';
-import type { UserRole, CanonicalUserRole } from '../models/types';
-import { canonicalRole } from '../models/types';
+import type { UserRole } from '../models/types';
+import { roleHasPermission } from './role-permissions';
 
 export interface AuthUser {
   id: string;
@@ -239,54 +239,13 @@ export class AuthService {
   hasPermission(permission: string): boolean {
     const session = this.getSession();
     if (!session) return false;
-
-    // Plan §Users §4+§5: ADMIN/MANAGER/SALES/ACCOUNTANT mit granularen VIEW/CREATE/EDIT/DELETE/APPROVE.
-    // Legacy-Rollen werden via canonicalRole normalisiert.
-    const canonical = canonicalRole(session.role);
-    const rolePermissions: Record<CanonicalUserRole, string[]> = {
-      // Plan §Users §4A: ADMIN — voller Zugriff
-      ADMIN: ['*'],
-      // Plan §Users §4B: MANAGER — Zugriff auf alle Module, eingeschränkte Admin-Rechte
-      MANAGER: [
-        'products.*', 'customers.*', 'offers.*', 'invoices.*', 'payments.*',
-        'tasks.*', 'documents.*', 'repairs.*', 'consignments.*', 'agents.*',
-        'orders.*', 'suppliers.*', 'purchases.*', 'expenses.*', 'banking.*',
-        'partners.view', 'production.*', 'returns.*',
-        'kpi.*', 'reports.*', 'settings.view', 'users.view',
-      ],
-      // Plan §Users §4C: SALES — Sales erlaubt, keine sensiblen Daten
-      SALES: [
-        'products.view', 'products.create', 'products.edit',
-        'customers.view', 'customers.create', 'customers.edit',
-        'offers.*', 'invoices.view', 'invoices.create', 'invoices.edit',
-        'payments.view', 'payments.create',
-        'tasks.view', 'tasks.edit', 'documents.upload', 'documents.view',
-        'repairs.view', 'repairs.create', 'kpi.view_own',
-      ],
-      // Plan §Users §4D: ACCOUNTANT — Finance-Fokus
-      ACCOUNTANT: [
-        'products.view', 'customers.view',
-        'invoices.*', 'payments.*', 'banking.*', 'expenses.*',
-        'purchases.view', 'purchases.payments',
-        'suppliers.view',
-        'reports.*', 'kpi.*', 'tax.*',
-        'partners.view', 'debts.*',
-        'documents.view',
-      ],
-    };
-
-    const perms = rolePermissions[canonical] || [];
-    if (perms.includes('*')) return true;
-
-    return perms.some(p => {
-      if (p === permission) return true;
-      if (p.endsWith('.*')) {
-        const prefix = p.slice(0, -2);
-        return permission.startsWith(prefix);
-      }
-      return false;
-    });
+    // CENTRAL-C4 — die Tabelle steht in `role-permissions`, damit sie AUCH ohne Sitzung
+    // fragbar ist: ein Fernauftrag kommt von einem anderen Rechner, und was SEIN Absender darf,
+    // steht in dessen geprueftem Token — nicht in der Sitzung dieses Bildschirms. Hier wird
+    // dieselbe Tabelle mit der eigenen Rolle gefragt.
+    return roleHasPermission(session.role, permission);
   }
+
 }
 
 export const authService = new AuthService();

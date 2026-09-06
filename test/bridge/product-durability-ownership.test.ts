@@ -98,7 +98,7 @@ function freshDb(): Db {
 
 const identity = (n: string, hash = 'h1') => ({
   commandId: `${n.padStart(8, '0')}-0000-4000-8000-000000000000`,
-  tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test',
+  tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN',
   op: 'products.create', payloadHash: hash,
 });
 
