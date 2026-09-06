@@ -1902,6 +1902,79 @@ function runMigrations(database: Database): void {
     // keine Kindtabelle. Verkauf, Provision, Auszahlung und Rückgabe stehen alle in Spalten der
     // Zeile selbst (`consignment_payouts` existiert ausdrücklich nicht), und JEDER ihrer Schreiber
     // geht über `UPDATE consignments` — der Trigger oben trifft sie damit vollständig.
+
+    // ── CENTRAL-C3F — die Fassung einer Reparatur und eines Agenten-Transfers ──
+    //
+    // Beide bekommen einen Fern-Änderungsweg, und beide hatten bisher GAR KEINE Absicherung:
+    // `updateRepair` und `updateTransfer` schreiben ihre Spalten bedingungslos. Es wird derselbe
+    // Vertrag genommen wie bei Rechnung, Auftrag und Kommission — eine Ganzzahl, vom Trigger
+    // geführt, streng steigend, unteilbar mit der Wirkung. Kein Zeitstempel.
+    `ALTER TABLE repairs ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_repairs_revision`,
+    `CREATE TRIGGER trg_repairs_revision
+       AFTER UPDATE ON repairs
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE repairs SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE agent_transfers ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_agent_transfers_revision`,
+    `CREATE TRIGGER trg_agent_transfers_revision
+       AFTER UPDATE ON agent_transfers
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE agent_transfers SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    // Und dieselbe Lehre wie beim Auftrag: eine Reparatur ist nicht ihre Kopfzeile. Ihre
+    // Arbeitszeilen tragen die Kosten, und `addRepairLine`/`updateRepairLine`/`cancelRepairLine`
+    // schreiben sie — die Neuberechnung der Summen fasst den Kopf zwar an, aber das ist eine
+    // Eigenschaft der heutigen Aufrufer, kein Vertrag. Der Trigger macht es zu einem.
+    `DROP TRIGGER IF EXISTS trg_repair_lines_insert_repairs_revision`,
+    `CREATE TRIGGER trg_repair_lines_insert_repairs_revision
+       AFTER INSERT ON repair_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE repairs SET revision = revision + 1 WHERE id = NEW.repair_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_repair_lines_update_repairs_revision`,
+    `CREATE TRIGGER trg_repair_lines_update_repairs_revision
+       AFTER UPDATE ON repair_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE repairs SET revision = revision + 1 WHERE id = NEW.repair_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_repair_lines_delete_repairs_revision`,
+    `CREATE TRIGGER trg_repair_lines_delete_repairs_revision
+       AFTER DELETE ON repair_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE repairs SET revision = revision + 1 WHERE id = OLD.repair_id;
+       END`,
+    // Der Agenten-Transfer hat genau eine Kindtabelle: die Abrechnungszahlungen. Sie sind Geld,
+    // das an ihm hängt — wer eine sieht, sieht einen anderen Vorgang als vorher.
+    `DROP TRIGGER IF EXISTS trg_agent_settlement_payments_insert_agent_transfers_revision`,
+    `CREATE TRIGGER trg_agent_settlement_payments_insert_agent_transfers_revision
+       AFTER INSERT ON agent_settlement_payments
+       FOR EACH ROW
+       BEGIN
+         UPDATE agent_transfers SET revision = revision + 1 WHERE id = NEW.transfer_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_agent_settlement_payments_update_agent_transfers_revision`,
+    `CREATE TRIGGER trg_agent_settlement_payments_update_agent_transfers_revision
+       AFTER UPDATE ON agent_settlement_payments
+       FOR EACH ROW
+       BEGIN
+         UPDATE agent_transfers SET revision = revision + 1 WHERE id = NEW.transfer_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_agent_settlement_payments_delete_agent_transfers_revision`,
+    `CREATE TRIGGER trg_agent_settlement_payments_delete_agent_transfers_revision
+       AFTER DELETE ON agent_settlement_payments
+       FOR EACH ROW
+       BEGIN
+         UPDATE agent_transfers SET revision = revision + 1 WHERE id = OLD.transfer_id;
+       END`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

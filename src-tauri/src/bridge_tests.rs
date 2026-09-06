@@ -258,8 +258,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        27,
-        "Probe, dreizehn Lesevorgaenge und zwoelf Buchungen"
+        36,
+        "Probe, achtzehn Lesevorgaenge und siebzehn Buchungen"
     );
     for op in [
         OP_INVOICES_CREATE,
@@ -274,6 +274,11 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         OP_CONSIGNMENTS_UPDATE,
         OP_ORDERS_CREATE,
         OP_ORDERS_UPDATE,
+        OP_REPAIRS_CREATE,
+        OP_REPAIRS_UPDATE,
+        OP_TRANSFERS_CREATE,
+        OP_TRANSFERS_UPDATE,
+        OP_TRANSFERS_MARK_RETURNED,
     ] {
         assert!(REMOTE_OPS.contains(&op), "die freigegebene Buchung {op} fehlt");
     }
@@ -296,8 +301,13 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
             &OP_CONSIGNMENTS_UPDATE,
             &OP_ORDERS_CREATE,
             &OP_ORDERS_UPDATE,
+            &OP_REPAIRS_CREATE,
+            &OP_REPAIRS_UPDATE,
+            &OP_TRANSFERS_CREATE,
+            &OP_TRANSFERS_UPDATE,
+            &OP_TRANSFERS_MARK_RETURNED,
         ],
-        "und NUR diese zwoelf veraendern etwas — kein Loeschen von aussen, kein Storno, keine
+        "und NUR diese siebzehn veraendern etwas — kein Loeschen von aussen, kein Storno, keine
          Auszahlung, keine Umwandlung eines Auftrags in eine Rechnung"
     );
     // Der Einkauf hat KEIN Aendern — im Haus gibt es keine Bearbeitung eines Einkaufs, und eine
@@ -430,7 +440,11 @@ fn the_wiring_is_what_it_claims_to_be() {
         listener.contains(&format!("'{}'", EVENT_COMMAND)),
         "Renderer und Rust nennen dasselbe Ereignis"
     );
-    let registry = include_str!("../../src/core/bridge/command-registry.ts");
+    // Verglichen wird der VERTRAG, nicht seine Zeilenenden: eine Datei, die jemand mit einem
+    // anderen Editor gespeichert hat, aendert die Zulassungsliste nicht — und ein Test, der daran
+    // scheitert, sagt etwas Falsches aus.
+    let registry = include_str!("../../src/core/bridge/command-registry.ts").replace("\r\n", "\n");
+    let registry = registry.as_str();
     assert!(
         registry.contains(&format!("export const OP_PROBE = '{}'", OP_PROBE)),
         "und dieselbe Operation"
@@ -595,12 +609,13 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     // Und der Riegel gegen veraendernde Fernoperationen steht im Renderer-Code. Seit C3B ist er
     // eine namentliche Zulassung statt eines Schalters: ein Schalter haette in einem Zug JEDE
     // kuenftige Mutation registrierbar gemacht.
-    let registry = include_str!("../../src/core/bridge/command-registry.ts");
+    let registry = include_str!("../../src/core/bridge/command-registry.ts").replace("\r\n", "\n");
+    let registry = registry.as_str();
     assert!(
         registry.contains(
-            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n];"
+            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n  'repairs.create', 'repairs.update',\n  'transfers.create', 'transfers.update', 'transfers.mark_returned',\n];"
         ),
-        "genau diese zwoelf veraendernden Namen sind freigegeben"
+        "genau diese siebzehn veraendernden Namen sind freigegeben"
     );
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),

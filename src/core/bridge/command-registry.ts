@@ -84,6 +84,8 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'purchases.create',
   'consignments.create', 'consignments.update',
   'orders.create', 'orders.update',
+  'repairs.create', 'repairs.update',
+  'transfers.create', 'transfers.update', 'transfers.mark_returned',
 ];
 
 export interface CommandSpec {

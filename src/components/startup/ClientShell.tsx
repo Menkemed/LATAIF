@@ -21,11 +21,14 @@ import { ClientInvoiceDetail } from '@/components/client/ClientInvoiceDetail';
 import { ClientPurchaseForm } from '@/components/client/ClientPurchaseForm';
 import { ClientConsignmentForm } from '@/components/client/ClientConsignmentForm';
 import { ClientOrderForm } from '@/components/client/ClientOrderForm';
+import { ClientRepairForm } from '@/components/client/ClientRepairForm';
+import { ClientTransferForm } from '@/components/client/ClientTransferForm';
 
 type Area =
   | 'products' | 'customers' | 'invoices' | 'purchases' | 'consignments' | 'orders'
   | 'new-invoice' | 'new-customer' | 'new-product'
-  | 'new-purchase' | 'new-consignment' | 'new-order';
+  | 'new-purchase' | 'new-consignment' | 'new-order'
+  | 'repairs' | 'transfers' | 'new-repair' | 'new-transfer';
 
 interface ListState {
   items: Array<Record<string, unknown>>;
@@ -49,6 +52,12 @@ const AREAS: Array<{ key: Area; label: string; op: string | null }> = [
   { key: 'new-purchase', label: 'New purchase', op: null },
   { key: 'new-consignment', label: 'New consignment', op: null },
   { key: 'new-order', label: 'New order', op: null },
+  // CENTRAL-C3F — Reparaturen und Ware auf Kommission bei einem Kunden. „Transfer" ist hier KEIN
+  // Filialtransfer: es gibt im Haus keinen.
+  { key: 'repairs', label: 'Repairs', op: 'repairs.list' },
+  { key: 'transfers', label: 'On approval', op: 'transfers.list' },
+  { key: 'new-repair', label: 'New repair', op: null },
+  { key: 'new-transfer', label: 'Send out', op: null },
 ];
 
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -74,6 +83,8 @@ export function ClientShell() {
   // Dieselbe Regel für Kommission und Auftrag: das Ändern beginnt an einer gelesenen Zeile.
   const [editConsignmentId, setEditConsignmentId] = useState<string | null>(null);
   const [editOrderId, setEditOrderId] = useState<string | null>(null);
+  const [editRepairId, setEditRepairId] = useState<string | null>(null);
+  const [editTransferId, setEditTransferId] = useState<string | null>(null);
 
   const areaOp = AREAS.find((a) => a.key === area)!.op;
 
@@ -115,6 +126,7 @@ export function ClientShell() {
               setArea(a.key); setDetail(null); setQuery('');
               setEditCustomerId(null); setEditProductId(null); setOpenInvoiceId(null);
               setEditConsignmentId(null); setEditOrderId(null);
+              setEditRepairId(null); setEditTransferId(null);
             }}
             style={chip(area === a.key)}>{a.label}</button>
         ))}
@@ -124,7 +136,8 @@ export function ClientShell() {
           style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #D5D9DE', fontSize: 12 }} />
         <button data-client-refresh onClick={() => setTick((t) => t + 1)} style={chip(false)}>Refresh</button>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: '#6B7280' }}>
-          reads + invoice + clients + items + payments + purchases + consignments + orders · {cfg.serverUrl}
+          reads + invoice + clients + items + payments + purchases + consignments + orders
+          {' + repairs + approvals · '}{cfg.serverUrl}
         </span>
         <button onClick={() => { leaveClientMode(); window.location.reload(); }} style={chip(false)}>Disconnect</button>
       </div>
@@ -181,6 +194,26 @@ export function ClientShell() {
           onCancel={() => setEditOrderId(null)}
         />
       )}
+      {area === 'new-repair' && (
+        <ClientRepairForm onSaved={() => { setArea('repairs'); setTick((t) => t + 1); }} />
+      )}
+      {editRepairId && (
+        <ClientRepairForm
+          repairId={editRepairId}
+          onSaved={() => { setEditRepairId(null); setDetail(null); setTick((t) => t + 1); }}
+          onCancel={() => setEditRepairId(null)}
+        />
+      )}
+      {area === 'new-transfer' && (
+        <ClientTransferForm onSaved={() => { setArea('transfers'); setTick((t) => t + 1); }} />
+      )}
+      {editTransferId && (
+        <ClientTransferForm
+          transferId={editTransferId}
+          onSaved={() => { setEditTransferId(null); setDetail(null); setTick((t) => t + 1); }}
+          onCancel={() => setEditTransferId(null)}
+        />
+      )}
       {busy && !list && <p style={{ fontSize: 12, color: '#6B7280' }}>Loading…</p>}
 
       {list?.stock && (
@@ -206,7 +239,7 @@ export function ClientShell() {
       )}
 
       {detail && !editCustomerId && !editProductId && !openInvoiceId
-        && !editConsignmentId && !editOrderId && (
+        && !editConsignmentId && !editOrderId && !editRepairId && !editTransferId && (
         <div data-client-detail style={{ marginTop: 16, padding: 14, border: '1px solid #D5D9DE', borderRadius: 10 }}>
           <button onClick={() => setDetail(null)} style={chip(false)}>Close</button>
           {area === 'customers' && (
@@ -228,6 +261,14 @@ export function ClientShell() {
           {area === 'orders' && (
             <button data-client-edit-order style={{ ...chip(true), marginLeft: 8 }}
               onClick={() => setEditOrderId(s(detail.id))}>Edit</button>
+          )}
+          {area === 'repairs' && (
+            <button data-client-edit-repair style={{ ...chip(true), marginLeft: 8 }}
+              onClick={() => setEditRepairId(s(detail.id))}>Edit</button>
+          )}
+          {area === 'transfers' && (
+            <button data-client-edit-transfer style={{ ...chip(true), marginLeft: 8 }}
+              onClick={() => setEditTransferId(s(detail.id))}>Edit / take back</button>
           )}
           {/* Ein Einkauf hat KEINEN Ändern-Knopf: es gibt im Haus keine Bearbeitung eines
               Einkaufs, und ein Knopf, der nichts kann, wäre ein Versprechen. */}
@@ -253,6 +294,12 @@ function rowLabel(area: Area, r: Record<string, unknown>): string {
   if (area === 'orders') {
     return `${s(r.orderNumber)} · ${s(r.status)} · ${fmt(Number(r.agreedPrice) || 0)} BHD · open ${fmt(Number(r.remainingAmount) || 0)}`;
   }
+  if (area === 'repairs') {
+    return `${s(r.repairNumber)} · ${s(r.status)} · ${s(r.itemBrand)} ${s(r.itemModel)}`;
+  }
+  if (area === 'transfers') {
+    return `${s(r.transferNumber)} · ${s(r.status)} · ${fmt(Number(r.agentPrice) || 0)} BHD`;
+  }
   return `${s(r.invoiceNumber)} · ${s(r.status)} · ${fmt(Number(r.grossAmount) || 0)} BHD`;
 }
 
@@ -264,6 +311,8 @@ const DETAIL_OPS: Partial<Record<Area, string>> = {
   purchases: 'purchases.get',
   consignments: 'consignments.get',
   orders: 'orders.get',
+  repairs: 'repairs.get',
+  transfers: 'transfers.get',
 };
 
 async function openDetail(

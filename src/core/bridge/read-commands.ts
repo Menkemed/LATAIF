@@ -45,6 +45,14 @@ export const OP_CONSIGNMENTS_GET = 'consignments.get';
 export const OP_ORDERS_LIST = 'orders.list';
 export const OP_ORDERS_GET = 'orders.get';
 
+// CENTRAL-C3F — Reparaturen und Agenten-Transfers. Der Transfer ist ausdrücklich KEIN
+// Filialtransfer: es gibt im Haus keine Quell-/Zielfiliale und keine Mengenbewegung, sondern
+// ein Stück Ware bei einem Agenten — der Bestandseffekt ist ein Statuswechsel am Artikel.
+export const OP_REPAIRS_LIST = 'repairs.list';
+export const OP_REPAIRS_GET = 'repairs.get';
+export const OP_TRANSFERS_LIST = 'transfers.list';
+export const OP_TRANSFERS_GET = 'transfers.get';
+
 /** Jede Leseoperation, die C2 freischaltet — dieselbe Liste kennt auch Rust. */
 export const C2_READ_OPS = [
   OP_PRODUCTS_LIST, OP_PRODUCTS_GET,
@@ -54,6 +62,8 @@ export const C2_READ_OPS = [
   OP_PURCHASES_LIST, OP_PURCHASES_GET,
   OP_CONSIGNMENTS_LIST, OP_CONSIGNMENTS_GET,
   OP_ORDERS_LIST, OP_ORDERS_GET,
+  OP_REPAIRS_LIST, OP_REPAIRS_GET,
+  OP_TRANSFERS_LIST, OP_TRANSFERS_GET,
 ] as const;
 
 /** Wie viele Zeilen eine Liste höchstens liefert, auch wenn jemand mehr verlangt. */
@@ -671,6 +681,160 @@ registerCommand(OP_ORDERS_GET, {
       lines,
       // Auch hier summiert der Primary. Der Client zeigt nur.
       paidAmount: num(paid[0]?.s),
+    };
+  },
+});
+
+// ── Reparaturen ────────────────────────────────────────────────────────────
+
+const REPAIR_COLUMNS =
+  'id, repair_number, customer_id, product_id, item_brand, item_model, item_serial, '
+  + 'issue_description, diagnosis, repair_type, repair_scope, external_vendor, '
+  + 'workshop_supplier_id, estimated_cost, actual_cost, internal_cost, charge_to_customer, '
+  + 'margin, status, received_at, estimated_ready, tax_scheme, updated_at, revision';
+
+function repairDto(r: Row): CommandResult {
+  return {
+    id: str(r.id),
+    repairNumber: str(r.repair_number),
+    customerId: str(r.customer_id),
+    productId: str(r.product_id),
+    itemBrand: str(r.item_brand),
+    itemModel: str(r.item_model),
+    itemSerial: str(r.item_serial),
+    issueDescription: str(r.issue_description),
+    diagnosis: str(r.diagnosis),
+    repairType: str(r.repair_type),
+    repairScope: str(r.repair_scope),
+    externalVendor: str(r.external_vendor),
+    workshopSupplierId: str(r.workshop_supplier_id),
+    estimatedCost: r.estimated_cost === null ? null : num(r.estimated_cost),
+    actualCost: r.actual_cost === null ? null : num(r.actual_cost),
+    internalCost: num(r.internal_cost),
+    chargeToCustomer: r.charge_to_customer === null ? null : num(r.charge_to_customer),
+    // Die Marge rechnet der Primary. Sie reist als ERGEBNIS mit, nie als Eingabe.
+    margin: r.margin === null ? null : num(r.margin),
+    status: str(r.status),
+    receivedAt: str(r.received_at),
+    estimatedReady: str(r.estimated_ready),
+    taxScheme: str(r.tax_scheme),
+    revision: num(r.revision),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+registerCommand(OP_REPAIRS_LIST, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const q = searchOf(p);
+    const like = `%${q.toLowerCase()}%`;
+    const list = q
+      ? rows(
+        `SELECT ${REPAIR_COLUMNS} FROM repairs
+          WHERE branch_id = ? AND (LOWER(repair_number) LIKE ? OR LOWER(COALESCE(item_brand,'')) LIKE ?
+            OR LOWER(COALESCE(item_model,'')) LIKE ?)
+          ORDER BY received_at DESC LIMIT ?`,
+        [branch, like, like, like, limitOf(p)],
+      )
+      : rows(`SELECT ${REPAIR_COLUMNS} FROM repairs WHERE branch_id = ? ORDER BY received_at DESC LIMIT ?`,
+        [branch, limitOf(p)]);
+    return { items: list.map(repairDto), truncated: list.length >= limitOf(p) };
+  },
+});
+
+registerCommand(OP_REPAIRS_GET, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const id = idOf(p);
+    const found = rows(`SELECT ${REPAIR_COLUMNS}, notes, voucher_code FROM repairs WHERE id = ? AND branch_id = ?`, [id, branch]);
+    if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such repair in this branch');
+    // Die Arbeitszeilen gehören dazu: sie tragen die Kosten, und wer den Kopf ändert, muss sehen,
+    // worauf er sich bezieht.
+    const lines = rows(
+      `SELECT id, supplier_id, work_type, cost_amount, status, position
+         FROM repair_lines WHERE repair_id = ? ORDER BY position ASC`,
+      [id],
+    ).map((l) => ({
+      id: str(l.id),
+      supplierId: str(l.supplier_id),
+      workType: str(l.work_type),
+      costAmount: num(l.cost_amount),
+      status: str(l.status),
+    }));
+    return { ...repairDto(found[0]), notes: str(found[0].notes), voucherCode: str(found[0].voucher_code), lines };
+  },
+});
+
+// ── Agenten-Transfers ──────────────────────────────────────────────────────
+
+const TRANSFER_COLUMNS =
+  'id, transfer_number, agent_id, product_id, agent_price, minimum_price, settlement_model, '
+  + 'excess_split_pct, status, transferred_at, return_by, sold_at, returned_at, '
+  + 'actual_sale_price, settlement_status, updated_at, revision';
+
+function transferDto(r: Row): CommandResult {
+  return {
+    id: str(r.id),
+    transferNumber: str(r.transfer_number),
+    agentId: str(r.agent_id),
+    productId: str(r.product_id),
+    agentPrice: num(r.agent_price),
+    minimumPrice: r.minimum_price === null ? null : num(r.minimum_price),
+    settlementModel: str(r.settlement_model),
+    excessSplitPct: r.excess_split_pct === null ? null : num(r.excess_split_pct),
+    status: str(r.status),
+    transferredAt: str(r.transferred_at),
+    returnBy: str(r.return_by),
+    soldAt: str(r.sold_at),
+    returnedAt: str(r.returned_at),
+    actualSalePrice: r.actual_sale_price === null ? null : num(r.actual_sale_price),
+    settlementStatus: str(r.settlement_status),
+    revision: num(r.revision),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+registerCommand(OP_TRANSFERS_LIST, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const q = searchOf(p);
+    const like = `%${q.toLowerCase()}%`;
+    const list = q
+      ? rows(
+        `SELECT ${TRANSFER_COLUMNS} FROM agent_transfers
+          WHERE branch_id = ? AND LOWER(transfer_number) LIKE ?
+          ORDER BY transferred_at DESC LIMIT ?`,
+        [branch, like, limitOf(p)],
+      )
+      : rows(`SELECT ${TRANSFER_COLUMNS} FROM agent_transfers WHERE branch_id = ? ORDER BY transferred_at DESC LIMIT ?`,
+        [branch, limitOf(p)]);
+    return { items: list.map(transferDto), truncated: list.length >= limitOf(p) };
+  },
+});
+
+registerCommand(OP_TRANSFERS_GET, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    const id = idOf(p);
+    const found = rows(`SELECT ${TRANSFER_COLUMNS}, notes FROM agent_transfers WHERE id = ? AND branch_id = ?`, [id, branch]);
+    if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such transfer in this branch');
+    const agent = rows(`SELECT name, company FROM agents WHERE id = ?`, [str(found[0].agent_id)])[0];
+    // Abrechnungszahlungen sind Geld an diesem Vorgang. Der Client darf sie SEHEN — anfassen
+    // kann er sie nicht: dafür gibt es keine freigegebene Operation.
+    const payments = rows(
+      'SELECT id, amount, method, paid_at FROM agent_settlement_payments WHERE transfer_id = ? ORDER BY paid_at ASC',
+      [id],
+    ).map((x) => ({ id: str(x.id), amount: num(x.amount), method: str(x.method), paidAt: str(x.paid_at) }));
+    return {
+      ...transferDto(found[0]),
+      notes: str(found[0].notes),
+      agentName: str(agent?.name),
+      agentCompany: str(agent?.company),
+      settlementPayments: payments,
     };
   },
 });

@@ -189,8 +189,9 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   await import('../../src/core/bridge/product-commands.ts');
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
   await import('../../src/core/bridge/commercial-commands.ts');
+  await import('../../src/core/bridge/service-commands.ts');
   ok(Array.isArray(registry.ALLOWED_MUTATIONS)
-    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
+    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
     `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
 
   for (const op of ['products.delete', 'invoice.delete', 'purchase.create', 'anything.write']) {
@@ -202,15 +203,15 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 27, `ALLOWLIST produktiv siebenundzwanzig Namen (${known.length}: ${known.join(', ')})`);
-  ok(reads.length === 14 && known.includes('bridge.probe') && known.includes('invoices.create'),
+  ok(known.length === 36, `ALLOWLIST produktiv sechsunddreissig Namen (${known.length}: ${known.join(', ')})`);
+  ok(reads.length === 18 && known.includes('bridge.probe') && known.includes('invoices.create'),
     'ALLOWLIST eine Probe, sechs Lesevorgaenge, sieben Mutationen');
 
   // Und Rust prueft dieselbe Liste ein zweites Mal.
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 27, 'ALLOWLIST …und seine Liste ist genau siebenundzwanzig Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 36, 'ALLOWLIST …und seine Liste ist genau sechsunddreissig Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

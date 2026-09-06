@@ -580,19 +580,19 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   const registry = src('src/core/bridge/command-registry.ts');
   ok(!/export const REMOTE_MUTATIONS_ENABLED/.test(registry), 'WIRED der globale Schalter ist weg…');
   const listed = registry.slice(registry.indexOf('export const ALLOWED_MUTATIONS'), registry.indexOf('];', registry.indexOf('export const ALLOWED_MUTATIONS')));
-  ok([...listed.matchAll(/'([a-z._]+)'/g)].map((m) => m[1]).join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
-    `WIRED …und an seiner Stelle stehen zwoelf namentlich freigegebene (${listed.replace(/\s+/g, ' ')})`);
+  ok([...listed.matchAll(/'([a-z._]+)'/g)].map((m) => m[1]).join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
+    `WIRED …und an seiner Stelle stehen siebzehn namentlich freigegebene (${listed.replace(/\s+/g, ' ')})`);
   const bridgeRs = src('src-tauri/src/bridge.rs');
   const list = bridgeRs.slice(bridgeRs.indexOf('pub const REMOTE_OPS'), bridgeRs.indexOf('];', bridgeRs.indexOf('pub const REMOTE_OPS')));
   const ops = (list.match(/OP_[A-Z_]+/g) || []).map((n) => {
     const m = bridgeRs.match(new RegExp(`${n}: &str = "([^"]+)"`));
     return m ? m[1] : n;
   });
-  ok(ops.length === 27, `WIRED die Liste ist um GENAU zwoelf weitere Namen gewachsen: 27 (${ops.length})`);
+  ok(ops.length === 36, `WIRED die Liste ist um GENAU einundzwanzig weitere Namen gewachsen: 36 (${ops.length})`);
   const wiredMut = ops.filter((o) => o !== 'bridge.probe' && !o.endsWith('.list') && !o.endsWith('.get'));
-  ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 14 && ops.includes('bridge.probe')
-    && wiredMut.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
-    `WIRED eine Probe, vierzehn Lesevorgaenge, ZWOELF Mutationen (${wiredMut.join(', ')})`);
+  ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 18 && ops.includes('bridge.probe')
+    && wiredMut.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
+    `WIRED eine Probe, achtzehn Lesevorgaenge, SIEBZEHN Mutationen (${wiredMut.join(', ')})`);
   const engine = src('src/core/bridge/mutation-engine.ts');
   ok(!/registerCommand/.test(engine), 'WIRED die Maschine registriert selbst nichts');
 }

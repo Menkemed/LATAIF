@@ -100,6 +100,21 @@ pub const OP_CONSIGNMENTS_UPDATE: &str = "consignments.update";
 pub const OP_ORDERS_CREATE: &str = "orders.create";
 pub const OP_ORDERS_UPDATE: &str = "orders.update";
 
+/// CENTRAL-C3F — Reparaturen und AGENTEN-Transfers. Der Transfer ist ausdruecklich KEIN
+/// Filialtransfer: es gibt im Haus keine Quell-/Zielfiliale und keine Mengenbewegung, sondern
+/// ein Stueck Ware bei einem Agenten. Statuswechsel am Artikel, kein Zwischenzustand.
+pub const OP_REPAIRS_LIST: &str = "repairs.list";
+pub const OP_REPAIRS_GET: &str = "repairs.get";
+pub const OP_TRANSFERS_LIST: &str = "transfers.list";
+pub const OP_TRANSFERS_GET: &str = "transfers.get";
+pub const OP_REPAIRS_CREATE: &str = "repairs.create";
+pub const OP_REPAIRS_UPDATE: &str = "repairs.update";
+pub const OP_TRANSFERS_CREATE: &str = "transfers.create";
+pub const OP_TRANSFERS_UPDATE: &str = "transfers.update";
+/// Die Rueckgabe schliesst den normalen Kreislauf. Verkauf, Abrechnung, Rechnung und
+/// Loeschen stehen ABSICHTLICH nicht hier: jedes ist ein eigener Geld- oder Zerstoerungsweg.
+pub const OP_TRANSFERS_MARK_RETURNED: &str = "transfers.mark_returned";
+
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
     OP_PROBE,
@@ -129,6 +144,15 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_CONSIGNMENTS_UPDATE,
     OP_ORDERS_CREATE,
     OP_ORDERS_UPDATE,
+    OP_REPAIRS_LIST,
+    OP_REPAIRS_GET,
+    OP_TRANSFERS_LIST,
+    OP_TRANSFERS_GET,
+    OP_REPAIRS_CREATE,
+    OP_REPAIRS_UPDATE,
+    OP_TRANSFERS_CREATE,
+    OP_TRANSFERS_UPDATE,
+    OP_TRANSFERS_MARK_RETURNED,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

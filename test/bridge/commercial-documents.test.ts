@@ -62,6 +62,7 @@ const { resetDurabilityStateForTest } = await import('../../src/core/bridge/dura
 const { resetTransactionHealthForTest } = await import('../../src/core/db/transaction-health.ts');
 const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const cmd = await import('../../src/core/bridge/commercial-commands.ts');
+await import('../../src/core/bridge/service-commands.ts');
 const { executeCommand, ALLOWED_MUTATIONS, knownCommands } =
   await import('../../src/core/bridge/command-registry.ts');
 await import('../../src/core/bridge/read-commands.ts');
@@ -155,7 +156,7 @@ const PURCHASE_BODY = {
 {
   const registry = src('src/core/bridge/command-registry.ts');
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 12, `SCOPE genau 12 Mutationen sind freigegeben (${list.length}: ${list.join(', ')})`);
+  ok(list.length === 17, `SCOPE genau 17 Mutationen sind freigegeben (${list.length}: ${list.join(', ')})`);
   for (const op of ['purchases.create', 'consignments.create', 'consignments.update', 'orders.create', 'orders.update']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich in der Zulassungsliste`);
   }

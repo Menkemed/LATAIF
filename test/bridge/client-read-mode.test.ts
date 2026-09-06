@@ -129,7 +129,7 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     'AUTH die Lesebefehle laufen auf der sql.js-Datenbank des Primary');
   ok(/kind: 'read'/.test(reads), 'AUTH …und sind als Lesevorgang ausgewiesen');
   const registered = (reads.match(/^registerCommand\(/gm) || []).length;
-  ok(registered === 14, `AUTH vierzehn Leseoperationen (${registered})`);
+  ok(registered === 18, `AUTH achtzehn Leseoperationen (${registered})`);
   ok(!/kind: 'mutation'/.test(reads), 'AUTH und keine einzige veraendernde');
 
   // Und in Rust wird KEINE neue Leseroute auf die Datei gelegt.
@@ -241,15 +241,15 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   // das nichts an der Sache, um die es hier geht: er schreibt nie SELBST, sondern schickt jeden
   // dieser Namen an den Primary — und alles, was nicht namentlich darauf steht, bleibt
   // unregistrierbar.
-  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
-    `READONLY zwoelf namentlich freigegebene Mutationen (${ALLOWED_MUTATIONS.join(', ')})`);
+  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
+    `READONLY siebzehn namentlich freigegebene Mutationen (${ALLOWED_MUTATIONS.join(', ')})`);
   // Die Lesebefehle ziehen die ganze Datenschicht mit; hier zaehlt ihre Registrierung im Quelltext.
   const readSrc = code('src/core/bridge/read-commands.ts');
   const registeredReads = readSrc.split('\n').filter((l) => l.startsWith('registerCommand(')).length;
   const known = knownCommands();
   ok(known.length === 1 && known[0] === 'bridge.probe',
     `READONLY geladen ist zunaechst nur die Probe (${known.join(',')})`);
-  ok(registeredReads === 14, `READONLY plus vierzehn Lesevorgaenge im Quelltext (${registeredReads})`);
+  ok(registeredReads === 18, `READONLY plus achtzehn Lesevorgaenge im Quelltext (${registeredReads})`);
   ok(!/registerCommand\('[a-z.]*(create|edit|delete|sell|import|save|update)/i.test(readSrc),
     'READONLY und kein Name klingt nach Veraenderung');
 
@@ -472,16 +472,16 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const reads = resolved.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
-  ok(resolved.length === 27, `ALLOWLIST siebenundzwanzig Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
+  ok(resolved.length === 36, `ALLOWLIST sechsunddreissig Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
-  ok(reads.length === 14, `ALLOWLIST genau vierzehn Lesevorgaenge (${reads.length}: ${reads.join(', ')})`);
-  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
-    `ALLOWLIST und GENAU diese zwoelf veraendernden (${mutations.join(', ') || 'keine'})`);
+  ok(reads.length === 18, `ALLOWLIST genau achtzehn Lesevorgaenge (${reads.length}: ${reads.join(', ')})`);
+  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
+    `ALLOWLIST und GENAU diese siebzehn veraendernden (${mutations.join(', ') || 'keine'})`);
   // Loeschen steht auf KEINER Liste: es hat einen eigenen Referenz-Vertrag, und der ist von aussen
   // nicht durchdacht.
   ok(!mutations.some((o) => o.endsWith('.delete')),
     'ALLOWLIST und kein Loeschen — das hat einen eigenen Vertrag');
-  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,suppliers.list,categories.list,purchases.list,purchases.get,consignments.list,consignments.get,orders.list,orders.get,purchases.create,consignments.create,consignments.update,orders.create,orders.update',
+  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,suppliers.list,categories.list,purchases.list,purchases.get,consignments.list,consignments.get,orders.list,orders.get,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.list,repairs.get,transfers.list,transfers.get,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Es gibt keine eigene Suchoperation — die Suche ist ein Parameter.
   ok(!resolved.some((o) => /search/.test(o)), 'ALLOWLIST keine eigene Suchoperation');
