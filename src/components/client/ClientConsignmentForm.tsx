@@ -60,7 +60,7 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
   const [payoutStatus, setPayoutStatus] = useState('');
   const [payoutAmount, setPayoutAmount] = useState('');
   const [payoutMethod, setPayoutMethod] = useState('cash');
-  const [payoutOutcome, setPayoutOutcome] = useState<SaveOutcome<{ payoutPaidAmount: number; payoutOpenAmount: number; payoutStatus: string; replayed?: boolean }> | null>(null);
+  const [payoutOutcome, setPayoutOutcome] = useState<SaveOutcome<{ payoutPaidAmount: number; payoutOpenAmount: number; payoutStatus: string; revision: number; replayed?: boolean }> | null>(null);
   const [payoutBusy, setPayoutBusy] = useState(false);
   const [consignors, setConsignors] = useState<Array<Record<string, unknown>>>([]);
   const [categories, setCategories] = useState<Array<Record<string, unknown>>>([]);
@@ -80,7 +80,7 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
   // Ein eigener Vorsatz mit eigenem Wächter: eine hängengebliebene Änderung darf niemals als
   // Auszahlung weiterlaufen.
   const payoutController = useMemo(
-    () => new CommandSaveController<{ payoutPaidAmount: number; payoutOpenAmount: number; payoutStatus: string; replayed?: boolean }>(OP_CONSIGNMENTS_RECORD_PAYOUT),
+    () => new CommandSaveController<{ payoutPaidAmount: number; payoutOpenAmount: number; payoutStatus: string; revision: number; replayed?: boolean }>(OP_CONSIGNMENTS_RECORD_PAYOUT),
     [],
   );
 
@@ -316,6 +316,9 @@ export function ClientConsignmentForm({ consignmentId, onSaved, onCancel, read =
                       setPayoutOpen(out.value.payoutOpenAmount);
                       setPayoutStatus(out.value.payoutStatus);
                       setPayoutAmount('');
+                      // Die neue Fassung uebernehmen — sonst scheitert die naechste Teilzahlung
+                      // an einem Stand, den dieser Klick selbst ueberholt hat.
+                      setRevision((out.value as unknown as { revision: number }).revision);
                     }
                   } finally { setPayoutBusy(false); }
                 }}

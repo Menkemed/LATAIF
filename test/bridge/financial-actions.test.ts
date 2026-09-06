@@ -558,6 +558,14 @@ const CONSIGN = {
   ok(sv.settlementAmount > 0, `SOLD und was uns zusteht, rechnet die SSOT (${sv.settlementAmount})`);
   ok(s(db, "SELECT stock_status FROM products WHERE id = 'p1'") !== 'in_stock',
     'SOLD die Ware kommt nicht ins Lager zurueck');
+  // Der Befund des Zwei-Instanzen-E2E: `markTransferSold` schlaegt den AGENTEN in der geladenen
+  // Liste nach, um den Kunden zu finden, gegen den die Forderung laeuft. Ein Fernauftrag hat
+  // keinen Bildschirm, der sie laedt — die Forderung wurde STILL nicht gebucht. Der Verkauf sah
+  // richtig aus, und das Geld stand nirgends.
+  ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ?", [tid]) > 0,
+    'SOLD die Forderung IST gebucht — der Fernweg laedt die Agentenliste vorher');
+  ok(/loadAgents\(\)/.test(codeOf('src/core/bridge/financial-commands.ts')),
+    'SOLD …und genau deshalb steht loadAgents() im Fernweg');
 
   // Wiederholung.
   const againSold = await fin.runMarkSold(d, identity('73', 'transfers.mark_sold'),

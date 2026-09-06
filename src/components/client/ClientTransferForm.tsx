@@ -27,6 +27,8 @@ export const OP_TRANSFERS_MARK_RETURNED = 'transfers.mark_returned';
 export const OP_TRANSFERS_MARK_SOLD = 'transfers.mark_sold';
 export const OP_TRANSFERS_MARK_SETTLED = 'transfers.mark_settled';
 
+interface HasRevision { revision: number }
+
 export interface TransferSaveValue {
   transferId: string;
   transferNumber: string;
@@ -132,7 +134,9 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
     setBusy(true);
     try {
       const attempt = editController.beginAttempt();
-      setOutcome(await attempt.send(body));
+      const out = await attempt.send(body);
+      setOutcome(out);
+      if (out.kind === 'ok' && editing) setRevision(out.value.revision);
     } finally {
       setBusy(false);
     }
@@ -142,7 +146,9 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
     setBusy(true);
     try {
       const attempt = returnController.beginAttempt();
-      setReturnOutcome(await attempt.send(transferReturnRequest(transferId!, revision)));
+      const out = await attempt.send(transferReturnRequest(transferId!, revision));
+      setReturnOutcome(out);
+      if (out.kind === 'ok') setRevision(out.value.revision);
     } finally {
       setBusy(false);
     }
@@ -268,9 +274,10 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
         disabled={pending || closed}
         onChange={(e) => (editing ? setE('notes', e.target.value) : set('notes', e.target.value))} style={field} />
 
-      {editing && status === 'transferred' && (
+      {editing && (status === 'transferred' || soldOutcome) && (
         <div data-client-transfer-sold-box style={{ marginTop: 16, borderTop: '1px solid rgba(128,128,128,0.3)', paddingTop: 12 }}>
           <div style={{ fontSize: 12, opacity: 0.7 }}>The agent sold it</div>
+          {status === 'transferred' && (
           <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
             <input data-client-transfer-saleprice type="number" min={0} step="0.001" value={salePrice}
               disabled={soldOutcome?.kind === 'unknown'} placeholder="sale price"
@@ -283,13 +290,20 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
                   const attempt = soldController.beginAttempt();
                   const out = await attempt.send(markSoldRequest(transferId!, revision, salePrice, '', ackBelow));
                   setSoldOutcome(out);
-                  if (out.kind === 'ok') { setStatus(out.value.status); setSettlementOpen(out.value.settlementAmount); }
+                  if (out.kind === 'ok') {
+                    setStatus(out.value.status);
+                    setSettlementOpen(out.value.settlementAmount);
+                    // Die Antwort traegt die NEUE Fassung. Ohne sie naennte die naechste Aktion
+                    // einen Stand, den dieser Klick selbst ueberholt hat.
+                    setRevision((out.value as unknown as HasRevision).revision);
+                  }
                 } finally { setMoneyBusy(false); }
               }}
               style={{ ...btn(true), marginTop: 0 }}>
               {soldOutcome?.kind === 'unknown' ? 'Retry the same sale' : 'Mark sold'}
             </button>
           </div>
+          )}
           {soldOutcome?.kind === 'business_error' && soldOutcome.code === 'SALE_BELOW_OUR_PRICE' && (
             <div data-client-transfer-below style={warn}>
               {soldOutcome.message}
@@ -306,7 +320,11 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
                     const attempt = soldController.beginAttempt();
                     const out = await attempt.send(markSoldRequest(transferId!, revision, salePrice, '', true));
                     setSoldOutcome(out);
-                    if (out.kind === 'ok') { setStatus(out.value.status); setSettlementOpen(out.value.settlementAmount); }
+                    if (out.kind === 'ok') {
+                      setStatus(out.value.status);
+                      setSettlementOpen(out.value.settlementAmount);
+                      setRevision((out.value as unknown as HasRevision).revision);
+                    }
                   } finally { setMoneyBusy(false); }
                 }}
                 style={{ ...btn(false), marginTop: 0 }}>Sell anyway</button>
@@ -346,7 +364,11 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
                   const attempt = settleController.beginAttempt();
                   const out = await attempt.send(markSettledRequest(transferId!, revision, settleAmount, settleMethod));
                   setSettleOutcome(out);
-                  if (out.kind === 'ok') { setSettlementOpen(out.value.settlementOpenAmount); setSettleAmount(''); }
+                  if (out.kind === 'ok') {
+                    setSettlementOpen(out.value.settlementOpenAmount);
+                    setSettleAmount('');
+                    setRevision((out.value as unknown as HasRevision).revision);
+                  }
                 } finally { setMoneyBusy(false); }
               }}
               style={{ ...btn(true), marginTop: 0 }}>

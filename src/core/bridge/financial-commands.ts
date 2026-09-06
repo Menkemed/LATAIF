@@ -588,6 +588,11 @@ export function runMarkSold(deps: EngineDeps, identity: CommandIdentity, raw: un
         `this transfer is "${String(t.status)}" — only one that is still out can be sold`);
     }
     assertRevision('agent_transfers', req.transferId, req.expectedRevision, 'TRANSFER_NOT_FOUND');
+    // Gemessen und behoben: `markTransferSold` schlaegt den AGENTEN in der geladenen Liste nach,
+    // um den Kunden zu finden, gegen den die Forderung gebucht wird. Ohne ihn wird sie STILL gar
+    // nicht gebucht — der Verkauf saehe richtig aus, und das Geld staende nirgends. Also beide
+    // Listen laden, nicht nur die Transfers.
+    useAgentStore.getState().loadAgents();
     useAgentStore.getState().loadTransfers();
     try {
       useAgentStore.getState().markTransferSold(
@@ -661,6 +666,11 @@ export function runMarkSettled(deps: EngineDeps, identity: CommandIdentity, raw:
       throw new CommandRejected('ALREADY_SETTLED', 'this transfer is already settled in full');
     }
     assertRevision('agent_transfers', req.transferId, req.expectedRevision, 'TRANSFER_NOT_FOUND');
+    // Gemessen und behoben: `markTransferSold` schlaegt den AGENTEN in der geladenen Liste nach,
+    // um den Kunden zu finden, gegen den die Forderung gebucht wird. Ohne ihn wird sie STILL gar
+    // nicht gebucht — der Verkauf saehe richtig aus, und das Geld staende nirgends. Also beide
+    // Listen laden, nicht nur die Transfers.
+    useAgentStore.getState().loadAgents();
     useAgentStore.getState().loadTransfers();
     useAgentStore.getState().markTransferSettled(req.transferId, req.amount, req.method);
 

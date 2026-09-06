@@ -189,6 +189,31 @@ const FORMS = [INVOICE, ORDER, CONSIGN, TRANSFER];
     'SCOPE eine Guthaben-Zahlung wird als nicht berichtigbar gezeigt, statt einen toten Knopf anzubieten');
 }
 
+// ── 4b) Nach einer Geldaktion gilt die NEUE Fassung ──────────────────────
+//
+// Der Befund des Zwei-Instanzen-E2E: die Formulare trugen weiter die Fassung, die sie beim Laden
+// gelesen hatten. Die naechste Aktion an demselben Vorgang nannte damit einen Stand, den der
+// eigene Klick gerade ueberholt hatte — und wurde zu Recht abgewiesen. Jede Antwort traegt die
+// neue Fassung; sie wird uebernommen.
+{
+  const tf = code(TRANSFER);
+  ok((tf.match(/setRevision\(/g) ?? []).length >= 4,
+    `REVISION das Transferformular uebernimmt die neue Fassung nach jeder Wirkung (${(tf.match(/setRevision\(/g) ?? []).length} Stellen)`);
+  for (const anchor of ['markSoldRequest', 'markSettledRequest', 'transferReturnRequest']) {
+    // Die AUFRUFSTELLE, nicht die Importzeile ganz oben — die traegt denselben Namen.
+    const at = tf.lastIndexOf(anchor);
+    ok(at > 0 && /setRevision\(/.test(tf.slice(at, at + 900)),
+      `REVISION …auch nach ${anchor}`);
+  }
+  const cf = code(CONSIGN);
+  const payoutAt = cf.lastIndexOf('recordPayoutRequest');
+  ok(payoutAt > 0 && /setRevision\(/.test(cf.slice(payoutAt, payoutAt + 900)),
+    'REVISION die Auszahlung ebenso — sonst scheitert die zweite Teilzahlung an sich selbst');
+  // Die Rechnungsansicht macht es anders, aber nicht schlechter: sie laedt nach jeder Wirkung neu.
+  ok(/if \(out\.kind === 'ok'\) setTick/.test(code(INVOICE)),
+    'REVISION die Rechnungsansicht laedt nach jeder Wirkung neu — dieselbe Zusage, anderer Weg');
+}
+
 // ── 5) Eine Kennung pro Vorsatz — am echten Wächter ──────────────────────
 {
   cm.enterClientMode('https://primary.local');
