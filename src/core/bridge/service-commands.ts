@@ -38,6 +38,7 @@ import {
 import { useRepairStore } from '@/stores/repairStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { internalCostOnCreate, internalCostOnEdit, repairMargin } from '@/core/repairs/repair-cost';
 import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
 } from './mutation-engine';
@@ -249,7 +250,10 @@ export function runRepairCreate(deps: EngineDeps, identity: CommandIdentity, raw
       externalVendor: req.externalVendor,
       workshopSupplierId: req.workshopSupplierId,
       estimatedCost: req.estimatedCost,
-      internalCost: req.internalCost ?? 0,
+      // Gemessen und behoben: der Aufnahmebildschirm leitet die eigenen Kosten AB, bevor er den
+      // Store ruft — bei einer Fremdarbeit ohne eigene Angabe gilt der Voranschlag. Der Fernweg
+      // speicherte hier 0, also bei derselben Eingabe eine andere Zeile. Jetzt dieselbe Quelle.
+      internalCost: internalCostOnCreate(req),
       chargeToCustomer: req.chargeToCustomer,
       estimatedReady: req.estimatedReady,
       notes: req.notes,
@@ -353,17 +357,14 @@ export function runRepairUpdate(deps: EngineDeps, identity: CommandIdentity, raw
       if (v === undefined) return fallback;
       return v === null ? null : Number(v);
     };
-    const type = req.repairType ?? String(live.repair_type ?? 'internal');
-    const estimated = numOr(req.estimatedCost, live.estimated_cost === null ? null : Number(live.estimated_cost));
-    const actual = numOr(req.actualCost, live.actual_cost === null ? null : Number(live.actual_cost));
-    const givenInternal = req.internalCost ?? Number(live.internal_cost ?? 0);
-    const charge = numOr(req.chargeToCustomer, live.charge_to_customer === null ? null : Number(live.charge_to_customer));
-
-    const derivedInternal = actual ?? estimated ?? 0;
-    const effectiveInternal = type === 'hybrid'
-      ? givenInternal
-      : (givenInternal > 0 ? givenInternal : derivedInternal);
-    const totalCost = type === 'hybrid' ? effectiveInternal + (estimated ?? 0) : effectiveInternal;
+    // Der Stand, der NACH dieser Änderung gilt — was der Auftrag mitbringt, sonst die Zeile.
+    const effective = {
+      repairType: req.repairType ?? String(live.repair_type ?? 'internal'),
+      estimatedCost: numOr(req.estimatedCost, live.estimated_cost === null ? null : Number(live.estimated_cost)),
+      actualCost: numOr(req.actualCost, live.actual_cost === null ? null : Number(live.actual_cost)),
+      internalCost: req.internalCost ?? Number(live.internal_cost ?? 0),
+      chargeToCustomer: numOr(req.chargeToCustomer, live.charge_to_customer === null ? null : Number(live.charge_to_customer)),
+    };
 
     const patch: Record<string, unknown> = {};
     for (const k of ['diagnosis', 'estimatedCost', 'actualCost', 'chargeToCustomer', 'repairType',
@@ -371,9 +372,10 @@ export function runRepairUpdate(deps: EngineDeps, identity: CommandIdentity, raw
       'itemSerial', 'notes'] as const) {
       if (req[k] !== undefined) patch[k] = req[k];
     }
-    // Die beiden abgeleiteten Werte kommen IMMER vom Primary, nie aus dem Rumpf.
-    patch.internalCost = effectiveInternal;
-    patch.margin = charge === null ? null : charge - totalCost;
+    // Die beiden abgeleiteten Werte kommen IMMER vom Primary, nie aus dem Rumpf — und aus
+    // derselben Quelle wie der Bildschirm der Detailseite.
+    patch.internalCost = internalCostOnEdit(effective);
+    patch.margin = repairMargin(effective);
 
     useRepairStore.getState().updateRepair(req.id, patch as never);
     return repairState(req.id) as unknown as Record<string, unknown>;
@@ -506,7 +508,6 @@ export interface TransferUpdateRequest {
   id: string;
   expectedRevision: number;
   agentPrice?: number;
-  minimumPrice?: number | null;
   returnBy?: string | null;
   notes?: string | null;
 }
@@ -518,10 +519,20 @@ export interface TransferUpdateRequest {
  * Status, Verkaufspreis, Provisionsbetrag, Abrechnungsbetrag, Abrechnungsstand und die Zeitpunkte
  * `sold_at`/`returned_at`/`settled_at` setzen. Nichts davon ist eine Eingabe; alles davon entsteht
  * aus einem Vorgang (`markTransferSold`, `markTransferSettled`, `markTransferReturned`).
+ *
+ * **Artikel und Agent sind nach dem Anlegen unveränderlich.** Kein Transferbildschirm des Hauses
+ * schreibt `product_id` oder `agent_id` — geprüft in beiden (TransferDetail, TransferTable), und
+ * beide bearbeiten ausschließlich Preis, Rückgabedatum und Notiz. Ein Fernauftrag, der den Artikel
+ * wechseln könnte, müsste das alte Stück freigeben, das neue übernehmen und beide Artikelzustände
+ * mit dem Transfer in EINER Transaktion halten — eine Wirkung, die es im Haus nicht gibt. Statt
+ * sie zu erfinden, wird sie abgewiesen: `productId` und `agentId` sind hier keine Felder.
  */
 export function parseTransferUpdate(raw: unknown): TransferUpdateRequest {
   if (!isPlain(raw)) throw new ServicePayloadError('payload must be an object');
-  onlyKnownFields(raw, ['id', 'expectedRevision', 'agentPrice', 'minimumPrice', 'returnBy', 'notes']);
+  // GENAU die drei Felder, die beide echten Bildschirme (TransferDetail und TransferTable)
+  // schreiben — nicht eines mehr. `minimumPrice` stand hier und ist an KEINEM von beiden
+  // editierbar; ein Feld, das nur der Fernweg kann, wäre ein Vertrag, den das Haus nicht hat.
+  onlyKnownFields(raw, ['id', 'expectedRevision', 'agentPrice', 'returnBy', 'notes']);
   const out: TransferUpdateRequest = {
     id: reqString(raw.id, 'id'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
@@ -533,13 +544,9 @@ export function parseTransferUpdate(raw: unknown): TransferUpdateRequest {
     }
     out.agentPrice = p;
   }
-  if (raw.minimumPrice !== undefined) {
-    out.minimumPrice = raw.minimumPrice === null ? null : money(raw.minimumPrice, 'minimumPrice');
-  }
   if (raw.returnBy !== undefined) out.returnBy = raw.returnBy === null ? null : reqString(raw.returnBy, 'returnBy');
   if (raw.notes !== undefined) out.notes = raw.notes === null ? null : String(raw.notes);
-  if (out.agentPrice === undefined && out.minimumPrice === undefined
-    && out.returnBy === undefined && out.notes === undefined) {
+  if (out.agentPrice === undefined && out.returnBy === undefined && out.notes === undefined) {
     throw new ServicePayloadError('an edit must change something');
   }
   return out;
@@ -566,7 +573,6 @@ export function runTransferUpdate(deps: EngineDeps, identity: CommandIdentity, r
     assertRevision('agent_transfers', req.id, req.expectedRevision, 'TRANSFER_NOT_FOUND');
     const patch: Record<string, unknown> = {};
     if (req.agentPrice !== undefined) patch.agentPrice = req.agentPrice;
-    if (req.minimumPrice !== undefined) patch.minimumPrice = req.minimumPrice;
     if (req.returnBy !== undefined) patch.returnBy = req.returnBy;
     if (req.notes !== undefined) patch.notes = req.notes;
     useAgentStore.getState().updateTransfer(req.id, patch as never);

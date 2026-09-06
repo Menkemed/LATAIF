@@ -22,6 +22,7 @@ import { getLotsWithPurchaseNumbers, formatLotLabel } from '@/core/lots/lot-quer
 import type { Repair, RepairStatus } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { Bhd } from '@/components/ui/Bhd';
+import { internalCostOnCreate } from '@/core/repairs/repair-cost';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -298,11 +299,10 @@ export function RepairList() {
     // auf der Detail-Seite via "Add Work Line" ein wenn die Werkstatt
     // Bescheid gibt. RepairDetail.handleStatusAdvance warnt freundlich
     // wenn man Status flippt ohne Workshop + ohne Lines.
-    const effectiveInternalCost =
-      (form.repairType === 'external' || form.repairType === 'hybrid')
-        ? (form.internalCost || form.estimatedCost || 0)
-        : (form.internalCost || 0);
-    createRepair({ ...form, internalCost: effectiveInternalCost });
+    // CENTRAL-C3F FINAL — dieselbe Ableitung wie der Fernauftrag, aus derselben Quelle. Sie
+    // stand hier als Ausdruck; ein zweiter Rechner haette sie nachtippen muessen, und genau
+    // daran ist sie auseinandergelaufen.
+    createRepair({ ...form, internalCost: internalCostOnCreate(form) });
     setShowNew(false);
   }
 

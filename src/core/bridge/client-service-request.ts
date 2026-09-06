@@ -9,6 +9,8 @@
 //  3. **Und die gesehene FASSUNG reist mit.** Sie ist nicht wählbar: genau die Zahl, die der
 //     Lesevorgang geliefert hat. Ohne sie lehnt der Primary ab.
 
+import { repairMargin } from '@/core/repairs/repair-cost';
+
 export type Draft = Record<string, string>;
 
 const numOrNull = (v: string): number | null => {
@@ -116,15 +118,16 @@ export function repairUpdateRequest(id: string, revision: number, base: Draft, n
  * der Primary rechnet seine eigene aus dem Stand, der nach der Änderung gilt.
  */
 export function previewMargin(d: Pick<RepairDraft, 'repairType' | 'estimatedCost' | 'actualCost' | 'internalCost' | 'chargeToCustomer'>): number | null {
-  const charge = numOrNull(d.chargeToCustomer);
-  if (charge === null) return null;
-  const estimated = numOrNull(d.estimatedCost);
-  const actual = numOrNull(d.actualCost);
-  const given = numOrNull(d.internalCost) ?? 0;
-  const derived = actual ?? estimated ?? 0;
-  const effective = d.repairType === 'hybrid' ? given : (given > 0 ? given : derived);
-  const total = d.repairType === 'hybrid' ? effective + (estimated ?? 0) : effective;
-  return charge - total;
+  // Keine eigene Rechnung: dieselbe Primitive, die auch die Detailseite des Primary und der
+  // Fernauftrag benutzen. Eine Vorschau, die anders rechnet als die Buchung, ist schlimmer als
+  // gar keine.
+  return repairMargin({
+    repairType: d.repairType,
+    estimatedCost: numOrNull(d.estimatedCost),
+    actualCost: numOrNull(d.actualCost),
+    internalCost: numOrNull(d.internalCost),
+    chargeToCustomer: numOrNull(d.chargeToCustomer),
+  });
 }
 
 // ── Agenten-Transfer ──────────────────────────────────────────────────────
@@ -133,7 +136,6 @@ export interface TransferDraft {
   customerId: string;
   productId: string;
   agentPrice: string;
-  minimumPrice: string;
   settlementModel: string;
   excessSplitPct: string;
   returnBy: string;
@@ -141,7 +143,7 @@ export interface TransferDraft {
 }
 
 export const EMPTY_TRANSFER: TransferDraft = {
-  customerId: '', productId: '', agentPrice: '', minimumPrice: '',
+  customerId: '', productId: '', agentPrice: '',
   settlementModel: 'full', excessSplitPct: '50', returnBy: '', notes: '',
 };
 
@@ -169,9 +171,9 @@ export function transferComplete(d: TransferDraft): boolean {
   return d.customerId.trim() !== '' && d.productId.trim() !== '' && (numOrNull(d.agentPrice) ?? 0) > 0;
 }
 
-/** Genau die vier Felder, die an einem noch offenen Transfer geändert werden dürfen. */
-export const TRANSFER_EDIT_FIELDS = ['agentPrice', 'minimumPrice', 'returnBy', 'notes'] as const;
-const TRANSFER_EDIT_MONEY: readonly string[] = ['agentPrice', 'minimumPrice'];
+/** Genau die drei Felder, die beide echten Transferbildschirme schreiben. Mehr gibt es nicht. */
+export const TRANSFER_EDIT_FIELDS = ['agentPrice', 'returnBy', 'notes'] as const;
+const TRANSFER_EDIT_MONEY: readonly string[] = ['agentPrice'];
 
 export function transferUpdateRequest(id: string, revision: number, base: Draft, now: Draft): Record<string, unknown> {
   const body: Record<string, unknown> = { id, expectedRevision: revision };

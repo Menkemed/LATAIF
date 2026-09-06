@@ -32,6 +32,7 @@ import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
+import { internalCostOnEdit, repairMargin } from '@/core/repairs/repair-cost';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -417,16 +418,9 @@ export function RepairDetail() {
     // Bei Hybrid ist der Fallback aber nicht erlaubt: dort ist estimatedCost = Workshop Fee
     // (separate Größe), und darf nicht in internalCost gespiegelt werden — sonst doppelt
     // gezählt in der Margin.
-    const derivedInternal = form.actualCost ?? form.estimatedCost ?? 0;
-    const effectiveInternal = form.repairType === 'hybrid'
-      ? (form.internalCost || 0)
-      : (form.internalCost && form.internalCost > 0 ? form.internalCost : derivedInternal);
-    const totalCost = form.repairType === 'hybrid'
-      ? effectiveInternal + (form.estimatedCost || 0)
-      : effectiveInternal;
-    const computedMargin = form.chargeToCustomer != null
-      ? form.chargeToCustomer - totalCost
-      : undefined;
+    // CENTRAL-C3F FINAL — dieselbe Ableitung wie der Fernauftrag, aus derselben Quelle.
+    const effectiveInternal = internalCostOnEdit(form);
+    const computedMargin = repairMargin(form) ?? undefined;
     updateRepair(id, {
       diagnosis: form.diagnosis,
       estimatedCost: form.estimatedCost,

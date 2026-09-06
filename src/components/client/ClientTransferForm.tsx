@@ -237,10 +237,6 @@ export function ClientTransferForm({ transferId, onSaved, onCancel, read = remot
         <TextField kind="transfer" name="agentPrice" label="Our price" numeric
           value={editing ? (edit.agentPrice ?? '') : draft.agentPrice}
           onChange={(v) => (editing ? setE('agentPrice', v) : set('agentPrice', v))} disabled={pending || closed} />
-        {editing && (
-          <TextField kind="transfer" name="minimumPrice" label="Minimum" numeric value={edit.minimumPrice ?? ''}
-            onChange={(v) => setE('minimumPrice', v)} disabled={pending || closed} />
-        )}
         <TextField kind="transfer" name="returnBy" label="Back by" date
           value={editing ? (edit.returnBy ?? '') : draft.returnBy}
           onChange={(v) => (editing ? setE('returnBy', v) : set('returnBy', v))} disabled={pending || closed} />
