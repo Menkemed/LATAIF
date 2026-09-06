@@ -67,6 +67,8 @@ const {
 const registry = await import('../../src/core/bridge/command-registry.ts');
 await import('../../src/core/bridge/read-commands.ts');
 await import('../../src/core/bridge/invoice-command.ts');
+await import('../../src/core/bridge/return-commands.ts');
+await import('../../src/core/bridge/lifecycle-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 
@@ -325,11 +327,11 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
-  ok(mutations.length === 24 && mutations.includes('invoices.create')
+  ok(mutations.length === 40 && mutations.includes('invoices.create')
     && mutations.includes('customers.create') && mutations.includes('customers.update'),
-    `ALLOWLIST genau sieben Mutationen (${mutations.join(', ')})`);
-  ok(known.length === 43 && reads.length === 18 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 6 Reads + 7 Mutationen = 14 (${known.length}: ${known.join(', ')})`);
+    `ALLOWLIST genau vierzig Mutationen (${mutations.join(', ')})`);
+  ok(known.length === 59 && reads.length === 18 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
     let threw: string | null = null;
@@ -340,7 +342,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 43, 'ALLOWLIST Rust kennt dieselben dreiundvierzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 59, 'ALLOWLIST Rust kennt dieselben neunundfuenfzig Namen');
   ok(/OP_CUSTOMERS_CREATE: &str = "customers.create"/.test(rs) && /OP_CUSTOMERS_UPDATE: &str = "customers.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

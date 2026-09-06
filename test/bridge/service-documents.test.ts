@@ -65,6 +65,9 @@ await import('../../src/core/bridge/customer-commands.ts');
 await import('../../src/core/bridge/product-commands.ts');
 await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
 await import('../../src/core/bridge/commercial-commands.ts');
+await import('../../src/core/bridge/financial-commands.ts');
+await import('../../src/core/bridge/return-commands.ts');
+await import('../../src/core/bridge/lifecycle-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { useRepairStore } = await import('../../src/stores/repairStore.ts');
@@ -167,21 +170,25 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
 // ── 1) Umfang: was freigegeben ist — und was ausdrücklich nicht ───────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 24, `SCOPE genau 24 Mutationen (${list.length})`);
+  // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
+  // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
+  // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
+  ok(list.length === 40, `SCOPE genau 40 Mutationen (${list.length})`);
   for (const op of ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich auf der Liste`);
   }
-  for (const op of [
-    'repairs.update_status', 'repairs.delete', 'repairs.create_invoice', 'repairs.add_line',
-    'transfers.convert_to_invoice', 'transfers.delete', 'transfers.undo_convert',
-    'repairs.action', 'transfers.action',
-  ]) {
+  for (const op of ['repairs.update_status', 'repairs.create_invoice', 'repairs.add_line',
+    'transfers.convert_to_invoice']) {
+    ok(list.includes(op), `SCOPE ${op} ist seit C3H freigegeben`);
+  }
+  for (const op of ['repairs.delete', 'transfers.delete', 'transfers.undo_convert',
+    'repairs.action', 'transfers.action', 'repairs.set_status']) {
     ok(!list.includes(op), `SCOPE ${op} bleibt fail-closed`);
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 43 && reads.length === 18,
-    `SCOPE 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length}/${reads.length})`);
+  ok(known.length === 59 && reads.length === 18,
+    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of ['repairs.list', 'repairs.get', 'transfers.list', 'transfers.get',
     'repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {

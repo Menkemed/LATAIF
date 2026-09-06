@@ -23,6 +23,7 @@ import type { Repair, RepairStatus } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { Bhd } from '@/components/ui/Bhd';
 import { internalCostOnCreate } from '@/core/repairs/repair-cost';
+import { quickRepairNext } from '@/core/repairs/repair-status-flow';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -46,11 +47,6 @@ const STATUS_FILTERS: { value: RepairStatus | ''; label: string }[] = [
   { value: 'returned', label: 'Returned' },
 ];
 
-const NEXT_STATUS: Partial<Record<RepairStatus, { status: RepairStatus; label: string }>> = {
-  received: { status: 'in_progress', label: 'Start' },
-  in_progress: { status: 'ready', label: 'Mark Ready' },
-  ready: { status: 'picked_up', label: 'Picked Up' },
-};
 
 const REPAIR_STATUS_STYLE: Record<string, { label: string; fg: string; bg: string }> = {
   received:    { label: 'Received',    fg: '#3D7FFF', bg: 'rgba(61,127,255,0.10)'  },
@@ -459,8 +455,7 @@ export function RepairList() {
       )}
 
       {filtered.map(rep => {
-        const rawNext = NEXT_STATUS[rep.status];
-        const next = (rep.repairScope === 'OWN' && rawNext?.status === 'picked_up') ? undefined : rawNext;
+        const next = quickRepairNext(rep.status, rep.repairScope);
         const itemLabel = [rep.itemBrand, rep.itemModel].filter(Boolean).join(' ');
         const eligible = isEligibleForBulk(rep);
         // Create Invoice Shortcut bleibt auch nach Pick-up sichtbar, solange noch

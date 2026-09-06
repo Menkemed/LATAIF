@@ -23,6 +23,12 @@ import { ClientConsignmentForm } from '@/components/client/ClientConsignmentForm
 import { ClientOrderForm } from '@/components/client/ClientOrderForm';
 import { ClientRepairForm } from '@/components/client/ClientRepairForm';
 import { ClientTransferForm } from '@/components/client/ClientTransferForm';
+// CENTRAL-C3H — die Lebenszyklus-Tafeln haengen an denselben Bildschirmen wie die Formulare:
+// wer einen Vorgang offen hat, sieht darunter, was mit ihm als naechstes geschehen kann.
+import {
+  ClientConsignmentLifecycle, ClientOrderLifecycle, ClientRepairLifecycle,
+  ClientReturnPanel, ClientTransferInvoicePanel,
+} from '@/components/client/ClientLifecyclePanels';
 
 type Area =
   | 'products' | 'customers' | 'invoices' | 'purchases' | 'consignments' | 'orders'
@@ -73,6 +79,9 @@ export function ClientShell() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tick, setTick] = useState(0);
+  // Zaehlt NUR die Wirkungen der Lebenszyklus-Tafeln. Er ist der Schluessel der Formulare:
+  // was die Tafel bewegt hat, liest das Formular darueber frisch.
+  const [lifeTick, setLifeTick] = useState(0);
   // Welchen Kunden gerade jemand ändert. Kein eigener Bereich: das Ändern beginnt IMMER an einem
   // Kunden, den dieser Rechner vorher gelesen hat — eine frei eingetippte Kennung gäbe es sonst.
   const [editCustomerId, setEditCustomerId] = useState<string | null>(null);
@@ -166,10 +175,15 @@ export function ClientShell() {
         />
       )}
       {openInvoiceId && (
-        <ClientInvoiceDetail
-          invoiceId={openInvoiceId}
-          onClose={() => { setOpenInvoiceId(null); setDetail(null); setTick((t) => t + 1); }}
-        />
+        <>
+          <ClientInvoiceDetail
+            key={`openInvoiceId:${lifeTick}`}
+            invoiceId={openInvoiceId}
+            onClose={() => { setOpenInvoiceId(null); setDetail(null); setTick((t) => t + 1); }}
+          />
+          {/* Die Rueckgabe-Kette gehoert an die Rechnung: sie bezieht sich auf deren Zeilen. */}
+          <ClientReturnPanel invoiceId={openInvoiceId} onChanged={() => { setLifeTick((t) => t + 1); setTick((t) => t + 1); }} />
+        </>
       )}
       {area === 'new-purchase' && (
         <ClientPurchaseForm onSaved={() => { setArea('purchases'); setTick((t) => t + 1); }} />
@@ -178,41 +192,57 @@ export function ClientShell() {
         <ClientConsignmentForm onSaved={() => { setArea('consignments'); setTick((t) => t + 1); }} />
       )}
       {editConsignmentId && (
-        <ClientConsignmentForm
-          consignmentId={editConsignmentId}
-          onSaved={() => { setEditConsignmentId(null); setDetail(null); setTick((t) => t + 1); }}
-          onCancel={() => setEditConsignmentId(null)}
-        />
+        <>
+          <ClientConsignmentForm
+            key={`editConsignmentId:${lifeTick}`}
+            consignmentId={editConsignmentId}
+            onSaved={() => { setEditConsignmentId(null); setDetail(null); setTick((t) => t + 1); }}
+            onCancel={() => setEditConsignmentId(null)}
+          />
+          <ClientConsignmentLifecycle consignmentId={editConsignmentId} onChanged={() => { setLifeTick((t) => t + 1); setTick((t) => t + 1); }} />
+        </>
       )}
       {area === 'new-order' && (
         <ClientOrderForm onSaved={() => { setArea('orders'); setTick((t) => t + 1); }} />
       )}
       {editOrderId && (
-        <ClientOrderForm
-          orderId={editOrderId}
-          onSaved={() => { setEditOrderId(null); setDetail(null); setTick((t) => t + 1); }}
-          onCancel={() => setEditOrderId(null)}
-        />
+        <>
+          <ClientOrderForm
+            key={`editOrderId:${lifeTick}`}
+            orderId={editOrderId}
+            onSaved={() => { setEditOrderId(null); setDetail(null); setTick((t) => t + 1); }}
+            onCancel={() => setEditOrderId(null)}
+          />
+          <ClientOrderLifecycle orderId={editOrderId} onChanged={() => { setLifeTick((t) => t + 1); setTick((t) => t + 1); }} />
+        </>
       )}
       {area === 'new-repair' && (
         <ClientRepairForm onSaved={() => { setArea('repairs'); setTick((t) => t + 1); }} />
       )}
       {editRepairId && (
-        <ClientRepairForm
-          repairId={editRepairId}
-          onSaved={() => { setEditRepairId(null); setDetail(null); setTick((t) => t + 1); }}
-          onCancel={() => setEditRepairId(null)}
-        />
+        <>
+          <ClientRepairForm
+            key={`editRepairId:${lifeTick}`}
+            repairId={editRepairId}
+            onSaved={() => { setEditRepairId(null); setDetail(null); setTick((t) => t + 1); }}
+            onCancel={() => setEditRepairId(null)}
+          />
+          <ClientRepairLifecycle repairId={editRepairId} onChanged={() => { setLifeTick((t) => t + 1); setTick((t) => t + 1); }} />
+        </>
       )}
       {area === 'new-transfer' && (
         <ClientTransferForm onSaved={() => { setArea('transfers'); setTick((t) => t + 1); }} />
       )}
       {editTransferId && (
-        <ClientTransferForm
-          transferId={editTransferId}
-          onSaved={() => { setEditTransferId(null); setDetail(null); setTick((t) => t + 1); }}
-          onCancel={() => setEditTransferId(null)}
-        />
+        <>
+          <ClientTransferForm
+            key={`editTransferId:${lifeTick}`}
+            transferId={editTransferId}
+            onSaved={() => { setEditTransferId(null); setDetail(null); setTick((t) => t + 1); }}
+            onCancel={() => setEditTransferId(null)}
+          />
+          <ClientTransferInvoicePanel transferId={editTransferId} onChanged={() => { setLifeTick((t) => t + 1); setTick((t) => t + 1); }} />
+        </>
       )}
       {busy && !list && <p style={{ fontSize: 12, color: '#6B7280' }}>Loading…</p>}
 

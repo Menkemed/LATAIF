@@ -1968,6 +1968,93 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE agent_transfers SET revision = revision + 1 WHERE id = NEW.transfer_id;
        END`,
+    // ── CENTRAL-C3H — die Fassung einer Rueckgabe, und was sie an der Rechnung aendert ──
+    //
+    // Die Rueckgabe-Kette hat VIER Stufen (anlegen, genehmigen, erstatten, Auszahlung buchen),
+    // und jede davon aendert Geld. Bisher gab es fuer sie gar keine Fassung: am Primary sass ein
+    // Mensch vor einem Bildschirm, mit einem zweiten Rechner ist die gleichzeitige Bearbeitung
+    // der Regelfall.
+    //
+    // Es wird derselbe Vertrag genommen wie bei Rechnung, Auftrag, Kommission, Reparatur und
+    // Transfer: eine Ganzzahl, vom Trigger gefuehrt, streng steigend, unteilbar mit der Wirkung.
+    `ALTER TABLE sales_returns ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_sales_returns_revision`,
+    `CREATE TRIGGER trg_sales_returns_revision
+       AFTER UPDATE ON sales_returns
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE sales_returns SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    // Eine Rueckgabe ist nicht ihre Kopfzeile: ihre Zeilen tragen die Mengen, und ihre
+    // Gutschrift ist die Steuerurkunde. Wer eine der beiden sieht, sieht einen anderen Vorgang.
+    `DROP TRIGGER IF EXISTS trg_sales_return_lines_insert_returns_revision`,
+    `CREATE TRIGGER trg_sales_return_lines_insert_returns_revision
+       AFTER INSERT ON sales_return_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE sales_returns SET revision = revision + 1 WHERE id = NEW.return_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_sales_return_lines_update_returns_revision`,
+    `CREATE TRIGGER trg_sales_return_lines_update_returns_revision
+       AFTER UPDATE ON sales_return_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE sales_returns SET revision = revision + 1 WHERE id = NEW.return_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_sales_return_lines_delete_returns_revision`,
+    `CREATE TRIGGER trg_sales_return_lines_delete_returns_revision
+       AFTER DELETE ON sales_return_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE sales_returns SET revision = revision + 1 WHERE id = OLD.return_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_credit_notes_insert_returns_revision`,
+    `CREATE TRIGGER trg_credit_notes_insert_returns_revision
+       AFTER INSERT ON credit_notes
+       FOR EACH ROW
+       WHEN NEW.sales_return_id IS NOT NULL
+       BEGIN
+         UPDATE sales_returns SET revision = revision + 1 WHERE id = NEW.sales_return_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_credit_notes_update_returns_revision`,
+    `CREATE TRIGGER trg_credit_notes_update_returns_revision
+       AFTER UPDATE ON credit_notes
+       FOR EACH ROW
+       WHEN NEW.sales_return_id IS NOT NULL
+       BEGIN
+         UPDATE sales_returns SET revision = revision + 1 WHERE id = NEW.sales_return_id;
+       END`,
+
+    // Und die andere Richtung, die genau so wichtig ist: eine RUECKGABE aendert die RECHNUNG.
+    //
+    // Der Client liest eine Rechnung mit ihren Zeilen und der Menge, die noch zurueckgegeben
+    // werden darf. Legt in diesem Moment jemand am Primary eine Rueckgabe auf dieselbe Zeile an,
+    // ist die verbleibende Menge eine andere — die Kopfzeile der Rechnung wurde dabei aber nicht
+    // zwingend angefasst. Ohne diesen Trigger truege der Client eine Fassung, die noch "stimmt",
+    // waehrend der Vorgang darunter ein anderer geworden ist. Genau daran haengt die
+    // Ueberrueckgabe-Nebenlaeufigkeit aus §1.
+    `DROP TRIGGER IF EXISTS trg_sales_returns_insert_invoice_revision`,
+    `CREATE TRIGGER trg_sales_returns_insert_invoice_revision
+       AFTER INSERT ON sales_returns
+       FOR EACH ROW
+       BEGIN
+         UPDATE invoices SET revision = revision + 1 WHERE id = NEW.invoice_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_sales_returns_update_invoice_revision`,
+    `CREATE TRIGGER trg_sales_returns_update_invoice_revision
+       AFTER UPDATE ON sales_returns
+       FOR EACH ROW
+       BEGIN
+         UPDATE invoices SET revision = revision + 1 WHERE id = NEW.invoice_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_credit_notes_insert_invoice_revision`,
+    `CREATE TRIGGER trg_credit_notes_insert_invoice_revision
+       AFTER INSERT ON credit_notes
+       FOR EACH ROW
+       BEGIN
+         UPDATE invoices SET revision = revision + 1 WHERE id = NEW.invoice_id;
+       END`,
     `DROP TRIGGER IF EXISTS trg_agent_settlement_payments_delete_agent_transfers_revision`,
     `CREATE TRIGGER trg_agent_settlement_payments_delete_agent_transfers_revision
        AFTER DELETE ON agent_settlement_payments

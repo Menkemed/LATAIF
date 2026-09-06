@@ -85,3 +85,24 @@ export function repairMargin(input: RepairCostInput & { chargeToCustomer?: numbe
   if (charge === null) return null;
   return charge - totalRepairCost(input);
 }
+
+// ── CENTRAL-C3H — die Kosten, die auf die RECHNUNGSZEILE einer Reparatur gehoeren ────────
+//
+// Gemessen, nicht vermutet: das Haus hatte hier ZWEI Ableitungen.
+//
+//   • `createCombinedRepairInvoice` schreibt `internalCost + Summe der offenen Arbeitszeilen`
+//     als Einstand — mit einem ausdruecklichen Kommentar, dass genau das der Fix gegen eine
+//     stille Margendrift war.
+//   • Der Einzelweg auf der Detailseite schreibt `repair.internalCost` und sonst nichts.
+//
+// Dieselbe Reparatur, zwei Wege, zwei Einstaende: sobald Arbeitszeilen im Spiel sind, weist der
+// Einzelweg einen zu kleinen Einstand aus und die Rechnung einen zu hohen Rohertrag. Das ist
+// kein Fernauftrags-Problem — es war schon vorher falsch. Der Fernauftrag faehrt den
+// gebuendelten Weg; damit lokal und fern nicht wieder auseinanderlaufen, benutzen jetzt BEIDE
+// diese eine Ableitung.
+export function repairInvoiceLineCost(
+  input: { internalCost?: number | null },
+  openLineTotal = 0,
+): number {
+  return (num(input.internalCost) ?? 0) + (Number.isFinite(openLineTotal) ? openLineTotal : 0);
+}

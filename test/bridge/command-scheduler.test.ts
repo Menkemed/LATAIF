@@ -354,8 +354,8 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 // mitgenommen.
 {
   const { ALLOWED_MUTATIONS } = await import('../../src/core/bridge/command-registry.ts');
-  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
-    `GATE genau diese vierundzwanzig veraendernden Namen sind freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
+  ok(ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
+    `GATE genau diese vierzig veraendernden Namen sind freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
 
   for (const name of ['invoice.save', 'sale.commit', 'irgendwas.ganz.neu']) {
     let threw: string | null = null;

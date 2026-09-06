@@ -75,6 +75,8 @@ const { businessWriteScheduler } = await import('../../src/core/bridge/command-s
 const { toInvoiceLine } = await import('../../src/core/invoices/line-derivation.ts');
 const { InvoiceSaveAttempt, InvoiceSaveController } = await import('../../src/core/bridge/client-invoice-save.ts');
 const { enterClientMode, setClientToken } = await import('../../src/core/bridge/client-mode.ts');
+await import('../../src/core/bridge/return-commands.ts');
+await import('../../src/core/bridge/lifecycle-commands.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 
 let PASS = 0; const fails: string[] = [];
@@ -192,7 +194,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
   ok(Array.isArray(registry.ALLOWED_MUTATIONS)
-    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
+    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
     `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
 
   for (const op of ['products.delete', 'invoice.delete', 'purchase.create', 'anything.write']) {
@@ -204,15 +206,15 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 43, `ALLOWLIST produktiv dreiundvierzig Namen (${known.length}: ${known.join(', ')})`);
+  ok(known.length === 59, `ALLOWLIST produktiv neunundfuenfzig Namen (${known.length}: ${known.join(', ')})`);
   ok(reads.length === 18 && known.includes('bridge.probe') && known.includes('invoices.create'),
-    'ALLOWLIST eine Probe, sechs Lesevorgaenge, sieben Mutationen');
+    'ALLOWLIST eine Probe, achtzehn Lesevorgaenge, vierzig Mutationen');
 
   // Und Rust prueft dieselbe Liste ein zweites Mal.
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 43, 'ALLOWLIST …und seine Liste ist genau dreiundvierzig Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 59, 'ALLOWLIST …und seine Liste ist genau neunundfuenfzig Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

@@ -259,6 +259,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       settlementStatus: 'settlement_status',
       notes: 'notes', soldAt: 'sold_at', returnedAt: 'returned_at', settledAt: 'settled_at',
       staffId: 'staff_id',
+      // CENTRAL-C3H — gemessen: diese Zeile fehlte. `convertTransferToInvoice` ruft
+      // `updateTransfer(id, { invoiceId })`, und ohne die Abbildung fiel das Feld still weg
+      // (`fields.length === 0` → kein UPDATE). Der Transfer trug danach KEINEN Rechnungsbezug,
+      // der eigene Riegel gegen die zweite Umwandlung konnte nie greifen, und die Forderung
+      // liess sich doppelt stellen. Jeder andere Store bildet dieses Feld ab.
+      invoiceId: 'invoice_id',
     };
     for (const [k, v] of Object.entries(data)) {
       const col = map[k];

@@ -23,6 +23,11 @@ import { getStockAggregates } from '@/core/lots/lot-queries';
 // zweites Mal gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
 import { payoutModelLock } from '@/core/consignment/payout-edit';
 import { rowToConsignment } from '@/stores/consignmentStore';
+// CENTRAL-C3H — welcher Schritt als naechstes erlaubt ist, ist eine Aussage der DOMAENE. Sie
+// wird hier gelesen, damit der Client sie anzeigen kann — und beim Schreiben ein zweites Mal
+// gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
+import { nextOrderStatus } from '@/core/orders/order-status-flow';
+import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 
 export const OP_PRODUCTS_LIST = 'products.list';
 export const OP_PRODUCTS_GET = 'products.get';
@@ -401,6 +406,43 @@ registerCommand(OP_INVOICES_GET, {
       vatRate: num(l.vat_rate),
       vatAmount: num(l.vat_amount),
       lineTotal: num(l.line_total),
+      // CENTRAL-C3H — wieviel von dieser Zeile noch zurueckgegeben werden darf. Der Primary
+      // rechnet es (Originalmenge minus alles, was nicht verworfene Rueckgaben schon halten) —
+      // genau dieselbe Bedingung, die `createReturn` in der Transaktion noch einmal prueft.
+      // Ohne diese Auskunft boete ein Client eine Menge an, die es nicht mehr gibt.
+      returnedQuantity: num(rows(
+        `SELECT COALESCE(SUM(srl.quantity), 0) AS q FROM sales_return_lines srl
+           JOIN sales_returns r ON r.id = srl.return_id
+          WHERE srl.invoice_line_id = ? AND r.status != 'REJECTED'`,
+        [str(l.id)],
+      )[0]?.q),
+      returnableQuantity: Math.max(0, (l.quantity === null ? 1 : num(l.quantity)) - num(rows(
+        `SELECT COALESCE(SUM(srl.quantity), 0) AS q FROM sales_return_lines srl
+           JOIN sales_returns r ON r.id = srl.return_id
+          WHERE srl.invoice_line_id = ? AND r.status != 'REJECTED'`,
+        [str(l.id)],
+      )[0]?.q)),
+    }));
+    // Die Rueckgaben dieser Rechnung — mit ihrer eigenen FASSUNG, denn Genehmigen, Erstatten
+    // und Auszahlen beziehen sich auf die RUECKGABE, nicht auf die Rechnung.
+    const returns = rows(
+      `SELECT id, return_number, status, total_amount, refund_amount, refund_paid_amount,
+              refund_status, refund_method, product_disposition, return_date, revision
+         FROM sales_returns WHERE invoice_id = ? ORDER BY return_date ASC, id ASC`,
+      [id],
+    ).map((r) => ({
+      id: str(r.id),
+      returnNumber: str(r.return_number),
+      status: str(r.status),
+      totalAmount: num(r.total_amount),
+      refundPaidAmount: num(r.refund_paid_amount),
+      // Auch hier: was offen ist, rechnet der Primary.
+      refundOpenAmount: Math.max(0, num(r.total_amount) - num(r.refund_paid_amount)),
+      refundStatus: str(r.refund_status),
+      refundMethod: str(r.refund_method),
+      productDisposition: str(r.product_disposition),
+      returnDate: str(r.return_date),
+      revision: num(r.revision),
     }));
     // CENTRAL-C3G — die Zahlungen gehören zur Rechnung, nicht in einen eigenen Lesebefehl. Wer
     // eine berichtigen oder löschen will, muss sehen, welche es gibt.
@@ -430,6 +472,7 @@ registerCommand(OP_INVOICES_GET, {
       notes: str(found[0].notes),
       lines,
       payments,
+      returns,
       creditAvailable: Math.max(0, num(credit[0]?.c)),
     };
   },
@@ -605,6 +648,10 @@ function consignmentDto(r: Row): CommandResult {
     commissionAmount: r.commission_amount === null ? null : num(r.commission_amount),
     // Die Sperre kommt aus der Domäne, nicht aus einer Nachbildung im Client.
     payoutLocked: payoutModelLock(rowToConsignment(r)).locked,
+    // CENTRAL-C3H — der Kaeufer darf nicht der Einlieferer sein (das waere eine Ruecknahme,
+    // kein Verkauf). Der Client kann ihn damit aus seiner Auswahl nehmen; der Primary weist es
+    // trotzdem noch einmal ab.
+    invoiceId: str(r.invoice_id),
     revision: num(r.revision),
     updatedAt: str(r.updated_at),
   };
@@ -668,6 +715,10 @@ function orderDto(r: Row): CommandResult {
     // CENTRAL-C3G — ist der Auftrag schon berechnet? Ohne diese Auskunft böte ein Client eine
     // Umwandlung an, die der Primary sofort ablehnt.
     invoiceId: str(r.invoice_id),
+    // CENTRAL-C3H — welcher Schritt als naechstes ginge. Aus DERSELBEN Ableitung, die auch der
+    // Bildschirm des Primary und der Fernauftrag benutzen: ein Client, der sich eine eigene
+    // Reihenfolge ausdaechte, boete Knoepfe an, die der Primary sofort abweist.
+    nextStatus: nextOrderStatus(str(r.status)) ?? '',
     revision: num(r.revision),
     updatedAt: str(r.updated_at),
   };
@@ -720,11 +771,33 @@ registerCommand(OP_ORDERS_GET, {
       billable: str(l.invoice_id) === '' && Number(l.is_customer_facing ?? 1) === 1
         && ['ARRIVED', 'DELIVERED'].includes(str(l.status)),
     }));
-    const paid = rows('SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ?', [id]);
+    const paid = rows(
+      'SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0',
+      [id],
+    );
+    // CENTRAL-C3H — die Anzahlungen EINZELN: wer eine zuruecknehmen will, muss sehen, welche es
+    // gibt. Eine bereits an die Rechnung uebergegangene ist sichtbar, aber nicht mehr loeschbar
+    // — das Geld steht dort in einem Beleg.
+    const payments = rows(
+      `SELECT id, amount, method, card_brand, paid_at, reference, note, converted_to_invoice
+         FROM order_payments WHERE order_id = ? ORDER BY paid_at ASC, created_at ASC`,
+      [id],
+    ).map((x) => ({
+      id: str(x.id),
+      amount: num(x.amount),
+      method: str(x.method),
+      cardBrand: str(x.card_brand),
+      paidAt: str(x.paid_at),
+      reference: str(x.reference),
+      note: str(x.note),
+      convertedToInvoice: Number(x.converted_to_invoice ?? 0) === 1,
+      deletable: Number(x.converted_to_invoice ?? 0) === 0,
+    }));
     return {
       ...orderDto(found[0]),
       notes: str(found[0].notes),
       lines,
+      payments,
       // Auch hier summiert der Primary. Der Client zeigt nur.
       paidAmount: num(paid[0]?.s),
     };
@@ -737,7 +810,7 @@ const REPAIR_COLUMNS =
   'id, repair_number, customer_id, product_id, item_brand, item_model, item_serial, '
   + 'issue_description, diagnosis, repair_type, repair_scope, external_vendor, '
   + 'workshop_supplier_id, estimated_cost, actual_cost, internal_cost, charge_to_customer, '
-  + 'margin, status, received_at, estimated_ready, tax_scheme, updated_at, revision';
+  + 'margin, status, received_at, estimated_ready, tax_scheme, invoice_id, updated_at, revision';
 
 function repairDto(r: Row): CommandResult {
   return {
@@ -764,6 +837,11 @@ function repairDto(r: Row): CommandResult {
     receivedAt: str(r.received_at),
     estimatedReady: str(r.estimated_ready),
     taxScheme: str(r.tax_scheme),
+    // CENTRAL-C3H — hat sie schon eine Rechnung? Ohne diese Auskunft boete ein Client eine
+    // zweite an, die der Primary sofort abweist.
+    invoiceId: str(r.invoice_id),
+    // Und welche Schritte von hier aus wirklich gingen — aus der geteilten Ableitung.
+    allowedStatusTargets: allowedRepairStatusTargets(str(r.status), str(r.repair_type), str(r.repair_scope)),
     revision: num(r.revision),
     updatedAt: str(r.updated_at),
   };
@@ -800,7 +878,7 @@ registerCommand(OP_REPAIRS_GET, {
     // worauf er sich bezieht.
     const lines = rows(
       `SELECT id, supplier_id, work_type, cost_amount, status, position
-         FROM repair_lines WHERE repair_id = ? ORDER BY position ASC`,
+         , expense_id FROM repair_lines WHERE repair_id = ? ORDER BY position ASC`,
       [id],
     ).map((l) => ({
       id: str(l.id),
@@ -808,8 +886,22 @@ registerCommand(OP_REPAIRS_GET, {
       workType: str(l.work_type),
       costAmount: num(l.cost_amount),
       status: str(l.status),
+      // Eine Zeile mit gebuchter Zahlung wird nicht mehr geaendert — das sagt der Primary, nicht
+      // eine Nachbildung im Client.
+      expenseId: str(l.expense_id),
+      editable: str(l.status) === 'OPEN'
+        && num(rows('SELECT COALESCE(paid_amount, 0) AS p FROM expenses WHERE id = ?', [str(l.expense_id)])[0]?.p) <= 0,
     }));
-    return { ...repairDto(found[0]), notes: str(found[0].notes), voucherCode: str(found[0].voucher_code), lines };
+    // Was die offenen Arbeitszeilen zusammen kosten — die Zahl, die in den Einstand der
+    // Rechnungszeile eingeht. Vom Primary summiert.
+    const openLineTotal = num(rows(
+      "SELECT COALESCE(SUM(cost_amount), 0) AS t FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'",
+      [id],
+    )[0]?.t);
+    return {
+      ...repairDto(found[0]), notes: str(found[0].notes),
+      voucherCode: str(found[0].voucher_code), lines, openLineTotal,
+    };
   },
 });
 
@@ -819,7 +911,7 @@ const TRANSFER_COLUMNS =
   'id, transfer_number, agent_id, product_id, agent_price, minimum_price, settlement_model, '
   + 'excess_split_pct, status, transferred_at, return_by, sold_at, returned_at, '
   + 'actual_sale_price, settlement_amount, settlement_paid_amount, settlement_status, '
-  + 'updated_at, revision';
+  + 'invoice_id, updated_at, revision';
 
 function transferDto(r: Row): CommandResult {
   return {
@@ -843,6 +935,9 @@ function transferDto(r: Row): CommandResult {
     settlementPaidAmount: num(r.settlement_paid_amount),
     settlementOpenAmount: Math.max(0, num(r.settlement_amount) - num(r.settlement_paid_amount)),
     settlementStatus: str(r.settlement_status),
+    // CENTRAL-C3H — ist er schon in eine Rechnung gewandert? Zweimal umwandeln geht nicht, und
+    // ein Client soll es gar nicht erst anbieten.
+    invoiceId: str(r.invoice_id),
     revision: num(r.revision),
     updatedAt: str(r.updated_at),
   };

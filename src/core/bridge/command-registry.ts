@@ -90,6 +90,17 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'orders.convert_to_invoice',
   'consignments.record_payout',
   'transfers.mark_sold', 'transfers.mark_settled',
+  // CENTRAL-C3H — die sechzehn Aktionen, die C3G ausdruecklich als `B_DEFERRED` liegen liess.
+  // Jede von ihnen stand in der geprueften Matrix, keine kam dazu, und keine Klasse-C-Aktion ist
+  // dabei. Der Grund, warum sie ueberhaupt noch fehlten, steht in `lifecycle-commands.ts`: die
+  // Umwandlung eines Auftrags war freigegeben, das Tor davor (`orders.update_status`) nicht —
+  // der Weg endete in einer Sackgasse.
+  'returns.create', 'returns.approve', 'returns.refund', 'returns.record_refund_payment',
+  'orders.update_status', 'orders.add_payment', 'orders.delete_payment',
+  'consignments.record_sale', 'consignments.mark_returned',
+  'repairs.update_status', 'repairs.create_invoice',
+  'repairs.add_line', 'repairs.update_line', 'repairs.cancel_line',
+  'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',
 ];
 
 export interface CommandSpec {

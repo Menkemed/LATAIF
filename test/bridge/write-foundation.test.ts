@@ -580,7 +580,7 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
   const registry = src('src/core/bridge/command-registry.ts');
   ok(!/export const REMOTE_MUTATIONS_ENABLED/.test(registry), 'WIRED der globale Schalter ist weg…');
   const listed = registry.slice(registry.indexOf('export const ALLOWED_MUTATIONS'), registry.indexOf('];', registry.indexOf('export const ALLOWED_MUTATIONS')));
-  ok([...listed.matchAll(/'([a-z._]+)'/g)].map((m) => m[1]).join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
+  ok([...listed.matchAll(/'([a-z._]+)'/g)].map((m) => m[1]).join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
     `WIRED …und an seiner Stelle stehen vierundzwanzig namentlich freigegebene (${listed.replace(/\s+/g, ' ')})`);
   const bridgeRs = src('src-tauri/src/bridge.rs');
   const list = bridgeRs.slice(bridgeRs.indexOf('pub const REMOTE_OPS'), bridgeRs.indexOf('];', bridgeRs.indexOf('pub const REMOTE_OPS')));
@@ -588,11 +588,12 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
     const m = bridgeRs.match(new RegExp(`${n}: &str = "([^"]+)"`));
     return m ? m[1] : n;
   });
-  ok(ops.length === 43, `WIRED die Liste ist um GENAU einundzwanzig weitere Namen gewachsen: 36 (${ops.length})`);
+  // CENTRAL-C3H — sechzehn weitere Namen: die in C3G als `B_DEFERRED` klassifizierten Aktionen.
+  ok(ops.length === 59, `WIRED die Liste zaehlt neunundfuenfzig Namen (${ops.length})`);
   const wiredMut = ops.filter((o) => o !== 'bridge.probe' && !o.endsWith('.list') && !o.endsWith('.get'));
   ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 18 && ops.includes('bridge.probe')
-    && wiredMut.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
-    `WIRED eine Probe, achtzehn Lesevorgaenge, VIERUNDZWANZIG Mutationen (${wiredMut.join(', ')})`);
+    && wiredMut.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
+    `WIRED eine Probe, achtzehn Lesevorgaenge, VIERZIG Mutationen (${wiredMut.join(', ')})`);
   const engine = src('src/core/bridge/mutation-engine.ts');
   ok(!/registerCommand/.test(engine), 'WIRED die Maschine registriert selbst nichts');
 }

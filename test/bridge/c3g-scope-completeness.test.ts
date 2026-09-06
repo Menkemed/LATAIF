@@ -65,6 +65,8 @@ await import('../../src/core/bridge/read-commands.ts');
 await import('../../src/core/bridge/customer-commands.ts');
 await import('../../src/core/bridge/product-commands.ts');
 await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+await import('../../src/core/bridge/return-commands.ts');
+await import('../../src/core/bridge/lifecycle-commands.ts');
 await import('../../src/core/bridge/commercial-commands.ts');
 await import('../../src/core/bridge/service-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
@@ -190,10 +192,12 @@ const ACTIONS: Action[] = [
 // ── 3) Keine Klasse-C-Aktion ist registriert ─────────────────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 24, `REGISTRY genau 24 Mutationen (${list.length})`);
+  ok(list.length === 40, `REGISTRY genau 40 Mutationen (${list.length}) — 24 aus C3G plus die 16 aus C3H`);
   const known = knownCommands();
-  ok(known.length === 43 && known.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 18,
-    `REGISTRY 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length})`);
+  // CENTRAL-C3H hat die sechzehn `B_DEFERRED`-Aktionen freigeschaltet. Diese Datei bleibt der
+  // Nachweis der KLASSIFIKATION — die Zahlen ziehen mit, die Einordnung nicht.
+  ok(known.length === 59 && known.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 18,
+    `REGISTRY 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length})`);
   for (const a of ACTIONS.filter((x) => x.klass === 'C_PRIMARY_ONLY')) {
     // Kein Name dieser Aktion — in irgendeiner plausiblen Schreibweise — steht auf der Liste.
     const guesses = [
@@ -203,10 +207,37 @@ const ACTIONS: Action[] = [
     ok(guesses.every((g) => !list.includes(g)),
       `REGISTRY ${a.module}.${a.fn} ist nicht registriert`);
   }
-  for (const a of ACTIONS.filter((x) => x.klass === 'B_DEFERRED')) {
-    const guess = `${a.module}s.${a.fn.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}`;
-    ok(!list.includes(guess), `REGISTRY ${a.module}.${a.fn} ist vertagt, nicht heimlich freigegeben`);
+  // Die sechzehn Vertagten sind in C3H freigeschaltet worden — jede genau EINMAL und unter
+  // genau EINEM Namen. Geprueft wird deshalb, dass fuer jede von ihnen ein Name auf der Liste
+  // steht, und dass die Zahl der dabei benutzten Namen die erwartete ist.
+  const C3H_NAME_OF: Record<string, string> = {
+    'return.createReturn': 'returns.create',
+    'return.approveReturn': 'returns.approve',
+    'return.refundReturn': 'returns.refund',
+    'return.recordRefundPayment': 'returns.record_refund_payment',
+    'order.updateStatus': 'orders.update_status',
+    'order.addPayment': 'orders.add_payment',
+    'order.deletePayment': 'orders.delete_payment',
+    'consignment.recordSale': 'consignments.record_sale',
+    'consignment.markReturned': 'consignments.mark_returned',
+    'repair.updateStatus': 'repairs.update_status',
+    'repair.createCombinedRepairInvoice': 'repairs.create_invoice',
+    'repair.addRepairLine': 'repairs.add_line',
+    'repair.updateRepairLine': 'repairs.update_line',
+    'repair.cancelRepairLine': 'repairs.cancel_line',
+    'transfer.convertTransferToInvoice': 'transfers.convert_to_invoice',
+    'transfer.convertTransfersToInvoice': 'transfers.convert_many_to_invoice',
+  };
+  const deferredKeys = ACTIONS.filter((x) => x.klass === 'B_DEFERRED').map((a) => `${a.module}.${a.fn}`);
+  ok(deferredKeys.length === Object.keys(C3H_NAME_OF).length,
+    `C3H die Abbildung deckt genau die sechzehn Vertagten (${deferredKeys.length}/${Object.keys(C3H_NAME_OF).length})`);
+  for (const key of deferredKeys) {
+    const name = C3H_NAME_OF[key];
+    ok(!!name, `C3H ${key} hat einen Operationsnamen`);
+    ok(!!name && list.includes(name), `C3H ${key} → ${name} steht auf der Liste`);
   }
+  ok(new Set(Object.values(C3H_NAME_OF)).size === 16,
+    'C3H sechzehn Aktionen, sechzehn Namen — keiner geteilt');
   ok((fin.C3G_PRIMARY_ONLY as readonly string[]).length === 10,
     'REGISTRY die Klasse-C-Liste steht als Konstante im Code');
 }
@@ -315,6 +346,10 @@ const ACTIONS: Action[] = [
   const deferred = ACTIONS.filter((a) => a.klass === 'B_DEFERRED');
   ok(deferred.every((a) => a.status.startsWith('C3H')),
     'C3H jede vertagte Aktion nennt ihren Folge-Schnitt');
+  // …und dieser Folge-Schnitt ist gebaut: jede von ihnen faehrt jetzt durch die Bruecke.
+  const c3hSrc = src('src/core/bridge/lifecycle-commands.ts') + src('src/core/bridge/return-commands.ts');
+  ok((c3hSrc.match(/registerCommand\(/g) ?? []).length === 16,
+    'C3H sechzehn Anmeldungen — genau so viele wie vertagte Aktionen');
   // Die Lücke, die der Auftragsweg wirklich hat: PC2 kann einen Auftrag anlegen und wandeln,
   // aber nicht auf „angekommen" setzen — und ohne das ist nichts abrechenbar.
   const gate = deferred.find((a) => a.module === 'order' && a.fn === 'updateStatus');

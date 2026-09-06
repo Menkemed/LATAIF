@@ -258,8 +258,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        43,
-        "Probe, achtzehn Lesevorgaenge und vierundzwanzig Buchungen"
+        59,
+        "Probe, achtzehn Lesevorgaenge und vierzig Buchungen"
     );
     for op in [
         OP_INVOICES_CREATE,
@@ -286,6 +286,22 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         OP_CONSIGNMENTS_RECORD_PAYOUT,
         OP_TRANSFERS_MARK_SOLD,
         OP_TRANSFERS_MARK_SETTLED,
+        OP_RETURNS_CREATE,
+        OP_RETURNS_APPROVE,
+        OP_RETURNS_REFUND,
+        OP_RETURNS_RECORD_REFUND_PAYMENT,
+        OP_ORDERS_UPDATE_STATUS,
+        OP_ORDERS_ADD_PAYMENT,
+        OP_ORDERS_DELETE_PAYMENT,
+        OP_CONSIGNMENTS_RECORD_SALE,
+        OP_CONSIGNMENTS_MARK_RETURNED,
+        OP_REPAIRS_UPDATE_STATUS,
+        OP_REPAIRS_CREATE_INVOICE,
+        OP_REPAIRS_ADD_LINE,
+        OP_REPAIRS_UPDATE_LINE,
+        OP_REPAIRS_CANCEL_LINE,
+        OP_TRANSFERS_CONVERT_TO_INVOICE,
+        OP_TRANSFERS_CONVERT_MANY_TO_INVOICE,
     ] {
         assert!(REMOTE_OPS.contains(&op), "die freigegebene Buchung {op} fehlt");
     }
@@ -320,10 +336,46 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
             &OP_CONSIGNMENTS_RECORD_PAYOUT,
             &OP_TRANSFERS_MARK_SOLD,
             &OP_TRANSFERS_MARK_SETTLED,
+            &OP_RETURNS_CREATE,
+            &OP_RETURNS_APPROVE,
+            &OP_RETURNS_REFUND,
+            &OP_RETURNS_RECORD_REFUND_PAYMENT,
+            &OP_ORDERS_UPDATE_STATUS,
+            &OP_ORDERS_ADD_PAYMENT,
+            &OP_ORDERS_DELETE_PAYMENT,
+            &OP_CONSIGNMENTS_RECORD_SALE,
+            &OP_CONSIGNMENTS_MARK_RETURNED,
+            &OP_REPAIRS_UPDATE_STATUS,
+            &OP_REPAIRS_CREATE_INVOICE,
+            &OP_REPAIRS_ADD_LINE,
+            &OP_REPAIRS_UPDATE_LINE,
+            &OP_REPAIRS_CANCEL_LINE,
+            &OP_TRANSFERS_CONVERT_TO_INVOICE,
+            &OP_TRANSFERS_CONVERT_MANY_TO_INVOICE,
         ],
-        "und NUR diese vierundzwanzig veraendern etwas — kein Loeschen von aussen, kein Storno, keine
-         Auszahlung, keine Umwandlung eines Auftrags in eine Rechnung"
+        "und NUR diese vierzig veraendern etwas — kein Loeschen von aussen, kein Storno mit Geld,
+         keine Sondermarke, kein Rueckgaengigmachen einer Umwandlung"
     );
+    // CENTRAL-C3H — und die Gegenprobe zur Freischaltung: was C3G ausdruecklich als Klasse C am
+    // Primary gelassen hat, steht auch nach sechzehn neuen Namen NICHT auf der Liste.
+    for forbidden in [
+        "invoices.set_special_mark",
+        "invoices.delete",
+        "orders.cancel_with_money",
+        "orders.delete",
+        "consignments.cancel_sale",
+        "consignments.mark_returned_after_sale",
+        "consignments.delete",
+        "repairs.delete",
+        "transfers.undo_convert",
+        "transfers.delete",
+        "returns.cancel",
+    ] {
+        assert!(
+            !REMOTE_OPS.contains(&forbidden),
+            "{forbidden} ist zerstoerend/administrativ und bleibt am Primary"
+        );
+    }
     // Der Einkauf hat KEIN Aendern — im Haus gibt es keine Bearbeitung eines Einkaufs, und eine
     // aus der Ferne zu bauen hiesse, die Bewertung von Ware ein zweites Mal zu schreiben.
     assert!(
@@ -626,15 +678,25 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     let registry = include_str!("../../src/core/bridge/command-registry.ts").replace("\r\n", "\n");
     let registry = registry.as_str();
     assert!(
-        registry.contains(
-            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n  'repairs.create', 'repairs.update',\n  'transfers.create', 'transfers.update', 'transfers.mark_returned',\n  'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',\n  'orders.convert_to_invoice',\n  'consignments.record_payout',\n  'transfers.mark_sold', 'transfers.mark_settled',\n];"
+        allow_listed_names(registry).contains(
+            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n  'repairs.create', 'repairs.update',\n  'transfers.create', 'transfers.update', 'transfers.mark_returned',\n  'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',\n  'orders.convert_to_invoice',\n  'consignments.record_payout',\n  'transfers.mark_sold', 'transfers.mark_settled',\n  'returns.create', 'returns.approve', 'returns.refund', 'returns.record_refund_payment',\n  'orders.update_status', 'orders.add_payment', 'orders.delete_payment',\n  'consignments.record_sale', 'consignments.mark_returned',\n  'repairs.update_status', 'repairs.create_invoice',\n  'repairs.add_line', 'repairs.update_line', 'repairs.cancel_line',\n  'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',\n];"
         ),
-        "genau diese vierundzwanzig veraendernden Namen sind freigegeben"
+        "genau diese vierzig veraendernden Namen sind freigegeben — und keiner mehr"
     );
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),
         "erst die KLASSE, dann der NAME — ein neu benanntes invoice.save faellt an beidem"
     );
+}
+
+/// Der Block `ALLOWED_MUTATIONS` OHNE seine Kommentarzeilen. Verglichen wird der Vertrag —
+/// die Namen und ihre Reihenfolge —, nicht die Begruendung, die daneben steht.
+fn allow_listed_names(registry: &str) -> String {
+    registry
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── 15) Die Kennung benennt eine Absicht, nicht nur einen Absender ────────

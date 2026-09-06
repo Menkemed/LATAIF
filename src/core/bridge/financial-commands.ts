@@ -90,31 +90,34 @@ export class FinancialPayloadError extends Error {
   }
 }
 
-const isPlain = (v: unknown): v is Record<string, unknown> =>
+// CENTRAL-C3H — dieselben Bausteine benutzen jetzt auch die Rueckgabe-Kette und die
+// Lebenszyklus-Aktionen. Sie werden EXPORTIERT statt kopiert: ein zweiter Satz Pruefungen waere
+// ein zweiter Satz Luecken.
+export const isPlain = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
-function onlyKnownFields(raw: Record<string, unknown>, allowed: readonly string[]): void {
+export function onlyKnownFields(raw: Record<string, unknown>, allowed: readonly string[]): void {
   for (const k of Object.keys(raw)) {
     if (!allowed.includes(k)) throw new FinancialPayloadError(`unknown field: ${k}`);
   }
 }
-function reqString(v: unknown, name: string): string {
+export function reqString(v: unknown, name: string): string {
   if (typeof v !== 'string' || !v.trim()) throw new FinancialPayloadError(`${name} is required`);
   return v.trim();
 }
-function optString(v: unknown, name: string): string | undefined {
+export function optString(v: unknown, name: string): string | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v !== 'string') throw new FinancialPayloadError(`${name} must be a string`);
   const t = v.trim();
   return t === '' ? undefined : t;
 }
-function positive(v: unknown, name: string): number {
+export function positive(v: unknown, name: string): number {
   if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
     throw new FinancialPayloadError(`${name} must be a positive number`);
   }
   return v;
 }
-function expectedRevisionOf(v: unknown): number {
+export function expectedRevisionOf(v: unknown): number {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
     throw new FinancialPayloadError('expectedRevision is required — a money action must say which revision it saw');
   }
@@ -122,8 +125,11 @@ function expectedRevisionOf(v: unknown): number {
 }
 
 /** Der Fassungsvergleich, INNERHALB der Transaktion, gegen die Zeile selbst. */
-function assertRevision(
-  table: 'invoices' | 'orders' | 'consignments' | 'agent_transfers',
+export type RevisionedTable =
+  'invoices' | 'orders' | 'consignments' | 'agent_transfers' | 'repairs' | 'sales_returns';
+
+export function assertRevision(
+  table: RevisionedTable,
   id: string, expected: number, notFound: string,
 ): void {
   const live = query(`SELECT revision FROM ${table} WHERE id = ?`, [id])[0];
@@ -151,7 +157,7 @@ export function financialDeps(): EngineDeps {
 export type FinancialResult = { readonly [k: string]: unknown };
 
 /** Der Rechnungszustand, wie ihn auch der Lesebefehl zeigt — vom Primary gerechnet. */
-function invoiceState(id: string): FinancialResult {
+export function invoiceState(id: string): FinancialResult {
   const r = query(
     'SELECT id, invoice_number, status, gross_amount, paid_amount, revision, updated_at '
     + 'FROM invoices WHERE id = ?', [id],
@@ -171,7 +177,7 @@ function invoiceState(id: string): FinancialResult {
 }
 
 /** Ein nicht stornierter, offener Beleg — sonst gar nichts. */
-function liveInvoice(id: string, branchId: string): Record<string, unknown> {
+export function liveInvoice(id: string, branchId: string): Record<string, unknown> {
   const inv = query('SELECT id, status, gross_amount, paid_amount FROM invoices WHERE id = ? AND branch_id = ?',
     [id, branchId])[0];
   if (!inv) throw new CommandRejected('INVOICE_NOT_FOUND', 'no such invoice in this branch');
@@ -697,7 +703,11 @@ export function runMarkSettled(deps: EngineDeps, identity: CommandIdentity, raw:
 
 // ── Die Anmeldung ─────────────────────────────────────────────────────────
 
-async function execute(
+// CENTRAL-C3H — dieselbe Klammer benutzen jetzt auch die Rueckgabe-Kette und die
+// Lebenszyklus-Aktionen. Sie wird EXPORTIERT statt kopiert: die Uebersetzung von
+// "eingefrorenes Urteil" nach "fachliches Nein" und von "nie bewertet" nach "offener Ausgang"
+// darf es genau einmal geben.
+export async function execFinancial(
   run: (deps: EngineDeps, identity: CommandIdentity, raw: unknown) => Promise<CommandOutcome>,
   op: string,
   payload: unknown,
@@ -721,29 +731,29 @@ async function execute(
 
 registerCommand(OP_INVOICES_APPLY_CREDIT, {
   kind: 'mutation',
-  handler: (p, a?: CommandActor) => execute(runApplyCredit, OP_INVOICES_APPLY_CREDIT, p, a),
+  handler: (p, a?: CommandActor) => execFinancial(runApplyCredit, OP_INVOICES_APPLY_CREDIT, p, a),
 });
 registerCommand(OP_INVOICES_UPDATE_PAYMENT, {
   kind: 'mutation',
-  handler: (p, a?: CommandActor) => execute(runUpdatePayment, OP_INVOICES_UPDATE_PAYMENT, p, a),
+  handler: (p, a?: CommandActor) => execFinancial(runUpdatePayment, OP_INVOICES_UPDATE_PAYMENT, p, a),
 });
 registerCommand(OP_INVOICES_DELETE_PAYMENT, {
   kind: 'mutation',
-  handler: (p, a?: CommandActor) => execute(runDeletePayment, OP_INVOICES_DELETE_PAYMENT, p, a),
+  handler: (p, a?: CommandActor) => execFinancial(runDeletePayment, OP_INVOICES_DELETE_PAYMENT, p, a),
 });
 registerCommand(OP_ORDERS_CONVERT_TO_INVOICE, {
   kind: 'mutation',
-  handler: (p, a?: CommandActor) => execute(runConvertOrder, OP_ORDERS_CONVERT_TO_INVOICE, p, a),
+  handler: (p, a?: CommandActor) => execFinancial(runConvertOrder, OP_ORDERS_CONVERT_TO_INVOICE, p, a),
 });
 registerCommand(OP_CONSIGNMENTS_RECORD_PAYOUT, {
   kind: 'mutation',
-  handler: (p, a?: CommandActor) => execute(runRecordPayout, OP_CONSIGNMENTS_RECORD_PAYOUT, p, a),
+  handler: (p, a?: CommandActor) => execFinancial(runRecordPayout, OP_CONSIGNMENTS_RECORD_PAYOUT, p, a),
 });
 registerCommand(OP_TRANSFERS_MARK_SOLD, {
   kind: 'mutation',
-  handler: (p, a?: CommandActor) => execute(runMarkSold, OP_TRANSFERS_MARK_SOLD, p, a),
+  handler: (p, a?: CommandActor) => execFinancial(runMarkSold, OP_TRANSFERS_MARK_SOLD, p, a),
 });
 registerCommand(OP_TRANSFERS_MARK_SETTLED, {
   kind: 'mutation',
-  handler: (p, a?: CommandActor) => execute(runMarkSettled, OP_TRANSFERS_MARK_SETTLED, p, a),
+  handler: (p, a?: CommandActor) => execFinancial(runMarkSettled, OP_TRANSFERS_MARK_SETTLED, p, a),
 });

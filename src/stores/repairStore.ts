@@ -5,6 +5,7 @@ import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
 import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
+import { repairInvoiceLineCost } from '@/core/repairs/repair-cost';
 import { canonicalRepairStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
@@ -1216,8 +1217,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       const gross = r.chargeToCustomer || 0;
       const net = scheme === 'VAT_10' ? gross / (1 + rate / 100) : gross;
       const vat = gross - net;
-      const externalLineTotal = sumOpenRepairLineCosts(r.id);
-      const fullCost = (r.internalCost || 0) + externalLineTotal;
+      // CENTRAL-C3H — dieselbe Ableitung, die jetzt auch der Einzelweg der Detailseite und der
+      // Fernauftrag benutzen. Vorher stand sie nur hier, und der Einzelweg rechnete anders.
+      const fullCost = repairInvoiceLineCost(r, sumOpenRepairLineCosts(r.id));
       return {
         productId,
         unitPrice: net,

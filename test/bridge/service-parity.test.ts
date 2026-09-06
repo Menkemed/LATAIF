@@ -431,14 +431,22 @@ const REPAIR_COMPARE = [
 {
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
+  await import('../../src/core/bridge/return-commands.ts');
+  await import('../../src/core/bridge/lifecycle-commands.ts');
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 43 && reads.length === 18 && ALLOWED_MUTATIONS.length === 24,
-    `SCOPE 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
+  // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
+  // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
+  // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
+  ok(known.length === 59 && reads.length === 18 && ALLOWED_MUTATIONS.length === 40,
+    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   const c3f = ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned'];
   for (const op of c3f) ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} steht darauf`);
-  for (const op of ['transfers.convert_to_invoice', 'transfers.undo_convert',
-    'transfers.delete', 'repairs.update_status', 'repairs.delete']) {
+  // Umwandlung und Zustandsmaschine sind in C3H dazugekommen — die ZERSTOERENDEN nicht.
+  for (const op of ['transfers.convert_to_invoice', 'repairs.update_status']) {
+    ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} ist seit C3H freigegeben`);
+  }
+  for (const op of ['transfers.undo_convert', 'transfers.delete', 'repairs.delete']) {
     ok(!(ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} bleibt draussen`);
   }
   const unknown = await executeCommand('transfers.delete', { input: {} }, identity('90', 'transfers.delete', 'z'));

@@ -524,10 +524,15 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   await import('../../src/core/bridge/customer-commands.ts');
   await import('../../src/core/bridge/product-commands.ts');
   await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+  await import('../../src/core/bridge/return-commands.ts');
+  await import('../../src/core/bridge/lifecycle-commands.ts');
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 43 && reads.length === 18 && ALLOWED_MUTATIONS.length === 24,
-    `SCOPE 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
+  // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
+  // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
+  // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
+  ok(known.length === 59 && reads.length === 18 && ALLOWED_MUTATIONS.length === 40,
+    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   ok(!ALLOWED_MUTATIONS.includes('purchases.update'),
     'SCOPE der Einkauf bleibt Create-only — es gibt keinen lokalen Edit-Pfad');
 }

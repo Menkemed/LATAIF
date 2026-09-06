@@ -13,6 +13,7 @@ import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orde
 import { OrderLineEditModal, type OrderLineEditPatch } from '@/components/work-orders/OrderLineEditModal';
 import { SourceItemsModal } from '@/components/work-orders/SourceItemsModal';
 import { CancelOrderModal } from '@/components/work-orders/CancelOrderModal';
+import { ORDER_STATUS_FLOW, nextOrderStatus } from '@/core/orders/order-status-flow';
 import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -43,7 +44,9 @@ function fmt(v: number | undefined | null): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
-const STATUS_FLOW: OrderStatus[] = ['pending', 'arrived', 'notified', 'completed'];
+// CENTRAL-C3H — die Ableitung stand hier als Ausdruck; ein zweiter Rechner haette sie
+// nachtippen muessen. Jetzt teilen sich Seite und Fernauftrag EINE Quelle.
+const STATUS_FLOW = ORDER_STATUS_FLOW;
 
 // v0.5.0 — Icon/Label fuer Order-Line-Kinds (Produkt + Custom-Komponenten).
 const COST_KIND_META: Record<string, { icon: string; label: string }> = {
@@ -55,11 +58,7 @@ const COST_KIND_META: Record<string, { icon: string; label: string }> = {
   product: { icon: '📦', label: 'Product' },
 };
 
-function getNextStatus(current: OrderStatus): OrderStatus | null {
-  const idx = STATUS_FLOW.indexOf(current);
-  if (idx === -1 || idx >= STATUS_FLOW.length - 1) return null;
-  return STATUS_FLOW[idx + 1];
-}
+const getNextStatus = nextOrderStatus;
 
 function statusLabel(s: OrderStatus): string {
   return s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());

@@ -157,15 +157,21 @@ const PURCHASE_BODY = {
 {
   const registry = src('src/core/bridge/command-registry.ts');
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 24, `SCOPE genau 17 Mutationen sind freigegeben (${list.length}: ${list.join(', ')})`);
+  // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
+  // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
+  // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
+  ok(list.length === 40, `SCOPE genau 40 Mutationen sind freigegeben (${list.length})`);
   for (const op of ['purchases.create', 'consignments.create', 'consignments.update', 'orders.create', 'orders.update']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich in der Zulassungsliste`);
   }
   // Was NICHT freigegeben ist — und zwar keins davon versehentlich.
+  for (const op of ['consignments.record_sale', 'orders.update_status', 'orders.add_payment']) {
+    ok(list.includes(op), `SCOPE ${op} ist seit C3H freigegeben`);
+  }
   for (const op of [
     'purchases.update', 'purchases.cancel', 'purchases.add_payment', 'purchases.create_return',
-    'consignments.record_sale', 'consignments.mark_paid_out', 'consignments.delete',
-    'orders.delete', 'orders.update_status', 'orders.add_payment', 'orders.cancel_with_money',
+    'consignments.mark_paid_out', 'consignments.delete',
+    'orders.delete', 'orders.cancel_with_money',
   ]) {
     ok(!list.includes(op), `SCOPE ${op} bleibt fail-closed`);
   }

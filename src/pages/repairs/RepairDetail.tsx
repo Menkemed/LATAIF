@@ -26,13 +26,14 @@ import { SearchSelect } from '@/components/ui/SearchSelect';
 import { formatProductMultiLine } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import type { Repair, RepairStatus, RepairLine } from '@/core/models/types';
+import type { Repair, RepairLine } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
-import { internalCostOnEdit, repairMargin } from '@/core/repairs/repair-cost';
+import { internalCostOnEdit, repairInvoiceLineCost, repairMargin } from '@/core/repairs/repair-cost';
+import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -56,18 +57,10 @@ const COST_KIND_META: Record<string, { icon: string; label: string }> = {
   other: { icon: '🔧', label: 'Other' },
 };
 
-// OWN-scope endet bei 'ready' — kein Pickup, da das Produkt sowieso bei uns bleibt.
-function getStatusFlow(repairType: string | undefined, scope?: 'CUSTOMER' | 'OWN'): RepairStatus[] {
-  const base: RepairStatus[] = ['received', 'diagnosed', 'in_progress'];
-  const ext = repairType === 'external' || repairType === 'hybrid';
-  if (scope === 'OWN') {
-    return ext ? [...base, 'sent_to_workshop', 'ready'] : [...base, 'ready'];
-  }
-  if (ext) {
-    return [...base, 'sent_to_workshop', 'ready', 'picked_up'];
-  }
-  return [...base, 'ready', 'picked_up'];
-}
+// CENTRAL-C3H — OWN-scope endet bei 'ready'. Die Ableitung steht jetzt in
+// `core/repairs/repair-status-flow` und wird von dieser Seite, der Liste UND dem
+// Fernauftrag benutzt — vorher gab es hier und in der Liste zwei verschiedene.
+const getStatusFlow = repairStatusFlow;
 
 const STATUS_LABELS: Record<string, string> = {
   received: 'Received',
@@ -86,12 +79,7 @@ const STATUS_LABELS: Record<string, string> = {
   CANCELLED: 'Cancelled',
 };
 
-function getNextStatus(current: RepairStatus, repairType?: string, scope?: 'CUSTOMER' | 'OWN'): RepairStatus | null {
-  const flow = getStatusFlow(repairType, scope);
-  const idx = flow.indexOf(current);
-  if (idx === -1 || idx >= flow.length - 1) return null;
-  return flow[idx + 1];
-}
+const getNextStatus = nextRepairStatus;
 
 export function RepairDetail() {
   const { id } = useParams<{ id: string }>();
@@ -367,7 +355,7 @@ export function RepairDetail() {
   async function executeRepairInvoiceCreate(specialMark: boolean) {
     setNumberDialogOpen(false);
     if (!repair || !id || !customer) return;
-    const { getOrCreateRepairServiceProductId } = await import('@/stores/repairStore');
+    const { getOrCreateRepairServiceProductId, sumOpenRepairLineCosts } = await import('@/stores/repairStore');
     const { currentBranchId: getBranch } = await import('@/core/db/helpers');
     let branchId: string;
     try { branchId = getBranch(); } catch { branchId = 'branch-main'; }
@@ -391,7 +379,11 @@ export function RepairDetail() {
       [{
         productId,
         unitPrice: netAmount,
-        purchasePrice: repair.internalCost || 0,
+        // CENTRAL-C3H — gemessen: hier stand `repair.internalCost` allein, waehrend der
+        // gebuendelte Weg ausdruecklich internalCost + offene Arbeitszeilen schreibt. Bei einer
+        // Reparatur mit Arbeitszeilen wies dieser Weg einen zu kleinen Einstand aus — und damit
+        // einen zu hohen Rohertrag. Beide Wege benutzen jetzt dieselbe Ableitung.
+        purchasePrice: repairInvoiceLineCost(repair, sumOpenRepairLineCosts(repair.id)),
         taxScheme: scheme,
         vatRate: rate,
         vatAmount,

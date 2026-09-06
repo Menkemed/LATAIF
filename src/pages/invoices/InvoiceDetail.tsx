@@ -28,6 +28,7 @@ import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-fo
 import { usePermission } from '@/hooks/usePermission';
 import logoUrl from '@/assets/logo.png';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
+import { grossUnitPrice, returnLineAmounts } from '@/core/returns/return-lines';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { computeCardFee } from '@/core/finance/card-fees';
@@ -377,8 +378,9 @@ export function InvoiceDetail() {
     if (!invoice) return;
     const init: Record<string, { include: boolean; quantity: number; unitPrice: number }> = {};
     for (const l of invoice.lines) {
-      // Gross-Unit-Preis (inkl. VAT) als Default — was der Kunde tatsächlich pro Stück gezahlt hat.
-      const grossUnit = l.lineTotal / Math.max(1, l.quantity);
+      // CENTRAL-C3H — der Brutto-Stueckpreis kommt jetzt aus einer geteilten Ableitung; der
+      // Fernauftrag rechnet ihn mit derselben Funktion, statt sie nachzutippen.
+      const grossUnit = grossUnitPrice(l);
       // Default-Qty = noch verbleibende returnfähige Menge nach Abzug bereits zurückgegebener.
       const alreadyReturned = getReturnedQtyForLine(l.id);
       const remainingQty = Math.max(0, l.quantity - alreadyReturned);
@@ -399,17 +401,15 @@ export function InvoiceDetail() {
       .filter(l => returnLines[l.id]?.include)
       .map(l => {
         const rl = returnLines[l.id];
-        // unitPrice ist jetzt GROSS (inkl. VAT). VAT-Anteil proportional zum zurückgegebenen
-        // Wert berechnen — funktioniert für VAT_10 + MARGIN identisch.
-        const returnedTotal = rl.quantity * rl.unitPrice;
-        const origTotal = l.lineTotal || 0;
-        const vatAmount = origTotal > 0 ? (l.vatAmount * returnedTotal) / origTotal : 0;
+        // CENTRAL-C3H — Brutto-Stueckpreis und anteilige Steuer aus der Rechnungszeile: EINE
+        // Ableitung fuer diesen Bildschirm und fuer den Fernauftrag.
+        const amounts = returnLineAmounts(l, rl.quantity);
         return {
           invoiceLineId: l.id,
           productId: l.productId,
-          quantity: rl.quantity,
-          unitPrice: rl.unitPrice,
-          vatAmount,
+          quantity: amounts.quantity,
+          unitPrice: amounts.unitPrice,
+          vatAmount: amounts.vatAmount,
         };
       });
     if (included.length === 0) {

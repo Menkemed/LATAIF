@@ -72,6 +72,9 @@ await import('../../src/core/bridge/read-commands.ts');
 await import('../../src/core/bridge/customer-commands.ts');
 await import('../../src/core/bridge/product-commands.ts');
 await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+// CENTRAL-C3H — die sechzehn weiteren Namen gehoeren zur Registrierung, also auch zu ihrer Zaehlung.
+await import('../../src/core/bridge/return-commands.ts');
+await import('../../src/core/bridge/lifecycle-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { useInvoiceStore } = await import('../../src/stores/invoiceStore.ts');
@@ -186,7 +189,10 @@ function giveCredit(db: Db, customerId: string, amount: number, id = 'cr-1'): vo
 // ── 1) Der Umfang ist eine Entscheidung ──────────────────────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 24, `SCOPE genau 24 Mutationen (${list.length})`);
+  // CENTRAL-C3H hat sechzehn weitere freigeschaltet — die, die C3G ausdruecklich als
+  // `B_DEFERRED` liegen liess. Was diese Datei prueft, bleibt: die SIEBEN aus C3G stehen drauf,
+  // und die zehn Klasse-C-Namen stehen es weiterhin NICHT.
+  ok(list.length === 40, `SCOPE genau 40 Mutationen (${list.length})`);
   for (const op of ['invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',
     'orders.convert_to_invoice', 'consignments.record_payout', 'transfers.mark_sold', 'transfers.mark_settled']) {
     ok(list.includes(op), `SCOPE ${op} ist freigegeben`);
@@ -195,16 +201,21 @@ function giveCredit(db: Db, customerId: string, amount: number, id = 'cr-1'): vo
   for (const op of fin.C3G_PRIMARY_ONLY) {
     ok(!list.includes(op), `SCOPE ${op} bleibt Primary-only`);
   }
-  // Und die vertagten Klasse-B-Ketten sind ebenfalls nicht heimlich dabei.
-  for (const op of ['invoices.create_return', 'invoices.create_credit_note', 'returns.create',
-    'consignments.record_sale', 'repairs.update_status', 'repairs.create_invoice',
-    'transfers.convert_to_invoice', 'orders.add_payment']) {
-    ok(!list.includes(op), `SCOPE ${op} ist vertagt, nicht freigeschaltet`);
+  // Die in C3G vertagten Klasse-B-Ketten sind in C3H freigeschaltet worden — und zwar GENAU
+  // die, die dort benannt waren. Namen, die in keiner der beiden Matrizen standen, gibt es
+  // weiterhin nicht.
+  for (const op of ['returns.create', 'consignments.record_sale', 'repairs.update_status',
+    'repairs.create_invoice', 'transfers.convert_to_invoice', 'orders.add_payment']) {
+    ok(list.includes(op), `SCOPE ${op} ist in C3H freigeschaltet`);
+  }
+  for (const op of ['invoices.create_return', 'invoices.create_credit_note', 'returns.cancel',
+    'repairs.set_status', 'orders.set_status']) {
+    ok(!list.includes(op), `SCOPE ${op} gibt es nicht — kein erfundener Name`);
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 43 && reads.length === 18,
-    `SCOPE 1 Probe + 18 Reads + 24 Mutationen = 43 (${known.length}/${reads.length})`);
+  ok(known.length === 59 && reads.length === 18,
+    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of ['invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',
     'orders.convert_to_invoice', 'consignments.record_payout', 'transfers.mark_sold', 'transfers.mark_settled']) {

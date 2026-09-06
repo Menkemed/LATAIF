@@ -418,9 +418,11 @@ const IMAGES = { kind: 'data_urls' as const, images: ['data:image/jpeg;base64,AA
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
+  await import('../../src/core/bridge/return-commands.ts');
+  await import('../../src/core/bridge/lifecycle-commands.ts');
   const known = registry.knownCommands();
-  ok(known.length === 43 && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled',
-    `WIRED 1 Probe + 6 Reads + 7 Mutationen (${known.length}: ${registry.ALLOWED_MUTATIONS.join(', ')})`);
+  ok(known.length === 59 && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
+    `WIRED 1 Probe + 18 Reads + 40 Mutationen (${known.length}: ${registry.ALLOWED_MUTATIONS.join(', ')})`);
   const productCmd = src('src/core/bridge/product-commands.ts');
   ok(/runRemoteCommand\(/.test(productCmd) && /alreadySerialised: true/.test(productCmd),
     'WIRED der Produkt-Fernauftrag laeuft durch die Maschine und reiht sich nicht doppelt ein');

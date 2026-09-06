@@ -126,6 +126,29 @@ pub const OP_CONSIGNMENTS_RECORD_PAYOUT: &str = "consignments.record_payout";
 pub const OP_TRANSFERS_MARK_SOLD: &str = "transfers.mark_sold";
 pub const OP_TRANSFERS_MARK_SETTLED: &str = "transfers.mark_settled";
 
+/// CENTRAL-C3H — die sechzehn Aktionen, die C3G ausdruecklich als `B_DEFERRED` liegen liess:
+/// die Rueckgabe-Kette (4), Auftragsstatus und Auftragszahlungen (3), Verkauf und Rueckgabe einer
+/// Kommission (2), die Reparatur-Zustandsmaschine samt Rechnung und Arbeitszeilen (5) und die
+/// beiden Wege vom Agenten-Transfer zur Rechnung (2). Keine Klasse-C-Aktion ist dabei:
+/// Sondermarke, Beleg-Loeschung, Storno mit Geld, Verkaufs-Storno, Rueckgabe NACH dem Verkauf,
+/// Reparatur-Loeschung und das Rueckgaengigmachen einer Transfer-Rechnung bleiben Primary-only.
+pub const OP_RETURNS_CREATE: &str = "returns.create";
+pub const OP_RETURNS_APPROVE: &str = "returns.approve";
+pub const OP_RETURNS_REFUND: &str = "returns.refund";
+pub const OP_RETURNS_RECORD_REFUND_PAYMENT: &str = "returns.record_refund_payment";
+pub const OP_ORDERS_UPDATE_STATUS: &str = "orders.update_status";
+pub const OP_ORDERS_ADD_PAYMENT: &str = "orders.add_payment";
+pub const OP_ORDERS_DELETE_PAYMENT: &str = "orders.delete_payment";
+pub const OP_CONSIGNMENTS_RECORD_SALE: &str = "consignments.record_sale";
+pub const OP_CONSIGNMENTS_MARK_RETURNED: &str = "consignments.mark_returned";
+pub const OP_REPAIRS_UPDATE_STATUS: &str = "repairs.update_status";
+pub const OP_REPAIRS_CREATE_INVOICE: &str = "repairs.create_invoice";
+pub const OP_REPAIRS_ADD_LINE: &str = "repairs.add_line";
+pub const OP_REPAIRS_UPDATE_LINE: &str = "repairs.update_line";
+pub const OP_REPAIRS_CANCEL_LINE: &str = "repairs.cancel_line";
+pub const OP_TRANSFERS_CONVERT_TO_INVOICE: &str = "transfers.convert_to_invoice";
+pub const OP_TRANSFERS_CONVERT_MANY_TO_INVOICE: &str = "transfers.convert_many_to_invoice";
+
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
     OP_PROBE,
@@ -171,6 +194,22 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_CONSIGNMENTS_RECORD_PAYOUT,
     OP_TRANSFERS_MARK_SOLD,
     OP_TRANSFERS_MARK_SETTLED,
+    OP_RETURNS_CREATE,
+    OP_RETURNS_APPROVE,
+    OP_RETURNS_REFUND,
+    OP_RETURNS_RECORD_REFUND_PAYMENT,
+    OP_ORDERS_UPDATE_STATUS,
+    OP_ORDERS_ADD_PAYMENT,
+    OP_ORDERS_DELETE_PAYMENT,
+    OP_CONSIGNMENTS_RECORD_SALE,
+    OP_CONSIGNMENTS_MARK_RETURNED,
+    OP_REPAIRS_UPDATE_STATUS,
+    OP_REPAIRS_CREATE_INVOICE,
+    OP_REPAIRS_ADD_LINE,
+    OP_REPAIRS_UPDATE_LINE,
+    OP_REPAIRS_CANCEL_LINE,
+    OP_TRANSFERS_CONVERT_TO_INVOICE,
+    OP_TRANSFERS_CONVERT_MANY_TO_INVOICE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.
