@@ -415,7 +415,7 @@ impl MediaIngestService {
             return Err(e);
         }
         // Journal updates are replace-safe: we intend to supersede the old entry.
-        fs::rename(&tmp, &final_path).map_err(|e| {
+        storage::with_transient_retry(|| fs::rename(&tmp, &final_path)).map_err(|e| {
             let _ = fs::remove_file(&tmp);
             io_err(&e)
         })?;
@@ -462,7 +462,7 @@ impl MediaIngestService {
         // final path exists — on POSIX because `link(2)` returns `EEXIST`, on
         // Windows because `CreateHardLinkW` returns `ERROR_ALREADY_EXISTS`.
         // Rust maps both to the same kind.
-        let outcome = match fs::hard_link(&tmp, &final_path) {
+        let outcome = match storage::with_transient_retry(|| fs::hard_link(&tmp, &final_path)) {
             Ok(()) => CreateOutcome::Created,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => CreateOutcome::Existed,
             Err(e) => {
@@ -656,7 +656,7 @@ impl MediaIngestService {
             f.flush().map_err(|e| io_err(&e))?;
             f.sync_all().map_err(|e| io_err(&e))?;
         }
-        fs::rename(&tmp, &final_path).map_err(|e| {
+        storage::with_transient_retry(|| fs::rename(&tmp, &final_path)).map_err(|e| {
             let _ = fs::remove_file(&tmp);
             io_err(&e)
         })?;

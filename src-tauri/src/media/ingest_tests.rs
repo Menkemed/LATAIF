@@ -499,6 +499,47 @@ fn atomic_create_barrier_leaves_no_journal_file() {
     assert_eq!(p.state, IngestState::Prepared);
 }
 
+/// CENTRAL-C5 — der Beleg fuer den Windows-Defekt und fuer seine Behebung.
+///
+/// Genau die Abfolge des Tests darueber, nur dreitausendmal und sechzehnfach nebeneinander.
+/// OHNE den kurzen Wiederholungsversuch in `storage::with_transient_retry` scheitert das hier
+/// reproduzierbar: das Ersetzen der eben erst erzeugten Journaldatei antwortet mit
+/// ERROR_ACCESS_DENIED, weil ein fremder Leser sie noch offen haelt — rund zwei bis sieben Mal
+/// pro Durchlauf. MIT dem Wiederholungsversuch laeuft es durch.
+///
+/// Dauert gut zwei Minuten und braucht Last, deshalb `#[ignore]`: er gehoert nicht in jeden
+/// Lauf, sondern zu jeder Aenderung an den Veroeffentlichungs-Primitiven. Aufruf:
+/// `cargo test --lib media::ingest::ingest_tests::a_crowded_machine -- --ignored`.
+#[test]
+#[ignore]
+fn a_crowded_machine_never_loses_a_prepare_to_a_borrowed_file() {
+    let mut hs = Vec::new();
+    for _ in 0..16 {
+        hs.push(std::thread::spawn(|| {
+            for i in 0..200 {
+                let root = TempRoot::new();
+                let svc = MediaIngestService::new(root.path().to_path_buf());
+                let bytes = png_bytes(320, 200);
+                let hash = super::canonical_request_hash(SCOPE, &bytes);
+                svc.set_journal_write_barrier(Some(Arc::new(|| {
+                    Err(IngestError::Io("io:test-barrier".to_string()))
+                })));
+                let err = svc.prepare(SCOPE, REQ_ID, &hash, &bytes, None).unwrap_err();
+                assert!(matches!(err, IngestError::Io(_)));
+                assert!(!journal_file(root.path(), SCOPE, REQ_ID).exists());
+                svc.set_journal_write_barrier(None);
+                let p = svc
+                    .prepare(SCOPE, REQ_ID, &hash, &bytes, None)
+                    .unwrap_or_else(|e| panic!("iteration {i}: {e:?}"));
+                assert_eq!(p.state, IngestState::Prepared);
+            }
+        }));
+    }
+    for h in hs {
+        h.join().unwrap();
+    }
+}
+
 // ── semantic journal validation ──────────────────────────────────────────────
 
 fn overwrite_journal_at(path: &Path, j: &IngestJournal) {

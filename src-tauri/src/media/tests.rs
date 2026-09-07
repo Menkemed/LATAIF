@@ -78,6 +78,70 @@ fn to_webp(img: &image::RgbImage) -> Option<Vec<u8>> {
 
 const SCOPE: &str = "tenant-1";
 
+// CENTRAL-C5 — der kurze Wiederholungsversuch beim Ersetzen/Verlinken.
+//
+// Bewiesen wurde der Defekt am echten Aufruf: unter Last verweigert Windows das Ersetzen der
+// eben erst erzeugten Journaldatei mit ERROR_ACCESS_DENIED, weil ein fremder Leser sie noch
+// offen haelt. Hier steht die Regel selbst auf dem Pruefstand: wann wird wiederholt, wann
+// nicht, und wie oft wird ueberhaupt aufgerufen.
+mod transient_retry {
+    use std::cell::Cell;
+    use std::io::{Error, ErrorKind, Result};
+
+    #[test]
+    fn a_call_that_works_is_made_exactly_once() {
+        let calls = Cell::new(0);
+        let out: Result<u8> = super::super::storage::with_transient_retry(|| {
+            calls.set(calls.get() + 1);
+            Ok(7)
+        });
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls.get(), 1, "kein Warten, wenn nichts schiefgeht");
+    }
+
+    #[test]
+    fn a_real_failure_is_surfaced_immediately_and_not_retried() {
+        for kind in [ErrorKind::NotFound, ErrorKind::AlreadyExists] {
+            let calls = Cell::new(0);
+            let out: Result<()> = super::super::storage::with_transient_retry(|| {
+                calls.set(calls.get() + 1);
+                Err(Error::new(kind, "nope"))
+            });
+            assert_eq!(out.unwrap_err().kind(), kind);
+            assert_eq!(calls.get(), 1, "{kind:?} aendert sich durch Warten nie");
+        }
+    }
+
+    // Ein belegter Nachbar der Zieldatei ist ein Zustand: beim zweiten Anlauf ist er weg.
+    #[cfg(windows)]
+    #[test]
+    fn a_borrowed_file_is_retried_until_the_other_reader_lets_go() {
+        let calls = Cell::new(0);
+        let out: Result<&str> = super::super::storage::with_transient_retry(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 {
+                Err(Error::from_raw_os_error(5)) // ERROR_ACCESS_DENIED
+            } else {
+                Ok("published")
+            }
+        });
+        assert_eq!(out.unwrap(), "published");
+        assert_eq!(calls.get(), 3);
+    }
+
+    // Aber nicht endlos: wer dauerhaft belegt ist, wird ehrlich als Fehler gemeldet.
+    #[cfg(windows)]
+    #[test]
+    fn a_permanently_blocked_target_gives_up_and_reports_the_truth() {
+        let calls = Cell::new(0);
+        let out: Result<()> = super::super::storage::with_transient_retry(|| {
+            calls.set(calls.get() + 1);
+            Err(Error::from_raw_os_error(32)) // ERROR_SHARING_VIOLATION
+        });
+        assert_eq!(out.unwrap_err().raw_os_error(), Some(32));
+        assert_eq!(calls.get(), 20, "ein Versuch plus neunzehn Wiederholungen");
+    }
+}
 struct TempRoot(PathBuf);
 impl TempRoot {
     fn new() -> Self {

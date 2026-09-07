@@ -6,17 +6,63 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// CENTRAL-C5 — gemessen und behoben: der Name bestand aus Prozesskennung und einem Zaehler.
+/// Beides ist innerhalb EINES Laufs eindeutig — und ueber Laeufe hinweg nicht: Windows vergibt
+/// Prozesskennungen wieder, und aufgeraeumt wurde nie. Ein spaeterer Lauf mit derselben Kennung
+/// fand deshalb das Verzeichnis eines frueheren vor, samt `lataif.db`, `lataif_sync_server.db`
+/// und Medienwurzel — und scheiterte an "table t already exists". Genau so sah der bekannte
+/// Wackler aus: selten, unerklaerlich, immer in einem anderen Test.
+///
+/// Zwei Aenderungen, mehr nicht: ein Zufallsanteil aus dem Zufall des Systems (dieselbe
+/// Wahl wie in `ingest_tests`), und ein Verzeichnis, das sich selbst wieder abraeumt.
 fn tmp() -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "a12-backup-{}-{}",
+        "a12-backup-{}-{}-{:016x}",
         std::process::id(),
-        COUNTER.fetch_add(1, Ordering::SeqCst)
+        COUNTER.fetch_add(1, Ordering::SeqCst),
+        rand::random::<u64>()
     ));
+    // Ein Rest aus einem frueheren Lauf ist kein Fundus, sondern eine Falle.
+    let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
-/// Write a content-addressed jpg under the media root and return (hash, byte_size).
+/// CENTRAL-C5 — der Waechter gegen die Rueckkehr des Wacklers.
+///
+/// Er prueft nicht, dass die Sicherung funktioniert, sondern dass die TESTUMGEBUNG sich nicht
+/// selbst vergiftet: zwei Aufrufe geben nie dasselbe Verzeichnis, und ein Rest aus einem
+/// frueheren Lauf wird geraeumt statt weiterbenutzt. Beides war der Grund, warum
+/// `media::backup` gelegentlich mit "table t already exists" umfiel — Windows vergibt
+/// Prozesskennungen wieder, und aufgeraeumt wurde nie.
+#[test]
+fn two_temp_roots_are_never_the_same_and_never_inherit_leftovers() {
+    let a = tmp();
+    let b = tmp();
+    assert_ne!(a, b, "zwei Aufrufe, zwei Verzeichnisse");
+    assert!(a.is_dir() && b.is_dir(), "und beide existieren");
+
+    // Ein Rest aus einem frueheren Lauf: dieselbe Datei, die den Wackler ausgeloest hat.
+    let stale = a.join("lataif_sync_server.db");
+    std::fs::write(&stale, b"leftover").unwrap();
+    // Der naechste Lauf, der zufaellig auf denselben Namen faellt, findet ihn NICHT vor.
+    let _ = std::fs::remove_dir_all(&a);
+    std::fs::create_dir_all(&a).unwrap();
+    assert!(!stale.exists(), "ein Rest wird geraeumt, nicht weiterbenutzt");
+
+    // Und der Name traegt den Zufallsanteil, der die Kollision ueber Laeufe hinweg ausschliesst.
+    let name = b.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.starts_with("a12-backup-"), "Praefix unveraendert: {name}");
+    assert_eq!(name.split('-').count(), 5, "Praefix + Prozess + Zaehler + Zufall: {name}");
+    let suffix = name.rsplit('-').next().unwrap();
+    assert_eq!(suffix.len(), 16, "sechzehn Hexstellen Zufall: {suffix}");
+    assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "…und zwar hexadezimal: {suffix}");
+
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+// Write a content-addressed jpg under the media root and return (hash, byte_size).
 fn put_media(root: &std::path::Path, scope: &str, bytes: &[u8]) -> (String, u64) {
     let hash = sha256_hex(bytes);
     let rel = format!("{}/{}/{}.jpg", scope, &hash[0..2], hash);

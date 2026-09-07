@@ -114,6 +114,47 @@ fn safe_io(err: &std::io::Error) -> String {
     format!("io:{:?}", err.kind())
 }
 
+/// CENTRAL-C5 — Windows verweigert das Ersetzen oder Verlinken einer Datei kurzzeitig, wenn ein
+/// anderer Prozess sie noch offen haelt: der Virenscanner, der Suchindex oder eine Sicherung
+/// greift die gerade erst erzeugte Zieldatei ab, und `MoveFileExW` bzw. `CreateHardLinkW`
+/// antworten dann mit ERROR_ACCESS_DENIED (5) oder ERROR_SHARING_VIOLATION (32).
+///
+/// Das ist ein Zustand, kein Ergebnis. Beide Aufrufe sind atomar — sie haben entweder gewirkt
+/// oder gar nichts getan —, also ist ein erneuter Versuch unbedenklich und aendert keine Zusage:
+/// kein Ueberschreiben, kein halber Stand. Ohne diese kurze Wiederholung scheitert unter Last
+/// etwa jede fuenfhundertste Bildaufnahme an einem fremden Lesezugriff, obwohl nichts kaputt
+/// ist. Nach rund 0,8 Sekunden geben wir auf und melden den Fehler unveraendert weiter.
+///
+/// Ausserhalb von Windows gibt es diesen Zustand nicht; dort wird nie wiederholt.
+pub(crate) fn with_transient_retry<T>(
+    mut op: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut wait = std::time::Duration::from_millis(1);
+    let mut retries_left = 19u32;
+    loop {
+        match op() {
+            Err(e) if retries_left > 0 && is_transient_denial(&e) => {
+                retries_left -= 1;
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(std::time::Duration::from_millis(50));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Nur die beiden Windows-Codes, die "gerade jemand anders dran" bedeuten — nicht eine echte
+/// Rechteverweigerung durch Dateisystemrechte, die sich durch Warten nie aendert. (POSIX vergibt
+/// 5 und 32 an voellig andere Fehler, deshalb wird dort gar nicht erst wiederholt.)
+#[cfg(windows)]
+fn is_transient_denial(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5) | Some(32))
+}
+#[cfg(not(windows))]
+fn is_transient_denial(_e: &std::io::Error) -> bool {
+    false
+}
+
 /// Random 16-hex temp suffix. Uses `rand` (already a direct dependency) so the
 /// code stays free of wall-clock/`Date` calls.
 fn temp_suffix() -> String {
@@ -278,7 +319,7 @@ fn publish_impl<F: FnOnce()>(
 
     // No-clobber publication: create the final path as a hard link to the temp.
     // This fails (never overwrites) if the final path already exists.
-    match fs::hard_link(&tmp, &final_path) {
+    match with_transient_retry(|| fs::hard_link(&tmp, &final_path)) {
         Ok(()) => {
             let _ = fs::remove_file(&tmp);
             // Best-effort durability of the directory entry. Opening a directory
