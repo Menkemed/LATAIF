@@ -185,7 +185,22 @@ export default function App() {
           automationsRegistered = true;
         }
       })
-      .catch(err => { console.error('DB init failed:', err); setDbError(String(err)); });
+      .catch(err => {
+        console.error('DB init failed:', err);
+        // CENTRAL-C6-P1 — der eine Fall, in dem eine Datenbank DA ist, sich aber nicht oeffnen
+        // laesst. Frueher lief die Anwendung hier mit einem frischen, leeren Bestand weiter und
+        // ueberschrieb den vorhandenen beim naechsten Speichern. Jetzt endet der Start hier, die
+        // Datei bleibt unangetastet — und der Text sagt, was zu tun ist, statt einen Fehlercode
+        // zu zeigen. Wiederhergestellt wird NICHTS von selbst: das bleibt der bestehende,
+        // ausdrueckliche Weg ueber Sicherung/Wiederherstellung.
+        const recovery = String((err as { code?: string })?.code) === 'DB_RECOVERY_REQUIRED';
+        setDbError(recovery
+          ? 'Die vorhandene Datenbank konnte nicht geoeffnet werden. Es wurde NICHTS geaendert und '
+            + 'keine neue Datenbank angelegt — Ihre Datei liegt unveraendert an ihrem Platz. '
+            + 'Bitte stellen Sie die letzte Sicherung wieder her oder wenden Sie sich an den Support, '
+            + 'bevor Sie weiterarbeiten.'
+          : String(err));
+      });
     }
   }, [initialize]);
 

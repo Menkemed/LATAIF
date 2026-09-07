@@ -202,8 +202,8 @@ const read = (p: string) => readFileSync(join(repo, p), 'utf8');
   const dbsrc = read('src/core/db/database.ts').replace(/\r\n/g, '\n');
   const calls = [...dbsrc.matchAll(/seedFreshDatabase\(db\)/g)].length;
   ok(calls === 2, `BOUNDARY der Demo-Startbestand wird an genau zwei Stellen gerufen (${calls})`);
-  ok(!/[^s]\bawait seedFreshDatabase\(db\);\n(?![\s\S]{0,40}else)/.test(dbsrc) || /isTauri\(\) \? /.test(dbsrc) || dbsrc.includes('if (isTauri()) await seedCleanDatabase(db);\n      else await seedFreshDatabase(db);'),
-    'BOUNDARY …der Wiederherstellungszweig nimmt unter Tauri den sauberen Start');
+  ok(/if \(isTauri\(\)\) throw new DatabaseRecoveryRequiredError\(/.test(dbsrc),
+    'BOUNDARY …und der Wiederherstellungszweig legt auf einem echten Rechner gar nichts mehr an');
   ok(dbsrc.includes("VALUES ('user-owner', 'tenant-1', 'ali@lataif.com'") && dbsrc.includes('isTauri()'),
     'BOUNDARY …und die Demokonten bleiben dem Entwicklungsbrowser vorbehalten');
 }

@@ -85,39 +85,77 @@ async function getDbFilePath(): Promise<string> {
 }
 
 // ── Load DB from file (Tauri) or localStorage (browser) ──
-async function loadSavedDb(): Promise<Uint8Array | null> {
+/**
+ * CENTRAL-C6-P1 — "es gibt keine Datenbank" und "ich komme an die Datenbank nicht heran" sind
+ * zwei verschiedene Antworten, und sie waren hier jahrelang dieselbe: jeder Lesefehler wurde zu
+ * `null`, und `null` heisst weiter unten "Erstlauf, leg eine neue an". Eine vorhandene, nur
+ * gerade nicht lesbare Datei wurde damit zum Erstlauf — und der naechste Speichervorgang legte
+ * die leere Datenbank an ihre Stelle. Deshalb sagt diese Funktion jetzt, WELCHER der drei
+ * Zustaende vorliegt, und der Aufrufer entscheidet.
+ */
+export type LoadedDb =
+  | { kind: 'missing' }
+  | { kind: 'bytes'; data: Uint8Array }
+  | { kind: 'unreadable'; reason: string };
+
+/**
+ * CENTRAL-C6-P1 — der Zustand, in dem NICHTS passieren darf: es gibt eine Geschaeftsdatenbank,
+ * aber sie laesst sich nicht oeffnen. Kein neuer Bestand, kein Speichern, keine Bereitschaft.
+ * Die Oberflaeche erkennt diesen Fehler an seinem Namen und zeigt den Weg zur Wiederherstellung.
+ */
+export class DatabaseRecoveryRequiredError extends Error {
+  readonly code = 'DB_RECOVERY_REQUIRED';
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`DB_RECOVERY_REQUIRED: ${reason}`);
+    this.name = 'DatabaseRecoveryRequiredError';
+    this.reason = reason;
+  }
+}
+
+async function loadSavedDb(): Promise<LoadedDb> {
   if (isTauri()) {
+    let path: string;
+    let exists: boolean;
     try {
       const fs = await getTauriFs();
-      const path = await getDbFilePath();
-      const exists = await fs.exists(path);
-      if (exists) {
-        const data = await fs.readFile(path);
-        // D2: Baseline-Signatur der GERADE geladenen Datei merken — der Stale-Guard
-        // vergleicht spätere Saves gegen genau diesen Stand.
-        try {
-          const st = await fs.stat(path);
-          lastKnownDiskSig = { size: st.size, mtimeMs: st.mtime ? st.mtime.getTime() : null };
-        } catch {
-          lastKnownDiskSig = null; // nicht stat-bar → keine Baseline (Stale-Check fällt fail-open aus)
-        }
-        return new Uint8Array(data);
-      }
+      path = await getDbFilePath();
+      exists = await fs.exists(path);
+    } catch (err) {
+      // Wir konnten nicht einmal FRAGEN, ob es die Datei gibt. Abwesenheit ist damit nicht
+      // bewiesen — und ohne diesen Beweis wird nichts Neues angelegt.
+      return { kind: 'unreadable', reason: `existence check failed: ${String(err)}` };
+    }
+    if (!exists) {
       lastKnownDiskSig = null; // keine Datei → keine Baseline
+      return { kind: 'missing' };
+    }
+    try {
+      const fs = await getTauriFs();
+      const data = await fs.readFile(path);
+      // D2: Baseline-Signatur der GERADE geladenen Datei merken — der Stale-Guard
+      // vergleicht spätere Saves gegen genau diesen Stand.
+      try {
+        const st = await fs.stat(path);
+        lastKnownDiskSig = { size: st.size, mtimeMs: st.mtime ? st.mtime.getTime() : null };
+      } catch {
+        lastKnownDiskSig = null; // nicht stat-bar → keine Baseline (Stale-Check fällt fail-open aus)
+      }
+      return { kind: 'bytes', data: new Uint8Array(data) };
     } catch (err) {
       console.warn('[DB] Tauri file load failed:', err);
+      return { kind: 'unreadable', reason: `read failed: ${String(err)}` };
     }
-    return null;
   }
 
   // Browser fallback
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved) {
     try {
-      return Uint8Array.from(atob(saved), c => c.charCodeAt(0));
+      return { kind: 'bytes', data: Uint8Array.from(atob(saved), c => c.charCodeAt(0)) };
     } catch { /* corrupt */ }
   }
-  return null;
+  return { kind: 'missing' };
 }
 
 // ── Save DB to file (Tauri) or localStorage (browser) ──
@@ -2671,9 +2709,16 @@ export async function initDatabase(): Promise<Database> {
   const SQL = await initSqlJs({ locateFile: () => wasmUrl });
 
   const saved = await loadSavedDb();
-  if (saved) {
+  // CENTRAL-C6-P1 — es gibt eine Datei, aber wir kommen nicht an sie heran. Hier endet der
+  // Start. Kein frischer Bestand, kein Speichern, keine Bereitschaft: alles, was danach kaeme,
+  // schriebe frueher oder spaeter eine leere Datenbank an die Stelle der vorhandenen. Ein
+  // neuer Bestand entsteht ausschliesslich, wenn BEWIESEN ist, dass es keine Datei gibt.
+  if (saved.kind === 'unreadable') {
+    throw new DatabaseRecoveryRequiredError(saved.reason);
+  }
+  if (saved.kind === 'bytes') {
     try {
-      db = new SQL.Database(saved);
+      db = new SQL.Database(saved.data);
       db.run(SCHEMA);
       runMigrations(db);
       migrateCategoriesToV2(db);
@@ -2682,17 +2727,18 @@ export async function initDatabase(): Promise<Database> {
       reconcileProductQuantities(db);
       backfillConsumedProducts(db);
     } catch (err) {
-      console.warn('DB load failed, creating fresh:', err);
+      // Die Bytes sind da, lassen sich aber nicht oeffnen oder wandern. Frueher wurde hier eine
+      // frische Datenbank angelegt und weitergearbeitet — das ist genau der Weg, auf dem der
+      // vorhandene Bestand verloren ging. Jetzt bleibt die Datei unangetastet liegen, und der
+      // Benutzer bekommt den Wiederherstellungsweg gezeigt, statt eine leere Anwendung.
+      db = null;
+      if (isTauri()) throw new DatabaseRecoveryRequiredError(`open failed: ${String(err)}`);
+      // Im Entwicklungsbrowser gibt es nichts zu verlieren: dort weiterhin der Demobestand.
+      console.warn('DB load failed, creating fresh (browser only):', err);
       db = new SQL.Database();
       db.run(SCHEMA);
       runMigrations(db);
-      // CENTRAL-C6 — auch dieser Weg ist ein ECHTER Start auf einem echten Rechner, kein
-      // Entwicklungsbrowser. `seedFreshDatabase` legt Demobenutzer mit bekannten Passwoertern an
-      // (`ali@`/`admin`, `youssef@`/`sales`); die Anmeldung am Anfang ueberschreibt nur den einen
-      // Besitzer, die anderen blieben als aktive Konten stehen. Unter Tauri wird deshalb derselbe
-      // saubere Start benutzt wie im Zweig darunter — Demodaten gibt es nur im Browser.
-      if (isTauri()) await seedCleanDatabase(db);
-      else await seedFreshDatabase(db);
+      await seedFreshDatabase(db);
       migrateCategoriesToV2(db);
       migrateCategoriesToV3(db);
       backfillStockLots(db);
@@ -3345,9 +3391,11 @@ export async function reloadDbFromDisk(): Promise<boolean> {
   await dbLifecycle.runExclusiveSwap(async () => {
     const SQL = await initSqlJs({ locateFile: () => wasmUrl });
     const saved = await loadSavedDb();
-    if (!saved) return; // no file → no swap, no epoch bump
+    // CENTRAL-C6-P1 — nur ECHTE Bytes rechtfertigen einen Tausch. Eine fehlende Datei war schon
+    // immer ein Nichts-tun; eine unlesbare ist es jetzt auch, statt weiter unten aufzuschlagen.
+    if (saved.kind !== 'bytes') return; // kein Beweis, kein Tausch, keine neue Epoche
     if (db) { db.close(); db = null; }
-    db = new SQL.Database(saved);
+    db = new SQL.Database(saved.data);
     db.run(SCHEMA);
     runMigrations(db);
     dbLifecycle.bumpEpoch();
