@@ -17,6 +17,8 @@ import { discoverLanServers, getServerStatus, startSyncServer } from './sync-ser
 import { getSyncUrl, setSyncConfig, startAutoSync } from './sync-service';
 import { runLanStartup, type PrimaryState } from './lan-startup';
 
+import { isClientMode } from '../bridge/client-mode';
+
 export { runLanStartup };
 export type { PrimaryState, LanStartupOps } from './lan-startup';
 
@@ -110,6 +112,9 @@ async function migrateLegacyOnce(): Promise<void> {
 
 /** Produktiver Einstiegspunkt: Legacy einmalig migrieren, Rolle lesen, danach starten. */
 export async function autoLanSetup(): Promise<PrimaryState> {
+  // CENTRAL-C6 — ein Client startet keinen LAN-Sync, weder als Server noch als Peer. Er hat
+  // nichts, was er anbieten oder abgleichen koennte.
+  if (isClientMode()) return 'unconfigured';
   await migrateLegacyOnce();
 
   const status = await getPrimaryStatus();

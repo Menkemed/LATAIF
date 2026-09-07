@@ -19,6 +19,31 @@ import { recordClientQuarantine, quarantineStatus, type QuarantineStatus } from 
 export { isControlPlaneTable, isValidSyncIdentifier } from './apply-change';
 // SYNC-SAFETY-A1 — der dauerhafte, an den Server gebundene Pull-Wasserstand.
 import { readCursor, writeCursor, resolveCursorStart, isServerFingerprint, serverLogBehind } from './cursor-store';
+// CENTRAL-C6 — der alte Desktop-Sync ist im Client-Modus nicht abgeschaltet, sondern nicht
+// vorhanden. Die Weiche in App.tsx erreicht diesen Zustand heute schon nie; das hier ist der
+// Riegel an der Sache selbst, damit kein spaeterer Aufrufweg ihn versehentlich wieder oeffnet.
+import { isClientMode } from '../bridge/client-mode';
+
+/**
+ * CENTRAL-C6 — im Client-Modus gibt es keinen zweiten Besitzer der Wahrheit.
+ *
+ * Ein Rechner, der ausdruecklich nur eine Oberflaeche am Primary ist, hat keine
+ * Geschaeftsdatenbank. Damit kann er nichts pullen, nichts pushen, keinen Ausgangskorb anlegen
+ * und keinen Wasserstand fortschreiben — und er darf es auch nicht versuchen: jeder dieser Wege
+ * wuerde eine zweite Quelle erfinden, und genau die abzuschaffen war der ganze Zweck von C2.
+ *
+ * Deshalb wird hier NICHT die Oberflaeche versteckt, sondern der Weg selbst verweigert. Einmal
+ * pro Einstiegspunkt eine Zeile im Protokoll, damit ein solcher Aufruf sichtbar ist statt still.
+ */
+const refusedInClientMode = new Set<string>();
+function legacySyncRefused(entryPoint: string): boolean {
+  if (!isClientMode()) return false;
+  if (!refusedInClientMode.has(entryPoint)) {
+    refusedInClientMode.add(entryPoint);
+    console.warn(`[sync] ${entryPoint} refused: the legacy desktop sync does not exist in client mode`);
+  }
+  return true;
+}
 
 const SYNC_INTERVAL = 30_000; // 30 seconds
 const STORAGE_KEY_URL = 'lataif_sync_url';
@@ -103,6 +128,7 @@ export function getSyncUrl(): string {
 }
 
 export function setSyncConfig(url: string, token: string) {
+  if (legacySyncRefused('setSyncConfig')) return;
   localStorage.setItem(STORAGE_KEY_URL, url);
   localStorage.setItem(STORAGE_KEY_TOKEN, token);
 }
@@ -132,6 +158,7 @@ export function isSyncConfigured(): boolean {
 // ── Track changes locally ──
 
 export function trackChange(tableName: string, recordId: string, action: 'insert' | 'update' | 'delete', data: Record<string, unknown>) {
+  if (legacySyncRefused('trackChange')) return;
   if (!isSyncConfigured()) return;
   try {
     const db = getDatabase();
@@ -479,6 +506,7 @@ export function syncNow(): Promise<void> {
   // M4-A1: waehrend eines App-Close (syncPaused) KEINEN neuen Lauf starten; ebenso kein
   // paralleler Lauf (syncing-Single-Flight bleibt unveraendert). Rueckgabe ist der laufende
   // Zyklus als Promise, damit waitForSyncIdle() darauf warten kann.
+  if (legacySyncRefused('syncNow')) return Promise.resolve();
   if (syncing || syncPaused || !isSyncConfigured()) return Promise.resolve();
   syncing = true;
   setStatus('syncing');
@@ -517,6 +545,7 @@ export function syncNow(): Promise<void> {
 // ── Auto-sync ──
 
 export function startAutoSync() {
+  if (legacySyncRefused('startAutoSync')) return;
   if (syncTimer) return;
   if (!isSyncConfigured()) return;
 
@@ -572,6 +601,7 @@ export async function pauseAutoSyncAndWaitForIdle(): Promise<void> {
 // ── Server login (connects desktop to server) ──
 
 export async function connectToServer(serverUrl: string, email: string, password: string): Promise<{ success: boolean; error?: string }> {
+  if (legacySyncRefused('connectToServer')) return { success: false, error: 'CLIENT_MODE_NO_LEGACY_SYNC' };
   try {
     const res = await fetch(`${serverUrl}/api/auth/login`, {
       method: 'POST',

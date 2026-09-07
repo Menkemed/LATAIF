@@ -2686,7 +2686,13 @@ export async function initDatabase(): Promise<Database> {
       db = new SQL.Database();
       db.run(SCHEMA);
       runMigrations(db);
-      await seedFreshDatabase(db);
+      // CENTRAL-C6 — auch dieser Weg ist ein ECHTER Start auf einem echten Rechner, kein
+      // Entwicklungsbrowser. `seedFreshDatabase` legt Demobenutzer mit bekannten Passwoertern an
+      // (`ali@`/`admin`, `youssef@`/`sales`); die Anmeldung am Anfang ueberschreibt nur den einen
+      // Besitzer, die anderen blieben als aktive Konten stehen. Unter Tauri wird deshalb derselbe
+      // saubere Start benutzt wie im Zweig darunter — Demodaten gibt es nur im Browser.
+      if (isTauri()) await seedCleanDatabase(db);
+      else await seedFreshDatabase(db);
       migrateCategoriesToV2(db);
       migrateCategoriesToV3(db);
       backfillStockLots(db);

@@ -354,11 +354,12 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const remoteScripts = [...indexHtml.matchAll(/<script[^>]*src="(https?:)?\/\//g)];
   ok(remoteScripts.length === 0, `TOKEN kein fremdes Skript in der Seite (${remoteScripts.length})`);
   ok(!/<link[^>]*href="https?:\/\//.test(indexHtml), 'TOKEN …und kein fremdes Stylesheet');
-  // BEFUND: es gibt heute KEINE Content-Security-Policy — das steht im Bericht, statt hier
-  // still eine einzufuehren (eine CSP ist eine Verhaltensaenderung am WebView, kein Audit).
+  // C4 hielt hier den Befund fest, dass es KEINE Content-Security-Policy gibt. C6 hat ihn
+  // geschlossen: es gibt jetzt eine, und sie laesst kein fremdes Skript zu. Der Beleg, dass sie
+  // im echten Fenster auch greift, steht im C6-E2E — hier steht nur, dass sie gesetzt ist.
   const conf = JSON.parse(src('src-tauri/tauri.conf.json'));
-  ok(conf.app?.security?.csp === null,
-    `TOKEN BEFUND: die Anwendung setzt keine CSP (${JSON.stringify(conf.app?.security?.csp)})`);
+  ok(typeof conf.app?.security?.csp === 'string' && conf.app.security.csp.length > 0,
+    `TOKEN die Anwendung setzt eine CSP (${String(conf.app?.security?.csp).slice(0, 40)}…)`);
   // Das Token wird nicht protokolliert, steht in keiner Adresse und verschwindet bei 401.
   for (const f of ['src/core/bridge/client-mode.ts', 'src/core/bridge/client-command-save.ts',
     'src/core/bridge/remote-read.ts']) {
@@ -437,9 +438,12 @@ const ACT = (over: Record<string, unknown> = {}) => ({
     .map((f) => (codeOf(f).match(/Authorization: ['`]Bearer /g) ?? []).length)
     .reduce((a, b) => a + b, 0);
   ok(headerUses >= 2, `CSP es reist als Authorization-Kopfzeile (${headerUses} Stellen)`);
-  // BEFUND, festgehalten fuer den naechsten Schnitt.
-  ok(conf.app?.security?.csp === null,
-    'CSP BEFUND C6_CSP_HARDENING_REVIEW: die Anwendung setzt weiterhin keine CSP');
+  // C6_CSP_HARDENING_REVIEW ist geschlossen: die Richtlinie steht, und ihre schaerfste Zusage
+  // ist, dass Skripte nur aus dem eigenen Buendel kommen duerfen.
+  const cspNow = String(conf.app?.security?.csp || '');
+  const scriptSrc = cspNow.split(';').map((x) => x.trim()).find((x) => x.startsWith('script-src ')) || '';
+  ok(/^script-src 'self'/.test(scriptSrc) && !/https?:/.test(scriptSrc) && !/'unsafe-eval'/.test(scriptSrc),
+    `CSP C6 hat den Befund geschlossen: Skripte nur aus dem eigenen Buendel (${scriptSrc})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c4 final: reads, revocation, replay: ${PASS} passed, ${fails.length} failed`);
