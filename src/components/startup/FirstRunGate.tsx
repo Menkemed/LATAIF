@@ -112,7 +112,13 @@ export function FirstRunGate() {
           This computer has no LATAIF data yet. Nothing has been created — choose how to continue.
         </p>
 
-        {!recovering ? (
+        {/* HOTFIX v0.8.54 — die aeussere Frage muss BEIDE Wege kennen. Sie fragte nur nach
+            `recovering`, also blieb die Auswahl stehen, wenn jemand „Connect to existing LATAIF
+            server" drueckte: `connecting` wurde gesetzt, aendern tat sich nichts. Die
+            Verbinden-Maske war damit unerreichbar — sie haette `recovering` UND `connecting`
+            gebraucht, und sobald `recovering` gilt, gibt es den Verbinden-Knopf gar nicht mehr.
+            Der zweite Rechner liess sich ueber die Oberflaeche also nie einrichten. */}
+        {!recovering && !connecting ? (
           <div style={{ display: 'grid', gap: 12 }}>
             <button
               data-first-run-new

@@ -155,6 +155,33 @@ await clickSel(c, '[data-first-run-back]');
 await sleep(400);
 ok(await exists(c, '[data-first-run-new]'), 'A back leads to the gate again');
 
+// ── A2) Der dritte Weg: dieser Rechner wird eine Oberflaeche am Primary ──────
+//
+// HOTFIX v0.8.54 — hier wird der ECHTE Knopf gedrueckt, nicht `localStorage` vorbelegt. Genau
+// deshalb ist es lange niemandem aufgefallen: die Weiche fragte nur nach `recovering`, also
+// blieb beim Druck auf „Connect to existing LATAIF server" schlicht die Auswahl stehen. Die
+// Verbinden-Maske war ueber die Oberflaeche unerreichbar — der zweite Rechner liess sich gar
+// nicht einrichten. Ein Test, der den Modus selbst setzt, haette das nie gesehen.
+ok(await exists(c, '[data-first-run-connect]'), 'A2 the gate offers "Connect to existing LATAIF server"');
+await clickSel(c, '[data-first-run-connect]');
+await sleep(600);
+ok(await exists(c, '[data-first-run-connect-panel]'), 'A2 …and pressing it really opens the connect panel');
+ok(!(await exists(c, '[data-first-run-new]')), 'A2 …the choice list gives way instead of just staying there');
+ok(await exists(c, '[data-first-run-server]'), 'A2 the address field is there');
+ok(await exists(c, '[data-first-run-connect-go]'), 'A2 …and the Connect button with it');
+ok(controlEntries().length === 0, 'A2 opening it creates nothing on this machine');
+await clickSel(c, '[data-first-run-connect-back]');
+await sleep(400);
+ok(await exists(c, '[data-first-run-new]'), 'A2 Back returns to the choice list');
+// Und der Wiederherstellungsweg ist danach unveraendert erreichbar.
+await clickSel(c, '[data-first-run-recover]');
+await sleep(600);
+ok(await exists(c, '[data-first-run-recover-panel]'), 'A2 …and recovery is still reachable afterwards');
+await clickSel(c, '[data-first-run-back]');
+await sleep(400);
+ok(await exists(c, '[data-first-run-new]'), 'A2 …with the gate back again');
+ok(controlEntries().length === 0, 'A2 after all of it the machine is still untouched');
+
 // ── B) Schliessen und neu starten ───────────────────────────────────────────
 c.close(); killAllApp(); await waitProcessGone(); await waitPortFree(PORT);
 ok(controlEntries().length === 0, 'B closing the app leaves the machine exactly as it was');
