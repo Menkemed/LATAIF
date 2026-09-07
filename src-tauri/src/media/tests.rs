@@ -129,6 +129,96 @@ mod transient_retry {
         assert_eq!(calls.get(), 3);
     }
 
+    // CENTRAL-C5 FINAL — die Grenze der Regel, statisch festgenagelt. Ein Wiederholungsversuch,
+    // der irgendwann auch eine Datenbank- oder Geschaeftsaktion umschliesst, waere kein
+    // Dateisystem-Detail mehr, sondern eine stille zweite Wirkung.
+    #[test]
+    fn the_retry_stays_on_the_two_publish_primitives_and_on_two_windows_codes() {
+        use std::path::{Path, PathBuf};
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+
+        let mut mentioning: Vec<String> = Vec::new();
+        let mut call_sites: Vec<(String, String)> = Vec::new();
+        for f in &files {
+            let src = std::fs::read_to_string(f).unwrap();
+            if !src.contains("with_transient_retry") {
+                continue;
+            }
+            let rel = f
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            mentioning.push(rel.clone());
+            if rel.contains("test") {
+                continue; // Testdateien duerfen den Namen nennen, sie sind keine Aufrufstelle im Produkt.
+            }
+            for line in src.lines() {
+                if line.contains("with_transient_retry(|| ") {
+                    call_sites.push((rel.clone(), line.trim().to_string()));
+                }
+            }
+        }
+        mentioning.sort();
+        assert_eq!(
+            mentioning,
+            vec![
+                "media/ingest.rs".to_string(),
+                "media/ingest_tests.rs".to_string(),
+                "media/storage.rs".to_string(),
+                "media/tests.rs".to_string(),
+            ],
+            "der Wiederholungsversuch kommt ausserhalb der Medienablage nirgends vor"
+        );
+        assert_eq!(call_sites.len(), 4, "genau vier Aufrufstellen: {call_sites:?}");
+        for (rel, line) in &call_sites {
+            assert!(
+                rel == "media/ingest.rs" || rel == "media/storage.rs",
+                "kein Aufruf ausserhalb der Medienablage: {rel}"
+            );
+            assert!(
+                line.contains("with_transient_retry(|| fs::rename(")
+                    || line.contains("with_transient_retry(|| fs::hard_link("),
+                "wiederholt wird nur Ersetzen und Verlinken, nie eine Datenbank- oder Geschaeftsaktion: {line}"
+            );
+        }
+        let renames = call_sites.iter().filter(|(_, l)| l.contains("fs::rename(")).count();
+        let links = call_sites.iter().filter(|(_, l)| l.contains("fs::hard_link(")).count();
+        assert_eq!((renames, links), (2, 2), "zwei Ersetzen, zwei Verlinken");
+
+        // Und was ueberhaupt als voruebergehend gilt, entscheidet genau eine Stelle.
+        let storage = std::fs::read_to_string(root.join("media/storage.rs")).unwrap();
+        assert_eq!(
+            storage.matches("Some(5) | Some(32)").count(),
+            1,
+            "eine einzige Stelle entscheidet, was voruebergehend ist"
+        );
+        assert!(
+            storage.contains("matches!(e.raw_os_error(), Some(5) | Some(32))"),
+            "nur ERROR_ACCESS_DENIED und ERROR_SHARING_VIOLATION"
+        );
+        assert_eq!(
+            storage.matches("fn is_transient_denial").count(),
+            2,
+            "genau zwei Fassungen: eine fuer Windows, eine die nie wiederholt"
+        );
+        assert!(
+            storage.contains("#[cfg(not(windows))]"),
+            "ausserhalb von Windows wird gar nicht erst wiederholt"
+        );
+    }
     // Aber nicht endlos: wer dauerhaft belegt ist, wird ehrlich als Fehler gemeldet.
     #[cfg(windows)]
     #[test]
