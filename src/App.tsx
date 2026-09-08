@@ -426,7 +426,9 @@ export default function App() {
               reason="This developer tool writes test records straight into the database. It only runs on the main computer."
             />
           ) : <RepairFlowTestPage />} />
-          <Route path="/admin/reconcile" element={<RepairReconcilePage />} />
+          <Route path="/admin/reconcile" element={clientMode ? (
+            <PrimaryOnlyNotice title="Repair reconcile" reason="This maintenance tool audits and repairs ledger entries in the database. It only runs on the main computer." />
+          ) : <RepairReconcilePage />} />
           <Route path="/scrap-trades" element={<ScrapTradeList />} />
           <Route path="/scrap-trades/new" element={<ScrapTradeNew />} />
           <Route path="/scrap-trades/:id" element={<ScrapTradeDetail />} />
@@ -442,18 +444,10 @@ export default function App() {
           <Route path="/orders/:id" element={<OrderDetail />} />
           <Route path="/documents" element={<DocumentList />} />
           <Route path="/tasks" element={<TaskList />} />
-          {/* Die Auswertung rechnet ihre Zahlen in rund fuenfzig eigenen Abfragen direkt in
-              der Datenbank zusammen — als einzige Geschaeftsflaeche noch ohne gemeinsame
-              Ladefunktion. Ohne Datenbank faengt jede Abfrage ihren Fehler ab und liefert eine
-              leere Menge; die Seite zeigte dann ueberall NULL. Nullen, die wie Zahlen aussehen,
-              sind schlimmer als keine Seite — bis sie ihren eigenen Schnitt bekommt, sagt sie
-              deshalb, wo sie zu haben ist. */}
-          <Route path="/analytics" element={clientMode ? (
-            <PrimaryOnlyNotice
-              title="Analytics"
-              reason="Analytics computes its figures directly in the database. This computer works with the main computer's data over the network, so the report is only available there for now."
-            />
-          ) : <AnalyticsPage />} />
+          {/* CENTRAL-UI-PARITY R2C — die Auswertung ist jetzt dieselbe Seite auf beiden
+              Rechnern: ihre Rechnung liegt in einer gemeinsamen Ladefunktion, und der Client
+              holt das fertige Ergebnis mit EINER Auskunft. */}
+          <Route path="/analytics" element={<AnalyticsPage />} />
           <Route path="/debts" element={<DebtsPage />} />
           <Route path="/receivables" element={<ReceivablesPage />} />
           <Route path="/employees" element={<EmployeeList />} />
@@ -470,8 +464,12 @@ export default function App() {
           <Route path="/production" element={<ProductionPage />} />
           <Route path="/production/:id" element={<ProductionDetail />} />
           <Route path="/business-reports" element={<BusinessReportsPage />} />
-          <Route path="/reconciliation" element={<ReconciliationPage />} />
-          <Route path="/ledger-backfill" element={<BackfillPage />} />
+          <Route path="/reconciliation" element={clientMode ? (
+            <PrimaryOnlyNotice title="Reconciliation" reason="Reconciliation reads and repairs the books directly in the database. Open it on the main computer." />
+          ) : <ReconciliationPage />} />
+          <Route path="/ledger-backfill" element={clientMode ? (
+            <PrimaryOnlyNotice title="Ledger backfill" reason="Backfilling writes ledger entries into the database. It only runs on the main computer." />
+          ) : <BackfillPage />} />
           <Route path="/credit-notes" element={<CreditNoteList />} />
           <Route path="/credit-notes/:id" element={<CreditNoteDetail />} />
           <Route path="/ai" element={<AIPage />} />
@@ -482,7 +480,9 @@ export default function App() {
             />
           ) : <SettingsPage />} />
           <Route path="/import" element={<ImportPage />} />
-          <Route path="/ledger-debug" element={<LedgerDebugPage />} />
+          <Route path="/ledger-debug" element={clientMode ? (
+            <PrimaryOnlyNotice title="Ledger debug" reason="This diagnostic view reads raw ledger rows from the database. Open it on the main computer." />
+          ) : <LedgerDebugPage />} />
         </Routes>
         </ErrorBoundary>
       </div>

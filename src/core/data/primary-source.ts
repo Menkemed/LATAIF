@@ -72,6 +72,29 @@ export function hydrateFromPrimary(
 
 
 /**
+ * CENTRAL-UI-PARITY R2C — dieselbe Fernauskunft, aber als ANTWORT statt als Nebenwirkung.
+ *
+ * `hydrateFromPrimary` passt zu allem, was in einen Bestand fliesst und die Seite danach neu
+ * zeichnet. Manches wird aber im Augenblick des Klicks gebraucht und gehoert in keinen Bestand:
+ * der Inhalt genau des Belegs, den jemand gerade oeffnet, die Zeilen genau des Berichts, den
+ * jemand gerade herunterlaedt. Dafuer gibt es hier eine Zusage statt eines Rueckrufs — derselbe
+ * Weg, dieselbe Pruefung, nur wartet der Aufrufer auf das Ergebnis.
+ */
+export async function fetchFromPrimary(
+  op: string,
+  params: Record<string, unknown> = {},
+): Promise<Record<string, unknown> | null> {
+  try {
+    const reply = await remoteRead<{ data?: Record<string, unknown> }>(op, params);
+    return reply?.data ?? null;
+  } catch (e) {
+    if (e instanceof RemoteReadError && onFailure) onFailure(op, e);
+    else console.warn(`[data] ${op} failed:`, e);
+    return null;
+  }
+}
+
+/**
  * Derselbe Gedanke fuer einen EINZELNEN Vorgang: hier gibt es einen Parameter (eine Auftrags-
  * oder Kundenkennung), also auch keine gemeinsame Klammer — jede Kennung fragt fuer sich.
  */

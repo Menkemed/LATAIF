@@ -47,6 +47,13 @@ export const OP_STORE_DOCUMENTS_GET = 'store.documents.get';
 export const OP_STORE_OFFERS_GET = 'store.offers.get';
 export const OP_STORE_PRODUCTION_GET = 'store.production.get';
 
+// CENTRAL-UI-PARITY R2C — der Schluss der Lesefläche. Drei Namen, und jeder steht für genau
+// eine Sache: die Auswertung als EIN Ergebnis (statt fünfzig Abfragen über das Netz), der
+// Steuerbericht auf Abruf, und der Inhalt genau eines Belegs.
+export const OP_STORE_ANALYTICS_GET = 'store.analytics.get';
+export const OP_ANALYTICS_VAT_EXPORT_GET = 'analytics.vat_export.get';
+export const OP_DOCUMENTS_CONTENT_GET = 'documents.content.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -79,6 +86,9 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_STORE_DOCUMENTS_GET,
   OP_STORE_OFFERS_GET,
   OP_STORE_PRODUCTION_GET,
+  OP_STORE_ANALYTICS_GET,
+  OP_ANALYTICS_VAT_EXPORT_GET,
+  OP_DOCUMENTS_CONTENT_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

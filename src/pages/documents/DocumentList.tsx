@@ -45,7 +45,7 @@ function DocIcon({ fileType }: { fileType: string }) {
 }
 
 export function DocumentList() {
-  const { documents, loadDocuments, uploadDocument, deleteDocument, extractOcr } = useDocumentStore();
+  const { documents, loadDocuments, uploadDocument, deleteDocument, extractOcr, getContent } = useDocumentStore();
   const [filterClass, setFilterClass] = useState<DocumentClass | ''>('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [showUpload, setShowUpload] = useState(false);
@@ -63,6 +63,21 @@ export function DocumentList() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { loadDocuments(); }, [loadDocuments]);
+
+  // CENTRAL-UI-PARITY R2C — der Inhalt eines Belegs reist erst, wenn jemand ihn wirklich
+  // ansieht. In dieser Tabelle steht die ganze Datei als Data-URL; die LISTE über das Netz mit
+  // allen Inhalten zu schicken wären je Aufruf viele Megabyte für Bilder, die niemand geöffnet
+  // hat. Am Primary steht der Inhalt ohnehin schon in der Zeile — dann tut das hier nichts.
+  useEffect(() => {
+    if (!showPreview || showPreview.filePath) return;
+    const id = showPreview.id;
+    let alive = true;
+    void getContent(id).then((content) => {
+      if (!alive || !content) return;
+      setShowPreview((p) => (p && p.id === id ? { ...p, filePath: content } : p));
+    });
+    return () => { alive = false; };
+  }, [showPreview, getContent]);
 
   const filtered = useMemo(() => {
     if (!filterClass) return documents;

@@ -167,7 +167,11 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
     'SELECT value FROM settings WHERE branch_id = ? AND key = ?',
     [ctx.branchId, 'payables.grace_period_days']
   );
-  const gracePeriodDays = parseInt(String(graceRows[0]?.value ?? '30'), 10) || 30;
+  // `|| 30` waere hier falsch: eine eingestellte Karenz von NULL Tagen ist eine gueltige
+  // Antwort ("faellig am Rechnungsdatum") und wurde davon still auf dreissig zurueckgedreht.
+  // Der Rueckfall gilt nur, wenn gar nichts oder etwas Unlesbares dasteht.
+  const graceParsed = parseInt(String(graceRows[0]?.value ?? ''), 10);
+  const gracePeriodDays = Number.isFinite(graceParsed) && graceParsed >= 0 ? graceParsed : 30;
   const rows: PayableRow[] = [];
 
   // 1) Supplier purchases — wir schulden Lieferanten Geld

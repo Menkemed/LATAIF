@@ -589,12 +589,12 @@ function deps(db: Db, opts: { failSave?: boolean } = {}) {
     return m ? m[1] : n;
   });
   // CENTRAL-C3H — sechzehn weitere Namen: die in C3G als `B_DEFERRED` klassifizierten Aktionen.
-  // CENTRAL-UI-PARITY: dazu 27 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(ops.length === 86, `WIRED die Liste zaehlt sechsundachtzig Namen (${ops.length})`);
+  // CENTRAL-UI-PARITY: dazu 30 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  ok(ops.length === 89, `WIRED die Liste zaehlt neunundachtzig Namen (${ops.length})`);
   const wiredMut = ops.filter((o) => o !== 'bridge.probe' && !o.endsWith('.list') && !o.endsWith('.get'));
-  ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 45 && ops.includes('bridge.probe')
+  ok(ops.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 48 && ops.includes('bridge.probe')
     && wiredMut.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
-    `WIRED eine Probe, fuenfundvierzig Lesevorgaenge, VIERZIG Mutationen (${wiredMut.join(', ')})`);
+    `WIRED eine Probe, achtundvierzig Lesevorgaenge, VIERZIG Mutationen (${wiredMut.join(', ')})`);
   const engine = src('src/core/bridge/mutation-engine.ts');
   ok(!/registerCommand/.test(engine), 'WIRED die Maschine registriert selbst nichts');
 }

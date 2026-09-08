@@ -29,6 +29,7 @@ import {
   OP_STORE_PAYABLES_GET, OP_STORE_DEBTS_GET, OP_STORE_GOLD_GET, OP_STORE_METALS_GET,
   OP_STORE_SCRAP_TRADES_GET, OP_STORE_EMPLOYEES_GET, OP_STORE_PARTNERS_GET,
   OP_STORE_TASKS_GET, OP_STORE_DOCUMENTS_GET, OP_STORE_OFFERS_GET, OP_STORE_PRODUCTION_GET,
+  OP_STORE_ANALYTICS_GET, OP_ANALYTICS_VAT_EXPORT_GET, OP_DOCUMENTS_CONTENT_GET,
 } from './store-read-ops';
 
 /** Der Rumpf, den die Route baut: geprüfter Absender plus die Eingabe des Clients. */
@@ -326,5 +327,43 @@ registerCommand(OP_STORE_PRODUCTION_GET, {
   handler: async (payload, actor): Promise<CommandResult> => {
     const ctx = contextOf(payload, actor);
     return { data: (await import('@/stores/productionStore')).loadProductionRecordsFor(ctx) };
+  },
+});
+
+// ── CENTRAL-UI-PARITY R2C — Auswertung und Belegeinhalt ────────────────────
+//
+// Die Auswertung ist der Grund, warum es hier EINE Auskunft gibt und nicht fünfzig: die Seite
+// rechnete bisher jede Kennzahl selbst in der Datenbank. Über das Netz wären das fünfzig
+// Anfragen je Seitenaufbau gewesen — und fünfzig Gelegenheiten, Zahlen aus verschiedenen
+// Augenblicken nebeneinander zu zeigen. Jetzt kommt ein begrenztes Ergebnis, in einem Stück.
+
+registerCommand(OP_STORE_ANALYTICS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/core/reports/analytics-snapshot')).loadAnalyticsFor(ctx) };
+  },
+});
+
+registerCommand(OP_ANALYTICS_VAT_EXPORT_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    // Zeilenweise und damit groß — deshalb steht er nicht in der Auskunft oben, sondern kommt
+    // nur, wenn jemand den Knopf drückt.
+    return { data: (await import('@/core/reports/analytics-snapshot')).vatExportRowsFor(ctx) };
+  },
+});
+
+registerCommand(OP_DOCUMENTS_CONTENT_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const documentId = requiredId(payload, 'documentId');
+    const doc = (await import('@/stores/documentStore')).documentContentFor(ctx, documentId);
+    // Ein Beleg einer fremden Filiale ist nicht „verboten", sondern schlicht nicht da — die
+    // Antwort verrät damit nicht einmal, dass es ihn gibt.
+    if (!doc) throw new BusinessError('DOCUMENT_NOT_FOUND', 'no such document');
+    return { data: doc };
   },
 });

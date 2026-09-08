@@ -8,7 +8,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { hydrateFromPrimary, readsFromPrimary, fetchFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
@@ -33,6 +33,11 @@ interface DocumentStore {
   deleteDocument: (id: string) => void;
   updateDocument: (id: string, data: Partial<Pick<Document, 'docClass' | 'linkedEntityType' | 'linkedEntityId'>>) => void;
   extractOcr: (id: string) => Promise<{ text: string; confidence: number }>;
+  /**
+   * Der Inhalt EINES Belegs, auf Abruf. Am Primary steht er längst in der Liste; auf einem
+   * Rechner ohne Datenbank kommt er erst, wenn jemand den Beleg wirklich öffnet.
+   */
+  getContent: (id: string) => Promise<string | null>;
 }
 
 function rowToDocument(row: Record<string, unknown>): DocumentRow {
@@ -73,6 +78,15 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     } catch {
       set({ documents: [], loading: false });
     }
+  },
+
+  getContent: async (id) => {
+    // Am Primary trägt die Liste den Inhalt bereits — dann ist hier nichts zu holen.
+    const local = get().documents.find((d) => d.id === id)?.filePath;
+    if (local) return local;
+    if (!readsFromPrimary()) return null;
+    const d = await fetchFromPrimary('documents.content.get', { documentId: id });
+    return typeof d?.content === 'string' && d.content ? d.content : null;
   },
 
   getDocumentsForEntity: (entityType, entityId) => {
@@ -184,6 +198,33 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
  * Inhalt. Die Liste selbst zeigt dann ihr Symbol statt der Vorschau — sie prueft `filePath`
  * ohnehin schon.
  */
+/**
+ * CENTRAL-UI-PARITY R2C — der Inhalt genau EINES Belegs.
+ *
+ * Drei Dinge sind hier absichtlich eng: die Kennung muss genannt werden, die Filiale kommt aus
+ * dem Ausweis (ein fremder Beleg ist schlicht nicht da), und zurück geht nur, was wirklich
+ * Inhalt IST. In alten Beständen kann in `file_path` noch ein echter Dateipfad stehen — der
+ * gehört niemandem über das Netz gezeigt, also kommt in dem Fall nichts.
+ */
+export function documentContentFor(
+  ctx: BusinessReadContext,
+  documentId: string,
+): { id: string; fileName: string; fileType: string; content: string } | null {
+  const rows = query(
+    'SELECT id, file_name, file_type, file_path FROM documents WHERE id = ? AND branch_id = ?',
+    [documentId, ctx.branchId]
+  );
+  const r = rows[0];
+  if (!r) return null;
+  const stored = String(r.file_path ?? '');
+  return {
+    id: String(r.id),
+    fileName: String(r.file_name ?? ''),
+    fileType: String(r.file_type ?? ''),
+    content: stored.startsWith('data:') ? stored : '',
+  };
+}
+
 export function loadDocumentsFor(
   ctx: BusinessReadContext,
   opts?: { withContent?: boolean },

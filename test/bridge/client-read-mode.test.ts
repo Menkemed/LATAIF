@@ -385,15 +385,36 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   }
 
   // Und es gibt keinen weiteren mehrphasigen Geschaeftsschreiber, der uebersehen waere.
+  //
+  // CENTRAL-UI-PARITY R2C: seitdem gibt es auch wartende LESE-Aktionen — der Beleginhalt und der
+  // Steuerbericht kommen auf Abruf vom Primary. Die gehoeren ausdruecklich NICHT in die
+  // Schreibspur; die Frage dieses Gates ist eine andere: schreibt hier jemand mehrphasig, ohne
+  // sich anzustellen? Also wird nicht mehr die blosse Zahl geprueft, sondern der RUMPF.
   let asyncActions = [];
   walk(resolvePath(repo, 'src/stores'), (p, text) => {
-    for (const line of text.split(/\r?\n/)) {
-      const m = line.match(/^\s{2}([A-Za-z][A-Za-z0-9_]*): async \(/);
-      if (m) asyncActions.push(p.slice(repo.length + 1).split('\\').join('/') + ':' + m[1]);
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^\s{2}([A-Za-z][A-Za-z0-9_]*): async \(/);
+      if (!m) continue;
+      let body = '';
+      for (let j = i + 1; j < lines.length && !/^\s{2}\},?\s*$/.test(lines[j]); j++) body += lines[j] + '\n';
+      asyncActions.push({
+        id: p.slice(repo.length + 1).split('\\').join('/') + ':' + m[1],
+        schreibt: /\bdb\.run\(|saveDatabase|getDatabase\(|INSERT INTO|UPDATE \w+ SET|DELETE FROM/.test(body),
+      });
     }
   });
-  ok(asyncActions.length === 1 && asyncActions[0].endsWith('authStore.ts:login'),
-    `REALWRITE die einzige verbleibende async-Aktion ist die Anmeldung (${asyncActions.join(', ') || 'keine'})`);
+  const ERLAUBT = {
+    'src/stores/authStore.ts:login': 'die Anmeldung',
+    'src/stores/analyticsStore.ts:vatExportRows': 'liest den Steuerbericht auf Abruf',
+    'src/stores/documentStore.ts:getContent': 'liest den Inhalt genau eines Belegs',
+  };
+  const unbekannt = asyncActions.filter((a) => !(a.id in ERLAUBT)).map((a) => a.id);
+  ok(unbekannt.length === 0,
+    `REALWRITE keine unbedachte async-Aktion in den Bestaenden (${unbekannt.join(', ') || 'keine'})`);
+  const schreibende = asyncActions.filter((a) => a.schreibt && a.id !== 'src/stores/authStore.ts:login').map((a) => a.id);
+  ok(schreibende.length === 0,
+    `REALWRITE …und keine davon schreibt an der Spur vorbei (${schreibende.join(', ') || 'keine'})`);
 
   // Die Automatisierung schreibt eigenes SQL — aber SYNCHRON, also unteilbar.
   for (const f of ['src/core/automation/automation-handlers.ts', 'src/core/automation/daily-sweep.ts']) {
@@ -478,21 +499,21 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const reads = resolved.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
-  // CENTRAL-UI-PARITY: dazu 27 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(resolved.length === 86, `ALLOWLIST sechsundachtzig Namen insgesamt (${resolved.length})`);
+  // CENTRAL-UI-PARITY: dazu 30 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  ok(resolved.length === 89, `ALLOWLIST neunundachtzig Namen insgesamt (${resolved.length})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
-  const storeReads = reads.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get'].includes(o));
-  // CENTRAL-UI-PARITY — achtzehn Auskuenfte aus C2, dazu 27 typisierte Auskuenfte fuer die
+  const storeReads = reads.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get'].includes(o));
+  // CENTRAL-UI-PARITY — achtzehn Auskuenfte aus C2, dazu 30 typisierte Auskuenfte fuer die
   // gemeinsame Oberflaeche. Beides ist Lesen; getrennt gezaehlt, damit die Herkunft sichtbar bleibt.
-  ok(reads.length === 45 && storeReads.length === 27,
-    `ALLOWLIST 18 Auskuenfte + 27 typisierte Auskuenfte (${reads.length}/${storeReads.length})`);
+  ok(reads.length === 48 && storeReads.length === 30,
+    `ALLOWLIST 18 Auskuenfte + 30 typisierte Auskuenfte (${reads.length}/${storeReads.length})`);
   ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
     `ALLOWLIST und GENAU diese vierzig veraendernden (${mutations.join(', ') || 'keine'})`);
   // Loeschen steht auf KEINER Liste: es hat einen eigenen Referenz-Vertrag, und der ist von aussen
   // nicht durchdacht.
   ok(!mutations.some((o) => o.endsWith('.delete')),
     'ALLOWLIST und kein Loeschen — das hat einen eigenen Vertrag');
-  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,suppliers.list,categories.list,purchases.list,purchases.get,consignments.list,consignments.get,orders.list,orders.get,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.list,repairs.get,transfers.list,transfers.get,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,store.products.get,store.customers.get,store.invoices.get,order_payments.get,session.context.get,store.suppliers.get,store.sales_returns.get,store.credit_notes.get,store.orders.get,store.consignments.get,store.purchases.get,store.repairs.get,store.agents.get,store.expenses.get,store.recurring_expenses.get,store.banking.get,store.payables.get,store.debts.get,store.gold.get,store.metals.get,store.scrap_trades.get,store.employees.get,store.partners.get,store.tasks.get,store.documents.get,store.offers.get,store.production.get',
+  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,suppliers.list,categories.list,purchases.list,purchases.get,consignments.list,consignments.get,orders.list,orders.get,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.list,repairs.get,transfers.list,transfers.get,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,store.products.get,store.customers.get,store.invoices.get,order_payments.get,session.context.get,store.suppliers.get,store.sales_returns.get,store.credit_notes.get,store.orders.get,store.consignments.get,store.purchases.get,store.repairs.get,store.agents.get,store.expenses.get,store.recurring_expenses.get,store.banking.get,store.payables.get,store.debts.get,store.gold.get,store.metals.get,store.scrap_trades.get,store.employees.get,store.partners.get,store.tasks.get,store.documents.get,store.offers.get,store.production.get,store.analytics.get,analytics.vat_export.get,documents.content.get',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Es gibt keine eigene Suchoperation — die Suche ist ein Parameter.
   ok(!resolved.some((o) => /search/.test(o)), 'ALLOWLIST keine eigene Suchoperation');

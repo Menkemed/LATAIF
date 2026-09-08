@@ -181,6 +181,11 @@ pub const OP_STORE_DOCUMENTS_GET: &str = "store.documents.get";
 pub const OP_STORE_OFFERS_GET: &str = "store.offers.get";
 pub const OP_STORE_PRODUCTION_GET: &str = "store.production.get";
 
+// CENTRAL-UI-PARITY R2C — der Schluss der Lesefläche.
+pub const OP_STORE_ANALYTICS_GET: &str = "store.analytics.get";
+pub const OP_ANALYTICS_VAT_EXPORT_GET: &str = "analytics.vat_export.get";
+pub const OP_DOCUMENTS_CONTENT_GET: &str = "documents.content.get";
+
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
 // `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
@@ -273,6 +278,9 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_STORE_DOCUMENTS_GET,
     OP_STORE_OFFERS_GET,
     OP_STORE_PRODUCTION_GET,
+    OP_STORE_ANALYTICS_GET,
+    OP_ANALYTICS_VAT_EXPORT_GET,
+    OP_DOCUMENTS_CONTENT_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

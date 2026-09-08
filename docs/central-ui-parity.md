@@ -311,3 +311,117 @@ TS und Rust stimmen bitgenau überein (`STORE_READ_OPS` ↔ `REMOTE_OPS`).
   ohne Riegel; sie faengt ihren Fehler ab und bleibt auf einem Client leer. Fern ist sie gar nicht
   erreichbar, weil es fuer sie keinen Namen in der Registry gibt.
 
+---
+
+## R2C — Auswertung, Beleginhalt, und der ehrliche Schlussstand (08.09.2026)
+
+### §1 Die zwei Scope-Fehler sind festgenagelt
+
+`test/uiparity/r2c-payables-trades-scope.test.ts` (32/0) prüft für **jede** der sechs
+korrigierten Abfragen: Filiale A sieht ihre Zeile, Filiale B sieht sie nicht, die Sitzung des
+Menschen am Primary (absichtlich eine **dritte** Filiale) ändert nichts, und ein Filialwunsch im
+Rumpf ändert nichts. Die Negativkontrolle zählt dieselben Abfragen **ohne** Prädikat: sie liefern
+mehr Zeilen, als der Anfragende besitzen darf — der Fehler war real.
+
+**Dabei gefunden und behoben:** die Karenzfrist las `parseInt(…) || 30`. Eine eingestellte
+Karenz von **null** Tagen ist gültig („fällig am Rechnungsdatum") und wurde davon still auf
+dreißig zurückgedreht. Jetzt greift der Rückfall nur noch, wenn gar nichts Lesbares dasteht.
+
+### §2 Die Auswertung, wirklich gezählt
+
+| Block | Abfragen | Quellen (Auszug) | Parameter | Filialgrenze heute |
+|---|---|---|---|---|
+| Verkauf | 5 | `invoices, offers, invoice_lines, products, categories` | — | in jeder |
+| Bestand | 4 | `products, categories` | — | in jeder |
+| Finanzen | 33 | `invoices, purchases, repairs, consignments, scrap_trades, payments, expenses, debts, settings, bank_transfers, partner_transactions, tax_payments …` | — | in jeder |
+| Kunden | 7 | `customers, invoices, invoice_lines` | — | in jeder |
+| Hilfsrechnung | 1 | `sales_returns, invoices` | — | ja |
+
+**Befund des Audits:** 50 echte Abfragen, und **alle 50** trugen bereits `branch_id = ?`.
+Hier gab es also keinen zweiten Leak wie bei den Verbindlichkeiten. Ebenso wichtig: diese
+Fläche hat **keine** Zeitraum-, Kategorie- oder Statusauswahl — die vier Blöcke hängen allein
+an der Filiale (`useMemo(…, [branchId])`). Es gab also nichts zu trennen; käme später ein
+Filter dazu, wäre er ein Parameter und niemals die Berechtigung.
+
+### §3/§4 Eine gemeinsame Rechnung, ein Netzvertrag
+
+`src/core/reports/analytics-snapshot.ts` hält jetzt die vollständige Rechnung:
+`salesFor(ctx)`, `stockFor(ctx)`, `financeFor(ctx)`, `clientsFor(ctx)` und darüber
+`loadAnalyticsFor(ctx) → { snapshot }`. Zustandsfrei, ohne `currentBranchId()`, ohne React.
+Die Seite hat keine eigene Abfrage mehr; sie liest vier Felder aus `useAnalyticsStore`.
+
+Über das Netz ist das **eine** Auskunft (`store.analytics.get`) statt fünfzig Aufrufen — und
+als Nebeneffekt stammen alle Zahlen garantiert aus demselben Augenblick. Der Steuerbericht
+ist bewusst **nicht** Teil davon: er ist zeilenweise und reist nur auf Knopfdruck
+(`analytics.vat_export.get`).
+
+### §5 Die Zahlen stimmen — gegen die Fixture gerechnet
+
+Zwei Filialen mit verschiedenen Zahlen, der Primary in einer dritten. Geprüft gegen von Hand
+gerechnete Erwartungen: Verkauf (1 Rechnung / 200 gegen 1 / 500), Bestand (1 Stück 100/150
+gegen 2 Stück 14/18), Einkauf (5 Vorsteuer gegen 0), Forderungen (eine offene über 60 gegen
+keine) und Verbindlichkeiten (ein Einkauf über 55 gegen keinen).
+
+### §6 Der Beleginhalt
+
+Die Belegliste zeigt Vorschaubilder aus `documents.file_path` — dort steht die **ganze Datei**
+als Data-URL. Der Inhalt bleibt deshalb aus der Liste (R2B) und kommt über einen eigenen,
+ausdrücklichen Weg: `documents.content.get(documentId)`. Kennung genannt, Filiale aus dem
+Ausweis, fremder Beleg = **nicht da** (nicht „verboten" — die Antwort verrät nicht einmal seine
+Existenz), kein Pfad vom Client, und ein alter **echter Dateipfad** im Feld wird nicht als
+Inhalt ausgeliefert. Dieselbe Vorschau öffnet auf beiden Rechnern; die Liste zeigt auf einem
+Client ihr Symbol, bis jemand einen Beleg wirklich öffnet.
+
+### §7 Der vollständige Scan — und was er zutage brachte
+
+**Die bisherige Zählung war zu klein.** „Vier Seiten, zwei Komponenten" entstand aus der Suche
+nach dem Import von `core/db/database` und übersah damit jede Seite, die einfach `query` aus
+`core/db/helpers` holt. Der neue Scan (`test/uiparity/r2c-direct-db-scan.test.ts`) sucht nach
+dem Zugriff selbst und ordnet **jede** Fundstelle ein:
+
+| Art | Stellen | Auflösung |
+|---|---|---|
+| Maschine | 6 | `Primary only` an der Route (Einstellungen, Entwicklerwerkzeug, Abstimmung, Nachbuchung, Hauptbuch-Rohsicht) + Erstlauf unerreichbar |
+| untätig | 1 | `SyncDuplicateGuard` — sein Ereignis kommt nur aus dem im Client verweigerten Abgleich |
+| Schreiblücke | 2 | Inventursitzung; Steuerzahlung eintragen (Schaltfläche im Client ausgeblendet) |
+| **offen (Lesen)** | **12** | **brauchen auf PC2 noch eine lokale Datenbank** |
+
+Die zwölf offenen Lesestellen, namentlich und gezählt (41 Zugriffe):
+
+- `pages/watches/ProductDetail` (8) — Verkaufs-, Einkaufs- und Fertigungshistorie eines Artikels
+- `components/shared/GlobalSearch` (9) — die übergreifende Suche
+- `pages/suppliers/SupplierDetail` (5) — Zahlungen, Retouren, Ausgaben
+- `pages/customers/CustomerDetail` (3) — Zahlungen, Erstattungen, Gutschriften
+- `pages/orders/OrderDetail` (3) — Einkaufsverknüpfung, Zahlungstopf, vereinbarter Preis
+- `pages/purchases/PurchaseCreate` (3) — Wareneingang und Auftragszeilen als Vorlage
+- `components/expenses/PaySupplierModal` (3) — Belegnummern verknüpfter Vorgänge
+- `pages/invoices/InvoiceList` (2) — Zahlungen und Zahl der offenen Rechnungen
+- `pages/watches/WatchList` (2) — Mandant der Filiale
+- `pages/dashboard/Dashboard` (1) — Monatsziel aus den Einstellungen
+- `pages/orders/OrderList` (1) — Summe der Anzahlungen je Auftrag
+- `components/repairs/SettleGoldModal` (1) — Goldbestand je Karat
+
+Das Gate ist heute **grün** und hält diesen Stand fest: eine neue, nicht eingeordnete Stelle
+macht es rot, und die Zahlen dürfen nur sinken. Der Marker
+`CENTRAL_UI_PARITY_FULL_READ_SURFACE_PROVED` wird **nicht** vergeben, solange diese zwölf
+stehen — sie sind die Arbeit von R2D.
+
+### §8/§9 Isolation und Registry
+
+Auswertung, Steuerbericht und Beleginhalt fassen keinen Primary-Bestand an (Sentinel vorher/
+nachher, ohne Sichern und Zurückspielen); insbesondere landet die Auswertung des Anfragenden
+nicht im Bestand des Primary.
+
+```
+Probe            = 1
+C2 Reads         = 18
+UI-Parity Reads  = 30   (27 aus R1/R2A/R2B + 3 aus R2C)
+Mutations        = 40   (unverändert)
+Total            = 89
+```
+
+**Zur Typprüfung:** `npx tsc --noEmit` auf der Wurzel prüft **nichts** — `tsconfig.json` ist
+eine reine Verweisdatei (`"files": []`). Das echte Tor ist `tsc -b` bzw.
+`tsc --noEmit -p tsconfig.app.json`; frühere Meldungen „tsc sauber" aus der Wurzel waren
+inhaltsleer. Beide Projekte sind jetzt geprüft und sauber.
+
