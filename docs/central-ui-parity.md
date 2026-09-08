@@ -425,3 +425,95 @@ eine reine Verweisdatei (`"files": []`). Das echte Tor ist `tsc -b` bzw.
 `tsc --noEmit -p tsconfig.app.json`; frühere Meldungen „tsc sauber" aus der Wurzel waren
 inhaltsleer. Beide Projekte sind jetzt geprüft und sauber.
 
+---
+
+## R2D — die Lesefläche ist geschlossen (08.09.2026)
+
+### §1/§10 Der Scan als einzige Wahrheit
+
+| Art | vor R2D | nach R2D |
+|---|---|---|
+| Maschine (`Primary only`) | 6 | **4** |
+| untätig | 1 | 1 |
+| Schreiblücke | 2 | **4** |
+| **offenes Geschäftslesen** | **12 Dateien / 41 Zugriffe** | **0** |
+
+Damit ist die Zusage einlösbar: **keine Fläche der gemeinsamen Oberfläche liest noch aus einer
+lokalen Datenbank.** Das Gate `test/uiparity/r2c-direct-db-scan.test.ts` hält den Stand fest und
+wird rot, sobald eine neue, nicht eingeordnete Stelle dazukommt.
+
+### §2 Neu klassifiziert — nach Autorität, nicht nach Bauweise
+
+| Fläche | was der Mensch dort tut | Einordnung |
+|---|---|---|
+| **Abstimmung** (`/reconciliation`) | vergleicht Hauptbuch mit den Fachaggregaten | **buchhalterische Auskunft → jetzt fern lesbar.** Nur der Storno bleibt am Hauptrechner, und die Schaltfläche erscheint dort nicht, wo sie nichts täte. |
+| **Nachbuchung** (`/ledger-backfill`) | schreibt fehlende Hauptbuchzeilen nach | Geschäfts-**Schreiben** → Lücke, dokumentiert, `Primary only` |
+| **Hauptbuch-Rohsicht** (`/ledger-debug`) | erzeugt Testbuchungen im Hauptbuch | Prüfstand, der **schreibt** → machine-local |
+| Einstellungen | Datenort, Sicherung, Aktualisierung, Benutzer | machine-local; die fachlichen Teile sind Schreibmasken |
+| Entwicklerwerkzeug, Erstlauf | Testfälle schreiben, neue Datenbank anlegen | machine-local |
+
+### §3/§4 Zwölf Flächen, zwölf typisierte Auskünfte
+
+Aus 41 direkten Zugriffen wurden **zwölf** Namen — einer je Fläche oder Domäne, keiner je Abfrage:
+
+```
+page.dashboard.get         page.customer_detail.get   refs.numbers.get
+page.invoice_list.get      page.order_detail.get      metals.stock_by_karat.get
+page.order_list.get        page.supplier_detail.get   search.global.get
+page.product_detail.get    page.purchase_create.get   page.reconciliation.get
+```
+
+Die Ladefunktionen liegen in `src/core/data/page-reads.ts`, `src/core/search/global-search.ts` und
+`src/core/reports/reconciliation-snapshot.ts`. Die Seiten benutzen sie über **eine** Zeile:
+
+```ts
+const x = useSharedRead('page.foo.get', { id }, (ctx) => fooFor(ctx, id), LEER, [deps]);
+```
+
+Am Primary rechnet das synchron und gemerkt wie das frühere `useMemo`; auf einem Client fragt es
+einmal nach. Keine Seite weiß, an welchem Rechner sie läuft.
+
+**Der Mandant** kam dreimal aus `SELECT tenant_id FROM branches`. Dafür braucht es keine Auskunft:
+am Primary steht er in der Filialtabelle, auf einem Client im geprüften Ausweis — `sessionTenantId()`.
+
+### §5/§6 Was die Prüfung erzwingt
+
+Drei Filialen mit vollem Belegsatz, der Mensch am Primary in der **dritten**. Für jede der zwölf
+Auskünfte: A bekommt A, B bekommt von A **nichts** (und sehr wohl das Eigene), die Sitzung am
+Primary ändert nichts, ein Filialwunsch im Rumpf ändert nichts. Eine Kennung ist **Auswahl**:
+ein fremder Artikel hat keine Historie, ein fremder Kunde keine Zahlungen, eine fremde Vorlage
+füllt kein Formular. Ohne Kennung gibt es keine Antwort.
+
+### Drei echte Defekte, von der Migration ans Licht gebracht
+
+1. **Die übergreifende Suche war kaputt — und sagte es nicht.** Zwei Abfragen nannten Spalten,
+   die es in dieser Datenbank nie gab (`products.retail_price`, `purchases.gross_amount`).
+   Ein einziger umschließender `try` verschluckte den Fehler; weil die Artikelabfrage früh
+   stand, fiel mit ihr **alles danach im selben Block** aus — Kunden, Angebote, Rechnungen,
+   Reparaturen, Aufträge. Die Suche fand still nichts. Beide Spalten sind korrigiert
+   (`planned_sale_price`, `total_amount`), und das Gate prüft jetzt zusätzlich das
+   **Protokoll**: eine geschluckte Abfrage ist ein Fehlschlag, kein leeres Ergebnis.
+2. **Die Rechnungsliste zählte über alle Filialen.** Weder die Zahlungen noch die Zahl der
+   offenen Rechnungen hatten eine Filialgrenze.
+3. **Die Auftragsliste ebenso**: die Summe der Anzahlungen lief über alle `order_payments`.
+
+### Registry
+
+```
+Probe            = 1
+C2 Reads         = 18
+UI-Parity Reads  = 42   (30 aus R1–R2C + 12 aus R2D)
+Mutations        = 40   (unverändert seit C3)
+Total            = 101
+```
+
+TS und Rust bitgenau gleich. Geprüft mit `tsc --noEmit -p tsconfig.app.json` **und**
+`-p tsconfig.node.json` — die Wurzel prüft nichts.
+
+### Was auf einem Rechner ohne Datenbank weiterhin nicht geht
+
+Nur noch **Schreiben**, und zwar viermal: die Inventursitzung, das Eintragen einer Steuerzahlung,
+die Umwandlung Auftrag→Rechnung (sie rechnet den Zahlungstopf lokal um) und die Nachbuchung im
+Hauptbuch. Keine dieser Schaltflächen wird auf einem Client angeboten. Dazu die vier
+Maschinenflächen, die sagen, wo sie zu bedienen sind.
+

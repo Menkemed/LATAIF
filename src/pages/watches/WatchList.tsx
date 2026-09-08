@@ -19,7 +19,7 @@ import { useProductStore } from '@/stores/productStore';
 import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { useAuthStore } from '@/stores/authStore';
-import { query, currentBranchId } from '@/core/db/helpers';
+import { currentBranchId } from '@/core/db/helpers';
 import { resolvePrimaryImageForExport } from '@/core/media/product-image-export';
 import { buildCollectionWorkbookBuffer } from '@/core/media/collection-workbook';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
@@ -30,6 +30,8 @@ import { exportFile } from '@/core/utils/export-file';
 import type { Product, TaxScheme, StockStatus, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
+// CENTRAL-UI-PARITY R2D — Mandant und Artikelhistorie ohne eigene Abfrage in der Seite.
+import { sessionTenantId } from '@/core/data/shared-read';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -59,11 +61,12 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
   // MEDIA-CONSUMERS-EXPORT — authorised media scope for the canonical resolver
   // (media-pipeline products keep images='[]'). Derived once; missing scope falls
   // back to the legacy column only (no cross-scope read).
+  // CENTRAL-UI-PARITY R2D — der Mandant kommt aus einer Quelle, die es auf BEIDEN Rechnern
+  // gibt: am Primary aus der Filialtabelle, auf einem Client aus dem geprueften Ausweis.
   let mediaScope: { tenantId: string | undefined; branchId: string | undefined } = { tenantId: undefined, branchId: undefined };
   try {
     const b = currentBranchId();
-    const rows = b ? query('SELECT tenant_id FROM branches WHERE id = ?', [b]) : [];
-    mediaScope = { branchId: b || undefined, tenantId: rows.length > 0 ? ((rows[0].tenant_id as string | null) || undefined) : undefined };
+    mediaScope = { branchId: b || undefined, tenantId: sessionTenantId(b || undefined) };
   } catch { /* no scope → legacy-only export */ }
 
   const buffer = await buildCollectionWorkbookBuffer(items, {
@@ -136,12 +139,7 @@ export function WatchList() {
   // the session, tenantId = branches.tenant_id (DB-authoritative). Missing either
   // → the thumb falls back to the legacy column / placeholder, never a default.
   const sessionBranchId = useAuthStore(s => s.session?.branchId);
-  const mediaTenantId = useMemo(() => {
-    if (!sessionBranchId) return undefined;
-    const rows = query('SELECT tenant_id FROM branches WHERE id = ?', [sessionBranchId]);
-    const t = rows.length > 0 ? (rows[0].tenant_id as string | null) : null;
-    return t || undefined;
-  }, [sessionBranchId]);
+  const mediaTenantId = useMemo(() => sessionTenantId(sessionBranchId), [sessionBranchId]);
   const [showNew, setShowNew] = useState(false);
   // MEDIA-04A-3B2B — create-with-media flow state.
   const [createBusy, setCreateBusy] = useState(false);

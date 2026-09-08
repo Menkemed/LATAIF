@@ -24,9 +24,11 @@ import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/Settl
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { PaySupplierModal } from '@/components/expenses/PaySupplierModal';
 import type { GoldPayable } from '@/core/models/types';
-import { query } from '@/core/db/helpers';
 import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import type { Supplier } from '@/core/models/types';
+// CENTRAL-UI-PARITY R2D — die Seite liest ueber gemeinsame Ladefunktionen.
+import { useSharedRead } from '@/core/data/shared-read';
+import { refNumbersFor, supplierDetailReadsFor, type SupplierDetailReads } from '@/core/data/page-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -95,21 +97,25 @@ export function SupplierDetail() {
   // Quell-Beleg (ORD-… / REP-…) je Gold-Payable — fuer einen ehrlichen Link in
   // der GOLD-OWED-Liste. Eine Gold-Schuld kann aus einem Repair ODER einer
   // (Custom-)Order stammen; vorher zeigte die Spalte nur Repairs als UUID-Fragment.
+  // CENTRAL-UI-PARITY R2D — die Belegnummern der Quellen kommen aus EINER Auskunft statt aus
+  // einer Abfrage je Zeile; die Filiale steht in beiden Abfragen.
+  const goldRefIds = useMemo(() => ({
+    orders: supplierGoldPayables.map((gp) => gp.sourceOrderId).filter((x): x is string => !!x),
+    repairs: supplierGoldPayables.map((gp) => gp.sourceRepairId).filter((x): x is string => !!x),
+  }), [supplierGoldPayables]);
+  const goldRefs = useSharedRead('refs.numbers.get', goldRefIds, (ctx) => refNumbersFor(ctx, goldRefIds),
+    { orders: {}, repairs: {}, consignments: {} }, [goldRefIds]);
   const goldSourceMap = useMemo(() => {
     const m: Record<string, { num: string; path: string }> = {};
     for (const gp of supplierGoldPayables) {
-      try {
-        if (gp.sourceOrderId) {
-          const r = query(`SELECT order_number FROM orders WHERE id = ?`, [gp.sourceOrderId]);
-          if (r.length > 0) m[gp.id] = { num: r[0].order_number as string, path: `/orders/${gp.sourceOrderId}` };
-        } else if (gp.sourceRepairId) {
-          const r = query(`SELECT repair_number FROM repairs WHERE id = ?`, [gp.sourceRepairId]);
-          if (r.length > 0) m[gp.id] = { num: r[0].repair_number as string, path: `/repairs/${gp.sourceRepairId}` };
-        }
-      } catch { /* */ }
+      if (gp.sourceOrderId && goldRefs.orders[gp.sourceOrderId]) {
+        m[gp.id] = { num: goldRefs.orders[gp.sourceOrderId], path: `/orders/${gp.sourceOrderId}` };
+      } else if (gp.sourceRepairId && goldRefs.repairs[gp.sourceRepairId]) {
+        m[gp.id] = { num: goldRefs.repairs[gp.sourceRepairId], path: `/repairs/${gp.sourceRepairId}` };
+      }
     }
     return m;
-  }, [supplierGoldPayables]);
+  }, [supplierGoldPayables, goldRefs]);
 
   const supplier = useMemo(() => suppliers.find(s => s.id === id), [suppliers, id]);
 
@@ -177,89 +183,23 @@ export function SupplierDetail() {
     [purchases, id]
   );
 
-  // Payment-Historie aus purchase_payments
-  const payments = useMemo(() => {
-    if (!id) return [] as Array<{ id: string; purchaseNumber: string; amount: number; method: string; paidAt: string; reference?: string }>;
-    try {
-      const rows = query(
-        `SELECT pp.id, pp.amount, pp.method, pp.paid_at, pp.reference, p.purchase_number
-         FROM purchase_payments pp
-         JOIN purchases p ON p.id = pp.purchase_id
-         WHERE p.supplier_id = ?
-         ORDER BY pp.paid_at DESC`,
-        [id]
-      );
-      return rows.map(r => ({
-        id: r.id as string,
-        purchaseNumber: r.purchase_number as string,
-        amount: r.amount as number,
-        method: r.method as string,
-        paidAt: r.paid_at as string,
-        reference: r.reference as string | undefined,
-      }));
-    } catch { return []; }
-  }, [id, purchases]);
-
-  const returns = useMemo(() => {
-    if (!id) return [] as Array<{ id: string; returnNumber: string; totalAmount: number; returnDate: string; status: string; refundMethod?: string }>;
-    try {
-      const rows = query(
-        `SELECT id, return_number, total_amount, return_date, status, refund_method
-         FROM purchase_returns WHERE supplier_id = ? ORDER BY return_date DESC`,
-        [id]
-      );
-      return rows.map(r => ({
-        id: r.id as string,
-        returnNumber: r.return_number as string,
-        totalAmount: r.total_amount as number,
-        returnDate: r.return_date as string,
-        status: r.status as string,
-        refundMethod: r.refund_method as string | undefined,
-      }));
-    } catch { return []; }
-  }, [id, purchases]);
-
-  // Workshop-/Service-Payables: A/P-Expenses aus Repairs UND Orders. Order-
-  // Kostenzeilen (Goldschmied-Labor, Diamant-Einkauf bei Sonderanfertigungen)
-  // tragen related_module='order' — vorher fehlten sie hier komplett, obwohl
-  // die OUTSTANDING-KPI sie laengst mitzaehlt (getLedger summiert ALLE expenses
-  // des Suppliers, modul-unabhaengig). Jetzt deckt sich Liste wieder mit KPI.
-  const workshopExpenses = useMemo(() => {
-    if (!id) return [] as Array<{ id: string; expenseNumber: string; description: string; amount: number; paidAmount: number; creditPaid: number; expenseDate: string; status: string; module: string; linkId?: string; sourceNumber?: string }>;
-    try {
-      // LEFT JOIN holt die echte Beleg-Nummer der Quelle (ORD-… / REP-…), damit
-      // die SOURCE-Spalte ein ehrlicher Link ist: angezeigte Nummer == Ziel.
-      // Slice B — credit_paid gebuendelt (Korrelations-Subquery, kein N+1) → settled = cash+credit.
-      const rows = query(
-        `SELECT e.id, e.expense_number, e.description, e.amount, e.paid_amount, e.expense_date, e.status,
-                e.related_module, e.related_entity_id,
-                o.order_number AS order_number, r.repair_number AS repair_number,
-                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
-                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
-           FROM expenses e
-           LEFT JOIN orders  o ON o.id = e.related_entity_id AND e.related_module = 'order'
-           LEFT JOIN repairs r ON r.id = e.related_entity_id AND e.related_module = 'repair'
-          WHERE e.supplier_id = ? AND e.related_module IN ('repair', 'order') AND e.status != 'CANCELLED'
-          ORDER BY e.expense_date DESC`,
-        [id]
-      );
-      return rows.map(r => ({
-        id: r.id as string,
-        expenseNumber: r.expense_number as string,
-        description: r.description as string,
-        amount: (r.amount as number) || 0,
-        paidAmount: (r.paid_amount as number) || 0,
-        creditPaid: Number(r.credit_paid) || 0,
-        expenseDate: r.expense_date as string,
-        status: r.status as string,
-        module: (r.related_module as string) || 'repair',
-        linkId: (r.related_entity_id as string) || undefined,
-        sourceNumber: (r.order_number as string) || (r.repair_number as string) || undefined,
-      }));
-    } catch { return []; }
-    // expenses-Array als Dep: nach recordExpensePayment aendert sich der Store, das useMemo re-queryt.
-    // refreshKey-Dep: nach Credit-Einloesung (PaySupplier-onClose) re-queryt die Card OHNE F5.
-  }, [id, purchases, expenses, refreshKey]);
+  // CENTRAL-UI-PARITY R2D — Zahlungen, Retouren und Werkstatt-Ausgaben dieses Lieferanten:
+  // eine gemeinsame Ladefunktion statt dreier Abfragen in der Seite, und jede traegt die
+  // Filiale des Anfragenden mit.
+  const supplierReads = useSharedRead(
+    'page.supplier_detail.get', { supplierId: id ?? '' },
+    (ctx) => supplierDetailReadsFor(ctx, id ?? ''),
+    { payments: [], returns: [], expenses: [] } as SupplierDetailReads,
+    [id, purchases, expenses, refreshKey],
+  );
+  const payments = supplierReads.payments;
+  const returns = supplierReads.returns;
+  const workshopExpenses = useMemo(() => supplierReads.expenses.map((e) => ({
+    id: e.id, expenseNumber: e.expenseNumber, description: e.description,
+    amount: e.amount, paidAmount: e.paidAmount, creditPaid: e.creditPaid,
+    expenseDate: e.expenseDate, status: e.status, module: e.relatedModule || 'repair',
+    linkId: e.relatedEntityId, sourceNumber: e.orderNumber || e.repairNumber,
+  })), [supplierReads]);
 
   if (!supplier) {
     return (

@@ -19,8 +19,9 @@ import { Input } from '@/components/ui/Input';
 import { SoftWarn } from '@/components/ui/SoftWarn';
 import { useGoldStore } from '@/stores/goldStore';
 import { KARAT_PURITY } from '@/core/gold/purity';
-import { query, currentBranchId } from '@/core/db/helpers';
 import type { GoldPayable, CustomerGoldCredit } from '@/core/models/types';
+import { useSharedRead } from '@/core/data/shared-read';
+import { metalStockByKaratFor } from '@/core/data/page-reads';
 
 export type SettleGoldMode =
   | 'settle_supplier_return'
@@ -95,21 +96,12 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
 
   // v0.1.47 — fetche Shop-Inventory pro Karat damit der User sieht was zur
   // Verfuegung steht. Nur fuer apply_shop_to_supplier-Mode relevant.
-  const shopInventory = useMemo<Array<{ karat: string; grams: number }>>(() => {
-    if (mode !== 'apply_shop_to_supplier' || !open) return [];
-    try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT karat, COALESCE(SUM(weight_grams), 0) AS total
-           FROM precious_metals
-           WHERE branch_id = ? AND status = 'in_stock' AND weight_grams > 0
-           GROUP BY karat
-           ORDER BY karat DESC`,
-        [branchId]
-      );
-      return rows.map(r => ({ karat: r.karat as string, grams: r.total as number }));
-    } catch { return []; }
-  }, [mode, open]);
+  // CENTRAL-UI-PARITY R2D — der Ladenbestand kommt aus der gemeinsamen Ladefunktion.
+  const metalStock = useSharedRead('metals.stock_by_karat.get', {}, metalStockByKaratFor, { rows: [] }, [mode, open]);
+  const shopInventory = useMemo<Array<{ karat: string; grams: number }>>(
+    () => (mode !== 'apply_shop_to_supplier' || !open ? [] : metalStock.rows),
+    [mode, open, metalStock],
+  );
 
   // v0.1.47 — Conversion-Preview fuer Cross-Karat
   const isCrossKarat = mode === 'apply_shop_to_supplier' && sourceKarat && sourceKarat !== karat;

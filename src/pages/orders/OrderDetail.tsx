@@ -38,6 +38,9 @@ import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
+// CENTRAL-UI-PARITY R2D — die Anzeige liest ueber die gemeinsame Ladefunktion.
+import { useSharedRead } from '@/core/data/shared-read';
+import { orderDetailReadsFor } from '@/core/data/page-reads';
 
 function fmt(v: number | undefined | null): string {
   if (v === undefined || v === null) return '0.000';
@@ -165,24 +168,20 @@ export function OrderDetail() {
   // Back-to-Back — pro customer-facing Zeile: gibt es einen aktiven (nicht
   // stornierten) Purchase, der sie beschafft hat? Reverse-Lookup ueber
   // purchase_lines.source_order_line_id.
+  // CENTRAL-UI-PARITY R2D — welche Auftragszeile ueber welchen Einkauf beschafft wurde, kommt
+  // aus der gemeinsamen Ladefunktion. Sie fragt nach dem AUFTRAG statt nach einer Liste von
+  // Zeilenkennungen: so kann keine fremde Zeile mitgeschickt werden.
+  const sourcedReads = useSharedRead(
+    'page.order_detail.get', { orderId: id ?? '' },
+    (ctx) => orderDetailReadsFor(ctx, id ?? ''),
+    { sourced: [] },
+    [customerLines, lineRefresh],
+  );
   const sourcedMap = useMemo(() => {
     const map = new Map<string, { purchaseId: string; purchaseNumber: string }>();
-    const ids = customerLines.map(l => l.id);
-    if (ids.length === 0) return map;
-    try {
-      const placeholders = ids.map(() => '?').join(',');
-      const rows = query(
-        `SELECT pl.source_order_line_id AS olid, pl.purchase_id AS pid, p.purchase_number AS pnum
-           FROM purchase_lines pl JOIN purchases p ON p.id = pl.purchase_id
-          WHERE pl.source_order_line_id IN (${placeholders}) AND p.status != 'CANCELLED'`,
-        ids
-      );
-      for (const r of rows) {
-        map.set(r.olid as string, { purchaseId: r.pid as string, purchaseNumber: r.pnum as string });
-      }
-    } catch { /* Migration evtl. noch nicht durch */ }
+    for (const r of sourcedReads.sourced) map.set(r.orderLineId, { purchaseId: r.purchaseId, purchaseNumber: r.purchaseNumber });
     return map;
-  }, [customerLines, lineRefresh]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sourcedReads]);
   // Back-to-Back — un-beschaffte Produkt-Posten: brauchen Wareneingang (Purchase).
   // v0.6.9 — PENDING-Zeilen mit vorhandenem Lager-Bestand werden NICHT als
   // sourceCandidates gezaehlt: das Produkt liegt im Regal, keine Bestellung noetig.

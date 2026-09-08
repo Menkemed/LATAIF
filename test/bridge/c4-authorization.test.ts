@@ -82,7 +82,7 @@ await import('../../src/core/bridge/service-commands.ts');
 await import('../../src/core/bridge/lifecycle-commands.ts');
 const { runInvoiceCreate } = await import('../../src/core/bridge/invoice-command.ts');
 const fin = await import('../../src/core/bridge/financial-commands.ts');
-// CENTRAL-UI-PARITY — die 30 Store-Auskuenfte gehoeren zum ausgelieferten Zustand.
+// CENTRAL-UI-PARITY — die 42 Store-Auskuenfte gehoeren zum ausgelieferten Zustand.
 await import('../../src/core/bridge/store-read-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
@@ -197,13 +197,13 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   ok(list.length === 40, `SCOPE weiterhin genau 40 Mutationen (${list.length})`);
-  // CENTRAL-UI-PARITY R1: dazu 30 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
-  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get'].includes(o));
-  ok(known.length === 89 && reads.length === 48 && parityReads.length === 30,
-    `SCOPE 1 Probe + 18 Auskuenfte + 30 typisierte Auskuenfte + 40 Buchungen = 89 (${known.length}/${reads.length}/${parityReads.length})`);
+  // CENTRAL-UI-PARITY R1: dazu 42 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
+  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get'].includes(o));
+  ok(known.length === 101 && reads.length === 60 && parityReads.length === 42,
+    `SCOPE 1 Probe + 18 Auskuenfte + 42 typisierte Auskuenfte + 40 Buchungen = 101 (${known.length}/${reads.length}/${parityReads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rl = rust.slice(rust.indexOf('pub const REMOTE_OPS'), rust.indexOf('];', rust.indexOf('pub const REMOTE_OPS')));
-  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 89, 'SCOPE Rust kennt dieselben 89');
+  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 101, 'SCOPE Rust kennt dieselben 101');
   // C4 hat NICHTS registriert.
   const mine = codeOf('src/core/bridge/command-permissions.ts') + codeOf('src/core/auth/role-permissions.ts');
   ok(!/registerCommand\(/.test(mine), 'SCOPE C4 registriert keine einzige Operation');

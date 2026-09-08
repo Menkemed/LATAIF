@@ -25,11 +25,13 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
-import { query } from '@/core/db/helpers';
 import { Truck } from 'lucide-react';
 import type { Customer, VIPLevel, SalesStage, CustomerType } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
+// CENTRAL-UI-PARITY R2D — die Seite liest ueber die gemeinsame Ladefunktion.
+import { useSharedRead } from '@/core/data/shared-read';
+import { customerDetailReadsFor, type CustomerDetailReads } from '@/core/data/page-reads';
 
 function fmtDate(iso?: string | null): string {
   if (!iso) return '\u2014';
@@ -50,61 +52,25 @@ type PaymentEntry =
   | { type: 'payment'; id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; invoiceId: string }
   | { type: 'refund'; id: string; amount: number; method: string; receivedAt: string; returnNumber: string; invoiceId: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; creditNoteId?: string };
 
-// Merged payment + refund history sorted by date descending.
-function useCustomerPayments(customerId: string | undefined): PaymentEntry[] {
-  return useMemo(() => {
-    if (!customerId) return [];
-    try {
-      const payRows = query(
-        `SELECT p.id, p.amount, p.method, p.received_at, p.notes, i.invoice_number, i.status, i.special_mark, i.id AS invoice_id
-         FROM payments p JOIN invoices i ON i.id = p.invoice_id
-         WHERE i.customer_id = ?
-         ORDER BY p.received_at DESC`,
-        [customerId]
-      );
-      const payments: PaymentEntry[] = payRows.map(r => ({
-        type: 'payment' as const,
-        id: r.id as string,
-        amount: r.amount as number,
-        method: (r.method as string) || '',
-        receivedAt: (r.received_at as string) || '',
-        notes: (r.notes as string | null) || undefined,
-        invoiceNumber: r.invoice_number as string,
-        invoiceStatus: (r.status as string) || '',
-        invoiceSpecialMark: Number(r.special_mark) === 1,
-        invoiceId: r.invoice_id as string,
-      }));
+// CENTRAL-UI-PARITY R2D — Zahlungen, Erstattungen und zurueckgebuchte Forderungen kommen aus
+// EINER gemeinsamen Ladefunktion. Sie traegt die Filiale des Anfragenden mit: eine
+// Kundenkennung aus einer fremden Filiale liefert deshalb nichts statt fremder Zahlen.
+function useCustomerReads(customerId: string | undefined) {
+  return useSharedRead(
+    'page.customer_detail.get', { customerId: customerId ?? '' },
+    (ctx) => customerDetailReadsFor(ctx, customerId ?? ''),
+    { payments: [], refunds: [], creditNoteCancels: {} } as CustomerDetailReads,
+    [customerId],
+  );
+}
 
-      const refundRows = query(
-        `SELECT sr.id, sr.return_number, sr.refund_paid_amount, sr.refund_method,
-                sr.refund_paid_date, sr.invoice_id, i.invoice_number, i.status, i.special_mark,
-                cn.id AS cn_id
-         FROM sales_returns sr
-         JOIN invoices i ON i.id = sr.invoice_id
-         LEFT JOIN credit_notes cn ON cn.sales_return_id = sr.id
-         WHERE sr.customer_id = ? AND sr.refund_paid_amount > 0
-         ORDER BY sr.refund_paid_date DESC`,
-        [customerId]
-      );
-      const refunds: PaymentEntry[] = refundRows.map(r => ({
-        type: 'refund' as const,
-        id: r.id as string,
-        amount: (r.refund_paid_amount as number) || 0,
-        method: (r.refund_method as string) || 'cash',
-        receivedAt: (r.refund_paid_date as string) || '',
-        returnNumber: r.return_number as string,
-        invoiceId: r.invoice_id as string,
-        invoiceNumber: r.invoice_number as string,
-        invoiceStatus: (r.status as string) || '',
-        invoiceSpecialMark: Number(r.special_mark) === 1,
-        creditNoteId: (r.cn_id as string | null) || undefined,
-      }));
-
-      return [...payments, ...refunds].sort(
-        (a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime()
-      );
-    } catch { return []; }
-  }, [customerId]);
+/** Zahlungen und Erstattungen in EINER Liste, neueste zuerst — wie bisher. */
+function mergeCustomerPayments(reads: CustomerDetailReads): PaymentEntry[] {
+  const alle: PaymentEntry[] = [
+    ...reads.payments.map((r) => ({ type: 'payment' as const, ...r })),
+    ...reads.refunds.map((r) => ({ type: 'refund' as const, ...r })),
+  ];
+  return alle.sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime());
 }
 
 function MethodIcon({ method }: { method: string }) {
@@ -200,24 +166,13 @@ export function CustomerDetail() {
     [invoices, id]
   );
   const customerLoans = useMemo(() => id ? debts.filter(d => d.customerId === id) : [], [debts, id]);
-  const customerPayments = useCustomerPayments(id);
+  const customerReads = useCustomerReads(id);
+  const customerPayments = useMemo(() => mergeCustomerPayments(customerReads), [customerReads]);
 
-  // CN receivable_cancel per invoice — für korrekte "Remaining" Anzeige in der Invoice-Tabelle.
-  const invoiceCNCancelMap = useMemo(() => {
-    if (!customerInvoices.length) return {} as Record<string, number>;
-    try {
-      const ids = customerInvoices.map(i => i.id);
-      const rows = query(
-        `SELECT invoice_id, COALESCE(SUM(receivable_cancel_amount), 0) AS cancel_amount
-         FROM credit_notes WHERE invoice_id IN (${ids.map(() => '?').join(',')})
-         GROUP BY invoice_id`,
-        ids
-      );
-      const map: Record<string, number> = {};
-      for (const r of rows) map[r.invoice_id as string] = Number(r.cancel_amount || 0);
-      return map;
-    } catch { return {}; }
-  }, [customerInvoices]);
+  // CN receivable_cancel per invoice — fuer korrekte "Remaining" Anzeige in der Invoice-Tabelle.
+  // Die Zuordnung kommt aus derselben Auskunft: die Rechnungsliste dieses Kunden steht in der
+  // DATENBANK, sie wird nicht mehr als Kennungsliste mitgeschickt.
+  const invoiceCNCancelMap = customerReads.creditNoteCancels;
 
   const matchingProducts = useMemo(() => {
     if (!customer) return [];

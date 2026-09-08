@@ -8,13 +8,14 @@ import { Input } from '@/components/ui/Input';
 import { useOrderStore } from '@/stores/orderStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
-import { query } from '@/core/db/helpers';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { OrderStatus, OrderPaymentStatus, OrderType } from '@/core/models/types';
 import { deriveOrderPaymentStatus } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedRead } from '@/core/data/shared-read';
+import { orderPaidTotalsFor } from '@/core/data/page-reads';
 
 function fmtDate(iso?: string): string {
   if (!iso) return '—';
@@ -91,17 +92,14 @@ export function OrderList() {
 
   // Plan §Order: Single source of truth fuer paid-Betrag = SUM(order_payments).
   // OrderDetail rechnet aus den geladenen Payments — wir brauchen denselben Wert in der Liste.
+  // CENTRAL-UI-PARITY R2D — dieselbe Summe, jetzt aus der gemeinsamen Ladefunktion. Sie zaehlt
+  // ausserdem nur noch die eigene Filiale: vorher lief sie ueber ALLE.
+  const paidTotals = useSharedRead('page.order_list.get', {}, orderPaidTotalsFor, { totals: [] }, [orders]);
   const paidByOrder = useMemo(() => {
     const m = new Map<string, number>();
-    try {
-      const rows = query(
-        // M-08 — converted Payments (zur Invoice abgegeben) nicht mitzaehlen.
-        `SELECT order_id, COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE COALESCE(converted_to_invoice, 0) = 0 GROUP BY order_id`
-      );
-      rows.forEach(r => m.set(r.order_id as string, Number(r.t || 0)));
-    } catch { /* table might not exist on first load */ }
+    for (const t of paidTotals.totals) m.set(t.orderId, t.paid);
     return m;
-  }, [orders]);
+  }, [paidTotals]);
 
   // Pre-fill from URL — forward customer to /orders/new
   useEffect(() => {

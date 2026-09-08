@@ -440,7 +440,7 @@ const links = (db: Db, pid: string): number =>
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
-  // CENTRAL-UI-PARITY — die 30 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
+  // CENTRAL-UI-PARITY — die 42 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
   // Bruecken-Zuhoerer laedt sie ebenfalls. Ohne diesen Import misst das Gate einen Teilstand.
   await import('../../src/core/bridge/store-read-commands.ts');
   const known = registry.knownCommands();
@@ -448,10 +448,10 @@ const links = (db: Db, pid: string): number =>
   const mutations = registry.ALLOWED_MUTATIONS;
   ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
     `ALLOWLIST genau diese vierzig Mutationen (${mutations.join(', ')})`);
-  // CENTRAL-UI-PARITY R1: dazu 30 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
-  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get'].includes(o));
-  ok(known.length === 89 && reads.length === 48 && parityReads.length === 30 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 18 Auskuenfte + 30 typisierte Auskuenfte + 40 Buchungen = 89 (${known.length}/${reads.length}/${parityReads.length})`);
+  // CENTRAL-UI-PARITY R1: dazu 42 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
+  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get'].includes(o));
+  ok(known.length === 101 && reads.length === 60 && parityReads.length === 42 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Auskuenfte + 42 typisierte Auskuenfte + 40 Buchungen = 101 (${known.length}/${reads.length}/${parityReads.length})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
     let threw: string | null = null;
@@ -462,7 +462,7 @@ const links = (db: Db, pid: string): number =>
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 89, 'ALLOWLIST Rust kennt dieselben neunundachtzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 101, 'ALLOWLIST Rust kennt dieselben einhundertein Namen');
   ok(/OP_PRODUCTS_CREATE: &str = "products.create"/.test(rs) && /OP_PRODUCTS_UPDATE: &str = "products.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

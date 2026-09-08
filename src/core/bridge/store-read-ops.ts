@@ -54,6 +54,24 @@ export const OP_STORE_ANALYTICS_GET = 'store.analytics.get';
 export const OP_ANALYTICS_VAT_EXPORT_GET = 'analytics.vat_export.get';
 export const OP_DOCUMENTS_CONTENT_GET = 'documents.content.get';
 
+// CENTRAL-UI-PARITY R2D — die Flächen, die ihre Abfrage bisher selbst stellten. Ein Name je
+// Fläche oder Domäne, nicht einer je Abfrage: aus 41 direkten Zugriffen werden elf Auskünfte.
+export const OP_PAGE_DASHBOARD_GET = 'page.dashboard.get';
+export const OP_PAGE_INVOICE_LIST_GET = 'page.invoice_list.get';
+export const OP_PAGE_ORDER_LIST_GET = 'page.order_list.get';
+export const OP_PAGE_CUSTOMER_DETAIL_GET = 'page.customer_detail.get';
+export const OP_PAGE_ORDER_DETAIL_GET = 'page.order_detail.get';
+export const OP_PAGE_SUPPLIER_DETAIL_GET = 'page.supplier_detail.get';
+export const OP_PAGE_PRODUCT_DETAIL_GET = 'page.product_detail.get';
+export const OP_PAGE_PURCHASE_CREATE_GET = 'page.purchase_create.get';
+export const OP_REFS_NUMBERS_GET = 'refs.numbers.get';
+export const OP_METALS_STOCK_BY_KARAT_GET = 'metals.stock_by_karat.get';
+export const OP_SEARCH_GLOBAL_GET = 'search.global.get';
+
+// Die Abstimmung ist eine BUCHHALTERISCHE Auskunft, keine Maschinenfunktion — sie war nur
+// deshalb an den Hauptrechner gebunden, weil sie ihre zwanzig Abfragen selbst stellte.
+export const OP_PAGE_RECONCILIATION_GET = 'page.reconciliation.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -89,6 +107,18 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_STORE_ANALYTICS_GET,
   OP_ANALYTICS_VAT_EXPORT_GET,
   OP_DOCUMENTS_CONTENT_GET,
+  OP_PAGE_DASHBOARD_GET,
+  OP_PAGE_INVOICE_LIST_GET,
+  OP_PAGE_ORDER_LIST_GET,
+  OP_PAGE_CUSTOMER_DETAIL_GET,
+  OP_PAGE_ORDER_DETAIL_GET,
+  OP_PAGE_SUPPLIER_DETAIL_GET,
+  OP_PAGE_PRODUCT_DETAIL_GET,
+  OP_PAGE_PURCHASE_CREATE_GET,
+  OP_REFS_NUMBERS_GET,
+  OP_METALS_STOCK_BY_KARAT_GET,
+  OP_SEARCH_GLOBAL_GET,
+  OP_PAGE_RECONCILIATION_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

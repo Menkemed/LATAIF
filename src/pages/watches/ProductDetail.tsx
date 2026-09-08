@@ -17,7 +17,6 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '@/stores/repairStore';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
-import { query } from '@/core/db/helpers';
 import { usePermission } from '@/hooks/usePermission';
 import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
@@ -32,6 +31,9 @@ import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { StockCheckPanel } from '@/components/products/StockCheckPanel';
 import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
+// CENTRAL-UI-PARITY R2D — Mandant und Artikelhistorie ohne eigene Abfrage in der Seite.
+import { useSharedRead, sessionTenantId } from '@/core/data/shared-read';
+import { productDetailReadsFor } from '@/core/data/page-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -115,12 +117,19 @@ export function ProductDetail() {
   // von beiden, bleibt der Hook idle und die Anzeige fällt auf den bisherigen
   // product.images-Pfad zurück.
   const sessionBranchId = useAuthStore(s => s.session?.branchId);
-  const tenantId = useMemo(() => {
-    if (!sessionBranchId) return undefined;
-    const rows = query('SELECT tenant_id FROM branches WHERE id = ?', [sessionBranchId]);
-    const t = rows.length > 0 ? (rows[0].tenant_id as string | null) : null;
-    return t || undefined;
-  }, [sessionBranchId]);
+  const tenantId = useMemo(() => sessionTenantId(sessionBranchId), [sessionBranchId]);
+
+  // CENTRAL-UI-PARITY R2D — Verkaufs-, Einkaufs- und Fertigungshistorie samt Herkunft der
+  // Charge: EINE gemeinsame Ladefunktion statt sieben Abfragen in dieser Datei. Sie prueft
+  // zuerst, ob der Artikel ueberhaupt zur Filiale des Anfragenden gehoert.
+  const detail = useSharedRead(
+    'page.product_detail.get', { productId: id ?? '' },
+    (ctx) => productDetailReadsFor(ctx, id ?? ''),
+    { sales: [], purchases: [], production: [], provenance: { supplier: null, paidFrom: null } },
+    // Dieselben Ausloeser wie die frueheren vier Memos: Status-Wechsel an Rechnung oder
+    // Einkauf sollen die Historie neu zeichnen.
+    [id, invoices, purchases, products],
+  );
   // MEDIA-04A-3B2C2-R1: the resolver stays ACTIVE during edit — the draft shows
   // the existing gallery via the SAME live object URLs (media.items), so their
   // identity (mediaId) is matched back on save and no URL is revoked mid-edit.
@@ -215,199 +224,16 @@ export function ProductDetail() {
   // schon storniert. PARTIAL → FINAL ist dieselbe invoice_id, also keine
   // Doppelung — die Zeile aendert nur Status + Nummer.
   // Reihenfolge: neueste zuerst.
-  const productSales = useMemo(() => {
-    if (!id) return [] as Array<{
-      invoiceId: string; invoiceNumber: string; status: string; specialMark: boolean;
-      issuedAt: string; customerName: string;
-      unitPrice: number; quantity: number; lineTotal: number;
-    }>;
-    const rows = query(
-      `SELECT i.id AS inv_id, i.invoice_number, i.status, i.special_mark, i.issued_at,
-              c.first_name, c.last_name,
-              il.unit_price, il.quantity, il.line_total
-         FROM invoice_lines il
-         JOIN invoices i ON i.id = il.invoice_id
-         LEFT JOIN customers c ON c.id = i.customer_id
-        WHERE il.product_id = ?
-          AND i.status IN ('FINAL', 'PARTIAL')
-        ORDER BY i.issued_at DESC, i.created_at DESC`,
-      [id]
-    );
-    return rows.map(r => ({
-      invoiceId: r.inv_id as string,
-      invoiceNumber: r.invoice_number as string,
-      status: (r.status as string) || '',
-      specialMark: Number(r.special_mark) === 1,
-      issuedAt: (r.issued_at as string) || '',
-      customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || '—',
-      unitPrice: Number(r.unit_price) || 0,
-      quantity: Number(r.quantity) || 1,
-      lineTotal: Number(r.line_total) || 0,
-    }));
-    // Dep auf `invoices` damit Status-Updates (PARTIAL→FINAL via recordPayment)
-    // den re-query triggern und die Zeile in der Tabelle aktualisieren.
-  }, [id, invoices]);
-
-  // Purchase History — alle Purchases die dieses Produkt enthalten.
-  // DRAFT/CANCELLED ausgeblendet (kein Commitment bzw. storniert).
-  // Reihenfolge: neueste zuerst (purchase_date DESC).
-  const productPurchases = useMemo(() => {
-    if (!id) return [] as Array<{
-      purchaseId: string; purchaseNumber: string; status: string;
-      purchaseDate: string; supplierName: string;
-      unitPrice: number; quantity: number; lineTotal: number;
-    }>;
-    const rows = query(
-      `SELECT p.id AS pur_id, p.purchase_number, p.status, p.purchase_date,
-              s.name AS supplier_name,
-              pl.unit_price, pl.quantity, pl.line_total
-         FROM purchase_lines pl
-         JOIN purchases p ON p.id = pl.purchase_id
-         LEFT JOIN suppliers s ON s.id = p.supplier_id
-        WHERE pl.product_id = ?
-          AND p.status NOT IN ('DRAFT', 'CANCELLED')
-        ORDER BY p.purchase_date DESC, p.created_at DESC`,
-      [id]
-    );
-    return rows.map(r => ({
-      purchaseId: r.pur_id as string,
-      purchaseNumber: r.purchase_number as string,
-      status: (r.status as string) || '',
-      purchaseDate: (r.purchase_date as string) || '',
-      supplierName: (r.supplier_name as string) || '—',
-      unitPrice: Number(r.unit_price) || 0,
-      quantity: Number(r.quantity) || 1,
-      lineTotal: Number(r.line_total) || 0,
-    }));
-    // Dep auf `purchases` damit Status-Updates (UNPAID→PAID via recordPayment)
-    // den re-query triggern und die Zeile in der Tabelle aktualisieren.
-  }, [id, purchases]);
-
-  // Production-History (2026-05-18): Jedes Produkt — egal ob Input oder Output —
-  // soll zeigen welche PRD-Records es beruehren. Wir bauen pro PRD eine Zeile,
-  // teilen direction = 'input' (konsumiert) oder 'output' (entstanden aus), und
-  // listen die "andere Seite" (bei input: erzeugte Outputs, bei output: konsumierte
-  // Inputs) als Mini-Liste.
-  const productionHistory = useMemo(() => {
-    if (!id) return [] as Array<{
-      recordId: string; recordNumber: string; productionDate: string;
-      direction: 'input' | 'output';
-      value: number;                                    // input_value bzw. output_value dieser Zeile
-      counterpart: Array<{ productId: string; label: string; value: number }>;
-    }>;
-    const out: Array<{
-      recordId: string; recordNumber: string; productionDate: string;
-      direction: 'input' | 'output'; value: number;
-      counterpart: Array<{ productId: string; label: string; value: number }>;
-    }> = [];
-
-    // INPUT-Seite: dieses Produkt wurde in PRD X konsumiert.
-    const inputRows = query(
-      `SELECT pi.record_id, pi.input_value,
-              pr.record_number, pr.production_date
-         FROM production_inputs pi
-         JOIN production_records pr ON pr.id = pi.record_id
-        WHERE pi.product_id = ?
-        ORDER BY pr.production_date DESC, pr.created_at DESC`,
-      [id]
-    );
-    for (const r of inputRows) {
-      const recId = r.record_id as string;
-      // Gegenstuecke = die Outputs des selben Records
-      const counterRows = query(
-        `SELECT po.product_id, po.output_value, p.brand, p.name
-           FROM production_outputs po
-           LEFT JOIN products p ON p.id = po.product_id
-          WHERE po.record_id = ?`,
-        [recId]
-      );
-      out.push({
-        recordId: recId,
-        recordNumber: (r.record_number as string) || '—',
-        productionDate: (r.production_date as string) || '',
-        direction: 'input',
-        value: Number(r.input_value) || 0,
-        counterpart: counterRows.map(cr => ({
-          productId: (cr.product_id as string) || '',
-          label: [cr.brand, cr.name].filter(Boolean).join(' ').trim() || '(deleted)',
-          value: Number(cr.output_value) || 0,
-        })),
-      });
-    }
-
-    // OUTPUT-Seite: dieses Produkt ist in PRD X entstanden.
-    const outputRows = query(
-      `SELECT po.record_id, po.output_value,
-              pr.record_number, pr.production_date
-         FROM production_outputs po
-         JOIN production_records pr ON pr.id = po.record_id
-        WHERE po.product_id = ?
-        ORDER BY pr.production_date DESC, pr.created_at DESC`,
-      [id]
-    );
-    for (const r of outputRows) {
-      const recId = r.record_id as string;
-      // Gegenstuecke = die Inputs des selben Records (mit Snapshot-Fallback)
-      const counterRows = query(
-        `SELECT pi.product_id, pi.input_value, pi.product_snapshot, p.brand, p.name
-           FROM production_inputs pi
-           LEFT JOIN products p ON p.id = pi.product_id
-          WHERE pi.record_id = ?`,
-        [recId]
-      );
-      out.push({
-        recordId: recId,
-        recordNumber: (r.record_number as string) || '—',
-        productionDate: (r.production_date as string) || '',
-        direction: 'output',
-        value: Number(r.output_value) || 0,
-        counterpart: counterRows.map(cr => {
-          let label = [cr.brand, cr.name].filter(Boolean).join(' ').trim();
-          if (!label && cr.product_snapshot) {
-            try {
-              const s = JSON.parse(cr.product_snapshot as string);
-              label = [s.brand, s.name].filter(Boolean).join(' ').trim();
-            } catch { /* */ }
-          }
-          return {
-            productId: (cr.product_id as string) || '',
-            label: label || '(deleted)',
-            value: Number(cr.input_value) || 0,
-          };
-        }),
-      });
-    }
-
-    // Neueste zuerst
-    return out.sort((a, b) => (b.productionDate || '').localeCompare(a.productionDate || ''));
-  }, [id, products]);
-
-  // Provenance-Fallback: products.supplier_name / paid_from sind Legacy-Spalten,
-  // die nur beim INITIAL anlegen via "New Item"-Form gesetzt werden. Wird das
-  // Produkt spaeter ueber "Existing Product" in weiteren Purchases verwendet,
-  // bleibt diese Spalte leer — aber die Info liegt am Lot → Purchase → Supplier /
-  // purchase_payments.method. Hier sammeln wir die distinct Werte ueber ALLE
-  // aktiven Lots; wenn nur einer existiert, zeigen wir den. Sonst joinen wir
-  // (z.B. "Swiss Watch LLC, Souq Trader") — damit der User sieht woher die
-  // Charge tatsaechlich kommt.
-  const lotProvenance = useMemo(() => {
-    if (!id) return { supplier: null as string | null, paidFrom: null as string | null };
-    const rows = query(
-      `SELECT DISTINCT s.name AS supplier_name, pp.method AS paid_method
-         FROM stock_lots sl
-         LEFT JOIN purchases p ON p.id = sl.purchase_id
-         LEFT JOIN suppliers s ON s.id = p.supplier_id
-         LEFT JOIN purchase_payments pp ON pp.purchase_id = sl.purchase_id
-        WHERE sl.product_id = ? AND sl.status != 'CANCELLED'`,
-      [id]
-    );
-    const suppliers = Array.from(new Set(rows.map(r => (r.supplier_name as string | null) || '').filter(Boolean)));
-    const methods = Array.from(new Set(rows.map(r => (r.paid_method as string | null) || '').filter(Boolean)));
-    return {
-      supplier: suppliers.length > 0 ? suppliers.join(', ') : null,
-      paidFrom: methods.length > 0 ? methods.map(m => m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m).join(', ') : null,
-    };
-  }, [id, products]);
+  // CENTRAL-UI-PARITY R2D — vier Auswertungen, eine Quelle. Die Rechnung steht in der
+  // gemeinsamen Ladefunktion; hier bleibt nur, was die Seite anzeigt.
+  const productSales = detail.sales;
+  const productPurchases = detail.purchases;
+  // Neueste zuerst — dieselbe Reihenfolge wie zuvor.
+  const productionHistory = useMemo(
+    () => [...detail.production].sort((a, b) => (b.productionDate || '').localeCompare(a.productionDate || '')),
+    [detail],
+  );
+  const lotProvenance = detail.provenance;
   // Im Edit-Mode: Kategorie aus form.categoryId → Felder passen sich live an.
   // Im Read-Mode: Kategorie aus product.categoryId.
   const category = useMemo(() => {

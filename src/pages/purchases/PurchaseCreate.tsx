@@ -26,7 +26,9 @@ import { useProductStore } from '@/stores/productStore';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import type { Product, Supplier } from '@/core/models/types';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
-import { query } from '@/core/db/helpers';
+// CENTRAL-UI-PARITY R2D — die Vorlage kommt aus der gemeinsamen Ladefunktion.
+import { useSharedRead } from '@/core/data/shared-read';
+import { purchaseCreatePrefillFor, type PurchaseCreatePrefill } from '@/core/data/page-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -66,93 +68,78 @@ export function PurchaseCreate() {
   // das Mobile-Capture-Foto in die erste "New Item"-Zeile laden und den
   // NewProductModal direkt oeffnen, damit der User AI-Identify nutzen kann.
   const inboxId = searchParams.get('inbox');
+  const sourceOrderId = searchParams.get('sourceOrderId');
+  const wantedLineIds = useMemo(
+    () => (searchParams.get('sourceOrderLineIds') || '').split(',').map((x) => x.trim()).filter(Boolean),
+    [searchParams],
+  );
+
+  // CENTRAL-UI-PARITY R2D — die Vorlage (Wareneingang-Foto, Auftragskopf, Auftragszeilen) kommt
+  // aus EINER gemeinsamen Ladefunktion. Sie prueft die Filiale mit und laesst nur Zeilen zu, die
+  // wirklich zu diesem Auftrag gehoeren — eine fremde Zeilenkennung im Netzweg bringt nichts mit.
+  const prefillParams = useMemo(
+    () => ({ inboxId: inboxId ?? undefined, orderId: sourceOrderId ?? undefined, lineIds: wantedLineIds }),
+    [inboxId, sourceOrderId, wantedLineIds],
+  );
+  const prefill = useSharedRead(
+    'page.purchase_create.get', prefillParams,
+    (ctx) => purchaseCreatePrefillFor(ctx, prefillParams),
+    { inbox: null, order: null, lines: [] } as PurchaseCreatePrefill,
+    [prefillParams],
+  );
+
   const [inboxLoaded, setInboxLoaded] = useState(false);
   useEffect(() => {
-    if (!inboxId || inboxLoaded || categories.length === 0) return;
-    try {
-      const rows = query('SELECT images, note FROM purchase_inbox WHERE id = ?', [inboxId]);
-      if (rows.length > 0) {
-        let imgs: string[] = [];
-        try {
-          const parsed = JSON.parse((rows[0].images as string) || '[]');
-          if (Array.isArray(parsed)) imgs = parsed as string[];
-        } catch { /* kein Bild */ }
-        if (imgs.length > 0) {
-          setLines(prev => {
-            const next = [...prev];
-            next[0] = {
-              ...next[0],
-              mode: 'new',
-              newProduct: {
-                categoryId: next[0].categoryId || categories[0]?.id || '',
-                brand: '', name: '', sku: '', condition: '',
-                taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD',
-                attributes: {}, images: imgs,
-              },
-            };
-            return next;
-          });
-          setNewItemModalIdx(0);
-        }
-        const note = rows[0].note as string | null;
-        if (note) setNotes(prev => prev || note);
-      }
-    } catch { /* Inbox-Eintrag nicht gefunden → normale New Purchase */ }
+    if (!inboxId || inboxLoaded || categories.length === 0 || !prefill.inbox) return;
+    const imgs = prefill.inbox.images;
+    if (imgs.length > 0) {
+      setLines(prev => {
+        const next = [...prev];
+        next[0] = {
+          ...next[0],
+          mode: 'new',
+          newProduct: {
+            categoryId: next[0].categoryId || categories[0]?.id || '',
+            brand: '', name: '', sku: '', condition: '',
+            taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD',
+            attributes: {}, images: imgs,
+          },
+        };
+        return next;
+      });
+      setNewItemModalIdx(0);
+    }
+    if (prefill.inbox.note) setNotes(prev => prev || prefill.inbox!.note);
     setInboxLoaded(true);
-  }, [inboxId, inboxLoaded, categories]);
+  }, [inboxId, inboxLoaded, categories, prefill]);
 
   // Back-to-Back: aus einer Order geoeffnet (Wareneingang erfassen) — die
   // angegebenen Order-Zeilen werden als Purchase-Zeilen vorbefuellt + verknuepft.
-  const sourceOrderId = searchParams.get('sourceOrderId');
   const [sourceLoaded, setSourceLoaded] = useState(false);
   const [sourceOrderInfo, setSourceOrderInfo] = useState<{ orderNumber: string; customerName: string } | null>(null);
   useEffect(() => {
     if (!sourceOrderId || sourceLoaded || categories.length === 0 || products.length === 0) return;
-    try {
-      const ordRows = query(
-        `SELECT o.order_number AS onum, c.first_name AS fn, c.last_name AS ln
-           FROM orders o LEFT JOIN customers c ON c.id = o.customer_id
-          WHERE o.id = ?`,
-        [sourceOrderId]
-      );
-      if (ordRows.length > 0) {
-        setSourceOrderInfo({
-          orderNumber: (ordRows[0].onum as string) || '',
-          customerName: `${ordRows[0].fn || ''} ${ordRows[0].ln || ''}`.trim(),
-        });
-      }
-      const wantIds = (searchParams.get('sourceOrderLineIds') || '')
-        .split(',').map(s => s.trim()).filter(Boolean);
-      if (wantIds.length > 0) {
-        const placeholders = wantIds.map(() => '?').join(',');
-        const lineRows = query(
-          `SELECT id, product_id, description, quantity FROM order_lines WHERE id IN (${placeholders})`,
-          wantIds
-        );
-        const byId = new Map(lineRows.map(r => [r.id as string, r]));
-        const seeded: DraftLine[] = [];
-        for (const oid of wantIds) {
-          const r = byId.get(oid);
-          if (!r) continue;
-          const pid = (r.product_id as string | null) || undefined;
-          const p = pid ? products.find(pp => pp.id === pid) : undefined;
-          seeded.push({
-            mode: pid ? 'existing' : 'new',
-            productId: pid,
-            brand: p?.brand || '',
-            name: p?.name || (r.description as string) || '',
-            sku: p?.sku || '',
-            categoryId: p?.categoryId || categories[0]?.id || '',
-            quantity: Math.max(1, (r.quantity as number) || 1),
-            unitPrice: 0,
-            sourceOrderLineId: oid,
-          });
-        }
-        if (seeded.length > 0) setLines(seeded);
-      }
-    } catch { /* Order/Migration nicht da → normales New Purchase */ }
+    if (!prefill.order) return;
+    setSourceOrderInfo(prefill.order);
+    if (prefill.lines.length > 0) {
+      const seeded: DraftLine[] = prefill.lines.map((r) => {
+        const p = r.productId ? products.find(pp => pp.id === r.productId) : undefined;
+        return {
+          mode: r.productId ? 'existing' : 'new',
+          productId: r.productId,
+          brand: p?.brand || '',
+          name: p?.name || r.description || '',
+          sku: p?.sku || '',
+          categoryId: p?.categoryId || categories[0]?.id || '',
+          quantity: Math.max(1, r.quantity || 1),
+          unitPrice: 0,
+          sourceOrderLineId: r.id,
+        };
+      });
+      if (seeded.length > 0) setLines(seeded);
+    }
     setSourceLoaded(true);
-  }, [sourceOrderId, sourceLoaded, categories, products, searchParams]);
+  }, [sourceOrderId, sourceLoaded, categories, products, prefill]);
 
   const [supplierId, setSupplierId] = useState(searchParams.get('supplier') || '');
   const [purchaseDate, setPurchaseDate] = useState(new Date().toISOString().split('T')[0]);

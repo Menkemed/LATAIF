@@ -464,9 +464,10 @@ export default function App() {
           <Route path="/production" element={<ProductionPage />} />
           <Route path="/production/:id" element={<ProductionDetail />} />
           <Route path="/business-reports" element={<BusinessReportsPage />} />
-          <Route path="/reconciliation" element={clientMode ? (
-            <PrimaryOnlyNotice title="Reconciliation" reason="Reconciliation reads and repairs the books directly in the database. Open it on the main computer." />
-          ) : <ReconciliationPage />} />
+          {/* CENTRAL-UI-PARITY R2D — die Abstimmung ist eine buchhalterische AUSKUNFT und
+              laeuft jetzt auf beiden Rechnern. Nur das Reparieren bleibt am Hauptrechner: die
+              Storno-Schaltflaeche erscheint dort nicht, wo sie nichts tun koennte. */}
+          <Route path="/reconciliation" element={<ReconciliationPage />} />
           <Route path="/ledger-backfill" element={clientMode ? (
             <PrimaryOnlyNotice title="Ledger backfill" reason="Backfilling writes ledger entries into the database. It only runs on the main computer." />
           ) : <BackfillPage />} />

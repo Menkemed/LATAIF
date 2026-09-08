@@ -186,6 +186,20 @@ pub const OP_STORE_ANALYTICS_GET: &str = "store.analytics.get";
 pub const OP_ANALYTICS_VAT_EXPORT_GET: &str = "analytics.vat_export.get";
 pub const OP_DOCUMENTS_CONTENT_GET: &str = "documents.content.get";
 
+// CENTRAL-UI-PARITY R2D — die Flächen, die bisher selbst abfragten.
+pub const OP_PAGE_DASHBOARD_GET: &str = "page.dashboard.get";
+pub const OP_PAGE_INVOICE_LIST_GET: &str = "page.invoice_list.get";
+pub const OP_PAGE_ORDER_LIST_GET: &str = "page.order_list.get";
+pub const OP_PAGE_CUSTOMER_DETAIL_GET: &str = "page.customer_detail.get";
+pub const OP_PAGE_ORDER_DETAIL_GET: &str = "page.order_detail.get";
+pub const OP_PAGE_SUPPLIER_DETAIL_GET: &str = "page.supplier_detail.get";
+pub const OP_PAGE_PRODUCT_DETAIL_GET: &str = "page.product_detail.get";
+pub const OP_PAGE_PURCHASE_CREATE_GET: &str = "page.purchase_create.get";
+pub const OP_REFS_NUMBERS_GET: &str = "refs.numbers.get";
+pub const OP_METALS_STOCK_BY_KARAT_GET: &str = "metals.stock_by_karat.get";
+pub const OP_SEARCH_GLOBAL_GET: &str = "search.global.get";
+pub const OP_PAGE_RECONCILIATION_GET: &str = "page.reconciliation.get";
+
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
 // `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
@@ -281,6 +295,18 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_STORE_ANALYTICS_GET,
     OP_ANALYTICS_VAT_EXPORT_GET,
     OP_DOCUMENTS_CONTENT_GET,
+    OP_PAGE_DASHBOARD_GET,
+    OP_PAGE_INVOICE_LIST_GET,
+    OP_PAGE_ORDER_LIST_GET,
+    OP_PAGE_CUSTOMER_DETAIL_GET,
+    OP_PAGE_ORDER_DETAIL_GET,
+    OP_PAGE_SUPPLIER_DETAIL_GET,
+    OP_PAGE_PRODUCT_DETAIL_GET,
+    OP_PAGE_PURCHASE_CREATE_GET,
+    OP_REFS_NUMBERS_GET,
+    OP_METALS_STOCK_BY_KARAT_GET,
+    OP_SEARCH_GLOBAL_GET,
+    OP_PAGE_RECONCILIATION_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

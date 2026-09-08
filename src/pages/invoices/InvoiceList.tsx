@@ -17,8 +17,9 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import { exportCsv } from '@/core/utils/export-file';
 import { exportNbrVatReport, invoiceFinalizationDate } from '@/core/tax/nbr-export';
 import { matchesDeep } from '@/core/utils/deep-search';
-import { query } from '@/core/db/helpers';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedRead } from '@/core/data/shared-read';
+import { invoiceListExtrasFor } from '@/core/data/page-reads';
 
 function fmtDate(iso?: string): string {
   if (!iso) return '\u2014';
@@ -87,19 +88,20 @@ export function InvoiceList() {
 
   // v0.7.23 — Alle Payments gebuendelt (eine Query). Liefert das Finalisierungs-
   // Datum (Tag der Vollzahlung = spaeteste Zahlung) fuer Kandidaten-Filter + Export.
+  // CENTRAL-UI-PARITY R2D — Zahlungen und die Zahl der offenen Rechnungen kommen aus EINER
+  // gemeinsamen Ladefunktion. Beide Abfragen lasen vorher ueber alle Filialen.
+  const invoiceExtras = useSharedRead('page.invoice_list.get', {}, invoiceListExtrasFor,
+    { payments: [], openCount: 0 }, [invoices]);
+
   const nbrPaymentsByInvoice = useMemo(() => {
     const map = new Map<string, { amount: number; method: string; receivedAt: string }[]>();
-    try {
-      const rows = query('SELECT invoice_id, amount, method, received_at FROM payments');
-      for (const r of rows) {
-        const iid = r.invoice_id as string;
-        const arr = map.get(iid) || [];
-        arr.push({ amount: (r.amount as number) || 0, method: r.method as string, receivedAt: r.received_at as string });
-        map.set(iid, arr);
-      }
-    } catch { /* keine Payments-Tabelle / leer */ }
+    for (const p of invoiceExtras.payments) {
+      const arr = map.get(p.invoiceId) || [];
+      arr.push({ amount: p.amount, method: p.method, receivedAt: p.receivedAt });
+      map.set(p.invoiceId, arr);
+    }
     return map;
-  }, [invoices]);
+  }, [invoiceExtras]);
 
   // v0.7.23 — NBR-Kandidaten: nur FINAL (voll bezahlt), gruppiert nach dem
   // Finalisierungs-JAHR (Tag der Vollzahlung) — exakt wie der Export. So zeigt der
@@ -127,22 +129,7 @@ export function InvoiceList() {
   useEffect(() => { loadInvoices(); loadOffers(); loadCustomers(); loadProducts(); loadSalesReturns(); loadEmployees(); }, [loadInvoices, loadOffers, loadCustomers, loadProducts, loadSalesReturns, loadEmployees]);
 
   // CN-aware open count — subtrahiert receivable_cancel damit zurückgebuchte Forderungen nicht als "open" zählen.
-  const openInvoiceCount = useMemo(() => {
-    try {
-      const rows = query(
-        `SELECT COALESCE(SUM(CASE WHEN (i.gross_amount - i.paid_amount
-             - COALESCE(cn_totals.cancel_amount, 0)) > 0.005 THEN 1 ELSE 0 END), 0) AS cnt
-         FROM invoices i
-         LEFT JOIN (
-           SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
-           FROM credit_notes GROUP BY invoice_id
-         ) cn_totals ON cn_totals.invoice_id = i.id
-         WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'FINAL', 'RETURNED')`,
-        []
-      );
-      return Number(rows[0]?.cnt || 0);
-    } catch { return invoices.filter(i => i.status !== 'CANCELLED' && i.paidAmount < i.grossAmount - 0.005).length; }
-  }, [invoices]);
+  const openInvoiceCount = invoiceExtras.openCount;
 
   // URL-Param: /invoices?customer=:id → nur Invoices dieses Kunden anzeigen.
   const customerFilter = searchParams.get('customer') || '';

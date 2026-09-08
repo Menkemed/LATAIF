@@ -24,12 +24,14 @@ import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { useMediaScope } from '@/hooks/useMediaScope';
-import { query, currentBranchId } from '@/core/db/helpers';
+import { currentBranchId } from '@/core/db/helpers';
 import { balanceOf, totalReceivables } from '@/core/ledger/queries';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { receivablesBreakdown } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
 import { computeSalesMetrics, computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
+import { useSharedRead } from '@/core/data/shared-read';
+import { dashboardExtrasFor } from '@/core/data/page-reads';
 
 function getGreeting(): string {
   const h = new Date().getHours();
@@ -331,17 +333,17 @@ export function Dashboard() {
     return gross - refundsThisMonth;
   }, [invoices, salesReturns, finalInvoiceMap]);
 
+  // CENTRAL-UI-PARITY R2D — das eingestellte Monatsziel kommt aus der gemeinsamen
+  // Ladefunktion: am Primary aus der eigenen Datenbank, sonst als Auskunft vom Primary.
+  const dashboardExtras = useSharedRead('page.dashboard.get', {}, dashboardExtrasFor, { monthlyTarget: '' });
+
   const { monthlyTarget, monthlyTargetSource } = useMemo<{ monthlyTarget: number; monthlyTargetSource: string }>(() => {
     // 1) Manual override (per-branch)
-    try {
-      const branchId = currentBranchId();
-      const r = query(`SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.monthly_target'`, [branchId]);
-      const raw = r[0]?.value as string | undefined;
-      if (raw && raw.trim() !== '') {
-        const v = parseFloat(raw);
-        if (Number.isFinite(v) && v > 0) return { monthlyTarget: v, monthlyTargetSource: 'Custom target' };
-      }
-    } catch { /* fall through */ }
+    const raw = dashboardExtras.monthlyTarget;
+    if (raw && raw.trim() !== '') {
+      const v = parseFloat(raw);
+      if (Number.isFinite(v) && v > 0) return { monthlyTarget: v, monthlyTargetSource: 'Custom target' };
+    }
 
     // Build month-by-month NET totals for FINAL invoices (gross minus refunds in same month).
     // Sonst basiert das Ziel auf inflated Gross-Umsatz, der nie wirklich realisiert wurde.

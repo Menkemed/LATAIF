@@ -324,7 +324,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
-  // CENTRAL-UI-PARITY — die 30 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
+  // CENTRAL-UI-PARITY — die 42 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
   // Bruecken-Zuhoerer laedt sie ebenfalls. Ohne diesen Import misst das Gate einen Teilstand.
   await import('../../src/core/bridge/store-read-commands.ts');
   const known = registry.knownCommands();
@@ -333,10 +333,10 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   ok(mutations.length === 40 && mutations.includes('invoices.create')
     && mutations.includes('customers.create') && mutations.includes('customers.update'),
     `ALLOWLIST genau vierzig Mutationen (${mutations.join(', ')})`);
-  // CENTRAL-UI-PARITY R1: dazu 30 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
-  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get'].includes(o));
-  ok(known.length === 89 && reads.length === 48 && parityReads.length === 30 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 18 Auskuenfte + 30 typisierte Auskuenfte + 40 Buchungen = 89 (${known.length}/${reads.length}/${parityReads.length})`);
+  // CENTRAL-UI-PARITY R1: dazu 42 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
+  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get'].includes(o));
+  ok(known.length === 101 && reads.length === 60 && parityReads.length === 42 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Auskuenfte + 42 typisierte Auskuenfte + 40 Buchungen = 101 (${known.length}/${reads.length}/${parityReads.length})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
     let threw: string | null = null;
@@ -347,7 +347,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 89, 'ALLOWLIST Rust kennt dieselben neunundachtzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 101, 'ALLOWLIST Rust kennt dieselben einhundertein Namen');
   ok(/OP_CUSTOMERS_CREATE: &str = "customers.create"/.test(rs) && /OP_CUSTOMERS_UPDATE: &str = "customers.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

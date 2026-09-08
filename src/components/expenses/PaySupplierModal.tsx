@@ -20,10 +20,12 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
-import { query } from '@/core/db/helpers';
 import { creditPaidByExpense } from '@/core/finance/expenseSettlement';
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
 import { applySupplierCreditViaServer } from '@/core/operations/service';
+// CENTRAL-UI-PARITY R2D — Belegnummern ueber die gemeinsame Ladefunktion.
+import { useSharedRead } from '@/core/data/shared-read';
+import { refNumbersFor } from '@/core/data/page-reads';
 
 interface PaySupplierModalProps {
   supplierId: string | null;
@@ -108,6 +110,18 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   // Effect) gibt ihn frei; bei Fehler/Confirm-Abbruch wird er sofort freigegeben (Retry moeglich).
   const submittingRef = useRef(false);
 
+  // CENTRAL-UI-PARITY R2D — die Nummern der verknuepften Vorgaenge, gebuendelt und
+  // filialgebunden. Vorher stellte diese Maske je offener Zeile eine eigene Abfrage.
+  const refIds = useMemo(() => {
+    const mine = expenses.filter((e) => e.supplierId === supplierId && e.relatedEntityId);
+    return {
+      orders: mine.filter((e) => e.relatedModule === 'order').map((e) => e.relatedEntityId as string),
+      repairs: mine.filter((e) => e.relatedModule === 'repair').map((e) => e.relatedEntityId as string),
+      consignments: mine.filter((e) => e.relatedModule === 'consignment').map((e) => e.relatedEntityId as string),
+    };
+  }, [expenses, supplierId]);
+  const refNumbers = useSharedRead('refs.numbers.get', refIds, (ctx) => refNumbersFor(ctx, refIds),
+    { orders: {}, repairs: {}, consignments: {} }, [refIds]);
   const openItems = useMemo<OpenItem[]>(() => {
     if (!supplierId) return [];
 
@@ -120,20 +134,14 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
       const remaining = (e.amount || 0) - (e.paidAmount || 0);
       if (remaining <= 0.005) continue;
 
-      // Beleg-Nummer aus dem related_entity (Repair, Order, Consignment).
-      let sourceNumber: string | undefined;
-      try {
-        if (e.relatedModule === 'order' && e.relatedEntityId) {
-          const r = query(`SELECT order_number FROM orders WHERE id = ?`, [e.relatedEntityId]);
-          if (r.length > 0) sourceNumber = r[0].order_number as string;
-        } else if (e.relatedModule === 'repair' && e.relatedEntityId) {
-          const r = query(`SELECT repair_number FROM repairs WHERE id = ?`, [e.relatedEntityId]);
-          if (r.length > 0) sourceNumber = r[0].repair_number as string;
-        } else if (e.relatedModule === 'consignment' && e.relatedEntityId) {
-          const r = query(`SELECT consignment_number FROM consignments WHERE id = ?`, [e.relatedEntityId]);
-          if (r.length > 0) sourceNumber = r[0].consignment_number as string;
-        }
-      } catch { /* */ }
+      // CENTRAL-UI-PARITY R2D — die Belegnummer kommt aus der gemeinsamen Auskunft oben:
+      // eine Anfrage fuer alle Zeilen statt einer je Zeile.
+      const sourceNumber = e.relatedEntityId
+        ? (e.relatedModule === 'order' ? refNumbers.orders[e.relatedEntityId]
+          : e.relatedModule === 'repair' ? refNumbers.repairs[e.relatedEntityId]
+          : e.relatedModule === 'consignment' ? refNumbers.consignments[e.relatedEntityId]
+          : undefined)
+        : undefined;
 
       items.push({
         kind: classifyExpense(e.relatedModule, e.category),
@@ -180,7 +188,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
       return a.number.localeCompare(b.number);
     });
     return items;
-  }, [supplierId, expenses, purchases]);
+  }, [supplierId, expenses, purchases, refNumbers]);
 
   const totalOutstanding = useMemo(() => openItems.reduce((s, e) => s + e.remaining, 0), [openItems]);
 
