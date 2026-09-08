@@ -16,8 +16,6 @@ import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
-import { getStockAggregates } from '@/core/lots/lot-queries';
-import { receivablesBreakdown } from '@/core/finance/receivables';
 import { computeSalesMetrics } from '@/core/reports/sales-metrics';
 import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { usePartnerStore } from '@/stores/partnerStore';
@@ -26,6 +24,9 @@ import { useAgentStore } from '@/stores/agentStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useDebtStore } from '@/stores/debtStore';
 import { useScrapTradeStore } from '@/stores/scrapTradeStore';
+// CENTRAL-UI-PARITY R4A — Bestand und Forderungen ueber die gemeinsamen Kernauskuenfte.
+import { useSharedRead } from '@/core/data/shared-read';
+import { receivableRowsFor, lotAggregatesFor } from '@/core/data/domain-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -120,6 +121,11 @@ export function BusinessReportsPage() {
   const [customerFilter, setCustomerFilter] = useState<string>('');
   const [supplierFilter, setSupplierFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('');
+
+  // CENTRAL-UI-PARITY R4A — Bestand und Forderungen kommen aus den gemeinsamen Kernauskuenften;
+  // die Berichte rechnen darauf und brauchen selbst keine Datenbank mehr.
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
+  const forderungen = useSharedRead('finance.receivables.get', {}, receivableRowsFor, { rows: [] }, []);
 
   const periodRange = useMemo<{ from: string; to: string }>(() => {
     const now = new Date();
@@ -272,7 +278,7 @@ export function BusinessReportsPage() {
     const inStock = products.filter(p =>
       (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
     );
-    const agg = getStockAggregates(inStock.map(p => p.id));
+    const agg = new Map(bestand.paare);
     let totalCount = 0, totalValue = 0;
     const byCat: Record<string, { count: number; value: number; name: string }> = {};
     for (const p of inStock) {
@@ -326,7 +332,7 @@ export function BusinessReportsPage() {
   // bereinigt und damit identisch zur Dashboard-RECEIVABLES-KPI. Die alte
   // Variante zählte nur PARTIAL-Invoices und unterschlug Approval/Consignment/Repair.
   const receivablesReport = useMemo(() => {
-    const rows = receivablesBreakdown();
+    const rows = forderungen.rows;
     const byCustomer: Record<string, { name: string; outstanding: number; count: number }> = {};
     for (const r of rows) {
       const e = byCustomer[r.customerId] || { name: r.customerName, outstanding: 0, count: 0 };

@@ -83,7 +83,7 @@ await import('../../src/core/bridge/service-commands.ts');
 await import('../../src/core/bridge/lifecycle-commands.ts');
 const { runInvoiceCreate } = await import('../../src/core/bridge/invoice-command.ts');
 const fin = await import('../../src/core/bridge/financial-commands.ts');
-// CENTRAL-UI-PARITY — die 42 Store-Auskuenfte gehoeren zum ausgelieferten Zustand.
+// CENTRAL-UI-PARITY — die 47 Store-Auskuenfte gehoeren zum ausgelieferten Zustand.
 await import('../../src/core/bridge/store-read-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
@@ -195,24 +195,24 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 101, `COVER die Registrierung zaehlt 86 Namen (${known.length})`);
+  ok(known.length === 106, `COVER die Registrierung zaehlt 86 Namen (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 60 && mutations.length === 40,
+  ok(probes.length === 1 && reads.length === 65 && mutations.length === 40,
     `COVER 1 Probe + 23 Auskuenfte (18 + 27 typisierte) + 40 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.
   const uncovered = [...reads, ...mutations].filter((o) => !perms.isOperationCovered(o));
-  ok(uncovered.length === 0, `COVER jede der 100 ist namentlich bedacht (offen: ${uncovered.join(', ') || 'keine'})`);
+  ok(uncovered.length === 0, `COVER jede der 105 ist namentlich bedacht (offen: ${uncovered.join(', ') || 'keine'})`);
   const invented = [...Object.keys(perms.OPERATION_PERMISSIONS), ...Object.keys(perms.READ_PERMISSIONS)]
     .filter((o) => !known.includes(o));
   ok(invented.length === 0, `COVER …und keine erfundene steht drin (${invented.join(', ') || 'keine'})`);
   // CENTRAL-UI-PARITY R1 — 18 Auskuenfte aus C2, dazu 27 typisierte. Beide stehen auf `null`,
   // und aus demselben Grund: der Primary bewacht seine Anzeige nirgends mit einem Recht.
-  const storePerms = Object.keys(perms.READ_PERMISSIONS).filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get'].includes(o));
-  ok(Object.keys(perms.READ_PERMISSIONS).length === 60 && storePerms.length === 42,
-    `COVER 18 Auskuenfte + 42 typisierte Auskuenfte stehen einzeln da (${Object.keys(perms.READ_PERMISSIONS).length})`);
+  const storePerms = Object.keys(perms.READ_PERMISSIONS).filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'expenses.credit_paid.get'].includes(o));
+  ok(Object.keys(perms.READ_PERMISSIONS).length === 65 && storePerms.length === 47,
+    `COVER 18 Auskuenfte + 47 typisierte Auskuenfte stehen einzeln da (${Object.keys(perms.READ_PERMISSIONS).length})`);
   for (const r of reads) ok(r in perms.READ_PERMISSIONS, `COVER ${r} ist als Auskunft bedacht`);
 
   // BEFUND, am echten Bildschirmcode belegt: es gibt kein Lese-Tor am Primary.

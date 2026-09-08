@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type { Product, Category, StockStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { getStockAggregates, computeStockValuation, isOwnStockAsset } from '@/core/lots/lot-queries';
+import { getStockAggregates, computeStockValuation, isOwnStockAsset , type LotAggregate } from '@/core/lots/lot-queries';
 // CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
 import { runExclusiveUnless } from '@/core/bridge/command-scheduler';
@@ -403,8 +403,15 @@ interface ProductStore {
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
   updateCategory: (id: string, data: Partial<Category>) => void;
-  getStockValue: () => { purchaseTotal: number; saleTotal: number; count: number };
-  getStockByCategory: () => { categoryId: string; name: string; color: string; count: number; value: number }[];
+  /**
+   * CENTRAL-UI-PARITY R4A — die Losezahlen kommen als PARAMETER herein.
+   *
+   * Vorher holte sich der Getter sie selbst aus der Datenbank; auf einem Rechner ohne Datenbank
+   * warf das mitten im Zeichnen der Uebersicht. Wer die Zahlen hat, reicht sie durch — am
+   * Primary wie aus der Ferne dieselbe Rechnung.
+   */
+  getStockValue: (agg?: Map<string, LotAggregate>) => { purchaseTotal: number; saleTotal: number; count: number };
+  getStockByCategory: (agg?: Map<string, LotAggregate>) => { categoryId: string; name: string; color: string; count: number; value: number }[];
   // Plan §Product: SKU-Kollisions-Check. Nimmt einen Prefix ("RLX-SUB") und findet nächste freie Nummer.
   // Gibt vollen SKU zurück, z.B. "RLX-SUB-042". Vermeidet Duplikate über alle Produkte (auch sold).
   nextAvailableSku: (prefix: string) => string;
@@ -1373,7 +1380,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     get().loadCategories();
   },
 
-  getStockValue: () => {
+  getStockValue: (agg) => {
     // Plan §Commission §5 + §Dashboard §3.C: "Gesamtwert (nur OWN)".
     // Stock-Lots Phase 7: Bestandswert kommt aus stock_lots (Σ qty_remaining * unit_cost),
     // damit Multi-Lot-Produkte nicht den irreführenden single product.purchase_price benutzen.
@@ -1381,14 +1388,14 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // (Legacy-Daten vor Backfill / Produkte ohne Purchase-History).
     const inStock = get().products.filter(isOwnStockAsset);
     // L-18 — zentrale Bewertung via computeStockValuation (Lot, sonst pp×qty).
-    const v = computeStockValuation(inStock);
+    const v = computeStockValuation(inStock, agg);
     return { purchaseTotal: v.cost, saleTotal: v.plannedSale, count: v.count };
   },
 
-  getStockByCategory: () => {
+  getStockByCategory: (uebergeben) => {
     const { products, categories } = get();
     const inStock = products.filter(isOwnStockAsset);
-    const agg = getStockAggregates(inStock.map(p => p.id));
+    const agg = uebergeben ?? getStockAggregates(inStock.map(p => p.id));
     return categories.map(cat => {
       const items = inStock.filter(p => p.categoryId === cat.id);
       let count = 0, value = 0;

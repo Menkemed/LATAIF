@@ -597,3 +597,103 @@ während des Aufbaus, also vor jeder Fehlergrenze. Jetzt fällt die Filialliste 
 des geprüften Ausweises zurück: es ist genau eine, und mehr darf dieser Rechner ohnehin nicht
 sehen.
 
+---
+
+## R4A — die Lesefläche, jetzt am laufenden Programm gemessen (08.09.2026)
+
+### Warum es einen neuen Maßstab brauchte
+
+R2D hat die Abfragen aus den Seiten geholt und danach gezählt, was noch **in** Seiten steht. Der
+erste Lauf an zwei echten Rechnern hat gezeigt, dass diese Zählung am Kern vorbeigeht: eine
+Seite liest auch, wenn sie `balanceOf`, `receivablesBreakdown`, `getStockAggregates` oder
+`creditPaidByExpense` ruft. Ein Scan über Dateien kann das nicht beweisen — **gefahren** werden
+muss es.
+
+### §1/§2 Der reproduzierte Absturz und der neue Maßstab
+
+Der Weg, wörtlich: frischer Rechner → „Connect to existing LATAIF server" → Anmeldung → normale
+Anwendung → Übersicht → `Error: Database not initialized`. Und der Teil, der es gefährlich
+machte: **die Fehlergrenze bleibt danach im Fehlerzustand**. Ohne frischen Seitenaufbau je Route
+sieht jede weitere Fläche einfach leer aus, ohne dass irgendwo etwas rot wird.
+
+Der neue Maßstab ist deshalb `test/e2e/r4a-route-crawl.e2e.mjs`:
+
+- zwei echte Anwendungen, echter Verbindungsklick, echte Anmeldung,
+- **jede Route mit eigenem Seitenaufbau**,
+- ein Stolperdraht, der über `Page.addScriptToEvaluateOnNewDocument` **vor** dem ersten Skript
+  der Seite liegt und jeden Griff zur lokalen Datenbank mit Route, Meldung und Bauteil festhält.
+
+Der Stolperdraht lebt im Test. Im ausgelieferten Programm gibt es keinen Debug-Zugang.
+
+### §3 Die transitive Inventur
+
+| Kernfunktion | Modul | wer rief sie beim Zeichnen |
+|---|---|---|
+| `balanceOf`, `totalReceivables` | `ledger/queries` | Übersicht, Bank |
+| `receivablesBreakdown` | `finance/receivables` | Übersicht, Forderungen, Berichte |
+| `getStockAggregates`, `deriveProductCostFromLots`, `getLotsWithPurchaseNumbers` | `lots/lot-queries` | Sammlung, Artikel, Rechnung/Auftrag anlegen, Angebote |
+| `creditPaidByExpense`, `creditPaidForExpense` | `finance/expenseSettlement` | Ausgaben, Auftrag, Lieferant, Reparatur, beide Zahlmasken |
+| `getStockValue`, `getStockByCategory` | `stores/productStore` | Übersicht |
+
+Fünf neue **Domänen**-Auskünfte decken das ab — ein Name je Sache, nicht je Bildschirm:
+
+```
+ledger.balances.get           finance.receivables.get
+inventory.lot_aggregates.get  product.lots.get
+expenses.credit_paid.get
+```
+
+Kopiert wurde nichts: `core/data/domain-reads.ts` **ruft** die vorhandenen Funktionen auf. Die
+reinen Rechnungen bleiben, wo sie sind — `computeExpenseSettlement`, `summarizeInventory`,
+`bucketTotals`, `formatLotLabel` brauchen keine Datenbank und wurden nicht angefasst.
+
+### Vier echte Defekte, die dabei ans Licht kamen
+
+1. **Der Client blieb nach dem Anmelden weiß** (schon in R3 gefunden, hier bewiesen):
+   `getUserBranches()` las `user_branches` — im Aufbau, also vor jeder Fehlergrenze.
+2. **Der Medien-Nachlauf lief auch ohne Datenbank.** `triggerMediaRecoveryPostAuth` stieß
+   Wiederherstellung, Einbettungen und den Telefon-Posteingang an; auf einem Client endete das
+   bei **jedem** Seitenaufbau in abgewiesenen Zusagen. Er gehört zur Maschine und startet dort
+   nicht mehr.
+3. **Einkauf-Detail zählte Haken falsch** (React #310): die „nicht gefunden"-Weiche stand VOR
+   einem `useMemo`. Am Primary fiel es kaum auf, weil der Einkauf beim ersten Zeichnen meist
+   schon da war; auf einem Client kommt er erst mit der Antwort — erster Aufbau kurz, zweiter
+   lang. Die Weiche steht jetzt hinter allen Haken.
+4. **Die Bankseite zeigte drei Nullen.** Ihr `catch` fing den Fehler ab und lieferte
+   `{cash:0, bank:0, benefit:0}` — Zahlen, die wie Salden aussehen und keine sind.
+
+Dazu ein weiterer Scope-Fund derselben Sorte wie in R2B: `receivablesBreakdown()` hatte
+**keine Filialgrenze** und zählte Kommissionen, Rechnungen, Übergaben und Reparaturen aller
+Filialen zusammen. Sie nimmt jetzt eine Filiale entgegen und gibt sie an alle vier Quellen weiter.
+
+### §5–§9 Ergebnis am laufenden Programm
+
+```
+38 Geschaeftsflaechen   → alle gezeichnet, kein Absturz, kein Zugriff auf eine lokale Datenbank
+ 4 Maschinenflaechen    → zeigen ihren Hinweis, stuerzen nicht ab
+ 0 offene Lesestellen
+```
+
+Dazu: die Identität des Clients stammt aus dem geprüften Ausweis (Filiale der Sitzung == Filiale
+im Ausweis == Filiale des Datenbestands), der Bildschirm des Primary ist nach dem gesamten
+Rundgang unverändert, und auf dem Client liegt weiterhin keine `lataif.db`, kein Datenort,
+kein Ausgangskorb.
+
+### Registry
+
+```
+Probe            = 1
+C2 Reads         = 18
+UI-Parity Reads  = 47   (42 aus R1–R2D + 5 Kernauskuenfte aus R4A)
+Mutations        = 40   (unveraendert — R4A fasst keinen Schreibweg an)
+Total            = 106
+```
+
+### Was R4A ausdrücklich NICHT anfasst
+
+Die gemeinsame Oberfläche erreicht weiterhin **0 von 40** Fernbuchungen (R3 §1). Das bleibt
+offen und ist die nächste Scheibe. Ebenso zwei Leseaufrufe, die erst auf **Klick** laufen
+(Losauswahl in „Rechnung anlegen" und „Reparatur anlegen") sowie der Verlauf-Aufklapper und die
+eigenen Landesvorwahlen — sie gehören zu Handlungen, nicht zum Zeichnen, und sind im Gate
+namentlich eingeordnet.
+

@@ -54,7 +54,15 @@ function computeDaysOverdue(dueAt: string | null, issuedAt: string, graceDays = 
   return dayDiff(today, d.toISOString());
 }
 
-export function receivablesBreakdown(): ReceivableRow[] {
+/**
+ * CENTRAL-UI-PARITY R4A — die offenen Forderungen einer Filiale.
+ *
+ * Bis hierher hatte diese Aufstellung KEINE Filialgrenze: sie zaehlte Kommissionen, Rechnungen,
+ * Uebergaben und Reparaturen aller Filialen zusammen. Am Ein-Filial-Betrieb faellt das nicht auf;
+ * ueber das Netz waere es die Preisgabe fremder Zahlen. Ohne Angabe bleibt es beim alten
+ * Verhalten, damit kein Aufrufer still etwas anderes bekommt als bisher.
+ */
+export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
   const rows: ReceivableRow[] = [];
 
   // ── 1. Consignment-Auto-Invoices ─────────────────────────────
@@ -80,7 +88,8 @@ export function receivablesBreakdown(): ReceivableRow[] {
        ) cn ON cn.invoice_id = i.id
       WHERE cs.invoice_id IS NOT NULL
         AND i.status NOT IN ('CANCELLED', 'DRAFT', 'RETURNED')
-        AND (i.gross_amount - i.paid_amount - COALESCE(cn.cancel_amount, 0)) > 0.005`
+        AND (i.gross_amount - i.paid_amount - COALESCE(cn.cancel_amount, 0)) > 0.005${branchId ? ' AND i.branch_id = ?' : ''}`,
+    branchId ? [branchId] : []
   );
   for (const r of consRows) {
     const total = (Number(r.gross) || 0) - (Number(r.cn_cancel) || 0);
@@ -129,7 +138,8 @@ export function receivablesBreakdown(): ReceivableRow[] {
        LEFT JOIN consignments cs ON cs.invoice_id = i.id
       WHERE cs.id IS NULL
         AND i.status NOT IN ('CANCELLED', 'DRAFT', 'RETURNED')
-        AND (i.gross_amount - i.paid_amount - COALESCE(cn.cancel_amount, 0)) > 0.005`
+        AND (i.gross_amount - i.paid_amount - COALESCE(cn.cancel_amount, 0)) > 0.005${branchId ? ' AND i.branch_id = ?' : ''}`,
+    branchId ? [branchId] : []
   );
   for (const r of invRows) {
     const total = (Number(r.gross) || 0) - (Number(r.cn_cancel) || 0);
@@ -178,7 +188,8 @@ export function receivablesBreakdown(): ReceivableRow[] {
        JOIN customers c  ON c.id = ag.customer_id
       WHERE at.invoice_id IS NULL
         AND at.status IN ('sold', 'settled')
-        AND (COALESCE(at.settlement_amount, 0) - COALESCE(at.settlement_paid_amount, 0)) > 0.005`
+        AND (COALESCE(at.settlement_amount, 0) - COALESCE(at.settlement_paid_amount, 0)) > 0.005${branchId ? ' AND at.branch_id = ?' : ''}`,
+    branchId ? [branchId] : []
   );
   for (const r of aprRows) {
     const total = Number(r.settle_total) || 0;
@@ -226,7 +237,8 @@ export function receivablesBreakdown(): ReceivableRow[] {
       WHERE r.invoice_id IS NULL
         AND r.status IN ('ready', 'picked_up')
         AND COALESCE(r.charge_to_customer, 0) > 0
-        AND (COALESCE(r.charge_to_customer, 0) - COALESCE(r.customer_paid_amount, 0)) > 0.005`
+        AND (COALESCE(r.charge_to_customer, 0) - COALESCE(r.customer_paid_amount, 0)) > 0.005${branchId ? ' AND r.branch_id = ?' : ''}`,
+    branchId ? [branchId] : []
   );
   for (const r of repRows) {
     const total = Number(r.charge) || 0;

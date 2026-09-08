@@ -12,7 +12,9 @@
 
 import { useMemo } from 'react';
 import { useAuthStore } from '@/stores/authStore';
-import { query } from '@/core/db/helpers';
+// CENTRAL-UI-PARITY R4A — der Mandant kommt aus einer Quelle, die es auf BEIDEN Rechnern gibt:
+// am Primary aus der Filialtabelle, auf einem Client aus dem geprueften Ausweis.
+import { sessionTenantId } from '@/core/data/shared-read';
 
 export interface MediaScope {
   tenantId: string | undefined;
@@ -21,11 +23,6 @@ export interface MediaScope {
 
 export function useMediaScope(): MediaScope {
   const branchId = useAuthStore(s => s.session?.branchId) || undefined;
-  const tenantId = useMemo(() => {
-    if (!branchId) return undefined;
-    const rows = query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]);
-    const t = rows.length > 0 ? (rows[0].tenant_id as string | null) : null;
-    return t || undefined;
-  }, [branchId]);
+  const tenantId = useMemo(() => sessionTenantId(branchId), [branchId]);
   return { tenantId, branchId };
 }

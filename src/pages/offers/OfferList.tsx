@@ -14,8 +14,9 @@ import { useProductStore } from '@/stores/productStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { matchesDeep } from '@/core/utils/deep-search';
-import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedRead } from '@/core/data/shared-read';
+import { lotAggregatesFor } from '@/core/data/domain-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -41,6 +42,10 @@ export function OfferList() {
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
 
   useEffect(() => { loadOffers(); loadCustomers(); loadProducts(); loadOrders(); }, [loadOffers, loadCustomers, loadProducts, loadOrders]);
+  // CENTRAL-UI-PARITY R4A — die FIFO-Kosten kommen aus der gemeinsamen Kernauskunft:
+  // ein Durchgang fuer alle Artikel statt einer Abfrage je Zeile.
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
+  const fifoKosten = useMemo(() => new Map(bestand.fifo), [bestand]);
 
   const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
 
@@ -102,7 +107,7 @@ export function OfferList() {
       const p = products.find(pr => pr.id === id);
       if (!p) return null;
       // Phase 7 — Cost-Basis fuer Margin-Scheme aus FIFO-Lot (= naechste Sale-Cost).
-      const fifo = deriveProductCostFromLots(p.id);
+      const fifo = fifoKosten.get(p.id) ?? null;
       const costBasis = fifo ? fifo.fifoCost : p.purchasePrice;
       return { productId: p.id, unitPrice: linePrices[id] ?? p.plannedSalePrice ?? p.purchasePrice, purchasePrice: costBasis, taxScheme: p.taxScheme };
     }).filter(Boolean) as { productId: string; unitPrice: number; purchasePrice: number; taxScheme: string }[];

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { authService, type Session, type UserBranch } from '@/core/auth/auth';
+import { readsFromPrimary } from '@/core/data/primary-source';
 import type { UserRole } from '@/core/models/types';
 
 /**
@@ -9,6 +10,11 @@ import type { UserRole } from '@/core/models/types';
  * recovery is once-per-epoch, reconciliation is guarded per product.
  */
 function triggerMediaRecoveryPostAuth(): void {
+  // CENTRAL-UI-PARITY R4A — dieser Nachlauf gehoert zur MASCHINE, auf der die Datenbank steht:
+  // Medien-Wiederherstellung, Einbettungen, der durable Posteingang der Telefone. Auf einem
+  // Rechner ohne Datenbank greift jeder dieser Schritte ins Leere — sichtbar als abgewiesene
+  // Zusage bei JEDEM Seitenaufbau. Er wird dort deshalb gar nicht erst angestossen.
+  if (readsFromPrimary()) return;
   void import('@/stores/productStore')
     .then((m) => m.triggerStartupMediaRecovery())
     .catch(() => { /* never blocks auth */ })

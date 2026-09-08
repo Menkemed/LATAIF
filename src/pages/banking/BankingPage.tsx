@@ -9,8 +9,8 @@ import { Bhd } from '@/components/ui/Bhd';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { useBankingStore, transferFlow, transferDirectionFor, type BankTransactionType, type BankAccount } from '@/stores/bankingStore';
-import { balanceOf } from '@/core/ledger/queries';
-import { currentBranchId } from '@/core/db/helpers';
+import { useSharedRead } from '@/core/data/shared-read';
+import { ledgerBalancesFor, LEERE_SALDEN } from '@/core/data/domain-reads';
 
 
 const TYPE_LABELS: Record<BankTransactionType, string> = {
@@ -75,18 +75,11 @@ export function BankingPage() {
   // Karten-Geld liegt auf CARD_CLEARING (brutto−Gebühr) und wird in die Bank-Liquidität
   // eingerechnet (Parität). allTxs bleibt der Bewegungs-Log (Liste + Filter) und dient
   // hier nur als Recompute-Trigger, wenn sich Transaktionen ändern.
-  const balances = useMemo(() => {
-    try {
-      const branchId = currentBranchId();
-      return {
-        cash: balanceOf('CASH', { branchId }),
-        bank: balanceOf('BANK', { branchId }) + balanceOf('CARD_CLEARING', { branchId }),
-        benefit: balanceOf('BENEFIT', { branchId }),
-      };
-    } catch {
-      return { cash: 0, bank: 0, benefit: 0 };
-    }
-  }, [allTxs]);
+  // CENTRAL-UI-PARITY R4A — die Salden kommen aus der gemeinsamen Kernauskunft. Vorher rief
+  // diese Seite `balanceOf` direkt; auf einem Rechner ohne Datenbank fing der `catch` den Fehler
+  // ab und zeigte drei NULLEN — Zahlen, die wie Salden aussehen und keine sind.
+  const salden = useSharedRead('ledger.balances.get', {}, ledgerBalancesFor, LEERE_SALDEN, [allTxs]);
+  const balances = { cash: salden.cash, bank: salden.bank, benefit: salden.benefit };
   const filteredTxs = useMemo(() => {
     return allTxs.filter(t => {
       if (accountFilter !== 'all' && t.account !== accountFilter) return false;

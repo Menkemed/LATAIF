@@ -200,6 +200,13 @@ pub const OP_METALS_STOCK_BY_KARAT_GET: &str = "metals.stock_by_karat.get";
 pub const OP_SEARCH_GLOBAL_GET: &str = "search.global.get";
 pub const OP_PAGE_RECONCILIATION_GET: &str = "page.reconciliation.get";
 
+// CENTRAL-UI-PARITY R4A — die Kernauskuenfte hinter den Seiten.
+pub const OP_LEDGER_BALANCES_GET: &str = "ledger.balances.get";
+pub const OP_FINANCE_RECEIVABLES_GET: &str = "finance.receivables.get";
+pub const OP_INVENTORY_LOT_AGGREGATES_GET: &str = "inventory.lot_aggregates.get";
+pub const OP_PRODUCT_LOTS_GET: &str = "product.lots.get";
+pub const OP_EXPENSES_CREDIT_PAID_GET: &str = "expenses.credit_paid.get";
+
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
 // `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
@@ -307,6 +314,11 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_METALS_STOCK_BY_KARAT_GET,
     OP_SEARCH_GLOBAL_GET,
     OP_PAGE_RECONCILIATION_GET,
+    OP_LEDGER_BALANCES_GET,
+    OP_FINANCE_RECEIVABLES_GET,
+    OP_INVENTORY_LOT_AGGREGATES_GET,
+    OP_PRODUCT_LOTS_GET,
+    OP_EXPENSES_CREDIT_PAID_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

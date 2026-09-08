@@ -55,17 +55,10 @@ export function PurchaseDetail() {
   const supplierLedger = useMemo(() => purchase ? getLedger(purchase.supplierId) : { creditBalance: 0, totalPurchases: 0, totalPaid: 0, outstandingBalance: 0 }, [purchase, getLedger, returns, purchases]);
   const linkedReturns = useMemo(() => returns.filter(r => r.purchaseId === id), [returns, id]);
 
-  if (!purchase) {
-    return (
-      <div className="flex-1 flex items-center justify-center" style={{ height: '100vh', background: '#FFFFFF' }}>
-        <p style={{ color: '#6B7280' }}>Purchase not found</p>
-      </div>
-    );
-  }
 
-  const canPay = purchase.status !== 'CANCELLED' && purchase.status !== 'PAID' && purchase.remainingAmount > 0;
-  const canCancel = purchase.status !== 'CANCELLED' && purchase.status !== 'PAID';
-  const canReturn = purchase.status !== 'CANCELLED' && linkedReturns.filter(r => r.status !== 'CANCELLED').length === 0;
+  const canPay = !!purchase && purchase.status !== 'CANCELLED' && purchase.status !== 'PAID' && purchase.remainingAmount > 0;
+  const canCancel = !!purchase && purchase.status !== 'CANCELLED' && purchase.status !== 'PAID';
+  const canReturn = !!purchase && purchase.status !== 'CANCELLED' && linkedReturns.filter(r => r.status !== 'CANCELLED').length === 0;
 
   function handleAddPayment() {
     const amt = parseFloat(payAmount);
@@ -126,6 +119,19 @@ export function PurchaseDetail() {
       return s;
     }, 0);
   }, [returnLines, purchase]);
+
+  // CENTRAL-UI-PARITY R4A — diese Weiche stand frueher VOR dem Haken darueber. Am Primary fiel
+  // das kaum auf, weil der Einkauf beim ersten Zeichnen meist schon geladen war; auf einem
+  // Rechner ohne Datenbank kommt er erst mit der Antwort — der erste Aufbau nahm die kurze
+  // Fassung, der zweite die lange, und React zaehlte mehr Haken als zuvor (#310). Sie steht
+  // deshalb jetzt hinter ALLEN Haken.
+  if (!purchase) {
+    return (
+      <div className="flex-1 flex items-center justify-center" style={{ height: '100vh', background: '#FFFFFF' }}>
+        <p style={{ color: '#6B7280' }}>Purchase not found</p>
+      </div>
+    );
+  }
 
   function handleCreateReturn() {
     if (!id || !purchase) return;

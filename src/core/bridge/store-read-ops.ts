@@ -72,6 +72,15 @@ export const OP_SEARCH_GLOBAL_GET = 'search.global.get';
 // deshalb an den Hauptrechner gebunden, weil sie ihre zwanzig Abfragen selbst stellte.
 export const OP_PAGE_RECONCILIATION_GET = 'page.reconciliation.get';
 
+// CENTRAL-UI-PARITY R4A — was eine Seite ueber eine KERNFUNKTION liest. Der erste Zwei-App-Lauf
+// hat gezeigt, dass ein Scan ueber Dateien das nicht findet: die Uebersicht ruft `balanceOf`,
+// die Forderungsseite `receivablesBreakdown`, die Sammlung `getStockAggregates`.
+export const OP_LEDGER_BALANCES_GET = 'ledger.balances.get';
+export const OP_FINANCE_RECEIVABLES_GET = 'finance.receivables.get';
+export const OP_INVENTORY_LOT_AGGREGATES_GET = 'inventory.lot_aggregates.get';
+export const OP_PRODUCT_LOTS_GET = 'product.lots.get';
+export const OP_EXPENSES_CREDIT_PAID_GET = 'expenses.credit_paid.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -119,6 +128,11 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_METALS_STOCK_BY_KARAT_GET,
   OP_SEARCH_GLOBAL_GET,
   OP_PAGE_RECONCILIATION_GET,
+  OP_LEDGER_BALANCES_GET,
+  OP_FINANCE_RECEIVABLES_GET,
+  OP_INVENTORY_LOT_AGGREGATES_GET,
+  OP_PRODUCT_LOTS_GET,
+  OP_EXPENSES_CREDIT_PAID_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

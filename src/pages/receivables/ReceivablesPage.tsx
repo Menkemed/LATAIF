@@ -5,7 +5,7 @@ import { PageLayout } from '@/components/layout/PageLayout';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import {
-  receivablesBreakdown, bucketTotals, overdueCount, receivablesTotal,
+  bucketTotals, overdueCount, receivablesTotal,
   RECEIVABLE_SOURCE_LABELS, RECEIVABLE_SOURCE_COLORS,
   type ReceivableSource, type ReceivableAgeBucket, type ReceivableRow,
 } from '@/core/finance/receivables';
@@ -14,6 +14,8 @@ import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { useDebtStore } from '@/stores/debtStore';
+import { useSharedRead } from '@/core/data/shared-read';
+import { receivableRowsFor } from '@/core/data/domain-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -99,10 +101,11 @@ export function ReceivablesPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSources, overdueOnly]);
 
-  const allRows = useMemo(
-    () => receivablesBreakdown(),
-    [invoices, consignments, transfers, repairs, debts]
-  );
+  // CENTRAL-UI-PARITY R4A — die Aufstellung kommt aus der gemeinsamen Kernauskunft; die
+  // Auswertung darauf (Faecher, Summen, Ueberfaellige) bleibt hier, sie rechnet nur.
+  const forderungen = useSharedRead('finance.receivables.get', {}, receivableRowsFor, { rows: [] },
+    [invoices, consignments, transfers, repairs, debts]);
+  const allRows = forderungen.rows;
 
   const filtered = useMemo(() => {
     let r = allRows;

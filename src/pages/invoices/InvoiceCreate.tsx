@@ -20,10 +20,12 @@ import { useProductStore } from '@/stores/productStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { calcInvoiceLine, toInvoiceLine } from '@/core/invoices/line-derivation';
-import { getLotsWithPurchaseNumbers, formatLotLabel, getStockAggregates, type StockLot } from '@/core/lots/lot-queries';
+import { getLotsWithPurchaseNumbers, formatLotLabel, type StockLot } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import { checkEditReason, EDIT_REASON_REQUIRED_MESSAGE } from '@/core/invoices/edit-reason';
+import { useSharedRead } from '@/core/data/shared-read';
+import { lotAggregatesFor } from '@/core/data/domain-reads';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -133,7 +135,11 @@ export function InvoiceCreate() {
     subtitle: c.phone,
   })), [customers]);
   // v0.6.9 — Reservierungen vorberechnen (Soft-Warnung im Picker).
-  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
+  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
+  // CENTRAL-UI-PARITY R4A — Losezahlen aus der gemeinsamen Kernauskunft statt einer eigenen
+  // Abfrage: auf einem Rechner ohne Datenbank warf die sonst mitten im Zeichnen.
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
+  const lotAgg = useMemo(() => new Map(bestand.paare), [bestand]);
 
   const productOptions = useMemo(() => {
     // Plan §Sales §Partial-Payment-Reservation: 'reserved' / 'consignment_reserved'
@@ -149,7 +155,7 @@ export function InvoiceCreate() {
     );
     // Phase 7: "stock N" zeigt Lot-Total (echte verfuegbare Stuecke) statt
     // legacy product.quantity. Eine Query fuer alle Produkte (Bulk).
-    const agg = getStockAggregates(visible.map(p => p.id));
+    const agg = lotAgg;
     return visible.map(p => {
       const stock = agg.get(p.id)?.totalQty ?? (p.quantity || 1);
       // v0.6.9 — Soft-Reservation: zeige im Picker an, wenn dieses Stueck in einer

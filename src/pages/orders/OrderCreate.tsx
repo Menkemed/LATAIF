@@ -21,7 +21,6 @@ import { useGoldStore } from '@/stores/goldStore';
 import { getSpotPrices } from '@/core/market/spot-prices';
 import { purityOf } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
-import { getStockAggregates } from '@/core/lots/lot-queries';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import type { OrderStatus, OrderType, CustomOrderMeta, MaterialDetails, Product } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
@@ -29,6 +28,8 @@ import { MaterialsCard, type MaterialLine } from '@/components/work-orders/Mater
 import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
 import { NewProductModal } from '@/components/products/NewProductModal';
 import { v4 as genId } from 'uuid';
+import { useSharedRead } from '@/core/data/shared-read';
+import { lotAggregatesFor } from '@/core/data/domain-reads';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 
@@ -178,10 +179,9 @@ export function OrderCreate() {
   // Phase 7 — Lot-Aggregate fuer alle in lines referenzierten Produkte cachen,
   // damit Cost-Basis fuer Margin-Scheme aus dem FIFO-Lot kommt (= naechster Sale-Cost)
   // statt aus dem irrefuehrenden single product.purchase_price.
-  const lotAgg = useMemo(() => {
-    const ids = lines.map(l => l.productId).filter((x): x is string => Boolean(x));
-    return getStockAggregates(ids);
-  }, [lines]);
+  // CENTRAL-UI-PARITY R4A — Losezahlen aus der gemeinsamen Kernauskunft.
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
+  const lotAgg = useMemo(() => new Map(bestand.paare), [bestand]);
 
   // Pro Zeile auflösen: Scheme + VAT + Net + Gross (genau wie Invoice).
   const computed = lines.map(l => {

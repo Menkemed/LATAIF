@@ -18,7 +18,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useExpenseStore } from '@/stores/expenseStore';
-import { computeExpenseSettlement, creditPaidForExpense } from '@/core/finance/expenseSettlement';
+import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { useProductStore } from '@/stores/productStore';
@@ -34,6 +34,8 @@ import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { internalCostOnEdit, repairInvoiceLineCost, repairMargin } from '@/core/repairs/repair-cost';
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
+import { useSharedRead } from '@/core/data/shared-read';
+import { creditPaidFor } from '@/core/data/domain-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -132,7 +134,9 @@ export function RepairDetail() {
 
   // v0.7.6 — Explizite In-house-Option als ersten Eintrag, damit User nicht
   // versehentlich "leer" laesst und still als own-work bucht wird. Sentinel-
-  // ID '__INHOUSE__' wird beim Save zu undefined (= null in DB) uebersetzt.
+  // ID '__INHOUSE__' wird beim Save zu undefined (= null in DB) uebersetzt.
+  // CENTRAL-UI-PARITY R4A — Guthaben je Ausgabe aus der gemeinsamen Kernauskunft.
+  const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, []);
   const supplierOptions = useMemo(() => [
     { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: 'No supplier — own labor / own stock', meta: '' },
     ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
@@ -155,7 +159,7 @@ export function RepairDetail() {
     const linked = expenses.find(e => e.relatedModule === 'repair' && e.relatedEntityId === id);
     if (!linked) return !!repair.internalPaidFrom;
     // Settlement-SSOT: cash + credit. Eine credit-beglichene Workshop-Expense gilt als bezahlt.
-    const settlement = computeExpenseSettlement(linked.amount, linked.paidAmount || 0, creditPaidForExpense(linked.id), linked.status);
+    const settlement = computeExpenseSettlement(linked.amount, linked.paidAmount || 0, guthaben.byExpense[linked.id] || 0, linked.status);
     return settlement.status === 'PAID';
   }, [id, repair, expenses]);
 

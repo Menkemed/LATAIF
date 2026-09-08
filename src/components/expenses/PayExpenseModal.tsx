@@ -5,13 +5,15 @@
 // Chip-Klick) und OrderDetail (A/P-Chip-Klick). Eine UI, eine SSOT-Action
 // (`recordExpensePayment`) — Cross-Store-Reload triggert die anderen Views
 // automatisch via expenseStore.recordExpensePayment.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Bhd } from '@/components/ui/Bhd';
 import { useExpenseStore } from '@/stores/expenseStore';
-import { computeExpenseSettlement, creditPaidForExpense } from '@/core/finance/expenseSettlement';
+import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
+import { useSharedRead } from '@/core/data/shared-read';
+import { creditPaidFor } from '@/core/data/domain-reads';
 
 interface PayExpenseModalProps {
   expenseId: string | null;
@@ -33,7 +35,9 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   // Settlement-SSOT: Rest = amount − (cash + credit). credit_paid einzeln (eine Expense → eine Query,
   // kein N+1). Ohne den credit-Anteil koennte das Modal Cash auf eine bereits credit-beglichene
   // Expense ueber-einziehen und zeigte einen falschen Restbetrag.
-  const creditPaid = useMemo(() => (expenseId ? creditPaidForExpense(expenseId) : 0), [expenseId, expenses]);
+  // Dieselbe Kernauskunft wie die Liste — eine Anfrage, keine je Beleg.
+  const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, [expenseId, expenses]);
+  const creditPaid = expenseId ? (guthaben.byExpense[expenseId] || 0) : 0;
   const settlement = exp ? computeExpenseSettlement(exp.amount, exp.paidAmount || 0, creditPaid, exp.status) : null;
   const remaining = settlement ? settlement.remaining : 0;
 

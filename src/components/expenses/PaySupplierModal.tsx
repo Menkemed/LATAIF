@@ -20,12 +20,12 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
-import { creditPaidByExpense } from '@/core/finance/expenseSettlement';
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
 import { applySupplierCreditViaServer } from '@/core/operations/service';
 // CENTRAL-UI-PARITY R2D — Belegnummern ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { refNumbersFor } from '@/core/data/page-reads';
+import { creditPaidFor } from '@/core/data/domain-reads';
 
 interface PaySupplierModalProps {
   supplierId: string | null;
@@ -233,7 +233,8 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   const isCredit = method === 'credit';
 
   // Credit-Einloesungen je Expense gebuendelt (eine GROUP-BY-Query, kein N+1) → settled = cash+credit.
-  const creditPaidMap = useMemo(() => creditPaidByExpense(), [expenses, refreshTick]);
+  const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, [expenses, refreshTick]);
+  const creditPaidMap = useMemo(() => new Map(Object.entries(guthaben.byExpense)), [guthaben]);
 
   // Offene supplier-verknuepfte Expenses (settled-aware, > 0 offen) + offene Credits — NUR Expenses,
   // Purchases fliessen bewusst NICHT ein. Reines Lesen; speist Max + Vorschau.

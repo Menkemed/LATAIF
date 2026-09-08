@@ -24,7 +24,7 @@ import { formatProductMultiLine } from '@/core/utils/product-format';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useExpenseStore } from '@/stores/expenseStore';
-import { computeExpenseSettlement, creditPaidByExpense } from '@/core/finance/expenseSettlement';
+import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { query } from '@/core/db/helpers';
 import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
@@ -41,6 +41,7 @@ import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY R2D — die Anzeige liest ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
+import { creditPaidFor } from '@/core/data/domain-reads';
 
 function fmt(v: number | undefined | null): string {
   if (v === undefined || v === null) return '0.000';
@@ -138,7 +139,8 @@ export function OrderDetail() {
 
   // Slice B — Credit-Einloesungen je Expense gebuendelt (EINE GROUP-BY-Query, kein N+1). Der A/P-Chip
   // pro Kostenzeile rechnet settled = cash+credit, sonst zeigt eine credit-beglichene Zeile "Pay".
-  const expenseCreditPaid = useMemo(() => creditPaidByExpense(), [expenses]);
+  const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, [expenses]);
+  const expenseCreditPaid = useMemo(() => new Map(Object.entries(guthaben.byExpense)), [guthaben]);
   // M-08 — angezeigter offener Saldo: konvertierte Order-Payments (Geld zur Invoice
   // gewandert) ausschliessen. totalPaid (roh) bleibt fuer Flow-Logik (Convert/Delete/Cancel).
   const totalPaidActive = useMemo(() => payments.filter(p => !p.convertedToInvoice).reduce((s, p) => s + p.amount, 0), [payments]);

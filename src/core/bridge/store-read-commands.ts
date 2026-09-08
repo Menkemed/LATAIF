@@ -34,6 +34,8 @@ import {
   OP_PAGE_CUSTOMER_DETAIL_GET, OP_PAGE_ORDER_DETAIL_GET, OP_PAGE_SUPPLIER_DETAIL_GET,
   OP_PAGE_PRODUCT_DETAIL_GET, OP_PAGE_PURCHASE_CREATE_GET, OP_REFS_NUMBERS_GET,
   OP_METALS_STOCK_BY_KARAT_GET, OP_SEARCH_GLOBAL_GET, OP_PAGE_RECONCILIATION_GET,
+  OP_LEDGER_BALANCES_GET, OP_FINANCE_RECEIVABLES_GET, OP_INVENTORY_LOT_AGGREGATES_GET,
+  OP_PRODUCT_LOTS_GET, OP_EXPENSES_CREDIT_PAID_GET,
 } from './store-read-ops';
 
 /** Der Rumpf, den die Route baut: geprüfter Absender plus die Eingabe des Clients. */
@@ -530,5 +532,51 @@ registerCommand(OP_PAGE_RECONCILIATION_GET, {
     // Nur die AUSKUNFT reist. Repariert wird weiterhin dort, wo die Datenbank steht — jede
     // Storno-Schaltflaeche dieser Seite schreibt, und Schreiben gehoert zu den 40 Buchungen.
     return { data: (await import('@/core/reports/reconciliation-snapshot')).reconciliationSnapshotFor(ctx) };
+  },
+});
+
+// ── CENTRAL-UI-PARITY R4A — die Kernauskuenfte ─────────────────────────────
+//
+// Sie sind bewusst nach DOMAENE geschnitten, nicht nach Seite: dieselben Zahlen braucht die
+// Uebersicht, die Forderungsseite und der Bericht. Ein Name je Sache, nicht je Bildschirm.
+
+registerCommand(OP_LEDGER_BALANCES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/core/data/domain-reads')).ledgerBalancesFor(ctx) };
+  },
+});
+
+registerCommand(OP_FINANCE_RECEIVABLES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/core/data/domain-reads')).receivableRowsFor(ctx) };
+  },
+});
+
+registerCommand(OP_INVENTORY_LOT_AGGREGATES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/core/data/domain-reads')).lotAggregatesFor(ctx) };
+  },
+});
+
+registerCommand(OP_PRODUCT_LOTS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const productId = requiredId(payload, 'productId');
+    return { data: (await import('@/core/data/domain-reads')).productLotsFor(ctx, productId) };
+  },
+});
+
+registerCommand(OP_EXPENSES_CREDIT_PAID_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/core/data/domain-reads')).creditPaidFor(ctx) };
   },
 });

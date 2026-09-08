@@ -24,14 +24,14 @@ import { PillBarChart } from '@/components/charts/PillBarChart';
 import { TopProductsList, type TopProductItem } from '@/components/charts/TopProductsList';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { useMediaScope } from '@/hooks/useMediaScope';
-import { currentBranchId } from '@/core/db/helpers';
-import { balanceOf, totalReceivables } from '@/core/ledger/queries';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
-import { receivablesBreakdown } from '@/core/finance/receivables';
 import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
 import { computeSalesMetrics, computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
 import { useSharedRead } from '@/core/data/shared-read';
 import { dashboardExtrasFor } from '@/core/data/page-reads';
+// CENTRAL-UI-PARITY R4A — Salden und Forderungen ueber die gemeinsamen Kernauskuenfte.
+import { ledgerBalancesFor, receivableRowsFor, LEERE_SALDEN } from '@/core/data/domain-reads';
+import { lotAggregatesFor } from '@/core/data/domain-reads';
 
 function getGreeting(): string {
   const h = new Date().getHours();
@@ -124,8 +124,12 @@ export function Dashboard() {
     [orders, products, getOrderIdsNeedingPurchase]
   );
 
-  const stock = useMemo(() => getStockValue(), [products, getStockValue]);
-  const stockByCat = useMemo(() => getStockByCategory(), [products, categories, getStockByCategory]);
+  // CENTRAL-UI-PARITY R4A — die Losezahlen kommen aus der gemeinsamen Kernauskunft und werden
+  // durchgereicht; die Bewertung selbst rechnet unveraendert.
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, [products]);
+  const lotAgg = useMemo(() => new Map(bestand.paare), [bestand]);
+  const stock = useMemo(() => getStockValue(lotAgg), [products, getStockValue, lotAgg]);
+  const stockByCat = useMemo(() => getStockByCategory(lotAgg), [products, categories, getStockByCategory, lotAgg]);
 
   const featured = useMemo(() => products.filter(p => p.stockStatus === 'in_stock').slice(0, 4), [products]);
   // M-01 — Top Clients aus der EINEN Umsatz-Wahrheit (rechnungsbasiert, all-time,
@@ -199,14 +203,12 @@ export function Dashboard() {
   // GUTHABEN (SUPPLIER_CREDIT, eigenes Asset-Konto) mindert AP nicht — wie
   // heute in der Domain-Anzeige (SupplierDetail zeigt es separat).
   // ⚠️ Wert korrekt erst nach einmaligem /ledger-backfill (M-12-Caveat).
-  const supplierPayables = useMemo(() => {
-    try {
-      const branchId = currentBranchId();
-      return Math.max(0, balanceOf('ACCOUNTS_PAYABLE', { branchId, counterpartyType: 'SUPPLIER' }));
-    } catch {
-      return 0;
-    }
-  }, [purchases, allExpenses, suppliers]);
+  // CENTRAL-UI-PARITY R4A — die Hauptbuchsalden kommen aus der gemeinsamen Kernauskunft.
+  // Vorher rief diese Seite `balanceOf` direkt; auf einem Rechner ohne Datenbank warf das
+  // WAEHREND des Zeichnens, die Fehlergrenze sprang an, und danach sah jede Seite leer aus.
+  const salden = useSharedRead('ledger.balances.get', {}, ledgerBalancesFor, LEERE_SALDEN,
+    [invoices, purchases, allExpenses, salesReturns, suppliers, debts]);
+  const supplierPayables = salden.supplierPayable;
   const partnerCapital = useMemo(
     () => partners.reduce((s, p) => s + (p.balance || 0), 0),
     [partners]
@@ -219,18 +221,7 @@ export function Dashboard() {
   // CARD_CLEARING (brutto−Gebühr) und wird wie bisher in die Bank-Liquidität
   // eingerechnet (Parität zur alten bankingStore-Sicht). bankingStore bleibt die
   // Transaktions-Liste der Banking-Page.
-  const accountBalances = useMemo(() => {
-    try {
-      const branchId = currentBranchId();
-      return {
-        cash: balanceOf('CASH', { branchId }),
-        bank: balanceOf('BANK', { branchId }) + balanceOf('CARD_CLEARING', { branchId }),
-        benefit: balanceOf('BENEFIT', { branchId }),
-      };
-    } catch {
-      return { cash: 0, bank: 0, benefit: 0 };
-    }
-  }, [invoices, purchases, allExpenses, salesReturns]);
+  const accountBalances = { cash: salden.cash, bank: salden.bank, benefit: salden.benefit };
 
   // Plan §Dashboard §3.F: Total + Monthly + Top Kategorien.
   // v0.6.0 — kapitalisierte Kategorien (Inventory) zaehlen NICHT als laufende
@@ -275,24 +266,16 @@ export function Dashboard() {
   // ihre AR im Ledger (Domain schloss sie aus); Tip-Ueberzahlungen druecken
   // per-Kunde-AR ins Minus und netten global (kein TIPS-Konto — Backlog).
   // ⚠️ Wert korrekt erst nach einmaligem /ledger-backfill (M-12-Caveat).
-  const customerReceivables = useMemo(() => {
-    try {
-      return totalReceivables(currentBranchId());
-    } catch {
-      return 0;
-    }
-  }, [invoices, purchases, allExpenses, salesReturns]);
+  const customerReceivables = salden.receivables;
   // Repairs-Info: offener Werkstatt-Forderungs-Anteil aus dem Domain-Breakdown
   // (REPAIR-Zeilen) — beschreibend neben der Ledger-Zahl, nie addiert.
-  const repairsOpen = useMemo(() => {
-    try {
-      return receivablesBreakdown()
-        .filter(r => r.source === 'REPAIR')
-        .reduce((s, r) => s + r.open, 0);
-    } catch {
-      return 0;
-    }
-  }, [invoices, salesReturns]);
+  // Dieselbe Aufstellung, die auch die Forderungsseite zeigt — eine Quelle, kein Nachbau.
+  const forderungen = useSharedRead('finance.receivables.get', {}, receivableRowsFor, { rows: [] },
+    [invoices, salesReturns]);
+  const repairsOpen = useMemo(
+    () => forderungen.rows.filter((r) => r.source === 'REPAIR').reduce((s, r) => s + r.open, 0),
+    [forderungen],
+  );
 
   // Alerts (Plan §Dashboard §7)
   // M-24: Alert zeigt EXAKT dieselbe Ledger-Zahl wie die RECEIVABLES-Karte
@@ -475,17 +458,7 @@ export function Dashboard() {
   // max(0,·) wie vorher (Domain clampte pro Loan). Die COUNTS bleiben aus der
   // debts-Liste — das Ledger zaehlt keine offenen Loans. Deps wie accountBalances.
   // ⚠️ Salden korrekt erst nach einmaligem /ledger-backfill (M-12-Caveat).
-  const loanBalances = useMemo(() => {
-    try {
-      const branchId = currentBranchId();
-      return {
-        given: Math.max(0, balanceOf('LOAN_RECEIVABLE', { branchId })),
-        taken: Math.max(0, balanceOf('LOAN_PAYABLE', { branchId })),
-      };
-    } catch {
-      return { given: 0, taken: 0 };
-    }
-  }, [debts]);
+  const loanBalances = { given: salden.loanGiven, taken: salden.loanTaken };
   const loansGiven = loanBalances.given;
   const loansTaken = loanBalances.taken;
   // Robust gegen Legacy-Direction ('we_lend'/'we_borrow') und Legacy-Status ('open'/'settled').

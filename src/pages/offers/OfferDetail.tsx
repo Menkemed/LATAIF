@@ -14,13 +14,14 @@ import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-format';
-import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
 import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import type { TaxScheme } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedRead } from '@/core/data/shared-read';
+import { lotAggregatesFor } from '@/core/data/domain-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -49,7 +50,11 @@ export function OfferDetail() {
   const [showFollowUp, setShowFollowUp] = useState(false);
   const perm = usePermission();
 
-  useEffect(() => { loadOffers(); loadCustomers(); loadProducts(); loadCategories(); }, [loadOffers, loadCustomers, loadProducts, loadCategories]);
+  useEffect(() => { loadOffers(); loadCustomers(); loadProducts(); loadCategories(); }, [loadOffers, loadCustomers, loadProducts, loadCategories]);
+  // CENTRAL-UI-PARITY R4A — die FIFO-Kosten kommen aus der gemeinsamen Kernauskunft:
+  // ein Durchgang fuer alle Artikel statt einer Abfrage je Zeile.
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
+  const fifoKosten = useMemo(() => new Map(bestand.fifo), [bestand]);
 
   const offer = useMemo(() => offers.find(o => o.id === id), [offers, id]);
   const customer = useMemo(() => offer ? customers.find(c => c.id === offer.customerId) : null, [offer, customers]);
@@ -169,7 +174,7 @@ export function OfferDetail() {
     // Phase 7 — Cost-Basis fuer Margin-Scheme/VAT-Calc kommt aus dem FIFO-Lot
     // (= naechster Sale-Cost), nicht aus product.purchase_price. Bei Multi-Lot
     // ist purchase_price irrefuehrend; bei keinem Lot Fallback.
-    const fifo = deriveProductCostFromLots(product.id);
+    const fifo = fifoKosten.get(product.id) ?? null;
     const costBasis = fifo ? fifo.fifoCost : product.purchasePrice;
     addOfferLine(id, {
       productId: product.id,

@@ -32,6 +32,8 @@ import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
 // CENTRAL-UI-PARITY R2D — Mandant und Artikelhistorie ohne eigene Abfrage in der Seite.
 import { sessionTenantId } from '@/core/data/shared-read';
+import { lotAggregatesFor } from '@/core/data/domain-reads';
+import { useSharedRead } from '@/core/data/shared-read';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -287,7 +289,10 @@ export function WatchList() {
   }, [products, searchQuery, filterCategory, filterStatus, filterOwnership, categories]);
 
   // Phase 7 — Lot-Aggregat einmal pro Render fuer alle sichtbaren Produkte.
-  const lotAgg = useMemo(() => getStockAggregates(filtered.map(p => p.id)), [filtered]);
+  // CENTRAL-UI-PARITY R4A — die Losezahlen kommen aus der gemeinsamen Kernauskunft; die
+  // Zusammenfassung darauf rechnet nur und bleibt hier.
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
+  const lotAgg = useMemo(() => new Map(bestand.paare), [bestand]);
   // Die Kopfzeile beschreibt, was GERADE AUF DER SEITE STEHT — also wird sie aus derselben Menge
   // gerechnet, die die Liste zeigt, und folgt jedem Filter. Datensaetze und Stueck sind dabei zwei
   // Zahlen: eine Zeile mit `quantity = 10` ist EIN Artikel und ZEHN Stueck; frueher stand hier die

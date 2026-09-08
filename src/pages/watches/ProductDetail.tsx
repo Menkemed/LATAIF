@@ -16,7 +16,6 @@ import { useProductStore, type EditProductResult } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '@/stores/repairStore';
-import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { usePermission } from '@/hooks/usePermission';
 import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
@@ -34,6 +33,7 @@ import type { AiCategoryId } from '@/core/ai/ai-service';
 // CENTRAL-UI-PARITY R2D — Mandant und Artikelhistorie ohne eigene Abfrage in der Seite.
 import { useSharedRead, sessionTenantId } from '@/core/data/shared-read';
 import { productDetailReadsFor } from '@/core/data/page-reads';
+import { productLotsFor } from '@/core/data/domain-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -122,6 +122,12 @@ export function ProductDetail() {
   // CENTRAL-UI-PARITY R2D — Verkaufs-, Einkaufs- und Fertigungshistorie samt Herkunft der
   // Charge: EINE gemeinsame Ladefunktion statt sieben Abfragen in dieser Datei. Sie prueft
   // zuerst, ob der Artikel ueberhaupt zur Filiale des Anfragenden gehoert.
+  const lose = useSharedRead(
+    'product.lots.get', { productId: id ?? '' },
+    (ctx) => productLotsFor(ctx, id ?? ''),
+    { lots: [], fifo: null },
+    [id, products],
+  );
   const detail = useSharedRead(
     'page.product_detail.get', { productId: id ?? '' },
     (ctx) => productDetailReadsFor(ctx, id ?? ''),
@@ -186,7 +192,7 @@ export function ProductDetail() {
   // und/oder mehrere Lieferanten hatte.
   const productLots = useMemo(() => {
     if (!id) return [];
-    const lots = getLotsWithPurchaseNumbers(id);
+    const lots = lose.lots;
     // Defensive (2026-05-17): Bei nicht-verfügbaren Produkt-Status ist jeder
     // Lot-Bestand konzeptionell ungültig (Daten-Inkonsistenz möglich). Die Card
     // wird ausgeblendet, damit kein "Available"-Badge bei verkauften Items steht.

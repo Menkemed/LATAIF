@@ -21,7 +21,9 @@ import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { matchesDeep } from '@/core/utils/deep-search';
 // Slice B — Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen. paid_amount bleibt
 // cash-only; ohne den credit-Anteil zeigte eine credit-beglichene Expense faelschlich "Unpaid".
-import { computeExpenseSettlement, creditPaidByExpense } from '@/core/finance/expenseSettlement';
+import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
+import { useSharedRead } from '@/core/data/shared-read';
+import { creditPaidFor } from '@/core/data/domain-reads';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -157,7 +159,10 @@ export function ExpenseList() {
   }, [expenses, search, categoryFilter]);
 
   // Credit-Einloesungen je Expense gebuendelt (EINE GROUP-BY-Query, kein N+1) → Settlement je Expense.
-  const creditPaidMap = useMemo(() => creditPaidByExpense(), [expenses]);
+  // CENTRAL-UI-PARITY R4A — wie viel mit Guthaben beglichen wurde, kommt aus der gemeinsamen
+  // Kernauskunft; die Abrechnung darauf (`computeExpenseSettlement`) rechnet nur.
+  const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, [expenses]);
+  const creditPaidMap = useMemo(() => new Map(Object.entries(guthaben.byExpense)), [guthaben]);
   const settlementByExpense = useMemo(() => {
     const m = new Map<string, ReturnType<typeof computeExpenseSettlement>>();
     for (const e of expenses) {
