@@ -7,6 +7,8 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postMetalPayment, postMetalPaymentReversed, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { useGoldStore } from '@/stores/goldStore';
 import { useExpenseStore } from '@/stores/expenseStore';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -63,6 +65,7 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
   loading: false,
 
   loadMetals: () => {
+    if (hydrateFromPrimary('store.metals.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM precious_metals WHERE branch_id = ? ORDER BY updated_at DESC', [branchId]);

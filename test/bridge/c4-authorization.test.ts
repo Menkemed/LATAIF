@@ -82,6 +82,8 @@ await import('../../src/core/bridge/service-commands.ts');
 await import('../../src/core/bridge/lifecycle-commands.ts');
 const { runInvoiceCreate } = await import('../../src/core/bridge/invoice-command.ts');
 const fin = await import('../../src/core/bridge/financial-commands.ts');
+// CENTRAL-UI-PARITY — die 25 Store-Auskuenfte gehoeren zum ausgelieferten Zustand.
+await import('../../src/core/bridge/store-read-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { useInvoiceStore } = await import('../../src/stores/invoiceStore.ts');
@@ -195,11 +197,13 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   ok(list.length === 40, `SCOPE weiterhin genau 40 Mutationen (${list.length})`);
-  ok(known.length === 59 && reads.length === 18,
-    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length})`);
+  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  const storeReads = known.filter((o) => o.startsWith('store.'));
+  ok(known.length === 84 && reads.length === 43 && storeReads.length === 25,
+    `SCOPE 1 Probe + 18 Auskuenfte + 25 Store-Auskuenfte + 40 Buchungen = 84 (${known.length}/${reads.length}/${storeReads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rl = rust.slice(rust.indexOf('pub const REMOTE_OPS'), rust.indexOf('];', rust.indexOf('pub const REMOTE_OPS')));
-  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 59, 'SCOPE Rust kennt dieselben 59');
+  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 84, 'SCOPE Rust kennt dieselben 84');
   // C4 hat NICHTS registriert.
   const mine = codeOf('src/core/bridge/command-permissions.ts') + codeOf('src/core/auth/role-permissions.ts');
   ok(!/registerCommand\(/.test(mine), 'SCOPE C4 registriert keine einzige Operation');

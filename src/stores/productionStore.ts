@@ -17,6 +17,8 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postExpensePayment, reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -98,6 +100,7 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
   loading: false,
 
   loadRecords: () => {
+    if (hydrateFromPrimary('store.production.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM production_records WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);

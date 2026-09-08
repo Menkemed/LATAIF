@@ -10,6 +10,8 @@ import type { Employee, EmploymentStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 export interface SalaryHistoryRow {
   expenseId: string;
@@ -174,6 +176,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
   loading: false,
 
   loadEmployees: () => {
+    if (hydrateFromPrimary('store.employees.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query(

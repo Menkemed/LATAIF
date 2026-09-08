@@ -30,6 +30,8 @@ import { runStartupMediaRecovery, type CompletedProductScope } from '@/core/medi
 import { findProductsNeedingEmbedding } from '@/core/media/embedding-reconcile';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { isSyncConfigured } from '@/core/sync/sync-service';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -681,6 +683,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   setFilterStatus: (s) => set({ filterStatus: s }),
 
   loadCategories: () => {
+    if (hydrateFromPrimary('store.products.get', (d) => set(d as never))) return;
     // EINE Abfrage fuer beides: die Auswahl (nur aktive) und die Auslegung (alle bekannten).
     // Der Filter steht bewusst hier und nicht im SQL — so kann die Definition einer
     // deaktivierten Kategorie nicht verlorengehen, waehrend die Auswahlliste unveraendert
@@ -699,6 +702,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   },
 
   loadProducts: () => {
+    if (hydrateFromPrimary('store.products.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM products WHERE branch_id = ? ORDER BY updated_at DESC', [branchId]);

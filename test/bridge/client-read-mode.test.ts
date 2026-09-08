@@ -102,10 +102,16 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const initAt = app.indexOf('    initDatabase()');
   ok(clientAt > 0 && clientAt < firstRunAt, 'DBLESS die Client-Weiche kommt VOR der Erstlauf-Frage');
   ok(clientAt < initAt, 'DBLESS …und vor jedem `initDatabase()`');
-  ok(/if \(isClientMode\(\)\) \{[\s\S]{0,220}return \(\) => \{ cancelled = true; \};/.test(app),
-    'DBLESS im Client-Modus kehrt der Start zurueck, ohne etwas zu oeffnen');
-  ok(/if \(isClientMode\(\)\) return clientReady \? <ClientShell \/> : null;/.test(app),
-    'DBLESS und gerendert wird die Leseoberflaeche, nicht die Anwendung');
+  ok(/if \(isClientMode\(\)\) \{[\s\S]{0,600}return \(\) => \{ cancelled = true; \};/.test(app),
+    'DBLESS im Client-Modus kehrt der Start zurueck, ohne eine Datenbank zu oeffnen');
+  // CENTRAL-UI-PARITY — hier hat sich die Zusage GEAENDERT, und zwar bewusst: frueher endete der
+  // Client-Modus in einer eigenen, schlanken Oberflaeche. Jetzt fuehrt `ClientShell` nur noch zum
+  // Server und meldet an; danach laeuft DIESELBE Anwendung wie am Primary. Was NICHT nachgibt: es
+  // wird weiterhin keine Datenbank geoeffnet, und ohne Sitzung gibt es keine Anwendung.
+  ok(/if \(!session\) \{[\s\S]{0,40}return <ClientShell onSignedIn=/.test(app),
+    'PARITY ohne Sitzung fuehrt der Client-Modus zur Verbinden-/Anmeldeoberflaeche');
+  ok(/const clientMode = isClientMode\(\);/.test(app) && /if \(!clientMode && !dbReady\)/.test(app),
+    'PARITY …und mit Sitzung rendert er die normale Anwendung, ohne auf eine Datenbank zu warten');
 
   // Die Client-Module duerfen die Datenschicht gar nicht erst kennen.
   for (const f of ['src/core/bridge/client-mode.ts', 'src/core/bridge/remote-read.ts', 'src/components/startup/ClientShell.tsx']) {
@@ -472,16 +478,21 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const reads = resolved.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
-  ok(resolved.length === 59, `ALLOWLIST neunundfuenfzig Namen insgesamt (${resolved.length}: ${resolved.join(', ')})`);
+  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  ok(resolved.length === 84, `ALLOWLIST vierundachtzig Namen insgesamt (${resolved.length})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
-  ok(reads.length === 18, `ALLOWLIST genau achtzehn Lesevorgaenge (${reads.length}: ${reads.join(', ')})`);
+  const storeReads = reads.filter((o) => o.startsWith('store.'));
+  // CENTRAL-UI-PARITY — achtzehn Auskuenfte aus C2, dazu 25 Store-Auskuenfte fuer die
+  // gemeinsame Oberflaeche. Beides ist Lesen; getrennt gezaehlt, damit die Herkunft sichtbar bleibt.
+  ok(reads.length === 43 && storeReads.length === 25,
+    `ALLOWLIST 18 Auskuenfte + 25 Store-Auskuenfte (${reads.length}/${storeReads.length})`);
   ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
     `ALLOWLIST und GENAU diese vierzig veraendernden (${mutations.join(', ') || 'keine'})`);
   // Loeschen steht auf KEINER Liste: es hat einen eigenen Referenz-Vertrag, und der ist von aussen
   // nicht durchdacht.
   ok(!mutations.some((o) => o.endsWith('.delete')),
     'ALLOWLIST und kein Loeschen — das hat einen eigenen Vertrag');
-  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,suppliers.list,categories.list,purchases.list,purchases.get,consignments.list,consignments.get,orders.list,orders.get,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.list,repairs.get,transfers.list,transfers.get,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
+  ok(resolved.join(',') === 'bridge.probe,products.list,products.get,customers.list,customers.get,invoices.list,invoices.get,invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,suppliers.list,categories.list,purchases.list,purchases.get,consignments.list,consignments.get,orders.list,orders.get,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.list,repairs.get,transfers.list,transfers.get,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,store.products.get,store.customers.get,store.invoices.get,store.suppliers.get,store.purchases.get,store.orders.get,store.consignments.get,store.repairs.get,store.agents.get,store.sales_returns.get,store.credit_notes.get,store.expenses.get,store.recurring_expenses.get,store.payables.get,store.debts.get,store.banking.get,store.gold.get,store.metals.get,store.scrap_trades.get,store.offers.get,store.production.get,store.partners.get,store.employees.get,store.tasks.get,store.documents.get',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Es gibt keine eigene Suchoperation — die Suche ist ein Parameter.
   ok(!resolved.some((o) => /search/.test(o)), 'ALLOWLIST keine eigene Suchoperation');

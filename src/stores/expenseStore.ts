@@ -21,6 +21,8 @@ import {
 } from '@/core/ledger/posting';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
 import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE, SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Buchungsfehler blockieren den operativen Domain-Insert NICHT; Reconciliation-View
@@ -96,6 +98,7 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
   loading: false,
 
   loadExpenses: () => {
+    if (hydrateFromPrimary('store.expenses.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query(

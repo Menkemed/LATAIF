@@ -74,7 +74,7 @@ const { executeCommand } = await import('../../src/core/bridge/command-registry.
 const { businessWriteScheduler } = await import('../../src/core/bridge/command-scheduler.ts');
 const { toInvoiceLine } = await import('../../src/core/invoices/line-derivation.ts');
 const { InvoiceSaveAttempt, InvoiceSaveController } = await import('../../src/core/bridge/client-invoice-save.ts');
-const { enterClientMode, setClientToken } = await import('../../src/core/bridge/client-mode.ts');
+const { enterClientMode, leaveClientMode, setClientToken } = await import('../../src/core/bridge/client-mode.ts');
 await import('../../src/core/bridge/return-commands.ts');
 await import('../../src/core/bridge/lifecycle-commands.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
@@ -193,6 +193,9 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
+  // CENTRAL-UI-PARITY — die 25 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
+  // Bruecken-Zuhoerer laedt sie ebenfalls. Ohne diesen Import misst das Gate einen Teilstand.
+  await import('../../src/core/bridge/store-read-commands.ts');
   ok(Array.isArray(registry.ALLOWED_MUTATIONS)
     && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
     `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
@@ -206,15 +209,17 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 59, `ALLOWLIST produktiv neunundfuenfzig Namen (${known.length}: ${known.join(', ')})`);
-  ok(reads.length === 18 && known.includes('bridge.probe') && known.includes('invoices.create'),
-    'ALLOWLIST eine Probe, achtzehn Lesevorgaenge, vierzig Mutationen');
+  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  ok(known.length === 84, `ALLOWLIST produktiv vierundachtzig Namen (${known.length})`);
+  // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 25 Store-Auskuenfte fuer die gemeinsame Oberflaeche.
+  ok(reads.length === 43 && known.includes('bridge.probe') && known.includes('invoices.create'),
+    `ALLOWLIST eine Probe, dreiundvierzig Lesevorgaenge, vierzig Mutationen (${reads.length})`);
 
   // Und Rust prueft dieselbe Liste ein zweites Mal.
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 59, 'ALLOWLIST …und seine Liste ist genau neunundfuenfzig Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 84, 'ALLOWLIST …und seine Liste ist genau vierundachtzig Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:
@@ -712,6 +717,10 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
 // ── 11) Der Primary schreibt weiter lokal ─────────────────────────────────
 {
+  // CENTRAL-UI-PARITY — zurueck in den Primary-Modus. Abschnitt 10 hat den Clientmodus ECHT
+  // gesetzt, und er wirkt jetzt WIRKLICH: die Stores laden dort fern und `trackChange` schweigt.
+  // Wer ihn setzt, muss ihn verlassen; vorher fiel das nicht auf, weil er folgenlos war.
+  leaveClientMode();
   resetDurabilityStateForTest();
   resetTransactionHealthForTest();
   const db = freshDb();

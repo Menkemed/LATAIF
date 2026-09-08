@@ -94,16 +94,6 @@ async function findPage(ms) {
   }
   return null;
 }
-async function start() {
-  spawn(APP, [], { env: appEnv(), stdio: 'ignore', detached: true }).unref();
-  const page = await findPage(120000);
-  if (!page) throw new Error('no CDP page');
-  const c = new CDP(page.webSocketDebuggerUrl); await c.send('Runtime.enable'); return c;
-}
-async function stop(c) {
-  try { c?.close(); } catch { /* egal */ }
-  killImage('lataif.exe'); await waitGone('lataif.exe'); await waitPortFree(PORT);
-}
 const setVal = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; const p=e.tagName==='SELECT'?HTMLSelectElement.prototype:(e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype); Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
 const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO'; b.click(); return 'OK';`);
@@ -129,6 +119,18 @@ try {
   ok(assertE2eBinary(APP).verified.length === 4, 'ARTEFACT the primary is the isolated e2e build');
   assertE2eScope({ appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() });
   e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() });
+
+  async function start() {
+    spawn(APP, [], { env: appEnv(), stdio: 'ignore', detached: true }).unref();
+    const page = await findPage(120000);
+    if (!page) throw new Error('no CDP page');
+    const c = new CDP(page.webSocketDebuggerUrl); await c.send('Runtime.enable'); return c;
+  }
+  async function stop(c) {
+    try { c?.close(); } catch { /* egal */ }
+    killImage('lataif.exe'); await waitGone('lataif.exe'); await waitPortFree(PORT);
+  }
+
 
   // ── §1 — KEINE Datenbank: der Erstlaufweg ist unveraendert ──────────────
   app = await start();

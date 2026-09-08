@@ -69,7 +69,7 @@ const AREAS: Array<{ key: Area; label: string; op: string | null }> = [
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 const s = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
 
-export function ClientShell() {
+export function ClientShell({ onSignedIn }: { onSignedIn?: () => void } = {}) {
   const cfg = clientConfig();
   const [signedIn, setSignedIn] = useState(Boolean(cfg?.token));
   const [area, setArea] = useState<Area>('products');
@@ -123,7 +123,9 @@ export function ClientShell() {
   }
 
   if (!signedIn) {
-    return <SignIn serverUrl={cfg.serverUrl} onDone={() => { setSignedIn(true); setTick((t) => t + 1); }} />;
+    // CENTRAL-UI-PARITY — hier endet die Zustaendigkeit dieser Oberflaeche. Sie fuehrt zum Server
+    // und meldet an; was danach kommt, ist die NORMALE Anwendung, dieselbe wie am Primary.
+    return <SignIn serverUrl={cfg.serverUrl} onDone={() => { setSignedIn(true); setTick((t) => t + 1); onSignedIn?.(); }} />;
   }
 
   return (

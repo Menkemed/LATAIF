@@ -568,13 +568,18 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
+  // CENTRAL-UI-PARITY — die 25 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
+  // Bruecken-Zuhoerer laedt sie ebenfalls. Ohne diesen Import misst das Gate einen Teilstand.
+  await import('../../src/core/bridge/store-read-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
   ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
     `ALLOWLIST genau diese vierzig Mutationen (${mutations.join(', ')})`);
-  ok(known.length === 59 && reads.length === 18 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length})`);
+  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  const storeReads = known.filter((o) => o.startsWith('store.'));
+  ok(known.length === 84 && reads.length === 43 && storeReads.length === 25 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Auskuenfte + 25 Store-Auskuenfte + 40 Buchungen = 84 (${known.length}/${reads.length}/${storeReads.length})`);
   ok(!mutations.some((o) => o.endsWith('.delete')), 'ALLOWLIST kein Loeschen');
 
   for (const op of ['invoices.delete', 'invoices.cancel', 'payments.delete', 'payments.update', 'anything.write']) {
@@ -586,7 +591,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 59, 'ALLOWLIST Rust kennt dieselben neunundfuenfzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 84, 'ALLOWLIST Rust kennt dieselben vierundachtzig Namen');
   ok(/OP_INVOICES_UPDATE: &str = "invoices.update"/.test(rs)
     && /OP_INVOICES_RECORD_PAYMENT: &str = "invoices.record_payment"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');

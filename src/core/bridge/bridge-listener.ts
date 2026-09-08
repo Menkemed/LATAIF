@@ -26,6 +26,10 @@ import './service-commands';
 import './financial-commands';
 import './return-commands';
 import './lifecycle-commands';
+// CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche
+// fuellt wie der Primary. Ohne diesen Import kennt der Renderer sie nicht, und jede Seite auf PC2
+// bliebe leer.
+import './store-read-commands';
 
 /** Muss mit `bridge::EVENT_COMMAND` in Rust übereinstimmen. */
 export const BRIDGE_COMMAND_EVENT = 'central-c1-bridge-command';

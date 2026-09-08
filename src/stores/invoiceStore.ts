@@ -31,6 +31,8 @@ import { logAudit } from '@/core/audit/audit-log';
 import { planEditOverpayment } from '@/core/credit/overpayment-teardown';
 import { useProductStore } from '@/stores/productStore';
 import type { Expense } from '@/core/models/types';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Domain-Insert + Ledger-Posting laufen in einem Try/Catch. Posting-Fehler werden
@@ -201,6 +203,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   loading: false,
 
   loadInvoices: () => {
+    if (hydrateFromPrimary('store.invoices.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM invoices WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);

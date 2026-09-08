@@ -10,6 +10,8 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — offer_lines + offers-Totals
 
 interface OfferStore {
@@ -79,6 +81,7 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
   loading: false,
 
   loadOffers: () => {
+    if (hydrateFromPrimary('store.offers.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM offers WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);

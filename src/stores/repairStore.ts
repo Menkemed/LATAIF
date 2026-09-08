@@ -28,6 +28,8 @@ import { expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE } from '
 import type { Expense } from '@/core/models/types';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand } from '@/core/finance/card-fees';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -591,6 +593,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   loading: false,
 
   loadRepairs: () => {
+    if (hydrateFromPrimary('store.repairs.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM repairs WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);

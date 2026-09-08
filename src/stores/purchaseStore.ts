@@ -33,6 +33,8 @@ import {
   hasReversalFor,
 } from '@/core/ledger/posting';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Wenn die Buchung scheitert, wird das Domain-Insert NICHT zurückgerollt; stattdessen
@@ -493,6 +495,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
   loading: false,
 
   loadPurchases: () => {
+    if (hydrateFromPrimary('store.purchases.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM purchases WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
@@ -510,6 +513,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
   // ── v0.4.0 — Purchase-Inbox (Mobile-Capture) ──
   loadPurchaseInbox: () => {
+    if (hydrateFromPrimary('store.purchases.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query(
@@ -537,6 +541,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
   },
 
   loadReturns: () => {
+    if (hydrateFromPrimary('store.purchases.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM purchase_returns WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);

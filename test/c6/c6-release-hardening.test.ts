@@ -67,8 +67,13 @@ const read = (p: string) => readFileSync(join(repo, p), 'utf8');
     mutations += (s.match(/kind: 'mutation',/g) || []).length;
     probes += (s.match(/kind: 'probe',/g) || []).length;
   }
-  ok(probes === 1 && reads === 18 && mutations === 40,
-    `SCOPE die Oberfläche kennt 1 Probe + 18 Auskünfte + 40 Buchungen (${probes}/${reads}/${mutations})`);
+  // CENTRAL-UI-PARITY — die 18 C2-Auskünfte sind um 25 Store-Auskünfte gewachsen, damit auf PC2
+  // DIESELBE Oberfläche läuft. Die Zahl der BUCHUNGEN ist unverändert die Zusage, die zählt.
+  // Gezaehlt wird hier der QUELLTEXT: die 18 C2-Auskuenfte stehen einzeln da, die 25
+  // Store-Auskuenfte entstehen in einer Schleife ueber den Katalog — also 19 Fundstellen.
+  const catalogue = (read('src/core/bridge/store-read-ops.ts').match(/'store\.[a-z_]+\.get':/g) || []).length;
+  ok(probes === 1 && reads === 19 && catalogue === 25 && mutations === 40,
+    `SCOPE 1 Probe + 18 Auskünfte + 25 Store-Auskünfte + 40 Buchungen (${probes}/${reads}/${catalogue}/${mutations})`);
 
   const a = reg.indexOf('ALLOWED_MUTATIONS: readonly string[] = [');
   const body = reg.slice(reg.indexOf('[', a) + 1, reg.indexOf('\n];', a));
@@ -78,7 +83,7 @@ const read = (p: string) => readFileSync(join(repo, p), 'utf8');
   const bridge = read('src-tauri/src/bridge.rs').replace(/\r\n/g, '\n');
   const rustList = bridge.slice(bridge.indexOf('pub const REMOTE_OPS: &[&str] = &['));
   const rustOps = rustList.slice(0, rustList.indexOf('\n];')).split('\n').filter((l) => /^\s{4}OP_[A-Z0-9_]+,$/.test(l));
-  ok(rustOps.length === 59, `SCOPE und Rust lässt genau dieselben 59 Namen durch (${rustOps.length})`);
+  ok(rustOps.length === 84, `SCOPE und Rust lässt genau dieselben 84 Namen durch (${rustOps.length})`);
 }
 
 // ── §2 — der alte Desktop-Abgleich ist im Client-Modus verweigert ──────────

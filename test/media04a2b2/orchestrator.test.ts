@@ -1135,7 +1135,7 @@ async function main(): Promise<void> {
     ok(/from '\.\/db-lifecycle'/.test(src), 'database.ts imports the lifecycle controller');
     ok(/export async function acquireDbLease\b/.test(src), 'acquireDbLease is async (awaits swaps)');
     ok(/dbLifecycle\.acquireLease\(\)/.test(src), 'acquireDbLease goes through the controller');
-    const reload = src.match(/export async function reloadDbFromDisk[\s\S]{0,900}?\n}/);
+    const reload = src.match(/export async function reloadDbFromDisk[\s\S]{0,1400}?\n}/);
     ok(reload != null && /dbLifecycle\.runExclusiveSwap\(/.test(reload[0]),
       'reloadDbFromDisk runs inside runExclusiveSwap');
     const reset = src.match(/export async function resetDatabase[\s\S]{0,900}?\n}/);

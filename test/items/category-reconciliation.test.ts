@@ -56,7 +56,7 @@ const RECONCILED = ['cat-branded-gold-jewelry', 'cat-original-gold-jewelry', 'ca
 {
   // A/B: the array is re-run unconditionally on the existing-database boot path.
   const bootPath = DB_TS.slice(DB_TS.indexOf('const saved = await loadSavedDb();'));
-  ok(/if \(saved\) \{[\s\S]{0,400}runMigrations\(db\);/.test(bootPath),
+  ok(/if \(saved\.kind === 'bytes'\) \{[\s\S]{0,400}runMigrations\(db\);/.test(bootPath),
     '§2 B an existing database runs the whole migration array on every boot');
   ok(!/if \(saved\)[\s\S]{0,400}seedCleanDatabase/.test(bootPath),
     '§2 B …and is never re-seeded, so the seeding path cannot be what keeps categories current');

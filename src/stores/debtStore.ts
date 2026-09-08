@@ -5,6 +5,8 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import type { Debt, DebtPayment, DebtDirection, CashSource, DebtStatus } from '@/core/models/types';
 import { canonicalLoanDirection } from '@/core/models/types';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 import {
   postLoanCreated,
   postLoanPayment,
@@ -114,6 +116,7 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   loading: false,
 
   loadDebts: () => {
+    if (hydrateFromPrimary('store.debts.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query(

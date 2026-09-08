@@ -10,6 +10,8 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 interface CreateTaskData {
   title: string;
@@ -69,6 +71,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   loading: false,
 
   loadTasks: () => {
+    if (hydrateFromPrimary('store.tasks.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query(

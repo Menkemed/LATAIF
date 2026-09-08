@@ -19,6 +19,7 @@
 // Zeile im durablen Nachweis, keine Wirkung.
 
 import { isAdminOrManagerRole, roleHasPermission } from '../auth/role-permissions';
+import { STORE_READ_OPS } from './store-read-ops';
 
 /** Wie ein Recht geprüft wird. Beides gibt es in `usePermission` schon so. */
 export type PermissionRule =
@@ -149,6 +150,13 @@ export const READ_PERMISSIONS: Readonly<Record<string, PermissionRule | null>> =
   'orders.list': null, 'orders.get': null,
   'repairs.list': null, 'repairs.get': null,
   'transfers.list': null, 'transfers.get': null,
+  // CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche
+  // fuellt. Sie stehen hier aus demselben Grund wie die 18 darueber auf `null`: der Primary
+  // bewacht seine Anzeige nirgends mit einem Recht — jeder angemeldete Benutzer sieht dort alles.
+  // Ein Tor hier waere kein Gleichstand, sondern eine ERFUNDENE Regel, die es lokal nicht gibt.
+  // Der Befund bleibt derselbe wie in C4 und ist unveraendert offen: es gibt am Primary keine
+  // allgemeinen Lese-Rechte. Aendert sich das, aendert es sich fuer beide Rechner zugleich.
+  ...Object.fromEntries(STORE_READ_OPS.map((op) => [op, null])),
 };
 
 /** Das Recht, das diese Operation verlangt — `null`, wenn der Primary keins verlangt. */

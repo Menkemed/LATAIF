@@ -13,6 +13,8 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackDelete } from '@/core/sync/track';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 import {
   postBankTransfer,
   postBankTransferReversed,
@@ -142,6 +144,7 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
   transfers: [],
 
   loadTransfers: () => {
+    if (hydrateFromPrimary('store.banking.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM bank_transfers WHERE branch_id = ? ORDER BY transfer_date DESC, created_at DESC', [branchId]);

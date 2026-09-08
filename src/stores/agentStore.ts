@@ -20,6 +20,8 @@ import {
   hasReversalFor,
 } from '@/core/ledger/posting';
 import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -121,6 +123,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: [], transfers: [], loading: false,
 
   loadAgents: () => {
+    if (hydrateFromPrimary('store.agents.get', (d) => set(d as never))) return;
     try {
       const rows = query('SELECT * FROM agents WHERE branch_id = ? ORDER BY name', [currentBranchId()]);
       set({ agents: rows.map(rowToAgent) });
@@ -128,6 +131,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   loadTransfers: () => {
+    if (hydrateFromPrimary('store.agents.get', (d) => set(d as never))) return;
     try {
       const rows = query('SELECT * FROM agent_transfers WHERE branch_id = ? ORDER BY created_at DESC', [currentBranchId()]);
       set({ transfers: rows.map(rowToTransfer), loading: false });

@@ -64,7 +64,10 @@ import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
 // DATA-ROOT-B1a — die Erstlauf-Weiche und ihre eine, nichts veraendernde Frage.
 import { isFirstRunPending } from '@/core/lifecycle/first-run';
-import { isClientMode } from '@/core/bridge/client-mode';
+import { isClientMode, clientConfig } from '@/core/bridge/client-mode';
+// CENTRAL-UI-PARITY — auf PC2 entsteht die Sitzung aus dem geprueften Ausweis statt aus einer
+// Benutzertabelle, die es dort nicht gibt.
+import { installClientSession } from '@/core/auth/client-session';
 import { ClientShell } from '@/components/startup/ClientShell';
 import { FirstRunGate } from '@/components/startup/FirstRunGate';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
@@ -140,6 +143,10 @@ export default function App() {
     // darf weder gefragt werden noch etwas anlegen. `initDatabase()` wird hier nie erreicht.
     if (isClientMode()) {
       setFirstRun(false);
+      // CENTRAL-UI-PARITY — liegt bereits ein Ausweis vor, wird daraus die Sitzung gebaut und die
+      // NORMALE Anwendung gestartet. Ohne Ausweis bleibt es bei der Verbinden-/Anmeldeoberflaeche.
+      const token = clientConfig()?.token;
+      if (token && installClientSession(token)) initialize();
       setClientReady(true);
       return () => { cancelled = true; };
     }
@@ -341,15 +348,26 @@ export default function App() {
     });
   }, [dbReady, session?.branchId]);
 
-  // CENTRAL-C2 — im Client-Modus gibt es die gewohnte Anwendung nicht: keine lokale Datenbank,
-  // keine Stores, keine Automatisierung. Nur die Leseoberfläche am Server.
-  if (isClientMode()) return clientReady ? <ClientShell /> : null;
+  // CENTRAL-UI-PARITY — im Client-Modus fuehrt `ClientShell` nur noch zum Server und meldet an.
+  // Danach laeuft DIESELBE Anwendung wie am Primary: dieselben Routen, dieselbe Seitenleiste,
+  // dieselben Seiten. Was fehlt, ist ausschliesslich die eigene Datenbank — die Stores holen
+  // ihren Stand ueber die geprueften Store-Auskuenfte vom Primary.
+  const clientMode = isClientMode();
+  if (clientMode) {
+    if (!clientReady) return null;
+    if (!session) {
+      return <ClientShell onSignedIn={() => {
+        const t = clientConfig()?.token;
+        if (t && installClientSession(t)) initialize();
+      }} />;
+    }
+  }
 
   // Solange die Frage offen ist — oder noch gestellt wird — gibt es keine App, nur die Weiche.
-  if (firstRun === null) return null;
-  if (firstRun) return <FirstRunGate />;
+  if (!clientMode && firstRun === null) return null;
+  if (!clientMode && firstRun) return <FirstRunGate />;
 
-  if (!dbReady) {
+  if (!clientMode && !dbReady) {
     return (
       <div className="flex items-center justify-center" style={{ height: '100vh', width: '100vw', background: '#F2F7FA' }}>
         <div className="text-center">
@@ -364,7 +382,7 @@ export default function App() {
     );
   }
 
-  if (needsOnboarding) return <OnboardingPage onComplete={() => setNeedsOnboarding(false)} />;
+  if (!clientMode && needsOnboarding) return <OnboardingPage onComplete={() => setNeedsOnboarding(false)} />;
   if (!session) return <LoginPage />;
 
   return (

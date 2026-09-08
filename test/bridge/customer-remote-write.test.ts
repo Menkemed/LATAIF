@@ -324,14 +324,19 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
+  // CENTRAL-UI-PARITY — die 25 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
+  // Bruecken-Zuhoerer laedt sie ebenfalls. Ohne diesen Import misst das Gate einen Teilstand.
+  await import('../../src/core/bridge/store-read-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
   ok(mutations.length === 40 && mutations.includes('invoices.create')
     && mutations.includes('customers.create') && mutations.includes('customers.update'),
     `ALLOWLIST genau vierzig Mutationen (${mutations.join(', ')})`);
-  ok(known.length === 59 && reads.length === 18 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length})`);
+  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  const storeReads = known.filter((o) => o.startsWith('store.'));
+  ok(known.length === 84 && reads.length === 43 && storeReads.length === 25 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Auskuenfte + 25 Store-Auskuenfte + 40 Buchungen = 84 (${known.length}/${reads.length}/${storeReads.length})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
     let threw: string | null = null;
@@ -342,7 +347,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 59, 'ALLOWLIST Rust kennt dieselben neunundfuenfzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 84, 'ALLOWLIST Rust kennt dieselben vierundachtzig Namen');
   ok(/OP_CUSTOMERS_CREATE: &str = "customers.create"/.test(rs) && /OP_CUSTOMERS_UPDATE: &str = "customers.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

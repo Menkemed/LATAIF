@@ -8,6 +8,8 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { customerBalance } from '@/core/ledger/queries';
 import { computeSalesMetrics } from '@/core/reports/sales-metrics';
 import { loadSalesData } from '@/core/reports/sales-metrics-loader';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 interface CustomerStore {
   customers: Customer[];
@@ -83,6 +85,7 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   setSearchQuery: (q) => set({ searchQuery: q }),
 
   loadCustomers: () => {
+    if (hydrateFromPrimary('store.customers.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       // Sentinel-Customers (z.B. sys-own-shop-* für Own-Item Repairs) werden in keiner UI gelistet.

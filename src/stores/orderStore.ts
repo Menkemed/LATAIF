@@ -28,6 +28,8 @@ import {
 // → clawback). Runtime-Funktionsimport; der orderPaymentStore↔orderStore-Zyklus ist sicher
 // (beide Bindings werden nur in Actions zur Laufzeit aufgerufen, nicht bei Modul-Init).
 import { teardownOrderOverpayCredit, reconcileOrderOverpayCredit } from '@/stores/orderPaymentStore';
+// CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
+import { hydrateFromPrimary } from '@/core/data/primary-source';
 
 // F1 — Order→Invoice-Idempotenz: Meldung, wenn eine Order-Line bereits in einer Rechnung
 // steckt (harter Guard analog H-03 bei Offer→Invoice).
@@ -239,6 +241,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   loading: false,
 
   loadOrders: () => {
+    if (hydrateFromPrimary('store.orders.get', (d) => set(d as never))) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM orders WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
