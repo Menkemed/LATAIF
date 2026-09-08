@@ -517,3 +517,83 @@ die Umwandlung Auftrag→Rechnung (sie rechnet den Zahlungstopf lokal um) und di
 Hauptbuch. Keine dieser Schaltflächen wird auf einem Client angeboten. Dazu die vier
 Maschinenflächen, die sagen, wo sie zu bedienen sind.
 
+---
+
+## R3 — zwei echte Anwendungen, und was dabei herauskam (08.09.2026) · **BLOCKED**
+
+### §1/§2 Die Schreibfähigkeiten, abgeglichen
+
+Die vierzig geprüften Fernbuchungen sind vollständig gebaut — TS und Rust, Rechte, Ledger,
+Exactly-once. Der Abgleich mit der **laufenden** Oberfläche ergibt trotzdem:
+
+```
+Fernbuchungen insgesamt                              40
+davon von der ALTEN ClientShell erreichbar (vorher)  38
+davon von der GEMEINSAMEN Oberflaeche erreichbar      0
+```
+
+**Das ist kein Konstruktionsstand, sondern ein Verlust.** Bis zur Parität war `ClientShell` die
+Oberfläche des Clients und rief die Buchungen über den Speichervertrag auf. Seit der Parität
+führt sie nur noch zum Server und meldet an; danach läuft dieselbe Anwendung wie am Primary —
+und deren Stores schreiben synchron in die **lokale** Datenbank, die es auf PC2 nicht gibt.
+
+**Zur Pflichtprüfung `orders.convert_to_invoice`:** die Buchung existiert, aber sie ist **enger**
+als die Handlung der Oberfläche. Sie legt die Rechnung an und verknüpft die Zeilen; die
+Auftragsseite trägt danach den Anzahlungstopf über und teilt eine Überzahlung ab
+(`carryOverOrderPaymentsToInvoice`). Wer nur die Buchung aufruft, lässt Geld liegen. Deshalb
+wird sie **nicht** einfach verdrahtet — dieselbe Kennung mit zwei verschiedenen Wirkungen wäre
+schlimmer als eine ehrliche Lücke. Festgehalten in `test/uiparity/r3-write-matrix.test.ts`.
+
+### §3 Der echte Zwei-App-Lauf — was er bewiesen hat
+
+Zwei wirkliche Anwendungen (`com.lataif.app.e2e` / `.client`), **ohne** localStorage-Kniff:
+der Client startet leer, zeigt seine Erstlauf-Maske, ein Klick auf „Connect to existing LATAIF
+server", die Adresse, die Anmeldung — und danach steht die normale Anwendung mit **derselben
+Seitenleiste, Ziel für Ziel**. Der Modus stand danach auf `client`, gesetzt vom Knopf.
+
+### §3 …und woran er scheitert
+
+**Die gemeinsame Oberfläche stürzt auf einem echten Client ab:** `Error: Database not
+initialized`. Die Fehlergrenze fängt es ab und bleibt danach im Fehlerzustand — **jede weitere
+Seite sieht dann leer aus**, ohne dass irgendwo etwas rot wird. Genau deshalb prüft das Gate
+jetzt als Erstes darauf.
+
+**Warum der R2D-Scan das nicht sah:** er zählte `query(` und `getDatabase(` **in Seiten und
+Komponenten**. Eine Seite kann die Datenbank aber auch **durch eine Kernfunktion** lesen —
+Hauptbuch-Salden, Forderungsaufstellung, Los-Abfragen. Die Übersicht tut genau das. Das Modell
+des Scans war zu eng; die Lesefläche ist damit **nicht** vollständig geschlossen, sondern nur
+auf der Ebene der Seiten selbst.
+
+### Der Stand nach R3
+
+| § | Sache | Stand |
+|---|---|---|
+| §1 | Schreibmatrix gegen die 40 | **belegt** — 0 von 40 erreichbar |
+| §2 | echte Lücken benannt | **belegt** — inklusive der Enge von `orders.convert_to_invoice` |
+| §3 | Verbinden ohne Kniff, gleiche Seitenleiste | **belegt** |
+| §3 | dieselben Seiten mit Inhalt | **rot** — Absturz aus einer Kernfunktion |
+| §4 | dieselben Zahlen | **rot** — Folge des Absturzes |
+| §5 | Primary-Bildschirm unberührt | belegt, aber schwach (der Client zeigte nichts) |
+| §6 | Schreibweg über die gemeinsame Oberfläche | **fehlt** |
+| §7 | kein Geschäftsspeicher auf dem Client | **belegt** |
+| §8 | Maschinenflächen sagen es | **rot** — Folge des Absturzes |
+
+### Was als Nächstes zu tun ist (R4)
+
+1. **Den Absturz beseitigen:** die Kernfunktionen, die eine Seite beim Zeichnen befragt
+   (Hauptbuch, Forderungen, Lose), brauchen denselben Schnitt wie die Store-Ladefunktionen.
+   Der Direkt-Scan muss dann über den Aufrufweg gehen, nicht über die Datei.
+2. **Den Schreibweg bauen:** ein Gegenstück zu `hydrateFromPrimary` für Buchungen, auf
+   `CommandSaveController` (Exactly-once ist dort schon gelöst). Die Store-Aktionen sind heute
+   **synchron** — das ist die eigentliche Entwurfsfrage, und sie gehört in eine eigene Scheibe.
+3. Erst danach ist `orders.convert_to_invoice` sinnvoll zu verdrahten — zusammen mit dem
+   Anzahlungsübertrag, sonst bleibt es die engere Handlung.
+
+### Nebenbei behoben
+
+**Der Client blieb nach dem Anmelden weiß.** `authStore.initialize()` rief `getUserBranches()`,
+das `user_branches` liest — eine Tabelle, die es ohne Datenbank nicht gibt. Der Fehler flog
+während des Aufbaus, also vor jeder Fehlergrenze. Jetzt fällt die Filialliste auf die Filiale
+des geprüften Ausweises zurück: es ist genau eine, und mehr darf dieser Rechner ohnehin nicht
+sehen.
+

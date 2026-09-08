@@ -51,6 +51,28 @@ interface AuthStore {
   hasPermission: (perm: string) => boolean;
 }
 
+/**
+ * CENTRAL-UI-PARITY R3 — die Filialen eines Benutzers, auch ohne Datenbank.
+ *
+ * Am Primary stehen sie in `user_branches`. Auf einem Rechner ohne Datenbank gibt es diese
+ * Tabelle nicht — und der Aufruf warf. Das war kein kleiner Fehler: er warf WAEHREND des
+ * Anmeldens, also im Aufbau der Anwendung, und liess einen komplett weissen Bildschirm zurueck.
+ *
+ * Die ehrliche Antwort dort ist die Filiale, die im geprueften Ausweis steht — es ist genau eine,
+ * und mehr darf dieser Rechner ohnehin nicht sehen.
+ */
+function branchesFor(session: Session): UserBranch[] {
+  try {
+    return authService.getUserBranches(session.userId);
+  } catch {
+    return [{
+      branchId: session.branchId,
+      branchName: session.branch?.name || '',
+      role: session.role,
+      isDefault: true,
+    }];
+  }
+}
 export const useAuthStore = create<AuthStore>((set, get) => ({
   session: null,
   branches: [],
@@ -60,7 +82,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   initialize: () => {
     const session = authService.getSession();
     if (session) {
-      const branches = authService.getUserBranches(session.userId);
+      const branches = branchesFor(session);
       set({ session, branches });
       triggerMediaRecoveryPostAuth();
     }
@@ -70,7 +92,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const session = await authService.login(email, password);
-      const branches = authService.getUserBranches(session.userId);
+      const branches = branchesFor(session);
       set({ session, branches, loading: false });
       // MEDIA-04A-3B2B-R5: with the branch/tenant now available, drive startup
       // media recovery + embedding reconciliation. Recovery itself is
