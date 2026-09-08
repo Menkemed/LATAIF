@@ -8,7 +8,10 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 /** Extended document with DB-only display fields */
 export interface DocumentRow extends Document {
@@ -64,11 +67,9 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
   loading: false,
 
   loadDocuments: () => {
-    if (remoteReadUnavailable('store.documents.get')) return;
+    if (hydrateFromPrimary('store.documents.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM documents WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      set({ documents: rows.map(rowToDocument), loading: false });
+      set({ ...loadDocumentsFor(localReadContext()), loading: false });
     } catch {
       set({ documents: [], loading: false });
     }
@@ -173,3 +174,22 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     get().loadDocuments();
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2B — die Belege einer Filiale, zustandsfrei.
+ *
+ * `file_path` traegt in dieser Tabelle nicht einen Pfad, sondern den GESAMTEN Dateiinhalt als
+ * Data-URL. Ueber das Netz waere das je Liste zweistellig viele Megabyte. Deshalb kann der Inhalt
+ * abgewaehlt werden: der Primary liest wie bisher alles, die Fernauskunft schickt die Liste ohne
+ * Inhalt. Die Liste selbst zeigt dann ihr Symbol statt der Vorschau — sie prueft `filePath`
+ * ohnehin schon.
+ */
+export function loadDocumentsFor(
+  ctx: BusinessReadContext,
+  opts?: { withContent?: boolean },
+): { documents: DocumentRow[] } {
+  const rows = query('SELECT * FROM documents WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const documents = rows.map(rowToDocument);
+  if (opts?.withContent === false) for (const d of documents) d.filePath = '';
+  return { documents };
+}

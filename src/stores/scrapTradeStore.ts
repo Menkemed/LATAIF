@@ -15,7 +15,10 @@ import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import {
   rowToScrapTrade,
   rowToScrapTradeLine,
@@ -282,55 +285,11 @@ export const useScrapTradeStore = create<ScrapTradeStore>((set, get) => ({
   trades: [],
 
   loadTrades: () => {
-    if (remoteReadUnavailable('store.scrap_trades.get')) return;
+    if (hydrateFromPrimary('store.scrap_trades.get', (d) => set(d as never))) return;
+    // Der Nachtrag fehlender Altdaten ist ein SCHREIBvorgang. Er bleibt deshalb ausschliesslich
+    // im Weg des Primary — eine Fernauskunft darf nichts veraendern.
     backfillTradeData();
-    const tradeRows = query(
-      `SELECT * FROM scrap_trades ORDER BY trade_date DESC, created_at DESC`
-    );
-    const ids = tradeRows.map(t => String(t.id));
-    const linesByTrade = new Map<string, ScrapTradeLine[]>();
-    const paymentsOutByTrade = new Map<string, ScrapTradePayment[]>();
-    const paymentsInByTrade = new Map<string, ScrapTradePayment[]>();
-
-    if (ids.length > 0) {
-      const placeholders = ids.map(() => '?').join(',');
-      const lineRows = query(
-        `SELECT * FROM scrap_trade_lines
-         WHERE scrap_trade_id IN (${placeholders})
-         ORDER BY position ASC`,
-        ids
-      );
-      for (const row of lineRows) {
-        const line = rowToScrapTradeLine(row);
-        const list = linesByTrade.get(line.scrapTradeId) || [];
-        list.push(line);
-        linesByTrade.set(line.scrapTradeId, list);
-      }
-
-      const pmtRows = query(
-        `SELECT * FROM scrap_trade_payments
-         WHERE scrap_trade_id IN (${placeholders})
-         ORDER BY direction, position ASC`,
-        ids
-      );
-      for (const row of pmtRows) {
-        const pmt = rowToScrapTradePayment(row);
-        const target = pmt.direction === 'OUT' ? paymentsOutByTrade : paymentsInByTrade;
-        const list = target.get(pmt.scrapTradeId) || [];
-        list.push(pmt);
-        target.set(pmt.scrapTradeId, list);
-      }
-    }
-
-    const trades = tradeRows.map(r =>
-      rowToScrapTrade(
-        r,
-        linesByTrade.get(String(r.id)) || [],
-        paymentsOutByTrade.get(String(r.id)) || [],
-        paymentsInByTrade.get(String(r.id)) || [],
-      )
-    );
-    set({ trades });
+    set(loadScrapTradesFor(localReadContext()));
   },
 
   getTrade: (id) => get().trades.find(t => t.id === id),
@@ -474,3 +433,62 @@ export const useScrapTradeStore = create<ScrapTradeStore>((set, get) => ({
     set(s => ({ trades: s.trades.filter(t => t.id !== id) }));
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2B — die Altgold-Geschaefte einer Filiale samt Zeilen und Zahlungen.
+ *
+ * Zwei Dinge sind hier anders als in der alten Store-Fassung, und beide mit Absicht:
+ * der Nachtrag alter Daten (ein Schreibvorgang) bleibt draussen, und die Abfrage ist auf die
+ * Filiale des Ausweises eingeschraenkt. Vorher las sie ALLE Filialen — am Ein-Filial-Betrieb
+ * faellt das nicht auf, ueber das Netz waere es eine Preisgabe fremder Daten.
+ */
+export function loadScrapTradesFor(ctx: BusinessReadContext): { trades: ScrapTrade[] } {
+  const tradeRows = query(
+    `SELECT * FROM scrap_trades WHERE branch_id = ? ORDER BY trade_date DESC, created_at DESC`,
+    [ctx.branchId]
+  );
+  const ids = tradeRows.map(t => String(t.id));
+  const linesByTrade = new Map<string, ScrapTradeLine[]>();
+  const paymentsOutByTrade = new Map<string, ScrapTradePayment[]>();
+  const paymentsInByTrade = new Map<string, ScrapTradePayment[]>();
+
+  if (ids.length > 0) {
+    const placeholders = ids.map(() => '?').join(',');
+    const lineRows = query(
+      `SELECT * FROM scrap_trade_lines
+       WHERE scrap_trade_id IN (${placeholders})
+       ORDER BY position ASC`,
+      ids
+    );
+    for (const row of lineRows) {
+      const line = rowToScrapTradeLine(row);
+      const list = linesByTrade.get(line.scrapTradeId) || [];
+      list.push(line);
+      linesByTrade.set(line.scrapTradeId, list);
+    }
+
+    const pmtRows = query(
+      `SELECT * FROM scrap_trade_payments
+       WHERE scrap_trade_id IN (${placeholders})
+       ORDER BY direction, position ASC`,
+      ids
+    );
+    for (const row of pmtRows) {
+      const pmt = rowToScrapTradePayment(row);
+      const target = pmt.direction === 'OUT' ? paymentsOutByTrade : paymentsInByTrade;
+      const list = target.get(pmt.scrapTradeId) || [];
+      list.push(pmt);
+      target.set(pmt.scrapTradeId, list);
+    }
+  }
+
+  const trades = tradeRows.map(r =>
+    rowToScrapTrade(
+      r,
+      linesByTrade.get(String(r.id)) || [],
+      paymentsOutByTrade.get(String(r.id)) || [],
+      paymentsInByTrade.get(String(r.id)) || [],
+    )
+  );
+  return { trades };
+}

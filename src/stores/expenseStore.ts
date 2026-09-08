@@ -22,7 +22,10 @@ import {
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
 import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE, SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Buchungsfehler blockieren den operativen Domain-Insert NICHT; Reconciliation-View
@@ -98,14 +101,9 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
   loading: false,
 
   loadExpenses: () => {
-    if (remoteReadUnavailable('store.expenses.get')) return;
+    if (hydrateFromPrimary('store.expenses.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        'SELECT * FROM expenses WHERE branch_id = ? ORDER BY expense_date DESC, created_at DESC',
-        [branchId]
-      );
-      set({ expenses: rows.map(rowToExpense), loading: false });
+      set({ ...loadExpensesFor(localReadContext()), loading: false });
     } catch { set({ expenses: [], loading: false }); }
   },
 
@@ -441,3 +439,17 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
       .reduce((s, e) => s + e.amount, 0);
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2B — die Ausgaben einer Filiale, zustandsfrei.
+ *
+ * Dieselbe Abfrage wie zuvor, nur nimmt sie die Filiale aus dem Ausweis der Anfrage statt aus der
+ * Sitzung des Menschen am Primary. Sie fasst keinen Zustandsspeicher an.
+ */
+export function loadExpensesFor(ctx: BusinessReadContext): { expenses: Expense[] } {
+  const rows = query(
+    'SELECT * FROM expenses WHERE branch_id = ? ORDER BY expense_date DESC, created_at DESC',
+    [ctx.branchId]
+  );
+  return { expenses: rows.map(rowToExpense) };
+}

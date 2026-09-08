@@ -55,6 +55,11 @@ import { BackfillPage } from '@/pages/reports/BackfillPage';
 import { LoginPage } from '@/pages/auth/LoginPage';
 import { OnboardingPage } from '@/pages/auth/OnboardingPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
+// CENTRAL-UI-PARITY R2B — die ehrliche Antwort fuer die drei Flaechen, die an der MASCHINE
+// haengen statt an der Geschaeftsansicht. Sie steht hier an der Wegkreuzung, nicht in den
+// Seiten selbst: so bekommt keine Seite eine zweite Fassung, und es bleibt bei EINER Stelle,
+// an der ueberhaupt zwischen Haupt- und Nebenrechner unterschieden wird.
+import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
 import { ImportPage } from '@/pages/settings/ImportPage';
 import { LedgerDebugPage } from '@/pages/settings/LedgerDebugPage';
 import { GlobalSearch } from '@/components/shared/GlobalSearch';
@@ -415,7 +420,12 @@ export default function App() {
           <Route path="/invoices/:id" element={<InvoiceDetail />} />
           <Route path="/repairs" element={<RepairList />} />
           <Route path="/repairs/:id" element={<RepairDetail />} />
-          <Route path="/admin/repair-flow-test" element={<RepairFlowTestPage />} />
+          <Route path="/admin/repair-flow-test" element={clientMode ? (
+            <PrimaryOnlyNotice
+              title="Repair flow test"
+              reason="This developer tool writes test records straight into the database. It only runs on the main computer."
+            />
+          ) : <RepairFlowTestPage />} />
           <Route path="/admin/reconcile" element={<RepairReconcilePage />} />
           <Route path="/scrap-trades" element={<ScrapTradeList />} />
           <Route path="/scrap-trades/new" element={<ScrapTradeNew />} />
@@ -432,7 +442,18 @@ export default function App() {
           <Route path="/orders/:id" element={<OrderDetail />} />
           <Route path="/documents" element={<DocumentList />} />
           <Route path="/tasks" element={<TaskList />} />
-          <Route path="/analytics" element={<AnalyticsPage />} />
+          {/* Die Auswertung rechnet ihre Zahlen in rund fuenfzig eigenen Abfragen direkt in
+              der Datenbank zusammen — als einzige Geschaeftsflaeche noch ohne gemeinsame
+              Ladefunktion. Ohne Datenbank faengt jede Abfrage ihren Fehler ab und liefert eine
+              leere Menge; die Seite zeigte dann ueberall NULL. Nullen, die wie Zahlen aussehen,
+              sind schlimmer als keine Seite — bis sie ihren eigenen Schnitt bekommt, sagt sie
+              deshalb, wo sie zu haben ist. */}
+          <Route path="/analytics" element={clientMode ? (
+            <PrimaryOnlyNotice
+              title="Analytics"
+              reason="Analytics computes its figures directly in the database. This computer works with the main computer's data over the network, so the report is only available there for now."
+            />
+          ) : <AnalyticsPage />} />
           <Route path="/debts" element={<DebtsPage />} />
           <Route path="/receivables" element={<ReceivablesPage />} />
           <Route path="/employees" element={<EmployeeList />} />
@@ -454,7 +475,12 @@ export default function App() {
           <Route path="/credit-notes" element={<CreditNoteList />} />
           <Route path="/credit-notes/:id" element={<CreditNoteDetail />} />
           <Route path="/ai" element={<AIPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings" element={clientMode ? (
+            <PrimaryOnlyNotice
+              title="Settings"
+              reason="Settings change this machine: data location, backups, updates, users and maintenance. They only work where the database lives, so open them on the main computer."
+            />
+          ) : <SettingsPage />} />
           <Route path="/import" element={<ImportPage />} />
           <Route path="/ledger-debug" element={<LedgerDebugPage />} />
         </Routes>

@@ -14,7 +14,10 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { useExpenseStore } from '@/stores/expenseStore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 interface RecurringExpenseStore {
   templates: RecurringExpenseTemplate[];
@@ -89,14 +92,9 @@ export const useRecurringExpenseStore = create<RecurringExpenseStore>((set, get)
   loading: false,
 
   loadTemplates: () => {
-    if (remoteReadUnavailable('store.recurring_expenses.get')) return;
+    if (hydrateFromPrimary('store.recurring_expenses.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT * FROM recurring_expense_templates WHERE branch_id = ? ORDER BY active DESC, created_at DESC`,
-        [branchId]
-      );
-      set({ templates: rows.map(rowToTemplate), loading: false });
+      set({ ...loadRecurringTemplatesFor(localReadContext()), loading: false });
     } catch { set({ templates: [], loading: false }); }
   },
 
@@ -289,3 +287,12 @@ export const useRecurringExpenseStore = create<RecurringExpenseStore>((set, get)
     return out;
   },
 }));
+
+/** CENTRAL-UI-PARITY R2B — die Dauerauftraege einer Filiale, zustandsfrei. */
+export function loadRecurringTemplatesFor(ctx: BusinessReadContext): { templates: RecurringExpenseTemplate[] } {
+  const rows = query(
+    `SELECT * FROM recurring_expense_templates WHERE branch_id = ? ORDER BY active DESC, created_at DESC`,
+    [ctx.branchId]
+  );
+  return { templates: rows.map(rowToTemplate) };
+}

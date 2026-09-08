@@ -193,7 +193,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   await import('../../src/core/bridge/commercial-commands.ts');
   await import('../../src/core/bridge/service-commands.ts');
   await import('../../src/core/bridge/financial-commands.ts');
-  // CENTRAL-UI-PARITY — die 25 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
+  // CENTRAL-UI-PARITY — die 27 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
   // Bruecken-Zuhoerer laedt sie ebenfalls. Ohne diesen Import misst das Gate einen Teilstand.
   await import('../../src/core/bridge/store-read-commands.ts');
   ok(Array.isArray(registry.ALLOWED_MUTATIONS)
@@ -209,17 +209,17 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(known.length === 72, `ALLOWLIST produktiv zweiundsiebzig Namen (${known.length})`);
-  // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 13 typisierte Auskuenfte fuer die gemeinsame Oberflaeche.
-  ok(reads.length === 31 && known.includes('bridge.probe') && known.includes('invoices.create'),
-    `ALLOWLIST eine Probe, einunddreissig Lesevorgaenge, vierzig Mutationen (${reads.length})`);
+  // CENTRAL-UI-PARITY: dazu 27 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
+  ok(known.length === 86, `ALLOWLIST produktiv sechsundachtzig Namen (${known.length})`);
+  // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 27 typisierte Auskuenfte fuer die gemeinsame Oberflaeche.
+  ok(reads.length === 45 && known.includes('bridge.probe') && known.includes('invoices.create'),
+    `ALLOWLIST eine Probe, fuenfundvierzig Lesevorgaenge, vierzig Mutationen (${reads.length})`);
 
   // Und Rust prueft dieselbe Liste ein zweites Mal.
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 72, 'ALLOWLIST …und seine Liste ist genau zweiundsiebzig Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 86, 'ALLOWLIST …und seine Liste ist genau sechsundachtzig Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

@@ -11,7 +11,10 @@ import { eventBus } from '@/core/events/event-bus';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — offer_lines + offers-Totals
 
 interface OfferStore {
@@ -81,17 +84,9 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
   loading: false,
 
   loadOffers: () => {
-    if (remoteReadUnavailable('store.offers.get')) return;
+    if (hydrateFromPrimary('store.offers.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM offers WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      const offers = rows.map(r => {
-        const offer = rowToOffer(r);
-        const lineRows = query('SELECT * FROM offer_lines WHERE offer_id = ? ORDER BY position', [offer.id]);
-        offer.lines = lineRows.map(rowToLine);
-        return offer;
-      });
-      set({ offers, loading: false });
+      set({ ...loadOffersFor(localReadContext()), loading: false });
     } catch { set({ offers: [], loading: false }); }
   },
 
@@ -274,3 +269,17 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
     trackChange('offers', offerId, 'update', {});
   },
 }));
+
+/** CENTRAL-UI-PARITY R2B — die Angebote einer Filiale samt Zeilen, zustandsfrei. */
+export function loadOffersFor(ctx: BusinessReadContext): { offers: Offer[] } {
+  const rows = query('SELECT * FROM offers WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const offers = rows.map((r) => {
+    const offer = rowToOffer(r);
+    // `offer_lines` hat keine eigene Filiale — sie haengt am Angebot, und das ist bereits
+    // eingeschraenkt. Die Zeile kann also nur zu einem Angebot der eigenen Filiale gehoeren.
+    const lineRows = query('SELECT * FROM offer_lines WHERE offer_id = ? ORDER BY position', [offer.id]);
+    offer.lines = lineRows.map(rowToLine);
+    return offer;
+  });
+  return { offers };
+}

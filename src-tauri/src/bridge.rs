@@ -165,6 +165,22 @@ pub const OP_STORE_PURCHASES_GET: &str = "store.purchases.get";
 pub const OP_STORE_REPAIRS_GET: &str = "store.repairs.get";
 pub const OP_STORE_AGENTS_GET: &str = "store.agents.get";
 
+// CENTRAL-UI-PARITY R2B — der Rest der Lesefläche: Finanzen und Betriebsfuehrung.
+pub const OP_STORE_EXPENSES_GET: &str = "store.expenses.get";
+pub const OP_STORE_RECURRING_EXPENSES_GET: &str = "store.recurring_expenses.get";
+pub const OP_STORE_BANKING_GET: &str = "store.banking.get";
+pub const OP_STORE_PAYABLES_GET: &str = "store.payables.get";
+pub const OP_STORE_DEBTS_GET: &str = "store.debts.get";
+pub const OP_STORE_GOLD_GET: &str = "store.gold.get";
+pub const OP_STORE_METALS_GET: &str = "store.metals.get";
+pub const OP_STORE_SCRAP_TRADES_GET: &str = "store.scrap_trades.get";
+pub const OP_STORE_EMPLOYEES_GET: &str = "store.employees.get";
+pub const OP_STORE_PARTNERS_GET: &str = "store.partners.get";
+pub const OP_STORE_TASKS_GET: &str = "store.tasks.get";
+pub const OP_STORE_DOCUMENTS_GET: &str = "store.documents.get";
+pub const OP_STORE_OFFERS_GET: &str = "store.offers.get";
+pub const OP_STORE_PRODUCTION_GET: &str = "store.production.get";
+
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
 // `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
@@ -243,6 +259,20 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_STORE_PURCHASES_GET,
     OP_STORE_REPAIRS_GET,
     OP_STORE_AGENTS_GET,
+    OP_STORE_EXPENSES_GET,
+    OP_STORE_RECURRING_EXPENSES_GET,
+    OP_STORE_BANKING_GET,
+    OP_STORE_PAYABLES_GET,
+    OP_STORE_DEBTS_GET,
+    OP_STORE_GOLD_GET,
+    OP_STORE_METALS_GET,
+    OP_STORE_SCRAP_TRADES_GET,
+    OP_STORE_EMPLOYEES_GET,
+    OP_STORE_PARTNERS_GET,
+    OP_STORE_TASKS_GET,
+    OP_STORE_DOCUMENTS_GET,
+    OP_STORE_OFFERS_GET,
+    OP_STORE_PRODUCTION_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

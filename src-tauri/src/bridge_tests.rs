@@ -258,8 +258,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        59,
-        "Probe, achtzehn Lesevorgaenge und vierzig Buchungen"
+        86,
+        "Probe, fuenfundvierzig Lesevorgaenge und vierzig Buchungen"
     );
     for op in [
         OP_INVOICES_CREATE,

@@ -101,6 +101,11 @@ export function hydrateOneFromPrimary(
  * geladen werden: er wuerde die Filiale des Primary lesen und dessen Bildschirm anfassen. Also
  * wird auf einem Rechner ohne Datenbank hier abgebrochen — kein Datenbankzugriff, kein toter
  * Netzaufruf, und eine Zeile im Protokoll, damit es sichtbar ist statt still.
+ *
+ * Seit R2B hat er KEINEN Aufrufer mehr: jede Store-Ladefunktion ist umgestellt. Er bleibt
+ * trotzdem stehen, denn er ist der Vertrag fuer den naechsten Store, der dazukommt — solange
+ * dessen Ladefunktion nicht denselben Schnitt hat, gehoert hier der Riegel hin und nicht ein
+ * „laeuft meistens".
  */
 const announced = new Set<string>();
 export function remoteReadUnavailable(what: string): boolean {

@@ -6,7 +6,10 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import type { Debt, DebtPayment, DebtDirection, CashSource, DebtStatus } from '@/core/models/types';
 import { canonicalLoanDirection } from '@/core/models/types';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import {
   postLoanCreated,
   postLoanPayment,
@@ -116,15 +119,9 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   loading: false,
 
   loadDebts: () => {
-    if (remoteReadUnavailable('store.debts.get')) return;
+    if (hydrateFromPrimary('store.debts.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        'SELECT * FROM debts WHERE branch_id = ? ORDER BY created_at DESC',
-        [branchId],
-      );
-      const debts: Debt[] = rows.map(r => rowToDebt(r, sumPaymentsFor(r.id as string)));
-      set({ debts, loading: false });
+      set({ ...loadDebtsFor(localReadContext()), loading: false });
     } catch {
       set({ debts: [], loading: false });
     }
@@ -362,3 +359,9 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
     return { id, debtId, amount, source, paidAt, notes, createdAt: now };
   },
 }));
+
+/** CENTRAL-UI-PARITY R2B — die Darlehen einer Filiale samt gezahlter Summen, zustandsfrei. */
+export function loadDebtsFor(ctx: BusinessReadContext): { debts: Debt[] } {
+  const rows = query('SELECT * FROM debts WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  return { debts: rows.map((r) => rowToDebt(r, sumPaymentsFor(r.id as string))) };
+}

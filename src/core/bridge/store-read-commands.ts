@@ -25,6 +25,10 @@ import {
   OP_STORE_SUPPLIERS_GET, OP_STORE_SALES_RETURNS_GET, OP_STORE_CREDIT_NOTES_GET,
   OP_STORE_ORDERS_GET, OP_STORE_CONSIGNMENTS_GET, OP_STORE_PURCHASES_GET,
   OP_STORE_REPAIRS_GET, OP_STORE_AGENTS_GET,
+  OP_STORE_EXPENSES_GET, OP_STORE_RECURRING_EXPENSES_GET, OP_STORE_BANKING_GET,
+  OP_STORE_PAYABLES_GET, OP_STORE_DEBTS_GET, OP_STORE_GOLD_GET, OP_STORE_METALS_GET,
+  OP_STORE_SCRAP_TRADES_GET, OP_STORE_EMPLOYEES_GET, OP_STORE_PARTNERS_GET,
+  OP_STORE_TASKS_GET, OP_STORE_DOCUMENTS_GET, OP_STORE_OFFERS_GET, OP_STORE_PRODUCTION_GET,
 } from './store-read-ops';
 
 /** Der Rumpf, den die Route baut: geprüfter Absender plus die Eingabe des Clients. */
@@ -189,5 +193,138 @@ registerCommand(OP_STORE_AGENTS_GET, {
     const ctx = contextOf(payload, actor);
     const s = await import('@/stores/agentStore');
     return { data: { ...s.loadAgentsFor(ctx), ...s.loadAgentTransfersFor(ctx) } };
+  },
+});
+
+// ── CENTRAL-UI-PARITY R2B — Finanzen ───────────────────────────────────────
+//
+// Derselbe Schnitt wie oben. Was diese Gruppe zusaetzlich zeigt: eine Auswahl ist keine
+// Berechtigung. Zeitraum, Kategorie, Status und Gruppierung schraenken eine Liste ein — die
+// Filiale und der Mandant kommen ausschliesslich aus dem geprueften Absender und stehen in
+// JEDER Abfrage. Zwei Listen hatten diese Grenze bisher gar nicht (Verbindlichkeiten,
+// Altgold-Geschaefte); sie haben sie jetzt.
+
+registerCommand(OP_STORE_EXPENSES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/expenseStore')).loadExpensesFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_RECURRING_EXPENSES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/recurringExpenseStore')).loadRecurringTemplatesFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_BANKING_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    // Umbuchungen UND die abgeleitete Bewegungsliste: ohne Datenbank laesst sich Letztere
+    // drueben nicht nachrechnen.
+    return { data: (await import('@/stores/bankingStore')).loadBankingFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_PAYABLES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/payablesStore')).loadPayablesFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_DEBTS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/debtStore')).loadDebtsFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_GOLD_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const s = await import('@/stores/goldStore');
+    return { data: { ...s.loadGoldPayablesFor(ctx), ...s.loadCustomerGoldCreditsFor(ctx) } };
+  },
+});
+
+registerCommand(OP_STORE_METALS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/metalStore')).loadMetalsFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_SCRAP_TRADES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    // Ohne den Nachtrag alter Zeilen: eine Auskunft liest, sie repariert nicht.
+    return { data: (await import('@/stores/scrapTradeStore')).loadScrapTradesFor(ctx) };
+  },
+});
+
+// ── CENTRAL-UI-PARITY R2B — Betriebsfuehrung ───────────────────────────────
+//
+// Mitarbeiter, Gesellschafter, Aufgaben, Belege, Angebote, Fertigung. Hier wird ausdruecklich
+// KEINE Rollenlogik erfunden: was jemand sehen darf, hat die Reautorisierung der Anfrage bereits
+// entschieden. Die Ladefunktionen kennen nur die Filiale ihres Ausweises.
+
+registerCommand(OP_STORE_EMPLOYEES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/employeeStore')).loadEmployeesFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_PARTNERS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const s = await import('@/stores/partnerStore');
+    return { data: { ...s.loadPartnersFor(ctx), ...s.loadPartnerTransactionsFor(ctx) } };
+  },
+});
+
+registerCommand(OP_STORE_TASKS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/taskStore')).loadTasksFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_DOCUMENTS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    // OHNE Dateiinhalt: in dieser Tabelle steht die ganze Datei als Data-URL. Die Liste ist die
+    // Auskunft; der Inhalt bleibt dort, wo die Datenbank steht.
+    return { data: (await import('@/stores/documentStore')).loadDocumentsFor(ctx, { withContent: false }) };
+  },
+});
+
+registerCommand(OP_STORE_OFFERS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/offerStore')).loadOffersFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_PRODUCTION_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/productionStore')).loadProductionRecordsFor(ctx) };
   },
 });

@@ -11,7 +11,10 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 export interface SalaryHistoryRow {
   expenseId: string;
@@ -176,16 +179,9 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
   loading: false,
 
   loadEmployees: () => {
-    if (remoteReadUnavailable('store.employees.get')) return;
+    if (hydrateFromPrimary('store.employees.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT * FROM employees WHERE branch_id = ?
-          ORDER BY CASE employment_status WHEN 'active' THEN 0 WHEN 'on_leave' THEN 1 ELSE 2 END,
-                   name ASC`,
-        [branchId]
-      );
-      set({ employees: rows.map(rowToEmployee), loading: false });
+      set({ ...loadEmployeesFor(localReadContext()), loading: false });
     } catch { set({ employees: [], loading: false }); }
   },
 
@@ -557,3 +553,19 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
     } catch { return []; }
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2B — die Mitarbeiter einer Filiale, zustandsfrei.
+ *
+ * Ausdruecklich OHNE Rollenlogik: wer etwas sehen darf, entscheidet die Reautorisierung der
+ * Anfrage (C4), nicht diese Ladefunktion. Hier wird nur die Filiale des Ausweises gelesen.
+ */
+export function loadEmployeesFor(ctx: BusinessReadContext): { employees: Employee[] } {
+  const rows = query(
+    `SELECT * FROM employees WHERE branch_id = ?
+      ORDER BY CASE employment_status WHEN 'active' THEN 0 WHEN 'on_leave' THEN 1 ELSE 2 END,
+               name ASC`,
+    [ctx.branchId]
+  );
+  return { employees: rows.map(rowToEmployee) };
+}

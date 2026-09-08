@@ -9,7 +9,10 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import {
   postPartnerTransaction,
   postPartnerTransactionReversed,
@@ -83,24 +86,16 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
   loading: false,
 
   loadPartners: () => {
-    if (remoteReadUnavailable('store.partners.get')) return;
+    if (hydrateFromPrimary('store.partners.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM partners WHERE branch_id = ? ORDER BY name', [branchId]);
-      const list = rows.map(rowToPartner);
-      for (const p of list) {
-        Object.assign(p, get().getPartnerLedger(p.id));
-      }
-      set({ partners: list, loading: false });
+      set({ ...loadPartnersFor(localReadContext()), loading: false });
     } catch { set({ partners: [], loading: false }); }
   },
 
   loadTransactions: () => {
-    if (remoteReadUnavailable('store.partners.get')) return;
+    if (hydrateFromPrimary('store.partners.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM partner_transactions WHERE branch_id = ? ORDER BY transaction_date DESC, created_at DESC', [branchId]);
-      set({ transactions: rows.map(rowToTx) });
+      set(loadPartnerTransactionsFor(localReadContext()));
     } catch { set({ transactions: [] }); }
   },
 
@@ -204,27 +199,7 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
     });
   },
 
-  getPartnerLedger: (partnerId) => {
-    try {
-      const rows = query(
-        `SELECT type, COALESCE(SUM(amount),0) as total FROM partner_transactions WHERE partner_id = ? GROUP BY type`,
-        [partnerId]
-      );
-      let totalInvested = 0, totalWithdrawn = 0, totalProfitShare = 0;
-      for (const r of rows) {
-        const amt = (r.total as number) || 0;
-        if (r.type === 'INVESTMENT') totalInvested = amt;
-        else if (r.type === 'WITHDRAWAL') totalWithdrawn = amt;
-        else if (r.type === 'PROFIT_DISTRIBUTION') totalProfitShare = amt;
-      }
-      return {
-        totalInvested, totalWithdrawn, totalProfitShare,
-        balance: totalInvested + totalProfitShare - totalWithdrawn,
-      };
-    } catch {
-      return { totalInvested: 0, totalWithdrawn: 0, totalProfitShare: 0, balance: 0 };
-    }
-  },
+  getPartnerLedger: (partnerId) => partnerLedgerFor(partnerId),
 }));
 
 // Helper — records a partner transaction with correct prefix
@@ -278,4 +253,51 @@ function recordTx(
   });
 
   return get().transactions.find(t => t.id === id)!;
+}
+
+
+/** CENTRAL-UI-PARITY R2B — die Gesellschafter einer Filiale samt ihren Salden, zustandsfrei. */
+export function loadPartnersFor(ctx: BusinessReadContext): { partners: Partner[] } {
+  const rows = query('SELECT * FROM partners WHERE branch_id = ? ORDER BY name', [ctx.branchId]);
+  const partners = rows.map(rowToPartner);
+  for (const p of partners) Object.assign(p, partnerLedgerFor(p.id));
+  return { partners };
+}
+
+/** CENTRAL-UI-PARITY R2B — die Bewegungen der Gesellschafter einer Filiale, zustandsfrei. */
+export function loadPartnerTransactionsFor(ctx: BusinessReadContext): { transactions: PartnerTransaction[] } {
+  const rows = query(
+    'SELECT * FROM partner_transactions WHERE branch_id = ? ORDER BY transaction_date DESC, created_at DESC',
+    [ctx.branchId]
+  );
+  return { transactions: rows.map(rowToTx) };
+}
+
+/**
+ * CENTRAL-UI-PARITY R2B — die Salden eines Gesellschafters, als freie Funktion.
+ *
+ * Sie war nur als Store-Methode verpackt; gerechnet hat sie immer schon aus der Datenbank. Die
+ * Einschraenkung auf die Filiale sitzt eine Ebene hoeher: der Gesellschafter selbst gehoert zu
+ * genau einer, und nur dessen Kennung kommt hier an.
+ */
+export function partnerLedgerFor(partnerId: string): { totalInvested: number; totalWithdrawn: number; totalProfitShare: number; balance: number } {
+  try {
+    const rows = query(
+      `SELECT type, COALESCE(SUM(amount),0) as total FROM partner_transactions WHERE partner_id = ? GROUP BY type`,
+      [partnerId]
+    );
+    let totalInvested = 0, totalWithdrawn = 0, totalProfitShare = 0;
+    for (const r of rows) {
+      const amt = (r.total as number) || 0;
+      if (r.type === 'INVESTMENT') totalInvested = amt;
+      else if (r.type === 'WITHDRAWAL') totalWithdrawn = amt;
+      else if (r.type === 'PROFIT_DISTRIBUTION') totalProfitShare = amt;
+    }
+    return {
+      totalInvested, totalWithdrawn, totalProfitShare,
+      balance: totalInvested + totalProfitShare - totalWithdrawn,
+    };
+  } catch {
+    return { totalInvested: 0, totalWithdrawn: 0, totalProfitShare: 0, balance: 0 };
+  }
 }

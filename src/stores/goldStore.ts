@@ -29,7 +29,10 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postGoldConversionCredit, hasLedgerEntries } from '@/core/ledger/posting';
 import { KARAT_PURITY as PURITY_LOOKUP } from '@/core/gold/purity';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -299,29 +302,15 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   loading: false,
 
   loadGoldPayables: () => {
-    try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT * FROM gold_payables WHERE branch_id = ? ORDER BY created_at DESC`,
-        [branchId]
-      );
-      set({ goldPayables: rows.map(rowToGoldPayable) });
-    } catch { set({ goldPayables: [] }); }
+    try { set(loadGoldPayablesFor(localReadContext())); } catch { set({ goldPayables: [] }); }
   },
 
   loadCustomerGoldCredits: () => {
-    try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT * FROM customer_gold_credits WHERE branch_id = ? ORDER BY created_at DESC`,
-        [branchId]
-      );
-      set({ customerGoldCredits: rows.map(rowToCustomerGoldCredit) });
-    } catch { set({ customerGoldCredits: [] }); }
+    try { set(loadCustomerGoldCreditsFor(localReadContext())); } catch { set({ customerGoldCredits: [] }); }
   },
 
   loadAll: () => {
-    if (remoteReadUnavailable('store.gold.get')) return;
+    if (hydrateFromPrimary('store.gold.get', (d) => set(d as never))) return;
     set({ loading: true });
     get().loadGoldPayables();
     get().loadCustomerGoldCredits();
@@ -1197,3 +1186,21 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     } catch { return { totalGrams: 0, pureAuGrams: 0, perKarat: [] }; }
   },
 }));
+
+/** CENTRAL-UI-PARITY R2B — die Gold-Verbindlichkeiten einer Filiale, zustandsfrei. */
+export function loadGoldPayablesFor(ctx: BusinessReadContext): { goldPayables: GoldPayable[] } {
+  const rows = query(
+    `SELECT * FROM gold_payables WHERE branch_id = ? ORDER BY created_at DESC`,
+    [ctx.branchId]
+  );
+  return { goldPayables: rows.map(rowToGoldPayable) };
+}
+
+/** CENTRAL-UI-PARITY R2B — die Gold-Guthaben der Kunden einer Filiale, zustandsfrei. */
+export function loadCustomerGoldCreditsFor(ctx: BusinessReadContext): { customerGoldCredits: CustomerGoldCredit[] } {
+  const rows = query(
+    `SELECT * FROM customer_gold_credits WHERE branch_id = ? ORDER BY created_at DESC`,
+    [ctx.branchId]
+  );
+  return { customerGoldCredits: rows.map(rowToCustomerGoldCredit) };
+}

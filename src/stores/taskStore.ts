@@ -11,7 +11,10 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 interface CreateTaskData {
   title: string;
@@ -71,14 +74,9 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   loading: false,
 
   loadTasks: () => {
-    if (remoteReadUnavailable('store.tasks.get')) return;
+    if (hydrateFromPrimary('store.tasks.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        'SELECT * FROM tasks WHERE branch_id = ? ORDER BY CASE status WHEN \'open\' THEN 0 WHEN \'in_progress\' THEN 1 WHEN \'completed\' THEN 2 WHEN \'cancelled\' THEN 3 END, due_at ASC, created_at DESC',
-        [branchId]
-      );
-      set({ tasks: rows.map(rowToTask), loading: false });
+      set({ ...loadTasksFor(localReadContext()), loading: false });
     } catch {
       set({ tasks: [], loading: false });
     }
@@ -183,3 +181,12 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     );
   },
 }));
+
+/** CENTRAL-UI-PARITY R2B — die Aufgaben einer Filiale, zustandsfrei. */
+export function loadTasksFor(ctx: BusinessReadContext): { tasks: Task[] } {
+  const rows = query(
+    'SELECT * FROM tasks WHERE branch_id = ? ORDER BY CASE status WHEN \'open\' THEN 0 WHEN \'in_progress\' THEN 1 WHEN \'completed\' THEN 2 WHEN \'cancelled\' THEN 3 END, due_at ASC, created_at DESC',
+    [ctx.branchId]
+  );
+  return { tasks: rows.map(rowToTask) };
+}

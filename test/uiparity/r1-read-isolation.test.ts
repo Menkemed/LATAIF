@@ -166,6 +166,11 @@ const SENTINEL = { id: 'sentinel', name: 'NICHT ANFASSEN' } as never;
     'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get',
     'store.orders.get', 'store.consignments.get', 'store.purchases.get',
     'store.repairs.get', 'store.agents.get',
+    // R2B — Finanzen und Betriebsfuehrung. Dieselben drei Zusagen, kein neuer Test je Domaene.
+    'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get',
+    'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get',
+    'store.scrap_trades.get', 'store.employees.get', 'store.partners.get',
+    'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get',
   ];
   twoBranchDb();
   setPrimarySession('branch-a', 'user-a');
@@ -178,6 +183,13 @@ const SENTINEL = { id: 'sentinel', name: 'NICHT ANFASSEN' } as never;
     import('../../src/stores/orderStore.ts'), import('../../src/stores/consignmentStore.ts'),
     import('../../src/stores/purchaseStore.ts'), import('../../src/stores/repairStore.ts'),
     import('../../src/stores/agentStore.ts'),
+    import('../../src/stores/expenseStore.ts'), import('../../src/stores/recurringExpenseStore.ts'),
+    import('../../src/stores/bankingStore.ts'), import('../../src/stores/payablesStore.ts'),
+    import('../../src/stores/debtStore.ts'), import('../../src/stores/goldStore.ts'),
+    import('../../src/stores/metalStore.ts'), import('../../src/stores/scrapTradeStore.ts'),
+    import('../../src/stores/employeeStore.ts'), import('../../src/stores/partnerStore.ts'),
+    import('../../src/stores/taskStore.ts'), import('../../src/stores/documentStore.ts'),
+    import('../../src/stores/offerStore.ts'), import('../../src/stores/productionStore.ts'),
   ]);
   const hooks = stores.map((m) => Object.values(m).find(
     (v) => typeof v === 'function' && typeof (v as { getState?: unknown }).getState === 'function',
@@ -226,6 +238,67 @@ const SENTINEL = { id: 'sentinel', name: 'NICHT ANFASSEN' } as never;
     'F dieselbe Kennung aus einer fremden Filiale liefert NICHTS statt fremder Daten');
   const missing = await remoteRead('order_payments.get', {}, 'branch-a');
   ok(missing.kind !== 'ok', `F ohne Kennung gibt es keine Antwort (${missing.kind})`);
+}
+
+// ── G — R2B: die zwei Listen, die vorher GAR KEINE Filialgrenze hatten ─────
+//
+// Verbindlichkeiten und Altgold-Geschaefte zaehlten bisher ueber alle Filialen. Am
+// Ein-Filial-Betrieb faellt das nicht auf; als Fernauskunft waere es die Preisgabe fremder
+// Zahlen. Hier stehen echte Zeilen in Filiale A — und Filiale B darf sie nicht sehen.
+{
+  twoBranchDb();
+  setPrimarySession('branch-a', 'user-a');
+  const db = twoBranchDbHandle;
+  db.run(`INSERT INTO suppliers (id, branch_id, name, active, created_at, updated_at)
+    VALUES ('s-a','branch-a','Lieferant A',1,?,?)`, [NOW, NOW]);
+  db.run(`INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, status,
+      total_amount, paid_amount, remaining_amount, purchase_date, created_at, updated_at)
+    VALUES ('pu-a','branch-a','PUR-A','s-a','UNPAID',100,0,100,?,?,?)`, [NOW, NOW, NOW]);
+  db.run(`INSERT INTO scrap_trades (id, branch_id, trade_number, seller_name, buyer_name,
+      weight_grams, karat, purchase_price, sale_price, profit, trade_date, created_at, updated_at)
+    VALUES ('st-a','branch-a','ST-A','Verkaeufer','Kaeufer',10,'21K',50,60,10,?,?,?)`, [NOW, NOW, NOW]);
+
+  const payA = await remoteRead('store.payables.get', {}, 'branch-a');
+  const payB = await remoteRead('store.payables.get', {}, 'branch-b');
+  const rowsA = (payA.value?.data?.payables ?? []) as Array<{ sourceId?: string }>;
+  const rowsB = (payB.value?.data?.payables ?? []) as Array<{ sourceId?: string }>;
+  ok(rowsA.some((r) => r.sourceId === 'pu-a'), `G die eigene Filiale sieht ihre offene Rechnung (${rowsA.length})`);
+  ok(rowsB.length === 0, `G die fremde Filiale sieht davon NICHTS (${rowsB.length})`);
+
+  const scrapA = await remoteRead('store.scrap_trades.get', {}, 'branch-a');
+  const scrapB = await remoteRead('store.scrap_trades.get', {}, 'branch-b');
+  ok(((scrapA.value?.data?.trades ?? []) as unknown[]).length === 1, 'G das Altgold-Geschaeft gehoert Filiale A');
+  ok(((scrapB.value?.data?.trades ?? []) as unknown[]).length === 0, 'G und Filiale B bekommt es nicht');
+
+  // Und die Auskunft repariert nichts: der Nachtrag alter Zeilen ist ein Schreibvorgang und
+  // bleibt im Weg des Primary. Die Zeile darf nach dem Fernlesen unveraendert sein.
+  const after = db.exec('SELECT status FROM scrap_trades WHERE id = ?', ['st-a']);
+  ok(String(after[0]?.values?.[0]?.[0] ?? '') === 'completed', 'G und sie hat die Zeile nicht angefasst');
+}
+
+// ── H — R2B: der Beleg reist ohne seinen Inhalt ────────────────────────────
+//
+// In dieser Tabelle steht die ganze Datei als Data-URL im Feld \`file_path\`. Die Liste soll
+// ueber das Netz gehen, der Inhalt nicht — sonst waeren es je Aufruf viele Megabyte.
+{
+  twoBranchDb();
+  setPrimarySession('branch-a', 'user-a');
+  const db = twoBranchDbHandle;
+  const fat = 'data:image/png;base64,' + 'A'.repeat(4096);
+  db.run(`INSERT INTO documents (id, branch_id, file_name, file_path, file_type, file_size,
+      doc_class, created_at) VALUES ('d-a','branch-a','beleg.png',?,'image/png',4096,'other',?)`,
+    [fat, NOW]);
+
+  const reply = await remoteRead('store.documents.get', {}, 'branch-a');
+  const docs = (reply.value?.data?.documents ?? []) as Array<{ id?: string; fileName?: string; filePath?: string }>;
+  ok(docs.length === 1 && docs[0].fileName === 'beleg.png', `H die Liste kommt an (${docs.length})`);
+  ok(docs[0]?.filePath === '', 'H aber ohne den Dateiinhalt');
+  ok(!JSON.stringify(reply.value ?? {}).includes(fat.slice(0, 64)), 'H und er steckt auch sonst nirgends in der Antwort');
+
+  // Am Primary bleibt derselbe Loader vollstaendig — sonst waere die Vorschau dort kaputt.
+  const { loadDocumentsFor } = await import('../../src/stores/documentStore.ts');
+  const local = loadDocumentsFor({ tenantId: 'tenant-1', branchId: 'branch-a', userId: 'user-a', role: 'ADMIN' });
+  ok(local.documents[0]?.filePath === fat, 'H der Primary liest den Inhalt weiterhin');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r1: read isolation and identity: ${PASS} passed, ${fails.length} failed`);

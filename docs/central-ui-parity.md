@@ -211,3 +211,103 @@ TS und Rust stimmen bitgenau überein (`STORE_READ_OPS` ↔ `REMOTE_OPS`).
 Diese laufen auf PC2 in `remoteReadUnavailable`: kein Datenbankzugriff, kein Rückfall auf einen
 Primary-Store-Loader, kein veralteter Zwischenspeicher. Das betrifft insbesondere Finanzen,
 Berichte und Business Management — sie sind für R2B vorgesehen.
+
+---
+
+## R2B — der Rest der Lesefläche (08.09.2026)
+
+### §1 Inventur der vierzehn fern gesperrten Stores
+
+| Store | Ladefunktion(en) | Parameter | filialbezogen? | mandantenbezogen? | global/System? | direkte DB-Abhängigkeit | erwartete Verbraucher |
+|---|---|---|---|---|---|---|---|
+| `expenseStore` | `loadExpenses` | — | ja | über Filiale | nein | `expenses` | Ausgaben, Dashboard, Berichte, Lieferant, Auftrag, Reparatur, Kommission |
+| `recurringExpenseStore` | `loadTemplates` | — | ja | über Filiale | nein | `recurring_expense_templates` | Ausgabenliste |
+| `bankingStore` | `loadTransfers, getTransactions` | — | ja | über Filiale | nein | `bank_transfers + 14 Quell-Abfragen` | Bank, Dashboard |
+| `payablesStore` | `loadPayables` | — | **nein → jetzt ja** | über Filiale | nein | `purchases, sales_returns, consignments, expenses, debts, settings` | Verbindlichkeiten, Dashboard |
+| `debtStore` | `loadDebts, loadPaymentsForDebt` | debtId (Zahlungen) | ja | über Filiale | nein | `debts, debt_payments` | Darlehen, Kunde, Mitarbeiter, Forderungen, Berichte, Dashboard |
+| `goldStore` | `loadAll → loadGoldPayables, loadCustomerGoldCredits` | — | ja | über Filiale | nein | `gold_payables, customer_gold_credits (+ 12 abgeleitete Abfragen)` | Reparatur, Kunde, Lieferant, Auftrag |
+| `metalStore` | `loadMetals` | — | ja | über Filiale | nein | `precious_metals (+ Kurse, Zahlungen)` | Edelmetalle |
+| `scrapTradeStore` | `loadTrades` | — | **nein → jetzt ja** | über Filiale | nein | `scrap_trades, _lines, _payments` | Altgold, Dashboard, Berichte |
+| `employeeStore` | `loadEmployees` | — | ja | über Filiale | nein | `employees (+ 9 Verlaufsabfragen je Mitarbeiter)` | 15 Seiten/Komponenten (Personalauswahl überall) |
+| `partnerStore` | `loadPartners, loadTransactions, getPartnerLedger` | partnerId (Saldo) | ja | über Filiale | nein | `partners, partner_transactions` | Gesellschafter, Dashboard, Berichte |
+| `taskStore` | `loadTasks` | — | ja | über Filiale | nein | `tasks` | Aufgaben |
+| `documentStore` | `loadDocuments` | — | ja | über Filiale | nein | `documents (Inhalt als Data-URL in `file_path`)` | Belege |
+| `offerStore` | `loadOffers` | — | ja | über Filiale | nein | `offers, offer_lines` | Angebote, Rechnungsliste |
+| `productionStore` | `loadRecords` | — | ja | über Filiale | nein | `production_records, _inputs, _outputs` | Fertigung |
+
+**Der Befund der Inventur, und er war nicht erwartet:** zwei dieser Listen hatten überhaupt
+keine Filialgrenze. `loadPayables` zählte Einkäufe, Retouren, Kommissionen, Ausgaben und
+Darlehen **aller** Filialen zusammen, `loadTrades` ebenso alle Altgold-Geschäfte. Am
+Ein-Filial-Betrieb fällt das nicht auf — als Fernauskunft wäre es die Preisgabe fremder Zahlen
+gewesen. Beide sind jetzt auf den Ausweis der Anfrage eingeschränkt (fünf bzw. eine Abfrage).
+
+### §1b Die sechs Stellen mit direktem Datenbankzugriff außerhalb der Stores
+
+| Stelle | Einordnung | Auflösung |
+|---|---|---|
+| `pages/analytics/AnalyticsPage` | Geschäftsauskunft, rechnet in ~51 eigenen Abfragen | **eigener Schnitt nötig** — bis dahin ehrlicher Hinweis statt Nullen |
+| `pages/settings/SettingsPage` | Maschine: Datenort, Sicherung, Aktualisierung, Wartung | `Primary only` |
+| `pages/admin/RepairFlowTestPage` | Maschine: Entwicklerwerkzeug, schreibt Testfälle | `Primary only` |
+| `pages/auth/OnboardingPage` | Maschine: Erstlauf einer neuen Datenbank | bereits unerreichbar (`!clientMode && needsOnboarding`) |
+| `components/sync/SyncDuplicateGuard` | Maschine: hängt am Abgleich | untätig — das Ereignis kommt nur aus `sync-service`, und der ist im Client verweigert |
+| `components/products/StockCheckInventoryModal` | **Geschäfts-SCHREIBvorgang** (Inventursitzung) | **Lücke** — Schreiben bleibt bei den 40 Buchungen, diese ist keine davon |
+
+Als siebte Stelle taucht `components/shared/UpdateBanner` im Rohbefund auf; sie ruft nur
+`saveDatabaseDurably`, und das kehrt ohne Datenbank sofort zurück. Keine Auflösung nötig.
+
+### §2–§4 Migrierte Domänen
+
+**Finanzen:** Ausgaben, Daueraufträge, Bank (Umbuchungen **und** die abgeleitete Bewegungsliste),
+Verbindlichkeiten, Darlehen, Gold (Verbindlichkeiten + Kundenguthaben), Edelmetalle,
+Altgold-Geschäfte.
+
+**Betriebsführung:** Mitarbeiter, Gesellschafter (samt Salden), Aufgaben, Belege, Angebote,
+Fertigung.
+
+**Berichte und Auswertungen** brauchten keine eigene Auskunft: `BusinessReportsPage` und
+`ReceivablesPage` rechnen ausschließlich aus Stores. Mit deren Migration sind sie
+paritätsfähig, ohne dass eine Zeile an ihnen geändert wurde. Der Scope-Audit dieser Flächen
+sagt dasselbe wie die Loader: Zeitraum, Kategorie, Status und Gruppierung sind **Auswahl** und
+stehen in der Seite; Filiale und Mandant sind **Berechtigung** und kommen aus dem Ausweis.
+Keine dieser Seiten ersetzt das eine durch das andere.
+
+### Drei Entscheidungen, die im Code sichtbar sind
+
+1. **Die Bank rechnet weiter auf Abruf.** `getTransactions` kostet gut ein Dutzend Abfragen.
+   Sie in die Ladefunktion zu ziehen hätte das Dashboard verteuert. Am Primary bleibt es
+   deshalb beim Abruf; die Fernauskunft schickt die fertige Liste mit, weil drüben keine
+   Datenbank steht, aus der man sie nachrechnen könnte.
+2. **Der Altgold-Nachtrag bleibt am Primary.** `loadTrades` rief `backfillTradeData()` —
+   einen SCHREIBvorgang. Eine Auskunft liest; sie repariert nicht. Der Nachtrag steht jetzt im
+   Store, nicht in der gemeinsamen Ladefunktion, und ein Test hält das fest.
+3. **Belege reisen ohne Inhalt.** In `documents.file_path` steht nicht ein Pfad, sondern die
+   ganze Datei als Data-URL. Die Ladefunktion kann den Inhalt abwählen: der Primary liest wie
+   bisher alles, die Fernauskunft schickt nur die Liste. Die Belegliste prüft `filePath` ohnehin
+   schon und zeigt dann ihr Symbol.
+
+### Registry
+
+```
+Probe            = 1
+C2 Reads         = 18
+UI-Parity Reads  = 27   (13 aus R1/R2A + 14 aus R2B)
+Mutations        = 40   (unverändert — R2B fasst keinen Schreibweg an)
+Total            = 86
+```
+
+TS und Rust stimmen bitgenau überein (`STORE_READ_OPS` ↔ `REMOTE_OPS`).
+
+### Was auf einem Rechner ohne Datenbank weiterhin nicht geht
+
+- **Auswertung** (`/analytics`) — eigener Schnitt, eigene Scheibe. Zeigt einen Hinweis, keine Nullen.
+- **Einstellungen, Entwicklerwerkzeug** — Maschinenfunktionen, `Primary only`.
+- **Inventursitzung** — ein Schreibweg, der nicht zu den 40 Buchungen gehört.
+- **Einzelne abgeleitete Detailabfragen**, die synchron aus der Datenbank rechnen statt aus dem
+  Bestand: `expenseStore.getExpensePayments`, `debtStore.loadPaymentsForDebt`,
+  `metalStore.getSpotPrice/getMetalPayments`, die zwölf Auswertungen in `goldStore`,
+  die neun Verlaufslisten in `employeeStore`. Sie liefern dort leere Mengen — die Listen,
+  an denen sie hängen, kommen vollständig an.
+- **Kundennachrichten** (`customerMessageStore`) — eine Liste je Kunde, ohne Filialbezug und
+  ohne Riegel; sie faengt ihren Fehler ab und bleibt auf einem Client leer. Fern ist sie gar nicht
+  erreichbar, weil es fuer sie keinen Namen in der Registry gibt.
+

@@ -8,7 +8,10 @@ import { postMetalPayment, postMetalPaymentReversed, hasLedgerEntries, hasRevers
 import { useGoldStore } from '@/stores/goldStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -65,11 +68,9 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
   loading: false,
 
   loadMetals: () => {
-    if (remoteReadUnavailable('store.metals.get')) return;
+    if (hydrateFromPrimary('store.metals.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM precious_metals WHERE branch_id = ? ORDER BY updated_at DESC', [branchId]);
-      set({ metals: rows.map(rowToMetal), loading: false });
+      set({ ...loadMetalsFor(localReadContext()), loading: false });
     } catch {
       set({ metals: [], loading: false });
     }
@@ -308,3 +309,9 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
     } catch { return []; }
   },
 }));
+
+/** CENTRAL-UI-PARITY R2B — die Edelmetall-Bestaende einer Filiale, zustandsfrei. */
+export function loadMetalsFor(ctx: BusinessReadContext): { metals: PreciousMetal[] } {
+  const rows = query('SELECT * FROM precious_metals WHERE branch_id = ? ORDER BY updated_at DESC', [ctx.branchId]);
+  return { metals: rows.map(rowToMetal) };
+}

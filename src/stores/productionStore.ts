@@ -18,7 +18,10 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postExpensePayment, reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -100,17 +103,9 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
   loading: false,
 
   loadRecords: () => {
-    if (remoteReadUnavailable('store.production.get')) return;
+    if (hydrateFromPrimary('store.production.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM production_records WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      const list: ProductionRecord[] = rows.map(r => {
-        const rec = rowToRecord(r);
-        rec.inputs = query('SELECT * FROM production_inputs WHERE record_id = ?', [rec.id]).map(rowToInput);
-        rec.outputs = query('SELECT * FROM production_outputs WHERE record_id = ?', [rec.id]).map(rowToOutput);
-        return rec;
-      });
-      set({ records: list, loading: false });
+      set({ ...loadProductionRecordsFor(localReadContext()), loading: false });
     } catch { set({ records: [], loading: false }); }
   },
 
@@ -429,3 +424,16 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
     get().loadRecords();
   },
 }));
+
+/** CENTRAL-UI-PARITY R2B — die Fertigungsvorgaenge einer Filiale samt Ein- und Ausgang. */
+export function loadProductionRecordsFor(ctx: BusinessReadContext): { records: ProductionRecord[] } {
+  const rows = query('SELECT * FROM production_records WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const records: ProductionRecord[] = rows.map((r) => {
+    const rec = rowToRecord(r);
+    // Ein- und Ausgaenge haengen am Vorgang; der ist bereits auf die Filiale eingeschraenkt.
+    rec.inputs = query('SELECT * FROM production_inputs WHERE record_id = ?', [rec.id]).map(rowToInput);
+    rec.outputs = query('SELECT * FROM production_outputs WHERE record_id = ?', [rec.id]).map(rowToOutput);
+    return rec;
+  });
+  return { records };
+}
