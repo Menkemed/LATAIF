@@ -333,10 +333,10 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   ok(mutations.length === 40 && mutations.includes('invoices.create')
     && mutations.includes('customers.create') && mutations.includes('customers.update'),
     `ALLOWLIST genau vierzig Mutationen (${mutations.join(', ')})`);
-  // CENTRAL-UI-PARITY R1: dazu 5 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
-  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get'].includes(o));
-  ok(known.length === 64 && reads.length === 23 && parityReads.length === 5 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 18 Auskuenfte + 5 typisierte Auskuenfte + 40 Buchungen = 64 (${known.length}/${reads.length}/${parityReads.length})`);
+  // CENTRAL-UI-PARITY R1: dazu 13 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
+  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get'].includes(o));
+  ok(known.length === 72 && reads.length === 31 && parityReads.length === 13 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Auskuenfte + 13 typisierte Auskuenfte + 40 Buchungen = 64 (${known.length}/${reads.length}/${parityReads.length})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
     let threw: string | null = null;
@@ -347,7 +347,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 64, 'ALLOWLIST Rust kennt dieselben vierundsechzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 72, 'ALLOWLIST Rust kennt dieselben zweiundsiebzig Namen');
   ok(/OP_CUSTOMERS_CREATE: &str = "customers.create"/.test(rs) && /OP_CUSTOMERS_UPDATE: &str = "customers.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

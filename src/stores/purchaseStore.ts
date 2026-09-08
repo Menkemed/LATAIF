@@ -34,7 +34,10 @@ import {
 } from '@/core/ledger/posting';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Wenn die Buchung scheitert, wird das Domain-Insert NICHT zurückgerollt; stattdessen
@@ -495,32 +498,17 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
   loading: false,
 
   loadPurchases: () => {
-    if (remoteReadUnavailable('store.purchases.get')) return;
+    if (hydrateFromPrimary('store.purchases.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM purchases WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      const list: Purchase[] = rows.map(r => {
-        const p = rowToPurchase(r);
-        const lineRows = query('SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [p.id]);
-        p.lines = lineRows.map(rowToLine);
-        const payRows = query('SELECT * FROM purchase_payments WHERE purchase_id = ? ORDER BY paid_at ASC, created_at ASC', [p.id]);
-        p.payments = payRows.map(rowToPayment);
-        return p;
-      });
-      set({ purchases: list, loading: false });
+      set({ ...loadPurchasesFor(localReadContext()), loading: false });
     } catch { set({ purchases: [], loading: false }); }
   },
 
   // ── v0.4.0 — Purchase-Inbox (Mobile-Capture) ──
   loadPurchaseInbox: () => {
-    if (remoteReadUnavailable('store.purchases.get')) return;
+    if (hydrateFromPrimary('store.purchases.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT * FROM purchase_inbox WHERE branch_id = ? AND status = 'pending' ORDER BY created_at DESC`,
-        [branchId]
-      );
-      set({ purchaseInbox: rows.map(rowToInboxItem) });
+      set(loadPurchaseInboxFor(localReadContext()));
     } catch { set({ purchaseInbox: [] }); }
   },
 
@@ -541,17 +529,9 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
   },
 
   loadReturns: () => {
-    if (remoteReadUnavailable('store.purchases.get')) return;
+    if (hydrateFromPrimary('store.purchases.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM purchase_returns WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      const list: PurchaseReturn[] = rows.map(r => {
-        const pr = rowToReturn(r);
-        const lineRows = query('SELECT * FROM purchase_return_lines WHERE return_id = ?', [pr.id]);
-        pr.lines = lineRows.map(rowToReturnLine);
-        return pr;
-      });
-      set({ returns: list });
+      set(loadPurchaseReturnsFor(localReadContext()));
     } catch { set({ returns: [] }); }
   },
 
@@ -1211,3 +1191,53 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     get().loadReturns();
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Einkaeufe samt Zeilen und Zahlungen.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender.
+ */
+export function loadPurchasesFor(ctx: BusinessReadContext): { purchases: Purchase[] } {
+  const rows = query('SELECT * FROM purchases WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const purchases: Purchase[] = rows.map((r) => {
+    const p = rowToPurchase(r);
+    p.lines = query('SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [p.id]).map(rowToLine);
+    p.payments = query('SELECT * FROM purchase_payments WHERE purchase_id = ? ORDER BY paid_at ASC, created_at ASC', [p.id]).map(rowToPayment);
+    return p;
+  });
+  return { purchases };
+}
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer den offenen Wareneingang.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender.
+ */
+export function loadPurchaseInboxFor(ctx: BusinessReadContext): { purchaseInbox: PurchaseInboxItem[] } {
+  const rows = query(
+    `SELECT * FROM purchase_inbox WHERE branch_id = ? AND status = 'pending' ORDER BY created_at DESC`,
+    [ctx.branchId],
+  );
+  return { purchaseInbox: rows.map(rowToInboxItem) };
+}
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Einkaufsretouren samt ihren Zeilen.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender.
+ */
+export function loadPurchaseReturnsFor(ctx: BusinessReadContext): { returns: PurchaseReturn[] } {
+  const rows = query('SELECT * FROM purchase_returns WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const returns: PurchaseReturn[] = rows.map((r) => {
+    const pr = rowToReturn(r);
+    pr.lines = query('SELECT * FROM purchase_return_lines WHERE return_id = ?', [pr.id]).map(rowToReturnLine);
+    return pr;
+  });
+  return { returns };
+}

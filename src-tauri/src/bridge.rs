@@ -156,6 +156,14 @@ pub const OP_STORE_CUSTOMERS_GET: &str = "store.customers.get";
 pub const OP_STORE_INVOICES_GET: &str = "store.invoices.get";
 pub const OP_ORDER_PAYMENTS_GET: &str = "order_payments.get";
 pub const OP_SESSION_CONTEXT_GET: &str = "session.context.get";
+pub const OP_STORE_SUPPLIERS_GET: &str = "store.suppliers.get";
+pub const OP_STORE_SALES_RETURNS_GET: &str = "store.sales_returns.get";
+pub const OP_STORE_CREDIT_NOTES_GET: &str = "store.credit_notes.get";
+pub const OP_STORE_ORDERS_GET: &str = "store.orders.get";
+pub const OP_STORE_CONSIGNMENTS_GET: &str = "store.consignments.get";
+pub const OP_STORE_PURCHASES_GET: &str = "store.purchases.get";
+pub const OP_STORE_REPAIRS_GET: &str = "store.repairs.get";
+pub const OP_STORE_AGENTS_GET: &str = "store.agents.get";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
@@ -227,6 +235,14 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_STORE_INVOICES_GET,
     OP_ORDER_PAYMENTS_GET,
     OP_SESSION_CONTEXT_GET,
+    OP_STORE_SUPPLIERS_GET,
+    OP_STORE_SALES_RETURNS_GET,
+    OP_STORE_CREDIT_NOTES_GET,
+    OP_STORE_ORDERS_GET,
+    OP_STORE_CONSIGNMENTS_GET,
+    OP_STORE_PURCHASES_GET,
+    OP_STORE_REPAIRS_GET,
+    OP_STORE_AGENTS_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

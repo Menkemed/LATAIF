@@ -147,3 +147,67 @@ Netzaufruf, eine Zeile im Protokoll. Nichts steht auf „läuft meistens".
 **Offen bleibt:** die restlichen 20 Stores, die vier Seiten und zwei Komponenten mit direktem
 Datenbankzugriff, die Schreibwege außerhalb der 40 Buchungen, die `Primary only`-Zustände in
 der gemeinsamen Oberfläche — und der Beweis an zwei laufenden Anwendungen.
+
+---
+
+## R2A — die Kernflächen sind migriert (08.09.2026)
+
+### Inventur der früheren 25 WIP-Auskünfte
+
+| Stand | Anzahl |
+|---|---|
+| unsichere WIP-Auskünfte in `3eb7b81` | 25 |
+| davon in R1 **entfernt** (unsicher: Store-Nebenwirkung + falsche Filiale) | 25 |
+| in R1 sicher migriert | 3 (Artikel/Kategorien, Kunden, Rechnungen) + 2 neu (Auftragszahlungen, Sitzungskontext) |
+| in R2A zusätzlich sicher migriert | 8 |
+| **sicher insgesamt** | **13** |
+| noch fern nicht verfügbar (fail-closed) | 14 Stores |
+
+**Die Kategorien-Frage aus dem R1-Bericht:** es gibt keine eigene Kategorien-Auskunft und gab
+auch nie eine. Kategorien und Artikel gehören zum selben Store und kommen gemeinsam über
+`store.products.get` — in der WIP-Liste war das genauso. Es war also eine Benennungs-, keine
+Abdeckungslücke.
+
+### In R2A migrierte Domänen
+
+Lieferanten (samt Ledger-Zahlen), Verkaufsretouren (samt Zeilen), Gutschriften, Aufträge,
+Kommissionen, Einkäufe (samt Zeilen, Zahlungen, offenem Wareneingang und Retouren), Reparaturen
+(samt Arbeitszeilen), Agenten und Agenten-Transfers.
+
+Jede nach demselben Schnitt: eine exportierte, zustandsfreie `loadXFor(ctx)`-Funktion, vom
+Primary-Store **und** vom Fernweg benutzt. Beim Lieferanten wurde dafür `getLedger` aus dem
+Store-Objekt in die freie Funktion `supplierLedgerFor` gehoben — sie rechnete ohnehin nur aus
+der Datenbank.
+
+### Registry
+
+```
+Probe            = 1
+C2 Reads         = 18
+UI-Parity Reads  = 13
+Mutations        = 40
+Total            = 72
+```
+
+TS und Rust stimmen bitgenau überein (`STORE_READ_OPS` ↔ `REMOTE_OPS`).
+
+### Was fern weiterhin nicht verfügbar ist
+
+- `bankingStore`
+- `debtStore`
+- `documentStore`
+- `employeeStore`
+- `expenseStore`
+- `goldStore`
+- `metalStore`
+- `offerStore`
+- `partnerStore`
+- `payablesStore`
+- `productionStore`
+- `recurringExpenseStore`
+- `scrapTradeStore`
+- `taskStore`
+
+Diese laufen auf PC2 in `remoteReadUnavailable`: kein Datenbankzugriff, kein Rückfall auf einen
+Primary-Store-Loader, kein veralteter Zwischenspeicher. Das betrifft insbesondere Finanzen,
+Berichte und Business Management — sie sind für R2B vorgesehen.

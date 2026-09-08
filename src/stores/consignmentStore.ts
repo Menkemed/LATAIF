@@ -21,7 +21,10 @@ import { vatEngine } from '@/core/tax/vat-engine';
 import { computeConsignmentSale } from '@/core/consignment/economics';
 import { payoutModelLock, buildPayoutPatch, PayoutPatchError, PAYOUT_EDITABLE_SQL, type PayoutInput } from '@/core/consignment/payout-edit';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -173,11 +176,9 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
   loading: false,
 
   loadConsignments: () => {
-    if (remoteReadUnavailable('store.consignments.get')) return;
+    if (hydrateFromPrimary('store.consignments.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM consignments WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      set({ consignments: rows.map(rowToConsignment), loading: false });
+      set({ ...loadConsignmentsFor(localReadContext()), loading: false });
     } catch { set({ consignments: [], loading: false }); }
   },
 
@@ -1079,3 +1080,16 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     get().loadConsignments();
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Kommissionen.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender. Damit koennen beide Wege dieselbe Funktion benutzen, ohne dass das Lesen
+ * des einen den Bildschirm des anderen anfasst.
+ */
+export function loadConsignmentsFor(ctx: BusinessReadContext): { consignments: Consignment[] } {
+  const rows = query('SELECT * FROM consignments WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  return { consignments: rows.map(rowToConsignment) };
+}

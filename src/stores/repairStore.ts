@@ -29,7 +29,10 @@ import type { Expense } from '@/core/models/types';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -593,23 +596,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   loading: false,
 
   loadRepairs: () => {
-    if (remoteReadUnavailable('store.repairs.get')) return;
+    if (hydrateFromPrimary('store.repairs.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM repairs WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      set({ repairs: rows.map(rowToRepair), loading: false });
+      set({ ...loadRepairsFor(localReadContext()), loading: false });
     } catch { set({ repairs: [], loading: false }); }
   },
 
   loadRepairLines: () => {
+    if (hydrateFromPrimary('store.repairs.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT * FROM repair_lines WHERE branch_id = ? ORDER BY repair_id, position`,
-        [branchId]
-      );
-      const lines = rows.map(rowToRepairLine).map(enrichLineWithExpense);
-      set({ repairLines: lines });
+      set(loadRepairLinesFor(localReadContext()));
     } catch { set({ repairLines: [] }); }
   },
 
@@ -1500,3 +1496,27 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     get().loadRepairs();
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Reparaturen.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender.
+ */
+export function loadRepairsFor(ctx: BusinessReadContext): { repairs: Repair[] } {
+  const rows = query('SELECT * FROM repairs WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  return { repairs: rows.map(rowToRepair) };
+}
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer die Arbeitszeilen der Reparaturen.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender.
+ */
+export function loadRepairLinesFor(ctx: BusinessReadContext): { repairLines: RepairLine[] } {
+  const rows = query('SELECT * FROM repair_lines WHERE branch_id = ? ORDER BY repair_id, position', [ctx.branchId]);
+  return { repairLines: rows.map(rowToRepairLine).map(enrichLineWithExpense) };
+}

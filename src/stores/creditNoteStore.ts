@@ -13,7 +13,10 @@ import { trackInsert, trackDelete } from '@/core/sync/track';
 import { postCreditNote, hasLedgerEntries, reverseSource } from '@/core/ledger/posting';
 import { planCreditNoteCreditTeardown } from '@/core/credit/overpayment-teardown';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 interface CreditNoteStore {
   creditNotes: CreditNote[];
@@ -69,15 +72,10 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
   loading: false,
 
   loadCreditNotes: () => {
-    if (remoteReadUnavailable('store.credit_notes.get')) return;
+    if (hydrateFromPrimary('store.credit_notes.get', (d) => set(d as never))) return;
     try {
       set({ loading: true });
-      const branchId = currentBranchId();
-      const rows = query(
-        'SELECT * FROM credit_notes WHERE branch_id = ? ORDER BY issued_at DESC, created_at DESC',
-        [branchId]
-      );
-      set({ creditNotes: rows.map(rowToCN), loading: false });
+      set({ ...loadCreditNotesFor(localReadContext()), loading: false });
     } catch {
       set({ creditNotes: [], loading: false });
     }
@@ -228,3 +226,19 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     set(state => ({ creditNotes: state.creditNotes.filter(cn => cn.id !== id) }));
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Gutschriften.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender. Damit koennen beide Wege dieselbe Funktion benutzen, ohne dass das Lesen
+ * des einen den Bildschirm des anderen anfasst.
+ */
+export function loadCreditNotesFor(ctx: BusinessReadContext): { creditNotes: CreditNote[] } {
+  const rows = query(
+    'SELECT * FROM credit_notes WHERE branch_id = ? ORDER BY issued_at DESC, created_at DESC',
+    [ctx.branchId],
+  );
+  return { creditNotes: rows.map(rowToCN) };
+}

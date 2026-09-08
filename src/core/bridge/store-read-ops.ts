@@ -18,6 +18,17 @@ export const OP_ORDER_PAYMENTS_GET = 'order_payments.get';
 /** Der Sitzungskontext: Filiale, Name, Waehrung — serverautoritativ statt aus dem Speicher geraten. */
 export const OP_SESSION_CONTEXT_GET = 'session.context.get';
 
+// CENTRAL-UI-PARITY R2A — die uebrigen Kernflaechen der normalen Oberflaeche. Jede steht fuer
+// GENAU eine gemeinsame Ladefunktion mit demselben Schnitt wie oben.
+export const OP_STORE_SUPPLIERS_GET = 'store.suppliers.get';
+export const OP_STORE_SALES_RETURNS_GET = 'store.sales_returns.get';
+export const OP_STORE_CREDIT_NOTES_GET = 'store.credit_notes.get';
+export const OP_STORE_ORDERS_GET = 'store.orders.get';
+export const OP_STORE_CONSIGNMENTS_GET = 'store.consignments.get';
+export const OP_STORE_PURCHASES_GET = 'store.purchases.get';
+export const OP_STORE_REPAIRS_GET = 'store.repairs.get';
+export const OP_STORE_AGENTS_GET = 'store.agents.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -28,8 +39,16 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_STORE_INVOICES_GET,
   OP_ORDER_PAYMENTS_GET,
   OP_SESSION_CONTEXT_GET,
+  OP_STORE_SUPPLIERS_GET,
+  OP_STORE_SALES_RETURNS_GET,
+  OP_STORE_CREDIT_NOTES_GET,
+  OP_STORE_ORDERS_GET,
+  OP_STORE_CONSIGNMENTS_GET,
+  OP_STORE_PURCHASES_GET,
+  OP_STORE_REPAIRS_GET,
+  OP_STORE_AGENTS_GET,
 ];
 
-// Noch NICHT hier — und damit fern nicht aufrufbar: die uebrigen zwanzig Stores. Sie laufen noch
+// Noch NICHT hier — und damit fern nicht aufrufbar: Finanzen, Berichte und die uebrigen Flaechen. Sie laufen noch
 // ueber ihre alten Ladefunktionen und wuerden den Bildschirm des Primary anfassen. Sie kommen
 // zurueck, sobald ihre Ladefunktion denselben Schnitt hat wie die vier oben.

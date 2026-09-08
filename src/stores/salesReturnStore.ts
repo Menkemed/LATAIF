@@ -41,7 +41,10 @@ import type { CreditNote } from '@/core/models/types';
 import { refundCardFeePortion } from '@/core/finance/card-fee-booking';
 import { computeCardFee, normalizeCardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // Wenn sich CN.cash_refund_amount oder refund_method nach erstem Posting aendert,
 // urspruengliche Buchung reverten + neu posten — sonst zeigen CASH/BANK-Salden im
@@ -364,17 +367,9 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
   returns: [],
 
   loadReturns: () => {
-    if (remoteReadUnavailable('store.sales_returns.get')) return;
+    if (hydrateFromPrimary('store.sales_returns.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM sales_returns WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      const list: SalesReturn[] = rows.map(r => {
-        const ret = rowToReturn(r);
-        const lineRows = query('SELECT * FROM sales_return_lines WHERE return_id = ?', [ret.id]);
-        ret.lines = lineRows.map(rowToLine);
-        return ret;
-      });
-      set({ returns: list });
+      set(loadSalesReturnsFor(localReadContext()));
     } catch { set({ returns: [] }); }
   },
 
@@ -1076,3 +1071,22 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     return qty;
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Rueckgaben samt ihren Zeilen.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender. Damit koennen beide Wege dieselbe Funktion benutzen, ohne dass das Lesen
+ * des einen den Bildschirm des anderen anfasst.
+ */
+export function loadSalesReturnsFor(ctx: BusinessReadContext): { returns: SalesReturn[] } {
+  const rows = query('SELECT * FROM sales_returns WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const returns: SalesReturn[] = rows.map((r) => {
+    const ret = rowToReturn(r);
+    const lineRows = query('SELECT * FROM sales_return_lines WHERE return_id = ?', [ret.id]);
+    ret.lines = lineRows.map(rowToLine);
+    return ret;
+  });
+  return { returns };
+}

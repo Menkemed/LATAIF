@@ -18,7 +18,10 @@ import {
 // der Transaktion auf FRISCH geladenen Daten; dieselbe Funktion speist die UI-Vorschau.
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -218,16 +221,9 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   loading: false,
 
   loadSuppliers: () => {
-    if (remoteReadUnavailable('store.suppliers.get')) return;
+    if (hydrateFromPrimary('store.suppliers.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM suppliers WHERE branch_id = ? ORDER BY name', [branchId]);
-      const list = rows.map(rowToSupplier);
-      // Enrich with ledger numbers
-      for (const s of list) {
-        Object.assign(s, get().getLedger(s.id));
-      }
-      set({ suppliers: list, loading: false });
+      set({ ...loadSuppliersFor(localReadContext()), loading: false });
     } catch { set({ suppliers: [], loading: false }); }
   },
 
@@ -314,68 +310,8 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   // (Ledger-vs-Domain) und wird davon NICHT beruehrt; das DASHBOARD "SUPPLIER PAYABLES" liest
   // seit M-24 balanceOf('ACCOUNTS_PAYABLE') — diese getLedger-Domain-Sicht deckt sich danach
   // mit dem Ledger (bei sauberen Daten).
-  getLedger: (id) => {
-    try {
-      const purchaseRows = query(
-        `SELECT p.total_amount AS total, p.paid_amount AS paid,
-                COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
-                          WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
-           FROM purchases p WHERE p.supplier_id = ? AND p.status != 'CANCELLED'`,
-        [id]
-      );
-      let purchasesTotal = 0, purchasesOutstanding = 0;
-      for (const r of purchaseRows) {
-        const total = (r.total as number) || 0;
-        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
-        purchasesTotal += total;
-        purchasesOutstanding += Math.max(0, total - settled);
-      }
+  getLedger: (id) => supplierLedgerFor(id),
 
-      // Slice A — Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen. paid_amount
-      // bleibt cash-only; die credit-Begleichung kommt aus expense_payments(method='credit'). Eine
-      // gebuendelte Korrelations-Subquery (kein N+1). Ohne den credit-Anteil bliebe eine credit-
-      // beglichene Expense faelschlich im OUTSTANDING.
-      const expenseRows = query(
-        `SELECT e.amount AS total, e.paid_amount AS paid,
-                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
-                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
-           FROM expenses e WHERE e.supplier_id = ? AND e.status != 'CANCELLED'`,
-        [id]
-      );
-      let expensesTotal = 0, expensesOutstanding = 0;
-      for (const r of expenseRows) {
-        const total = (r.total as number) || 0;
-        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
-        expensesTotal += total;
-        expensesOutstanding += Math.max(0, total - settled);
-      }
-
-      // totalObligations = Σ aller Supplier-Verpflichtungen (Purchases + Workshop-Expenses).
-      // Das IST die Bedeutung des zurueckgegebenen Felds `totalPurchases` (bestehende Konvention,
-      // KPI "TOTAL PURCHASES" zeigt Purchases + Workshop). Identitaet damit explizit:
-      //   totalPaid = (purchasesTotal + expensesTotal) − outstandingBalance
-      // wobei outstandingBalance Purchases- UND Expense-Outstanding enthaelt.
-      const totalObligations = purchasesTotal + expensesTotal;
-      const outstandingBalance = purchasesOutstanding + expensesOutstanding;
-      const totalPaid = totalObligations - outstandingBalance;
-
-      const credit = query(
-        `SELECT COALESCE(SUM(amount - used_amount), 0) AS bal
-           FROM supplier_credits WHERE supplier_id = ?`,
-        [id]
-      );
-      const creditBalance = Math.max(0, (credit[0]?.bal as number) || 0);
-
-      return {
-        totalPurchases: round3(totalObligations),
-        totalPaid: round3(totalPaid),
-        outstandingBalance: round3(outstandingBalance),
-        creditBalance: round3(creditBalance),
-      };
-    } catch {
-      return { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 };
-    }
-  },
 
   // Plan §8 #3 — offene Credit-Records aus supplier_credits (neu eingeführte Tabelle).
   getOpenCredits: (supplierId) => {
@@ -726,3 +662,90 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     get().loadSuppliers();
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Lieferanten samt ihren Ledger-Zahlen.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender. Damit koennen beide Wege dieselbe Funktion benutzen, ohne dass das Lesen
+ * des einen den Bildschirm des anderen anfasst.
+ */
+export function loadSuppliersFor(ctx: BusinessReadContext): { suppliers: Supplier[] } {
+  const rows = query('SELECT * FROM suppliers WHERE branch_id = ? ORDER BY name', [ctx.branchId]);
+  const suppliers = rows.map(rowToSupplier);
+  // Die Ledger-Zahlen gehoeren zur Anzeige eines Lieferanten; sie werden hier mitgerechnet, damit
+  // beide Wege dieselbe Zeile sehen. Die Rechnung selbst ist unveraendert.
+  for (const s of suppliers) Object.assign(s, supplierLedgerFor(s.id));
+  return { suppliers };
+}
+
+/**
+ * CENTRAL-UI-PARITY R2A — die Ledger-Zahlen eines Lieferanten, als freie Funktion.
+ *
+ * Sie war nur als Store-Methode verpackt; gerechnet hat sie immer schon aus der Datenbank. Jetzt
+ * koennen der Primary-Store UND die gemeinsame Ladefunktion sie benutzen, ohne einen
+ * Zustandsspeicher anzufassen.
+ */
+export function supplierLedgerFor(id: string): { totalPurchases: number; totalPaid: number; outstandingBalance: number; creditBalance: number } {
+    try {
+      const purchaseRows = query(
+        `SELECT p.total_amount AS total, p.paid_amount AS paid,
+                COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
+                          WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
+           FROM purchases p WHERE p.supplier_id = ? AND p.status != 'CANCELLED'`,
+        [id]
+      );
+      let purchasesTotal = 0, purchasesOutstanding = 0;
+      for (const r of purchaseRows) {
+        const total = (r.total as number) || 0;
+        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
+        purchasesTotal += total;
+        purchasesOutstanding += Math.max(0, total - settled);
+      }
+
+      // Slice A — Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen. paid_amount
+      // bleibt cash-only; die credit-Begleichung kommt aus expense_payments(method='credit'). Eine
+      // gebuendelte Korrelations-Subquery (kein N+1). Ohne den credit-Anteil bliebe eine credit-
+      // beglichene Expense faelschlich im OUTSTANDING.
+      const expenseRows = query(
+        `SELECT e.amount AS total, e.paid_amount AS paid,
+                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
+                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
+           FROM expenses e WHERE e.supplier_id = ? AND e.status != 'CANCELLED'`,
+        [id]
+      );
+      let expensesTotal = 0, expensesOutstanding = 0;
+      for (const r of expenseRows) {
+        const total = (r.total as number) || 0;
+        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
+        expensesTotal += total;
+        expensesOutstanding += Math.max(0, total - settled);
+      }
+
+      // totalObligations = Σ aller Supplier-Verpflichtungen (Purchases + Workshop-Expenses).
+      // Das IST die Bedeutung des zurueckgegebenen Felds `totalPurchases` (bestehende Konvention,
+      // KPI "TOTAL PURCHASES" zeigt Purchases + Workshop). Identitaet damit explizit:
+      //   totalPaid = (purchasesTotal + expensesTotal) − outstandingBalance
+      // wobei outstandingBalance Purchases- UND Expense-Outstanding enthaelt.
+      const totalObligations = purchasesTotal + expensesTotal;
+      const outstandingBalance = purchasesOutstanding + expensesOutstanding;
+      const totalPaid = totalObligations - outstandingBalance;
+
+      const credit = query(
+        `SELECT COALESCE(SUM(amount - used_amount), 0) AS bal
+           FROM supplier_credits WHERE supplier_id = ?`,
+        [id]
+      );
+      const creditBalance = Math.max(0, (credit[0]?.bal as number) || 0);
+
+      return {
+        totalPurchases: round3(totalObligations),
+        totalPaid: round3(totalPaid),
+        outstandingBalance: round3(outstandingBalance),
+        creditBalance: round3(creditBalance),
+      };
+    } catch {
+      return { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 };
+    }
+}

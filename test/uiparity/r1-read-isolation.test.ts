@@ -74,6 +74,7 @@ function realMigrations(): string[] {
 const MIGRATIONS = realMigrations();
 
 /** Zwei Filialen, in jeder ein eigener Artikel — daran wird sichtbar, wessen Daten kommen. */
+let twoBranchDbHandle: Db;
 function twoBranchDb(): Db {
   const db = new SQL.Database() as unknown as Db;
   db.run(src('src/core/db/schema.sql'));
@@ -89,6 +90,7 @@ function twoBranchDb(): Db {
     ['p-' + b, b, 'cat-' + b, 'Zenith', 'Artikel ' + b, 'SKU-' + b, NOW, NOW]);
   }
   setTestDatabase(db as never);
+  twoBranchDbHandle = db;
   return db;
 }
 
@@ -151,6 +153,79 @@ const SENTINEL = { id: 'sentinel', name: 'NICHT ANFASSEN' } as never;
   const idsB = ((b.value?.data?.products ?? []) as Array<{ id?: string }>).map((r) => r.id).join(',');
   const idsA = ((a.value?.data?.products ?? []) as Array<{ id?: string }>).map((r) => r.id).join(',');
   ok(idsB === 'p-branch-b' && idsA === 'p-branch-a', `D zwei Kontexte, zwei Antworten (${idsB} | ${idsA})`);
+}
+
+// ── E — R2A: dieselbe Frage fuer JEDE migrierte Flaeche, datengetrieben ─────
+//
+// Kein eigener Riesentest je Domaene: eine Schleife ueber alle branchabhaengigen Auskuenfte, und
+// fuer jede dieselben drei Zusagen — der Bildschirm des Primary bleibt, die Daten sind die des
+// Anfragenden, und ein Filialwunsch im Rumpf aendert nichts.
+{
+  const OPS = [
+    'store.products.get', 'store.customers.get', 'store.invoices.get',
+    'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get',
+    'store.orders.get', 'store.consignments.get', 'store.purchases.get',
+    'store.repairs.get', 'store.agents.get',
+  ];
+  twoBranchDb();
+  setPrimarySession('branch-a', 'user-a');
+
+  // Der Primary haelt einen Sentinel-Zustand in JEDEM beteiligten Speicher.
+  const stores = await Promise.all([
+    import('../../src/stores/productStore.ts'), import('../../src/stores/customerStore.ts'),
+    import('../../src/stores/invoiceStore.ts'), import('../../src/stores/supplierStore.ts'),
+    import('../../src/stores/salesReturnStore.ts'), import('../../src/stores/creditNoteStore.ts'),
+    import('../../src/stores/orderStore.ts'), import('../../src/stores/consignmentStore.ts'),
+    import('../../src/stores/purchaseStore.ts'), import('../../src/stores/repairStore.ts'),
+    import('../../src/stores/agentStore.ts'),
+  ]);
+  const hooks = stores.map((m) => Object.values(m).find(
+    (v) => typeof v === 'function' && typeof (v as { getState?: unknown }).getState === 'function',
+  ) as { getState(): Record<string, unknown>; setState(p: Record<string, unknown>): void });
+  for (const h of hooks) h.setState({ __sentinel: 'NICHT ANFASSEN' });
+  const before = hooks.map((h) => JSON.stringify(h.getState().__sentinel));
+
+  let answered = 0;
+  for (const op of OPS) {
+    const reply = await remoteRead(op, { branchId: 'branch-a', tenantId: 'tenant-1' }, 'branch-b');
+    if (reply.kind === 'ok') answered++;
+    else ok(false, `E ${op} antwortet (${reply.kind} ${reply.code ?? ''})`);
+  }
+  ok(answered === OPS.length, `E alle ${OPS.length} migrierten Auskuenfte antworten (${answered})`);
+  ok(hooks.every((h, i) => JSON.stringify(h.getState().__sentinel) === before[i]),
+    'E und kein einziger Primary-Speicher wurde dabei angefasst');
+
+  // Und die Daten sind die des Anfragenden — an der Flaeche gepruefT, die Zeilen in beiden hat.
+  const pa = await remoteRead('store.products.get', {}, 'branch-a');
+  const pb = await remoteRead('store.products.get', {}, 'branch-b');
+  const idsA = ((pa.value?.data?.products ?? []) as Array<{ id?: string }>).map((r) => r.id).join(',');
+  const idsB = ((pb.value?.data?.products ?? []) as Array<{ id?: string }>).map((r) => r.id).join(',');
+  ok(idsA === 'p-branch-a' && idsB === 'p-branch-b', `E zwei Ausweise, zwei Antworten (${idsA} | ${idsB})`);
+}
+
+// ── F — Parameter schraenken ein, sie berechtigen nicht ────────────────────
+{
+  twoBranchDb();
+  setPrimarySession('branch-a', 'user-a');
+  // Ein Auftrag samt Zahlung in Filiale A.
+  const dbA = twoBranchDbHandle;
+  dbA.run(`INSERT INTO customers (id, branch_id, first_name, last_name, company, country, language,
+      vip_level, preferences, customer_type, sales_stage, created_at, updated_at)
+    VALUES ('c-a','branch-a','Kunde','A','','BH','en','NONE','[]','PRIVATE','active',?,?)`, [NOW, NOW]);
+  dbA.run(`INSERT INTO orders (id, branch_id, order_number, customer_id, requested_brand,
+      requested_model, status, created_at, updated_at)
+    VALUES ('o-a','branch-a','ORD-A','c-a','Zenith','Elite','PENDING',?,?)`, [NOW, NOW]);
+  dbA.run(`INSERT INTO order_payments (id, order_id, amount, paid_at, method, created_at)
+    VALUES ('op-a','o-a',50,?,'cash',?)`, [NOW, NOW]);
+
+  const mine = await remoteRead('order_payments.get', { orderId: 'o-a' }, 'branch-a');
+  ok(((mine.value?.data?.payments ?? []) as unknown[]).length === 1,
+    'F die eigene Auftragskennung liefert die eigene Zahlung');
+  const foreign = await remoteRead('order_payments.get', { orderId: 'o-a' }, 'branch-b');
+  ok(((foreign.value?.data?.payments ?? []) as unknown[]).length === 0,
+    'F dieselbe Kennung aus einer fremden Filiale liefert NICHTS statt fremder Daten');
+  const missing = await remoteRead('order_payments.get', {}, 'branch-a');
+  ok(missing.kind !== 'ok', `F ohne Kennung gibt es keine Antwort (${missing.kind})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r1: read isolation and identity: ${PASS} passed, ${fails.length} failed`);

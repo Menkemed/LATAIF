@@ -210,16 +210,16 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(known.length === 64, `ALLOWLIST produktiv vierundsechzig Namen (${known.length})`);
-  // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 5 typisierte Auskuenfte fuer die gemeinsame Oberflaeche.
-  ok(reads.length === 23 && known.includes('bridge.probe') && known.includes('invoices.create'),
-    `ALLOWLIST eine Probe, dreiundzwanzig Lesevorgaenge, vierzig Mutationen (${reads.length})`);
+  ok(known.length === 72, `ALLOWLIST produktiv zweiundsiebzig Namen (${known.length})`);
+  // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 13 typisierte Auskuenfte fuer die gemeinsame Oberflaeche.
+  ok(reads.length === 31 && known.includes('bridge.probe') && known.includes('invoices.create'),
+    `ALLOWLIST eine Probe, einunddreissig Lesevorgaenge, vierzig Mutationen (${reads.length})`);
 
   // Und Rust prueft dieselbe Liste ein zweites Mal.
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 64, 'ALLOWLIST …und seine Liste ist genau vierundsechzig Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 72, 'ALLOWLIST …und seine Liste ist genau zweiundsiebzig Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

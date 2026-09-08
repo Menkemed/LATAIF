@@ -22,6 +22,9 @@ import { remoteReadContext, type BusinessReadContext } from '@/core/data/read-co
 import {
   OP_STORE_PRODUCTS_GET, OP_STORE_CUSTOMERS_GET, OP_STORE_INVOICES_GET,
   OP_ORDER_PAYMENTS_GET, OP_SESSION_CONTEXT_GET,
+  OP_STORE_SUPPLIERS_GET, OP_STORE_SALES_RETURNS_GET, OP_STORE_CREDIT_NOTES_GET,
+  OP_STORE_ORDERS_GET, OP_STORE_CONSIGNMENTS_GET, OP_STORE_PURCHASES_GET,
+  OP_STORE_REPAIRS_GET, OP_STORE_AGENTS_GET,
 } from './store-read-ops';
 
 /** Der Rumpf, den die Route baut: geprüfter Absender plus die Eingabe des Clients. */
@@ -113,5 +116,78 @@ registerCommand(OP_SESSION_CONTEXT_GET, {
         role: ctx.role,
       },
     };
+  },
+});
+
+// ── CENTRAL-UI-PARITY R2A — die uebrigen Kernflaechen ──────────────────────
+//
+// Alle nach demselben Schnitt: Ausweis aus dem geprueften Absender, gemeinsame Ladefunktion,
+// einfache Daten zurueck. Kein Store wird angefasst, keine Abfrage nachgebaut.
+
+registerCommand(OP_STORE_SUPPLIERS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/supplierStore')).loadSuppliersFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_SALES_RETURNS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/salesReturnStore')).loadSalesReturnsFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_CREDIT_NOTES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/creditNoteStore')).loadCreditNotesFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_ORDERS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/orderStore')).loadOrdersFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_CONSIGNMENTS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: (await import('@/stores/consignmentStore')).loadConsignmentsFor(ctx) };
+  },
+});
+
+registerCommand(OP_STORE_PURCHASES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const s = await import('@/stores/purchaseStore');
+    // Eine Seite, drei Bestaende: Einkaeufe, offener Wareneingang, Retouren.
+    return { data: { ...s.loadPurchasesFor(ctx), ...s.loadPurchaseInboxFor(ctx), ...s.loadPurchaseReturnsFor(ctx) } };
+  },
+});
+
+registerCommand(OP_STORE_REPAIRS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const s = await import('@/stores/repairStore');
+    return { data: { ...s.loadRepairsFor(ctx), ...s.loadRepairLinesFor(ctx) } };
+  },
+});
+
+registerCommand(OP_STORE_AGENTS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const s = await import('@/stores/agentStore');
+    return { data: { ...s.loadAgentsFor(ctx), ...s.loadAgentTransfersFor(ctx) } };
   },
 });

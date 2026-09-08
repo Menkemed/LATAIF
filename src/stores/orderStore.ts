@@ -29,7 +29,10 @@ import {
 // (beide Bindings werden nur in Actions zur Laufzeit aufgerufen, nicht bei Modul-Init).
 import { teardownOrderOverpayCredit, reconcileOrderOverpayCredit } from '@/stores/orderPaymentStore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // F1 — Order→Invoice-Idempotenz: Meldung, wenn eine Order-Line bereits in einer Rechnung
 // steckt (harter Guard analog H-03 bei Offer→Invoice).
@@ -241,11 +244,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   loading: false,
 
   loadOrders: () => {
-    if (remoteReadUnavailable('store.orders.get')) return;
+    if (hydrateFromPrimary('store.orders.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM orders WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      set({ orders: rows.map(rowToOrder), loading: false });
+      set({ ...loadOrdersFor(localReadContext()), loading: false });
     } catch { set({ orders: [], loading: false }); }
   },
 
@@ -1408,3 +1409,16 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     get().loadOrders();
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Auftraege.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender. Damit koennen beide Wege dieselbe Funktion benutzen, ohne dass das Lesen
+ * des einen den Bildschirm des anderen anfasst.
+ */
+export function loadOrdersFor(ctx: BusinessReadContext): { orders: Order[] } {
+  const rows = query('SELECT * FROM orders WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  return { orders: rows.map(rowToOrder) };
+}

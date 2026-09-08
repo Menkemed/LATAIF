@@ -195,24 +195,24 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 64, `COVER die Registrierung zaehlt 64 Namen (${known.length})`);
+  ok(known.length === 72, `COVER die Registrierung zaehlt 72 Namen (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 23 && mutations.length === 40,
+  ok(probes.length === 1 && reads.length === 31 && mutations.length === 40,
     `COVER 1 Probe + 23 Auskuenfte (18 + 5 typisierte) + 40 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.
   const uncovered = [...reads, ...mutations].filter((o) => !perms.isOperationCovered(o));
-  ok(uncovered.length === 0, `COVER jede der 63 ist namentlich bedacht (offen: ${uncovered.join(', ') || 'keine'})`);
+  ok(uncovered.length === 0, `COVER jede der 71 ist namentlich bedacht (offen: ${uncovered.join(', ') || 'keine'})`);
   const invented = [...Object.keys(perms.OPERATION_PERMISSIONS), ...Object.keys(perms.READ_PERMISSIONS)]
     .filter((o) => !known.includes(o));
   ok(invented.length === 0, `COVER …und keine erfundene steht drin (${invented.join(', ') || 'keine'})`);
   // CENTRAL-UI-PARITY R1 — 18 Auskuenfte aus C2, dazu 5 typisierte. Beide stehen auf `null`,
   // und aus demselben Grund: der Primary bewacht seine Anzeige nirgends mit einem Recht.
-  const storePerms = Object.keys(perms.READ_PERMISSIONS).filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get'].includes(o));
-  ok(Object.keys(perms.READ_PERMISSIONS).length === 23 && storePerms.length === 5,
-    `COVER 18 Auskuenfte + 5 typisierte Auskuenfte stehen einzeln da (${Object.keys(perms.READ_PERMISSIONS).length})`);
+  const storePerms = Object.keys(perms.READ_PERMISSIONS).filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get'].includes(o));
+  ok(Object.keys(perms.READ_PERMISSIONS).length === 31 && storePerms.length === 13,
+    `COVER 18 Auskuenfte + 13 typisierte Auskuenfte stehen einzeln da (${Object.keys(perms.READ_PERMISSIONS).length})`);
   for (const r of reads) ok(r in perms.READ_PERMISSIONS, `COVER ${r} ist als Auskunft bedacht`);
 
   // BEFUND, am echten Bildschirmcode belegt: es gibt kein Lese-Tor am Primary.

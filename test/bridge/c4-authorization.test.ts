@@ -197,13 +197,13 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   ok(list.length === 40, `SCOPE weiterhin genau 40 Mutationen (${list.length})`);
-  // CENTRAL-UI-PARITY R1: dazu 5 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
-  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get'].includes(o));
-  ok(known.length === 64 && reads.length === 23 && parityReads.length === 5,
-    `SCOPE 1 Probe + 18 Auskuenfte + 5 typisierte Auskuenfte + 40 Buchungen = 64 (${known.length}/${reads.length}/${parityReads.length})`);
+  // CENTRAL-UI-PARITY R1: dazu 13 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
+  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get'].includes(o));
+  ok(known.length === 72 && reads.length === 31 && parityReads.length === 13,
+    `SCOPE 1 Probe + 18 Auskuenfte + 13 typisierte Auskuenfte + 40 Buchungen = 64 (${known.length}/${reads.length}/${parityReads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rl = rust.slice(rust.indexOf('pub const REMOTE_OPS'), rust.indexOf('];', rust.indexOf('pub const REMOTE_OPS')));
-  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 64, 'SCOPE Rust kennt dieselben 64');
+  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 72, 'SCOPE Rust kennt dieselben 64');
   // C4 hat NICHTS registriert.
   const mine = codeOf('src/core/bridge/command-permissions.ts') + codeOf('src/core/auth/role-permissions.ts');
   ok(!/registerCommand\(/.test(mine), 'SCOPE C4 registriert keine einzige Operation');

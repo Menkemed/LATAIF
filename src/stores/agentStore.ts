@@ -21,7 +21,10 @@ import {
 } from '@/core/ledger/posting';
 import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { remoteReadUnavailable } from '@/core/data/primary-source';
+import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -123,18 +126,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: [], transfers: [], loading: false,
 
   loadAgents: () => {
-    if (remoteReadUnavailable('store.agents.get')) return;
+    if (hydrateFromPrimary('store.agents.get', (d) => set(d as never))) return;
     try {
-      const rows = query('SELECT * FROM agents WHERE branch_id = ? ORDER BY name', [currentBranchId()]);
-      set({ agents: rows.map(rowToAgent) });
+      set(loadAgentsFor(localReadContext()));
     } catch { set({ agents: [] }); }
   },
 
   loadTransfers: () => {
-    if (remoteReadUnavailable('store.agents.get')) return;
+    if (hydrateFromPrimary('store.agents.get', (d) => set(d as never))) return;
     try {
-      const rows = query('SELECT * FROM agent_transfers WHERE branch_id = ? ORDER BY created_at DESC', [currentBranchId()]);
-      set({ transfers: rows.map(rowToTransfer), loading: false });
+      set({ ...loadAgentTransfersFor(localReadContext()), loading: false });
     } catch { set({ transfers: [], loading: false }); }
   },
 
@@ -811,3 +812,27 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Agenten.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender.
+ */
+export function loadAgentsFor(ctx: BusinessReadContext): { agents: Agent[] } {
+  const rows = query('SELECT * FROM agents WHERE branch_id = ? ORDER BY name', [ctx.branchId]);
+  return { agents: rows.map(rowToAgent) };
+}
+
+/**
+ * CENTRAL-UI-PARITY R2A — die gemeinsame Ladefunktion fuer Agenten-Transfers.
+ *
+ * Zustandsfrei: kein `set`, kein `get`, kein `currentBranchId()`. Die Filiale kommt aus dem
+ * Ausweis, den der Aufrufer mitbringt — am Primary aus der eigenen Sitzung, aus der Ferne aus dem
+ * geprueften Absender.
+ */
+export function loadAgentTransfersFor(ctx: BusinessReadContext): { transfers: AgentTransfer[] } {
+  const rows = query('SELECT * FROM agent_transfers WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  return { transfers: rows.map(rowToTransfer) };
+}
