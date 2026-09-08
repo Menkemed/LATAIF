@@ -197,13 +197,13 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   ok(list.length === 40, `SCOPE weiterhin genau 40 Mutationen (${list.length})`);
-  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  const storeReads = known.filter((o) => o.startsWith('store.'));
-  ok(known.length === 84 && reads.length === 43 && storeReads.length === 25,
-    `SCOPE 1 Probe + 18 Auskuenfte + 25 Store-Auskuenfte + 40 Buchungen = 84 (${known.length}/${reads.length}/${storeReads.length})`);
+  // CENTRAL-UI-PARITY R1: dazu 5 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
+  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get'].includes(o));
+  ok(known.length === 64 && reads.length === 23 && parityReads.length === 5,
+    `SCOPE 1 Probe + 18 Auskuenfte + 5 typisierte Auskuenfte + 40 Buchungen = 64 (${known.length}/${reads.length}/${parityReads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rl = rust.slice(rust.indexOf('pub const REMOTE_OPS'), rust.indexOf('];', rust.indexOf('pub const REMOTE_OPS')));
-  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 84, 'SCOPE Rust kennt dieselben 84');
+  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 64, 'SCOPE Rust kennt dieselben 64');
   // C4 hat NICHTS registriert.
   const mine = codeOf('src/core/bridge/command-permissions.ts') + codeOf('src/core/auth/role-permissions.ts');
   ok(!/registerCommand\(/.test(mine), 'SCOPE C4 registriert keine einzige Operation');

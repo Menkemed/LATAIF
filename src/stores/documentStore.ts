@@ -8,7 +8,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 
 /** Extended document with DB-only display fields */
 export interface DocumentRow extends Document {
@@ -64,7 +64,7 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
   loading: false,
 
   loadDocuments: () => {
-    if (hydrateFromPrimary('store.documents.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.documents.get')) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM documents WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);

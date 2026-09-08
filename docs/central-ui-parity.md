@@ -116,3 +116,34 @@ der Ausreißerliste steht.
 5. **Vier Seiten und zwei Komponenten** mit direktem Datenbankzugriff sind nicht paritätsfähig.
 6. Der alte Befund bleibt: der Primary hat **keine Lese-Rechte-Tore**; die Store-Auskünfte stehen
    deshalb auf `null`. Ein Tor hier wäre eine erfundene Regel, kein Gleichstand.
+
+---
+
+## R1 — nebenwirkungsfreie Ladefunktionen und geprüfte Identität (08.09.2026)
+
+Das Fundament oben hatte zwei Konstruktionsfehler, beide zuerst **rot bewiesen**
+(`test/uiparity/r1-read-isolation.test.ts`, vier von sechs Zusagen fielen), dann behoben:
+
+1. Die Fernauskunft rief die Ladefunktion des Primary-**Stores** — jedes Lesen von PC2 schrieb in
+   den sichtbaren Zustand des Primary (Liste, Auswahl, Filter).
+2. Diese Ladefunktion nahm ihre Filiale aus `currentBranchId()`, also aus der Sitzung des
+   Primary. Ein Client aus Filiale B bekam die Daten von A — und ein Filialwunsch im Rumpf hätte
+   es auch nicht besser gemacht.
+
+**Der Schnitt jetzt:** `BusinessReadContext` (Mandant, Filiale, Benutzer, Rolle) reist als
+Parameter. Am Primary kommt er aus der eigenen Sitzung, aus der Ferne **ausschließlich** aus dem
+geprüften Absender (C4); der Client-Rumpf wird für die Identität gar nicht erst angesehen.
+Die Ladefunktionen sind zustandsfrei und werden von **beiden** Wegen benutzt.
+
+Migriert (repräsentativ, wie beauftragt): Artikel + Kategorien (branchabhängig), Kunden,
+Rechnungen samt Zeilen, Auftragszahlungen (parametrisiert, Filiale im JOIN), sowie ein neuer
+Sitzungskontext für Filialname, Land und Währung.
+
+**Registry:** 1 Probe + 18 C2-Auskünfte + **5 typisierte Auskünfte** + 40 Buchungen = **64**.
+Die 20 noch nicht umgestellten Stores sind aus der Registry **entfernt** und laufen auf PC2 in
+einen ausdrücklichen Riegel (`remoteReadUnavailable`) — kein Datenbankzugriff, kein toter
+Netzaufruf, eine Zeile im Protokoll. Nichts steht auf „läuft meistens".
+
+**Offen bleibt:** die restlichen 20 Stores, die vier Seiten und zwei Komponenten mit direktem
+Datenbankzugriff, die Schreibwege außerhalb der 40 Buchungen, die `Primary only`-Zustände in
+der gemeinsamen Oberfläche — und der Beweis an zwei laufenden Anwendungen.

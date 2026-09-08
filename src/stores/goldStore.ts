@@ -29,7 +29,7 @@ import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postGoldConversionCredit, hasLedgerEntries } from '@/core/ledger/posting';
 import { KARAT_PURITY as PURITY_LOOKUP } from '@/core/gold/purity';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -321,7 +321,7 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   },
 
   loadAll: () => {
-    if (hydrateFromPrimary('store.gold.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.gold.get')) return;
     set({ loading: true });
     get().loadGoldPayables();
     get().loadCustomerGoldCredits();

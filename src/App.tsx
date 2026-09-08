@@ -67,7 +67,7 @@ import { isFirstRunPending } from '@/core/lifecycle/first-run';
 import { isClientMode, clientConfig } from '@/core/bridge/client-mode';
 // CENTRAL-UI-PARITY — auf PC2 entsteht die Sitzung aus dem geprueften Ausweis statt aus einer
 // Benutzertabelle, die es dort nicht gibt.
-import { installClientSession } from '@/core/auth/client-session';
+import { installClientSession, refreshClientSessionContext } from '@/core/auth/client-session';
 import { ClientShell } from '@/components/startup/ClientShell';
 import { FirstRunGate } from '@/components/startup/FirstRunGate';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
@@ -146,7 +146,11 @@ export default function App() {
       // CENTRAL-UI-PARITY — liegt bereits ein Ausweis vor, wird daraus die Sitzung gebaut und die
       // NORMALE Anwendung gestartet. Ohne Ausweis bleibt es bei der Verbinden-/Anmeldeoberflaeche.
       const token = clientConfig()?.token;
-      if (token && installClientSession(token)) initialize();
+      if (token && installClientSession(token)) {
+        initialize();
+        // Beschriftung der Filiale kommt vom Primary, nicht aus einer Vermutung.
+        void refreshClientSessionContext().then(() => initialize());
+      }
       setClientReady(true);
       return () => { cancelled = true; };
     }
@@ -358,7 +362,10 @@ export default function App() {
     if (!session) {
       return <ClientShell onSignedIn={() => {
         const t = clientConfig()?.token;
-        if (t && installClientSession(t)) initialize();
+        if (t && installClientSession(t)) {
+          initialize();
+          void refreshClientSessionContext().then(() => initialize());
+        }
       }} />;
     }
   }

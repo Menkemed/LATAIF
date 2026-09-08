@@ -4,7 +4,7 @@
 import { create } from 'zustand';
 import { query, getSetting } from '@/core/db/helpers';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 
 export type PayableType = 'refund' | 'supplier' | 'agent' | 'consignor' | 'expense' | 'loan';
 export type AgeBucket = 'current' | '1-30' | '31-60' | '60+';
@@ -98,7 +98,7 @@ export const usePayablesStore = create<PayablesStore>((set) => ({
   loading: false,
 
   loadPayables: () => {
-    if (hydrateFromPrimary('store.payables.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.payables.get')) return;
     try {
       const today = new Date();
       const gracePeriodDays = parseInt(getSetting('payables.grace_period_days', '30'), 10) || 30;

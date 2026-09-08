@@ -32,6 +32,9 @@ import { TauriMediaGateway } from '@/core/media/gateway';
 import { isSyncConfigured } from '@/core/sync/sync-service';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -557,6 +560,30 @@ export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string
   return `\n\n${sections.join('\n\n')}\n`;
 }
 
+/**
+ * CENTRAL-UI-PARITY R1 — die gemeinsame Ladefunktion fuer Artikel.
+ *
+ * Sie fasst KEINEN Zustandsspeicher an: kein `set`, kein `get`, keine Auswahl, kein Filter, kein
+ * `currentBranchId()`. Sie bekommt ihren Ausweis als Parameter und gibt reine Daten zurueck.
+ * Genau deshalb koennen der Primary und ein zweiter Rechner dieselbe Funktion benutzen, ohne dass
+ * das Lesen des einen den Bildschirm des anderen anfasst.
+ */
+export function loadProductsFor(ctx: BusinessReadContext): { products: Product[] } {
+  const rows = query('SELECT * FROM products WHERE branch_id = ? ORDER BY updated_at DESC', [ctx.branchId]);
+  return { products: rows.map(rowToProduct) };
+}
+
+/**
+ * Dieselbe Regel fuer die Kategorien. Der Unterschied zwischen "Auswahl" (nur aktive) und
+ * "Auslegung" (alle bekannten) bleibt, wo er war — er ist eine Aussage der Domaene, keine der
+ * Oberflaeche, und wird hier nicht nachgebaut, sondern mitgenommen.
+ */
+export function loadCategoriesFor(ctx: BusinessReadContext): { categorySchema: Category[]; categories: Category[] } {
+  const rows = query('SELECT * FROM categories WHERE branch_id = ? ORDER BY sort_order', [ctx.branchId]);
+  const { schema, active } = categorySelection(rows.map(rowToCategory));
+  return { categorySchema: schema, categories: active };
+}
+
 function rowToProduct(row: Record<string, unknown>): Product {
   return {
     id: row.id as string,
@@ -684,29 +711,21 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
   loadCategories: () => {
     if (hydrateFromPrimary('store.products.get', (d) => set(d as never))) return;
-    // EINE Abfrage fuer beides: die Auswahl (nur aktive) und die Auslegung (alle bekannten).
-    // Der Filter steht bewusst hier und nicht im SQL — so kann die Definition einer
-    // deaktivierten Kategorie nicht verlorengehen, waehrend die Auswahlliste unveraendert
-    // nur aktive Kategorien zeigt.
-    const apply = (rows: Record<string, unknown>[]) => {
-      const { schema, active } = categorySelection(rows.map(rowToCategory));
-      set({ categorySchema: schema, categories: active });
-    };
     try {
-      const branchId = currentBranchId();
-      apply(query('SELECT * FROM categories WHERE branch_id = ? ORDER BY sort_order', [branchId]));
+      set(loadCategoriesFor(localReadContext()));
     } catch {
-      // Not authenticated yet, load without branch filter
-      apply(parseResults(getDatabase().exec('SELECT * FROM categories ORDER BY sort_order')));
+      // Noch nicht angemeldet: die Auslegung ohne Filialfilter, damit die Oberflaeche etwas hat.
+      const { schema, active } = categorySelection(
+        parseResults(getDatabase().exec('SELECT * FROM categories ORDER BY sort_order')).map(rowToCategory),
+      );
+      set({ categorySchema: schema, categories: active });
     }
   },
 
   loadProducts: () => {
     if (hydrateFromPrimary('store.products.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM products WHERE branch_id = ? ORDER BY updated_at DESC', [branchId]);
-      const products = rows.map(rowToProduct);
+      const { products } = loadProductsFor(localReadContext());
       set({ products, loading: false });
       // Lazy-Backfill für pHash auf bestehende Produkte mit Bild aber ohne Hash.
       // Im Hintergrund, in Batches von 5, damit die Main-Thread nicht stockt.

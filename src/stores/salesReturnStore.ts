@@ -41,7 +41,7 @@ import type { CreditNote } from '@/core/models/types';
 import { refundCardFeePortion } from '@/core/finance/card-fee-booking';
 import { computeCardFee, normalizeCardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 
 // Wenn sich CN.cash_refund_amount oder refund_method nach erstem Posting aendert,
 // urspruengliche Buchung reverten + neu posten — sonst zeigen CASH/BANK-Salden im
@@ -364,7 +364,7 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
   returns: [],
 
   loadReturns: () => {
-    if (hydrateFromPrimary('store.sales_returns.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.sales_returns.get')) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM sales_returns WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);

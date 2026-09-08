@@ -149,34 +149,17 @@ pub const OP_REPAIRS_CANCEL_LINE: &str = "repairs.cancel_line";
 pub const OP_TRANSFERS_CONVERT_TO_INVOICE: &str = "transfers.convert_to_invoice";
 pub const OP_TRANSFERS_CONVERT_MANY_TO_INVOICE: &str = "transfers.convert_many_to_invoice";
 
-// CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
-// Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
-// `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
+// CENTRAL-UI-PARITY R1 — die Auskuenfte der gemeinsamen Oberflaeche. Der Client nennt einen
+// dieser Namen, nie eine Abfrage; die Liste deckt sich Zeichen fuer Zeichen mit dem Renderer.
 pub const OP_STORE_PRODUCTS_GET: &str = "store.products.get";
 pub const OP_STORE_CUSTOMERS_GET: &str = "store.customers.get";
 pub const OP_STORE_INVOICES_GET: &str = "store.invoices.get";
-pub const OP_STORE_SUPPLIERS_GET: &str = "store.suppliers.get";
-pub const OP_STORE_PURCHASES_GET: &str = "store.purchases.get";
-pub const OP_STORE_ORDERS_GET: &str = "store.orders.get";
-pub const OP_STORE_CONSIGNMENTS_GET: &str = "store.consignments.get";
-pub const OP_STORE_REPAIRS_GET: &str = "store.repairs.get";
-pub const OP_STORE_AGENTS_GET: &str = "store.agents.get";
-pub const OP_STORE_SALES_RETURNS_GET: &str = "store.sales_returns.get";
-pub const OP_STORE_CREDIT_NOTES_GET: &str = "store.credit_notes.get";
-pub const OP_STORE_EXPENSES_GET: &str = "store.expenses.get";
-pub const OP_STORE_RECURRING_EXPENSES_GET: &str = "store.recurring_expenses.get";
-pub const OP_STORE_PAYABLES_GET: &str = "store.payables.get";
-pub const OP_STORE_DEBTS_GET: &str = "store.debts.get";
-pub const OP_STORE_BANKING_GET: &str = "store.banking.get";
-pub const OP_STORE_GOLD_GET: &str = "store.gold.get";
-pub const OP_STORE_METALS_GET: &str = "store.metals.get";
-pub const OP_STORE_SCRAP_TRADES_GET: &str = "store.scrap_trades.get";
-pub const OP_STORE_OFFERS_GET: &str = "store.offers.get";
-pub const OP_STORE_PRODUCTION_GET: &str = "store.production.get";
-pub const OP_STORE_PARTNERS_GET: &str = "store.partners.get";
-pub const OP_STORE_EMPLOYEES_GET: &str = "store.employees.get";
-pub const OP_STORE_TASKS_GET: &str = "store.tasks.get";
-pub const OP_STORE_DOCUMENTS_GET: &str = "store.documents.get";
+pub const OP_ORDER_PAYMENTS_GET: &str = "order_payments.get";
+pub const OP_SESSION_CONTEXT_GET: &str = "session.context.get";
+
+// CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
+// Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
+// `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
 
 /// Die Zulassungsliste. Ein Name, der hier nicht steht, erreicht den Renderer nie.
 pub const REMOTE_OPS: &[&str] = &[
@@ -242,28 +225,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_STORE_PRODUCTS_GET,
     OP_STORE_CUSTOMERS_GET,
     OP_STORE_INVOICES_GET,
-    OP_STORE_SUPPLIERS_GET,
-    OP_STORE_PURCHASES_GET,
-    OP_STORE_ORDERS_GET,
-    OP_STORE_CONSIGNMENTS_GET,
-    OP_STORE_REPAIRS_GET,
-    OP_STORE_AGENTS_GET,
-    OP_STORE_SALES_RETURNS_GET,
-    OP_STORE_CREDIT_NOTES_GET,
-    OP_STORE_EXPENSES_GET,
-    OP_STORE_RECURRING_EXPENSES_GET,
-    OP_STORE_PAYABLES_GET,
-    OP_STORE_DEBTS_GET,
-    OP_STORE_BANKING_GET,
-    OP_STORE_GOLD_GET,
-    OP_STORE_METALS_GET,
-    OP_STORE_SCRAP_TRADES_GET,
-    OP_STORE_OFFERS_GET,
-    OP_STORE_PRODUCTION_GET,
-    OP_STORE_PARTNERS_GET,
-    OP_STORE_EMPLOYEES_GET,
-    OP_STORE_TASKS_GET,
-    OP_STORE_DOCUMENTS_GET,
+    OP_ORDER_PAYMENTS_GET,
+    OP_SESSION_CONTEXT_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

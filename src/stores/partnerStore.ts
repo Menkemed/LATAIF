@@ -9,7 +9,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 import {
   postPartnerTransaction,
   postPartnerTransactionReversed,
@@ -83,7 +83,7 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
   loading: false,
 
   loadPartners: () => {
-    if (hydrateFromPrimary('store.partners.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.partners.get')) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM partners WHERE branch_id = ? ORDER BY name', [branchId]);
@@ -96,7 +96,7 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
   },
 
   loadTransactions: () => {
-    if (hydrateFromPrimary('store.partners.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.partners.get')) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM partner_transactions WHERE branch_id = ? ORDER BY transaction_date DESC, created_at DESC', [branchId]);

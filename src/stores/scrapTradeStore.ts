@@ -15,7 +15,7 @@ import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 import {
   rowToScrapTrade,
   rowToScrapTradeLine,
@@ -282,7 +282,7 @@ export const useScrapTradeStore = create<ScrapTradeStore>((set, get) => ({
   trades: [],
 
   loadTrades: () => {
-    if (hydrateFromPrimary('store.scrap_trades.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.scrap_trades.get')) return;
     backfillTradeData();
     const tradeRows = query(
       `SELECT * FROM scrap_trades ORDER BY trade_date DESC, created_at DESC`

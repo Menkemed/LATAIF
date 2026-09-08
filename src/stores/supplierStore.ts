@@ -18,7 +18,7 @@ import {
 // der Transaktion auf FRISCH geladenen Daten; dieselbe Funktion speist die UI-Vorschau.
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -218,7 +218,7 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   loading: false,
 
   loadSuppliers: () => {
-    if (hydrateFromPrimary('store.suppliers.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.suppliers.get')) return;
     try {
       const branchId = currentBranchId();
       const rows = query('SELECT * FROM suppliers WHERE branch_id = ? ORDER BY name', [branchId]);

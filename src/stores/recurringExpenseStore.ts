@@ -14,7 +14,7 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { useExpenseStore } from '@/stores/expenseStore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 
 interface RecurringExpenseStore {
   templates: RecurringExpenseTemplate[];
@@ -89,7 +89,7 @@ export const useRecurringExpenseStore = create<RecurringExpenseStore>((set, get)
   loading: false,
 
   loadTemplates: () => {
-    if (hydrateFromPrimary('store.recurring_expenses.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.recurring_expenses.get')) return;
     try {
       const branchId = currentBranchId();
       const rows = query(

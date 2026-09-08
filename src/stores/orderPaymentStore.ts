@@ -22,6 +22,10 @@ import {
 import { assertGrantedCreditUnused, clawbackGrantedCredit } from '@/stores/invoiceStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import { hydrateOneFromPrimary } from '@/core/data/primary-source';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -194,12 +198,12 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
   paymentsByOrder: {},
 
   loadPayments: (orderId) => {
+    if (hydrateOneFromPrimary('order_payments.get', { orderId }, (d) => {
+      const payments = (d.payments ?? []) as OrderPayment[];
+      set(s => ({ paymentsByOrder: { ...s.paymentsByOrder, [orderId]: payments } }));
+    })) return;
     try {
-      const rows = query(
-        'SELECT * FROM order_payments WHERE order_id = ? ORDER BY paid_at ASC, created_at ASC',
-        [orderId]
-      );
-      set(s => ({ paymentsByOrder: { ...s.paymentsByOrder, [orderId]: rows.map(rowToPayment) } }));
+      set(s => ({ paymentsByOrder: { ...s.paymentsByOrder, [orderId]: loadOrderPaymentsFor(localReadContext(), orderId).payments } }));
     } catch {
       set(s => ({ paymentsByOrder: { ...s.paymentsByOrder, [orderId]: [] } }));
     }
@@ -335,3 +339,20 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     return list.filter(p => !p.convertedToInvoice).reduce((sum, p) => sum + p.amount, 0);
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R1 — der parametrisierte Weg: EIN Auftrag, nicht der ganze Speicher.
+ *
+ * Der Ausweis entscheidet, wessen Daten es sind; die Auftragskennung, welche. Beide sind
+ * Parameter — der eine geprueft, der andere vom Aufrufer benannt. Kein Zustandsspeicher.
+ */
+export function loadOrderPaymentsFor(ctx: BusinessReadContext, orderId: string): { payments: OrderPayment[] } {
+  const rows = query(
+    `SELECT p.* FROM order_payments p
+       JOIN orders o ON o.id = p.order_id
+      WHERE p.order_id = ? AND o.branch_id = ?
+      ORDER BY p.paid_at ASC, p.created_at ASC`,
+    [orderId, ctx.branchId],
+  );
+  return { payments: rows.map(rowToPayment) };
+}

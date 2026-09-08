@@ -1,65 +1,117 @@
-// CENTRAL-UI-PARITY — dieselbe Oberflaeche auf beiden Rechnern, und woher sie ihre Daten bekommt.
+// CENTRAL-UI-PARITY R1 — die Auskuenfte, mit denen ein Rechner ohne Datenbank DIESELBE
+// Oberflaeche fuellt wie der Primary.
 //
-// C2 hatte eine SCHLANKE Client-Oberflaeche, und dazu passte der Grundsatz von `read-commands.ts`:
-// die Antwort ist eine Form, keine Tabelle — benannte Felder statt `SELECT *`, damit nichts
-// Internes versehentlich mitreist. Mit der neuen Anforderung traegt dieser Grundsatz nicht mehr:
-// wenn auf PC2 DIESELBE Seite laufen soll, zeigt sie dieselben Felder, sonst ist es nicht dieselbe
-// Seite. Diese Datei ist deshalb ein ausdruecklich ANDERER Weg als die 18 Auskuenfte aus C2 — und
-// die Grenze, die dabei bleibt, ist eine andere, aber keine schwaechere:
+// Der erste Wurf hatte zwei Fehler, und beide sind hier abgestellt:
 //
-//   1. **Der Client nennt einen STORE, keine Abfrage.** Kein SQL, kein Tabellenname, kein
-//      Sortierausdruck reist ueber das Netz. Was gelesen werden darf, steht in `STORE_SOURCES`;
-//      alles andere gibt es nicht — Rust weist es schon vor dem Renderer ab.
-//   2. **Gelesen wird, indem der Primary seine EIGENE Ladefunktion ausfuehrt.** Nicht eine
-//      nachgebaute Abfrage, die morgen auseinanderlaeuft — dieselbe Funktion, die der Primary fuer
-//      seine eigene Anzeige benutzt. Damit ist Gleichstand keine Absicht, sondern Bauart.
-//   3. **Zurueck kommen nur DATEN.** Aus dem Zustand des Stores werden die Funktionen entfernt;
-//      was bleibt, ist genau das, was die Oberflaeche am Primary ohnehin anzeigt.
-//   4. **Die Rechte gelten unveraendert.** Der Weg laeuft durch `executeCommand`, also durch
-//      dieselbe Pruefung wie jede andere Operation.
+//   1. Er rief die Ladefunktion des Primary-STORES. Damit schrieb jedes Lesen von aussen in genau
+//      den Zustand, den der Mensch am Primary vor sich hat — Liste, Auswahl, Filter.
+//   2. Diese Ladefunktion nahm ihre Filiale aus `currentBranchId()`, also aus der Sitzung des
+//      Primary. Ein Client aus einer anderen Filiale bekam fremde Daten.
 //
-// Was dieser Weg NICHT ist: kein generischer SQL-Ausfuehrer, kein Spiegel der Datenbank, keine
-// zweite Wahrheit. Der Client haelt das Ergebnis im Anzeige-Zustand — geschrieben wird
-// ausschliesslich ueber die geprueften Fernbefehle, und der naechste Ladevorgang holt den Stand
-// wieder vom Primary.
+// Jetzt gilt: eine Auskunft ruft eine GEMEINSAME, zustandsfreie Ladefunktion — dieselbe, die auch
+// der Primary fuer seine eigene Anzeige benutzt — und uebergibt ihr den Ausweis des ANFRAGENDEN.
+// Der Ausweis kommt ausschliesslich aus dem bereits geprueften Absender (C4); was der Client im
+// Rumpf mitschickt, ist Eingabe, niemals Autoritaet.
+//
+// Was dieser Weg NICHT ist: kein SQL vom Client, kein beliebiger Store- oder Methodenname, kein
+// Spiegel der Datenbank, keine zweite Wahrheit. Zurueck reisen nur einfache, serialisierbare
+// Daten — keine Funktionen, keine Ausweise, keine Dateipfade, keine Systemkonfiguration.
 
-import { registerCommand, type CommandResult } from './command-registry';
-import { STORE_SOURCES, STORE_READ_OPS } from './store-read-ops';
+import { registerCommand, BusinessError, type CommandResult, type CommandActor } from './command-registry';
+import { remoteReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import {
+  OP_STORE_PRODUCTS_GET, OP_STORE_CUSTOMERS_GET, OP_STORE_INVOICES_GET,
+  OP_ORDER_PAYMENTS_GET, OP_SESSION_CONTEXT_GET,
+} from './store-read-ops';
 
-/** Nur Daten: Funktionen gehoeren zum Store, nicht zur Antwort. */
-function dataOf(state: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(state)) {
-    if (typeof v === 'function') continue;
-    out[k] = v;
-  }
-  return out;
-}
-
-interface ZustandLike {
-  getState(): Record<string, unknown>;
+/** Der Rumpf, den die Route baut: geprüfter Absender plus die Eingabe des Clients. */
+interface Envelope {
+  readonly actor?: { tenantId?: string; branchId?: string; userId?: string; role?: string };
+  readonly input?: Record<string, unknown>;
 }
 
 /**
- * Einen Store am Primary fuellen und seinen Datenstand zurueckgeben.
- *
- * Die Ladefunktionen werden GERUFEN, nicht nachgebaut — und falls eine von ihnen ein Versprechen
- * liefert, wird darauf gewartet, sonst reiste ein halb gefuellter Stand zurueck.
+ * Der Ausweis der Anfrage. Er kommt aus dem geprueften Absender — entweder als eigener Parameter
+ * (so ruft `executeCommand`) oder aus dem Umschlag, den die Route gebaut hat. Aus dem
+ * Client-Rumpf kommt er NIE: `input` wird hier gar nicht erst angesehen.
  */
-async function readStore(key: string): Promise<CommandResult> {
-  const src = STORE_SOURCES[key];
-  if (!src) return { data: {} }; // unerreichbar: registriert werden nur diese Schluessel
-  const mod = await src.load();
-  const store = mod[src.hook] as ZustandLike | undefined;
-  if (!store) throw new Error(`[bridge] store hook missing: ${src.hook}`);
-  for (const name of src.loaders) {
-    const fn = store.getState()[name];
-    if (typeof fn !== 'function') throw new Error(`[bridge] loader missing: ${key}.${name}`);
-    await (fn as () => unknown | Promise<unknown>)();
-  }
-  return { data: dataOf(store.getState()) };
+function contextOf(payload: unknown, actor?: CommandActor): BusinessReadContext {
+  const fromEnvelope = (payload as Envelope | null)?.actor;
+  return remoteReadContext(actor ?? fromEnvelope);
 }
 
-for (const key of STORE_READ_OPS) {
-  registerCommand(key, { kind: 'read', handler: () => readStore(key) });
+/** Die Eingabe des Clients — ausdruecklich getrennt vom Ausweis. */
+function inputOf(payload: unknown): Record<string, unknown> {
+  const i = (payload as Envelope | null)?.input;
+  return i && typeof i === 'object' ? i : {};
 }
+
+function requiredId(payload: unknown, field: string): string {
+  const v = inputOf(payload)[field];
+  if (typeof v !== 'string' || v.trim() === '') {
+    throw new BusinessError('INPUT_REQUIRED', `${field} is required`);
+  }
+  return v;
+}
+
+// ── Artikel und Kategorien ──────────────────────────────────────────────────
+registerCommand(OP_STORE_PRODUCTS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const store = await import('@/stores/productStore');
+    return { data: { ...store.loadProductsFor(ctx), ...store.loadCategoriesFor(ctx) } };
+  },
+});
+
+// ── Kunden ──────────────────────────────────────────────────────────────────
+registerCommand(OP_STORE_CUSTOMERS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const store = await import('@/stores/customerStore');
+    return { data: store.loadCustomersFor(ctx) };
+  },
+});
+
+// ── Rechnungen ──────────────────────────────────────────────────────────────
+registerCommand(OP_STORE_INVOICES_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const store = await import('@/stores/invoiceStore');
+    return { data: store.loadInvoicesFor(ctx) };
+  },
+});
+
+// ── Ein Auftrag, seine Zahlungen: der parametrisierte Weg ───────────────────
+registerCommand(OP_ORDER_PAYMENTS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const orderId = requiredId(payload, 'orderId');
+    const store = await import('@/stores/orderPaymentStore');
+    // Die Filiale steckt im Loader mit in der Abfrage: eine fremde Auftragskennung liefert nichts.
+    return { data: store.loadOrderPaymentsFor(ctx, orderId) };
+  },
+});
+
+// ── Sitzungskontext: Filiale, Name, Waehrung ───────────────────────────────
+registerCommand(OP_SESSION_CONTEXT_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const { query } = await import('@/core/db/helpers');
+    const rows = query('SELECT id, name, country, currency FROM branches WHERE id = ?', [ctx.branchId]);
+    const b = rows[0];
+    if (!b) throw new BusinessError('BRANCH_NOT_FOUND', 'the authenticated branch does not exist');
+    return {
+      data: {
+        branch: { id: String(b.id), name: String(b.name ?? ''), country: String(b.country ?? ''), currency: String(b.currency ?? '') },
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        role: ctx.role,
+      },
+    };
+  },
+});

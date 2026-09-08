@@ -77,6 +77,32 @@ export function installClientSession(token: string): Session | null {
   return s;
 }
 
+/**
+ * CENTRAL-UI-PARITY R1 — Filialname, Land und Waehrung stehen NICHT im Ausweis; sie sind
+ * Beschriftung. Frueher trugen sie deshalb den Hausstandard — geraten, nicht gewusst. Jetzt holt
+ * der Client sie ueber eine eigene Auskunft vom Primary, der sie aus SEINER Filialtabelle liest,
+ * und zwar zu der Filiale, die im geprueften Ausweis steht.
+ *
+ * Das bleibt Anzeige: die Sitzung wird damit beschriftet, nicht berechtigt. Wer sie von Hand
+ * aendert, aendert seine eigene Beschriftung — nicht, was der Primary tut.
+ */
+export async function refreshClientSessionContext(): Promise<void> {
+  const raw = (() => { try { return window.localStorage.getItem(KEY_SESSION); } catch { return null; } })();
+  if (!raw) return;
+  try {
+    const { remoteRead } = await import('@/core/bridge/remote-read');
+    const ctx = await remoteRead<{ data?: { branch?: { id: string; name: string; country: string; currency: string } } }>(
+      'session.context.get', {},
+    );
+    const branch = ctx?.data?.branch;
+    if (!branch) return;
+    const s = JSON.parse(raw) as Session;
+    if (branch.id !== s.branchId) return; // eine andere Filiale als im Ausweis wird nicht uebernommen
+    s.branch = branch;
+    window.localStorage.setItem(KEY_SESSION, JSON.stringify(s));
+  } catch { /* Beschriftung fehlt, mehr nicht */ }
+}
+
 /** Beim Trennen faellt sie wieder weg — es bleibt nichts stehen, was jemanden anmeldet. */
 export function clearClientSession(): void {
   try { window.localStorage.removeItem(KEY_SESSION); } catch { /* nichts zu raeumen */ }

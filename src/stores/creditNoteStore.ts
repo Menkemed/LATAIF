@@ -13,7 +13,7 @@ import { trackInsert, trackDelete } from '@/core/sync/track';
 import { postCreditNote, hasLedgerEntries, reverseSource } from '@/core/ledger/posting';
 import { planCreditNoteCreditTeardown } from '@/core/credit/overpayment-teardown';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { remoteReadUnavailable } from '@/core/data/primary-source';
 
 interface CreditNoteStore {
   creditNotes: CreditNote[];
@@ -69,7 +69,7 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
   loading: false,
 
   loadCreditNotes: () => {
-    if (hydrateFromPrimary('store.credit_notes.get', (d) => set(d as never))) return;
+    if (remoteReadUnavailable('store.credit_notes.get')) return;
     try {
       set({ loading: true });
       const branchId = currentBranchId();

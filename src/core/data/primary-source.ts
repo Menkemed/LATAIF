@@ -70,6 +70,48 @@ export function hydrateFromPrimary(
   return true;
 }
 
+
+/**
+ * Derselbe Gedanke fuer einen EINZELNEN Vorgang: hier gibt es einen Parameter (eine Auftrags-
+ * oder Kundenkennung), also auch keine gemeinsame Klammer — jede Kennung fragt fuer sich.
+ */
+export function hydrateOneFromPrimary(
+  op: string,
+  params: Record<string, unknown>,
+  apply: (data: Record<string, unknown>) => void,
+): boolean {
+  if (!readsFromPrimary()) return false;
+  void (async () => {
+    try {
+      const reply = await remoteRead<{ data?: Record<string, unknown> }>(op, params);
+      if (reply?.data) apply(reply.data);
+    } catch (e) {
+      if (e instanceof RemoteReadError && onFailure) onFailure(op, e);
+      else console.warn(`[data] ${op} failed:`, e);
+    }
+  })();
+  return true;
+}
+
+
+/**
+ * CENTRAL-UI-PARITY R1 — der ehrliche Riegel fuer alles, was noch nicht umgestellt ist.
+ *
+ * Ein Store, dessen Ladefunktion noch den alten Schnitt hat, darf aus der Ferne gar nicht erst
+ * geladen werden: er wuerde die Filiale des Primary lesen und dessen Bildschirm anfassen. Also
+ * wird auf einem Rechner ohne Datenbank hier abgebrochen — kein Datenbankzugriff, kein toter
+ * Netzaufruf, und eine Zeile im Protokoll, damit es sichtbar ist statt still.
+ */
+const announced = new Set<string>();
+export function remoteReadUnavailable(what: string): boolean {
+  if (!readsFromPrimary()) return false;
+  if (!announced.has(what)) {
+    announced.add(what);
+    console.warn(`[data] ${what} is not available on a client yet — no local database, no remote read`);
+  }
+  return true;
+}
+
 /** Nur fuer Tests und den Abmeldeweg: die laufenden Anfragen vergessen. */
 export function resetPrimarySource(): void {
   inFlight.clear();

@@ -33,6 +33,9 @@ import { useProductStore } from '@/stores/productStore';
 import type { Expense } from '@/core/models/types';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Domain-Insert + Ledger-Posting laufen in einem Try/Catch. Posting-Fehler werden
@@ -205,15 +208,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   loadInvoices: () => {
     if (hydrateFromPrimary('store.invoices.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      const rows = query('SELECT * FROM invoices WHERE branch_id = ? ORDER BY created_at DESC', [branchId]);
-      const invoices = rows.map(r => {
-        const inv = rowToInvoice(r);
-        const lineRows = query('SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY position', [inv.id]);
-        inv.lines = lineRows.map(rowToLine);
-        return inv;
-      });
-      set({ invoices, loading: false });
+      set({ ...loadInvoicesFor(localReadContext()), loading: false });
     } catch { set({ invoices: [], loading: false }); }
   },
 
@@ -1815,3 +1810,20 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     get().loadInvoices();
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R1 — die gemeinsame Ladefunktion fuer Rechnungen samt ihren Zeilen.
+ *
+ * Ohne Zustandsspeicher, ohne `currentBranchId()`. Die Zeilen werden hier mitgelesen, weil eine
+ * Rechnung ohne ihre Zeilen in keiner Ansicht etwas taugt — genau wie vorher.
+ */
+export function loadInvoicesFor(ctx: BusinessReadContext): { invoices: Invoice[] } {
+  const rows = query('SELECT * FROM invoices WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const invoices = rows.map((r) => {
+    const inv = rowToInvoice(r);
+    const lineRows = query('SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY position', [inv.id]);
+    inv.lines = lineRows.map(rowToLine);
+    return inv;
+  });
+  return { invoices };
+}

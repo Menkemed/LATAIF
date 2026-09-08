@@ -333,10 +333,10 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   ok(mutations.length === 40 && mutations.includes('invoices.create')
     && mutations.includes('customers.create') && mutations.includes('customers.update'),
     `ALLOWLIST genau vierzig Mutationen (${mutations.join(', ')})`);
-  // CENTRAL-UI-PARITY: dazu 25 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  const storeReads = known.filter((o) => o.startsWith('store.'));
-  ok(known.length === 84 && reads.length === 43 && storeReads.length === 25 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 18 Auskuenfte + 25 Store-Auskuenfte + 40 Buchungen = 84 (${known.length}/${reads.length}/${storeReads.length})`);
+  // CENTRAL-UI-PARITY R1: dazu 5 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
+  const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get'].includes(o));
+  ok(known.length === 64 && reads.length === 23 && parityReads.length === 5 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Auskuenfte + 5 typisierte Auskuenfte + 40 Buchungen = 64 (${known.length}/${reads.length}/${parityReads.length})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
     let threw: string | null = null;
@@ -347,7 +347,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 84, 'ALLOWLIST Rust kennt dieselben vierundachtzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 64, 'ALLOWLIST Rust kennt dieselben vierundsechzig Namen');
   ok(/OP_CUSTOMERS_CREATE: &str = "customers.create"/.test(rs) && /OP_CUSTOMERS_UPDATE: &str = "customers.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

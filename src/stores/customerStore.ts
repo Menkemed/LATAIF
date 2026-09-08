@@ -10,6 +10,9 @@ import { computeSalesMetrics } from '@/core/reports/sales-metrics';
 import { loadSalesData } from '@/core/reports/sales-metrics-loader';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
+// CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
+// Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
+import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
 interface CustomerStore {
   customers: Customer[];
@@ -87,13 +90,7 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   loadCustomers: () => {
     if (hydrateFromPrimary('store.customers.get', (d) => set(d as never))) return;
     try {
-      const branchId = currentBranchId();
-      // Sentinel-Customers (z.B. sys-own-shop-* für Own-Item Repairs) werden in keiner UI gelistet.
-      const rows = query(
-        `SELECT * FROM customers WHERE branch_id = ? AND id NOT LIKE 'sys-%' ORDER BY updated_at DESC`,
-        [branchId]
-      );
-      set({ customers: rows.map(rowToCustomer), loading: false });
+      set({ ...loadCustomersFor(localReadContext()), loading: false });
     } catch {
       set({ customers: [], loading: false });
     }
@@ -376,3 +373,18 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
     }
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R1 — die gemeinsame Ladefunktion fuer Kunden.
+ *
+ * Ohne Zustandsspeicher, ohne `currentBranchId()`: der Ausweis kommt als Parameter. Die
+ * Sentinel-Kunden (`sys-…`) bleiben aussen vor, weil sie in keiner Oberflaeche gelistet werden —
+ * dieselbe Regel wie vorher, nur an einer Stelle statt an zweien.
+ */
+export function loadCustomersFor(ctx: BusinessReadContext): { customers: Customer[] } {
+  const rows = query(
+    `SELECT * FROM customers WHERE branch_id = ? AND id NOT LIKE 'sys-%' ORDER BY updated_at DESC`,
+    [ctx.branchId],
+  );
+  return { customers: rows.map(rowToCustomer) };
+}
