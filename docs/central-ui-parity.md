@@ -1338,3 +1338,53 @@ aber die Umwandlung löste keine Buchung aus — die Schaltfläche war da, der W
 (vermutlich sieht der zweite Rechner die Auftragspositionen nicht als „abrechenbar"). Das ist
 die nächste Frage, und sie gehört gestellt, bevor hier „bewiesen" steht.
 
+---
+
+## R5A.1 — warum PC2 keinen Auftrag abrechnen konnte (09.09.2026) · BLOCKED
+
+### Der Abbruch lag VOR der Buchung
+
+```
+Klick „Create Invoice"
+  → handleCreateFinalInvoice
+  → getBillableLines(id)            ← 0 Positionen auf PC2
+  → alert("Nothing ready to invoice") und return
+  (der gemeinsame Schreibweg wurde nie erreicht)
+```
+
+### Die Ursache — und sie ist groesser als die Umwandlung
+
+`getOrderLines()` fragte ausschliesslich die lokale Datenbank, und ein `try` darum verschluckte
+den Fehler. Auf einem Rechner ohne Datenbank hiess das nicht „Fehler", sondern: **der Auftrag hat
+keine Positionen**. Keine Meldung, kein Absturz, nur eine leere Liste — und damit ist auf dem
+zweiten Rechner JEDE Handlung tot, die an Positionen haengt.
+
+Der Rundgang aus R4A hat das nicht gefunden, weil er auf Abstuerze und Datenbankgriffe schaut;
+ein geschluckter Fehler sieht aus wie ein leerer Auftrag.
+
+### Der Fix (kleinster Leseweg, keine neue Buchung)
+
+```
+loadOrdersFor(ctx) → { orders, orderLines }     ← die Positionen reisen mit, filialgebunden
+getOrderLines(id)  → Primary: Datenbank (wie bisher)
+                     Client:  derselbe Lesestand, den auch die Auftragsliste fuellt
+```
+
+Die Zeilen-Abbildung war eine anonyme Funktion INNERHALB von `getOrderLines`; sie heisst jetzt
+`rowToOrderLine` und wird von beiden Wegen benutzt — abgeschrieben ist nichts. Am Primary bleibt
+die Datenbank die Quelle, damit der Speicherstand nach dem Anlegen einer Position nicht veraltet.
+
+### Stand
+
+```
+Matrix 22 verdrahtet / 0 exakt offen / 16 Klasse B / 2 ohne Handlung · Registry 107
+Matrix-Gate 365/0 · Lesegates r1/r2d/c2 gruen · beide TS-Gates sauber
+```
+
+### Warum weiterhin BLOCKED
+
+Der Lesefehler ist behoben und geprueft, aber der Zwei-Rechner-Lauf loeste die Umwandlung immer
+noch nicht aus: die Schaltflaeche ist da und wird geklickt, es geht keine Buchung hinaus. Der
+naechste Schritt ist, den Weg NACH `getBillableLines` am laufenden Client zu protokollieren
+(Bestaetigungsdialog der Steuerschemata bzw. die Weiche davor) — nicht wieder zu raten.
+

@@ -29,7 +29,7 @@ import {
 // (beide Bindings werden nur in Actions zur Laufzeit aufgerufen, nicht bei Modul-Init).
 import { teardownOrderOverpayCredit, reconcileOrderOverpayCredit } from '@/stores/orderPaymentStore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
@@ -90,6 +90,9 @@ function cancelOrderLineExpense(expenseId: string): void {
 
 interface OrderStore {
   orders: Order[];
+  /** R5A.1 — die Positionen aus dem gemeinsamen Lesestand. Am Primary undefined: dort fragt
+   *  `getOrderLines` weiterhin die Datenbank. */
+  orderLines?: OrderLine[];
   loading: boolean;
   loadOrders: () => void;
   getOrder: (id: string) => Order | undefined;
@@ -1107,7 +1110,22 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     get().loadOrders();
   },
 
+  /**
+   * R5A.1 — die Positionen eines Auftrags.
+   *
+   * Bis hierher fragte das ausschliesslich die lokale Datenbank — und der `try` darum verschluckte
+   * den Fehler. Auf einem Rechner ohne Datenbank hiess das: der Auftrag hat KEINE Positionen. Kein
+   * Absturz, keine Meldung, nur eine leere Liste. Deshalb sagte „Rechnung erstellen" dort
+   * „Nothing ready to invoice" — die Umwandlung war unerreichbar, und niemand sah warum.
+   *
+   * Jetzt kommen sie von dort, wo sie entstehen: am Primary aus der Datenbank, auf einem Client
+   * aus demselben Lesestand, den auch die Auftragsliste fuellt (`store.orders.get`).
+   */
   getOrderLines: (orderId) => {
+    // Am Primary bleibt die Datenbank die Quelle: der Lesestand im Speicher wuerde sonst nach
+    // jedem Anlegen einer Position veralten, bis jemand neu laedt. Nur der Client, der keine
+    // Datenbank hat, nimmt den Stand, den er ohnehin ueber die Bruecke bekommen hat.
+    if (readsFromPrimary()) return (get().orderLines ?? []).filter((l) => l.orderId === orderId);
     try {
       const rows = query(
         `SELECT * FROM order_lines WHERE order_id = ? ORDER BY position`,
@@ -1420,7 +1438,51 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
  * geprueften Absender. Damit koennen beide Wege dieselbe Funktion benutzen, ohne dass das Lesen
  * des einen den Bildschirm des anderen anfasst.
  */
-export function loadOrdersFor(ctx: BusinessReadContext): { orders: Order[] } {
+/**
+ * R5A.1 — eine Zeile der Datenbank als Auftragsposition. Sie stand als anonyme Abbildung IN
+ * `getOrderLines`; jetzt hat sie einen Namen, damit der gemeinsame Lesestand dieselbe benutzt.
+ */
+export function rowToOrderLine(r: Record<string, unknown>): OrderLine {
+      let matDetails: MaterialDetails | undefined;
+      try {
+        const raw = r.material_details as string | null;
+        if (raw) matDetails = JSON.parse(raw) as MaterialDetails;
+      } catch { /* */ }
+      return {
+        id: r.id as string,
+        orderId: r.order_id as string,
+        productId: (r.product_id as string | null) || undefined,
+        description: (r.description as string) || '',
+        quantity: (r.quantity as number) || 1,
+        unitPrice: (r.unit_price as number) || 0,
+        lineTotal: (r.line_total as number) || 0,
+        position: (r.position as number) || 0,
+        taxScheme: (r.tax_scheme as OrderLine['taxScheme'] | null) || undefined,
+        vatRate: r.vat_rate != null ? (r.vat_rate as number) : undefined,
+        // v0.2.1 — neue Felder
+        supplierId: (r.supplier_id as string | null) || undefined,
+        costAmount: r.cost_amount != null ? (r.cost_amount as number) : undefined,
+        expenseId: (r.expense_id as string | null) || undefined,
+        isCustomerFacing: r.is_customer_facing == null ? true : Number(r.is_customer_facing) === 1,
+        materialKind: (r.material_kind as OrderLine['materialKind']) || undefined,
+        materialDetails: matDetails,
+        // v0.3.0 — Per-Line Status + partial-invoicing link
+        status: ((r.status as string) || 'PENDING') as OrderLineStatus,
+        invoiceId: (r.invoice_id as string | null) || undefined,
+        orderedSupplierId: (r.ordered_supplier_id as string | null) || undefined,
+      };
+}
+
+export function loadOrdersFor(ctx: BusinessReadContext): { orders: Order[]; orderLines: OrderLine[] } {
   const rows = query('SELECT * FROM orders WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
-  return { orders: rows.map(rowToOrder) };
+  // R5A.1 — die Positionen reisen mit. Ohne sie hat ein Auftrag auf dem zweiten Rechner keine
+  // Zeilen, und jede Handlung, die an ihnen haengt (abrechnen, umwandeln), ist dort tot.
+  const zeilen = query(
+    `SELECT ol.* FROM order_lines ol
+       JOIN orders o ON o.id = ol.order_id
+      WHERE o.branch_id = ?
+      ORDER BY ol.order_id, ol.position`,
+    [ctx.branchId],
+  );
+  return { orders: rows.map(rowToOrder), orderLines: zeilen.map(rowToOrderLine) };
 }

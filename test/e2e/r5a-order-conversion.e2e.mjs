@@ -436,6 +436,11 @@ try {
       '7 der Auftrag ist auf dem zweiten Rechner sichtbar');
     const geklickt = await clickText(client, 'Create Invoice');
     ok(geklickt === 'OK', `7 die normale Schaltflaeche „Create Invoice" ist da (${geklickt})`);
+    await sleep(1200);
+    // Der Bestaetigungsdialog der Steuerschemata gehoert zum normalen Weg — er wird geklickt,
+    // nicht umgangen.
+    const bestaetigt = await client.ev("const b=[...document.querySelectorAll('button')].find(x=>/^(Confirm|Create Invoice|Yes|OK)$/i.test(x.textContent.trim())); if(!b) return 'KEINER'; b.click(); return 'OK';");
+    console.log('      (Dialog) ' + bestaetigt);
     const weg = await warteBis(client, "location.pathname.startsWith('/invoices/')", 45000);
     const fehler = await client.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';");
     ok(weg, `7 nach der Umwandlung steht die Rechnung da (Hinweis: ${String(fehler).slice(0, 160) || 'keiner'})`);

@@ -250,6 +250,19 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   }
 }
 
+// ── R5A.1 — die Auftragspositionen erreichen den zweiten Rechner ────────
+{
+  const st = codeOf(src('src/stores/orderStore.ts'));
+  ok(st.includes('export function rowToOrderLine('),
+    'R5A.1 die Zeilen-Abbildung hat einen Namen — der Lesestand benutzt dieselbe');
+  ok(st.includes('orderLines: zeilen.map(rowToOrderLine)'),
+    'R5A.1 …und der gemeinsame Lesestand traegt die Positionen mit');
+  ok(st.includes('if (readsFromPrimary()) return (get().orderLines'),
+    'R5A.1 der Client nimmt sie von dort, der Primary bleibt bei seiner Datenbank');
+  ok(st.includes('JOIN orders o ON o.id = ol.order_id') && st.includes('WHERE o.branch_id = ?'),
+    'R5A.1 …und sie sind an die Filiale des Ausweises gebunden');
+}
+
 // ── Der Stand, offen benannt ────────────────────────────────────────────
 const verdrahtet = R4C_MATRIX.filter((z) => z.verdrahtet);
 const offenExakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet);
@@ -273,3 +286,5 @@ console.log('CENTRAL_UI_R5A_ORDER_PAYMENT_SEMANTICS_AUDITED');
 console.log('CENTRAL_UI_R5A_ATOMIC_ORDER_CONVERSION_PROVED');
 console.log('CENTRAL_UI_R5A_SHARED_ORDER_PAYMENT_DOMAIN_PROVED');
 console.log('CENTRAL_UI_R5A_MATRIX_UPDATED');
+console.log('CENTRAL_UI_R5A1_CONVERSION_PRECOMMAND_BLOCKER_AUDITED');
+console.log('CENTRAL_UI_R5A1_BILLABLE_LINE_PARITY_PROVED');
