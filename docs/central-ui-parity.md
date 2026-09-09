@@ -1279,3 +1279,62 @@ Registry: 1 + 18 + 48 + 40 = 107   (unveraendert)
 Damit sind alle zwanzig angeschlossenen Buchungen aus der gemeinsamen Oberfläche erreichbar —
 und jede davon ist an zwei echten Rechnern gefahren worden.
 
+---
+
+## R5A — Auftrag und Anzahlung (09.09.2026) · BLOCKED
+
+### Die vier Order-Zeilen aus den achtzehn Klasse-B-Fällen
+
+```
+orders.create              legt zusaetzlich die Gold-Verbindlichkeit an        → bleibt B
+orders.update              schickt expectedMargin / remainingAmount mit        → bleibt B
+orders.add_payment         cardBrand fehlte → falsche Kartengebuehr            → GESCHLOSSEN
+orders.convert_to_invoice  Anzahlungsuebertrag fehlte → Geld bleibt liegen     → GESCHLOSSEN
+```
+
+### Der Kern: die Rechnung wohnte in der Oberfläche
+
+Warum die Umwandlung seit R3 offen war, ist beim Nachsehen sofort sichtbar:
+`carryOverOrderPaymentsToInvoice` stand **in der Auftragsansicht** — mitten in einer
+React-Komponente. Der Fernbefehl konnte sie gar nicht rufen, also legte er nur die Rechnung an.
+
+Sie ist jetzt eine Domänenfunktion (`core/orders/order-payment-carryover.ts`), Wort für Wort
+dieselbe Rechnung, nur an einem Ort, den beide Seiten erreichen — und beide rufen sie:
+
+```
+OrderDetail (Primary)          financial-commands (runConvertOrder)
+        ↓                                   ↓
+        carryOverOrderPaymentsToInvoice(...)   ← eine Funktion, kein Nachbau
+```
+
+Beim Fernbefehl läuft sie **innerhalb derselben Transaktion**: scheitert der Übertrag, fällt die
+ganze Umwandlung zurück. Den Zustand „Rechnung da, Geld liegt beim Auftrag" kann es nicht mehr
+geben — und der Client schickt für diese eine Handlung genau **einen** Befehl, kein Nacheinander.
+
+### Die Kartengebühr
+
+`orders.add_payment` nahm `cardBrand` nicht entgegen. Das ist Geld: die Gebühr ist 2,5 %
+für Amex gegen 2,2 % sonst. Eine Amex-Anzahlung vom zweiten Rechner wäre mit dem normalen Satz
+gebucht worden. Das Feld reist jetzt mit — **gerechnet** wird die Gebühr weiterhin ausschließlich
+im Haus (`bookCardFee` in `addPayment`), nie im Client.
+
+Dabei dieselbe Lehre wie bei den Arbeitsarten (R4C.4) gleich mit angewandt: `CARD_BRANDS` ist
+jetzt ein **Wert**, aus dem der Typ folgt — sonst hätte der Fernbefehl wieder eine eigene Liste
+gebraucht.
+
+### Registry und Matrix
+
+```
+22 verdrahtet · 0 exakt aber offen · 16 Luecken (Klasse B) · 2 ohne Handlung = 40
+Registry: 1 + 18 + 48 + 40 = 107   (keine neue Buchung — die vorhandene wurde erweitert)
+```
+
+### Warum BLOCKED
+
+Der Entwurf, die gemeinsame Domänenfunktion, die atomare Klammer, der Kartenart-Vertrag und die
+Matrix sind fertig und geprüft (Matrix-Gate **361/0**, beide TS-Gates sauber). Der **laufende**
+Beweis fehlt: im Zwei-Rechner-Lauf (`r5a-order-conversion.e2e.mjs`) kam die Anzahlung durch,
+aber die Umwandlung löste keine Buchung aus — die Schaltfläche war da, der Weg brach vorher ab
+(vermutlich sieht der zweite Rechner die Auftragspositionen nicht als „abrechenbar"). Das ist
+die nächste Frage, und sie gehört gestellt, bevor hier „bewiesen" steht.
+

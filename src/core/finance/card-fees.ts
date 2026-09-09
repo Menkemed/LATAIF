@@ -7,7 +7,14 @@
 // das gesamte Konten-/Netting-Routing unveraendert korrekt.
 import { query } from '@/core/db/helpers';
 
-export type CardBrand = 'normal' | 'amex';
+/**
+ * R5A — die Kartenarten als WERT, nicht nur als Typ. Ein Vertrag, der sie pruefen muss (der
+ * Fernbefehl fuer eine Anzahlung), kann einen Typ nicht fragen — und schreibt sich sonst eine
+ * eigene Liste, die auseinanderlaeuft. Genau das war der Arbeitsart-Fehler aus R4C.4.
+ */
+export const CARD_BRANDS = ['normal', 'amex'] as const;
+
+export type CardBrand = typeof CARD_BRANDS[number];
 
 export const CARD_FEE_DEFAULTS: Record<CardBrand, number> = { normal: 2.2, amex: 2.5 };
 

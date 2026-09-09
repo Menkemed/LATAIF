@@ -166,8 +166,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'orders.add_payment', handlung: 'Anzahlung erfassen', ort: 'pages/orders/OrderDetail.tsx',
-    lokal: 'addPayment', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske schickt `cardBrand` (Amex vs. normal) mit — davon haengt die Kartengebuehr ab. Die Fernbuchung kennt das Feld nicht; dieselbe Zahlung koennte damit eine andere Gebuehr tragen.',
+    lokal: 'addPayment', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5A — die Fernbuchung nimmt jetzt die Kartenart entgegen; gerechnet wird die Gebuehr weiterhin ausschliesslich im Haus (bookCardFee in addPayment). Ein Aufruf, dieselben Werte.',
   },
   {
     op: 'orders.delete_payment', handlung: 'Anzahlung loeschen', ort: 'pages/orders/OrderDetail.tsx',
@@ -176,11 +176,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'orders.convert_to_invoice', handlung: 'Auftrag in Rechnung wandeln', ort: 'pages/orders/OrderDetail.tsx',
-    lokal: 'convertOrderLinesToInvoiceTx', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'PFLICHTBEISPIEL. Die Oberflaeche des Primary fuehrt in DERSELBEN Handlung zusaetzlich '
-      + 'den Anzahlungsuebertrag aus (carryOverOrderPaymentsToInvoice + Ueberzahlungsweg). Die '
-      + 'Fernbuchung legt nur die Rechnung an und verknuepft die Zeilen. Sie zu verdrahten hiesse: '
-      + 'Rechnung da, Anzahlung liegt beim Auftrag — Geld bleibt liegen. Erst atomar loesen.',
+    lokal: 'convertOrderLinesToInvoiceTx', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5A — die Fernbuchung fuehrt jetzt den Anzahlungsuebertrag MIT aus, in derselben Transaktion und ueber DIESELBE Funktion wie die Auftragsansicht (core/orders/order-payment-carryover). Eine Handlung, eine Buchung, kein liegengebliebenes Geld.',
   },
 
   // ── Reparaturen ──────────────────────────────────────────────────────────

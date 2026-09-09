@@ -27,6 +27,7 @@
 
 import { query } from '@/core/db/helpers';
 import { REPAIR_WORK_TYPES } from '@/core/models/types';
+import { CARD_BRANDS, type CardBrand } from '@/core/finance/card-fees';
 import { nextOrderStatus, isAllowedOrderAdvance } from '@/core/orders/order-status-flow';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { useOrderStore } from '@/stores/orderStore';
@@ -177,11 +178,17 @@ export interface AddOrderPaymentRequest {
   paidAt?: string;
   reference?: string;
   note?: string;
+  /** R5A — die Kartenart des Menschen. Die Gebuehr rechnet daraus das Haus, nicht der Client. */
+  cardBrand?: CardBrand;
 }
 
 export function parseAddOrderPayment(raw: unknown): AddOrderPaymentRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['orderId', 'amount', 'method', 'expectedRevision', 'paidAt', 'reference', 'note']);
+  // R5A — `cardBrand` fehlte hier, und das war Geld: die Kartengebuehr haengt daran
+  // (Amex 2,5 % gegen 2,2 %). Ohne das Feld buchte eine Amex-Zahlung vom zweiten Rechner die
+  // Gebuehr des normalen Satzes. Gerechnet wird sie weiterhin ausschliesslich im Haus
+  // (`bookCardFee` in `addPayment`); hier reist nur die Angabe des Menschen mit.
+  onlyKnownFields(raw, ['orderId', 'amount', 'method', 'expectedRevision', 'paidAt', 'reference', 'note', 'cardBrand']);
   const method = s(raw.method);
   if (!(ORDER_PAYMENT_METHODS as readonly string[]).includes(method)) {
     throw new FinancialPayloadError(`unknown payment method: ${method || '(none)'}`);
@@ -195,6 +202,14 @@ export function parseAddOrderPayment(raw: unknown): AddOrderPaymentRequest {
   out.paidAt = optString(raw.paidAt, 'paidAt');
   out.reference = optString(raw.reference, 'reference');
   out.note = optString(raw.note, 'note');
+  if (raw.cardBrand !== undefined && raw.cardBrand !== null) {
+    // Dieselbe Liste, die auch die Gebuehrenrechnung des Hauses kennt — keine zweite daneben.
+    const b = s(raw.cardBrand);
+    if (!(CARD_BRANDS as readonly string[]).includes(b)) {
+      throw new FinancialPayloadError(`unknown card brand: ${b}`);
+    }
+    out.cardBrand = b as CardBrand;
+  }
   return out;
 }
 
@@ -233,6 +248,7 @@ export function runAddOrderPayment(deps: EngineDeps, identity: CommandIdentity, 
         orderId: req.orderId,
         amount: req.amount,
         method: req.method,
+        cardBrand: req.cardBrand,
         paidAt: req.paidAt || new Date().toISOString().split('T')[0],
         reference: req.reference,
         note: req.note,

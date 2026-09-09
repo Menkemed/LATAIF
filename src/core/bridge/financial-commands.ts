@@ -44,6 +44,8 @@ import {
 } from '@/core/ledger/posting';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useOrderStore } from '@/stores/orderStore';
+import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
+import { carryOverOrderPaymentsToInvoice } from '@/core/orders/order-payment-carryover';
 import { useProductStore } from '@/stores/productStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useAgentStore } from '@/stores/agentStore';
@@ -460,9 +462,30 @@ export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw
       }
       throw err;
     }
+    // R5A — der Anzahlungsuebertrag gehoert zu DERSELBEN Handlung, nicht zu einer zweiten.
+    //
+    // Bis hierher legte dieser Befehl nur die Rechnung an und verknuepfte die Zeilen — das Geld
+    // blieb beim Auftrag liegen. Genau deshalb stand die Umwandlung als Klasse-B-Luecke da: eine
+    // halbe Handlung, die wie ein Erfolg aussieht. Sie laeuft jetzt INNERHALB derselben
+    // Transaktion dieses Befehls und ruft DIESELBE Funktion wie die Auftragsansicht
+    // (`core/orders/order-payment-carryover`) — kopiert ist nichts.
+    //
+    // Scheitert sie, faellt der ganze Auftrag zurueck: keine Rechnung, keine Verknuepfung, keine
+    // halb verschobene Anzahlung.
+    {
+      const gross = Number(query('SELECT gross_amount FROM invoices WHERE id = ?', [created.id])[0]?.gross_amount ?? 0);
+      const gezahlt = Number(query(
+        'SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ?', [req.orderId],
+      )[0]?.s ?? 0);
+      carryOverOrderPaymentsToInvoice(
+        created.id, req.orderId, String(order.order_number ?? ''), gross, gezahlt,
+      );
+    }
+
     useOrderStore.getState().loadOrders();
     useInvoiceStore.getState().loadInvoices();
     useProductStore.getState().loadProducts();
+    useOrderPaymentStore.getState().loadPayments(req.orderId);
 
     const inv = query('SELECT invoice_number, gross_amount FROM invoices WHERE id = ?', [created.id])[0];
     return {

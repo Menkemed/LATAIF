@@ -26,9 +26,9 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
-import { query } from '@/core/db/helpers';
 import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
 import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
+import { carryOverOrderPaymentsToInvoice } from '@/core/orders/order-payment-carryover';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
@@ -239,18 +239,31 @@ export function OrderDetail() {
   const remaining = (order.agreedPrice || 0) - totalPaidActive;
   const fullyPaid = (order.agreedPrice || 0) > 0 && totalPaidActive >= (order.agreedPrice || 0);
 
-  function handleAddPayment() {
-    if (!id) return;
+  async function handleAddPayment() {
+    if (!id || !order) return;
     const amt = Number(payAmount);
     if (!amt || amt <= 0) { alert('Enter a valid amount.'); return; }
-    addPayment({
-      orderId: id,
-      amount: amt,
-      paidAt: payDate,
-      method: payMethod,
-      cardBrand: payMethod === 'card' ? payCardBrand : undefined,
-      note: payNote || undefined,
-    });
+    // R5A — dieselbe Absicht, zwei Anschluesse. Die Kartenart reist mit; die Gebuehr rechnet
+    // beide Male dasselbe Haus (`bookCardFee` in `addPayment`), nie dieser Bildschirm.
+    const marke = payMethod === 'card' ? payCardBrand : undefined;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('recording a deposit (no revision loaded)'))); return; }
+    if (!await w.ok('orders.add_payment', {
+      local: () => {
+        addPayment({
+          orderId: id, amount: amt, paidAt: payDate, method: payMethod,
+          cardBrand: marke, note: payNote || undefined,
+        });
+        return {};
+      },
+      remote: () => ({
+        orderId: id, amount: amt, method: payMethod, expectedRevision: fassung,
+        paidAt: payDate,
+        ...(marke ? { cardBrand: marke } : {}),
+        ...(payNote ? { note: payNote } : {}),
+      }),
+    })) return;
+    loadOrders(); loadPayments(id);
     setPayAmount(''); setPayNote(''); setPayDate(new Date().toISOString().split('T')[0]);
     setShowPayment(false);
   }
@@ -492,76 +505,8 @@ export function OrderDetail() {
   // (Teil-)Convert wird hoechstens das Invoice-Total angerechnet (Cap). Ein
   // Ueberschuss (Deposit > diese Invoice) bleibt als frischer order_payments-
   // Eintrag stehen und fliesst beim naechsten Convert auf die naechste Invoice.
-  async function carryOverOrderPaymentsToInvoice(
-    invoiceId: string, orderId: string, orderNumber: string, invoiceTotal: number,
-  ) {
-    const inv = useInvoiceStore.getState();
-    const poolRows = query(
-      `SELECT id, amount, method, card_brand FROM order_payments
-         WHERE order_id = ? AND converted_to_invoice = 0
-         ORDER BY paid_at ASC, created_at ASC`,
-      [orderId],
-    );
-    const pool = poolRows.reduce((s, r) => s + Number(r.amount || 0), 0);
-
-    // Leerer Pool: Folge-Invoice nach verbrauchtem Deposit → startet UNPAID.
-    // Legacy-Fallback: alte Orders ohne order_payments-Zeilen (Deposit nur auf
-    // der orders-Zeile) — einmalig, gedeckelt aufs Invoice-Total.
-    if (pool <= 0.005) {
-      if (poolRows.length === 0 && totalPaid > 0) {
-        inv.recordPayment(invoiceId, Math.min(totalPaid, invoiceTotal), 'cash',
-          `Carried over from order ${orderNumber}`);
-      }
-      return;
-    }
-
-    // ZIEL.md §3a — Order-Payment-Ledger reversen + converted-Flag setzen, BEVOR
-    // die Invoice-Payments gepostet werden (sonst doppelt-Cash). Idempotent.
-    useOrderPaymentStore.getState().markConvertedToInvoice(orderId);
-
-    // Cap: hoechstens das Invoice-Total auf diese Invoice anrechnen.
-    const cap = Math.min(pool, invoiceTotal);
-    let budget = cap;
-    let lastMethod = 'cash';
-    let lastBrand: 'normal' | 'amex' | undefined;
-    for (const r of poolRows) {
-      if (budget <= 0.005) break;
-      const take = Math.min(Number(r.amount || 0), budget);
-      lastMethod = (r.method as string) || 'cash';
-      // v0.7.26 — Karten-Brand der Order-Zahlung mitnehmen: die Order-CardFee wurde
-      // beim Convert reversed (markConvertedToInvoice); die Invoice bucht hier eine
-      // frische CardFee mit der richtigen Rate (Amex 2,5% / Normal 2,2%).
-      lastBrand = lastMethod === 'card' ? ((r.card_brand as 'normal' | 'amex') || 'normal') : undefined;
-      inv.recordPayment(invoiceId, take, lastMethod, `Carried over from order ${orderNumber}`, undefined, lastBrand);
-      budget -= take;
-    }
-
-    // Slice 4a — Ueberschuss aufteilen: der echte Ueberzahlungs-Anteil (Pool ueber den
-    // agreedPrice der Order) wandert als GENAU EINE Invoice-Zahlung auf die Invoice → der
-    // 3a-Overpay-Split bucht daraus EINE einloesbare 'overpayment'-Kundengutschrift. Der Rest
-    // (Deposit bis agreedPrice, noch nicht invoiced) bleibt als Order-Deposit fuer die naechste
-    // Teil-Invoice. Der order_overpayment-Credit der Order wurde oben in markConvertedToInvoice
-    // bereits reverse+clawback abgebaut → keine Doppel-Gutschrift, genau eine fuer den Ueberschuss.
-    const remainder = pool - cap;
-    const agreedRow = query(`SELECT agreed_price FROM orders WHERE id = ?`, [orderId]);
-    const agreedPrice = agreedRow.length ? Number(agreedRow[0].agreed_price || 0) : 0;
-    const overpayPortion = Math.max(0, pool - Math.max(agreedPrice, invoiceTotal));
-    const depositPortion = Math.max(0, remainder - overpayPortion);
-    if (overpayPortion > 0.005) {
-      inv.recordPayment(invoiceId, overpayPortion, lastMethod,
-        `Overpayment carried over from order ${orderNumber}`, undefined, lastBrand);
-    }
-    if (depositPortion > 0.005) {
-      useOrderPaymentStore.getState().addPayment({
-        orderId,
-        amount: depositPortion,
-        paidAt: new Date().toISOString().split('T')[0],
-        method: lastMethod,
-        cardBrand: lastBrand,
-        note: `Deposit remainder after partial invoice for order ${orderNumber}`,
-      });
-    }
-  }
+  // R5A — die Rechnung dahinter wohnt jetzt in `core/orders/order-payment-carryover`, damit der
+  // Fernbefehl DIESELBE benutzen kann. Hier bleibt der Aufruf.
 
   // B5-B — zentrale ATOMARE Order→Invoice-Konvertierung (genutzt von modernem UND Legacy-Pfad).
   // convertOrderLinesToInvoiceTx fuehrt assertBillable → createDirectInvoice → markOrderLinesInvoiced
@@ -678,6 +623,23 @@ export function OrderDetail() {
   ) {
     if (!id || !order) return;
 
+    // R5A — auf einem verbundenen Rechner ist die Umwandlung EINE Buchung: der Primary legt die
+    // Rechnung an, verknuepft die Zeilen UND uebertraegt die Anzahlung, alles in derselben
+    // Transaktion. Kein Nacheinander mehrerer Befehle — sonst gaebe es den Zustand „Rechnung da,
+    // Geld liegt beim Auftrag", und genau der war die Luecke.
+    if (w.remote) {
+      const fassung = order.revision;
+      if (!fassung) { alert(fehlertext(nichtAmClient('converting this order (no revision loaded)'))); return; }
+      const r = await w.save<{ invoiceId?: string }>('orders.convert_to_invoice', {
+        local: () => ({}),
+        remote: () => ({ orderId: id, expectedRevision: fassung }),
+      });
+      if (r.kind !== 'ok') return;
+      loadOrders(); loadPayments(id);
+      if (r.value?.invoiceId) navigate(`/invoices/${r.value.invoiceId}`);
+      return;
+    }
+
     // v0.3.0 — defensiv: nur customer-facing Lines invoicen (cost-only NIE).
     const billableLines = orderLines.filter(l => l.isCustomerFacing !== false);
     if (billableLines.length === 0) {
@@ -782,7 +744,7 @@ export function OrderDetail() {
     // v0.3.1 — Deposit-Pool auf die Invoice anrechnen, gedeckelt aufs Invoice-Total.
     // Ein Ueberschuss bleibt fuer die naechste Teil-Invoice stehen; ist der Pool
     // leer (Deposit schon verbraucht), startet diese Invoice UNPAID.
-    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount);
+    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount, totalPaid);
     navigate(`/invoices/${invoice.id}`);
   }
 
@@ -839,7 +801,7 @@ export function OrderDetail() {
       return;
     }
     setPendingProduct(null);
-    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount);
+    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount, totalPaid);
     navigate(`/invoices/${invoice.id}`);
   }
 
@@ -1800,7 +1762,7 @@ export function OrderDetail() {
           <Input label="NOTE (optional)" value={payNote} onChange={e => setPayNote(e.target.value)} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowPayment(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleAddPayment} disabled={!payAmount}>Save Payment</Button>
+            <Button variant="primary" onClick={() => void handleAddPayment()} disabled={!payAmount || w.busy} data-save-order-payment>Save Payment</Button>
           </div>
         </div>
       </Modal>

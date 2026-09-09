@@ -73,7 +73,7 @@ for (const z of R4C_MATRIX) {
 
 // ── §3 „verdrahtet" ist im Quelltext nachweisbar ────────────────────────
 const RUFT = (s: string, op: string) =>
-  new RegExp(`(useSharedWrite<[^>]*>\\(|\\w+\\.ok\\(|\\w+\\.save\\()\\s*'${op.replace(/\./g, '\\.')}'`).test(s);
+  new RegExp(`(useSharedWrite<[^>]*>\\(|\\w+\\.(ok|save)(<[^>]*>)?\\()\\s*'${op.replace(/\./g, '\\.')}'`).test(s);
 for (const z of R4C_MATRIX.filter((x) => x.verdrahtet)) {
   const s = codeOf(src('src/' + z.ort));
   ok(RUFT(s, z.op), `3 ${z.op}: ${z.ort.split('/').pop()} ruft die Buchung ueber die gemeinsame Weiche`);
@@ -177,15 +177,46 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   ok(rustOps === 107, `10 und Rust laesst dieselben 107 Namen durch (${rustOps})`);
 }
 
-// ── §10 Auftrag → Rechnung bleibt ausdruecklich unverdrahtet ────────────
+// ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────
 {
   const z = R4C_MATRIX.find((x) => x.op === 'orders.convert_to_invoice');
-  ok(!!z && z.verdrahtet === false && z.luecke === 'B',
-    '10 die Auftragsumwandlung steht als Klasse B in der Matrix');
-  ok(!!z && /Anzahlungsuebertrag/.test(z.grund),
-    '10 …und der Grund nennt den Anzahlungsuebertrag');
-  const s = codeOf(src('src/pages/orders/OrderDetail.tsx'));
-  ok(!RUFT(s, 'orders.convert_to_invoice'), '10 …und die Auftragsseite ruft sie nicht');
+  ok(!!z && z.verdrahtet === true && z.luecke === null,
+    'R5A die Auftragsumwandlung ist geschlossen');
+  // Die Rechnung dahinter wohnt jetzt in einer Domaenendatei — nicht mehr in der Komponente.
+  const dom = codeOf(src('src/core/orders/order-payment-carryover.ts'));
+  ok(/export function carryOverOrderPaymentsToInvoice\(/.test(dom),
+    'R5A der Anzahlungsuebertrag ist eine Domaenenfunktion');
+  ok(/markConvertedToInvoice\(orderId\)/.test(dom) && /recordPayment\(/.test(dom),
+    'R5A …und er enthaelt den ganzen Vertrag: Umkehr, Anrechnung, Ueberschuss');
+  // Beide Seiten rufen DIESELBE — kopiert ist nichts.
+  for (const [datei, wer] of [
+    ['src/pages/orders/OrderDetail.tsx', 'die Auftragsansicht'],
+    ['src/core/bridge/financial-commands.ts', 'der Fernbefehl'],
+  ] as const) {
+    ok(/carryOverOrderPaymentsToInvoice\(/.test(codeOf(src(datei))),
+      `R5A ${wer} ruft dieselbe Funktion`);
+    ok(/order-payment-carryover/.test(src(datei)), `R5A …und importiert sie von dort`);
+  }
+  const ui = codeOf(src('src/pages/orders/OrderDetail.tsx'));
+  ok(!/const poolRows = query\(/.test(ui),
+    'R5A in der Oberflaeche steht keine Uebertragungsrechnung mehr');
+  // Kein Nacheinander mehrerer Befehle fuer eine Handlung.
+  const stelle = /if \(w\.remote\) \{[\s\S]{0,700}?orders\.convert_to_invoice[\s\S]{0,400}?\n    \}/.exec(ui)?.[0] ?? '';
+  ok(stelle.length > 100, 'R5A der Client-Weg der Umwandlung ist auffindbar');
+  ok((stelle.match(/\w+\.(ok|save)(<[^>]*>)?\(/g) || []).length === 1,
+    'R5A …und er schickt GENAU EINE Buchung, kein Nacheinander');
+
+  // Die Kartenart der Anzahlung reist mit — gerechnet wird die Gebuehr im Haus.
+  const lc = codeOf(src('src/core/bridge/lifecycle-commands.ts'));
+  ok(/'note', 'cardBrand'\]/.test(lc), 'R5A die Anzahlung nimmt die Kartenart entgegen');
+  ok(/CARD_BRANDS as readonly string\[\]/.test(lc),
+    'R5A …geprueft gegen die Liste des Hauses');
+  ok(!/computeCardFee|cardFeeRate/.test(lc),
+    'R5A …und die Gebuehr rechnet der Fernbefehl NICHT selbst');
+  const cf = src('src/core/finance/card-fees.ts');
+  ok(/export const CARD_BRANDS = \['normal', 'amex'\] as const;/.test(cf)
+    && /export type CardBrand = typeof CARD_BRANDS\[number\];/.test(cf),
+    'R5A die Kartenarten sind ein WERT, aus dem der Typ folgt');
 }
 
 // ── R4C.4 — die Arbeitsarten: EINE Liste, zwei Leser ────────────────────
@@ -237,3 +268,8 @@ console.log('CENTRAL_UI_R4C_REVISION_PATHS_PROVED');
 console.log('CENTRAL_UI_R4C_REMAINING_WRITE_GAPS_EXACT');
 console.log('CENTRAL_UI_R4C4_REPAIR_WORKTYPE_VOCABULARY_AUDITED');
 console.log('CENTRAL_UI_R4C4_REPAIR_WORKTYPE_SSOT_PROVED');
+console.log('CENTRAL_UI_R5A_CLASS_B_SCOPE_FROZEN');
+console.log('CENTRAL_UI_R5A_ORDER_PAYMENT_SEMANTICS_AUDITED');
+console.log('CENTRAL_UI_R5A_ATOMIC_ORDER_CONVERSION_PROVED');
+console.log('CENTRAL_UI_R5A_SHARED_ORDER_PAYMENT_DOMAIN_PROVED');
+console.log('CENTRAL_UI_R5A_MATRIX_UPDATED');
