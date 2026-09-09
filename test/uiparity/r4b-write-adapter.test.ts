@@ -238,7 +238,8 @@ function rumpfVon(s: string, name: string): string {
   const erlaubt = src('src/core/bridge/command-registry.ts');
   for (const [datei, op, lokal, fn] of MIGRIERT) {
     const s = codeOf(src(datei));
-    ok(new RegExp(`useSharedWrite<[^>]*>\\('${op.replace('.', '\\.')}'\\)`).test(s),
+    // R4C — dieselbe Absicht darf auch über die Mehrfach-Weiche laufen (`w.ok('op', …)`).
+    ok(new RegExp(`(useSharedWrite<[^>]*>\\(|\\w+\\.ok\\()\\s*'${op.replace('.', '\\.')}'`).test(s),
       `4 ${datei.split('/').pop()} speichert ueber die gemeinsame Weiche (${op})`);
     ok(erlaubt.includes(`'${op}'`), `4 …und ${op} ist eine BEREITS freigegebene Buchung`);
     const rumpf = rumpfVon(s, fn);

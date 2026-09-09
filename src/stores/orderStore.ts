@@ -197,6 +197,8 @@ function rowToOrder(row: Record<string, unknown>): Order {
     if (raw) customProductSpec = JSON.parse(raw) as Order['customProductSpec'];
   } catch { /* */ }
   return {
+    // R4C — die Fassung reist mit; ohne sie kann ein Auftrag nicht sagen, WORAUF er sich bezieht.
+    revision: row.revision === undefined || row.revision === null ? undefined : Number(row.revision),
     id: row.id as string,
     orderNumber: row.order_number as string,
     customerId: row.customer_id as string,

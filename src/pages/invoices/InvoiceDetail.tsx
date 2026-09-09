@@ -30,6 +30,8 @@ import logoUrl from '@/assets/logo.png';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { grossUnitPrice, returnLineAmounts } from '@/core/returns/return-lines';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { computeCardFee } from '@/core/finance/card-fees';
 import { currentBranchId } from '@/core/db/helpers';
@@ -60,6 +62,9 @@ export function InvoiceDetail() {
   const goBack = useGoBack('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
   const { invoices, loadInvoices, updateInvoice, editInvoice, recordPayment, applyCreditToInvoice, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
+  // CENTRAL-UI-PARITY R4C — dieselben Masken, zwei Anschluesse hinter jeder Geldhandlung.
+  // Ein Waechter je Buchung; eine Anzeige fuer den Ausgang.
+  const w = useSharedWrites();
   const { customers, loadCustomers, getAvailableCredit } = useCustomerStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -297,7 +302,7 @@ export function InvoiceDetail() {
     setProductPickerQuery('');
   }
 
-  function saveLines() {
+  async function saveLines() {
     if (!id || !invoice || lineDraft.length === 0) return;
     // Pflicht-Aenderungsgrund (Audit). editInvoice wirft sonst — hier vorab pruefen.
     const reason = lineEditReason.trim();
@@ -315,13 +320,31 @@ export function InvoiceDetail() {
     }));
     // Ein atomarer Vorgang im Store (reverse+repost+status+audit). Reduktion unter
     // den bereits gezahlten Betrag wird dort blockiert (klare Fehlermeldung).
-    try {
-      editInvoice(id, { lines: payload, reason });
-      setLinesModal(false);
-      setLineEditReason('');
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
+    // R4C — fassungsbasiert: der Auftrag nennt die Fassung, die DIESER Bildschirm gesehen hat.
+    // Hat der Primary inzwischen etwas geaendert, weist er ihn ab, statt still zu ueberschreiben.
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) {
+      w.clear(); alert(fehlertext(nichtAmClient('editing this invoice (no revision loaded)'))); return;
     }
+    const geglueckt = await w.ok('invoices.update', {
+      local: () => { editInvoice(id, { lines: payload, reason }); return {}; },
+      remote: () => ({
+        id,
+        expectedRevision: fassung,
+        reason,
+        customerId: invoice.customerId,
+        lines: payload.map((l) => ({
+          productId: l.productId,
+          quantity: l.quantity,
+          unitPrice: l.unitPrice,
+          scheme: l.taxScheme,
+        })),
+      }),
+    });
+    if (!geglueckt) return;
+    loadInvoices();
+    setLinesModal(false);
+    setLineEditReason('');
   }
 
   function handleCancelInvoice() {
@@ -444,7 +467,7 @@ export function InvoiceDetail() {
     }
   }
 
-  function handleRecordPayment() {
+  async function handleRecordPayment() {
     if (!id || !invoice) return;
     const amount = parseFloat(paymentAmount);
     if (isNaN(amount) || amount <= 0) return;
@@ -454,17 +477,32 @@ export function InvoiceDetail() {
       setPendingFinalPayment({ amount, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined });
       return;
     }
-    recordPayment(id, amount, paymentMethod, undefined, undefined, paymentMethod === 'card' ? cardBrand : undefined);
+    const marke = paymentMethod === 'card' ? cardBrand : undefined;
+    if (!await w.ok('invoices.record_payment', {
+      local: () => { recordPayment(id, amount, paymentMethod, undefined, undefined, marke); return {}; },
+      remote: () => ({ invoiceId: id, amount, method: paymentMethod, ...(marke ? { cardBrand: marke } : {}) }),
+    })) return;
+    loadInvoices();
     setPaymentOpen(false);
     setPaymentAmount('');
     setPaymentMethod('bank_transfer');
   }
 
-  function executeFinalPayment(specialMark: boolean) {
+  async function executeFinalPayment(specialMark: boolean) {
     const pending = pendingFinalPayment;
     setPendingFinalPayment(null);
     if (!id || !pending) return;
-    recordPayment(id, pending.amount, pending.method, undefined, specialMark, pending.cardBrand);
+    // Der Sonderkreis (eigene Belegnummer) ist kein Feld der Fernbuchung — am Client gesperrt,
+    // damit niemand ihn setzt und stillschweigend den normalen Kreis bekommt.
+    if (w.remote && specialMark) { alert(fehlertext(nichtAmClient('the special number circle'))); return; }
+    if (!await w.ok('invoices.record_payment', {
+      local: () => { recordPayment(id, pending.amount, pending.method, undefined, specialMark, pending.cardBrand); return {}; },
+      remote: () => ({
+        invoiceId: id, amount: pending.amount, method: pending.method,
+        ...(pending.cardBrand ? { cardBrand: pending.cardBrand } : {}),
+      }),
+    })) return;
+    loadInvoices();
     setPaymentOpen(false);
     setPaymentAmount('');
     setPaymentMethod('bank_transfer');
@@ -473,20 +511,47 @@ export function InvoiceDetail() {
   // Customer-Credit UI-Slice 1 — Store-Guthaben auf die Rechnung verrechnen.
   // FIFO-Verbrauch + Cap auf den Rest passieren im Store (applyCreditToInvoice);
   // der posted intern recordPayment(method='credit') → DR CUSTOMER_CREDIT / CR AR.
-  function handleApplyCredit() {
+  async function handleApplyCredit() {
     if (!id || !invoice) return;
     const toApply = Math.min(remaining, availableCredit);
     if (toApply <= 0.005) return;
-    try {
-      applyCreditToInvoice(id, toApply);
-      setPaymentOpen(false);
-      setPaymentAmount('');
-      setPaymentMethod('bank_transfer');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('[ApplyCredit] failed:', e);
-      alert(`Guthaben konnte nicht verrechnet werden:\n\n${msg}`);
-    }
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('applying credit (no revision loaded)'))); return; }
+    if (!await w.ok('invoices.apply_credit', {
+      local: () => { applyCreditToInvoice(id, toApply); return {}; },
+      remote: () => ({ invoiceId: id, amount: toApply, expectedRevision: fassung }),
+    })) return;
+    loadInvoices();
+    setPaymentOpen(false);
+    setPaymentAmount('');
+    setPaymentMethod('bank_transfer');
+  }
+
+  // ── R4C — eine Zahlung berichtigen bzw. loeschen ────────────────────────
+  //
+  // Beides ist fassungsbasiert: der Auftrag nennt die Fassung, die dieser Bildschirm gesehen
+  // hat. Ohne sie waere jede Berichtigung ein blindes Ueberschreiben dessen, was der Primary
+  // inzwischen getan hat.
+  async function zahlungBerichtigen(paymentId: string, patch: Record<string, unknown>) {
+    if (!id || !invoice) return;
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('editing a payment (no revision loaded)'))); return; }
+    if (!await w.ok('invoices.update_payment', {
+      local: () => { updatePayment(paymentId, id, patch as never); return {}; },
+      remote: () => ({ invoiceId: id, paymentId, expectedRevision: fassung, ...patch }),
+    })) return;
+    loadInvoices();
+  }
+
+  async function zahlungLoeschen(paymentId: string) {
+    if (!id || !invoice) return;
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('deleting a payment (no revision loaded)'))); return; }
+    if (!await w.ok('invoices.delete_payment', {
+      local: () => { deletePayment(paymentId, id); return {}; },
+      remote: () => ({ invoiceId: id, paymentId, expectedRevision: fassung }),
+    })) return;
+    loadInvoices();
   }
 
   // Customer-facing PDF — no margin VAT visible
@@ -585,6 +650,9 @@ export function InvoiceDetail() {
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
       <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
+
+        {/* R4C — der Ausgang jeder Geldhandlung dieser Seite, an einer Stelle. */}
+        <WriteError text={w.fehler} />
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
@@ -1450,7 +1518,7 @@ export function InvoiceDetail() {
             </span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={() => setLinesModal(false)}>Cancel</Button>
-              <Button variant="primary" onClick={saveLines} disabled={lineDraft.length === 0 || !lineEditReason.trim()}>Save Lines</Button>
+              <Button variant="primary" onClick={() => void saveLines()} data-save-lines disabled={w.busy || lineDraft.length === 0 || !lineEditReason.trim()}>Save Lines</Button>
             </div>
           </div>
         </div>
@@ -1475,13 +1543,13 @@ export function InvoiceDetail() {
                 {list.map(p => (
                   <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', borderTop: '1px solid #E5E9EE', alignItems: 'center' }}>
                     <input type="date" defaultValue={(p.receivedAt || '').split('T')[0]}
-                      onBlur={e => { if (e.target.value && id) updatePayment(p.id, id, { receivedAt: new Date(e.target.value).toISOString() }); }}
+                      onBlur={e => { if (e.target.value && id) void zahlungBerichtigen(p.id, { receivedAt: new Date(e.target.value).toISOString() }); }}
                       style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }} />
                     <input type="number" step="0.001" defaultValue={p.amount}
-                      onBlur={e => { if (id) updatePayment(p.id, id, { amount: parseFloat(e.target.value) || 0 }); }}
+                      onBlur={e => { if (id) void zahlungBerichtigen(p.id, { amount: parseFloat(e.target.value) || 0 }); }}
                       className="font-mono" style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }} />
                     <select defaultValue={p.method}
-                      onChange={e => { if (id) updatePayment(p.id, id, { method: e.target.value }); }}
+                      onChange={e => { if (id) void zahlungBerichtigen(p.id, { method: e.target.value }); }}
                       style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }}>
                       <option value="cash">Cash</option>
                       <option value="bank">Bank</option>
@@ -1491,9 +1559,9 @@ export function InvoiceDetail() {
                       <option value="other">Other</option>
                     </select>
                     <input defaultValue={p.notes || ''}
-                      onBlur={e => { if (id) updatePayment(p.id, id, { notes: e.target.value }); }}
+                      onBlur={e => { if (id) void zahlungBerichtigen(p.id, { notes: e.target.value }); }}
                       placeholder="Notes" style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }} />
-                    <button onClick={() => { if (window.confirm('Delete this payment? Status wird neu berechnet.')) { if (id) deletePayment(p.id, id); } }}
+                    <button onClick={() => { if (window.confirm('Delete this payment? Status wird neu berechnet.')) { if (id) void zahlungLoeschen(p.id); } }}
                       className="cursor-pointer" style={{ padding: '4px 8px', fontSize: 12, background: 'none', border: '1px solid #D5D9DE', borderRadius: 4, color: '#AA6E6E' }}>×</button>
                   </div>
                 ))}
@@ -1567,7 +1635,7 @@ export function InvoiceDetail() {
               <div style={{ fontSize: 12, color: '#4B5563', marginBottom: 10 }}>
                 Store-Guthaben verfügbar: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={availableCredit}/> BHD</span>
               </div>
-              <Button variant="secondary" fullWidth onClick={handleApplyCredit}>
+              <Button variant="secondary" fullWidth onClick={() => void handleApplyCredit()} disabled={w.busy} data-apply-credit>
                 Guthaben verrechnen (<Bhd v={Math.min(remaining, availableCredit)}/> BHD)
               </Button>
             </div>
@@ -1575,7 +1643,7 @@ export function InvoiceDetail() {
         </div>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setPaymentOpen(false)}>Cancel</Button>
-          <Button variant="primary" onClick={handleRecordPayment}>Confirm Payment</Button>
+          <Button variant="primary" onClick={() => void handleRecordPayment()} disabled={w.busy} data-record-payment>Confirm Payment</Button>
         </div>
       </Modal>
 

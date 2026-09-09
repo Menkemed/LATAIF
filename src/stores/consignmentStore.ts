@@ -139,6 +139,8 @@ interface ConsignmentStore {
 // dieselbe Form gefragt, die auch der Store benutzt.
 export function rowToConsignment(row: Record<string, unknown>): Consignment {
   return {
+    // R4C — die Fassung reist mit.
+    revision: row.revision === undefined || row.revision === null ? undefined : Number(row.revision),
     id: row.id as string,
     consignmentNumber: row.consignment_number as string,
     consignorId: row.consignor_id as string,

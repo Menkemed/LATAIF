@@ -156,6 +156,9 @@ interface InvoiceStore {
 
 function rowToInvoice(row: Record<string, unknown>): Invoice {
   return {
+    // R4C — die Fassung reist mit: ohne sie kann ein Aenderungsauftrag nicht sagen, WORAUF er
+    // sich bezieht, und der Primary weist ihn ab.
+    revision: row.revision === undefined || row.revision === null ? undefined : Number(row.revision),
     id: row.id as string,
     invoiceNumber: row.invoice_number as string,
     offerId: row.offer_id as string | undefined,

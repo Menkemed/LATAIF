@@ -894,7 +894,7 @@ export function InvoiceCreate() {
         {/* Error — E1: der Edit-Reason-Fehler wird INLINE am Reason-Feld oben gezeigt, daher hier
             unterdrückt (nicht isoliert unter der Summary doppeln). Alle anderen Fehler bleiben hier. */}
         {error && error !== EDIT_REASON_REQUIRED_MESSAGE && (
-          <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 8, fontSize: 12, color: '#DC2626' }}>
+          <div data-save-error style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 8, fontSize: 12, color: '#DC2626' }}>
             {error}
           </div>
         )}

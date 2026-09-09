@@ -905,3 +905,93 @@ Total            = 107
 Erreicht aus der gemeinsamen Oberfläche: **4 von 40**. Das ist der Anfang, nicht das Ende — aber
 es ist das Muster, an dem die übrigen 36 hängen.
 
+---
+
+## R4C — die vierzig Buchungen, Zeile für Zeile (09.09.2026) · BLOCKED
+
+### §1/§2 Die Matrix ist jetzt die eine Quelle
+
+`test/uiparity/_r4c-write-matrix.ts` hält für JEDE der vierzig Buchungen fest: welche
+Handlung sie in der gemeinsamen Oberfläche ist, wo sie sitzt, welche lokale Funktion der
+Primary ruft, ob die Semantik deckungsgleich ist, ob sie angeschlossen ist, und warum nicht.
+Das Gate (`r4c-write-matrix.test.ts`, 234/0) prüft jede Zeile gegen den echten Quelltext —
+Datei, Funktion, Anschluss, Sperre. Die Tabelle kann nicht zur Erzählung werden.
+
+```
+11 verdrahtet · 21 exakt aber noch offen · 6 Luecken (Klasse B) · 2 ohne Handlung
+```
+
+### Der Fund, der alles andere erklärt: fast jede Geldbuchung will die FASSUNG
+
+Von den vierzig Buchungen verlangen **21** ein `expectedRevision` — die Fassung, die der
+Mensch gesehen hat. Ohne sie weist der Primary ab, und das ist richtig so: sonst überschriebe
+ein Client blind, was inzwischen jemand anderes getan hat.
+
+Der gemeinsame Lesestand kannte die Fassung aber gar nicht: weder die Modelle noch die
+Zeilen-Abbildungen der Stores reichten sie durch. Damit war die halbe Schreibfläche technisch
+unerreichbar, unabhängig von jeder Weiche. `rowToInvoice`, `rowToOrder` und
+`rowToConsignment` geben sie jetzt weiter; die Masken schicken sie mit und lesen nach dem
+Erfolg frisch nach, weil die nächste Handlung die NEUE Fassung braucht.
+
+### §3/§4 Was angeschlossen wurde
+
+```
+invoices.update            Rechnungszeilen aendern   (mit Fassung)
+invoices.record_payment    Zahlung erfassen
+invoices.apply_credit      Guthaben verrechnen       (mit Fassung)
+invoices.update_payment    Zahlung berichtigen       (mit Fassung)
+invoices.delete_payment    Zahlung loeschen          (mit Fassung)
+orders.update_status       Auftragsstatus setzen     (mit Fassung, bestandswirksam)
+consignments.mark_returned Kommission zurueckgeben   (mit Fassung, bestandswirksam)
+```
+
+Dazu kam eine neue Form der Weiche: `useSharedWrites()`. Eine Rechnungsansicht kennt sieben
+Schreibhandlungen; sieben einzelne Weichen wären sieben Zustände und sieben Fehleranzeigen.
+Jetzt gibt es einen Zustand und eine Anzeige — aber weiterhin **einen Wächter je Buchung**, denn
+die Kennung gehört zur Absicht, nicht zur Seite.
+
+Nebenbefund: die Notiz am Kunden ist DIESELBE Buchung wie das Kundenformular
+(`customers.update`), lief aber an der Weiche vorbei und hätte auf einem Rechner ohne
+Datenbank geworfen. Sie geht jetzt denselben Weg.
+
+### §7 Die Lücken, genau benannt
+
+| Buchung | Klasse | warum |
+|---|---|---|
+| `orders.convert_to_invoice` | B | Die Oberfläche führt in DERSELBEN Handlung den Anzahlungsübertrag aus; die Buchung legt nur die Rechnung an. Geld bliebe liegen. |
+| `products.create` | B | Die Maske legt Artikel MIT Bildern an; die Buchung nimmt nur zwischengespeicherte Bildkennungen. |
+| `consignments.create` | B | Die Maske legt in derselben Handlung auch den Artikel an. |
+| `consignments.record_payout` | B | Die Maske zahlt VOLLSTÄNDIG aus; die Buchung kennt nur die Teilauszahlung mit Betrag. |
+| `repairs.create` | B | Die Maske legt auch EIGEN-Reparaturen an; die Buchung setzt den Bereich fest auf „Kunde". |
+| `repairs.create_invoice` | B | Die Liste rechnet auch MEHRERE Reparaturen in EINE Rechnung ab; die Buchung kennt nur eine. |
+| `repairs.update_line`, `transfers.mark_settled` | — | Die gemeinsame Oberfläche bietet die Handlung gar nicht an. |
+
+### Warum R4C BLOCKED ist
+
+Zwei Gründe, beide belegt:
+
+**1. Einundzwanzig deckungsgleiche Buchungen sind noch nicht angeschlossen.** Sie stehen
+namentlich in der Matrix (Retouren, Einkauf, Kommissionsverkauf, Auftrag anlegen/ändern,
+Anzahlungen, Reparaturen, Transfers). Der Weg dorthin ist jetzt mechanisch — Fassung durchreichen,
+`w.ok(op, { local, remote })` — aber er ist Arbeit an rund zwanzig Masken und gehört in eine
+eigene Scheibe, nicht in eine Zeile Bericht.
+
+**2. Der zweite Rechner meldet sich als `SALES`, nicht als Eigentümer.** Der Zwei-Rechner-Lauf
+kam bis zur Rechnung und blieb dort stehen: „Zahlung erfassen" und „Rechnung ändern" sind an
+`perm.canRecordPayments` bzw. `canEditInvoices` gebunden, und beide verlangen ADMIN. Die
+Sitzung des Clients trägt aber die Rolle `SALES` — dieselbe Person, die am Hauptrechner
+Eigentümer ist, sieht auf dem zweiten Rechner die Knöpfe gar nicht.
+
+Das ist kein Fehler der Weiche und keiner der Buchung: es ist eine offene Frage der IDENTITÄT.
+Sie hier nebenbei zu „lösen", hieße Rechte zu erfinden — und Rechte erfindet man nicht in einem
+Schreib-Slice. Der Befund steht, die Wege sind gebaut und statisch bewiesen; der laufende Beweis
+für die Geldwege fehlt, bis die Rolle geklärt ist.
+
+### Registry
+
+```
+Probe = 1 · C2 Reads = 18 · UI-Parity Reads = 48 · Mutations = 40 · Total = 107
+```
+
+R4C fügt keine Buchung hinzu — und hat keine gebraucht.
+

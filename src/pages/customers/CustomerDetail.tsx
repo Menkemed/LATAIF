@@ -15,7 +15,8 @@ import { SoftWarn } from '@/components/ui/SoftWarn';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useCustomerStore } from '@/stores/customerStore';
-import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { useSharedWrites } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 import { updatePayload, CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
 import { useGoldStore } from '@/stores/goldStore';
 import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
@@ -109,8 +110,7 @@ export function CustomerDetail() {
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; credit?: CustomerGoldCredit }>({ open: false, mode: 'return_customer' });
   const [editing, setEditing] = useState(false);
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
-  const aendern = useSharedWrite<{ customerId: string }>('customers.update');
-  const [saveError, setSaveError] = useState('');
+  const aendern = useSharedWrites();
   const [form, setForm] = useState<Partial<Customer>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
@@ -213,23 +213,31 @@ export function CustomerDetail() {
       }, 50);
       return;
     }
-    setSaveError('');
     const diff = updatePayload(customer as unknown as Record<string, unknown>, form as Record<string, unknown>, CUSTOMER_EDITABLE);
     // Nichts geaendert ist keine Absicht: der Fernbefehl weist einen leeren Auftrag ab, und das
     // waere hier eine Fehlermeldung fuer ein „Speichern", das nichts wollte.
     if (aendern.remote && Object.keys(diff).length === 0) { setEditErrors({}); setEditing(false); return; }
-    const r = await aendern.save({
-      local: () => { updateCustomer(id, form); return { customerId: id }; },
-      // NUR der Unterschied faehrt mit: ein Formular, das alles zurueckschickt, ueberschreibt
-      // auch das, was inzwischen jemand anderes geaendert hat (M-01).
+    if (!await aendern.ok('customers.update', {
+      local: () => { updateCustomer(id, form); return {}; },
       remote: () => ({ id, ...diff }),
-      shape: () => ({ customerId: id }),
-    });
-    if (r.kind !== 'ok') { setSaveError(fehlertext(r)); return; }
+    })) return;
     loadCustomers();
     setEditErrors({});
-    setSaveError('');
     setEditing(false);
+  }
+
+  /**
+   * R4C — die Notiz am Kunden ist DIESELBE Buchung wie das Formular (`customers.update`), nur mit
+   * genau einem Feld. Sie lief bisher an der Weiche vorbei und haette auf einem Rechner ohne
+   * Datenbank geworfen.
+   */
+  async function notizSpeichern(notes: string | undefined) {
+    if (!id) return;
+    if (!await aendern.ok('customers.update', {
+      local: () => { updateCustomer(id, { notes }); return {}; },
+      remote: () => ({ id, notes: notes ?? null }),
+    })) return;
+    loadCustomers();
   }
 
   function handleDelete() {
@@ -309,8 +317,8 @@ export function CustomerDetail() {
           <div className="flex gap-2">
             {editing ? (
               <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...customer }); setEditErrors({}); setSaveError(''); }}>Cancel</Button>
-                <Button variant="primary" onClick={handleSave} disabled={aendern.busy} data-save-client>
+                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...customer }); setEditErrors({}); aendern.clear(); }}>Cancel</Button>
+                <Button variant="primary" onClick={() => void handleSave()} disabled={aendern.busy} data-save-client>
                   <Save size={14} /> {aendern.busy ? 'Saving…' : 'Save'}
                 </Button>
               </>
@@ -469,12 +477,7 @@ export function CustomerDetail() {
                 </div>
               )}
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
-                {saveError && (
-                  <div data-save-error style={{
-                    gridColumn: '1 / -1', padding: '10px 12px', borderRadius: 6, fontSize: 12,
-                    background: 'rgba(220,80,60,0.08)', border: '1px solid rgba(220,80,60,0.3)', color: '#8B2E22',
-                  }}>{saveError}</div>
-                )}
+                <div style={{ gridColumn: '1 / -1' }}><WriteError text={aendern.fehler} /></div>
                 <div id="field-firstName">
                   <Input required label="FIRST NAME" value={form.firstName || ''} error={editErrors.firstName}
                     onChange={e => { setForm({ ...form, firstName: e.target.value }); if (editErrors.firstName) setEditErrors({ ...editErrors, firstName: '' }); }} />
@@ -1010,7 +1013,7 @@ export function CustomerDetail() {
               onKeyDown={e => {
                 if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                   if (!id) return;
-                  updateCustomer(id, { notes: noteDraft.trim() || undefined });
+                  void notizSpeichern(noteDraft.trim() || undefined);
                   setNoteModal(false);
                 }
               }} />
@@ -1022,7 +1025,7 @@ export function CustomerDetail() {
             {customer.notes ? (
               <button onClick={() => {
                 if (!id) return;
-                updateCustomer(id, { notes: undefined });
+                void notizSpeichern(undefined);
                 setNoteModal(false);
               }} className="cursor-pointer"
                 style={{ background: 'none', border: 'none', color: '#DC2626', fontSize: 12 }}>
@@ -1033,7 +1036,7 @@ export function CustomerDetail() {
               <Button variant="ghost" onClick={() => setNoteModal(false)}>Cancel</Button>
               <Button variant="primary" onClick={() => {
                 if (!id) return;
-                updateCustomer(id, { notes: noteDraft.trim() || undefined });
+                void notizSpeichern(noteDraft.trim() || undefined);
                 setNoteModal(false);
               }}>
                 <Save size={12} /> Save Note

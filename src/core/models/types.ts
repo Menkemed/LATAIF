@@ -262,6 +262,9 @@ export interface InvoiceLine {
 }
 
 export interface Invoice {
+  /** CENTRAL-UI-PARITY R4C — die Fassung, die dieser Bildschirm gesehen hat. Ein Aenderungs-
+   *  auftrag nennt sie, damit er nicht still ueberschreibt, was inzwischen jemand anderes tat. */
+  revision?: number;
   id: UUID;
   invoiceNumber: string;
   offerId?: UUID;
@@ -542,6 +545,8 @@ export function canonicalConsignmentStatus(s: ConsignmentStatus | string | undef
 }
 
 export interface Consignment {
+  /** R4C — die gesehene Fassung; jede Geldhandlung nennt sie. */
+  revision?: number;
   id: UUID;
   consignmentNumber: string;
   consignorId: UUID;
@@ -941,6 +946,8 @@ export function deriveOrderStatusFromLines(
 }
 
 export interface Order {
+  /** R4C — die gesehene Fassung; ein Aenderungs-/Statusauftrag nennt sie. */
+  revision?: number;
   id: UUID;
   orderNumber: string;
   customerId: UUID;

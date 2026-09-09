@@ -171,6 +171,68 @@ export function useSharedWrite<T>(op: string): SharedWrite<T> {
 export const CLIENT_WRITE_UNSUPPORTED = 'CLIENT_WRITE_UNSUPPORTED';
 
 /**
+ * Eine Seite mit MEHREREN Schreibhandlungen — R4C.
+ *
+ * Eine Rechnungsansicht kennt sieben davon (Zahlung erfassen, berichtigen, löschen, Guthaben
+ * verrechnen, Zeilen ändern, Retoure anlegen, erstatten). Sieben einzelne Weichen wären sieben
+ * Zustände und sieben Fehleranzeigen; hier gibt es EINEN Zustand und EINE Anzeige — aber weiterhin
+ * **einen Wächter je Buchung**, denn die Kennung gehört zur Absicht, nicht zur Seite.
+ *
+ *     const w = useSharedWrites();
+ *     if (!await w.ok('invoices.record_payment', { local: …, remote: … })) return;
+ *
+ * `ok()` gibt `false` zurück, sobald es NICHT geglückt ist — und legt den Grund in `w.fehler`.
+ * Ein offener Ausgang zählt dabei ausdrücklich als „nicht geglückt".
+ */
+export interface SharedWrites {
+  readonly busy: boolean;
+  readonly fehler: string;
+  readonly remote: boolean;
+  save: <T>(op: string, adapters: WriteAdapters<T>) => Promise<WriteOutcome<T>>;
+  ok: <T>(op: string, adapters: WriteAdapters<T>) => Promise<boolean>;
+  clear: () => void;
+}
+
+export function useSharedWrites(): SharedWrites {
+  const remote = readsFromPrimary();
+  // Ein Wächter JE BUCHUNG, über die Lebensdauer der Seite stabil.
+  const waechter = useRef(new Map<string, CommandSaveController<Record<string, unknown>>>());
+  const [busy, setBusy] = useState(false);
+  const [fehler, setFehler] = useState('');
+  const laeuft = useRef(false);
+
+  const save = useCallback(async <T,>(op: string, adapters: WriteAdapters<T>): Promise<WriteOutcome<T>> => {
+    if (laeuft.current) {
+      return { kind: 'not_executed', code: 'SAVE_IN_FLIGHT', message: 'a save is already running' };
+    }
+    laeuft.current = true;
+    setBusy(true);
+    try {
+      let attempt = null;
+      if (remote) {
+        let c = waechter.current.get(op);
+        if (!c) { c = new CommandSaveController<Record<string, unknown>>(op); waechter.current.set(op, c); }
+        attempt = c.beginAttempt();
+      }
+      return await runSharedWrite<T>(remote, adapters, attempt);
+    } finally {
+      laeuft.current = false;
+      setBusy(false);
+    }
+  }, [remote]);
+
+  const ok = useCallback(async <T,>(op: string, adapters: WriteAdapters<T>): Promise<boolean> => {
+    setFehler('');
+    const r = await save<T>(op, adapters);
+    if (r.kind === 'ok') return true;
+    setFehler(fehlertext(r));
+    return false;
+  }, [save]);
+
+  return { busy, fehler, remote, save, ok, clear: useCallback(() => setFehler(''), []) };
+}
+
+/**
  * Was der Mensch liest, wenn es nicht geklappt hat — eine Stelle für alle Formulare.
  *
  * Der offene Ausgang bekommt bewusst eigene Worte: „nicht gespeichert" wäre falsch (es kann

@@ -19,6 +19,8 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { usePermission } from '@/hooks/usePermission';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
@@ -93,6 +95,8 @@ export function ConsignmentDetail() {
     loadEmployees();
   }, [loadConsignments, loadCustomers, loadProducts, loadCategories, loadInvoices, loadPurchases, loadExpenses, loadEmployees]);
 
+  // CENTRAL-UI-PARITY R4C — dieselbe Maske, zwei Anschluesse hinter jeder Handlung.
+  const w = useSharedWrites();
   const consignment = useMemo(
     () => consignments.find(c => c.id === id),
     [consignments, id],
@@ -258,9 +262,17 @@ export function ConsignmentDetail() {
     setPaidRef('');
   }
 
-  function handleReturn() {
-    if (!id) return;
-    markReturned(id);
+  // R4C — bestandswirksam: der Artikel geht zurueck an den Eigentuemer und aus dem Bestand.
+  // Fassungsbasiert, damit ein zwischenzeitlicher Verkauf nicht ueberschrieben wird.
+  async function handleReturn() {
+    if (!id || !consignment) return;
+    const fassung = consignment.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('returning this consignment (no revision loaded)'))); return; }
+    if (!await w.ok('consignments.mark_returned', {
+      local: () => { markReturned(id); return {}; },
+      remote: () => ({ consignmentId: id, expectedRevision: fassung }),
+    })) return;
+    loadConsignments();
     setReturnModal(false);
   }
 
@@ -328,6 +340,8 @@ export function ConsignmentDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
+      {/* R4C — der Ausgang jeder Handlung dieser Seite, an einer Stelle. */}
+      <WriteError text={w.fehler} />
       <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Back */}
@@ -908,7 +922,7 @@ export function ConsignmentDetail() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setReturnModal(false)}>Cancel</Button>
-          <Button variant="secondary" onClick={handleReturn}>Confirm Return</Button>
+          <Button variant="secondary" onClick={() => void handleReturn()} disabled={w.busy} data-confirm-return>Confirm Return</Button>
         </div>
       </Modal>
 

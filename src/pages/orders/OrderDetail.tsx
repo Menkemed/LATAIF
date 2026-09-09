@@ -40,6 +40,8 @@ import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY R2D — die Anzeige liest ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
 
@@ -202,6 +204,8 @@ export function OrderDetail() {
   );
 
   const order = useMemo(() => orders.find(o => o.id === id), [orders, id]);
+  // CENTRAL-UI-PARITY R4C — dieselbe Maske, zwei Anschluesse hinter jeder Handlung.
+  const w = useSharedWrites();
   const customer = useMemo(
     () => order ? customers.find(c => c.id === order.customerId) : undefined,
     [order, customers],
@@ -412,9 +416,18 @@ export function OrderDetail() {
     setEditing(false);
   }
 
-  function handleAdvance(status: OrderStatus) {
-    if (!id) return;
-    updateStatus(id, status);
+  // R4C — der Statuswechsel ist bestandswirksam (Reservierung, Freigabe) und fassungsbasiert:
+  // der Auftrag nennt die Fassung, die dieser Bildschirm gesehen hat.
+  async function handleAdvance(status: OrderStatus) {
+    if (!id || !order) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('changing the order status (no revision loaded)'))); return; }
+    if (!await w.ok('orders.update_status', {
+      local: () => { updateStatus(id, status); return {}; },
+      remote: () => ({ orderId: id, status, expectedRevision: fassung }),
+    })) return;
+    // Nach dem Erfolg frisch lesen — die naechste Handlung braucht die NEUE Fassung.
+    loadOrders();
     setConfirmAdvance(null);
   }
 
@@ -829,6 +842,8 @@ export function OrderDetail() {
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
       <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
+        {/* R4C — der Ausgang jeder Handlung dieser Seite, an einer Stelle. */}
+        <WriteError text={w.fehler} />
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
@@ -1878,7 +1893,7 @@ export function OrderDetail() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmAdvance(null)}>Cancel</Button>
-          <Button variant="primary" onClick={() => confirmAdvance && handleAdvance(confirmAdvance)}>Confirm</Button>
+          <Button variant="primary" onClick={() => { if (confirmAdvance) void handleAdvance(confirmAdvance); }} disabled={w.busy}>Confirm</Button>
         </div>
       </Modal>
 
