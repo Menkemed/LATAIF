@@ -188,6 +188,37 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   ok(!RUFT(s, 'orders.convert_to_invoice'), '10 …und die Auftragsseite ruft sie nicht');
 }
 
+// ── R4C.4 — die Arbeitsarten: EINE Liste, zwei Leser ────────────────────
+{
+  const typen = src('src/core/models/types.ts');
+  const treffer = /export const REPAIR_WORK_TYPES = \[([\s\S]*?)\] as const;/.exec(typen);
+  ok(!!treffer, 'S die Arbeitsarten stehen als LISTE da, nicht nur als Typ');
+  const werte = [...(treffer?.[1] ?? '').matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  ok(werte.length === 8 && werte.includes('service') && werte.includes('spare_part'),
+    `S …und es sind die acht des Hauses (${werte.join(',')})`);
+  ok(/export type RepairWorkType = typeof REPAIR_WORK_TYPES\[number\];/.test(typen),
+    'S der Typ wird aus der Liste abgeleitet — nicht daneben gepflegt');
+
+  const lc = codeOf(src('src/core/bridge/lifecycle-commands.ts'));
+  ok(/const WORK_TYPES = REPAIR_WORK_TYPES;/.test(lc),
+    'S der Fernbefehl liest dieselbe Liste');
+  ok(!/const WORK_TYPES = \['/.test(lc),
+    'S …und hat keine eigene mehr');
+  ok(/import \{ REPAIR_WORK_TYPES \} from '@\/core\/models\/types';/.test(src('src/core/bridge/lifecycle-commands.ts')),
+    'S …sie kommt aus der Quelle des Hauses');
+
+  const ui = codeOf(src('src/pages/repairs/RepairDetail.tsx'));
+  ok(/REPAIR_WORK_TYPES\.map\(/.test(ui),
+    'S und die Maske zeichnet ihre Auswahl aus derselben Liste');
+  ok(!/<option value="polishing">/.test(ui),
+    'S …statt aus abgeschriebenen Eintraegen');
+  // Kein Alias auf Verdacht: die alten Fernwoerter tauchen im Vertrag nicht mehr auf.
+  for (const alt of ['labor', 'polish', 'diamond', 'parts']) {
+    ok(!new RegExp(`WORK_TYPES[\\s\\S]{0,200}'${alt}'`).test(lc),
+      `S kein Alias auf Verdacht: '${alt}' steht nicht mehr im Vertrag`);
+  }
+}
+
 // ── Der Stand, offen benannt ────────────────────────────────────────────
 const verdrahtet = R4C_MATRIX.filter((z) => z.verdrahtet);
 const offenExakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet);
@@ -204,3 +235,5 @@ console.log('CENTRAL_UI_R4C_SEMANTIC_PARITY_CLASSIFIED');
 console.log('CENTRAL_UI_R4C_ASYNC_WRITE_UI_PROVED');
 console.log('CENTRAL_UI_R4C_REVISION_PATHS_PROVED');
 console.log('CENTRAL_UI_R4C_REMAINING_WRITE_GAPS_EXACT');
+console.log('CENTRAL_UI_R4C4_REPAIR_WORKTYPE_VOCABULARY_AUDITED');
+console.log('CENTRAL_UI_R4C4_REPAIR_WORKTYPE_SSOT_PROVED');

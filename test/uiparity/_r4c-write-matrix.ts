@@ -209,8 +209,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'repairs.add_line', handlung: 'Reparaturposition hinzufuegen', ort: 'pages/repairs/RepairDetail.tsx',
-    lokal: 'addRepairLine', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Am laufenden Programm gefunden: die Fernbuchung prueft die Arbeitsart gegen eine EIGENE Liste (labor|polish|plating|stone|diamond|gold|parts|other|material), waehrend das Haus RepairWorkType spricht (service|polishing|spare_part|gold_work|stone_setting|...). Ueberschneidung: ein einziges Wort. Die normale Eingabe der Maske wird abgewiesen. Zwei Vokabulare fuer dieselbe Sache — erst zusammenfuehren, dann verdrahten.',
+    lokal: 'addRepairLine', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'Ein Aufruf mit Werkstatt, Art, Beschreibung, Kosten und Termin. R4C.4 hat die zweite Arbeitsart-Liste des Fernbefehls entfernt: beide Seiten lesen jetzt REPAIR_WORK_TYPES. Die MATERIAL-Maske derselben Seite bleibt eine andere Handlung (Materialart, Materialdetails, auf Wunsch eine Gold-Verbindlichkeit) und dem Hauptrechner vorbehalten.',
   },
   {
     op: 'repairs.update_line', handlung: 'Reparaturposition aendern', ort: '(keine)',

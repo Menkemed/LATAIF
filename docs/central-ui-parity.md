@@ -1213,3 +1213,69 @@ Zwei Gründe, beide benannt: die Matrix steht nach dem Fund bei **19/19** statt 
 20/18 — `repairs.add_line` musste zurück —, und `repairs.cancel_line` ist als einzige der
 neu angeschlossenen Buchungen noch nicht real gefahren. Sieben von neun sind es.
 
+---
+
+## R4C.4 — eine Liste statt zweier (09.09.2026)
+
+### Der Wortschatz, nachgezählt
+
+```
+Primary-Maske  → <select> mit 8 Optionen  → RepairWorkType (nur ein TYP, kein Wert)
+                 service polishing spare_part gold_work stone_setting engraving plating other
+repairs.add_line → WORK_TYPES (eigener Wert, zur Laufzeit lesbar)
+                 labor polish plating stone diamond gold parts other material
+Ueberschneidung  → plating, other
+```
+
+Der Grund für die zweite Liste ist belegbar: sie stammt aus der zurückgebauten Client-Hülle
+(`ClientLifecyclePanels` setzt bis heute `workType: 'labor'`). Und sie war nötig, weil die
+Liste des Hauses **nur ein Typ** war — zur Übersetzungszeit sichtbar, zur Laufzeit nicht
+lesbar. Wer prüfen muss, kann einen Typ nicht fragen; also hat jemand abgeschrieben, und das
+Abgeschriebene ist nie mitgewachsen.
+
+### Kein Altvertrag hing daran
+
+Bewiesen, nicht vermutet: `repair_lines.work_type` ist ein `TEXT` ohne Prüfregel, der
+Altbestand-Einfüger schreibt `'service'`, und `labor/diamond/stone/gold` gehören im
+übrigen Code zur **Materialart** (`AddMaterialModal`), nicht zur Arbeitsart. Deshalb: kein
+Alias, keine Rückwärtsgrenze — die alten Wörter waren nie ein Vertrag.
+
+### Der Fix
+
+```
+export const REPAIR_WORK_TYPES = [...] as const;      // die eine Liste, als WERT
+export type RepairWorkType = typeof REPAIR_WORK_TYPES[number];
+        ↓                                   ↓
+RepairDetail <select>              lifecycle-commands WORK_TYPES
+```
+
+Die Maske zeichnet ihre Auswahl aus der Liste, der Fernbefehl prüft gegen dieselbe. Zwei Leser,
+eine Quelle. Das Gate hält fest, dass keine der beiden Seiten wieder eine eigene bekommt.
+
+### Und dann wirklich gefahren
+
+```
+test/e2e/r4c3-lifecycle-writes.e2e.mjs   73/0
+
+repairs.add_line     Arbeitszeile ueber die normale Maske, Arbeitsart aus der Auswahl
+                     ("service") → vom Fernbefehl angenommen, genau EINE Zeile, richtige
+                     Kosten, Fassung der Reparatur gestiegen, PC2 sieht sie nach frischem Lesen
+repairs.cancel_line  ueber die sichtbare Schaltflaeche → die Zeile ist weg; ein zweiter Versuch
+                     findet die Schaltflaeche nicht mehr und hinterlaesst nichts
+```
+
+Zwei Prüfstandsfunde nebenbei: der Aufbau hatte seiner Reparaturzeile keine Filiale gegeben
+(die Selbstheilung setzte `''` ein — der zweite Rechner sah sie deshalb nie), und die
+Erwartung „Zeile steht auf CANCELLED" war falsch: das Haus **entfernt** sie
+(`DELETE FROM repair_lines`). Beides Fehler des Tests, die wie Produktfehler aussahen.
+
+### Stand
+
+```
+20 verdrahtet · 0 exakt aber offen · 18 Luecken (Klasse B) · 2 ohne Handlung = 40
+Registry: 1 + 18 + 48 + 40 = 107   (unveraendert)
+```
+
+Damit sind alle zwanzig angeschlossenen Buchungen aus der gemeinsamen Oberfläche erreichbar —
+und jede davon ist an zwei echten Rechnern gefahren worden.
+

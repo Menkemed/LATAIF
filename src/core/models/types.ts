@@ -662,15 +662,17 @@ export interface AgentTransfer {
 
 // Plan §6: Work-Type Enum fuer Repair-Lines. Frei erweiterbar — UI rendert
 // als Dropdown. Wird im DB als TEXT gespeichert.
-export type RepairWorkType =
-  | 'service'
-  | 'polishing'
-  | 'spare_part'
-  | 'gold_work'
-  | 'stone_setting'
-  | 'engraving'
-  | 'plating'
-  | 'other';
+/**
+ * R4C.4 — die EINE Liste der Arbeitsarten. Sie stand bisher nur als Typ da, also nur zur
+ * Übersetzungszeit; der Fernbefehl hatte deshalb eine eigene, zur Laufzeit lesbare Liste — und
+ * die war mit dieser nie mitgewachsen (Überschneidung: ein einziges Wort). Jetzt ist die Liste
+ * ein Wert, den beide Seiten lesen, und der Typ wird aus ihr abgeleitet.
+ */
+export const REPAIR_WORK_TYPES = [
+  'service', 'polishing', 'spare_part', 'gold_work', 'stone_setting', 'engraving', 'plating', 'other',
+] as const;
+
+export type RepairWorkType = typeof REPAIR_WORK_TYPES[number];
 
 export type RepairLineStatus = 'OPEN' | 'CANCELLED';
 

@@ -26,6 +26,7 @@
 //  4. **Ändern braucht die gesehene FASSUNG**, verglichen INNERHALB der Transaktion.
 
 import { query } from '@/core/db/helpers';
+import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import { nextOrderStatus, isAllowedOrderAdvance } from '@/core/orders/order-status-flow';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { useOrderStore } from '@/stores/orderStore';
@@ -623,7 +624,13 @@ export function runCreateRepairInvoice(deps: EngineDeps, identity: CommandIdenti
 
 // ── 8/9/10) Die Arbeitszeilen ─────────────────────────────────────────────
 
-const WORK_TYPES = ['labor', 'polish', 'plating', 'stone', 'diamond', 'gold', 'parts', 'other', 'material'] as const;
+// R4C.4 — hier stand eine EIGENE Arbeitsart-Liste (labor|polish|plating|stone|diamond|gold|
+// parts|other|material). Sie stammte aus der zurückgebauten Client-Hülle und hatte mit dem
+// Wortschatz des Hauses genau EIN Wort gemeinsam: die normale Eingabe der Reparaturmaske
+// ("service") wurde abgewiesen. Kein Altvertrag hing daran — `repair_lines.work_type` hat keine
+// Prüfregel, und der einzige Altbestand-Einfüger schreibt "service". Also gilt jetzt die eine
+// Liste des Hauses, hier gelesen statt abgeschrieben.
+const WORK_TYPES = REPAIR_WORK_TYPES;
 
 export interface AddRepairLineRequest {
   repairId: string;

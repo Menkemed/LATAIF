@@ -29,6 +29,7 @@ import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-w
 import { WriteError } from '@/components/shared/WriteError';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Repair, RepairLine, RepairStatus } from '@/core/models/types';
+import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
@@ -263,21 +264,29 @@ export function RepairDetail() {
     const realSupplierId = newLineForm.supplierId === '__INHOUSE__'
       ? undefined
       : (newLineForm.supplierId || undefined);
-    // R4C.3 — NICHT verdrahtet, und der Grund ist am laufenden Programm gefunden worden:
-    // `repairs.add_line` prueft die Arbeitsart gegen eine EIGENE Liste
-    // (labor|polish|plating|stone|diamond|gold|parts|other|material), waehrend das Haus
-    // `RepairWorkType` spricht (service|polishing|spare_part|gold_work|stone_setting|…).
-    // Ueberschneidung: ein einziges Wort. Die Fernbuchung weist die normale Eingabe der Maske
-    // deshalb ab („unknown work type: service"). Dieselbe Sorte Fehler wie die zweite Rollenliste
-    // in R4C.1 — zwei Vokabulare fuer dieselbe Sache. Erst zusammenfuehren, dann verdrahten.
-    if (w.remote) { alert(fehlertext(nichtAmClient('adding a repair line'))); return; }
-    addRepairLine(id, {
-      supplierId: realSupplierId,
-      workType: newLineForm.workType,
-      description: newLineForm.description || undefined,
-      costAmount: cost,
-      dueDate: newLineForm.dueDate || undefined,
-    });
+    // R4C.4 — wieder angeschlossen: beide Seiten lesen jetzt dieselbe Arbeitsart-Liste.
+    const fassung = fassungOderNichts('adding a repair line');
+    if (fassung === null) return;
+    if (!await w.ok('repairs.add_line', {
+      local: () => {
+        addRepairLine(id, {
+          supplierId: realSupplierId,
+          workType: newLineForm.workType,
+          description: newLineForm.description || undefined,
+          costAmount: cost,
+          dueDate: newLineForm.dueDate || undefined,
+        });
+        return {};
+      },
+      remote: () => ({
+        repairId: id, expectedRevision: fassung, costAmount: cost,
+        ...(realSupplierId ? { supplierId: realSupplierId } : {}),
+        workType: newLineForm.workType,
+        ...(newLineForm.description ? { description: newLineForm.description } : {}),
+        ...(newLineForm.dueDate ? { dueDate: newLineForm.dueDate } : {}),
+      }),
+    })) return;
+    loadRepairs(); loadRepairLines();
     setShowAddLineModal(false);
     setNewLineForm({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
   }
@@ -1538,14 +1547,12 @@ export function RepairDetail() {
               value={newLineForm.workType}
               onChange={e => setNewLineForm({ ...newLineForm, workType: e.target.value as RepairWorkType })}
               style={{ width: '100%', padding: '9px 12px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#F2F7FA' }}>
-              <option value="service">Service</option>
-              <option value="polishing">Polishing</option>
-              <option value="spare_part">Spare Part</option>
-              <option value="gold_work">Gold Work</option>
-              <option value="stone_setting">Stone Setting</option>
-              <option value="engraving">Engraving</option>
-              <option value="plating">Plating</option>
-              <option value="other">Other</option>
+              {/* R4C.4 — aus derselben Liste, die auch der Fernbefehl prueft. */}
+              {REPAIR_WORK_TYPES.map(t => (
+                <option key={t} value={t}>
+                  {t.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
+                </option>
+              ))}
             </select>
           </div>
           <Input label="DESCRIPTION" placeholder="e.g. replace mainspring"

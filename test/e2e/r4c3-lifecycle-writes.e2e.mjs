@@ -260,7 +260,6 @@ function seed() {
     insert(db, 'repairs', { id: 'r43-rep', branch_id, repair_number: 'R43REP-01', customer_id: 'r43-cust', repair_scope: 'CUSTOMER', item_brand: 'Zenith', item_model: 'Defy', issue_description: 'Uhr laeuft nach', repair_type: 'internal', tax_scheme: 'VAT_10', status: 'received', estimated_cost: 0, charge_to_customer: 0, created_at: now, updated_at: now });
 
     // ── Agent mit drei Transfers ────────────────────────────────────────
-    insert(db, 'repair_lines', { id: 'r43-repline', repair_id: 'r43-rep', supplier_id: 'r43-sup', work_type: 'service', description: 'Aufbau', cost_amount: 80, status: 'OPEN', created_at: now, updated_at: now });
 
     // ── Agent mit drei Transfers ────────────────────────────────────────
     insert(db, 'agents', { id: 'r43-agent', branch_id, name: 'Rami Vertreter', company: 'R4C3 Agents', active: 1, created_at: now, updated_at: now });
@@ -463,14 +462,42 @@ try {
     ok(await warteBis(client, "document.body.innerText.includes('R43REP-01')", 40000),
       '5 die Reparatur ist auf dem zweiten Rechner sichtbar');
 
-    // ── add_line: NICHT mehr Teil der Abnahme ──
-    // R4C.3 hat hier den Grund gefunden, warum diese Buchung nicht verdrahtet werden darf: ihre
-    // Arbeitsart-Liste ist eine andere als die des Hauses. Sie steht jetzt als Klasse B in der
-    // Matrix; hier wird nur noch bewiesen, dass die Maske am Client ehrlich NEIN sagt.
-    {
-      const zeilenVorher = dbQ(BIZ_DB, "SELECT id FROM repair_lines WHERE repair_id = 'r43-rep'");
-      ok(zeilenVorher.length === 1, `5a der Aufbau hat genau eine Zeile zum Stornieren (${zeilenVorher.length})`);
-    }
+    // ── add_line — R4C.4: die zweite Arbeitsart-Liste ist weg, der Weg gilt wieder ──
+    const revVorZeile = dbQ(BIZ_DB, "SELECT revision FROM repairs WHERE id = 'r43-rep'")[0];
+    ok(dbQ(BIZ_DB, "SELECT id FROM repair_lines WHERE repair_id = 'r43-rep'").length === 0,
+      '5a der Aufbau hat noch keine Zeile — sie entsteht ueber die Maske');
+    ok(await clickContains(client, 'Add Work') === 'OK' || await clickContains(client, 'Add Line') === 'OK',
+      '5a die Maske fuer eine Arbeitszeile oeffnet');
+    await sleep(900);
+    // Die Werkstatt: der erste Eintrag des Pickers (In-house steht dort als erste Option).
+    await client.ev("const t=[...document.querySelectorAll('[data-ss-trigger]')].find(e=>/supplier|in-house|workshop/i.test(e.getAttribute('data-ss-trigger')||'')); if(t) t.click(); return 1;");
+    await sleep(600);
+    await client.ev("const o=document.querySelector('[data-ss-option]'); if(o) o.click(); return 1;");
+    await sleep(400);
+    // Die Arbeitsart kommt aus der Liste, die die Maske anbietet — nicht aus einer erfundenen.
+    const art = await client.ev(
+      "const s=[...document.querySelectorAll('select')].find(x=>[...x.options].some(o=>o.value==='service'));"
+      + "if(!s) return 'NO'; const p=HTMLSelectElement.prototype;"
+      + "Object.getOwnPropertyDescriptor(p,'value').set.call(s,'service');"
+      + "s.dispatchEvent(new Event('change',{bubbles:true})); return 'service';");
+    ok(art === 'service', `5a die Arbeitsart kommt aus der Auswahl der Maske (${art})`);
+    await setByLabel(client, 'COST (BHD)', '80');
+    await sleep(300);
+    const zeileAb = await client.ev("const b=document.querySelector('[data-add-repair-line]'); if(!b) return 'NO'; if(b.disabled) return 'DIS'; b.click(); return 'OK';");
+    ok(zeileAb === 'OK', `5a …und der Knopf ist da (${zeileAb})`);
+    await sleep(3000);
+    await nurEine('repairs.add_line', '5a');
+    const zeilen = dbQ(BIZ_DB, "SELECT id, work_type, cost_amount, status FROM repair_lines WHERE repair_id = 'r43-rep'");
+    ok(zeilen.length === 1, `5a genau EINE Zeile entstanden (${zeilen.length})`);
+    ok(String(zeilen[0]?.work_type) === 'service',
+      `5a …mit genau der Arbeitsart der Maske (${zeilen[0]?.work_type})`);
+    ok(Math.abs(Number(zeilen[0]?.cost_amount) - 80) < 0.01, `5a …und den eingegebenen Kosten (${zeilen[0]?.cost_amount})`);
+    const revNachZeile = dbQ(BIZ_DB, "SELECT revision FROM repairs WHERE id = 'r43-rep'")[0];
+    ok(Number(revNachZeile?.revision) > Number(revVorZeile?.revision ?? 0),
+      `5a die Fassung der Reparatur ist gestiegen (${revVorZeile?.revision} → ${revNachZeile?.revision})`);
+    client = await lade(client, '/repairs/r43-rep');
+    ok(await warteBis(client, "/80/.test(document.body.innerText)", 30000),
+      '5a …und der zweite Rechner sieht sie nach frischem Lesen');
 
     // ── cancel_line ──
     client = await lade(client, '/repairs/r43-rep');
@@ -481,8 +508,19 @@ try {
     await sleep(3000);
     await nurEine('repairs.cancel_line', '5c');
     const zeilen2 = dbQ(BIZ_DB, "SELECT status FROM repair_lines WHERE repair_id = 'r43-rep'");
-    ok(zeilen2.length === 1 && String(zeilen2[0]?.status).toLowerCase().includes('cancel'),
-      `5c genau eine Zeile, und sie ist storniert (${zeilen2.map((z) => z.status).join(',')})`);
+    // Das Haus ENTFERNT die stornierte Zeile (`DELETE FROM repair_lines`) — es setzt sie nicht
+    // auf CANCELLED. Genau das wird hier festgehalten, statt eine erfundene Erwartung zu pruefen.
+    ok(zeilen2.length === 0, `5c die stornierte Zeile ist weg (${zeilen2.length} uebrig)`);
+    // Eine zweite Stornierung derselben Zeile darf nichts mehr bewirken.
+    client = await lade(client, '/repairs/r43-rep');
+    await warteBis(client, "document.body.innerText.includes('R43REP-01')", 40000);
+    await client.ev('window.confirm = () => true; return 1;');
+    const nochmal = await client.ev("const b=document.querySelector('[data-cancel-repair-line]'); if(!b) return 'WEG'; b.click(); return 'DA';");
+    await sleep(2500);
+    await spuelen(primary);
+    const zeilen3 = dbQ(BIZ_DB, "SELECT status FROM repair_lines WHERE repair_id = 'r43-rep'");
+    ok(zeilen3.length === 0 && nochmal === 'WEG',
+      `5c die Schaltflaeche ist danach weg, und es bleibt bei null Zeilen (${nochmal}, ${zeilen3.length})`);
     // ── update_status ──
     client = await lade(client, '/repairs/r43-rep');
     await warteBis(client, "document.body.innerText.includes('R43REP-01')", 40000);
