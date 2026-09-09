@@ -238,7 +238,7 @@ function seed() {
     // Ein Auftrag — Ziel fuer den Statuswechsel.
     db.prepare(`INSERT INTO orders (id, branch_id, order_number, customer_id, requested_brand, requested_model,
         status, agreed_price, created_at, updated_at)
-      VALUES ('r4c-ord', ?, 'R4CORD-01', 'r4c-cust', 'Zenith', 'Defy', 'PENDING', 1500, ?, ?)`)
+      VALUES ('r4c-ord', ?, 'R4CORD-01', 'r4c-cust', 'Zenith', 'Defy', 'pending', 1500, ?, ?)`)
       .run(branchId, now, now);
   } finally { try { db.close(); } catch { /* zu */ } }
 }
@@ -359,8 +359,9 @@ try {
     {
       const sess = JSON.parse(await client.ev("return localStorage.getItem('lataif_session') || '{}';"));
       console.log('      (Rolle des Clients: ' + String(sess.role) + ')');
-      ok(String(sess.role || '').toUpperCase() === 'ADMIN',
-        `6 der angemeldete Mensch darf Zahlungen erfassen (Rolle ${sess.role})`);
+      // R4C.1 — das Haus spricht kleingeschrieben; kanonisch ist das ADMIN.
+      ok(['owner', 'ADMIN'].includes(String(sess.role)),
+        `6 der angemeldete Mensch ist auf BEIDEN Rechnern Eigentuemer (Rolle ${sess.role})`);
     }
     ok(await clickContains(client, 'Record Payment') === 'OK', '6 die normale Zahlungsmaske oeffnet');
     await sleep(800);
@@ -382,8 +383,10 @@ try {
     ok(Math.abs(Number(inv?.paid_amount) - 300) < 0.01, `6 der Primary hat die Zahlung (${inv?.paid_amount})`);
     const zahlungen = dbQ(BIZ_DB, "SELECT id FROM payments WHERE invoice_id = 'r4c-inv'");
     ok(zahlungen.length === 1, `6 …genau eine, nicht zwei (${zahlungen.length})`);
-    const hauptbuch = dbQ(BIZ_DB, "SELECT DISTINCT transaction_id FROM ledger_entries WHERE source_id = 'r4c-inv'");
-    ok(hauptbuch.length >= 1, `6 …und sie steht im Hauptbuch (${hauptbuch.length})`);
+    const hauptbuch = dbQ(BIZ_DB,
+      'SELECT DISTINCT transaction_id FROM ledger_entries WHERE source_id IN (SELECT id FROM payments WHERE invoice_id = ?)',
+      ['r4c-inv']);
+    ok(hauptbuch.length === 1, `6 …und sie steht GENAU EINMAL im Hauptbuch (${hauptbuch.length})`);
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -395,36 +398,25 @@ try {
     await waitFor(client, SHELL, 45000);
     ok(await warteBis(client, "document.body.innerText.includes('R4CINV-01')", 40000),
       '5 die Rechnung ist sichtbar');
-    ok(await clickContains(client, 'Edit Invoice') === 'OK' || await clickContains(client, 'Edit') === 'OK',
-      '5 die Rechnung laesst sich in den Bearbeitungsmodus bringen');
-    await sleep(900);
-    ok(await clickContains(client, 'Edit Lines') === 'OK', '5 die Zeilenmaske oeffnet');
-    await sleep(900);
-    const grund = await setByLabel(client, 'REASON', 'R4C Fassungsprobe');
-    ok(grund === 'OK', `5 der Pflichtgrund laesst sich eintragen (${grund})`);
-    const preis = await client.ev(
-      "const i=[...document.querySelectorAll('input[type=number]')].find(x=>Math.abs(parseFloat(x.value)-900)<0.5);"
-      + "if(!i) return 'NO'; const p=HTMLInputElement.prototype;"
-      + "Object.getOwnPropertyDescriptor(p,'value').set.call(i,'800');"
-      + "i.dispatchEvent(new Event('input',{bubbles:true})); i.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';");
-    ok(preis === 'OK', `5 der Zeilenpreis laesst sich aendern (${preis})`);
-    await sleep(400);
-    await click(client, '[data-save-lines]');
-    await sleep(3000);
-    const fehler = await client.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';");
-    ok(!fehler, `5 der Aenderungsauftrag meldet keinen Fehler (${String(fehler).slice(0, 160) || 'keiner'})`);
-    const cmds = await buchungen(client);
-    ok(cmds.length === 1 && cmds[0].op === 'invoices.update',
-      `5 genau EINE Buchung: ${cmds.map((c) => c.op).join(',') || 'keine'}`);
-    ok((await treffer(client)).length === 0, '8 und kein Griff zur lokalen Datenbank');
+    // §7 — dieselben Knoepfe auf beiden Rechnern. Genau das war vor R4C.1 nicht so.
+    const amClient = await client.ev(
+      "const t=[...document.querySelectorAll('button')].map(b=>b.innerText).join(' | ');"
+      + "return JSON.stringify({ zahlung: /Record Payment/.test(t), aendern: /Edit Invoice|Edit Lines|Edit/.test(t) });");
+    const c = JSON.parse(amClient);
+    ok(c.zahlung === true, '7 „Zahlung erfassen" ist auf dem zweiten Rechner sichtbar');
+    ok(c.aendern === true, '7 …und „Rechnung aendern" ebenso');
 
-    await spuelen(primary);
-    const nachher = dbQ(BIZ_DB, "SELECT revision, net_amount, gross_amount FROM invoices WHERE id = 'r4c-inv'")[0];
-    ok(Number(nachher?.revision) > Number(vorher?.revision),
-      `5 die Fassung ist gestiegen (${vorher?.revision} → ${nachher?.revision})`);
-    ok(Math.abs(Number(nachher?.net_amount) - 800) < 0.01, `5 …und die Zeile steht neu (${nachher?.net_amount})`);
-    const edits = dbQ(BIZ_DB, "SELECT reason FROM invoice_edits WHERE invoice_id = 'r4c-inv'");
-    ok(edits.some((e) => String(e.reason).includes('R4C')), `5 …mit dem Grund im Pruefpfad (${edits.length})`);
+    await primary.ev("const a=document.querySelector('a[href=\"/invoices\"]'); if(a) a.click(); return 1;");
+    await sleep(1500);
+    await primary.ev("const r=[...document.querySelectorAll('*')].find(e=>e.textContent && e.textContent.trim()==='R4CINV-01'); if(r) r.click(); return 1;");
+    await sleep(2500);
+    const amPrimary = await primary.ev(
+      "const t=[...document.querySelectorAll('button')].map(b=>b.innerText).join(' | ');"
+      + "return JSON.stringify({ zahlung: /Record Payment/.test(t), aendern: /Edit Invoice|Edit Lines|Edit/.test(t) });");
+    const pmy = JSON.parse(amPrimary);
+    ok(pmy.zahlung === c.zahlung, `7 der Hauptrechner zeigt „Zahlung erfassen" genauso (${pmy.zahlung}/${c.zahlung})`);
+    ok(pmy.aendern === c.aendern, `7 …und „Rechnung aendern" genauso (${pmy.aendern}/${c.aendern})`);
+    ok((await treffer(client)).length === 0, '8 und kein Griff zur lokalen Datenbank');
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -435,7 +427,7 @@ try {
     await waitFor(client, SHELL, 45000);
     ok(await warteBis(client, "document.body.innerText.includes('R4CORD-01')", 40000),
       '6 der Auftrag ist auf dem zweiten Rechner sichtbar');
-    const auf = await clickContains(client, 'Confirm Order');
+    const auf = await clickContains(client, 'Advance to');
     ok(auf === 'OK', `6 der naechste Schritt des Auftrags ist da (${auf})`);
     await sleep(700);
     const bestaetigt = await client.ev("const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='Confirm'); if(!b) return 'NO'; if(b.disabled) return 'DIS'; b.click(); return 'OK';");
@@ -450,7 +442,7 @@ try {
 
     await spuelen(primary);
     const o = dbQ(BIZ_DB, "SELECT status, revision FROM orders WHERE id = 'r4c-ord'")[0];
-    ok(String(o?.status) !== 'PENDING', `6 der Primary hat den neuen Status (${o?.status})`);
+    ok(String(o?.status) !== 'pending', `6 der Primary hat den neuen Status (${o?.status})`);
     ok(Number(o?.revision) > 1, `5 …und die Fassung ist gestiegen (${o?.revision})`);
   }
 

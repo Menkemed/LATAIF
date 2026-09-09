@@ -44,7 +44,16 @@ export function readClaims(token: string): Claims | null {
   }
 }
 
-const ROLES: readonly string[] = ['ADMIN', 'MANAGER', 'SALES', 'ACCOUNTANT'];
+// R4C.1 — hier stand eine EIGENE Rollenliste (`ADMIN|MANAGER|SALES|ACCOUNTANT`) mit `SALES` als
+// stillem Rückfall. Das Haus spricht aber kleingeschrieben (`owner`, `manager`, `sales`,
+// `backoffice`, `viewer`), und genau das steht auch im Ausweis: der Server schreibt
+// `user_branches.role` wörtlich hinein. `owner` stand in dieser Liste nicht — also wurde aus dem
+// Eigentümer auf dem zweiten Rechner ein Verkäufer, und die Knöpfe für Zahlung und
+// Rechnungsänderung verschwanden. Dieselbe Person, zwei verschiedene Oberflächen.
+//
+// Die Liste ist deshalb weg. Übersetzt wird mit `canonicalRole()` — DERSELBEN Funktion, die auch
+// der Hauptrechner benutzt (`usePermission`, `roleHasPermission`). Ein unbekanntes Wort landet
+// dort weiterhin bei der eingeschränktesten Rolle; nur eben an EINER Stelle statt an zweien.
 
 /**
  * Aus dem Ausweis die Sitzung bauen, mit der die normale Oberflaeche laeuft.
@@ -56,7 +65,11 @@ const ROLES: readonly string[] = ['ADMIN', 'MANAGER', 'SALES', 'ACCOUNTANT'];
 export function sessionFromToken(token: string): Session | null {
   const c = readClaims(token);
   if (!c?.sub || !c.branch_id) return null;
-  const role = (ROLES.includes(String(c.role)) ? c.role : 'SALES') as UserRole;
+  // Das Wort des Servers, unverändert. Fehlt es ganz, gibt es keine Sitzung — eine Rolle zu
+  // erfinden wäre in beide Richtungen falsch.
+  const claim = typeof c.role === 'string' ? c.role.trim() : '';
+  if (!claim) return null;
+  const role = claim as UserRole;
   return {
     userId: c.sub,
     branchId: c.branch_id,
@@ -91,14 +104,25 @@ export async function refreshClientSessionContext(): Promise<void> {
   if (!raw) return;
   try {
     const { remoteRead } = await import('@/core/bridge/remote-read');
-    const ctx = await remoteRead<{ data?: { branch?: { id: string; name: string; country: string; currency: string } } }>(
-      'session.context.get', {},
-    );
+    const ctx = await remoteRead<{
+      data?: {
+        branch?: { id: string; name: string; country: string; currency: string };
+        userId?: string; role?: string;
+      };
+    }>('session.context.get', {});
     const branch = ctx?.data?.branch;
     if (!branch) return;
     const s = JSON.parse(raw) as Session;
     if (branch.id !== s.branchId) return; // eine andere Filiale als im Ausweis wird nicht uebernommen
     s.branch = branch;
+    // R4C.1 — die AKTUELLE Rolle desselben Menschen, so wie der Server sie JETZT sieht.
+    //
+    // Der Ausweis gilt dreißig Tage; seine Rolle ist ein Abzug vom Moment der Anmeldung. Der
+    // Server liest sie bei jeder geschützten Anfrage neu aus `user_branches` und ersetzt die des
+    // Tokens (C4 `reauthorize`). Genau dieses Ergebnis kommt hier zurück — und nur, wenn es
+    // DENSELBEN Menschen und DIESELBE Filiale betrifft. Der Client wählt nichts aus.
+    const rolle = typeof ctx?.data?.role === 'string' ? ctx.data.role.trim() : '';
+    if (rolle && ctx?.data?.userId === s.userId) s.role = rolle as Session['role'];
     window.localStorage.setItem(KEY_SESSION, JSON.stringify(s));
   } catch { /* Beschriftung fehlt, mehr nicht */ }
 }

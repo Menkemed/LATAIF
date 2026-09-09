@@ -995,3 +995,88 @@ Probe = 1 · C2 Reads = 18 · UI-Parity Reads = 48 · Mutations = 40 · Total = 
 
 R4C fügt keine Buchung hinzu — und hat keine gebraucht.
 
+---
+
+## R4C.1 — dieselbe Person, dieselben Knöpfe (09.09.2026)
+
+### Der Befund aus R4C, jetzt erklärt
+
+Derselbe Mensch war am Hauptrechner Eigentümer und auf dem zweiten Rechner Verkäufer. Es war
+kein Rechteproblem und kein Serverfehler, sondern eine **Vokabelfrage** — und sie hat die halbe
+Geldfläche unsichtbar gemacht.
+
+```
+user_branches.role                    = "owner"        (kleingeschrieben, so spricht das Haus)
+sync/auth.rs create_token(... role)   = "owner"        (woertlich uebernommen)
+sessionFromToken()  ROLES-Liste       = ADMIN|MANAGER|SALES|ACCOUNTANT
+                    "owner" nicht dabei → stiller Rueckfall auf "SALES"
+usePermission()     canonicalRole("SALES")  = SALES    → keine Zahlungsknoepfe
+
+Am Hauptrechner dagegen:
+authService.login() session.role      = "owner"
+usePermission()     canonicalRole("owner")  = ADMIN    → alle Knoepfe
+```
+
+Es gab also **zwei Übersetzungen** für dieselbe Frage. Die eine (`canonicalRole`) kennt beide
+Schreibweisen, die andere (die private Liste im Client) nur eine — und fiel sonst still auf die
+engste Rolle zurück. Ein stiller Rückfall ist hier besonders teuer: er sieht aus wie eine
+Rechteentscheidung, ist aber ein Tippfehler im Wortschatz.
+
+### Der Fix — die Liste ist weg
+
+`sessionFromToken()` nimmt das Wort des Servers jetzt **wörtlich** und übersetzt gar nicht:
+das tut `canonicalRole()`, dieselbe Funktion, die auch der Hauptrechner benutzt
+(`usePermission`, `roleHasPermission`). Fehlt der Anspruch ganz, entsteht **keine Sitzung** —
+eine Rolle zu erfinden wäre in beide Richtungen falsch.
+
+Dazu die zweite Hälfte, die §3 verlangt: die **aktuelle** Rolle. Ein Ausweis gilt dreißig Tage;
+seine Rolle ist ein Abzug vom Moment der Anmeldung. Der Server liest sie bei jeder geschützten
+Anfrage neu aus `user_branches` und ersetzt die des Tokens (C4 `reauthorize`).
+`refreshClientSessionContext()` übernimmt genau dieses Ergebnis — und nur, wenn es **denselben
+Menschen** und **dieselbe Filiale** betrifft. Der Client wählt nichts aus.
+
+### Warum das keine Rechteausweitung ist
+
+Die Rolle entscheidet nur, welche Knöpfe ein Bildschirm zeigt. Was wirklich passieren darf,
+entscheidet weiterhin der Primary — pro Anfrage, gegen den aktuellen Zustand. Das Gate hält
+beide Richtungen fest:
+
+- Eigentümer: `payments.*`, `invoices.*`, `products.edit`, `customers.edit` auf beiden
+  Rechnern **gleich erlaubt**.
+- Verkäufer: `payments.*` und `invoices.*` auf beiden Rechnern **gleich verwehrt**.
+- Ein unbekanntes Wort landet weiterhin bei der engsten Rolle — nur eben an EINER Stelle.
+- Und der Riegel dahinter ist unverändert: ein `SALES`-Absender, der die Buchung trotz
+  verstecktem Knopf direkt schickt, bekommt `PERMISSION_DENIED` (C4-Gate, 169/0); ein im
+  Rumpf mitgeschickter fremder Absender wird ignoriert.
+
+### Was der Zwei-Rechner-Lauf jetzt zeigt
+
+```
+test/uiparity/r4c1-role-parity.test.ts    35/0
+test/e2e/r4c-shared-ui-writes.e2e.mjs     30/0   (vorher: an der Rolle stehengeblieben)
+```
+
+Der Lauf meldet die Rolle des Clients als `owner`, „Zahlung erfassen" und „Rechnung ändern"
+stehen auf **beiden** Bildschirmen gleich da, und die bereits verdrahteten Handlungen sind aus
+der normalen gemeinsamen Oberfläche erreichbar: eine Zahlung von 300 landet genau einmal beim
+Primary, mit genau einer Buchung im Hauptbuch; der Auftragsstatus wandert weiter und seine
+Fassung steigt; die Kundennotiz kommt an. Kein Griff zur lokalen Datenbank, kein
+Geschäftsspeicher auf dem Client.
+
+### Zwei Prüfstandsfunde nebenbei
+
+Der Aufbau des E2E sprach an zwei Stellen die falsche Sprache: ein Auftrag mit dem Status
+`PENDING` (das Haus schreibt `pending`) hat gar keinen nächsten Schritt, und eine Zahlung
+bucht unter IHRER Kennung, nicht unter der Rechnung. Beides waren Fehler des Tests, nicht des
+Programms — und beide hätten als „Feature funktioniert nicht" durchgehen können.
+
+### Unverändert
+
+```
+Matrix: 11 verdrahtet · 21 exakt offen · 6 Klasse B · 2 ohne Handlung
+Registry: 1 + 18 + 48 + 40 = 107
+```
+
+R4C.1 schließt keine weitere Buchung an und erweitert keine Rechte. Es macht nur, dass dieselbe
+Person auf beiden Rechnern dasselbe sieht.
+
