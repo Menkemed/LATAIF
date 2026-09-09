@@ -25,6 +25,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import { checkEditReason, EDIT_REASON_REQUIRED_MESSAGE } from '@/core/invoices/edit-reason';
 import { useSharedRead } from '@/core/data/shared-read';
+import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
@@ -88,6 +89,8 @@ export function InvoiceCreate() {
   // v0.7.26 — Karten-Brand (nur relevant wenn method === 'card'); steuert die Gebuehr (2,2% vs 2,5%).
   const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
   const [paidAmount, setPaidAmount] = useState<number>(0);
+  // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
+  const anlegen = useSharedWrite<{ invoiceId: string }>('invoices.create');
   const [notes, setNotes] = useState('');
   const [staffId, setStaffId] = useState<string>('');
   const [editReason, setEditReason] = useState('');  // Pflicht-Grund im Edit-Modus (Audit)
@@ -277,10 +280,21 @@ export function InvoiceCreate() {
       setNumberDialog({ thenPrint });
       return;
     }
-    performSave(thenPrint, false);
+    void performSave(thenPrint, false);
   }
 
-  function performSave(thenPrint: boolean, specialMark: boolean) {
+  async function performSave(thenPrint: boolean, specialMark: boolean) {
+    // R4B — was auf einem verbundenen Rechner noch NICHT geht, sagt es. Kein stilles Nichts, und
+    // vor allem kein Rueckfall auf die lokale Datenbank:
+    //   • Aendern ist ein eigener Vertrag (`invoices.update`) und in dieser Scheibe nicht dabei.
+    //   • `invoices.create` kennt keine Zahlung; sie waere ein zweiter Vorsatz. Eine Rechnung
+    //     anzulegen und das Geld liegen zu lassen waere schlimmer als ein ehrliches Nein.
+    if (anlegen.remote && isEditMode) {
+      setError(fehlertext(nichtAmClient('editing an invoice'))); return;
+    }
+    if (anlegen.remote && paidAmount > 0) {
+      setError(fehlertext(nichtAmClient('recording a payment while creating an invoice'))); return;
+    }
     // CENTRAL-C3B — dieselbe Ableitung, die der Fernauftrag benutzt. Phase 3 (Cost-Snapshot aus
     // dem gewaehlten Lot, Fallback auf products.purchase_price) und die v0.7.1-Regel fuer MARGIN
     // (internalVat persistieren) stecken jetzt in `toInvoiceLine` — eine Stelle, zwei Aufrufer.
@@ -334,18 +348,38 @@ export function InvoiceCreate() {
       return;
     }
 
-    const inv = createDirectInvoice(customerId, payload, notes || undefined, issuedDate, undefined, staffId || undefined, specialMark);
-    if (!inv) { setError('Failed to create invoice'); return; }
+    // CENTRAL-UI-PARITY R4B — dieselbe Absicht, zwei Anschluesse. Am Primary die vorhandene
+    // Domaenenfunktion (Nummernkreis, Bestandsabzug, Steuer, Buchung — alles unveraendert), am
+    // Client die vorhandene geprueste Fernbuchung `invoices.create`, die auf dem Primary GENAU
+    // DIESE Funktion ruft. Kopiert wird hier nichts.
+    const r = await anlegen.save({
+      local: () => {
+        const inv = createDirectInvoice(customerId, payload, notes || undefined, issuedDate, undefined, staffId || undefined, specialMark);
+        if (!inv) throw new Error('Failed to create invoice');
+        if (paidAmount > 0) {
+          recordPayment(inv.id, paidAmount, paymentMethod, undefined, specialMark, paymentMethod === 'card' ? cardBrand : undefined);
+        }
+        return { invoiceId: inv.id };
+      },
+      remote: () => ({
+        customerId,
+        lines: lines.map((l, i) => ({
+          productId: l.productId,
+          lotId: computed[i]?.selectedLot?.id ?? null,
+          quantity: l.quantity,
+          unitPrice: l.unitPrice,
+          scheme: l.scheme,
+        })),
+        ...(notes ? { notes } : {}),
+        ...(issuedDate ? { issuedDate } : {}),
+        ...(staffId ? { staffId } : {}),
+        specialMark,
+      }),
+      shape: (v) => ({ invoiceId: String(v.invoiceId ?? '') }),
+    });
+    if (r.kind !== 'ok') { setError(fehlertext(r)); return; }
 
-    if (paidAmount > 0) {
-      recordPayment(inv.id, paidAmount, paymentMethod, undefined, specialMark, paymentMethod === 'card' ? cardBrand : undefined);
-    }
-
-    if (thenPrint) {
-      navigate(`/invoices/${inv.id}?print=1`);
-    } else {
-      navigate(`/invoices/${inv.id}`);
-    }
+    navigate(thenPrint ? `/invoices/${r.value.invoiceId}?print=1` : `/invoices/${r.value.invoiceId}`);
   }
 
   return (
@@ -869,8 +903,8 @@ export function InvoiceCreate() {
         <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate(isEditMode && editInvoice ? `/invoices/${editInvoice.id}` : '/invoices')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => handleSave(true)}><Printer size={14} /> {isEditMode ? 'Save & Print' : 'Save & Print'}</Button>
-            <Button variant="primary" onClick={() => handleSave(false)}><Save size={14} /> {isEditMode ? 'Save Changes' : 'Save Invoice'}</Button>
+            <Button variant="secondary" onClick={() => handleSave(true)} disabled={anlegen.busy}><Printer size={14} /> Save & Print</Button>
+            <Button variant="primary" onClick={() => handleSave(false)} disabled={anlegen.busy} data-save-invoice><Save size={14} /> {anlegen.busy ? 'Saving…' : (isEditMode ? 'Save Changes' : 'Save Invoice')}</Button>
           </div>
         </div>
       </div>
@@ -885,7 +919,7 @@ export function InvoiceCreate() {
         onConfirm={(special) => {
           const ctx = numberDialog;
           setNumberDialog(null);
-          if (ctx) performSave(ctx.thenPrint, special);
+          if (ctx) void performSave(ctx.thenPrint, special);
         }}
       />
     </div>

@@ -783,3 +783,125 @@ Mutations        = 40   (unveraendert — R4A.1 fasst keinen Schreibweg an)
 Total            = 107
 ```
 
+---
+
+## R4B — die gemeinsame Oberfläche kann schreiben (09.09.2026)
+
+### Der Befund, den R3 gemacht hat
+
+Die gemeinsame Oberfläche erreichte **0 von 40** geprüften Fernbuchungen. Nicht, weil die
+Buchungen fehlten — es gab sie alle —, sondern weil jede Schreibaktion direkt die Store-Aktion
+rief, und die holt als erstes `getDatabase()`. Am Hauptrechner richtig, auf einem zweiten
+Rechner ein Fehler mitten im Klick.
+
+### §1 Die Wege, Klick für Klick
+
+```
+VORHER (jede Schreibaktion, ohne Ausnahme)
+  Klick → Seite → Store-Aktion → getDatabase() → db.run(...)
+
+DANEBEN, seit C3 vorhanden und ungenutzt
+  op → /api/command → Bruecke → Primary-Domaenenfunktion → eine Transaktion + Kennungsnachweis
+
+JETZT
+  Klick → Seite → useSharedWrite(op).save({ local, remote })
+                     ├─ Primary: dieselbe vorhandene Domaenenfunktion (synchron)
+                     └─ Client:  dieselbe vorhandene geprueste Fernbuchung
+```
+
+| UI-Handlung | lokale Funktion | Fernbuchung | Rückgabe | Fehlerart | Kennung/Fassung |
+|---|---|---|---|---|---|
+| Kunde anlegen | `createCustomer(data): Customer` | `customers.create` | `{customerId,name}` | `CUSTOMER_PAYLOAD_INVALID` | Kennung je Vorsatz |
+| Kunde ändern | `updateCustomer(id, data): void` | `customers.update` | `{customerId,name}` | `CUSTOMER_NOT_FOUND` | Kennung je Vorsatz |
+| Artikel ändern (Text) | `editProductTextDurably(...)` | `products.update` | `{status}` | Preissperre, `PRODUCT_NOT_FOUND` | Kennung je Vorsatz |
+| Rechnung anlegen | `createDirectInvoice(...)` | `invoices.create` | `{invoiceId,invoiceNumber,...}` | Bestand, Steuer, Nummernkreis | Kennung je Vorsatz |
+
+### §2 Was die Weiche NICHT ist
+
+`core/data/shared-write.ts` enthält keine einzige Geschäftsregel: keine Steuer, keinen
+Bestand, keinen Nummernkreis, keine Buchung, keine Fassungszählung, keine Validierung, keine
+Medienlogik. Sie kennt zwei Anschlüsse und vier Ausgänge, sonst nichts. Das Gate prüft das
+wörtlich (kein `SELECT`, kein `getDatabase`, keine Steuerbegriffe im Modul).
+
+Die Feldlisten (was ein Rumpf mitbringen darf) standen bisher nur im Fernbefehl. Sie wohnen
+jetzt in `core/data/write-payloads.ts`, und **der Befehl liest sie von dort** — eine Liste,
+zwei Leser. Eine zweite Liste wäre ein zweiter Vertrag, der auseinanderläuft.
+
+### §3 Die asynchrone Grenze
+
+Die Store-Aktionen sind synchron (`createCustomer(data): Customer`), eine Fernbuchung kann es
+nicht sein. Statt das mit verstecktem Feuern-und-Vergessen zu überbrücken, ist die Grenze jetzt
+sichtbar: `await speichern.save(...)`. Am Primary läuft die synchrone Funktion und ihr
+Ergebnis wird in den gemeinsamen Vertrag gehoben; die Oberfläche sperrt ihren Knopf, zeigt
+„Saving…" und meldet Erfolg **erst nach einem Erfolg**.
+
+Die vier Ausgänge, und warum es genau vier sein müssen:
+
+```
+ok             der Vorgang existiert (replayed = er existierte schon)
+business_error ein eingefrorenes Nein — der Mensch muss etwas anderes entscheiden
+not_executed   nachweislich NICHT gelaufen — dieselbe Kennung darf sofort wieder
+unknown        Ausgang offen — KEIN Erfolg; dieselbe Kennung wiederholen, nie eine neue
+```
+
+### §5 Eine Kennung je Absicht
+
+Kein neues System: der Wächter aus C3C (`CommandSaveController`) bleibt, wie er ist. Neu ist
+nur, dass die gemeinsame Oberfläche ihn benutzt — einer je Formular, über seine Lebensdauer
+stabil. Ein zweiter Klick, während der erste läuft, kommt gar nicht erst los (`useRef`-Riegel;
+ein Zustandswert stünde erst beim nächsten Zeichnen).
+
+### §7/§8 Am laufenden Programm bewiesen
+
+```
+test/uiparity/r4b-write-adapter.test.ts   140/0
+test/e2e/r4b-shared-ui-writes.e2e.mjs      49/0   zwei echte Anwendungen, vier echte Formulare
+```
+
+Der E2E-Lauf klickt auf einem echten, datenbanklosen zweiten Rechner durch `/clients`,
+`/clients/<id>`, `/collection/<id>` und `/invoices/new` — dieselben Routen, dieselben
+Knöpfe, dieselben Komponenten wie am Hauptrechner. Danach steht im Datenbestand des Primary
+genau ein neuer Kunde mit genau den eingegebenen Werten, die Änderung und **nur** sie, der
+geänderte Lagerort bei unangetasteter SKU, und eine Rechnung mit einer Zeile, echtem Betrag und
+abgezogenem Bestand. Kein einziger Griff zur lokalen Datenbank.
+
+**Der teuerste Fall** ist eigens gefahren: der Test nimmt der Oberfläche die Antwort weg,
+*nachdem* der Primary geschrieben hat (die Anfrage läuft wirklich, danach wirft er). Ergebnis:
+die Maske behauptet keinen Erfolg, sondern benennt den Ausgang als offen und bleibt stehen; der
+zweite Klick auf denselben Vorsatz geht mit **derselben Kennung** hinaus; und im Datenbestand
+steht danach **ein** Kunde, **eine** Rechnung, **eine** Zeile, **eine** Buchung im Hauptbuch.
+
+### §6 Was noch nicht geht, sagt es
+
+Drei Nebenwege sind am Client ausdrücklich gesperrt — mit eigenem Code
+(`CLIENT_WRITE_UNSUPPORTED`) und sichtbarer Meldung, nie als stilles Nichts und nie mit
+Rückfall auf die lokale Datenbank:
+
+- der **Bildweg** des Artikelformulars (er braucht den Zwischenspeicher- und Galerievertrag),
+- das **Ändern** einer Rechnung (eigener Vertrag, nicht in dieser Scheibe),
+- eine **Zahlung beim Anlegen** einer Rechnung — `invoices.create` kennt keine; eine Rechnung
+  anzulegen und das Geld liegen zu lassen wäre schlimmer als ein ehrliches Nein.
+
+Unter allem anderen liegt der harte Riegel: jede schreibende Store-Aktion holt als erstes die
+Datenbank. Auf einem Client wirft sie — laut, nicht still. Das Gate prüft das an allen
+schreibenden Store-Aktionen.
+
+### §10 Auftrag → Rechnung: bewusst NICHT
+
+`orders.convert_to_invoice` bleibt unverdrahtet. Die normale Oberfläche des Primary führt bei
+dieser Handlung zusätzlich den Anzahlungsübertrag aus; die Fernbuchung allein wäre die halbe
+Handlung und ließe Geld liegen. Das wird fachlich atomar gelöst, nicht nebenbei.
+
+### Registry
+
+```
+Probe            = 1
+C2 Reads         = 18
+UI-Parity Reads  = 48
+Mutations        = 40   (unveraendert — R4B fuegt KEINE neue Buchung hinzu)
+Total            = 107
+```
+
+Erreicht aus der gemeinsamen Oberfläche: **4 von 40**. Das ist der Anfang, nicht das Ende — aber
+es ist das Muster, an dem die übrigen 36 hängen.
+

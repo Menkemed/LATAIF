@@ -13,6 +13,8 @@ import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useProductStore, type EditProductResult } from '@/stores/productStore';
+import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { updatePayload, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '@/stores/repairStore';
@@ -48,6 +50,8 @@ export function ProductDetail() {
   const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
   const [editing, setEditing] = useState(false);
+  // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
+  const aendern = useSharedWrite<EditProductResult>('products.update');
   // MEDIA-04A-3B2C2-R2: bump to force the resolver to re-resolve after a durable
   // edit save (new gallery in, old Object-URLs revoked once). Refs guard the
   // async save from applying UI updates onto a different/unmounted product.
@@ -379,8 +383,44 @@ export function ProductDetail() {
     // fix for the confirmed bug where a text-only save soft-deleted the photo.
     const { images: _dropImages, ...textPayload } = payload;
     const startId = id;
+
+    // CENTRAL-UI-PARITY R4B — der TEXTWEG geht ueber die gemeinsame Schreibweiche: am Primary
+    // dieselbe durable Funktion wie bisher, am Client die vorhandene geprueste Fernbuchung
+    // `products.update`, die auf dem Primary GENAU DIESE Funktion ruft. Der BILDWEG bleibt hier
+    // dem Hauptrechner vorbehalten: er braucht den Zwischenspeicher- und Galerievertrag, und
+    // einen halben Medienweg zu bauen waere schlechter als keiner.
+    if (!imagesDirty) {
+      const diff = updatePayload(product as unknown as Record<string, unknown>, textPayload as Record<string, unknown>, PRODUCT_UPDATE_FIELDS);
+      if (aendern.remote && Object.keys(diff).length === 0) { setEditing(false); return; }
+      const r = await aendern.save({
+        local: async () => await editProductTextDurably(id, textPayload),
+        remote: () => ({ id, ...diff }),
+        shape: () => ({ status: 'edited' } as EditProductResult),
+      });
+      if (!mountedRef.current || idRef.current !== startId) return;
+      if (r.kind !== 'ok') { setErrors(e => ({ ...e, _save: fehlertext(r) })); return; }
+      const lokal = r.value as EditProductResult;
+      if (lokal.status === 'edited') {
+        setMediaReloadNonce(n => n + 1);
+        setImagesDirty(false);
+        setDraftSeeded(false);
+        setEditing(false);
+        loadProducts();
+        return;
+      }
+      if (lokal.status === 'cutover_reload') { setMediaReloadNonce(n => n + 1); return; }
+      setErrors(e => ({ ...e, _media: lokal.errorCode }));
+      return;
+    }
+
+    // R4B — der Bildweg gehoert dem Hauptrechner. Fail-closed und mit Grund, nicht still.
+    if (aendern.remote) {
+      setErrors(e => ({ ...e, _save: fehlertext(nichtAmClient('editing product images')) }));
+      return;
+    }
+
     let res: EditProductResult;
-    if (imagesDirty) {
+    {
       // MEDIA-EDIT-PRESERVE-R2 fail-closed guard: an image edit may ONLY be reconciled when the draft
       // provably came from the final gallery. The image controls are disabled until then, so this is
       // unreachable from the UI — it exists so no future path can reconcile a draft that never saw the
@@ -396,9 +436,6 @@ export function ProductDetail() {
       const status: ResolverStatus = presentationToResolverStatus(media.status);
       const resolved = media.status === 'media' ? media.items.map(i => ({ url: i.url, mediaId: i.mediaId })) : [];
       res = await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status });
-    } else {
-      // No image touched → product-text-only durable edit, gallery untouched.
-      res = await editProductTextDurably(id, textPayload);
     }
     // Stale-save guard: the user navigated to another product or the view
     // unmounted while the durable save ran — never apply this result onto a
@@ -475,7 +512,9 @@ export function ProductDetail() {
             {editing ? (
               <>
                 <Button variant="ghost" onClick={() => { setEditing(false); setImagesDirty(false); setDraftSeeded(false); setForm({ ...product }); setFormAttrs({ ...product.attributes }); setErrors({}); }}>Cancel</Button>
-                <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
+                <Button variant="primary" onClick={handleSave} disabled={aendern.busy} data-save-product>
+                  <Save size={14} /> {aendern.busy ? 'Saving…' : 'Save'}
+                </Button>
               </>
             ) : (
               <>
@@ -506,8 +545,17 @@ export function ProductDetail() {
           </div>
         </div>
 
+        {/* R4B — der Ausgang des Speicherns. Bis hier wurde `_media` gesetzt und NIE angezeigt:
+            ein blockierter Speichervorgang sah aus wie gar nichts. */}
+        {editing && (errors._save || errors._media) && (
+          <div data-save-error style={{
+            marginBottom: 16, padding: '12px 16px', borderRadius: 8, fontSize: 13,
+            background: 'rgba(220,80,60,0.08)', border: '1px solid rgba(220,80,60,0.30)', color: '#8B2E22',
+          }}>{errors._save || errors._media}</div>
+        )}
+
         {/* Validation banner — appears when Save was clicked with missing required fields. */}
-        {editing && Object.keys(errors).length > 0 && (
+        {editing && Object.keys(errors).filter(k => k !== '_save' && k !== '_media').length > 0 && (
           <div style={{
             marginBottom: 16, padding: '12px 16px', borderRadius: 8,
             background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
@@ -517,10 +565,10 @@ export function ProductDetail() {
             <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
             <div style={{ minWidth: 0, flex: 1 }}>
               <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                Please fill in {Object.keys(errors).length} required field{Object.keys(errors).length === 1 ? '' : 's'} before saving:
+                Please fill in {Object.keys(errors).filter(k => k !== '_save' && k !== '_media').length} required field{Object.keys(errors).filter(k => k !== '_save' && k !== '_media').length === 1 ? '' : 's'} before saving:
               </div>
               <ul style={{ margin: '4px 0 0 18px', listStyle: 'disc' }}>
-                {Object.entries(errors).map(([key, msg]) => (
+                {Object.entries(errors).filter(([key]) => key !== '_save' && key !== '_media').map(([key, msg]) => (
                   <li key={key}>
                     <button
                       onClick={() => {

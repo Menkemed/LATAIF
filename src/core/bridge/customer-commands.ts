@@ -26,6 +26,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
+import { CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
 
 export const OP_CUSTOMERS_CREATE = 'customers.create';
 export const OP_CUSTOMERS_UPDATE = 'customers.update';
@@ -35,12 +36,7 @@ export const OP_CUSTOMERS_UPDATE = 'customers.update';
  * Formulars; `lastContactAt`/`lastPurchaseAt` fehlen mit Absicht: die setzt die Domäne, wenn etwas
  * passiert, nicht ein Client.
  */
-const EDITABLE = new Set([
-  'firstName', 'lastName', 'company', 'phone', 'whatsapp', 'email',
-  'country', 'language', 'budgetMin', 'budgetMax', 'vipLevel',
-  'preferences', 'customerType', 'salesStage', 'notes',
-  'vatAccountNumber', 'personalId',
-]);
+const EDITABLE = new Set<string>(CUSTOMER_EDITABLE);
 
 /**
  * Felder, die der Client ausdrücklich NICHT setzen darf. Jedes einzelne wäre eine andere Art, das

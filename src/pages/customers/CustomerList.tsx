@@ -12,6 +12,8 @@ import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBa
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { createPayload, CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Customer, VIPLevel } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
@@ -24,6 +26,8 @@ export function CustomerList() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { customers, loadCustomers, createCustomer, searchQuery, setSearchQuery, getCustomerStats } = useCustomerStore();
   const [showNew, setShowNew] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const anlegen = useSharedWrite<{ customerId: string }>('customers.create');
   const [form, setForm] = useState<Partial<Customer>>({
     country: 'BH', language: 'en', vipLevel: 0, customerType: 'collector', salesStage: 'lead', preferences: [],
   });
@@ -58,10 +62,24 @@ export function CustomerList() {
     setSearchParams(next, { replace: true });
   }
 
-  function handleCreate() {
+  // CENTRAL-UI-PARITY R4B — dieselbe Absicht, zwei Anschluesse: am Primary die vorhandene
+  // Domaenenfunktion, am Client die vorhandene geprueste Fernbuchung. Die Maske daneben ist
+  // dieselbe, die Pruefung ist dieselbe — nur der Weg zur Wahrheit unterscheidet sich.
+  async function handleCreate() {
     if (!form.firstName || !form.lastName) return;
-    createCustomer(form);
+    setSaveError('');
+    const r = await anlegen.save({
+      local: () => ({ customerId: createCustomer(form).id }),
+      remote: () => createPayload(form as Record<string, unknown>, CUSTOMER_EDITABLE),
+      shape: (v) => ({ customerId: String(v.customerId ?? '') }),
+    });
+    // `unknown` ist KEIN Erfolg: der Ausgang ist offen, dieselbe Absicht wird wiederholt.
+    if (r.kind !== 'ok') { setSaveError(fehlertext(r)); return; }
+    // Der Stand kommt dort her, wo er entsteht — am Primary aus der Datenbank, am Client
+    // ueber dieselbe Auskunft wie beim Zeichnen.
+    loadCustomers();
     setShowNew(false);
+    setSaveError('');
     setForm({ country: 'BH', language: 'en', vipLevel: 0, customerType: 'collector', salesStage: 'lead', preferences: [] });
   }
 
@@ -273,10 +291,17 @@ export function CustomerList() {
             </div>
           </div>
 
+          {saveError && (
+            <div data-save-error style={{
+              marginTop: 12, padding: '10px 12px', borderRadius: 6, fontSize: 12,
+              background: 'rgba(220,80,60,0.08)', border: '1px solid rgba(220,80,60,0.3)', color: '#8B2E22',
+            }}>{saveError}</div>
+          )}
+
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate}>
-              {duplicateMatches.length > 0 ? 'Create anyway' : 'Create Client'}
+            <Button variant="primary" onClick={handleCreate} disabled={anlegen.busy} data-create-client>
+              {anlegen.busy ? 'Saving…' : (duplicateMatches.length > 0 ? 'Create anyway' : 'Create Client')}
             </Button>
           </div>
         </div>

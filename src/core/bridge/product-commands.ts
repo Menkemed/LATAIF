@@ -52,6 +52,7 @@ import { currentBranchId } from '@/core/db/helpers';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
+import { PRODUCT_CREATE_FIELDS, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
 
 export const OP_PRODUCTS_CREATE = 'products.create';
 export const OP_PRODUCTS_UPDATE = 'products.update';
@@ -64,25 +65,14 @@ export const MAX_REMOTE_IMAGES = 8;
  * sondern eine Vergabe. `images` fehlt ebenfalls — Bilder kommen als Kennungen der Zwischenablage,
  * nie als Daten-URL im Auftrag.
  */
-const CREATE_FIELDS = new Set([
-  'categoryId', 'brand', 'name', 'quantity', 'condition', 'scopeOfDelivery',
-  'storageLocation', 'purchaseDate', 'purchasePrice', 'purchaseCurrency',
-  'plannedSalePrice', 'minSalePrice', 'maxSalePrice',
-  'stockStatus', 'taxScheme', 'supplierName', 'purchaseSource', 'paidFrom',
-  'sourceType', 'notes', 'attributes',
-]);
+const CREATE_FIELDS = new Set<string>(PRODUCT_CREATE_FIELDS);
 
 /**
  * Was ein Änderungsauftrag anfassen darf. Enger als das Anlegen, und aus denselben Gründen, aus
  * denen der mobile Edit enger ist: eine geänderte Kategorie zieht jedes Attribut auf eine andere
  * Definition um, und die Menge ist keine Texteigenschaft, sondern eine Bestandsaussage.
  */
-const UPDATE_FIELDS = new Set([
-  'brand', 'name', 'condition', 'scopeOfDelivery', 'storageLocation',
-  'purchaseDate', 'purchasePrice', 'plannedSalePrice', 'minSalePrice', 'maxSalePrice',
-  'stockStatus', 'taxScheme', 'supplierName', 'purchaseSource', 'paidFrom',
-  'sourceType', 'notes', 'attributes',
-]);
+const UPDATE_FIELDS = new Set<string>(PRODUCT_UPDATE_FIELDS);
 
 /**
  * Felder, die der Client NIE setzen darf — jedes einzelne wäre eine andere Art, das Haus zu
