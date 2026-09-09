@@ -325,6 +325,8 @@ interface SalesReturnStore {
 function rowToReturn(row: Record<string, unknown>): SalesReturn {
   const rawStatus = row.refund_status as RefundStatus | undefined;
   return {
+    // R4C — die Fassung reist mit; ohne sie kann ein Auftrag nicht sagen, WORAUF er sich bezieht.
+    revision: row.revision === undefined || row.revision === null ? undefined : Number(row.revision),
     id: row.id as string,
     returnNumber: row.return_number as string,
     branchId: row.branch_id as string,

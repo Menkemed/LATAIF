@@ -195,31 +195,44 @@ export function ConsignmentDetail() {
   // Linked invoice (no useMemo needed — simple lookup, can stay after early return).
   const linkedInvoice = consignment.invoiceId ? invoices.find(i => i.id === consignment.invoiceId) : null;
 
-  function handleSave() {
-    if (!id) return;
+  async function handleSave() {
+    if (!id || !consignment) return;
     setEditError('');
-    // Zwei getrennte Vertraege, bewusst in dieser Reihenfolge: das Payout-Modell zuerst, weil es
-    // scheitern DARF (gesperrt oder ungueltiger Parameter). Scheitert es, wird auch der Rest nicht
-    // geschrieben — der Benutzer soll nicht die Haelfte seiner Eingabe gespeichert vorfinden.
-    if (!payoutLock.locked) {
-      try {
-        updateConsignmentPayoutModel(id, {
-          model: form.payoutModel,
-          commissionRate: form.commissionRate,
-          excessSplitPct: form.excessSplitPct,
-        });
-      } catch (e) {
-        setEditError(e instanceof Error ? e.message : String(e));
-        return;
-      }
-    }
-    updateConsignment(id, {
-      agreedPrice: Number(form.agreedPrice) || consignment!.agreedPrice,
+    const fassung = consignment.revision;
+    if (w.remote && !fassung) { setEditError(fehlertext(nichtAmClient('editing this consignment (no revision loaded)'))); return; }
+    const stamm = {
+      agreedPrice: Number(form.agreedPrice) || consignment.agreedPrice,
       minimumPrice: form.minimumPrice ? Number(form.minimumPrice) : undefined,
       expiryDate: form.expiryDate || undefined,
       notes: form.notes || undefined,
-    });
-    setEditing(false);
+    };
+    const modell = payoutLock.locked ? undefined : {
+      model: form.payoutModel,
+      commissionRate: form.commissionRate,
+      excessSplitPct: form.excessSplitPct,
+    };
+    {
+      if (!await w.ok('consignments.update', {
+        local: () => {
+          // Zwei getrennte Vertraege, bewusst in dieser Reihenfolge: das Auszahlungsmodell zuerst,
+          // weil es scheitern DARF. Genau diese Reihenfolge faehrt auch die Fernbuchung.
+          if (modell) updateConsignmentPayoutModel(id, modell);
+          updateConsignment(id, stamm);
+          return {};
+        },
+        remote: () => ({
+          id, expectedRevision: fassung,
+          ...(stamm.agreedPrice !== undefined ? { agreedPrice: stamm.agreedPrice } : {}),
+          ...(stamm.minimumPrice !== undefined ? { minimumPrice: stamm.minimumPrice } : {}),
+          ...(stamm.expiryDate !== undefined ? { expiryDate: stamm.expiryDate } : {}),
+          ...(stamm.notes !== undefined ? { notes: stamm.notes } : {}),
+          ...(modell ? { payout: modell } : {}),
+        }),
+      })) { setEditError(w.fehler); return; }
+      loadConsignments();
+      setEditing(false);
+      return;
+    }
   }
 
   function handleRecordSale() {

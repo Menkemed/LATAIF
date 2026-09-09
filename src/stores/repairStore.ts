@@ -541,6 +541,8 @@ function rowToRepair(row: Record<string, unknown>): Repair {
   let itemAttrs: Record<string, string | number | boolean> = {};
   try { itemAttrs = JSON.parse((row.item_attributes as string) || '{}'); } catch { /* */ }
   return {
+    // R4C — die Fassung reist mit; ohne sie kann ein Auftrag nicht sagen, WORAUF er sich bezieht.
+    revision: row.revision === undefined || row.revision === null ? undefined : Number(row.revision),
     id: row.id as string,
     repairNumber: row.repair_number as string,
     repairScope: ((row.repair_scope as string) === 'OWN' ? 'OWN' : 'CUSTOMER') as 'CUSTOMER' | 'OWN',

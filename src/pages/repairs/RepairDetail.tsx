@@ -25,8 +25,10 @@ import { useProductStore } from '@/stores/productStore';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { formatProductMultiLine } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import type { Repair, RepairLine } from '@/core/models/types';
+import type { Repair, RepairLine, RepairStatus } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
@@ -143,6 +145,37 @@ export function RepairDetail() {
   ], [suppliers]);
 
   const repair = useMemo(() => repairs.find(r => r.id === id), [repairs, id]);
+  // CENTRAL-UI-PARITY R4C.2 — dieselbe Maske, zwei Anschluesse hinter jeder Handlung.
+  const w = useSharedWrites();
+  /** R4C.2 — den Status weiterschalten. Bestandswirksam und fassungsbasiert. */
+  async function statusSetzen(status: RepairStatus) {
+    if (!id) return;
+    const fassung = fassungOderNichts('changing the repair status');
+    if (fassung === null) return;
+    if (!await w.ok('repairs.update_status', {
+      local: () => { updateStatus(id, status); return {}; },
+      remote: () => ({ repairId: id, status, expectedRevision: fassung }),
+    })) return;
+    loadRepairs(); loadRepairLines();
+  }
+
+  /** R4C.2 — eine Kostenzeile stornieren. */
+  async function zeileStornieren(lineId: string) {
+    if (!id) return;
+    const fassung = fassungOderNichts('cancelling a repair line');
+    if (fassung === null) return;
+    if (!await w.ok('repairs.cancel_line', {
+      local: () => { cancelRepairLine(lineId); return {}; },
+      remote: () => ({ repairId: id, lineId, expectedRevision: fassung }),
+    })) return;
+    loadRepairs(); loadRepairLines();
+  }
+  /** Die gesehene Fassung dieser Reparatur — ohne sie schickt der Client gar nicht erst. */
+  function fassungOderNichts(was: string): number | null {
+    const rev = repair?.revision;
+    if (w.remote && !rev) { alert(fehlertext(nichtAmClient(was + ' (no revision loaded)'))); return null; }
+    return rev ?? 0;
+  }
   const customer = useMemo(() => repair ? customers.find(c => c.id === repair.customerId) : null, [repair, customers]);
   const product = useMemo(() => repair?.productId ? products.find(p => p.id === repair.productId) : null, [repair, products]);
 
@@ -222,7 +255,7 @@ export function RepairDetail() {
     );
   }
 
-  function handleAddLine() {
+  async function handleAddLine() {
     if (!id || !repair) return;
     const cost = parseFloat(newLineForm.cost) || 0;
     // v0.7.6 — Sentinel '__INHOUSE__' uebersetzen zu null (in-house Arbeit).
@@ -230,13 +263,26 @@ export function RepairDetail() {
     const realSupplierId = newLineForm.supplierId === '__INHOUSE__'
       ? undefined
       : (newLineForm.supplierId || undefined);
-    addRepairLine(id, {
+    const fassung = fassungOderNichts('adding a repair line');
+    if (fassung === null) return;
+    const zeile = {
       supplierId: realSupplierId,
       workType: newLineForm.workType,
       description: newLineForm.description || undefined,
       costAmount: cost,
       dueDate: newLineForm.dueDate || undefined,
-    });
+    };
+    if (!await w.ok('repairs.add_line', {
+      local: () => { addRepairLine(id, zeile); return {}; },
+      remote: () => ({
+        repairId: id, expectedRevision: fassung, costAmount: cost,
+        ...(realSupplierId ? { supplierId: realSupplierId } : {}),
+        workType: newLineForm.workType,
+        ...(zeile.description ? { description: zeile.description } : {}),
+        ...(zeile.dueDate ? { dueDate: zeile.dueDate } : {}),
+      }),
+    })) return;
+    loadRepairs(); loadRepairLines();
     setShowAddLineModal(false);
     setNewLineForm({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
   }
@@ -467,7 +513,7 @@ export function RepairDetail() {
       if (!confirmed) return;
     }
     try {
-      updateStatus(id, nextStatus);
+      void statusSetzen(nextStatus);
     } catch (err) {
       // Plan §Repair §Picked-Up-Gate: charge > 0 → Invoice + Payment vorher Pflicht.
       // updateStatus throwt mit verständlicher Fehlermeldung; an User durchreichen.
@@ -525,6 +571,8 @@ export function RepairDetail() {
 
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
+      {/* R4C.2 — der Ausgang jeder Handlung dieser Seite, an einer Stelle. */}
+      <WriteError text={w.fehler} />
       <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }}>
 
         {/* Header */}
@@ -563,8 +611,7 @@ export function RepairDetail() {
                   <Button variant="secondary" onClick={() => {
                     if (!id) return;
                     if (!window.confirm(`Mark repair ${repair.repairNumber} as returned to customer (no repair performed)?`)) return;
-                    try { updateStatus(id, 'returned'); }
-                    catch (err) { alert(err instanceof Error ? err.message : String(err)); }
+                    void statusSetzen('returned');
                   }}>
                     <RotateCcw size={14} /> Mark as Returned
                   </Button>
@@ -1262,8 +1309,7 @@ export function RepairDetail() {
                         <button
                           onClick={() => {
                             if (!confirm('Remove this entry? Any linked gold liability + supplier expense will also be removed.')) return;
-                            try { cancelRepairLine(l.id); }
-                            catch (err) { alert(err instanceof Error ? err.message : String(err)); }
+                            void zeileStornieren(l.id);
                           }}
                           className="cursor-pointer"
                           style={{ background: 'none', border: 'none', color: '#DC2626', borderTop: '1px solid #E5E9EE', padding: '10px 0' }}
@@ -1519,8 +1565,8 @@ export function RepairDetail() {
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowAddLineModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleAddLine}
-              disabled={!newLineForm.supplierId || (!parseFloat(newLineForm.cost) && !newLineForm.description.trim())}>
+            <Button variant="primary" onClick={() => void handleAddLine()} data-add-repair-line
+              disabled={w.busy || !newLineForm.supplierId || (!parseFloat(newLineForm.cost) && !newLineForm.description.trim())}>
               Add Line
             </Button>
           </div>

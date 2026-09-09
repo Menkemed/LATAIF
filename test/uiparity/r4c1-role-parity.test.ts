@@ -186,7 +186,10 @@ const SALES = { sub: 'user-staff', tenant_id: 'tenant-1', branch_id: 'branch-mai
   const offen = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length;
   const luecken = R4C_MATRIX.filter((z) => z.luecke !== null).length;
   const ohneUi = R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length;
-  ok(verdrahtet === 11 && offen === 21 && luecken === 6 && ohneUi === 2,
+  // R4C.2 hat die Matrix nach dem argumentgenauen Vergleich neu gestellt: 20 verdrahtet,
+  // keine offenen deckungsgleichen mehr, 18 Klasse-B-Luecken. Der Rollenvertrag ist davon
+  // unberuehrt — er prueft die Zahlen nur, damit niemand ihn heimlich mitverschiebt.
+  ok(verdrahtet === 20 && offen === 0 && luecken === 18 && ohneUi === 2,
     `8 die Matrix ist unveraendert (${verdrahtet}/${offen}/${luecken}/${ohneUi})`);
   const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/
     .exec(src('src/core/bridge/command-registry.ts'))?.[1] ?? '').matchAll(/'([^']+)'/g)].length;

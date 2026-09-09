@@ -91,6 +91,8 @@ function rowToAgent(row: Record<string, unknown>): Agent {
 
 function rowToTransfer(row: Record<string, unknown>): AgentTransfer {
   return {
+    // R4C — die Fassung reist mit; ohne sie kann ein Auftrag nicht sagen, WORAUF er sich bezieht.
+    revision: row.revision === undefined || row.revision === null ? undefined : Number(row.revision),
     id: row.id as string, transferNumber: row.transfer_number as string,
     agentId: row.agent_id as string, productId: row.product_id as string,
     agentPrice: (row.agent_price as number) || 0,

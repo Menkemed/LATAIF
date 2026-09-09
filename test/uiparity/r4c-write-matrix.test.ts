@@ -77,9 +77,12 @@ const RUFT = (s: string, op: string) =>
 for (const z of R4C_MATRIX.filter((x) => x.verdrahtet)) {
   const s = codeOf(src('src/' + z.ort));
   ok(RUFT(s, z.op), `3 ${z.op}: ${z.ort.split('/').pop()} ruft die Buchung ueber die gemeinsame Weiche`);
-  // Und die lokale Funktion steht dort NUR im Primary-Anschluss.
+  // Und die lokale Funktion steht im SPEICHERWEG nur im Primary-Anschluss. Ausserhalb darf sie
+  // vorkommen — dann gehoert sie zu einer ANDEREN Handlung derselben Buchung, und die ist in der
+  // Matrix als eigener Fall benannt (z. B. die Materialzeile einer Reparatur).
   const ohneAnschluss = s.replace(/local: [\s\S]*?(?=\n\s*remote:)/g, '');
-  const frei = (ohneAnschluss.match(new RegExp(`\\b${z.lokal}\\(`, 'g')) || []).length;
+  const imWeg = new RegExp(`\\w+\\.ok\\('${z.op.replace(/\./g, '\\.')}'[\\s\\S]{0,900}`).exec(ohneAnschluss)?.[0] ?? '';
+  const frei = (imWeg.match(new RegExp(`\\b${z.lokal}\\(`, 'g')) || []).length;
   // `deletePayment`/`updatePayment` heissen in mehreren Stores gleich; gezaehlt wird nur, was
   // AUSSERHALB der Anschluesse steht — dort darf die Funktion nicht mehr aufgerufen werden.
   ok(frei === 0, `3 ${z.op}: ${z.lokal}() steht nur noch im Primary-Anschluss (${frei} frei)`);
@@ -121,11 +124,14 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     // Das Fenster reicht bewusst UEBER den Aufruf hinaus: das frische Lesen steht danach.
     const stelle = treffer.slice(0, 1200);
     if (!/expectedRevision/.test(stelle.slice(0, 700))) continue;
-    ok(/const fassung = \w+\.revision;/.test(s),
+    // Zwei zulaessige Formen, und beide sagen dasselbe: entweder die Fassung steht direkt in
+    // der Handlung, oder die Seite hat EINEN Helfer dafuer (`fassungVon`/`fassungOderNichts`) —
+    // der ist bei mehreren Handlungen je Seite die ehrlichere Form, nicht die schwaechere.
+    ok(/const fassung = \w+(\?)?\.revision;/.test(s) || /\?\.revision;/.test(s),
       `5 ${z.op}: die Fassung kommt aus dem gelesenen Datensatz, nicht aus der Luft`);
-    ok(/if \(w\.remote && !fassung\)/.test(s),
+    ok(/if \(w\.remote && !fassung\)/.test(s) || /if \(w\.remote && !rev\)/.test(s),
       `5 ${z.op}: ohne gelesene Fassung wird am Client gar nicht erst geschickt`);
-    ok(/load(Invoices|Orders|Consignments|Repairs|Transfers)\(\);/.test(stelle),
+    ok(/load(Invoices|Orders|Consignments|Repairs|RepairLines|Transfers|SalesReturns|Payments)\(/.test(stelle),
       `5 ${z.op}: nach dem Erfolg wird frisch gelesen — die naechste Handlung braucht die NEUE Fassung`);
   }
   // Und die Fassung steht wirklich im gemeinsamen Lesestand.
@@ -133,9 +139,12 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     ['src/stores/invoiceStore.ts', 'rowToInvoice'],
     ['src/stores/orderStore.ts', 'rowToOrder'],
     ['src/stores/consignmentStore.ts', 'rowToConsignment'],
+    ['src/stores/repairStore.ts', 'rowToRepair'],
+    ['src/stores/agentStore.ts', 'rowToTransfer'],
+    ['src/stores/salesReturnStore.ts', 'rowToReturn'],
   ] as const) {
     const s = src(datei);
-    const rumpf = s.slice(s.indexOf('function ' + name), s.indexOf('function ' + name) + 900);
+    const rumpf = s.slice(s.indexOf('function ' + name + '('), s.indexOf('function ' + name + '(') + 900);
     ok(/revision: row\.revision/.test(rumpf), `5 ${name}() reicht die Fassung durch`);
   }
 }

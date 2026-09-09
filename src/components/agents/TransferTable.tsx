@@ -18,6 +18,8 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import type { AgentTransfer, Invoice } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
@@ -68,6 +70,55 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
   const navigate = useNavigate();
   const { agents, transfers: allTransfers, markTransferSold, markTransferReturned,
     convertTransferToInvoice, convertTransfersToInvoice, undoTransferInvoiceConvert, updateTransfer, deleteTransfer } = useAgentStore();
+  // CENTRAL-UI-PARITY R4C.2 — dieselbe Tabelle, zwei Anschluesse hinter jeder Handlung.
+  const { loadTransfers } = useAgentStore();
+  const w = useSharedWrites();
+  /** Die gesehene Fassung DIESES Transfers — ohne sie schickt der Client gar nicht erst. */
+  function fassungVon(transferId: string, was: string): number | null {
+    const rev = allTransfers.find((t) => t.id === transferId)?.revision;
+    if (w.remote && !rev) { alert(fehlertext(nichtAmClient(was + ' (no revision loaded)'))); return null; }
+    return rev ?? 0;
+  }
+
+  /** R4C.2 — zurueckgenommen. Bestandswirksam: das Stueck kommt zurueck ins Lager. */
+  async function transferZurueck(transferId: string) {
+    const fassung = fassungVon(transferId, 'returning this transfer');
+    if (fassung === null) return;
+    if (!await w.ok('transfers.mark_returned', {
+      local: () => { markTransferReturned(transferId); return {}; },
+      remote: () => ({ id: transferId, expectedRevision: fassung }),
+    })) return;
+    loadTransfers();
+  }
+
+  /** R4C.2 — verkauft. Der Preis unter „Our Price" braucht die ausdrueckliche Bestaetigung. */
+  async function transferVerkauft(transferId: string, salePrice: number) {
+    const fassung = fassungVon(transferId, 'marking this transfer sold');
+    if (fassung === null) return;
+    if (!await w.ok('transfers.mark_sold', {
+      local: () => { markTransferSold(transferId, salePrice); return {}; },
+      remote: () => ({ transferId, salePrice, expectedRevision: fassung }),
+    })) return;
+    loadTransfers();
+  }
+
+  /** R4C.2 — Stammdaten des Transfers: Preis, Rueckgabedatum, Notiz. */
+  async function transferAendern(transferId: string, patch: Partial<AgentTransfer>) {
+    const fassung = fassungVon(transferId, 'editing this transfer');
+    if (fassung === null) return false;
+    if (!await w.ok('transfers.update', {
+      local: () => { updateTransfer(transferId, patch); return {}; },
+      remote: () => ({
+        id: transferId, expectedRevision: fassung,
+        ...(patch.agentPrice !== undefined ? { agentPrice: patch.agentPrice } : {}),
+        ...(patch.returnBy !== undefined ? { returnBy: patch.returnBy } : {}),
+        ...(patch.notes !== undefined ? { notes: patch.notes } : {}),
+      }),
+    })) return false;
+    loadTransfers();
+    return true;
+  }
+
   const { products } = useProductStore();
   const { customers, createCustomer } = useCustomerStore();
   const { invoices } = useInvoiceStore();
@@ -282,6 +333,8 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
 
   return (
     <div>
+      {/* R4C.2 — der Ausgang jeder Handlung dieser Tabelle, an einer Stelle. */}
+      <WriteError text={w.fehler} />
       {/* Bulk-Action-Toolbar — sichtbar sobald mind. 1 sold-Transfer selektiert */}
       {validSelectedIds.size > 0 && (
         <div style={{
@@ -390,7 +443,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                 <>
                   <button onClick={() => { setSoldModal(t.id); setSoldPrice(t.agentPrice); }}
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #7EAA6E', color: '#7EAA6E', borderRadius: 4, background: 'none' }}>Sold</button>
-                  <button onClick={() => markTransferReturned(t.id)}
+                  <button onClick={() => void transferZurueck(t.id)} disabled={w.busy}
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Return</button>
                 </>
               )}
@@ -463,7 +516,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={() => {
-              if (soldModal && soldPrice > 0) { markTransferSold(soldModal, soldPrice); setSoldModal(null); }
+              if (soldModal && soldPrice > 0) { void transferVerkauft(soldModal, soldPrice).then(() => setSoldModal(null)); }
             }} disabled={soldPrice <= 0}>Confirm Sale</Button>
           </div>
         </div>
@@ -569,8 +622,8 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
               <Button variant="ghost" onClick={() => setEditTransfer(null)}>Cancel</Button>
               <Button variant="primary" onClick={() => {
                 if (!editTransfer) return;
-                updateTransfer(editTransfer.id, editTransferForm);
-                setEditTransfer(null);
+                void transferAendern(editTransfer.id, editTransferForm)
+                  .then((ok) => { if (ok) setEditTransfer(null); });
               }}>Save</Button>
             </div>
           </div>

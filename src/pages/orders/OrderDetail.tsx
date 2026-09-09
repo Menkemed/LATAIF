@@ -416,6 +416,19 @@ export function OrderDetail() {
     setEditing(false);
   }
 
+  /** R4C.2 — eine Anzahlung loeschen. Fassungsbasiert wie jede Geldhandlung am Auftrag. */
+  async function anzahlungLoeschen(paymentId: string) {
+    if (!id || !order) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('deleting a deposit (no revision loaded)'))); return; }
+    if (!await w.ok('orders.delete_payment', {
+      local: () => { deletePayment(paymentId, id); return {}; },
+      remote: () => ({ orderId: id, paymentId, expectedRevision: fassung }),
+    })) return;
+    loadOrders();
+    loadPayments(id);
+  }
+
   // R4C — der Statuswechsel ist bestandswirksam (Reservierung, Freigabe) und fassungsbasiert:
   // der Auftrag nennt die Fassung, die dieser Bildschirm gesehen hat.
   async function handleAdvance(status: OrderStatus) {
@@ -1648,7 +1661,7 @@ export function OrderDetail() {
                       <button onClick={() => handleDownloadReceipt(p)}
                         className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12, paddingTop: 10, borderTop: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', gap: 4 }}
                       ><Download size={12} /> PDF</button>
-                      <button onClick={() => id && deletePayment(p.id, id)}
+                      <button onClick={() => { if (id) void anzahlungLoeschen(p.id); }}
                         className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 11, paddingTop: 10, borderTop: '1px solid #E5E9EE' }}
                       >Delete</button>
                     </div>

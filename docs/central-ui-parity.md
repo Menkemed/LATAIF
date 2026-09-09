@@ -1080,3 +1080,67 @@ Registry: 1 + 18 + 48 + 40 = 107
 R4C.1 schließt keine weitere Buchung an und erweitert keine Rechte. Es macht nur, dass dieselbe
 Person auf beiden Rechnern dasselbe sieht.
 
+---
+
+## R4C.2 — der argumentgenaue Vergleich (09.09.2026) · BLOCKED
+
+### Was die Prüfung ergeben hat
+
+R4C hatte 21 Buchungen als „deckungsgleich" geführt. Der Vergleich Feld für Feld — was die Maske
+WIRKLICH übergibt gegen das, was die Fernbuchung annimmt — hat **zehn davon widerlegt**, und zwei
+weitere fielen beim Verdrahten auf:
+
+| Buchung | was fehlt |
+|---|---|
+| `returns.create` | `staffId` + „sofort erstatten" ist ein zweiter Vorgang |
+| `returns.approve` / `returns.refund` | nur INNERHALB des Rechnungsstornos, kein eigener Knopf |
+| `purchases.create` | Zeilen mit NEUEN Artikeln, `staffId`, `sourceOrderId` |
+| `consignments.record_sale` | `specialMark` (Belegnummernkreis) |
+| `orders.create` | legt zusätzlich die Gold-Verbindlichkeit an |
+| `orders.update` | `expectedMargin`, `remainingAmount` |
+| `orders.add_payment` | `cardBrand` — davon hängt die Kartengebühr ab |
+| `repairs.update` | sechs Felder, darunter die Zahlwege |
+| `transfers.create` | `staffId` |
+| `transfers.convert_to_invoice` / `..._many` | legen im Modus „auto" erst den KUNDEN an |
+
+Jede dieser Zeilen steht mit ihrem Beweis in der Matrix. Halb zu verdrahten wäre hier teurer als
+gar nicht: eine Kartenzahlung mit falscher Gebühr oder ein Auftrag ohne Goldschuld sieht aus wie
+Erfolg.
+
+### Was angeschlossen wurde
+
+Neun Buchungen, alle fassungsbasiert:
+
+```
+returns.record_refund_payment   Erstattung auszahlen
+consignments.update             Kommission aendern (Modell + Stammdaten in EINEM Auftrag)
+orders.delete_payment           Anzahlung loeschen
+repairs.update_status           Reparaturstatus setzen
+repairs.add_line                Arbeitszeile hinzufuegen
+repairs.cancel_line             Zeile stornieren
+transfers.update                Preis / Rueckgabedatum / Notiz
+transfers.mark_returned         zurueckgenommen (bestandswirksam)
+transfers.mark_sold             verkauft
+```
+
+Voraussetzung war der zweite Teil der Fassungs-Arbeit: `rowToRepair`, `rowToTransfer` und
+`rowToReturn` reichen die Fassung jetzt ebenso durch wie Rechnung, Auftrag und Kommission. Wo
+eine Seite mehrere Handlungen hat, holt EIN Helfer die Fassung (`fassungVon`,
+`fassungOderNichts`) — dieselbe Regel, an einer Stelle statt an fünf.
+
+### Endstand der Matrix
+
+```
+20 verdrahtet · 0 exakt aber offen · 18 Luecken (Klasse B) · 2 ohne Handlung = 40
+Registry: 1 + 18 + 48 + 40 = 107   (keine neue Buchung)
+```
+
+### Warum BLOCKED
+
+§5 verlangt, je Domäne einen NEU verdrahteten Weg real zu fahren — Geld, Bestand, Auftrag,
+Kommission, Reparatur, Transfer, Retoure. Gefahren sind bisher die Wege aus R4C/R4C.1 (Zahlung,
+Auftragsstatus, Kundennotiz, Knopf-Parität): `r4c-shared-ui-writes.e2e.mjs` 30/0, unverändert
+grün. Die neun neuen Wege sind statisch bewiesen (Matrix-Gate 335/0), aber noch nicht am
+laufenden Programm gefahren. Das fehlt — und es steht hier als offener Punkt, nicht als stille
+Annahme.
+

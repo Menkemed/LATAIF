@@ -554,6 +554,25 @@ export function InvoiceDetail() {
     loadInvoices();
   }
 
+  /**
+   * R4C.2 — die Auszahlung einer Erstattung. Fassungsbasiert: der Auftrag nennt die Fassung der
+   * RETOURE, die dieser Bildschirm gesehen hat.
+   */
+  async function erstattungAuszahlen(returnId: string, amount: number, method: typeof refundPayMethod, deductCardFee: boolean) {
+    const ret = salesReturns.find((r) => r.id === returnId);
+    const fassung = ret?.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('paying out a refund (no revision loaded)'))); return; }
+    if (!await w.ok('returns.record_refund_payment', {
+      local: () => { recordRefundPayment(returnId, amount, method, undefined, deductCardFee); return {}; },
+      remote: () => ({ returnId, amount, method, expectedRevision: fassung, deductCardFee }),
+    })) return;
+    loadSalesReturns();
+    loadInvoices();
+    setRefundPayModal(null);
+    setRefundPayAmount('');
+    setRefundDeductFee(false);
+  }
+
   // Customer-facing PDF — no margin VAT visible
   function handleDownloadPdf() {
     if (!invoice) return;
@@ -1839,15 +1858,12 @@ export function InvoiceDetail() {
             })()}
             <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setRefundPayModal(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => {
+              <Button variant="primary" disabled={w.busy} data-record-refund onClick={() => {
                 const amt = parseFloat(refundPayAmount);
                 if (!amt || amt <= 0) return;
                 const capped = Math.min(amt, refundPayModal.outstanding);
                 // deductCardFee nur bei cash/bank relevant; bei 'card' erstattet der Store die Gebuehr ohnehin.
-                recordRefundPayment(refundPayModal.returnId, capped, refundPayMethod, undefined, refundDeductFee);
-                setRefundPayModal(null);
-                setRefundPayAmount('');
-                setRefundDeductFee(false);
+                void erstattungAuszahlen(refundPayModal.returnId, capped, refundPayMethod, refundDeductFee);
               }}>Record Payment</Button>
             </div>
           </div>

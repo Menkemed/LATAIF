@@ -457,6 +457,8 @@ export function canonicalRepairStatus(s: RepairStatus | string | undefined | nul
 }
 
 export interface Repair {
+  /** R4C — die gesehene Fassung; jede fassungsbasierte Buchung nennt sie. */
+  revision?: number;
   id: UUID;
   repairNumber: string;
   // Plan §Repair §Own-Item: zwei Varianten — Kundenreparatur (CUSTOMER) oder eigenes
@@ -614,6 +616,8 @@ export interface Agent {
 export type AgentTransferStatus = 'transferred' | 'sold' | 'returned' | 'settled';
 
 export interface AgentTransfer {
+  /** R4C — die gesehene Fassung; jede fassungsbasierte Buchung nennt sie. */
+  revision?: number;
   id: UUID;
   transferNumber: string;
   agentId: UUID;
@@ -1218,6 +1222,8 @@ export interface SalesReturnLine {
 }
 
 export interface SalesReturn {
+  /** R4C — die gesehene Fassung; jede fassungsbasierte Buchung nennt sie. */
+  revision?: number;
   id: UUID;
   returnNumber: string;
   branchId: UUID;
