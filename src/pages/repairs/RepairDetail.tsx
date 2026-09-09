@@ -263,26 +263,21 @@ export function RepairDetail() {
     const realSupplierId = newLineForm.supplierId === '__INHOUSE__'
       ? undefined
       : (newLineForm.supplierId || undefined);
-    const fassung = fassungOderNichts('adding a repair line');
-    if (fassung === null) return;
-    const zeile = {
+    // R4C.3 — NICHT verdrahtet, und der Grund ist am laufenden Programm gefunden worden:
+    // `repairs.add_line` prueft die Arbeitsart gegen eine EIGENE Liste
+    // (labor|polish|plating|stone|diamond|gold|parts|other|material), waehrend das Haus
+    // `RepairWorkType` spricht (service|polishing|spare_part|gold_work|stone_setting|…).
+    // Ueberschneidung: ein einziges Wort. Die Fernbuchung weist die normale Eingabe der Maske
+    // deshalb ab („unknown work type: service"). Dieselbe Sorte Fehler wie die zweite Rollenliste
+    // in R4C.1 — zwei Vokabulare fuer dieselbe Sache. Erst zusammenfuehren, dann verdrahten.
+    if (w.remote) { alert(fehlertext(nichtAmClient('adding a repair line'))); return; }
+    addRepairLine(id, {
       supplierId: realSupplierId,
       workType: newLineForm.workType,
       description: newLineForm.description || undefined,
       costAmount: cost,
       dueDate: newLineForm.dueDate || undefined,
-    };
-    if (!await w.ok('repairs.add_line', {
-      local: () => { addRepairLine(id, zeile); return {}; },
-      remote: () => ({
-        repairId: id, expectedRevision: fassung, costAmount: cost,
-        ...(realSupplierId ? { supplierId: realSupplierId } : {}),
-        workType: newLineForm.workType,
-        ...(zeile.description ? { description: zeile.description } : {}),
-        ...(zeile.dueDate ? { dueDate: zeile.dueDate } : {}),
-      }),
-    })) return;
-    loadRepairs(); loadRepairLines();
+    });
     setShowAddLineModal(false);
     setNewLineForm({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
   }
@@ -599,7 +594,7 @@ export function RepairDetail() {
             ) : (
               <>
                 {nextStatus && perm.canManageRepairs && (
-                  <Button variant="primary" onClick={handleStatusAdvance}>
+                  <Button variant="primary" onClick={handleStatusAdvance} disabled={w.busy} data-repair-advance>
                     <ClipboardCheck size={14} /> Mark as {STATUS_LABELS[nextStatus]}
                   </Button>
                 )}
@@ -1307,6 +1302,7 @@ export function RepairDetail() {
                               )}
                         </span>
                         <button
+                          data-cancel-repair-line
                           onClick={() => {
                             if (!confirm('Remove this entry? Any linked gold liability + supplier expense will also be removed.')) return;
                             void zeileStornieren(l.id);

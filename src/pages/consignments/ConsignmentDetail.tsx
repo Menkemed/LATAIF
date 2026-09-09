@@ -1145,7 +1145,7 @@ export function ConsignmentDetail() {
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
+            <Button variant="primary" onClick={() => void handleSave()} disabled={w.busy} data-save-consignment><Save size={14} /> Save</Button>
           </div>
         </div>
       </Modal>

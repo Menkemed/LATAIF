@@ -441,9 +441,9 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             <div className="flex gap-1 flex-wrap" onClick={e => e.stopPropagation()}>
               {t.status === 'transferred' && (
                 <>
-                  <button onClick={() => { setSoldModal(t.id); setSoldPrice(t.agentPrice); }}
+                  <button data-transfer-sold onClick={() => { setSoldModal(t.id); setSoldPrice(t.agentPrice); }}
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #7EAA6E', color: '#7EAA6E', borderRadius: 4, background: 'none' }}>Sold</button>
-                  <button onClick={() => void transferZurueck(t.id)} disabled={w.busy}
+                  <button data-transfer-return onClick={() => void transferZurueck(t.id)} disabled={w.busy}
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Return</button>
                 </>
               )}
@@ -478,7 +478,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                   </>
                 );
               })()}
-              <button onClick={() => { setEditTransfer(t); setEditTransferForm({ ...t }); }}
+              <button data-transfer-edit onClick={() => { setEditTransfer(t); setEditTransferForm({ ...t }); }}
                 className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
                 Edit
               </button>
@@ -517,7 +517,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>
             <Button variant="primary" onClick={() => {
               if (soldModal && soldPrice > 0) { void transferVerkauft(soldModal, soldPrice).then(() => setSoldModal(null)); }
-            }} disabled={soldPrice <= 0}>Confirm Sale</Button>
+            }} disabled={soldPrice <= 0 || w.busy} data-transfer-sold-confirm>Confirm Sale</Button>
           </div>
         </div>
       </Modal>
@@ -624,7 +624,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                 if (!editTransfer) return;
                 void transferAendern(editTransfer.id, editTransferForm)
                   .then((ok) => { if (ok) setEditTransfer(null); });
-              }}>Save</Button>
+              }} disabled={w.busy} data-transfer-save>Save</Button>
             </div>
           </div>
         </div>

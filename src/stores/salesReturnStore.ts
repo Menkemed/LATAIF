@@ -948,13 +948,27 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     if ((r.refundPaidAmount || 0) > 0.005) {
       return { canCancel: false, blockReason: `A refund of ${(r.refundPaidAmount || 0).toFixed(3)} BHD has already been paid out — reclaim it first.`, needsStockWarning: false };
     }
-    const usedCredit = query(
-      `SELECT cc.id FROM customer_credits cc
-         JOIN credit_notes cn ON cn.id = cc.source_id
-        WHERE cn.sales_return_id = ? AND cc.source_type = 'sales_return'
-          AND cc.used_amount > 0.005 LIMIT 1`,
-      [id]
-    );
+    // R4C.3 — diese Frage wird beim ZEICHNEN gestellt (die Storno-Schaltflaeche fragt sie fuer
+    // jede Retoure). Auf einem Rechner ohne eigene Datenbank warf sie mitten im Aufbau und riss
+    // die GANZE Rechnungsansicht mit: „Database not initialized". Ohne Auskunft ist die ehrliche
+    // Antwort nicht „darf stornieren", sondern das Gegenteil — dieselbe fail-closed Haltung, die
+    // `getInvoiceCardInfo` weiter unten schon hat.
+    let usedCredit: Array<Record<string, unknown>>;
+    try {
+      usedCredit = query(
+        `SELECT cc.id FROM customer_credits cc
+           JOIN credit_notes cn ON cn.id = cc.source_id
+          WHERE cn.sales_return_id = ? AND cc.source_type = 'sales_return'
+            AND cc.used_amount > 0.005 LIMIT 1`,
+        [id]
+      );
+    } catch {
+      return {
+        canCancel: false,
+        blockReason: 'Cancelling a return is only available on the main computer.',
+        needsStockWarning: false,
+      };
+    }
     if (usedCredit.length > 0) {
       return { canCancel: false, blockReason: 'The store credit from this return has already been used.', needsStockWarning: false };
     }

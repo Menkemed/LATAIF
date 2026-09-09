@@ -1144,3 +1144,72 @@ grün. Die neun neuen Wege sind statisch bewiesen (Matrix-Gate 335/0), aber noch
 laufenden Programm gefahren. Das fehlt — und es steht hier als offener Punkt, nicht als stille
 Annahme.
 
+---
+
+## R4C.3 — gefahren statt behauptet (09.09.2026) · BLOCKED
+
+R4C.2 hatte neun Buchungen angeschlossen und das statisch bewiesen. Das Fahren an zwei echten
+Rechnern hat **zwei echte Fehler** gefunden, die kein Gate hätte finden können — und beide
+gehören zur teuersten Sorte: sie sehen aus wie „funktioniert nicht" und sind in Wahrheit ein
+Absturz bzw. ein zweites Vokabular.
+
+### Fund 1 — die Rechnungsansicht stürzte ab, sobald eine Retoure daranhing
+
+```
+/invoices/<id> mit Retoure  →  UI CRASH: Error: Database not initialized
+```
+
+`getReturnCancelability()` fragt beim ZEICHNEN, ob eine Retoure noch stornierbar ist — für
+jede Retoure, in der Storno-Schaltfläche. Die Antwort holt sie aus `customer_credits`. Auf
+einem Rechner ohne eigene Datenbank warf das mitten im Aufbau und riss die ganze Ansicht mit.
+
+R4A hatte die Rechnungsansicht datenbanklos bewiesen — mit einer Rechnung OHNE Retoure. Der Weg
+war da, nur nie betreten. Die Funktion antwortet jetzt fail-closed („nur am Hauptrechner möglich")
+statt zu werfen — dieselbe Haltung, die `getInvoiceCardInfo` eine Funktion weiter unten schon
+hatte.
+
+### Fund 2 — `repairs.add_line` spricht ein anderes Vokabular
+
+```
+Haus  (RepairWorkType):  service | polishing | spare_part | gold_work | stone_setting | …
+Buchung (WORK_TYPES):    labor | polish | plating | stone | diamond | gold | parts | other | material
+Ueberschneidung:         plating — ein einziges Wort
+```
+
+Die normale Eingabe der Maske wird abgewiesen: „unknown work type: service". Das ist **dieselbe
+Sorte Fehler wie die zweite Rollenliste in R4C.1** — zwei Vokabulare für dieselbe Sache, und das
+zweite ist nie mitgewachsen. Die Buchung ist deshalb zurück in Klasse B; verdrahtet wird sie,
+wenn die Listen zusammengeführt sind, nicht vorher.
+
+### Was wirklich gefahren wurde
+
+```
+test/e2e/r4c3-lifecycle-writes.e2e.mjs   58 bestanden / 3 offen
+
+returns.record_refund_payment   Erstattung 300 ausgezahlt, genau eine Buchung im Hauptbuch
+consignments.update             650 statt 500, Fassung gestiegen, PC2 sieht es nach frischem Lesen
+repairs.update_status           Status weiter, Fassung gestiegen
+transfers.update                Preis 850, Fassung gestiegen
+transfers.mark_sold             Zustand „verkauft" mit echtem Preis
+transfers.mark_returned         Zustand „zurueckgenommen", Artikel wieder im Bestand
+orders.delete_payment           genau die Zielzahlung weg, Fassung gestiegen
+
+offen: repairs.cancel_line — die Schaltflaeche war in diesem Aufbau nicht erreichbar
+```
+
+Über den ganzen Lauf: kein einziger Griff zur lokalen Datenbank auf dem zweiten Rechner, keine
+`lataif.db`, kein Datenort, kein Ausgangskorb.
+
+### Stand
+
+```
+19 verdrahtet · 0 exakt aber offen · 19 Luecken (Klasse B) · 2 ohne Handlung = 40
+Registry: 1 + 18 + 48 + 40 = 107   (unveraendert)
+```
+
+### Warum BLOCKED
+
+Zwei Gründe, beide benannt: die Matrix steht nach dem Fund bei **19/19** statt bei den erwarteten
+20/18 — `repairs.add_line` musste zurück —, und `repairs.cancel_line` ist als einzige der
+neu angeschlossenen Buchungen noch nicht real gefahren. Sieben von neun sind es.
+
