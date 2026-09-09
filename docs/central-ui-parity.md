@@ -697,3 +697,89 @@ offen und ist die nächste Scheibe. Ebenso zwei Leseaufrufe, die erst auf **Klic
 eigenen Landesvorwahlen — sie gehören zu Handlungen, nicht zum Zeichnen, und sind im Gate
 namentlich eingeordnet.
 
+---
+
+## R4A.1 — die zwei Lesevorgänge, die erst auf Klick laufen (09.09.2026)
+
+### Was offen war
+
+R4A hat jede Fläche gezeichnet und dabei zwei Stellen bewusst stehen lassen: sie laufen beim
+Zeichnen nie, sondern erst, wenn der Mensch einen Artikel gewählt hat. Ein Rundgang erreicht
+sie deshalb nicht — er klickt nicht.
+
+### §1 Die beiden Wege, Klick für Klick
+
+```
+/invoices/new (InvoiceCreate)
+  → Klick in den Artikel-Picker einer Zeile
+  → pickProductForLine(idx, productId)
+  → Neuzeichnen: computed = lines.map(...)
+  → FRUEHER: getLotsWithPurchaseNumbers(product.id)
+  → core/lots/lot-queries.ts  →  query(SELECT ... FROM stock_lots ...)  →  getDatabase()
+  → JETZT:   useSharedRead(product.lots.batch.get, { productIds })
+
+/repairs (RepairList, Maske „New repair")
+  → Klick in den Artikel-Picker („Own Item")
+  → setForm({ productId })
+  → Neuzeichnen: der Block unter dem Picker
+  → FRUEHER: getLotsWithPurchaseNumbers(form.productId!)
+  → dieselbe Abfrage, dieselbe Datenbank
+  → JETZT:   useSharedRead(product.lots.get, { productId })
+```
+
+Zwei Griffe, nicht einer: „Rechnung anlegen" fragte die Datenbank ZUSÄTZLICH im Klick selbst,
+um sofort das älteste Los vorzuwählen. Das ist jetzt weg — der Klick setzt nur noch den
+Zustand, und die FIFO-Wahl fällt beim Zeichnen (`lots.find(...) || lots[0]`), also genau
+dort, wo sie ohnehin schon fiel. Gespeichert wird derselbe Lot wie vorher.
+
+### §3 Wiederverwendet, nicht neu erfunden
+
+„Reparatur anlegen" fragt nach EINEM Artikel und nimmt deshalb die vorhandene Auskunft
+`product.lots.get`. „Rechnung anlegen" braucht die Lose ALLER Zeilen gleichzeitig — ein
+Aufruf je Zeile wäre ein Rundgang je Zeile. Dafür, und nur dafür, kam eine kleine neue
+Auskunft dazu: `product.lots.batch.get`. Sie ruft dieselbe Einzelauskunft in einer
+Schleife; die FIFO-Logik ist nicht kopiert.
+
+### Ein echter Scope-Fund derselben Sorte wie in R2B/R4A
+
+`productLotsFor` hatte ein `void ctx`: die Lose hingen am Artikel, nicht an der Filiale.
+Über das Netz hieß das — eine fremde Artikelkennung genügte, und der Client bekam die Lose
+einer fremden Filiale samt Einkaufsnummer, Lieferant und Einstandspreis. `stock_lots` hat
+eine `branch_id`; sie wurde nur nicht gelesen.
+
+`getLotsWithPurchaseNumbers()` und `deriveProductCostFromLots()` nehmen jetzt eine Filiale
+entgegen (`AND sl.branch_id = ?`), und die Auskunft gibt ihnen die des AUSWEISES weiter —
+derselbe Schnitt wie bei `receivablesBreakdown()` in R4A. Die Negativkontrolle im Gate stellt
+den alten Zustand nach: dieselbe Abfrage ohne Filialgrenze liefert die fremden Lose.
+
+### Nebenbefund im Prüfstand selbst
+
+`r2c-payables-trades-scope.test.ts` rechnete die Fälligkeit gegen die ECHTE Uhr, baute den
+Fall aber auf einem fest eingetragenen Tag auf. Das Gate wanderte damit jeden Kalendertag um
+eins weiter (40 → 41 → …) und wäre ohne jede Programmänderung rot geworden. Der Aufbau nimmt
+jetzt dieselbe Uhr wie die Anwendung.
+
+### §2/§5/§6 Am laufenden Programm
+
+```
+test/uiparity/r4a1-click-reads.test.ts   31/0   Weg, Wiederverwendung, Autoritaet, Negativkontrolle
+test/e2e/r4a1-click-reads.e2e.mjs               zwei echte Anwendungen, zwei echte Klicks
+test/e2e/r4a-route-crawl.e2e.mjs          9/0   der Rundgang bleibt gruen
+```
+
+Der E2E-Lauf klickt wirklich: Artikel-Picker auf, Artikel wählen, und die Losauswahl muss
+offen dastehen — beide Lose, beide echten Einstandspreise, die Einkaufsnummer aus der
+verbundenen Tabelle, FIFO vorgewählt. Dabei kein Griff zur lokalen Datenbank, keine
+Fehlergrenze; der Bildschirm des Primary (Route, Suche, Auswahl, geöffnete Ansicht) ist
+danach unverändert, und auf dem Client liegt weiterhin kein Geschäftsspeicher.
+
+### Registry
+
+```
+Probe            = 1
+C2 Reads         = 18
+UI-Parity Reads  = 48   (47 aus R1–R4A + 1 Sammelauskunft aus R4A.1)
+Mutations        = 40   (unveraendert — R4A.1 fasst keinen Schreibweg an)
+Total            = 107
+```
+

@@ -61,8 +61,9 @@ for (const m of KERN) for (const f of dbFunktionen(m)) DB_FN.set(f, m);
  *   'maschine'  — eine Flaeche, die ohnehin nur am Hauptrechner laeuft.
  */
 const EINGEORDNET: Record<string, { beim: 'handlung' | 'maschine'; grund: string }> = {
-  'pages/invoices/InvoiceCreate.tsx:getLotsWithPurchaseNumbers': { beim: 'handlung', grund: 'Losauswahl beim Hinzufuegen einer Zeile' },
-  'pages/repairs/RepairList.tsx:getLotsWithPurchaseNumbers': { beim: 'handlung', grund: 'Losauswahl beim Anlegen' },
+  // R4A.1 — die beiden Losauswahlen standen hier und sind GESCHLOSSEN: beide Seiten fragen
+  // jetzt `product.lots.get` bzw. `product.lots.batch.get`. Kommt eine der Fundstellen zurueck,
+  // faellt sie durch Pruefung A — genau so ist es gemeint (`r4a1-click-reads.test.ts`).
   'pages/settings/SettingsPage.tsx:useCountryCodesStore': { beim: 'maschine', grund: 'Einstellungen laufen nur am Hauptrechner' },
   'pages/settings/LedgerDebugPage.tsx:balanceOf': { beim: 'maschine', grund: 'Pruefstand' },
   'pages/settings/LedgerDebugPage.tsx:cashflow': { beim: 'maschine', grund: 'Pruefstand' },

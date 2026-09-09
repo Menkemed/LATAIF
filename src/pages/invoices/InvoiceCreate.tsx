@@ -20,12 +20,12 @@ import { useProductStore } from '@/stores/productStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { calcInvoiceLine, toInvoiceLine } from '@/core/invoices/line-derivation';
-import { getLotsWithPurchaseNumbers, formatLotLabel, type StockLot } from '@/core/lots/lot-queries';
+import { formatLotLabel, type StockLot } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import { checkEditReason, EDIT_REASON_REQUIRED_MESSAGE } from '@/core/invoices/edit-reason';
 import { useSharedRead } from '@/core/data/shared-read';
-import { lotAggregatesFor } from '@/core/data/domain-reads';
+import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -135,11 +135,27 @@ export function InvoiceCreate() {
     subtitle: c.phone,
   })), [customers]);
   // v0.6.9 — Reservierungen vorberechnen (Soft-Warnung im Picker).
-  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
+  const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
   // CENTRAL-UI-PARITY R4A — Losezahlen aus der gemeinsamen Kernauskunft statt einer eigenen
   // Abfrage: auf einem Rechner ohne Datenbank warf die sonst mitten im Zeichnen.
   const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
   const lotAgg = useMemo(() => new Map(bestand.paare), [bestand]);
+  // CENTRAL-UI-PARITY R4A.1 — die Lose der gewaehlten Artikel. Bis hier holte sie jede Zeile im
+  // Zeichnen selbst aus der Datenbank; auf einem Rechner ohne Datenbank warf genau das, sobald
+  // der Mensch einen Artikel gewaehlt hatte. Jetzt eine Frage fuer alle Zeilen, ueber denselben
+  // Weg wie der Rest der Seite.
+  const zeilenArtikel = useMemo(
+    () => [...new Set(lines.map(l => l.productId).filter(Boolean))].sort(),
+    [lines],
+  );
+  const loseAntwort = useSharedRead(
+    'product.lots.batch.get',
+    { productIds: zeilenArtikel },
+    (ctx) => productLotsBatchFor(ctx, zeilenArtikel),
+    { byProduct: [] as Array<[string, typeof LEERE_LOSE]> },
+    [],
+  );
+  const loseJeArtikel = useMemo(() => new Map(loseAntwort.byProduct), [loseAntwort]);
 
   const productOptions = useMemo(() => {
     // Plan §Sales §Partial-Payment-Reservation: 'reserved' / 'consignment_reserved'
@@ -185,7 +201,7 @@ export function InvoiceCreate() {
         selectedLot: null as (StockLot & { purchaseNumber: string | null }) | null,
         scheme: 'VAT_10' as const, vatRate: 10, net: 0, vat: 0, internalVat: 0, gross: 0 };
     }
-    const lots = getLotsWithPurchaseNumbers(product.id);
+    const lots = loseJeArtikel.get(product.id)?.lots ?? [];
     const selectedLot = lots.find(lot => lot.id === l.lotId) || lots[0] || null;
     const costBasis = selectedLot ? selectedLot.unitCost : (product.purchasePrice || 0);
     const resolved = (l.scheme === 'auto' ? (product.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') : l.scheme);
@@ -212,12 +228,13 @@ export function InvoiceCreate() {
   function pickProductForLine(idx: number, productId: string) {
     const p = products.find(pp => pp.id === productId);
     if (!p) return;
-    // Phase 3 — beim Produktwechsel direkt aeltesten Lot auto-picken (FIFO),
-    // damit der Cost-Snapshot deterministisch ist und User nicht extra klicken muss.
-    const lots = getLotsWithPurchaseNumbers(productId);
+    // Phase 3 — beim Produktwechsel gilt FIFO: der aelteste aktive Lot.
+    // R4A.1 — die Wahl bleibt offen (`lotId: undefined`) statt hier eine eigene Abfrage zu
+    // stellen; das Zeichnen setzt danach genau denselben Lot (`lots.find(...) || lots[0]`), und
+    // gespeichert wird ebenfalls dieser. Gleiches Ergebnis, ohne Datenbank im Klick.
     updateLine(idx, {
       productId,
-      lotId: lots[0]?.id,
+      lotId: undefined,
       unitPrice: p.plannedSalePrice ?? p.purchasePrice ?? 0,
     });
   }

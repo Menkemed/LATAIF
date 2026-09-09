@@ -205,6 +205,7 @@ pub const OP_LEDGER_BALANCES_GET: &str = "ledger.balances.get";
 pub const OP_FINANCE_RECEIVABLES_GET: &str = "finance.receivables.get";
 pub const OP_INVENTORY_LOT_AGGREGATES_GET: &str = "inventory.lot_aggregates.get";
 pub const OP_PRODUCT_LOTS_GET: &str = "product.lots.get";
+pub const OP_PRODUCT_LOTS_BATCH_GET: &str = "product.lots.batch.get";
 pub const OP_EXPENSES_CREDIT_PAID_GET: &str = "expenses.credit_paid.get";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
@@ -318,6 +319,7 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_FINANCE_RECEIVABLES_GET,
     OP_INVENTORY_LOT_AGGREGATES_GET,
     OP_PRODUCT_LOTS_GET,
+    OP_PRODUCT_LOTS_BATCH_GET,
     OP_EXPENSES_CREDIT_PAID_GET,
 ];
 

@@ -18,7 +18,9 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { productSearchText } from '@/core/utils/product-format';
-import { getLotsWithPurchaseNumbers, formatLotLabel } from '@/core/lots/lot-queries';
+import { formatLotLabel } from '@/core/lots/lot-queries';
+import { useSharedRead } from '@/core/data/shared-read';
+import { productLotsFor, LEERE_LOSE } from '@/core/data/domain-reads';
 import type { Repair, RepairStatus } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { Bhd } from '@/components/ui/Bhd';
@@ -97,6 +99,17 @@ export function RepairList() {
   useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); loadEmployees(); loadOrders(); }, [loadRepairs, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers, loadEmployees, loadOrders]);
 
   const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
+
+  // CENTRAL-UI-PARITY R4A.1 — die Lose des gewaehlten Artikels. Bis hier holte die Maske sie
+  // mitten im Zeichnen selbst aus der Datenbank, sobald ein Artikel gewaehlt war; auf einem
+  // Rechner ohne Datenbank warf genau das. Jetzt derselbe Weg wie ueberall sonst.
+  const artikelLose = useSharedRead(
+    'product.lots.get',
+    { productId: form.productId ?? '' },
+    (ctx) => productLotsFor(ctx, form.productId ?? ''),
+    LEERE_LOSE,
+    [],
+  );
 
   // v0.7.6 — In-house Sentinel als erste Option (consistent mit RepairDetail).
   const supplierOptions = useMemo(() => [
@@ -844,7 +857,7 @@ export function RepairList() {
                 // Stock-Lots Phase 5d — User waehlt explizit welcher Lot den
                 // Repair-Cost kapitalisiert. Bei nur 1 aktivem Lot ist die Wahl
                 // implizit (kein Picker noetig); bei 0 Lots Hinweis auf FIFO-Fallback.
-                const lots = getLotsWithPurchaseNumbers(form.productId!);
+                const lots = artikelLose.lots;
                 return (
                   <>
                     <div style={{ marginTop: 10, padding: '10px 12px', background: '#F2F7FA', borderRadius: 6, border: '1px solid #E5E9EE', fontSize: 12 }}>

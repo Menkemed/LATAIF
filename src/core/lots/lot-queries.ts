@@ -93,7 +93,7 @@ export function formatLotLabel(lot: StockLot, purchaseNumber?: string): string {
 // idealerweise vom Caller batched, aber fuer 2-3 Lots pro Produkt ist die
 // einfache Variante ok. Supplier-Name kommt aus dem Purchase-Header (jeder Lot
 // gehoert zu genau einem Purchase, jeder Purchase zu genau einem Supplier).
-export function getLotsWithPurchaseNumbers(productId: string): Array<StockLot & {
+export function getLotsWithPurchaseNumbers(productId: string, branchId?: string): Array<StockLot & {
   purchaseNumber: string | null;
   supplierId: string | null;
   supplierName: string | null;
@@ -105,9 +105,9 @@ export function getLotsWithPurchaseNumbers(productId: string): Array<StockLot & 
        LEFT JOIN suppliers s ON s.id = p.supplier_id
       WHERE sl.product_id = ?
         AND sl.status != 'CANCELLED'
-        AND sl.qty_remaining > 0
+        AND sl.qty_remaining > 0${branchId ? ' AND sl.branch_id = ?' : ''}
       ORDER BY sl.acquired_at ASC, sl.id ASC`,
-    [productId]
+    branchId ? [productId, branchId] : [productId]
   );
   return rows.map(r => ({
     ...rowToLot(r),
@@ -329,15 +329,15 @@ export function syncAllProductQuantities(): number {
 // Nutzung in ProductDetail/InvoiceCreate/Reports: Anzeige "Cost: X BHD (lot)" statt
 // direktem Zugriff auf product.purchase_price. So erkennt der User dass mehrere
 // Kaeufe verschiedene Cost-Snapshots haben.
-export function deriveProductCostFromLots(productId: string): { fifoCost: number; weightedAvg: number; lotCount: number } | null {
+export function deriveProductCostFromLots(productId: string, branchId?: string): { fifoCost: number; weightedAvg: number; lotCount: number } | null {
   const rows = query(
     `SELECT id, unit_cost, qty_remaining, acquired_at
        FROM stock_lots
       WHERE product_id = ?
         AND status != 'CANCELLED'
-        AND qty_remaining > 0
+        AND qty_remaining > 0${branchId ? ' AND branch_id = ?' : ''}
       ORDER BY acquired_at ASC, id ASC`,
-    [productId]
+    branchId ? [productId, branchId] : [productId]
   );
   if (rows.length === 0) return null;
   const fifoCost = Number(rows[0].unit_cost) || 0;

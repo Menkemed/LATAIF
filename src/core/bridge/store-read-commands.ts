@@ -35,7 +35,7 @@ import {
   OP_PAGE_PRODUCT_DETAIL_GET, OP_PAGE_PURCHASE_CREATE_GET, OP_REFS_NUMBERS_GET,
   OP_METALS_STOCK_BY_KARAT_GET, OP_SEARCH_GLOBAL_GET, OP_PAGE_RECONCILIATION_GET,
   OP_LEDGER_BALANCES_GET, OP_FINANCE_RECEIVABLES_GET, OP_INVENTORY_LOT_AGGREGATES_GET,
-  OP_PRODUCT_LOTS_GET, OP_EXPENSES_CREDIT_PAID_GET,
+  OP_PRODUCT_LOTS_GET, OP_PRODUCT_LOTS_BATCH_GET, OP_EXPENSES_CREDIT_PAID_GET,
 } from './store-read-ops';
 
 /** Der Rumpf, den die Route baut: geprüfter Absender plus die Eingabe des Clients. */
@@ -568,8 +568,21 @@ registerCommand(OP_PRODUCT_LOTS_GET, {
   kind: 'read',
   handler: async (payload, actor): Promise<CommandResult> => {
     const ctx = contextOf(payload, actor);
-    const productId = requiredId(payload, 'productId');
+    // R4A.1 — ohne Artikel ist die ehrliche Antwort „keine Lose", kein Fehler: die Maske fragt
+    // schon, bevor der Mensch einen Artikel gewaehlt hat.
+    const productId = optionalId(payload, 'productId') ?? '';
     return { data: (await import('@/core/data/domain-reads')).productLotsFor(ctx, productId) };
+  },
+});
+
+// R4A.1 — dieselbe Auskunft für mehrere Artikel auf einmal: „Rechnung anlegen" braucht die Lose
+// jeder Zeile gleichzeitig, und ein Rundgang je Zeile wäre weder schnell noch ehrlich.
+registerCommand(OP_PRODUCT_LOTS_BATCH_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const productIds = idList(payload, 'productIds');
+    return { data: (await import('@/core/data/domain-reads')).productLotsBatchFor(ctx, productIds) };
   },
 });
 

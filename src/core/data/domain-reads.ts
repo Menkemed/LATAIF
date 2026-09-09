@@ -89,9 +89,34 @@ export interface ProductLots {
   fifo: { fifoCost: number; weightedAvg: number; lotCount: number } | null;
 }
 
+export const LEERE_LOSE: ProductLots = { lots: [], fifo: null };
+
 export function productLotsFor(ctx: BusinessReadContext, productId: string): ProductLots {
-  void ctx;
-  return { lots: getLotsWithPurchaseNumbers(productId), fifo: deriveProductCostFromLots(productId) };
+  if (!productId) return LEERE_LOSE;
+  // R4A.1 — die Filiale des Ausweises begrenzt die Lose. Ohne sie beantwortete eine fremde
+  // Artikelkennung die Frage trotzdem: die Lose einer fremden Filiale samt Einkaufsnummer,
+  // Lieferant und Einstandspreis. Derselbe Schnitt wie bei der Forderungsaufstellung.
+  return {
+    lots: getLotsWithPurchaseNumbers(productId, ctx.branchId),
+    fifo: deriveProductCostFromLots(productId, ctx.branchId),
+  };
+}
+
+// ── Die Lose MEHRERER Artikel ────────────────────────────────────────────
+//
+// „Rechnung anlegen" braucht sie für jede Zeile gleichzeitig. Ein Aufruf je Zeile wäre ein
+// Rundgang je Zeile — deshalb ein Name für die ganze Frage, gebaut aus derselben Auskunft.
+export interface ProductLotsBatch { byProduct: Array<[string, ProductLots]> }
+
+export function productLotsBatchFor(ctx: BusinessReadContext, productIds: readonly string[]): ProductLotsBatch {
+  const byProduct: Array<[string, ProductLots]> = [];
+  const gesehen = new Set<string>();
+  for (const id of productIds) {
+    if (!id || gesehen.has(id)) continue;
+    gesehen.add(id);
+    byProduct.push([id, productLotsFor(ctx, id)]);
+  }
+  return { byProduct };
 }
 
 // ── Wie viel einer Ausgabe mit Guthaben beglichen wurde ──────────────────

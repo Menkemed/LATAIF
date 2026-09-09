@@ -79,6 +79,7 @@ export const OP_LEDGER_BALANCES_GET = 'ledger.balances.get';
 export const OP_FINANCE_RECEIVABLES_GET = 'finance.receivables.get';
 export const OP_INVENTORY_LOT_AGGREGATES_GET = 'inventory.lot_aggregates.get';
 export const OP_PRODUCT_LOTS_GET = 'product.lots.get';
+export const OP_PRODUCT_LOTS_BATCH_GET = 'product.lots.batch.get';
 export const OP_EXPENSES_CREDIT_PAID_GET = 'expenses.credit_paid.get';
 
 /**
@@ -132,6 +133,7 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_FINANCE_RECEIVABLES_GET,
   OP_INVENTORY_LOT_AGGREGATES_GET,
   OP_PRODUCT_LOTS_GET,
+  OP_PRODUCT_LOTS_BATCH_GET,
   OP_EXPENSES_CREDIT_PAID_GET,
 ];
 

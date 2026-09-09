@@ -66,8 +66,12 @@ const { setPrimarySession } = await import('./_auth-switch.ts');
 const { executeCommand } = await import('../../src/core/bridge/command-registry.ts');
 await import('../../src/core/bridge/store-read-commands.ts');
 
-const NOW = '2026-09-08T00:00:00.000Z';
-const TODAY = new Date(NOW);
+// Die Fälligkeit rechnet die Anwendung gegen die ECHTE Uhr. Ein fest eingetragener Tag im
+// Aufbau wanderte deshalb jeden Kalendertag um eins weiter (40 → 41 → …) und machte dieses
+// Gate mit der Zeit rot, ohne dass sich am Programm etwas geändert hatte. Der Aufbau nimmt
+// jetzt dieselbe Uhr wie die Anwendung: vierzig Tage vor JETZT sind immer vierzig Tage.
+const TODAY = new Date();
+const NOW = TODAY.toISOString();
 const daysAgo = (n: number) => new Date(TODAY.getTime() - n * 86_400_000).toISOString();
 const OLD = daysAgo(40);   // vierzig Tage alt — mit Karenz 0 überfällig, mit Karenz 90 nicht
 
