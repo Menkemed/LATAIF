@@ -51,6 +51,10 @@ import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
 import {
+  buildOrderInvoiceLines, orderCustomCostBasis, markConvertedLinesDelivered,
+} from '@/core/orders/order-invoice-lines';
+import { TAX_SCHEMES, canonicalTaxScheme, type TaxScheme } from '@/core/models/types';
+import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
 } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
@@ -372,20 +376,55 @@ export function runDeletePayment(deps: EngineDeps, identity: CommandIdentity, ra
 export interface ConvertOrderRequest {
   orderId: string;
   expectedRevision: number;
+  /** R5A.2 — das Schema je Position, wie der Schema-Dialog es bestaetigt hat. */
+  taxSchemes?: Record<string, TaxScheme>;
+  /** R5A.2 — die Nummernart aus dem Nummern-Dialog (Punkt-Praefix). */
+  specialMark?: boolean;
+  /** R5A.2 — „Auftrag mit dieser Rechnung abschliessen". */
+  markComplete?: boolean;
 }
 
+const MAX_CONVERT_LINES = 500;
+
 /**
- * Kein Feld außer Kennung und Fassung. WELCHE Positionen abgerechnet werden, entscheidet das
- * Haus (`getBillableLines`: fertig, kundenseitig, noch nicht berechnet), und die Rechnungsnummer
- * ebenso. Ein Client, der eine Auswahl mitschickte, könnte eine Position doppelt berechnen.
+ * WELCHE Positionen abgerechnet werden, entscheidet das Haus (`getBillableLines`: fertig,
+ * kundenseitig, noch nicht berechnet), und die Rechnungsnummer ebenso. Ein Client, der eine
+ * Auswahl mitschickte, könnte eine Position doppelt berechnen.
+ *
+ * R5A.2 — was der Mensch in den Dialogen ENTSCHEIDET, reist dagegen mit: das Schema je Position,
+ * die Nummernart und „abschliessen". Das sind keine Ableitungen, sondern Wahlen — ohne sie
+ * rechnete der Primary still etwas anderes, als die Maske gezeigt hat. Das Schema-Verzeichnis
+ * waehlt KEINE Positionen aus: seine Schluessel muessen genau die abrechenbaren sein.
  */
 export function parseConvertOrder(raw: unknown): ConvertOrderRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['orderId', 'expectedRevision']);
-  return {
+  onlyKnownFields(raw, ['orderId', 'expectedRevision', 'taxSchemes', 'specialMark', 'markComplete']);
+  const out: ConvertOrderRequest = {
     orderId: reqString(raw.orderId, 'orderId'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
   };
+  for (const k of ['specialMark', 'markComplete'] as const) {
+    if (raw[k] === undefined) continue;
+    if (typeof raw[k] !== 'boolean') throw new FinancialPayloadError(`${k} must be true or false`);
+    out[k] = raw[k] as boolean;
+  }
+  if (raw.taxSchemes !== undefined) {
+    if (!isPlain(raw.taxSchemes)) throw new FinancialPayloadError('taxSchemes must be an object');
+    const eintraege = Object.entries(raw.taxSchemes);
+    if (eintraege.length === 0 || eintraege.length > MAX_CONVERT_LINES) {
+      throw new FinancialPayloadError('taxSchemes must name the lines to invoice');
+    }
+    const schemes: Record<string, TaxScheme> = {};
+    for (const [lineId, scheme] of eintraege) {
+      if (!lineId.trim()) throw new FinancialPayloadError('taxSchemes: empty line id');
+      if (!(TAX_SCHEMES as readonly unknown[]).includes(scheme)) {
+        throw new FinancialPayloadError(`unknown tax scheme: ${String(scheme)}`);
+      }
+      schemes[lineId] = scheme as TaxScheme;
+    }
+    out.taxSchemes = schemes;
+  }
+  return out;
 }
 
 export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
@@ -414,26 +453,44 @@ export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw
     const customerId = String(order.customer_id ?? '');
     if (!customerId) throw new CommandRejected('ORDER_HAS_NO_CUSTOMER', 'this order has no client');
 
-    // Die Zeilen der Rechnung entstehen aus den Auftragszeilen — mit dem Steuerschema, das der
-    // Auftrag festgehalten hat, und den Einstandskosten des Artikels. Gerechnet wird beides im
-    // Haus; hier wird nur zugeordnet.
-    const lines = billable.map((l) => {
-      const p = query('SELECT purchase_price, tax_scheme FROM products WHERE id = ?', [l.productId])[0];
-      const scheme = String(l.taxScheme ?? p?.tax_scheme ?? 'ZERO');
-      const rate = Number(l.vatRate ?? (scheme === 'VAT_10' ? 10 : 0));
-      const qty = Math.max(1, Number(l.quantity ?? 1));
-      const net = Number(l.unitPrice ?? 0) * qty;
-      const vat = rate > 0 ? net * rate / 100 : 0;
-      return {
-        productId: l.productId as string,
-        quantity: qty,
-        unitPrice: Number(l.unitPrice ?? 0),
-        purchasePrice: Number(p?.purchase_price ?? 0),
-        taxScheme: scheme,
-        vatRate: rate,
-        vatAmount: vat,
-        lineTotal: net + vat,
-      };
+    // R5A.2 — die gezeigten Positionen muessen die abzurechnenden sein. Hat sich dazwischen etwas
+    // bewegt (eine Position ist fertig geworden, eine andere schon berechnet), rechnet der Primary
+    // NICHT still eine andere Menge ab, als der Mensch bestaetigt hat.
+    if (req.taxSchemes) {
+      const gezeigt = Object.keys(req.taxSchemes).sort().join('|');
+      const faellig = billable.map((l) => l.id).sort().join('|');
+      if (gezeigt !== faellig) {
+        throw new CommandRejected('ORDER_LINES_CHANGED',
+          'the lines to invoice are not the ones that were confirmed — reload the order');
+      }
+    }
+    const auftrag = os.getOrder(req.orderId);
+    if (!auftrag) throw new CommandRejected('ORDER_NOT_FOUND', 'no such order in this branch');
+    // Der Artikelbestand des Hauses, frisch — die Einstandskosten kommen von dort, wie am Primary.
+    const ps = useProductStore.getState();
+    ps.loadProducts();
+    // Das Schema je Position: die Wahl aus dem Dialog, sonst das festgehaltene, sonst das des
+    // Artikels (Auftraege, die ohne Schema angelegt wurden).
+    const schemes: Record<string, TaxScheme> = {};
+    for (const l of billable) {
+      const p = query('SELECT tax_scheme FROM products WHERE id = ?', [l.productId])[0];
+      schemes[l.id] = req.taxSchemes?.[l.id]
+        ?? canonicalTaxScheme(String(l.taxScheme ?? p?.tax_scheme ?? 'ZERO'));
+    }
+    // Die Zeilen der Rechnung rechnet DIESELBE Funktion wie die Auftragsansicht — Steuer,
+    // Differenzbesteuerung und Sonderstueck-Brutto inklusive. Nachgebaut wird hier nichts.
+    const lines = buildOrderInvoiceLines({
+      order: auftrag,
+      billableLines: billable,
+      perLineSchemes: schemes,
+      customCostBasis: orderCustomCostBasis(os.getOrderLines(req.orderId)),
+      findProduct: (pid) => useProductStore.getState().products.find((p) => p.id === pid),
+      // Eine Position ohne Artikel wuerde hier einen ANLEGEN — das ist `products.create`, mit
+      // eigenem Nachweis (SKU, Medien). Der Fernbefehl legt keinen an.
+      createProduct: () => {
+        throw new CommandRejected('ORDER_LINE_WITHOUT_PRODUCT',
+          'a line of this order has no article yet — create it first');
+      },
     });
 
     let created: { id: string } | null = null;
@@ -447,7 +504,8 @@ export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw
         rollback: () => { /* dito — der Fernauftrag rollt zurück */ },
         assertBillable: () => os.assertOrderLinesBillable(billable.map((l) => l.id)),
         createInvoice: () => useInvoiceStore.getState().createDirectInvoice(
-          customerId, lines as never, `Invoice for order ${String(order.order_number ?? '')}`,
+          customerId, lines, `Invoice for order ${String(order.order_number ?? '')}`,
+          undefined, undefined, undefined, req.specialMark === true,
         ),
         linkLinesAndOrder: (invoiceId: string) => {
           os.markOrderLinesInvoiced(billable.map((l) => l.id), invoiceId);
@@ -462,6 +520,9 @@ export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw
       }
       throw err;
     }
+    // R5A.2 — „abschliessen", in derselben Reihenfolge wie am Primary: nach der Umwandlung, vor
+    // dem Anzahlungsuebertrag, ueber DIESELBE Funktion.
+    if (req.markComplete) markConvertedLinesDelivered(billable, os.updateOrderLineStatus);
     // R5A — der Anzahlungsuebertrag gehoert zu DERSELBEN Handlung, nicht zu einer zweiten.
     //
     // Bis hierher legte dieser Befehl nur die Rechnung an und verknuepfte die Zeilen — das Geld

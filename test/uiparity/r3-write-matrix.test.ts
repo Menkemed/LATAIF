@@ -153,8 +153,10 @@ const MATRIX: Record<string, Zeile> = {
   const seite = src('src/pages/orders/OrderDetail.tsx');
   ok(/carryOverOrderPaymentsToInvoice/.test(seite),
     'D die Oberflaeche traegt den Anzahlungstopf ueber…');
-  ok(!/carryOverOrderPayments|converted_to_invoice/.test(fin.slice(fin.indexOf('function runConvertOrder'), fin.indexOf('// ── Einlieferer auszahlen'))),
-    'D …die Buchung tut es nicht — dieselbe Kennung, zwei verschiedene Wirkungen');
+  // R5A — der Befund von R3 ist geschlossen: die Buchung fuehrt den Uebertrag jetzt selbst aus,
+  // ueber DIESELBE Funktion wie die Oberflaeche. Geprueft wird deshalb der neue Stand.
+  ok(/carryOverOrderPaymentsToInvoice\(/.test(fin.slice(fin.indexOf('function runConvertOrder'), fin.indexOf('// ── Einlieferer auszahlen'))),
+    'D …seit R5A tut die Buchung es auch — dieselbe Kennung, eine Wirkung');
 
   // Die anderen drei haben ueberhaupt keine passende Buchung.
   for (const [was, muster] of [

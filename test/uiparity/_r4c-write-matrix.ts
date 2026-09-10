@@ -177,7 +177,7 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   {
     op: 'orders.convert_to_invoice', handlung: 'Auftrag in Rechnung wandeln', ort: 'pages/orders/OrderDetail.tsx',
     lokal: 'convertOrderLinesToInvoiceTx', paritaet: 'exakt', verdrahtet: true, luecke: null,
-    grund: 'R5A — die Fernbuchung fuehrt jetzt den Anzahlungsuebertrag MIT aus, in derselben Transaktion und ueber DIESELBE Funktion wie die Auftragsansicht (core/orders/order-payment-carryover). Eine Handlung, eine Buchung, kein liegengebliebenes Geld.',
+    grund: 'R5A — die Fernbuchung fuehrt jetzt den Anzahlungsuebertrag MIT aus, in derselben Transaktion und ueber DIESELBE Funktion wie die Auftragsansicht (core/orders/order-payment-carryover). Eine Handlung, eine Buchung, kein liegengebliebenes Geld. R5A.2 — die Rechnungszeilen rechnet DIESELBE Funktion wie die Ansicht (core/orders/order-invoice-lines; vorher Steuer immer obendrauf, bei MARGIN +10 %), und die Wahl der beiden Dialoge (Schema je Zeile, Nummernart, abschliessen) reist als gepruefte Felder mit. Positionen ohne Artikel und Auftraege ohne Schema lehnt der Client ausdruecklich ab.',
   },
 
   // ── Reparaturen ──────────────────────────────────────────────────────────

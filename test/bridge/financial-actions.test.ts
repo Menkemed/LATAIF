@@ -609,6 +609,36 @@ const CONSIGN = {
   ok((twice as { frozen: boolean }).frozen === true, 'SETTLE …endgueltig');
 }
 
+// ── 5b) R5A.2 — die Wahl der Dialoge reist mit, die Zeilen rechnet das Haus ──
+{
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  const d = deps(db);
+  seedProduct(db, 'p1', 5);
+  const oid = await readyOrder(db, d, '60');
+  const rev = n(db, 'SELECT revision FROM orders WHERE id = ?', [oid]);
+  const lid = s(db, 'SELECT id FROM order_lines WHERE order_id = ?', [oid]);
+
+  const fremd = await fin.runConvertOrder(d, identity('61', 'orders.convert_to_invoice'),
+    { orderId: oid, expectedRevision: rev, taxSchemes: { 'nicht-gezeigt': 'ZERO' } });
+  ok(fremd.kind === 'rejected' && code(fremd) === 'ORDER_LINES_CHANGED',
+    `R5A.2 eine andere als die gezeigte Zeilenmenge wird nicht abgerechnet (${code(fremd)})`);
+  ok(n(db, 'SELECT COUNT(*) FROM invoices') === 0, 'R5A.2 …und es entsteht nichts');
+
+  const out = await fin.runConvertOrder(d, identity('62', 'orders.convert_to_invoice'),
+    { orderId: oid, expectedRevision: rev, taxSchemes: { [lid]: 'MARGIN' }, specialMark: true, markComplete: true });
+  ok(out.kind === 'ok', `R5A.2 die Umwandlung mit der Wahl der Dialoge laeuft (${JSON.stringify(out)})`);
+  const inv = val<{ invoiceId: string }>(out).invoiceId;
+  const brutto = n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [inv]);
+  // Differenzbesteuerung: der Kunde zahlt den Preis, die Steuer steckt in der Marge. Die alte
+  // Fernrechnung setzte 10 % obendrauf (330).
+  ok(Math.abs(brutto - 300) < 0.001, `R5A.2 MARGIN rechnet wie das Haus, nicht Steuer obendrauf (${brutto})`);
+  ok(s(db, 'SELECT tax_scheme FROM invoice_lines WHERE invoice_id = ?', [inv]) === 'MARGIN',
+    'R5A.2 …mit dem im Dialog gewaehlten Schema');
+  ok(n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [inv]) === 1, 'R5A.2 die Nummernart des Dialogs gilt');
+  ok(s(db, 'SELECT status FROM order_lines WHERE id = ?', [lid]) === 'DELIVERED', 'R5A.2 „abschliessen" gilt ebenfalls');
+}
+
 // ── 8) Der Rumpf bestimmt nichts Abgeleitetes ────────────────────────────
 {
   const cases: Array<[string, unknown, (r: unknown) => unknown]> = [
@@ -620,6 +650,8 @@ const CONSIGN = {
     ['eine Guthaben-Methode', { invoiceId: 'i1', paymentId: 'p1', expectedRevision: 1, method: 'credit' }, fin.parseUpdatePayment],
     ['eine Auswahl von Positionen', { orderId: 'o1', expectedRevision: 1, lineIds: ['a'] }, fin.parseConvertOrder],
     ['eine Rechnungsnummer', { orderId: 'o1', expectedRevision: 1, invoiceNumber: 'PINV-1' }, fin.parseConvertOrder],
+    ['ein unbekanntes Steuerschema', { orderId: 'o1', expectedRevision: 1, taxSchemes: { a: 'LUXURY' } }, fin.parseConvertOrder],
+    ['eine Nummernart als Text', { orderId: 'o1', expectedRevision: 1, specialMark: 'yes' }, fin.parseConvertOrder],
     ['einen Auszahlungsstand', { consignmentId: 'c1', amount: 5, method: 'cash', expectedRevision: 1, payoutStatus: 'paid' }, fin.parseRecordPayout],
     ['„zahl den Rest"', { consignmentId: 'c1', method: 'cash', expectedRevision: 1 }, fin.parseRecordPayout],
     ['einen Abrechnungsbetrag', { transferId: 't1', salePrice: 5, expectedRevision: 1, settlementAmount: 99 }, fin.parseMarkSold],

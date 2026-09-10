@@ -38,9 +38,13 @@ function ok(c: unknown, m: string): void { if (c) PASS++; else { FAIL++; failure
   // handleSave routes on imagesDirty: dirty → editProductWithMedia (reconcile),
   // clean → editProductTextDurably (gallery-safe).
   const save = pd.slice(pd.indexOf('async function handleSave'), pd.indexOf('function labelFor'));
-  ok(/if \(imagesDirty\) \{/.test(save), 'handleSave branches on imagesDirty');
+  // CENTRAL-UI-PARITY R4B — the clean (text) branch comes FIRST and returns; it runs through the
+  // shared write seam (`aendern.save`), whose local adapter is still editProductTextDurably.
+  ok(/if \(!imagesDirty\) \{/.test(save), 'handleSave branches on imagesDirty');
   ok(/editProductWithMedia\(id, textPayload, \{ srcs:/.test(save), 'dirty branch calls editProductWithMedia with the reconcile args');
-  ok(/\} else \{[\s\S]*editProductTextDurably\(id, textPayload\)/.test(save), 'clean branch calls editProductTextDurably (no gallery args)');
+  const clean = save.slice(save.indexOf('if (!imagesDirty) {'), save.indexOf('// R4B — der Bildweg'));
+  ok(clean.length > 100 && /editProductTextDurably\(id, textPayload\)/.test(clean) && !/editProductWithMedia\(/.test(clean),
+    'clean branch calls editProductTextDurably (no gallery args)');
   // The text-only call passes NO srcs/resolved/status — it cannot reconcile.
   ok(!/editProductTextDurably\([^)]*srcs/.test(save), 'editProductTextDurably is never handed a gallery/srcs argument');
   ok(/setImagesDirty\(false\);\s*\n\s*setDraftSeeded\(false\);\s*\n\s*setEditing\(false\)/.test(save), 'a successful save resets BOTH the dirty flag and the seed proof');
@@ -73,7 +77,7 @@ function ok(c: unknown, m: string): void { if (c) PASS++; else { FAIL++; failure
   ok(/#\[cfg\(feature = "e2e"\)\]\s*\{[\s\S]{0,300}?window\.__LATAIF_E2E__ = true/.test(rs), 'the marker is injected ONLY under #[cfg(feature = "e2e")] — a production build never sets it');
 
   // Fail-closed save guard: dirty images without a seeded draft must never reconcile.
-  const saveGuard = pd.slice(pd.indexOf('if (imagesDirty) {'), pd.indexOf('editProductWithMedia(id, textPayload'));
+  const saveGuard = pd.slice(pd.indexOf('// R4B — der Bildweg'), pd.indexOf('editProductWithMedia(id, textPayload'));
   ok(/if \(!draftSeeded\) \{[\s\S]*MEDIA_EDIT_GALLERY_NOT_READY[\s\S]*return;/.test(saveGuard), 'save fails closed when images are dirty but the draft was never seeded');
   ok(saveGuard.indexOf('!draftSeeded') < saveGuard.indexOf('presentationToResolverStatus'), 'the guard runs BEFORE any reconcile input is built');
 }

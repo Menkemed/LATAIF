@@ -29,6 +29,7 @@ import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
 import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
 import { carryOverOrderPaymentsToInvoice } from '@/core/orders/order-payment-carryover';
+import { buildOrderInvoiceLines, orderCustomCostBasis, markConvertedLinesDelivered } from '@/core/orders/order-invoice-lines';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
@@ -159,7 +160,7 @@ export function OrderDetail() {
   // internen Kostenpositionen (Labor + Diamond + Gold). Wird beim Convert als
   // purchasePrice (COGS) ins erzeugte Produkt kapitalisiert.
   const customCostBasis = useMemo(
-    () => orderLineList.reduce((s, l) => s + (l.costAmount || 0), 0),
+    () => orderCustomCostBasis(orderLineList),
     [orderLineList]
   );
   // v0.6.0 — Gold-Verbindlichkeiten (Goldschmied-Gold) dieser Order.
@@ -575,6 +576,10 @@ export function OrderDetail() {
       setShowPersistedVatConfirm(true);
       return;
     }
+    // R5A.2 — der Altweg (Auftrag ohne gespeichertes Schema) legt HIER schon einen Artikel an und
+    // aendert den Auftrag, bevor ein Dialog kommt. Auf einem Rechner ohne Datenbank waere das ein
+    // lokaler Schreibversuch — also ein ausdrueckliches Nein, kein stilles Nichts.
+    if (w.remote) { alert(fehlertext(nichtAmClient('converting an order without saved tax schemes'))); return; }
     const gross = order.agreedPrice || totalPaid;
     if (gross <= 0) { alert('Agreed price required.'); return; }
 
@@ -630,9 +635,26 @@ export function OrderDetail() {
     if (w.remote) {
       const fassung = order.revision;
       if (!fassung) { alert(fehlertext(nichtAmClient('converting this order (no revision loaded)'))); return; }
+      // R5A.2 — eine Position ohne Artikel wuerde am Primary einen Artikel ANLEGEN. Das ist ein
+      // eigener Weg (`products.create`, mit SKU und Medien); der Fernbefehl legt keinen an.
+      const faellig = orderLines.filter(l => l.isCustomerFacing !== false);
+      if (faellig.some(l => !l.productId)) {
+        alert(fehlertext(nichtAmClient('converting an order line that has no article yet')));
+        return;
+      }
+      // Was der Mensch in den beiden Dialogen gewaehlt hat, reist mit — das Schema je Zeile, die
+      // Nummernart und „abschliessen". Ohne das rechnete der Primary etwas anderes, als die Maske
+      // gezeigt hat. Welche Zeilen abgerechnet werden, entscheidet weiterhin der Primary; stimmt
+      // seine Menge nicht mit der gezeigten ueberein, lehnt er ab.
+      const taxSchemes = Object.fromEntries(faellig.map(l => [
+        l.id, (perLineSchemes?.[l.id] as TaxScheme | undefined) || (l.taxScheme as TaxScheme),
+      ]));
       const r = await w.save<{ invoiceId?: string }>('orders.convert_to_invoice', {
         local: () => ({}),
-        remote: () => ({ orderId: id, expectedRevision: fassung }),
+        remote: () => ({
+          orderId: id, expectedRevision: fassung, taxSchemes,
+          specialMark: specialMark === true, markComplete: markCompleteOnConvert === true,
+        }),
       });
       if (r.kind !== 'ok') return;
       loadOrders(); loadPayments(id);
@@ -647,71 +669,13 @@ export function OrderDetail() {
       return;
     }
 
-    const invoiceLineInputs: Array<{
-      productId: string; quantity: number; unitPrice: number; purchasePrice: number;
-      taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number;
-    }> = [];
-
-    for (const ol of billableLines) {
-      // v0.6.7 — Schema aus dem ConfirmTaxSchemeModal-Override, sonst persistiert.
-      const scheme = (perLineSchemes?.[ol.id] as TaxScheme | undefined) || (ol.taxScheme as TaxScheme);
-      const rate = scheme === 'ZERO' ? 0 : 10;
-      let prod = ol.productId ? products.find(p => p.id === ol.productId) : undefined;
-      // Für freitext-Lines ohne Produkt eines auto-erzeugen — analog zum bisherigen
-      // Single-Line-Auto-Create, nur jetzt pro Line.
-      if (!prod) {
-        // v0.6.0 Model B — das Custom-Stueck wird gefertigt, nicht gekauft:
-        // seine Kostenbasis (COGS) = Summe der internen Kostenpositionen der
-        // Order. Kein Purchase, kein Lager-Durchlauf ('reserved' statt 'in_stock').
-        const isCustomPiece = ol.materialKind === 'custom';
-        // v0.6.7 — bei Custom-Quote die strukturierte Produkt-Spec nutzen wenn da.
-        const spec = isCustomPiece ? (order.customProductSpec || {}) : {};
-        prod = createProduct({
-          categoryId: spec.categoryId || order.categoryId || '',
-          brand: spec.brand || order.requestedBrand || '',
-          name: spec.name || ol.description || order.requestedModel || 'Custom Item',
-          sku: spec.sku,
-          condition: spec.condition || order.condition || '',
-          attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || order.attributes || {},
-          images: spec.images || [],
-          scopeOfDelivery: spec.scopeOfDelivery || [],
-          purchasePrice: isCustomPiece ? customCostBasis : 0,
-          plannedSalePrice: ol.unitPrice * Math.max(1, ol.quantity),
-          stockStatus: 'reserved',
-          taxScheme: scheme,
-          sourceType: 'OWN',
-          notes: spec.notes || `From order ${order.orderNumber}`,
-        });
-      }
-      const qty = Math.max(1, ol.quantity);
-      // v0.6.7 — Custom-Quote-Lines speichern BRUTTO (Quoted Price = Endpreis).
-      // Bei VAT_10 auf Custom: lineNet aus brutto decomposen, sonst rechnet
-      // calculateNet 10% on-top und der Kunde wuerde Quoted * 1.10 zahlen.
-      // Normal-Produkt-Lines speichern Netto (siehe OrderCreate.unitNetFromGross),
-      // dort lineNet = unitPrice * qty wie bisher.
-      const grossPerLine = ol.unitPrice * qty;
-      let lineNet: number;
-      if (ol.materialKind === 'custom' && scheme === 'VAT_10') {
-        lineNet = grossPerLine / 1.10;
-      } else {
-        lineNet = grossPerLine;
-      }
-      const calc = vatEngine.calculateNet(lineNet, (prod.purchasePrice || 0) * qty, scheme, rate);
-      // v0.7.1 — NBR: MARGIN persistiert internalVatAmount damit MARGIN_VAT-Ledger
-      // + invoice.vatAmount-Hero korrekt sind. Display-Schicht versteckt VAT bei
-      // MARGIN-Print weiterhin (gesetzliche Differenzbesteuerung).
-      const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
-      invoiceLineInputs.push({
-        productId: prod.id,
-        quantity: qty,
-        unitPrice: lineNet / qty,
-        purchasePrice: prod.purchasePrice || 0,
-        taxScheme: scheme,
-        vatRate: rate,
-        vatAmount: persistedVat,
-        lineTotal: calc.grossAmount,
-      });
-    }
+    // R5A.2 — die Zeilenrechnung wohnt in `core/orders/order-invoice-lines`; der Fernbefehl ruft
+    // DIESELBE. Hier werden nur die Quellen hineingereicht.
+    const invoiceLineInputs = buildOrderInvoiceLines({
+      order, billableLines, perLineSchemes, customCostBasis,
+      findProduct: (pid) => products.find(p => p.id === pid),
+      createProduct,
+    });
 
     // B5-B — atomare Konvertierung: assertBillable + createDirectInvoice + markOrderLinesInvoiced
     // + updateOrder(invoiceId) laufen in EINER Ledger-Transaktion (convertOrderToInvoiceAtomic).
@@ -734,12 +698,7 @@ export function OrderDetail() {
     // setzen (NACH der atomaren Konvertierung). recomputeOrderStatus (in updateOrderLineStatus)
     // rollt die Order auf 'completed', sobald ALLE kundenseitigen Lines DELIVERED sind; bei
     // Teil-Convert bleibt sie 'arrived'. Default leer → unveraendertes Verhalten.
-    if (markCompleteOnConvert) {
-      for (const l of billableLines) {
-        try { updateOrderLineStatus(l.id, 'DELIVERED'); }
-        catch (err) { console.warn('[order] mark-complete-on-convert failed:', err); }
-      }
-    }
+    if (markCompleteOnConvert) markConvertedLinesDelivered(billableLines, updateOrderLineStatus);
     setPendingProduct(null);
     // v0.3.1 — Deposit-Pool auf die Invoice anrechnen, gedeckelt aufs Invoice-Total.
     // Ein Ueberschuss bleibt fuer die naechste Teil-Invoice stehen; ist der Pool

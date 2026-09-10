@@ -7,7 +7,10 @@ export type UUID = string;
 export type Currency = 'BHD' | 'USD' | 'EUR' | 'GBP' | 'SAR' | 'AED';
 // Plan §Tax §3: kanonische Namen VAT_10 / ZERO / MARGIN.
 // Legacy-Namen bleiben zur Laufzeit akzeptiert (via canonicalTaxScheme), Typ ist aber canonical-only.
-export type TaxSchemeCanonical = 'VAT_10' | 'ZERO' | 'MARGIN';
+// R5A.2 — die Liste ist ein WERT, aus dem der Typ folgt: ein Fernbefehl, der ein Schema
+// entgegennimmt, prueft gegen genau diese Liste statt gegen eine eigene.
+export const TAX_SCHEMES = ['VAT_10', 'ZERO', 'MARGIN'] as const;
+export type TaxSchemeCanonical = typeof TAX_SCHEMES[number];
 export type TaxScheme = TaxSchemeCanonical;
 export type InvoiceTaxScheme = TaxScheme | 'mixed';
 

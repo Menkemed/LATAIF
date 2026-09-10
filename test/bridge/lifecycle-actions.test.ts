@@ -544,7 +544,7 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   const totalBefore = n(db, "SELECT COALESCE(SUM(cost_amount),0) FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [rid]);
   const lSeen = prev(db, rid);
   const add = await life.runAddRepairLine(d, identity('3', 'repairs.add_line'),
-    { repairId: rid, costAmount: 25, supplierId: 'sup-1', workType: 'labor', expectedRevision: lSeen });
+    { repairId: rid, costAmount: 25, supplierId: 'sup-1', workType: 'service', expectedRevision: lSeen });
   ok(add.kind === 'ok', 'LINE die Arbeitszeile entsteht');
   const lid = String(val<Record<string, unknown>>(add).lineId);
   ok(n(db, 'SELECT COUNT(*) FROM repair_lines WHERE repair_id = ?', [rid]) === linesBefore + 1,

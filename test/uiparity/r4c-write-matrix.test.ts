@@ -201,7 +201,7 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   ok(!/const poolRows = query\(/.test(ui),
     'R5A in der Oberflaeche steht keine Uebertragungsrechnung mehr');
   // Kein Nacheinander mehrerer Befehle fuer eine Handlung.
-  const stelle = /if \(w\.remote\) \{[\s\S]{0,700}?orders\.convert_to_invoice[\s\S]{0,400}?\n    \}/.exec(ui)?.[0] ?? '';
+  const stelle = /if \(w\.remote\) \{\s*const fassung = order\.revision;[\s\S]{0,1600}?orders\.convert_to_invoice[\s\S]{0,600}?\n    \}/.exec(ui)?.[0] ?? '';
   ok(stelle.length > 100, 'R5A der Client-Weg der Umwandlung ist auffindbar');
   ok((stelle.match(/\w+\.(ok|save)(<[^>]*>)?\(/g) || []).length === 1,
     'R5A …und er schickt GENAU EINE Buchung, kein Nacheinander');
@@ -261,6 +261,36 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     'R5A.1 der Client nimmt sie von dort, der Primary bleibt bei seiner Datenbank');
   ok(st.includes('JOIN orders o ON o.id = ol.order_id') && st.includes('WHERE o.branch_id = ?'),
     'R5A.1 …und sie sind an die Filiale des Ausweises gebunden');
+}
+
+// ── R5A.2 — nach „abrechenbar": dieselbe Zeilenrechnung, und die Wahl reist mit ──
+{
+  const dom = codeOf(src('src/core/orders/order-invoice-lines.ts'));
+  ok(/export function buildOrderInvoiceLines\(/.test(dom) && /vatEngine\.calculateNet\(/.test(dom),
+    'R5A.2 die Rechnungszeilen eines Auftrags sind eine Domaenenfunktion');
+  const ui = codeOf(src('src/pages/orders/OrderDetail.tsx'));
+  const fc = codeOf(src('src/core/bridge/financial-commands.ts'));
+  ok(/buildOrderInvoiceLines\(/.test(ui) && /buildOrderInvoiceLines\(/.test(fc),
+    'R5A.2 Ansicht und Fernbefehl rufen DIESELBE');
+  ok(!/for \(const ol of billableLines\)/.test(ui), 'R5A.2 …und in der Ansicht steht keine zweite');
+  ok(!/net \* rate \/ 100/.test(fc), 'R5A.2 der Fernbefehl setzt die Steuer nicht mehr selbst obendrauf');
+  ok(/'taxSchemes', 'specialMark', 'markComplete'\]/.test(fc), 'R5A.2 die Wahl der Dialoge ist Teil des Vertrags');
+  ok(/TAX_SCHEMES as readonly unknown\[\]/.test(fc), 'R5A.2 …das Schema geprueft gegen die Liste des Hauses');
+  ok(/export const TAX_SCHEMES = \['VAT_10', 'ZERO', 'MARGIN'\] as const;/.test(src('src/core/models/types.ts'))
+    && /export type TaxSchemeCanonical = typeof TAX_SCHEMES\[number\];/.test(src('src/core/models/types.ts')),
+    'R5A.2 die Steuerschemata sind ein WERT, aus dem der Typ folgt');
+  ok(/req\.specialMark === true/.test(fc), 'R5A.2 die Nummernart erreicht die Rechnung');
+  ok(/ORDER_LINES_CHANGED/.test(fc), 'R5A.2 eine andere als die gezeigte Zeilenmenge wird abgelehnt');
+  ok(/ORDER_LINE_WITHOUT_PRODUCT/.test(fc), 'R5A.2 …und der Fernbefehl legt keinen Artikel an');
+  ok(/taxSchemes,\s*specialMark: specialMark === true, markComplete: markCompleteOnConvert === true/.test(ui),
+    'R5A.2 der Client schickt, was die Dialoge bestaetigt haben');
+  ok(/converting an order without saved tax schemes/.test(ui),
+    'R5A.2 der Altweg ist auf dem Client ein ausdrueckliches Nein, kein lokaler Schreibversuch');
+  ok(/converting an order line that has no article yet/.test(ui), 'R5A.2 …ebenso eine Position ohne Artikel');
+  ok(/markConvertedLinesDelivered\(/.test(ui) && /markConvertedLinesDelivered\(/.test(fc),
+    'R5A.2 „abschliessen" laeuft ueber dieselbe Funktion');
+  ok(/if \(r\.kind !== 'ok'\) setFehler\(fehlertext\(r\)\);/.test(codeOf(src('src/core/data/shared-write.ts'))),
+    'R5A.2 auch `save` legt den Grund in die Anzeige — kein Ausgang verschwindet still');
 }
 
 // ── Der Stand, offen benannt ────────────────────────────────────────────

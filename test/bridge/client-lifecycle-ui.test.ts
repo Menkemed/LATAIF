@@ -193,7 +193,7 @@ const REQ = 'src/core/bridge/client-lifecycle-request.ts';
     'ROUNDTRIP Reparaturstatus');
   ok(life.parseCreateRepairInvoice(ui.repairInvoiceRequest('r1', 5)).repairId === 'r1',
     'ROUNDTRIP Reparaturrechnung');
-  ok(life.parseAddRepairLine(ui.addRepairLineRequest('r1', 5, { costAmount: '25', supplierId: 'sup-1', workType: 'labor', description: '' })).costAmount === 25,
+  ok(life.parseAddRepairLine(ui.addRepairLineRequest('r1', 5, { costAmount: '25', supplierId: 'sup-1', workType: 'service', description: '' })).costAmount === 25,
     'ROUNDTRIP Arbeitszeile anlegen');
   ok(life.parseCancelRepairLine(ui.cancelRepairLineRequest('r1', 'l1', 5)).lineId === 'l1',
     'ROUNDTRIP Arbeitszeile zuruecknehmen');
@@ -204,7 +204,7 @@ const REQ = 'src/core/bridge/client-lifecycle-request.ts';
 
   // Nur der UNTERSCHIED reist beim Ändern mit — sonst wird eine Zeile neu gebucht, die
   // niemand angefasst hat.
-  const base = { costAmount: '25', supplierId: 'sup-1', workType: 'labor', description: 'x', dueDate: '', notes: '' };
+  const base = { costAmount: '25', supplierId: 'sup-1', workType: 'service', description: 'x', dueDate: '', notes: '' };
   const same = ui.updateRepairLineRequest('r1', 'l1', 5, base, base);
   ok(ui.lifecycleChangeCount(same) === 0, 'BODY ein unveraendertes Formular schickt nichts');
   const changed = ui.updateRepairLineRequest('r1', 'l1', 5, base, { ...base, costAmount: '40' });

@@ -183,7 +183,7 @@ const BEOBACHTER = `
     if (/\\/api\\/command$/.test(url)) {
       try {
         const body = JSON.parse((a[1] && a[1].body) || '{}');
-        window.__cmds.push({ op: body.op, commandId: body.commandId });
+        window.__cmds.push({ op: body.op, commandId: body.commandId, payload: body.payload });
       } catch (e) { /* kein lesbarer Rumpf */ }
       if (window.__killNext) {
         window.__killNext = false;
@@ -248,6 +248,22 @@ function seed() {
     insert(db, 'order_lines', { id: 'r5a-line', order_id: 'r5a-ord', product_id: 'r5a-prod', description: 'R5A Chronometer', quantity: 1, unit_price: 1000, line_total: 1000, position: 0, tax_scheme: 'ZERO', vat_rate: 0, is_customer_facing: 1, status: 'ARRIVED', created_at: now });
     insert(db, 'order_payments', { id: 'r5a-pay1', order_id: 'r5a-ord', amount: 400, paid_at: heute, method: 'cash', note: 'Anzahlung', created_at: now });
     insert(db, 'order_payments', { id: 'r5a-pay2', order_id: 'r5a-ord', amount: 800, paid_at: heute, method: 'cash', note: 'Restzahlung', created_at: now });
+
+    // Die Ware liegt wirklich im Lager: ein Los je Artikel, sonst verbraucht die Rechnung nichts.
+    insert(db, 'stock_lots', { id: 'lot-r5a-prod', branch_id, product_id: 'r5a-prod', unit_cost: 400, qty_total: 1, qty_remaining: 1, status: 'ACTIVE', acquired_at: now, created_at: now });
+
+    // Ein dritter Auftrag, eigener Kunde — hier geht die Antwort verloren.
+    insert(db, 'customers', { id: 'r5a-cust3', branch_id, first_name: 'Lina', last_name: 'Stillstand', company: 'R5A Co', country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
+    insert(db, 'products', {
+      id: 'r5a-prod2', branch_id, category_id, brand: 'Zenith', name: 'R5A Pilot', sku: 'R5A-SKU-02',
+      condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 200, purchase_currency: 'BHD',
+      planned_sale_price: 500, stock_status: 'in_stock', tax_scheme: 'ZERO', days_in_stock: 0,
+      quantity: 1, images: '[]', attributes: '{}', source_type: 'OWN', created_at: now, updated_at: now,
+    });
+    insert(db, 'stock_lots', { id: 'lot-r5a-prod2', branch_id, product_id: 'r5a-prod2', unit_cost: 200, qty_total: 1, qty_remaining: 1, status: 'ACTIVE', acquired_at: now, created_at: now });
+    insert(db, 'orders', { id: 'r5a-ord3', branch_id, order_number: 'R5AORD-03', customer_id: 'r5a-cust3', requested_brand: 'Zenith', requested_model: 'Pilot', status: 'completed', agreed_price: 500, type: 'normal', created_at: now, updated_at: now });
+    insert(db, 'order_lines', { id: 'r5a-line3', order_id: 'r5a-ord3', product_id: 'r5a-prod2', description: 'R5A Pilot', quantity: 1, unit_price: 500, line_total: 500, position: 0, tax_scheme: 'ZERO', vat_rate: 0, is_customer_facing: 1, status: 'ARRIVED', created_at: now });
+    insert(db, 'order_payments', { id: 'r5a-pay3', order_id: 'r5a-ord3', amount: 300, paid_at: heute, method: 'cash', note: 'Anzahlung', created_at: now });
 
     // Ein zweiter Auftrag, offen — Ziel fuer die Anzahlung mit Kartenart.
     insert(db, 'orders', { id: 'r5a-ord2', branch_id, order_number: 'R5AORD-02', customer_id: 'r5a-cust', requested_brand: 'Zenith', requested_model: 'Pilot', status: 'pending', agreed_price: 2000, type: 'normal', created_at: now, updated_at: now });
@@ -372,119 +388,211 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // §6 ANZAHLUNG MIT KARTENART — /orders/<id> → orders.add_payment
+  // ZAHLUNG MIT KARTENART — /orders/<id> → orders.add_payment
+  // Der Zahlweg ist eine Reihe echter Knoepfe, keine Auswahlliste: er wird geklickt.
   // ══════════════════════════════════════════════════════════════════════
   {
     client = await lade(client, '/orders/r5a-ord2');
     await waitFor(client, SHELL, 45000);
     ok(await warteBis(client, "document.body.innerText.includes('R5AORD-02')", 40000),
-      '6 der Auftrag ist auf dem zweiten Rechner sichtbar');
+      'ZAHLUNG der Auftrag ist auf dem zweiten Rechner sichtbar');
     ok(await clickContains(client, 'Add Payment') === 'OK' || await clickContains(client, 'Record Payment') === 'OK',
-      '6 die normale Zahlungsmaske oeffnet');
+      'ZAHLUNG die normale Zahlungsmaske oeffnet');
     await sleep(900);
     await setByLabel(client, 'AMOUNT (BHD)', '500');
     await sleep(200);
-    // Karte + Amex: genau der Fall, an dem die Gebuehr haengt.
-    const wegGesetzt = await client.ev(
-      "const s=[...document.querySelectorAll('select')].find(x=>[...x.options].some(o=>o.value==='card'));"
-      + "if(!s) return 'NO'; const p=HTMLSelectElement.prototype;"
-      + "Object.getOwnPropertyDescriptor(p,'value').set.call(s,'card');"
-      + "s.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';");
-    ok(wegGesetzt === 'OK', `6 der Zahlweg „Karte" laesst sich waehlen (${wegGesetzt})`);
-    await sleep(500);
-    const marke = await client.ev(
-      "const s=[...document.querySelectorAll('select')].find(x=>[...x.options].some(o=>o.value==='amex'));"
-      + "if(!s) return 'KEINE'; const p=HTMLSelectElement.prototype;"
-      + "Object.getOwnPropertyDescriptor(p,'value').set.call(s,'amex');"
-      + "s.dispatchEvent(new Event('change',{bubbles:true})); return 'amex';");
+    const wegGesetzt = await clickText(client, 'Card');
+    ok(wegGesetzt === 'OK', `ZAHLUNG der Zahlweg „Card" ist ein Knopf und laesst sich klicken (${wegGesetzt})`);
+    await sleep(400);
+    const marke = (await clickText(client, 'Amex')) === 'OK' ? 'amex' : 'KEINE';
+    ok(marke === 'amex', `ZAHLUNG …und die Kartenart „Amex" erscheint erst danach (${marke})`);
     await sleep(300);
     await click(client, '[data-save-order-payment]');
     await sleep(3000);
-    const cmds = await nurEine('orders.add_payment', '6');
-    void cmds;
+    const cmds = await nurEine('orders.add_payment', 'ZAHLUNG');
+    const p = cmds[0]?.payload || {};
+    ok(p.method === 'card' && p.cardBrand === 'amex', `ZAHLUNG der Rumpf traegt Zahlweg und Kartenart (${p.method}/${p.cardBrand})`);
     const fehler = await client.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';");
-    ok(!fehler, `6 kein Fehler gemeldet (${String(fehler).slice(0, 140) || 'keiner'})`);
+    ok(!fehler, `ZAHLUNG kein Fehler gemeldet (${String(fehler).slice(0, 140) || 'keiner'})`);
 
     const zahlung = dbQ(BIZ_DB, "SELECT amount, method, card_brand FROM order_payments WHERE order_id = 'r5a-ord2'");
     ok(zahlung.length === 1 && Math.abs(Number(zahlung[0]?.amount) - 500) < 0.01,
-      `6 genau EINE Anzahlung von 500 (${zahlung.length}/${zahlung[0]?.amount})`);
-    ok(String(zahlung[0]?.method) === 'card', `6 …mit dem Zahlweg der Maske (${zahlung[0]?.method})`);
-    if (marke === 'amex') {
-      ok(String(zahlung[0]?.card_brand) === 'amex',
-        `6 …und der KARTENART der Maske — daran haengt die Gebuehr (${zahlung[0]?.card_brand})`);
-    } else {
-      ok(true, '6 (die Maske bot keine Kartenart an — uebersprungen)');
-    }
-    // Die Gebuehr rechnet das Haus, und sie steht genau einmal im Hauptbuch.
+      `ZAHLUNG genau EINE Anzahlung von 500 (${zahlung.length}/${zahlung[0]?.amount})`);
+    ok(String(zahlung[0]?.method) === 'card', `ZAHLUNG …mit dem Zahlweg der Maske (${zahlung[0]?.method})`);
+    ok(String(zahlung[0]?.card_brand) === 'amex',
+      `ZAHLUNG …und der KARTENART der Maske — daran haengt die Gebuehr (${zahlung[0]?.card_brand})`);
     const gebuehr = dbQ(BIZ_DB,
       "SELECT DISTINCT transaction_id FROM ledger_entries WHERE source_module = 'card_fee' AND source_id LIKE '%r5a-ord2%'");
-    ok(gebuehr.length <= 1, `6 hoechstens EINE Gebuehrenbuchung (${gebuehr.length})`);
+    ok(gebuehr.length <= 1, `ZAHLUNG hoechstens EINE Gebuehrenbuchung (${gebuehr.length})`);
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // §7 AUFTRAG → RECHNUNG, MIT DEM GELD
+  // AUFTRAG → RECHNUNG — der Weg NACH „abrechenbar", Schritt fuer Schritt
   // ══════════════════════════════════════════════════════════════════════
+  /** Was die Seite direkt vor der Entscheidung zeigt — gelesen, nicht erraten. */
+  const BEREIT = "const m=/(\\d+) item\\(s\\) bereit zum Invoicen/.exec(document.body.innerText); return m ? Number(m[1]) : 0;";
+  const DIALOG = "const p=[...document.querySelectorAll('p')].find(x=>x.textContent.includes('Review the VAT scheme'));"
+    + "if(!p) return 'null'; const rows=[...p.parentElement.querySelectorAll('div')].filter(d=>d.children.length===2"
+    + "&&d.children[0].tagName==='SPAN'&&d.children[1].querySelectorAll('button').length===3"
+    + "&&d.children[0].textContent.trim()!=='APPLY TO ALL LINES');"
+    + "return JSON.stringify(rows.map(r=>({zeile:r.children[0].textContent.trim(),"
+    + "schema:([...r.children[1].querySelectorAll('button')].find(b=>/15, 15, 16/.test(b.style.border))||{}).textContent||null})));";
+  const DIALOG_ABBRECHEN = "const p=[...document.querySelectorAll('p')].find(x=>x.textContent.includes('Review the VAT scheme'));"
+    + "const b=p&&[...p.parentElement.querySelectorAll('button')].find(x=>x.textContent.trim()==='Cancel'); if(!b) return 'NO'; b.click(); return 'OK';";
+  const SCHEMA_OFFEN = "document.body.innerText.includes('VAT-Schema bestaetigen')";
+  const NUMMER_OFFEN = "document.body.innerText.includes('Choose Invoice Number Type')";
+  /** Der Weg des Primary, ohne Neuaufbau: dieselbe Seite, dieselbe Anwendung — nur die Adresse. */
+  const primaryZu = (route) => primary.ev(`history.pushState({}, '', ${S(route)}); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
+
   {
     const revVor = dbQ(BIZ_DB, "SELECT revision FROM orders WHERE id = 'r5a-ord'")[0];
     const topfVor = dbQ(BIZ_DB, "SELECT COALESCE(SUM(amount),0) AS s FROM order_payments WHERE order_id = 'r5a-ord' AND converted_to_invoice = 0")[0];
     ok(Math.abs(Number(topfVor?.s) - 1200) < 0.01,
-      `7 der Aufbau hat 1200 Anzahlung auf einem Auftrag ueber 1000 (${topfVor?.s})`);
+      `UMWANDLUNG der Aufbau hat 1200 Anzahlung auf einem Auftrag ueber 1000 (${topfVor?.s})`);
 
+    // ── Der Primary: derselbe Auftrag, dieselbe Maske — bis direkt VOR die Entscheidung ──
+    await primaryZu('/orders/r5a-ord');
+    const pOben = await warteBis(primary, "document.body.innerText.includes('R5AORD-01')", 30000);
+    const pBereit = await primary.ev(BEREIT);
+    await clickText(primary, 'Create Invoice');
+    const pDlg = await warteBis(primary, SCHEMA_OFFEN, 15000);
+    const pZeilen = JSON.parse(await primary.ev(DIALOG));
+    const pZu = await primary.ev(DIALOG_ABBRECHEN);
+    console.log(`      (Primary vor der Entscheidung) sichtbar=${pOben} bereit=${pBereit} Dialog=${pDlg} Zeilen=${S(pZeilen)} Abbruch=${pZu}`);
+
+    // ── PC2: derselbe Auftrag ──
     client = await lade(client, '/orders/r5a-ord');
     await waitFor(client, SHELL, 45000);
     ok(await warteBis(client, "document.body.innerText.includes('R5AORD-01')", 40000),
-      '7 der Auftrag ist auf dem zweiten Rechner sichtbar');
+      'WEG der Auftrag ist auf dem zweiten Rechner sichtbar');
+    const cBereit = await client.ev(BEREIT);
     const geklickt = await clickText(client, 'Create Invoice');
-    ok(geklickt === 'OK', `7 die normale Schaltflaeche „Create Invoice" ist da (${geklickt})`);
-    await sleep(1200);
-    // Der Bestaetigungsdialog der Steuerschemata gehoert zum normalen Weg — er wird geklickt,
-    // nicht umgangen.
-    const bestaetigt = await client.ev("const b=[...document.querySelectorAll('button')].find(x=>/^(Confirm|Create Invoice|Yes|OK)$/i.test(x.textContent.trim())); if(!b) return 'KEINER'; b.click(); return 'OK';");
-    console.log('      (Dialog) ' + bestaetigt);
+    ok(geklickt === 'OK', `WEG die normale Schaltflaeche „Create Invoice" ist da (${geklickt})`);
+    const cDlg = await warteBis(client, SCHEMA_OFFEN, 15000);
+    const cZeilen = JSON.parse(await client.ev(DIALOG));
+    console.log(`      (PC2 vor der Entscheidung)     bereit=${cBereit} Dialog=${cDlg} Zeilen=${S(cZeilen)}`);
+    ok(cBereit === 1, `WEG PC2 zaehlt die abrechenbare Position (${cBereit}) — kein geschluckter Lesefehler`);
+    ok(cDlg, 'WEG nach „abrechenbar" kommt der Schema-Dialog — der Weg bricht nicht vorher ab');
+    ok(pDlg && pBereit === cBereit && S(pZeilen) === S(cZeilen) && cZeilen.length === 1 && cZeilen[0].schema === 'Zero',
+      `PARITAET Primary und PC2 sehen vor der Entscheidung dasselbe (${S(pZeilen)} / ${S(cZeilen)})`);
+    ok((await buchungen(client)).length === 0, 'WEG bis hierher ging keine Buchung ueber die Bruecke');
+
+    // ── Die beiden Dialoge: bedient, nicht umgangen ──
+    ok(await clickText(client, 'Weiter') === 'OK', 'DIALOG der Schema-Dialog wird mit „Weiter" bestaetigt');
+    const nummer = await warteBis(client, NUMMER_OFFEN, 15000);
+    ok(nummer, 'DIALOG danach fragt die Maske nach der Nummernart — der normale Weg');
+    ok((await buchungen(client)).length === 0, 'DIALOG …und auch der Schema-Dialog hat nichts geschickt');
+    ok(await clickText(client, 'Confirm') === 'OK', 'DIALOG die Nummernart wird mit „Confirm" bestaetigt (Normal Final)');
+
     const weg = await warteBis(client, "location.pathname.startsWith('/invoices/')", 45000);
     const fehler = await client.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';");
-    ok(weg, `7 nach der Umwandlung steht die Rechnung da (Hinweis: ${String(fehler).slice(0, 160) || 'keiner'})`);
-    await nurEine('orders.convert_to_invoice', '7');
+    ok(weg, `UMWANDLUNG nach der Umwandlung steht die Rechnung da (Hinweis: ${String(fehler).slice(0, 160) || 'keiner'})`);
+    const cmds = await nurEine('orders.convert_to_invoice', 'DISPATCH');
+    const rumpf = cmds[0]?.payload || {};
+    console.log('      (Dispatch) ' + S({ commandId: cmds[0]?.commandId, ...rumpf }));
+    ok(String(cmds[0]?.commandId || '').length >= 16, `DISPATCH mit eigener Kennung (${cmds[0]?.commandId})`);
+    ok(rumpf.orderId === 'r5a-ord' && rumpf.expectedRevision === Number(revVor?.revision),
+      `DISPATCH der Rumpf traegt den Auftrag und die GESEHENE Fassung (${rumpf.orderId}/${rumpf.expectedRevision} = ${revVor?.revision})`);
+    ok(S(rumpf.taxSchemes) === S({ 'r5a-line': 'ZERO' }) && rumpf.specialMark === false && rumpf.markComplete === false,
+      `DISPATCH …und genau die Wahl der Dialoge (${S(rumpf.taxSchemes)} · special=${rumpf.specialMark} · abschliessen=${rumpf.markComplete})`);
 
-    const inv = dbQ(BIZ_DB, "SELECT id, invoice_number, gross_amount, paid_amount, status FROM invoices WHERE customer_id = 'r5a-cust'");
-    ok(inv.length === 1, `7 genau EINE Rechnung entstanden (${inv.length})`);
-    ok(String(inv[0]?.invoice_number || '').length > 0, `7 …mit einer Belegnummer (${inv[0]?.invoice_number})`);
-    ok(Math.abs(Number(inv[0]?.gross_amount) - 1000) < 0.01, `7 …ueber den Auftragsbetrag (${inv[0]?.gross_amount})`);
+    const inv = dbQ(BIZ_DB, "SELECT id, invoice_number, gross_amount, paid_amount, status, special_mark FROM invoices WHERE customer_id = 'r5a-cust'");
+    ok(inv.length === 1, `UMWANDLUNG genau EINE Rechnung entstanden (${inv.length})`);
+    ok(String(inv[0]?.invoice_number || '').length > 0, `UMWANDLUNG …mit einer Belegnummer (${inv[0]?.invoice_number})`);
+    ok(Math.abs(Number(inv[0]?.gross_amount) - 1000) < 0.01, `UMWANDLUNG …ueber den Auftragsbetrag (${inv[0]?.gross_amount})`);
+    ok(Number(inv[0]?.special_mark) === 0, 'UMWANDLUNG …im normalen Nummernkreis, wie im Dialog gewaehlt');
+    ok(await client.ev(`return location.pathname === ${S('/invoices/' + inv[0]?.id)};`),
+      'UMWANDLUNG PC2 zeigt GENAU die Rechnung, die der Primary angelegt hat');
 
     const ord = dbQ(BIZ_DB, "SELECT invoice_id, revision FROM orders WHERE id = 'r5a-ord'")[0];
-    ok(String(ord?.invoice_id) === String(inv[0]?.id), '7 der Auftrag zeigt auf genau diese Rechnung');
+    ok(String(ord?.invoice_id) === String(inv[0]?.id), 'UMWANDLUNG der Auftrag zeigt auf genau diese Rechnung');
     ok(Number(ord?.revision) > Number(revVor?.revision ?? 0),
-      `7 …und seine Fassung ist gestiegen (${revVor?.revision} → ${ord?.revision})`);
+      `UMWANDLUNG …und seine Fassung ist gestiegen (${revVor?.revision} → ${ord?.revision})`);
+    const zeile = dbQ(BIZ_DB, "SELECT invoice_id FROM order_lines WHERE id = 'r5a-line'")[0];
+    ok(String(zeile?.invoice_id) === String(inv[0]?.id), 'UMWANDLUNG die Position ist berechnet');
 
     // ── DER KERN: das Geld ist mitgegangen ──
     const offen = dbQ(BIZ_DB, "SELECT COALESCE(SUM(amount),0) AS s FROM order_payments WHERE order_id = 'r5a-ord' AND converted_to_invoice = 0")[0];
     const aufRechnung = Number(inv[0]?.paid_amount ?? 0);
-    ok(aufRechnung >= 999.99, `7 die Rechnung ist aus der Anzahlung bezahlt (${aufRechnung})`);
+    ok(aufRechnung >= 999.99, `GELD die Rechnung ist aus der Anzahlung bezahlt (${aufRechnung})`);
     ok(Number(offen?.s) <= 200.01,
-      `7 …und beim Auftrag liegt hoechstens der Anzahlungsrest, kein doppeltes Geld (${offen?.s})`);
+      `GELD …und beim Auftrag liegt hoechstens der Anzahlungsrest, kein doppeltes Geld (${offen?.s})`);
     const zahlungen = dbQ(BIZ_DB, 'SELECT id, amount FROM payments WHERE invoice_id = ?', [inv[0]?.id]);
-    ok(zahlungen.length >= 1, `7 …als echte Zahlungszeilen auf der Rechnung (${zahlungen.length})`);
-
-    // Ueberzahlung: der Topf lag 200 ueber dem Auftrag → genau EINE Gutschrift ODER Restanzahlung.
+    ok(zahlungen.length >= 1, `GELD …als echte Zahlungszeilen auf der Rechnung (${zahlungen.length})`);
     const credits = dbQ(BIZ_DB, "SELECT id, amount FROM customer_credits WHERE customer_id = 'r5a-cust'");
-    ok(credits.length <= 1, `7 hoechstens EINE Gutschrift aus der Ueberzahlung (${credits.length})`);
-    const summe = Number(offen?.s) + credits.reduce((s, c) => s + Number(c.amount || 0), 0);
-    ok(Math.abs((aufRechnung + summe) - 1200) < 0.02,
-      `7 und die Summe stimmt: 1200 sind vollstaendig verteilt (${aufRechnung} + ${summe})`);
-
-    // Das Hauptbuch: genau eine Buchung zur Rechnung.
+    ok(credits.length <= 1, `GELD hoechstens EINE Gutschrift aus der Ueberzahlung (${credits.length})`);
+    // Vertrag des Hauses: der Ueberzahlungsanteil wird EINE Rechnungszahlung, und daraus entsteht
+    // die Gutschrift — sie steckt also IN der bezahlten Summe, nicht daneben.
+    ok(Math.abs((aufRechnung + Number(offen?.s)) - 1200) < 0.02,
+      `GELD 1200 sind vollstaendig verteilt: Rechnung + Rest beim Auftrag (${aufRechnung} + ${offen?.s})`);
+    const gutschrift = credits.reduce((s, c) => s + Number(c.amount || 0), 0);
+    ok(Math.abs(gutschrift - Math.max(0, aufRechnung - 1000)) < 0.02,
+      `GELD …und die Gutschrift ist genau der Ueberzahlungsanteil (${gutschrift} = ${aufRechnung} − 1000)`);
     const hauptbuch = dbQ(BIZ_DB, 'SELECT DISTINCT transaction_id FROM ledger_entries WHERE source_id = ?', [inv[0]?.id]);
-    ok(hauptbuch.length >= 1, `7 die Rechnung steht im Hauptbuch (${hauptbuch.length})`);
+    ok(hauptbuch.length >= 1, `GELD die Rechnung steht im Hauptbuch (${hauptbuch.length})`);
 
-    // ── Wiederholung derselben Absicht: keine zweite Rechnung ──
+    // ── Danach: der Auftrag ist auf beiden Rechnern berechnet ──
     client = await lade(client, '/orders/r5a-ord');
     await warteBis(client, "document.body.innerText.includes('R5AORD-01')", 40000);
-    const nochmal = await clickText(client, 'Create Invoice');
-    await sleep(3500);
+    ok(await client.ev(BEREIT) === 0, 'PARITAET PC2 sieht danach nichts mehr abzurechnen — wie der Primary');
+    ok((await treffer(client)).length === 0, 'LOKAL …und weiterhin kein Griff zur lokalen Datenbank');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // DIE ANTWORT GEHT VERLOREN — derselbe Vorsatz, noch einmal
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const rechnungen = () => dbQ(BIZ_DB, "SELECT id, paid_amount FROM invoices WHERE customer_id = 'r5a-cust3'");
+    const stand = (invId) => ({
+      zahlungen: dbQ(BIZ_DB, 'SELECT COUNT(*) AS n, COALESCE(SUM(amount),0) AS s FROM payments WHERE invoice_id = ?', [invId])[0],
+      buchungen: dbQ(BIZ_DB, 'SELECT COUNT(DISTINCT transaction_id) AS n FROM ledger_entries WHERE source_id = ? OR source_id IN (SELECT id FROM payments WHERE invoice_id = ?)', [invId, invId])[0],
+      anzahlung: dbQ(BIZ_DB, "SELECT COUNT(*) AS n, COALESCE(SUM(converted_to_invoice),0) AS k FROM order_payments WHERE order_id = 'r5a-ord3'")[0],
+    });
+    const durchDieDialoge = async () => {
+      if (await clickText(client, 'Create Invoice') !== 'OK') return 'kein Knopf';
+      if (!(await warteBis(client, SCHEMA_OFFEN, 15000))) return 'kein Schema-Dialog';
+      if (await clickText(client, 'Weiter') !== 'OK') return 'kein Weiter';
+      if (!(await warteBis(client, NUMMER_OFFEN, 15000))) return 'kein Nummern-Dialog';
+      return 'OK';
+    };
+
+    client = await lade(client, '/orders/r5a-ord3');
+    await waitFor(client, SHELL, 45000);
+    await warteBis(client, "document.body.innerText.includes('R5AORD-03')", 40000);
+    ok(await durchDieDialoge() === 'OK', 'VERLOREN der erste Versuch geht den normalen Weg durch beide Dialoge');
+    await client.ev('window.__killNext = true; return 1;');
+    await clickText(client, 'Confirm');
+    const gemeldet = await warteBis(client, "/not clear whether/i.test(document.body.innerText)", 30000);
+    ok(gemeldet, 'VERLOREN die Seite meldet den offenen Ausgang, statt Erfolg zu behaupten');
+    ok(await client.ev("return location.pathname === '/orders/r5a-ord3';"), 'VERLOREN …und bleibt beim Auftrag stehen');
+    ok(await client.ev('return window.__killed;') === 1, 'VERLOREN (die Antwort wurde wirklich weggenommen)');
     await spuelen(primary);
-    const inv2 = dbQ(BIZ_DB, "SELECT id FROM invoices WHERE customer_id = 'r5a-cust'");
-    ok(inv2.length === 1, `7 eine Wiederholung erzeugt KEINE zweite Rechnung (${nochmal}, ${inv2.length})`);
-    ok((await treffer(client)).length === 0, '8 …und weiterhin kein Griff zur lokalen Datenbank');
+    const a = rechnungen();
+    ok(a.length === 1, `VERLOREN der Primary HAT geschrieben — genau eine Rechnung (${a.length})`);
+    const vorher = stand(a[0]?.id);
+
+    // Derselbe Vorsatz, erneut — kein neuer Rumpf, kein Kniff, derselbe Klickweg.
+    ok(await durchDieDialoge() === 'OK', 'VERLOREN der zweite Versuch geht denselben Weg');
+    await clickText(client, 'Confirm');
+    const weg = await warteBis(client, "location.pathname.startsWith('/invoices/')", 40000);
+    ok(weg, 'VERLOREN …kommt durch und zeigt die Rechnung');
+    const c = (await kommandos(client)).filter((x) => x.op === 'orders.convert_to_invoice');
+    ok(c.length === 2 && c[0].commandId === c[1].commandId,
+      `VERLOREN zwei Anfragen, DIESELBE Kennung (${c.length}: ${c.map((x) => String(x.commandId).slice(0, 8)).join(' / ')})`);
+    ok(c.length === 2 && S(c[0].payload) === S(c[1].payload), 'VERLOREN …mit demselben Rumpf');
+    await spuelen(primary);
+    const b = rechnungen();
+    ok(b.length === 1 && b[0]?.id === a[0]?.id, `VERLOREN keine zweite Rechnung — dieselbe (${b.length})`);
+    ok(await client.ev(`return location.pathname === ${S('/invoices/' + a[0]?.id)};`), 'VERLOREN PC2 zeigt genau diese');
+    const nachher = stand(a[0]?.id);
+    console.log('      (Stand vor/nach der Wiederholung) ' + S({ vorher, nachher }));
+    ok(Number(nachher.zahlungen?.n) === Number(vorher.zahlungen?.n) && Math.abs(Number(nachher.zahlungen?.s) - Number(vorher.zahlungen?.s)) < 0.001,
+      `VERLOREN kein zweiter Anzahlungsuebertrag (${S(vorher.zahlungen)} → ${S(nachher.zahlungen)})`);
+    ok(Math.abs(Number(a[0]?.paid_amount) - 300) < 0.01, `VERLOREN …die 300 Anzahlung stehen genau einmal auf der Rechnung (${a[0]?.paid_amount})`);
+    ok(Number(nachher.buchungen?.n) === Number(vorher.buchungen?.n) && Number(vorher.buchungen?.n) >= 1,
+      `VERLOREN kein doppeltes Hauptbuch (${vorher.buchungen?.n} → ${nachher.buchungen?.n})`);
+    ok(S(nachher.anzahlung) === S(vorher.anzahlung), `VERLOREN die Anzahlungszeilen bleiben, wie sie waren (${S(nachher.anzahlung)})`);
+    ok((await treffer(client)).length === 0, 'LOKAL kein Griff zur lokalen Datenbank');
   }
 
   // ── §8 Der Client besitzt weiterhin nichts ────────────────────────────
@@ -507,6 +615,10 @@ try {
 clearTimeout(WACHHUND);
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — central ui parity r5a: order to invoice, with the money: ${PASS} passed, ${FAIL} failed`);
 if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
+console.log('CENTRAL_UI_R5A2_PREDISPATCH_PATH_AUDITED');
+console.log('CENTRAL_UI_R5A2_PREDISPATCH_PARITY_PROVED');
+console.log('CENTRAL_UI_R5A2_REAL_CONVERSION_DISPATCH_PROVED');
+console.log('CENTRAL_UI_R5A1_CONVERSION_IDEMPOTENCY_PROVED');
 console.log('CENTRAL_UI_R5A_ORDER_PAYMENT_PARITY_PROVED');
 console.log('CENTRAL_UI_R5A_ORDER_TO_INVOICE_RUNTIME_PROVED');
 console.log('CENTRAL_UI_R5A_NO_LOCAL_CLIENT_WRITE_PROVED');

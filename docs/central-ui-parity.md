@@ -1388,3 +1388,51 @@ noch nicht aus: die Schaltflaeche ist da und wird geklickt, es geht keine Buchun
 naechste Schritt ist, den Weg NACH `getBillableLines` am laufenden Client zu protokollieren
 (Bestaetigungsdialog der Steuerschemata bzw. die Weiche davor) — nicht wieder zu raten.
 
+---
+
+## R5A.2 — Auftrag → Rechnung, der Weg nach „abrechenbar" (10.09.2026)
+
+### Der echte Weg, am laufenden Client gelesen
+
+```
+Create Invoice → handleCreateFinalInvoice → getBillableLines (PC2: 1, Primary: 1)
+  → alle Zeilen mit gespeichertem Schema → Schema-Dialog („VAT-Schema bestaetigen", Weiter)
+  → Nummern-Dialog („Choose Invoice Number Type", Confirm)
+  → convertWithPersistedSchemes → w.save → orders.convert_to_invoice   (genau eine Buchung)
+```
+
+Der R5A.1-Lauf klickte nach „Create Invoice" auf einen Knopf namens *Create Invoice* — das war
+wieder die Schaltfläche der Seite, nicht der Dialog. Der Dialog heißt „Weiter", danach kommt der
+Nummern-Dialog. Beide werden jetzt bedient, nicht umgangen.
+
+### Drei Funde auf diesem Weg
+
+1. **Der Fernbefehl rechnete die Rechnungszeilen selbst — und anders.** Steuer immer obendrauf
+   (`netto × Satz`): bei MARGIN 10 % zu viel auf der Rechnung, beim Sonderstück mit VAT_10 die
+   Steuer zweimal. Die Rechnung stand in der Auftragsansicht; sie ist jetzt wortgleich in
+   `core/orders/order-invoice-lines.ts` und beide Seiten rufen sie.
+2. **Die Wahl der Dialoge fiel still weg.** Schema je Zeile, Nummernart und „abschließen" reisen
+   jetzt als geprüfte Felder im bestehenden Befehl mit (`taxSchemes`, `specialMark`, `markComplete`;
+   Schemata gegen `TAX_SCHEMES`, das jetzt ein Wert ist). Die Schlüssel von `taxSchemes` müssen
+   genau die abrechenbaren Zeilen sein — sonst `ORDER_LINES_CHANGED`, nie eine andere Menge.
+3. **Ein offener Ausgang verschwand still.** `useSharedWrites.save` gab ihn nur zurück; die
+   Umwandlung kehrte bei verlorener Antwort wortlos um. Jetzt legt auch `save` den Grund in
+   `w.fehler`.
+
+Ausdrücklich abgelehnt auf dem Client (kein lokaler Schreibversuch): Aufträge ohne gespeichertes
+Schema (der Altweg legt vor dem Dialog einen Artikel an) und Positionen ohne Artikel (der
+Fernbefehl legt keinen an — `ORDER_LINE_WITHOUT_PRODUCT`).
+
+### Laufzeit, zwei echte Rechner
+
+```
+Primary vs PC2 vor der Entscheidung: bereit=1, [R5A Chronometer · Zero] — identisch
+Dispatch: orderId r5a-ord · expectedRevision 4 · taxSchemes {r5a-line: ZERO} · special false
+Rechnung 1000, bezahlt 1200 aus der Anzahlung, Gutschrift 200 = Ueberzahlungsanteil, Rest 0
+Antwort verloren: Banner „not clear whether", zweiter Klick → dieselbe Kennung, derselbe Rumpf,
+  eine Rechnung, Zahlungen 1/300, Hauptbuch 2 → 2, Anzahlungszeilen unverändert
+```
+
+Matrix unverändert **22 / 0 / 16 / 2**, Registry **107** — keine neue Buchung, der bestehende
+Befehl wurde exakt gemacht.
+

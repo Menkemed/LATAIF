@@ -207,6 +207,7 @@ export function useSharedWrites(): SharedWrites {
     }
     laeuft.current = true;
     setBusy(true);
+    setFehler('');
     try {
       let attempt = null;
       if (remote) {
@@ -214,20 +215,20 @@ export function useSharedWrites(): SharedWrites {
         if (!c) { c = new CommandSaveController<Record<string, unknown>>(op); waechter.current.set(op, c); }
         attempt = c.beginAttempt();
       }
-      return await runSharedWrite<T>(remote, adapters, attempt);
+      const r = await runSharedWrite<T>(remote, adapters, attempt);
+      // R5A.2 — auch wer den WERT braucht (`save` statt `ok`), bekommt den Grund in `w.fehler`.
+      // Vorher gab `save` den Ausgang nur zurueck; die Auftragsumwandlung kehrte bei einem offenen
+      // Ausgang still um — der Mensch klickte „Confirm", und nichts geschah.
+      if (r.kind !== 'ok') setFehler(fehlertext(r));
+      return r;
     } finally {
       laeuft.current = false;
       setBusy(false);
     }
   }, [remote]);
 
-  const ok = useCallback(async <T,>(op: string, adapters: WriteAdapters<T>): Promise<boolean> => {
-    setFehler('');
-    const r = await save<T>(op, adapters);
-    if (r.kind === 'ok') return true;
-    setFehler(fehlertext(r));
-    return false;
-  }, [save]);
+  const ok = useCallback(async <T,>(op: string, adapters: WriteAdapters<T>): Promise<boolean> =>
+    (await save<T>(op, adapters)).kind === 'ok', [save]);
 
   return { busy, fehler, remote, save, ok, clear: useCallback(() => setFehler(''), []) };
 }

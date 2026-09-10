@@ -48,7 +48,8 @@ const KATALOG: Record<string, Eintrag> = {
   // ── Schreiben: gehoert zu den 40 geprueften Buchungen — diese sind keine davon. ──
   'components/products/StockCheckInventoryModal.tsx': { art: 'schreib-luecke', abfragen: 5, grund: 'Inventursitzung' },
   'pages/analytics/AnalyticsPage.tsx': { art: 'schreib-luecke', abfragen: 1, grund: 'Steuerzahlung eintragen; die Schaltflaeche fehlt im Client' },
-  'pages/orders/OrderDetail.tsx': { art: 'schreib-luecke', abfragen: 2, grund: 'die Umwandlung Auftrag→Rechnung rechnet den Zahlungstopf lokal um' },
+  // R5A — OrderDetail ist hier NICHT mehr: der Zahlungstopf wird in
+  // `core/orders/order-payment-carryover` umgerechnet, die Ansicht fragt die Datenbank nicht mehr direkt.
   'pages/reports/BackfillPage.tsx': { art: 'schreib-luecke', abfragen: 3, grund: 'schreibt Hauptbuchzeilen nach; die Vorschau gehoert zum Schreibweg' },
 };
 
