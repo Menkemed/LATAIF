@@ -265,6 +265,21 @@ function seed() {
     insert(db, 'order_lines', { id: 'r5a-line3', order_id: 'r5a-ord3', product_id: 'r5a-prod2', description: 'R5A Pilot', quantity: 1, unit_price: 500, line_total: 500, position: 0, tax_scheme: 'ZERO', vat_rate: 0, is_customer_facing: 1, status: 'ARRIVED', created_at: now });
     insert(db, 'order_payments', { id: 'r5a-pay3', order_id: 'r5a-ord3', amount: 300, paid_at: heute, method: 'cash', note: 'Anzahlung', created_at: now });
 
+    // Der ZWILLING von r5a-ord — dieselben Werte, eigener Kunde, eigener Artikel. Ihn wandelt der
+    // Primary ueber seine normale Oberflaeche um; danach wird die Wirkung beider verglichen.
+    insert(db, 'customers', { id: 'r5a-custP', branch_id, first_name: 'Omar', last_name: 'Anzahlung', company: 'R5A Co', country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
+    insert(db, 'products', {
+      id: 'r5a-prodP', branch_id, category_id, brand: 'Zenith', name: 'R5A Chronometer', sku: 'R5A-SKU-0P',
+      condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 400, purchase_currency: 'BHD',
+      planned_sale_price: 1000, stock_status: 'in_stock', tax_scheme: 'ZERO', days_in_stock: 0,
+      quantity: 1, images: '[]', attributes: '{}', source_type: 'OWN', created_at: now, updated_at: now,
+    });
+    insert(db, 'stock_lots', { id: 'lot-r5a-prodP', branch_id, product_id: 'r5a-prodP', unit_cost: 400, qty_total: 1, qty_remaining: 1, status: 'ACTIVE', acquired_at: now, created_at: now });
+    insert(db, 'orders', { id: 'r5a-ordP', branch_id, order_number: 'R5AORD-0P', customer_id: 'r5a-custP', requested_brand: 'Zenith', requested_model: 'Defy', status: 'completed', agreed_price: 1000, type: 'normal', created_at: now, updated_at: now });
+    insert(db, 'order_lines', { id: 'r5a-lineP', order_id: 'r5a-ordP', product_id: 'r5a-prodP', description: 'R5A Chronometer', quantity: 1, unit_price: 1000, line_total: 1000, position: 0, tax_scheme: 'ZERO', vat_rate: 0, is_customer_facing: 1, status: 'ARRIVED', created_at: now });
+    insert(db, 'order_payments', { id: 'r5a-payP1', order_id: 'r5a-ordP', amount: 400, paid_at: heute, method: 'cash', note: 'Anzahlung', created_at: now });
+    insert(db, 'order_payments', { id: 'r5a-payP2', order_id: 'r5a-ordP', amount: 800, paid_at: heute, method: 'cash', note: 'Restzahlung', created_at: now });
+
     // Ein zweiter Auftrag, offen — Ziel fuer die Anzahlung mit Kartenart.
     insert(db, 'orders', { id: 'r5a-ord2', branch_id, order_number: 'R5AORD-02', customer_id: 'r5a-cust', requested_brand: 'Zenith', requested_model: 'Pilot', status: 'pending', agreed_price: 2000, type: 'normal', created_at: now, updated_at: now });
   } finally { try { db.close(); } catch { /* zu */ } }
@@ -460,6 +475,60 @@ try {
     const pZu = await primary.ev(DIALOG_ABBRECHEN);
     console.log(`      (Primary vor der Entscheidung) sichtbar=${pOben} bereit=${pBereit} Dialog=${pDlg} Zeilen=${S(pZeilen)} Abbruch=${pZu}`);
 
+    // ── LOKAL: der Zwilling, am Primary ueber die normale Oberflaeche umgewandelt ──
+    const maxRowid = () => Number(dbQ(BIZ_DB, 'SELECT COALESCE(MAX(rowid),0) AS m FROM ledger_entries')[0]?.m ?? 0);
+    // Kennungen, Nummern, Zeiten und Freitexte sind naturgemaess neu — alles andere muss gleich sein.
+    const OHNE = /^(id|rowid)$|_id$|_at$|number|^notes?$|description|reference|created_by|entry_no|metadata_json|^sku$|^name$/;
+    const norm = (rows) => rows.map((r) => S(Object.fromEntries(Object.entries(r).filter(([k]) => !OHNE.test(k))
+      .map(([k, v]) => [k, typeof v === 'number' ? Math.round(v * 1000) / 1000 : v])))).sort();
+    const effekt = (ordId, custId, prodId, lotId, ab) => {
+      const inv = dbQ(BIZ_DB, 'SELECT * FROM invoices WHERE customer_id = ?', [custId]);
+      const invId = inv[0]?.id;
+      const buch = dbQ(BIZ_DB, 'SELECT source_module, account, direction, amount, tax_scheme_snapshot, vat_rate_snapshot, counterparty_type FROM ledger_entries WHERE rowid > ? ORDER BY rowid', [ab]);
+      const saldo = {};
+      for (const b of buch) saldo[b.account] = Math.round(((saldo[b.account] || 0) + (b.direction === 'DEBIT' ? 1 : -1) * Number(b.amount)) * 1000) / 1000;
+      const summe = (acc, dir) => Math.round(buch.filter((b) => b.account === acc && b.direction === dir).reduce((s, b) => s + Number(b.amount), 0) * 1000) / 1000;
+      return {
+        invId, anzahl: inv.length, saldo, arSoll: summe('ACCOUNTS_RECEIVABLE', 'DEBIT'), arHaben: summe('ACCOUNTS_RECEIVABLE', 'CREDIT'),
+        rechnung: norm(inv), zeilen: norm(dbQ(BIZ_DB, 'SELECT * FROM invoice_lines WHERE invoice_id = ?', [invId])),
+        zahlungen: norm(dbQ(BIZ_DB, 'SELECT * FROM payments WHERE invoice_id = ?', [invId])),
+        gutschriften: norm(dbQ(BIZ_DB, 'SELECT * FROM customer_credits WHERE customer_id = ?', [custId])),
+        auftrag: norm(dbQ(BIZ_DB, 'SELECT * FROM orders WHERE id = ?', [ordId])),
+        positionen: norm(dbQ(BIZ_DB, 'SELECT * FROM order_lines WHERE order_id = ?', [ordId])),
+        anzahlungen: norm(dbQ(BIZ_DB, 'SELECT * FROM order_payments WHERE order_id = ?', [ordId])),
+        hauptbuch: norm(buch),
+        lager: norm(dbQ(BIZ_DB, 'SELECT * FROM stock_lots WHERE id = ?', [lotId])),
+        artikel: norm(dbQ(BIZ_DB, 'SELECT * FROM products WHERE id = ?', [prodId])),
+        kopf: dbQ(BIZ_DB, 'SELECT gross_amount, paid_amount, status FROM invoices WHERE id = ?', [invId])[0],
+        zahlBetraege: dbQ(BIZ_DB, 'SELECT amount, method FROM payments WHERE invoice_id = ? ORDER BY amount', [invId]),
+        gutBetraege: dbQ(BIZ_DB, 'SELECT amount, used_amount, source_type, status FROM customer_credits WHERE customer_id = ?', [custId]),
+        offen: Number(dbQ(BIZ_DB, 'SELECT COALESCE(SUM(amount),0) AS s FROM order_payments WHERE order_id = ? AND converted_to_invoice = 0', [ordId])[0]?.s ?? 0),
+        auftragGeld: dbQ(BIZ_DB, 'SELECT status, deposit_amount, remaining_amount, revision FROM orders WHERE id = ?', [ordId])[0],
+        zeileBerechnet: String(dbQ(BIZ_DB, 'SELECT invoice_id FROM order_lines WHERE order_id = ?', [ordId])[0]?.invoice_id ?? '') === String(invId),
+      };
+    };
+    await spuelen(primary);
+    const abLokal = maxRowid();
+    await primaryZu('/orders/r5a-ordP');
+    const lokalWeg = await warteBis(primary, "document.body.innerText.includes('R5AORD-0P')", 30000)
+      && (await clickText(primary, 'Create Invoice')) === 'OK'
+      && await warteBis(primary, SCHEMA_OFFEN, 15000)
+      && (await clickText(primary, 'Weiter')) === 'OK'
+      && await warteBis(primary, NUMMER_OFFEN, 15000)
+      && (await clickText(primary, 'Confirm')) === 'OK'
+      && await warteBis(primary, "location.pathname.startsWith('/invoices/')", 30000);
+    ok(lokalWeg, 'LOKAL der Primary wandelt den Zwilling ueber seine normale Oberflaeche um (beide Dialoge)');
+    // Der lokale Weg speichert ueber den normalen (verzoegerten) Speicherpfad — nicht ueber den
+    // durablen des Fernbefehls. Deshalb wird gewartet, bis der Stand wirklich auf der Platte steht:
+    // die Rechnung UND der fertige Anzahlungsuebertrag (der laeuft lokal nach dem Commit).
+    let lokal = null;
+    for (let i = 0; i < 40; i++) {
+      await spuelen(primary);
+      await sleep(500);
+      lokal = effekt('r5a-ordP', 'r5a-custP', 'r5a-prodP', 'lot-r5a-prodP', abLokal);
+      if (lokal.anzahl === 1 && lokal.offen === 0 && lokal.gutBetraege.length > 0) break;
+    }
+
     // ── PC2: derselbe Auftrag ──
     client = await lade(client, '/orders/r5a-ord');
     await waitFor(client, SHELL, 45000);
@@ -482,6 +551,8 @@ try {
     const nummer = await warteBis(client, NUMMER_OFFEN, 15000);
     ok(nummer, 'DIALOG danach fragt die Maske nach der Nummernart — der normale Weg');
     ok((await buchungen(client)).length === 0, 'DIALOG …und auch der Schema-Dialog hat nichts geschickt');
+    await spuelen(primary);
+    const abFern = maxRowid();
     ok(await clickText(client, 'Confirm') === 'OK', 'DIALOG die Nummernart wird mit „Confirm" bestaetigt (Normal Final)');
 
     const weg = await warteBis(client, "location.pathname.startsWith('/invoices/')", 45000);
@@ -530,6 +601,37 @@ try {
       `GELD …und die Gutschrift ist genau der Ueberzahlungsanteil (${gutschrift} = ${aufRechnung} − 1000)`);
     const hauptbuch = dbQ(BIZ_DB, 'SELECT DISTINCT transaction_id FROM ledger_entries WHERE source_id = ?', [inv[0]?.id]);
     ok(hauptbuch.length >= 1, `GELD die Rechnung steht im Hauptbuch (${hauptbuch.length})`);
+
+    // ── §1 DIE ÜBERZAHLUNG, BITGENAU — Vorschuss 1200, Rechnung 1000, Ueberschuss 200 ──
+    const fern = effekt('r5a-ord', 'r5a-cust', 'r5a-prod', 'lot-r5a-prod', abFern);
+    for (const [wer, e] of [['PC2', fern], ['Primary', lokal]]) {
+      console.log(`      (Buchhaltung ${wer}) ` + S({ kopf: e.kopf, zahlungen: e.zahlBetraege, gutschriften: e.gutBetraege,
+        offenBeimAuftrag: e.offen, auftrag: e.auftragGeld, AR: { soll: e.arSoll, haben: e.arHaben }, saldo: e.saldo }));
+    }
+    console.log('      (Hauptbuch PC2) ' + fern.hauptbuch.join(' '));
+    ok(fern.arSoll === 1000 && fern.arHaben === 1000 && fern.saldo.ACCOUNTS_RECEIVABLE === 0,
+      `KONTO auf die Forderung der Rechnung werden genau 1000 angerechnet, nicht 1200 (Soll ${fern.arSoll} / Haben ${fern.arHaben})`);
+    ok(fern.saldo.CUSTOMER_CREDIT === -200,
+      `KONTO der Ueberschuss 200 steht als Kundenguthaben im Haben (${fern.saldo.CUSTOMER_CREDIT})`);
+    ok(fern.gutBetraege.length === 1 && Number(fern.gutBetraege[0].amount) === 200 && fern.gutBetraege[0].source_type === 'overpayment'
+      && Number(fern.gutBetraege[0].used_amount || 0) === 0 && fern.gutBetraege[0].status === 'OPEN',
+      `KONTO …und als genau EINE offene Gutschrift ueber 200 aus der Ueberzahlung (${S(fern.gutBetraege)})`);
+    ok(S(fern.zahlBetraege) === S([{ amount: 200, method: 'cash' }, { amount: 400, method: 'cash' }, { amount: 600, method: 'cash' }]),
+      `KONTO die Zahlungszeilen: 400 + 600 bis zur Summe, 200 als Ueberzahlungsanteil (${S(fern.zahlBetraege)})`);
+    ok(Number(fern.kopf?.paid_amount) === 1200 && Number(fern.kopf?.gross_amount) === 1000 && fern.kopf?.status === 'FINAL',
+      `KONTO der Rechnungskopf fuehrt 1200 als ERHALTEN (Hausvertrag Slice 3: Ueberschuss → Guthaben statt Forderung) bei 1000 Summe, FINAL (${S(fern.kopf)})`);
+    ok(fern.offen === 0, `KONTO beim Auftrag bleibt keine Anzahlung liegen (${fern.offen})`);
+    ok(Math.abs(Object.values(fern.saldo).reduce((s, v) => s + v, 0)) < 0.001, `KONTO das Hauptbuch ist ausgeglichen (${S(fern.saldo)})`);
+    ok(fern.saldo.REVENUE === -1000, `KONTO Umsatz genau 1000 (${fern.saldo.REVENUE})`);
+
+    // ── §2 LOKAL vs FERN — dieselbe Wirkung, nur die Kennungen sind neu ──
+    ok(lokal.anzahl === 1 && fern.anzahl === 1 && lokal.zeileBerechnet && fern.zeileBerechnet,
+      'PARITAET beide Wege: genau eine Rechnung, die Position zeigt auf sie');
+    for (const teil of ['rechnung', 'zeilen', 'zahlungen', 'gutschriften', 'auftrag', 'positionen', 'anzahlungen', 'hauptbuch', 'lager', 'artikel']) {
+      const gleich = S(lokal[teil]) === S(fern[teil]);
+      ok(gleich, `PARITAET ${teil}: Primary-Oberflaeche == PC2${gleich ? '' : ` — lokal ${S(lokal[teil])} / fern ${S(fern[teil])}`}`);
+    }
+    ok(S(lokal.saldo) === S(fern.saldo), `PARITAET Kontensalden gleich (${S(lokal.saldo)})`);
 
     // ── Danach: der Auftrag ist auf beiden Rechnern berechnet ──
     client = await lade(client, '/orders/r5a-ord');
@@ -615,6 +717,8 @@ try {
 clearTimeout(WACHHUND);
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — central ui parity r5a: order to invoice, with the money: ${PASS} passed, ${FAIL} failed`);
 if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
+console.log('CENTRAL_UI_R5A_OVERPAYMENT_ACCOUNTING_PINNED');
+console.log('CENTRAL_UI_R5A_LOCAL_REMOTE_EFFECT_PARITY_PROVED');
 console.log('CENTRAL_UI_R5A2_PREDISPATCH_PATH_AUDITED');
 console.log('CENTRAL_UI_R5A2_PREDISPATCH_PARITY_PROVED');
 console.log('CENTRAL_UI_R5A2_REAL_CONVERSION_DISPATCH_PROVED');

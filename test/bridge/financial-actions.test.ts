@@ -625,6 +625,18 @@ const CONSIGN = {
     `R5A.2 eine andere als die gezeigte Zeilenmenge wird nicht abgerechnet (${code(fremd)})`);
   ok(n(db, 'SELECT COUNT(*) FROM invoices') === 0, 'R5A.2 …und es entsteht nichts');
 
+  // R5A FINAL — eine FREMDE Position (echt, abrechenbar, aber aus einem anderen Auftrag) laesst
+  // sich nicht dazuschmuggeln.
+  const oid2 = await readyOrder(db, d, '63');
+  const lid2 = s(db, 'SELECT id FROM order_lines WHERE order_id = ?', [oid2]);
+  const schmuggel = await fin.runConvertOrder(d, identity('64', 'orders.convert_to_invoice'),
+    { orderId: oid, expectedRevision: rev, taxSchemes: { [lid]: 'ZERO', [lid2]: 'ZERO' } });
+  ok(schmuggel.kind === 'rejected' && code(schmuggel) === 'ORDER_LINES_CHANGED',
+    `AUTHORITY eine Position eines anderen Auftrags wird nicht mitberechnet (${code(schmuggel)})`);
+  ok(n(db, 'SELECT COUNT(*) FROM invoices') === 0
+    && n(db, 'SELECT COUNT(*) FROM order_lines WHERE invoice_id IS NOT NULL') === 0,
+    'AUTHORITY …keine Rechnung, keine Position berechnet');
+
   const out = await fin.runConvertOrder(d, identity('62', 'orders.convert_to_invoice'),
     { orderId: oid, expectedRevision: rev, taxSchemes: { [lid]: 'MARGIN' }, specialMark: true, markComplete: true });
   ok(out.kind === 'ok', `R5A.2 die Umwandlung mit der Wahl der Dialoge laeuft (${JSON.stringify(out)})`);
@@ -637,6 +649,70 @@ const CONSIGN = {
     'R5A.2 …mit dem im Dialog gewaehlten Schema');
   ok(n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [inv]) === 1, 'R5A.2 die Nummernart des Dialogs gilt');
   ok(s(db, 'SELECT status FROM order_lines WHERE id = ?', [lid]) === 'DELIVERED', 'R5A.2 „abschliessen" gilt ebenfalls');
+}
+
+// ── 5c) R5A FINAL — ein Fehler NACH der Rechnung, VOR dem fertigen Uebertrag ──
+// Die Anzahlung ist hier ueber das Haus gebucht (mit Hauptbuch), damit der Uebertrag sie wirklich
+// zurueckdrehen muss. Der Fehler wird im TEST in den Speicher gelegt (setState), nicht im Produkt.
+{
+  resetDurabilityStateForTest();
+  resetTransactionHealthForTest();
+  const db = freshDb();
+  const d = deps(db);
+  seedProduct(db, 'p1', 5);
+  const created = await cmdC.runOrderCreate(d, identity('80', 'orders.create'),
+    { ...ORDER_BODY, depositAmount: 300, paymentMethod: 'cash' });
+  ok(created.kind === 'ok', `ATOMIC der Auftrag mit gebuchter Anzahlung entsteht (${JSON.stringify(created).slice(0, 160)})`);
+  const oid = (created as { value: { orderId: string } }).value.orderId;
+  useOrderStore.getState().loadOrders();
+  useOrderStore.getState().updateStatus(oid, 'arrived');
+  const rev = n(db, 'SELECT revision FROM orders WHERE id = ?', [oid]);
+  ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'ORDER_PAYMENT'") > 0,
+    'ATOMIC die Anzahlung steht im Hauptbuch — der Uebertrag muss sie zurueckdrehen');
+  const stand = (): Record<string, unknown> => ({
+    rechnungen: n(db, 'SELECT COUNT(*) FROM invoices'),
+    rechnungszeilen: n(db, 'SELECT COUNT(*) FROM invoice_lines'),
+    zahlungen: n(db, 'SELECT COUNT(*) FROM payments'),
+    gutschriften: n(db, 'SELECT COUNT(*) FROM customer_credits'),
+    hauptbuch: n(db, 'SELECT COUNT(*) FROM ledger_entries'),
+    auftragRechnung: s(db, "SELECT COALESCE(invoice_id, '') FROM orders WHERE id = ?", [oid]),
+    positionenBerechnet: n(db, 'SELECT COUNT(*) FROM order_lines WHERE order_id = ? AND invoice_id IS NOT NULL', [oid]),
+    anzahlung: s(db, "SELECT COUNT(*) || '/' || COALESCE(SUM(amount),0) || '/' || COALESCE(SUM(converted_to_invoice),0) FROM order_payments WHERE order_id = ?", [oid]),
+    los: n(db, "SELECT qty_remaining FROM stock_lots WHERE id = 'lot-p1'"),
+    revision: n(db, 'SELECT revision FROM orders WHERE id = ?', [oid]),
+  });
+  const vorher = stand();
+  const echt = useInvoiceStore.getState().recordPayment;
+  let imFehler = '';
+  useInvoiceStore.setState({ recordPayment: (() => {
+    imFehler = `${n(db, 'SELECT COUNT(*) FROM invoices')}/${n(db, 'SELECT COALESCE(SUM(converted_to_invoice),0) FROM order_payments WHERE order_id = ?', [oid])}`;
+    throw new Error('INJECTED: the carry-over breaks after the invoice exists');
+  }) as never });
+  let out: unknown = null; let geworfen = '';
+  try {
+    out = await fin.runConvertOrder(d, identity('81', 'orders.convert_to_invoice'), { orderId: oid, expectedRevision: rev });
+  } catch (e) { geworfen = String(e); }
+  finally { useInvoiceStore.setState({ recordPayment: echt }); }
+  ok(imFehler === '1/1', `ATOMIC der Fehler fiel MITTEN in den Uebertrag: Rechnung da, Anzahlung schon umgebucht (${imFehler})`);
+  ok(/INJECTED/.test(geworfen) || (out as { kind?: string } | null)?.kind !== 'ok',
+    `ATOMIC …und die Umwandlung meldet keinen Erfolg (${geworfen.slice(0, 90) || JSON.stringify(out)})`);
+  const nachher = stand();
+  for (const k of Object.keys(vorher)) {
+    ok(JSON.stringify(nachher[k]) === JSON.stringify(vorher[k]), `ATOMIC ${k}: nichts bleibt zurueck (${vorher[k]} → ${nachher[k]})`);
+  }
+  // Danach laeuft dieselbe Umwandlung sauber — und das Geld steht genau einmal da.
+  resetTransactionHealthForTest();
+  const heil = await fin.runConvertOrder(d, identity('82', 'orders.convert_to_invoice'), { orderId: oid, expectedRevision: rev });
+  ok(heil.kind === 'ok', `ATOMIC die Wiederholung nach dem Fehler laeuft (${JSON.stringify(heil).slice(0, 120)})`);
+  const inv = val<{ invoiceId: string }>(heil).invoiceId;
+  const saldo = (acc: string): number => n(db,
+    "SELECT COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END),0) FROM ledger_entries WHERE account = ?", [acc]);
+  const brutto = n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [inv]);
+  ok(n(db, 'SELECT paid_amount FROM invoices WHERE id = ?', [inv]) === 300, 'ATOMIC die 300 Anzahlung stehen genau einmal auf der Rechnung');
+  ok(Math.abs(saldo('CUSTOMER_DEPOSITS')) < 0.001, `ATOMIC die Anzahlungsschuld ist vollstaendig aufgeloest (${saldo('CUSTOMER_DEPOSITS')})`);
+  ok(Math.abs(saldo('ACCOUNTS_RECEIVABLE') - (brutto - 300)) < 0.001,
+    `ATOMIC die Forderung ist genau der Rest (${saldo('ACCOUNTS_RECEIVABLE')} = ${brutto} − 300)`);
+  ok(n(db, 'SELECT COUNT(*) FROM customer_credits') === 0, 'ATOMIC keine Gutschrift — es gab keine Ueberzahlung');
 }
 
 // ── 8) Der Rumpf bestimmt nichts Abgeleitetes ────────────────────────────
@@ -652,6 +728,16 @@ const CONSIGN = {
     ['eine Rechnungsnummer', { orderId: 'o1', expectedRevision: 1, invoiceNumber: 'PINV-1' }, fin.parseConvertOrder],
     ['ein unbekanntes Steuerschema', { orderId: 'o1', expectedRevision: 1, taxSchemes: { a: 'LUXURY' } }, fin.parseConvertOrder],
     ['eine Nummernart als Text', { orderId: 'o1', expectedRevision: 1, specialMark: 'yes' }, fin.parseConvertOrder],
+    ['eine Nummernart ausserhalb der Wahl', { orderId: 'o1', expectedRevision: 1, specialMark: 1 }, fin.parseConvertOrder],
+    ['eine Abschluss-Wahl als Text', { orderId: 'o1', expectedRevision: 1, markComplete: 'ja' }, fin.parseConvertOrder],
+    ['ein Schema in Altschreibweise', { orderId: 'o1', expectedRevision: 1, taxSchemes: { a: 'margin' } }, fin.parseConvertOrder],
+    ['ein leeres Schema-Verzeichnis', { orderId: 'o1', expectedRevision: 1, taxSchemes: {} }, fin.parseConvertOrder],
+    ['eine Summe', { orderId: 'o1', expectedRevision: 1, grossAmount: 1 }, fin.parseConvertOrder],
+    ['Zeilen mit Preisen', { orderId: 'o1', expectedRevision: 1, lines: [{ productId: 'p', unitPrice: 1 }] }, fin.parseConvertOrder],
+    ['Einstandskosten', { orderId: 'o1', expectedRevision: 1, purchasePrice: 1 }, fin.parseConvertOrder],
+    ['einen Uebertragsbetrag', { orderId: 'o1', expectedRevision: 1, carryOver: 1200 }, fin.parseConvertOrder],
+    ['eine bezahlte Summe', { orderId: 'o1', expectedRevision: 1, paidAmount: 1200 }, fin.parseConvertOrder],
+    ['einen Lagerbezug', { orderId: 'o1', expectedRevision: 1, lotId: 'lot-1' }, fin.parseConvertOrder],
     ['einen Auszahlungsstand', { consignmentId: 'c1', amount: 5, method: 'cash', expectedRevision: 1, payoutStatus: 'paid' }, fin.parseRecordPayout],
     ['„zahl den Rest"', { consignmentId: 'c1', method: 'cash', expectedRevision: 1 }, fin.parseRecordPayout],
     ['einen Abrechnungsbetrag', { transferId: 't1', salePrice: 5, expectedRevision: 1, settlementAmount: 99 }, fin.parseMarkSold],
@@ -750,3 +836,5 @@ const CONSIGN = {
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3g financial actions: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
+console.log('CENTRAL_UI_R5A_CONVERSION_FAIL_ATOMIC_PROVED');
+console.log('CENTRAL_UI_R5A_CONVERSION_INPUT_AUTHORITY_PROVED');

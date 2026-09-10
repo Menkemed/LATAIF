@@ -1436,3 +1436,46 @@ Antwort verloren: Banner „not clear whether", zweiter Klick → dieselbe Kennu
 Matrix unverändert **22 / 0 / 16 / 2**, Registry **107** — keine neue Buchung, der bestehende
 Befehl wurde exakt gemacht.
 
+---
+
+## R5A FINAL — Buchhaltung festgenagelt, lokal = fern (11.09.2026)
+
+### Die Überzahlung, bitgenau (Vorschuss 1200, Rechnung 1000)
+
+```
+Rechnung   gross 1000 · paid_amount 1200 · FINAL
+Zahlungen  400 + 600 (bis zur Summe) + 200 (Ueberzahlungsanteil), alle cash
+Hauptbuch  AR  Soll 1000 / Haben 1000 → Saldo 0     REVENUE −1000   COGS 400 / INVENTORY −400
+           CASH +1200 (genau einmal)                CUSTOMER_CREDIT −200
+Gutschrift genau eine: 200, overpayment, OPEN, unbenutzt
+Auftrag    offene Anzahlung 0 · deposit 0 · completed
+```
+
+Auf die Forderung werden genau **1000** angerechnet. `paid_amount = 1200` ist der bestehende
+Hausvertrag (Slice 3): der Rechnungskopf führt den ERHALTENEN Betrag, der Teil über der Summe wird
+in `recordPayment` als Kundenguthaben gebucht statt als negative Forderung.
+
+### Lokal = fern
+
+Ein Zwilling desselben Auftrags wird am Primary über die normale Oberfläche umgewandelt, das Original
+vom datenbanklosen PC2. Verglichen (ohne Kennungen, Nummern, Zeiten, Freitexte): Rechnungskopf,
+Zeilen, Zahlungen, Gutschrift, Auftrag samt Fassung, Positionen, Anzahlungen, jede neue
+Hauptbuchzeile, Los und Artikel — **alle zehn identisch**, Kontensalden identisch.
+
+Nebenbefund im Test: der lokale Weg speichert über den verzögerten Speicherpfad, der Fernbefehl
+durabel — der Vergleich wartet deshalb, bis der lokale Stand auf der Platte steht.
+
+### Transaktionsgrenze
+
+Fehler im Test in `recordPayment` gelegt (`setState`, kein Produkt-Hook): zu diesem Zeitpunkt
+existiert die Rechnung und die Anzahlung ist schon umgebucht. Danach: keine Rechnung, keine Zeile,
+keine Zahlung, keine Gutschrift, Hauptbuch unverändert, Auftrag nicht berechnet, Anzahlung
+unverändert, Los unverändert, Fassung unverändert. Die Wiederholung läuft; Anzahlungsschuld 0,
+Forderung = Summe − 300.
+
+### Eingaben des Clients
+
+Abgelehnt: fremde Position (eines anderen Auftrags), leeres/unbekanntes/Alt-Schema, Nummernart
+oder Abschluss als Nicht-Boolean, und jede Summe, Zeile, Kosten, Übertrags-, Bezahlt- oder
+Lagerangabe. Beträge, Kosten, Lager, Übertrag und Buchung bestimmt allein der Primary.
+
