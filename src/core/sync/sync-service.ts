@@ -23,6 +23,7 @@ import { readCursor, writeCursor, resolveCursorStart, isServerFingerprint, serve
 // vorhanden. Die Weiche in App.tsx erreicht diesen Zustand heute schon nie; das hier ist der
 // Riegel an der Sache selbst, damit kein spaeterer Aufrufweg ihn versehentlich wieder oeffnet.
 import { isClientMode } from '../bridge/client-mode';
+import { runExclusive } from '../bridge/command-scheduler';
 
 /**
  * CENTRAL-C6 — im Client-Modus gibt es keinen zweiten Besitzer der Wahrheit.
@@ -513,18 +514,27 @@ export function syncNow(): Promise<void> {
 
   const run = (async () => {
     try {
-      const pushed = await pushChanges();
-      const pulled = await pullChanges();
-      // C1: drain the authoritative operations-pull too, so a passive device
-      // converges on B1 operations (whose effects are NOT in sync_changelog).
-      // Dynamic import breaks the operations/sync static cycle.
-      let opsApplied = 0;
-      try {
-        const ops = await import('../operations/service');
-        opsApplied = await ops.pullAndApplyOperationsAuto();
-      } catch (e) {
-        console.warn('[Sync] ops-pull skipped:', e);
-      }
+      // R5B FINAL — gemessen im Zwei-Rechner-Lauf: dieser Zeitgeber-Lauf schrieb NEBEN der einen
+      // Warteschlange des Hauses in die Datenbank (Push-Markierungen, Fortschritt, Operationen) —
+      // auch mitten in einen Fernauftrag hinein, der gerade seine Transaktion offen hatte und auf
+      // die Medien wartete. Danach stand ein Artikel ohne seine Kommission in der Datenbank. Der
+      // Sync ist ein Geschäftsschreibvorgang wie jeder andere: er läuft deshalb IM exklusiven Platz
+      // (`runExclusive`), nie zwischen den Phasen eines anderen Vorgangs.
+      const { pushed, pulled, opsApplied } = await runExclusive(async () => {
+        const pushed = await pushChanges();
+        const pulled = await pullChanges();
+        // C1: drain the authoritative operations-pull too, so a passive device
+        // converges on B1 operations (whose effects are NOT in sync_changelog).
+        // Dynamic import breaks the operations/sync static cycle.
+        let opsApplied = 0;
+        try {
+          const ops = await import('../operations/service');
+          opsApplied = await ops.pullAndApplyOperationsAuto();
+        } catch (e) {
+          console.warn('[Sync] ops-pull skipped:', e);
+        }
+        return { pushed, pulled, opsApplied };
+      });
       setStatus('synced', `Pushed ${pushed}, pulled ${pulled}, ops ${opsApplied}`);
     } catch (err) {
       console.warn('[Sync] Error:', err);

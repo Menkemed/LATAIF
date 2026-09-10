@@ -712,6 +712,150 @@ const links = (db: Db, pid: string): number =>
   }
 }
 
+
+// ── 12b) R5B FINAL — der SKU-Vertrag, wie ihn die Masken VOR R5B schon hatten ──
+// Collection (WatchList): eine eingetippte SKU getrimmt gespeichert, eine schon vergebene hart
+// abgewiesen (isSkuTaken: getrimmt, ohne Gross/Klein), leer oder nur Leerzeichen → Vergabe aus dem
+// Zähler; ein Bild-Retry nutzt die schon beanspruchte Nummer weiter. Kommission: dieselbe Eingabe
+// über `resolveSkuDurable` (trimmt) und derselbe harte Riegel. `planProductCreate` bildet genau das ab.
+{
+  const { planProductCreate } = await import('../../src/core/products/product-create.ts');
+  let vergeben = 0;
+  const port = {
+    category: { id: 'cat-watch', name: 'W', attributes: [] } as never,
+    isSkuTaken: (s: string) => s.trim().toUpperCase() === 'RLX-001',
+    allocateSku: () => { vergeben += 1; return 'GEN-00' + vergeben; },
+  };
+  const base = { categoryId: 'cat-watch', brand: 'Rolex', name: 'Datejust' };
+  const typed = planProductCreate({ ...base, sku: '  RLX-777  ' }, port);
+  ok(typed.kind === 'ok' && typed.data.sku === 'RLX-777' && typed.allocated === false && vergeben === 0,
+    'SKU eine eingetippte Nummer wird getrimmt übernommen und beansprucht keine aus dem Zähler');
+  const taken = planProductCreate({ ...base, sku: ' rlx-001 ' }, port);
+  ok(taken.kind === 'sku_taken' && vergeben === 0, 'SKU eine vergebene Nummer (andere Schreibweise) ist ein hartes Nein');
+  const leer = planProductCreate({ ...base, sku: '   ' }, port);
+  ok(leer.kind === 'ok' && leer.data.sku === 'GEN-001' && leer.allocated === true, 'SKU nur Leerzeichen → Vergabe aus dem Zähler');
+  const retry = planProductCreate({ ...base, sku: '' }, port, 'GEN-001');
+  ok(retry.kind === 'ok' && retry.data.sku === 'GEN-001' && retry.allocated === false && vergeben === 1,
+    'SKU ein Retry derselben Anlage nutzt die schon beanspruchte Nummer weiter');
+  const alt = src('src/core/products/sku-sequence.ts');
+  ok(/if \(!skuIsEmpty\(current\)\) return String\(current\)\.trim\(\);/.test(alt),
+    'SKU …und die Kommissionsmaske hatte über resolveSkuDurable schon dieselbe Regel (getrimmt, sonst Zähler)');
+}
+
+// ── 13) R5B FINAL — die Grenze zwischen Datenbank und Dateien ─────────────
+{
+  const cmdC = await import('../../src/core/bridge/commercial-commands.ts');
+  const { useConsignmentStore } = await import('../../src/stores/consignmentStore.ts');
+  const code = (o: unknown): string => String((o as { code?: string }).code ?? '');
+  const OWNER = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test' };
+  const liegt = (id: string): boolean => [...tauriState.staged.keys()].some((k) => k.endsWith('/' + id));
+  const seedConsignor = (db: Db): void => {
+    db.run(`INSERT INTO customers (id, branch_id, first_name, last_name, country, language, vip_level,
+        preferences, customer_type, sales_stage, created_at, updated_at)
+      VALUES ('cust-1','branch-main','Ali','Hassan','BH','en',0,'[]','collector','active',?,?)`, [NOW, NOW]);
+  };
+  const CON = {
+    consignorId: 'cust-1',
+    product: { categoryId: 'cat-watch', brand: 'Patek', name: 'Calatrava' },
+    agreedPrice: 1000,
+    payout: { model: 'percent', commissionRate: 20 },
+    acknowledgeDuplicate: true,
+  };
+  const zaehle = (db: Db) => ({
+    artikel: Number(one(db, 'SELECT COUNT(*) FROM products')),
+    kommissionen: Number(one(db, 'SELECT COUNT(*) FROM consignments')),
+    verknuepfungen: Number(one(db, 'SELECT COUNT(*) FROM media_links')),
+    auftraege: Number(one(db, 'SELECT COUNT(*) FROM media_ingest_jobs')),
+    nachweise: commandCount(db as never),
+  });
+
+  // (a) Ablage vorhanden, der Datenbankteil scheitert — beim Artikel.
+  {
+    resetDurabilityStateForTest(); resetTransactionHealthForTest(); tauriState.reset();
+    const db = freshDb();
+    const { deps: d } = deps(db);
+    const img = image('grenze-a');
+    const echt = useProductStore.getState().createProductWithMedia;
+    useProductStore.setState({ createProductWithMedia: (async () => { throw new Error('INJECTED-DB'); }) as never });
+    let geworfen = '';
+    try { await runProductCreate(d, identity('401', 'products.create'), { ...WISH, stagingIds: [img] }); }
+    catch (e) { geworfen = String(e); }
+    finally { useProductStore.setState({ createProductWithMedia: echt }); }
+    const z = zaehle(db);
+    ok(/INJECTED-DB/.test(geworfen) && z.artikel === 0 && z.verknuepfungen === 0 && z.nachweise === 0,
+      `GRENZE Artikel: scheitert die Datenbank, entsteht nichts und nichts wird festgehalten (${JSON.stringify(z)})`);
+    ok(liegt(img) && tauriState.discarded.length === 0,
+      'GRENZE …die Ablage bleibt liegen, dem Absender zugeordnet — Fall für den Kehrbesen beim Start (24 h)');
+    const retry = await runProductCreate(d, identity('401', 'products.create'), { ...WISH, stagingIds: [img] });
+    ok(retry.kind === 'ok' && zaehle(db).artikel === 1 && !liegt(img),
+      'GRENZE …dieselbe Kennung legt danach genau einen Artikel an und räumt die Ablage');
+    // (c) Nach dem Erfolg ist die Ablage verbraucht: ein NEUER Auftrag mit derselben Kennung findet nichts.
+    let stale = '';
+    try { await runProductCreate(d, identity('402', 'products.create'), { ...WISH, name: 'Nochmal', stagingIds: [img] }); }
+    catch (e) { stale = String(e); }
+    ok(/staged image is gone/.test(stale) && zaehle(db).artikel === 1,
+      `GRENZE eine verbrauchte Ablage lässt sich nicht noch einmal einlösen (${stale.slice(0, 60)})`);
+  }
+
+  // (b) Datenbankteil begonnen (Zeile steht), die Veröffentlichung scheitert — bei der Kommission.
+  {
+    resetDurabilityStateForTest(); resetTransactionHealthForTest(); tauriState.reset();
+    const db = freshDb();
+    seedConsignor(db);
+    const { deps: d } = deps(db);
+    const img = image('grenze-b');
+    tauriState.prepareShouldThrow = true;
+    const failed = await cmdC.runConsignmentCreate(d, identity('411', 'consignments.create'), { ...CON, stagingIds: [img] })
+      .catch((e) => ({ kind: 'thrown', code: String(e) }));
+    tauriState.prepareShouldThrow = false;
+    const z = zaehle(db);
+    ok(code(failed).includes('PRODUCT_MEDIA_INCOMPLETE') || (failed as { frozen?: boolean }).frozen === false,
+      `GRENZE Kommission: ein Medienausfall ist kein Erfolg und kein Urteil (${JSON.stringify(failed).slice(0, 120)})`);
+    ok(z.artikel === 0 && z.kommissionen === 0 && z.verknuepfungen === 0 && z.auftraege === 0 && z.nachweise === 0,
+      `GRENZE …weder Artikel noch Kommission noch Bildauftrag noch Nachweis bleiben (${JSON.stringify(z)})`);
+    ok(liegt(img), 'GRENZE …die Ablage bleibt für die Wiederholung liegen');
+    const retry = await cmdC.runConsignmentCreate(d, identity('411', 'consignments.create'), { ...CON, stagingIds: [img] });
+    const z2 = zaehle(db);
+    ok(retry.kind === 'ok' && z2.artikel === 1 && z2.kommissionen === 1 && z2.verknuepfungen === 1 && !liegt(img),
+      `GRENZE …dieselbe Kennung legt danach genau EINE Kombination an (${JSON.stringify(z2)})`);
+    // Die Antwort geht nach dem Commit verloren → Wiederholung: nichts doppelt.
+    const replay = await cmdC.runConsignmentCreate(d, identity('411', 'consignments.create'), { ...CON, stagingIds: [img] });
+    ok(replay.kind === 'ok' && (replay as { replayed: boolean }).replayed === true
+      && JSON.stringify(zaehle(db)) === JSON.stringify(z2),
+      'GRENZE nach verlorener Antwort: dieselbe Antwort, keine zweite Kombination, kein zweites Bild');
+    let stale = '';
+    try {
+      await cmdC.runConsignmentCreate(d, identity('412', 'consignments.create'),
+        { ...CON, product: { ...CON.product, name: 'Nochmal' }, stagingIds: [img] });
+    } catch (e) { stale = String(e); }
+    ok(/staged image is gone/.test(stale) && zaehle(db).kommissionen === 1,
+      'GRENZE …und die verbrauchte Ablage öffnet keinem neuen Auftrag etwas');
+  }
+
+  // (d) Das Auszahlungsmodell cost_split: EINE Regel für Anlegen und Ändern (1 … 99 %).
+  {
+    resetDurabilityStateForTest(); resetTransactionHealthForTest(); tauriState.reset();
+    const db = freshDb();
+    seedConsignor(db);
+    const { deps: d } = deps(db);
+    const versuch = async (n: string, pct: number) => cmdC.runConsignmentCreate(d, identity(n, 'consignments.create'),
+      { ...CON, product: { ...CON.product, name: 'Split ' + pct, sku: 'SPLIT-' + pct }, payout: { model: 'cost_split', excessSplitPct: pct } });
+    for (const [n, pct] of [['421', 0], ['422', 100], ['423', 150], ['424', -5]] as const) {
+      const r = await versuch(n, pct);
+      ok(r.kind === 'rejected' && code(r) === 'PAYOUT_MODEL_INVALID', `PAYOUT cost_split ${pct} % ist kein gültiger Anteil (${code(r)})`);
+    }
+    for (const [n, pct] of [['425', 1], ['426', 99]] as const) {
+      const r = await versuch(n, pct);
+      const cid = (r as { value?: { consignmentId: string } }).value?.consignmentId;
+      ok(r.kind === 'ok' && Number(one(db, 'SELECT excess_split_pct FROM consignments WHERE id = ?', [cid])) === pct,
+        `PAYOUT cost_split ${pct} % wird angelegt, wie er eingegeben wurde`);
+    }
+    ok(src('src/core/consignment/consignment-create.ts').includes('buildPayoutPatch(input.payout)')
+      && src('src/stores/consignmentStore.ts').includes('buildPayoutPatch(input)'),
+      'PAYOUT Anlegen und Ändern lesen DIESELBE Regel (buildPayoutPatch)');
+  }
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3c product remote write: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_C3C_PRODUCT_DOMAIN_REUSE_PROVED');
@@ -719,4 +863,7 @@ console.log('CENTRAL_C3C_PRODUCT_SKU_AUTHORITY_PROVED');
 console.log('CENTRAL_C3C_PRODUCT_MEDIA_ATOMICITY_PROVED');
 console.log('CENTRAL_C3C_NEUTRAL_STAGING_INGRESS_PROVED');
 console.log('CENTRAL_UI_R5B_PRODUCT_MEDIA_FAILURE_CONTRACT_PROVED');
+console.log('CENTRAL_UI_R5B_MEDIA_FAILURE_BOUNDARY_PROVED');
+console.log('CENTRAL_UI_R5B_CONSIGNMENT_PAYOUT_RULE_PINNED');
+console.log('CENTRAL_UI_R5B_SKU_CONTRACT_PINNED');
 console.log('CENTRAL_UI_R5B_CONSIGNMENT_CREATE_ATOMIC_DOMAIN_PROVED');

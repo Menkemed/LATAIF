@@ -1538,3 +1538,57 @@ E2E   r5b-create-parity 54/0      (PC2: Artikel + Kommission mit echtem Foto, je
 Registry 107 · Matrix 24 / 0 / 14 / 2
 ```
 
+---
+
+## R5B FINAL — Vertrag, Altbestand, Medien, Test-Harnesses (11.09.2026)
+
+### SKU — kein neuer Vertrag
+
+Beide Masken konnten VOR R5B eine SKU eintippen: Collection trimmte sie und blockte eine vergebene
+(`isSkuTaken`: getrimmt, ohne Groß/Klein); die Kommissionsmaske über `resolveSkuDurable` (trimmt)
+mit demselben Riegel. Leer oder nur Leerzeichen → Zähler; ein Bild-Retry nutzt die beanspruchte
+Nummer weiter. `planProductCreate` bildet genau das ab — der Fernbefehl verbot die Eingabe bisher nur.
+
+### cost_split — eine Regel
+
+`buildPayoutPatch` (v0.8.51) verlangt 1–99 % und wird von Ändern (Maske + Fernbefehl) und vom
+Fernanlegen benutzt. Die alte Anlegemaske hatte keine Regel, nur eine Klemme mit Nebenwirkungen:
+„0" wurde über `|| 50` zu 50, negative Werte zu 0, >100 zu 100 — also historisch inkonsistent,
+nicht die kanonische Regel. 0 % gibt dem Shop nichts, 100 % ist `consignor_fixed` unter falschem Namen.
+
+### Altbestand
+
+Bilder als Text in `products.images` bleiben unverändert (keine Migration) und werden auf BEIDEN
+Rechnern gezeigt: am Primary über Schritt 1 des Resolvers, auf PC2 über denselben Schritt in
+`useProductMediaPresentation` (der gemeinsame Artikelbestand bringt die Altspalte mit). Neue Bilder
+kommen auf PC2 über `products.get` + `/api/media`.
+
+### Zwei Transaktionsfehler, gemessen und behoben
+
+Im Zwei-Rechner-Lauf stand — nicht in jedem Lauf — nach einem gescheiterten Fernauftrag ein
+Artikel „in Kommission" ohne Kommission in der Datenbank. Ursachen:
+
+1. **Der Zeitgeber-Sync schrieb neben der Warteschlange** (Push-Markierungen, Fortschritt,
+   Operationen) — auch mitten in einen Fernauftrag, der seine Transaktion offen hatte und auf
+   Medien wartete. Er läuft jetzt IM exklusiven Platz (`runExclusive`).
+2. **Der Speicherdurchlauf zog ein Abbild aus einer offenen Transaktion** (`db.export()` beendet
+   sie in sql.js still). Jetzt nie: `isReady` verlangt „keine offene Transaktion"; ein
+   durables Speichern, das dadurch nicht schrieb, meldet sich nicht als durabel.
+
+Dazu: das Anwenden von Operationen ließ den Transaktionszähler nach jedem Erfolg eine Stufe zu
+hoch stehen und setzte ihn bei einem inneren Fehler für ALLE zurück — beides ausgeglichen.
+
+### Harnesses
+
+Die vier nachgezogenen Tests stellen nur die IPC-Grenze zu Rust (dieselbe wie im Produkttest) und
+dieselbe echte sql.js-Testdatenbank auch für den Importweg des Medien-Orchestrators; dazu das
+echte Medienschema. Keine Prüfung entfernt außer „SKU verboten" (ersetzt durch fünf Verbote und
+die getrimmte Eingabe), kein `skip`.
+
+```
+Unit  product-remote-write 141/0 · save-in-transaction 13/0 · Harness-Gate im Matrixtest
+E2E   r5b-create-parity 74/0 ×3  (Altbestand + neu auf beiden Rechnern, Primary==PC2 für Artikel
+                                   und Kommission inkl. Bildbytes und Protokoll)
+Registry 107 · Matrix 24 / 0 / 14 / 2
+```
+

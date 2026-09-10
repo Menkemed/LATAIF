@@ -15,7 +15,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -98,8 +98,16 @@ class CDP {
   constructor(wsUrl) {
     this.ws = new WebSocket(wsUrl); this.id = 0; this.pending = new Map();
     this.ready = new Promise((res, rej) => { this.ws.addEventListener('open', res); this.ws.addEventListener('error', rej); });
+    this.events = [];
     this.ws.addEventListener('message', (e) => {
       const m = JSON.parse(e.data);
+      // Konsolenmeldungen und Ausnahmen der Seite mitschreiben — nur zum Lesen, falls etwas scheitert.
+      if (m.method === 'Runtime.consoleAPICalled' && /error|warn/.test(m.params?.type || '')) {
+        this.events.push(`${m.params.type}: ${(m.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ')}`.slice(0, 400));
+      }
+      if (m.method === 'Runtime.exceptionThrown') {
+        this.events.push(`exception: ${m.params?.exceptionDetails?.exception?.description || m.params?.exceptionDetails?.text || ''}`.slice(0, 400));
+      }
       if (m.id && this.pending.has(m.id)) {
         const { res, rej } = this.pending.get(m.id); this.pending.delete(m.id);
         m.error ? rej(new Error(m.error.message)) : res(m.result);
@@ -252,6 +260,12 @@ function seed() {
     // Marke und Name sind hier Pflicht.
     insert(db, 'categories', { id: 'cat-r5b', branch_id, name: 'R5B Plain', icon: 'watch', color: '#000', attributes: '[]', scope_options: '[]', condition_options: '[]', active: 1, sort_order: 0, created_at: now, updated_at: now });
     insert(db, 'customers', { id: 'r5b-cons', branch_id, first_name: 'Nadia', last_name: 'Einlieferer', company: 'R5B Co', country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
+    // Altbestand: ein Artikel und eine Kommission, deren Bild noch als Text in `products.images`
+    // steht — so, wie die Maske es vor R5B schrieb. KEINE Migration: genau so bleibt es liegen.
+    const alt = JSON.stringify(['data:image/png;base64,' + readFileSync(PHOTO).toString('base64')]);
+    insert(db, 'products', { id: 'r5b-legacy', branch_id, category_id: 'cat-r5b', brand: 'Rolex', name: 'R5B Altbestand', sku: 'R5B-ALT-1', condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 100, purchase_currency: 'BHD', stock_status: 'in_stock', tax_scheme: 'MARGIN', days_in_stock: 0, quantity: 1, images: alt, attributes: '{}', source_type: 'OWN', created_at: now, updated_at: now });
+    insert(db, 'products', { id: 'r5b-legacy-cn', branch_id, category_id: 'cat-r5b', brand: 'Rolex', name: 'R5B Alt-Kommission', sku: 'R5B-ALT-2', condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 800, purchase_currency: 'BHD', stock_status: 'consignment', tax_scheme: 'MARGIN', days_in_stock: 0, quantity: 1, images: alt, attributes: '{}', source_type: 'CONSIGNMENT', created_at: now, updated_at: now });
+    insert(db, 'consignments', { id: 'r5b-legacy-con', branch_id, consignment_number: 'CON-ALT-0001', consignor_id: 'r5b-cons', product_id: 'r5b-legacy-cn', agreed_price: 1000, commission_rate: 20, commission_type: 'percent', status: 'active', agreement_date: now.slice(0, 10), created_at: now, updated_at: now });
   } finally { try { db.close(); } catch { /* zu */ } }
 }
 
@@ -365,6 +379,17 @@ try {
   }
   const artikel = (name) => dbQ(BIZ_DB, 'SELECT * FROM products WHERE name = ?', [name]);
   const bilder = (pid) => dbQ(BIZ_DB, 'SELECT media_id, sort_order, is_primary FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [pid ?? '']);
+  /** Die Bytes hinter dem Hauptbild eines Artikels — der Beweis „dasselbe Bild", nicht nur „ein Bild". */
+  const bildHash = (pid) => dbQ(BIZ_DB,
+    `SELECT g.stored_blob_hash AS h FROM media_links l
+       JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
+       JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id
+       JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no
+      WHERE l.entity_id = ? AND l.deleted_at IS NULL`, [pid ?? ''])[0]?.h;
+  /** Was das Protokoll des Hauses über einen Datensatz festhält — ohne Zeiten und Kennungen. */
+  const protokoll = (eid) => dbQ(BIZ_DB,
+    'SELECT module, entity_type, action_type, field_name FROM audit_log WHERE entity_id = ? ORDER BY module, action_type, field_name',
+    [eid ?? '']).map((r) => `${r.module}/${r.entity_type}/${r.action_type}/${r.field_name ?? ''}`);
 
   // ══════════════════════════════════════════════════════════════════════
   // §9 ARTIKEL ANLEGEN, MIT BILD
@@ -471,6 +496,10 @@ try {
     const zu = await warteBis(client, "!document.querySelector('[data-cn-create]')", 45000);
     const fehler = await client.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';");
     ok(zu, `KOMMISSION die Maske schliesst nach dem Anlegen (Hinweis: ${String(fehler).slice(0, 160) || 'keiner'})`);
+    if (!zu) {
+      console.log('      (Primary-Konsole) ' + primary.events.slice(-25).join('\n      (Primary-Konsole) '));
+      console.log('      (PC2-Konsole) ' + client.events.slice(-15).join('\n      (PC2-Konsole) '));
+    }
     const cmds = await buchungen(client);
     ok(cmds.length === 1 && cmds[0].op === 'consignments.create',
       `KOMMISSION genau EINE Buchung — kein products.create davor: ${cmds.map((x) => x.op).join(',') || 'keine'}`);
@@ -516,6 +545,38 @@ try {
       `VERLOREN-K genau eine Kombination aus Artikel, Kommission und Bild (${p.length}/${k.length}/${bilder(p[0]?.id).length})`);
   }
 
+  // ── Derselbe Artikel an der Maske des Primary: dieselbe Wirkung ──
+  {
+    await primary.ev(`history.pushState({}, '', '/collection'); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
+    ok(await artikelMaske(primary, 'Omega', 'R5B Aqua Terra') === 'OK', 'PARITAET-A die Anlegemaske des Primary, mit demselben Foto');
+    await click(primary, '[data-create-product]');
+    const pzu = await warteBis(primary, "!document.querySelector('[data-create-product]')", 45000);
+    ok(pzu, 'PARITAET-A der Primary legt ihn über seine eigene Maske an');
+    if (!pzu) {
+      const warn = await primary.ev("return [...document.querySelectorAll('.rounded,[data-save-error]')].map(e=>e.textContent).filter(t=>/product|image|save|nicht|not/i.test(t)).slice(0,3).join(' | ');");
+      console.log('      (Primary-Maske) ' + String(warn).slice(0, 400));
+      console.log('      (Primary-Konsole) ' + primary.events.slice(-25).join('\n      (Primary-Konsole) '));
+    }
+    let lp = [];
+    for (let i = 0; i < 30; i++) {
+      await spuelen(primary);
+      await sleep(400);
+      lp = artikel('R5B Aqua Terra');
+      if (lp.length === 1 && bilder(lp[0].id).length === 1) break;
+    }
+    const fp = artikel('R5B Seamaster');
+    ok(lp.length === 1 && fp.length === 1, `PARITAET-A je genau ein Artikel (${lp.length}/${fp.length})`);
+    ok(norm(lp[0]) === norm(fp[0]), `PARITAET-A Felder, Menge, Bestand, Herkunft: Primary-Maske == PC2 (${norm(lp[0])} / ${norm(fp[0])})`);
+    ok(lp[0]?.branch_id === HAUS && fp[0]?.branch_id === HAUS, 'PARITAET-A dieselbe Filiale — die des Primary');
+    ok(String(lp[0]?.sku).replace(/\d+$/, '') === String(fp[0]?.sku).replace(/\d+$/, '') && lp[0]?.sku !== fp[0]?.sku,
+      `PARITAET-A die Nummer aus demselben Zähler: gleicher Stamm, eigene Nummer (${lp[0]?.sku} / ${fp[0]?.sku})`);
+    ok(S(bilder(lp[0]?.id).map((b) => [b.sort_order, b.is_primary])) === S(bilder(fp[0]?.id).map((b) => [b.sort_order, b.is_primary]))
+      && !!bildHash(lp[0]?.id) && bildHash(lp[0]?.id) === bildHash(fp[0]?.id),
+      'PARITAET-A dieselbe Galerie, dieselben Bildbytes');
+    ok(S(protokoll(lp[0]?.id)) === S(protokoll(fp[0]?.id)) && protokoll(fp[0]?.id).length > 0,
+      `PARITAET-A dasselbe Protokoll (${S(protokoll(fp[0]?.id))})`);
+  }
+
   // ── Dieselbe Kommission an der Maske des Primary: dieselbe Wirkung ──
   {
     await primary.ev(`history.pushState({}, '', '/consignments'); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
@@ -523,7 +584,13 @@ try {
     // Nummer sind im Vergleich ohnehin ausgenommen.
     ok(await kommissionsMaske(primary, 'Cartier', 'R5B Santos', 'R5B-CN-003') === 'OK', 'PARITAET die Kommissionsmaske des Primary, mit demselben Foto');
     await click(primary, '[data-cn-create]');
-    ok(await warteBis(primary, "!document.querySelector('[data-cn-create]')", 45000), 'PARITAET der Primary legt sie über seine eigene Maske an');
+    const kzu = await warteBis(primary, "!document.querySelector('[data-cn-create]')", 45000);
+    ok(kzu, 'PARITAET der Primary legt sie über seine eigene Maske an');
+    if (!kzu) {
+      const warn = await primary.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';");
+      console.log('      (Primary-Maske) ' + String(warn).slice(0, 400));
+      console.log('      (Primary-Konsole) ' + primary.events.slice(-25).join('\n      (Primary-Konsole) '));
+    }
     let lokal = { p: [], k: [] };
     for (let i = 0; i < 30; i++) {
       await spuelen(primary);
@@ -545,6 +612,34 @@ try {
         WHERE l.entity_id = ? AND l.deleted_at IS NULL`, [pid ?? ''])[0]?.h;
     const hl = mk(lokal.p[0]?.id), hf = mk(fern.p[0]?.id);
     ok(!!hl && hl === hf, `PARITAET dieselben Bildbytes auf beiden Wegen (${String(hl).slice(0, 12)} / ${String(hf).slice(0, 12)})`);
+    ok(lokal.p[0]?.branch_id === HAUS && fern.p[0]?.branch_id === HAUS && lokal.k[0]?.branch_id === HAUS && fern.k[0]?.branch_id === HAUS,
+      'PARITAET dieselbe Filiale für Artikel und Kommission');
+    ok(S(protokoll(lokal.p[0]?.id)) === S(protokoll(fern.p[0]?.id)) && S(protokoll(lokal.k[0]?.id)) === S(protokoll(fern.k[0]?.id)),
+      `PARITAET dasselbe Protokoll für Artikel und Kommission (${S(protokoll(fern.k[0]?.id))})`);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // §3 ALTBESTAND UND NEUE BILDER — auf BEIDEN Rechnern
+  // ══════════════════════════════════════════════════════════════════════
+  {
+    const neueKom = kommission('R5B-CN-001');
+    const faelle = [
+      ['Artikel mit Bild als Text (Altbestand)', '/collection/r5b-legacy', true],
+      ['Artikel mit Bild im Medienspeicher (neu)', '/collection/' + artikelId, false],
+      ['Kommission mit Bild als Text (Altbestand)', '/consignments/r5b-legacy-con', true],
+      ['Kommission mit Bild im Medienspeicher (neu)', '/consignments/' + String(neueKom.k[0]?.id || ''), false],
+    ];
+    const BILD = (alt) => `[...document.querySelectorAll('img')].some(i=>i.complete && i.naturalWidth>0 && ${alt ? "/^data:image\\/png/.test(i.src)" : "!/^data:/.test(i.src)"})`;
+    for (const [was, route, alt] of faelle) {
+      client = await lade(client, route);
+      ok(await warteBis(client, BILD(alt), 30000), `ALT/NEU PC2 zeigt: ${was}`);
+      await primary.ev(`history.pushState({}, '', ${S(route)}); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
+      ok(await warteBis(primary, BILD(alt), 30000), `ALT/NEU der Primary zeigt: ${was}`);
+    }
+    const unveraendert = dbQ(BIZ_DB, "SELECT images FROM products WHERE id IN ('r5b-legacy','r5b-legacy-cn')");
+    ok(unveraendert.length === 2 && unveraendert.every((r) => String(r.images).startsWith('["data:image/png')),
+      'ALT/NEU der Altbestand liegt unverändert — keine Migration, kein Umschreiben');
+    ok((await treffer(client)).length === 0, 'LOKAL …auch beim Anzeigen kein Griff zur lokalen Datenbank');
   }
 
   // ── Primary == PC2 nach frischem Lesen ──
@@ -577,6 +672,8 @@ try {
 clearTimeout(WACHHUND);
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — central ui parity r5b: product + consignment create, with media: ${PASS} passed, ${FAIL} failed`);
 if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
+console.log('CENTRAL_UI_R5B_LEGACY_MEDIA_COMPATIBILITY_PROVED');
+console.log('CENTRAL_UI_R5B_PRIMARY_REMOTE_EFFECT_PARITY_PROVED');
 console.log('CENTRAL_UI_R5B_MEDIA_PIPELINE_REUSED');
 console.log('CENTRAL_UI_R5B_PRODUCT_CREATE_RUNTIME_PROVED');
 console.log('CENTRAL_UI_R5B_CONSIGNMENT_CREATE_RUNTIME_PROVED');

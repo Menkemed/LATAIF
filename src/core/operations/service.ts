@@ -16,6 +16,7 @@ import { getDatabase, saveDatabase } from '../db/database';
 import { query, currentBranchId, currentUserId } from '../db/helpers';
 import {
   enterTransaction,
+  leaveNestedTransaction,
   resetTransactionContext,
   consumePendingSave,
 } from '../db/transaction-context';
@@ -113,10 +114,17 @@ function applyOneEnvelope(env: proto.Envelope, branchId: string, actor: string):
     if (shouldCommit) db.run('BEGIN IMMEDIATE');
     proto.applyEnvelope(dbApi, env, { now, actor, branchId });
     proto.writeOpCursor(dbApi, proto.canonicalToFils(env.serverSequence), now);
-    if (shouldCommit) db.run('COMMIT');
+    // R5B FINAL — die Ebene wird wieder verlassen, auch die innere. Vorher blieb der Zähler nach
+    // jedem Anwenden eine Stufe zu hoch: das Haus hielt sich danach für „in einer Transaktion",
+    // und der nächste echte Auftrag setzte kein BEGIN mehr.
+    if (leaveNestedTransaction() && shouldCommit) db.run('COMMIT');
   } catch (e) {
-    if (shouldCommit) db.run('ROLLBACK');
-    resetTransactionContext();
+    // Nur die ÄUSSERSTE Ebene rollt zurück und setzt den Zähler zurück. Eine innere würde sonst
+    // die Transaktion eines anderen Vorgangs verwerfen und dessen Klammer für beendet erklären.
+    if (shouldCommit) {
+      try { db.run('ROLLBACK'); } catch { /* sql.js hat bereits zurückgerollt */ }
+      resetTransactionContext();
+    }
     throw e;
   }
   if (shouldCommit) {

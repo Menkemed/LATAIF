@@ -14,7 +14,8 @@
 // existing lifecycle lease for the duration of each resolve.
 // ════════════════════════════════════════════════════════════════════════════
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useProductStore } from '@/stores/productStore';
 import {
   ProductMediaPresentationController,
   IDLE_STATE,
@@ -58,7 +59,15 @@ export function useProductMediaPresentation(
  * Objekt-URL wird genau einmal wieder freigegeben — beim Wechsel des Artikels und beim Abbau.
  */
 function useRemotePresentation(productId: string | undefined, enabled: boolean, reloadNonce: number): PresentationState {
-  const key = enabled && productId ? `${productId}#${reloadNonce}` : '';
+  // Schritt 1 des Resolvers, derselbe Vertrag: eine NICHT LEERE Altspalte (`products.images`) ist
+  // maßgeblich — auch mitten in einer Umstellung. Sie kommt auf dem zweiten Rechner mit dem
+  // gemeinsamen Artikelbestand; ein Artikel mit alten Bildern zeigt sie also unverändert.
+  const legacy = useProductStore((s) => (productId ? s.products.find((p) => p.id === productId)?.images : undefined));
+  const legacyState = useMemo<PresentationState | null>(
+    () => (legacy && legacy.length > 0 ? { status: 'legacy', srcs: legacy } : null),
+    [legacy],
+  );
+  const key = enabled && productId && !legacyState ? `${productId}#${reloadNonce}` : '';
   const [held, setHeld] = useState<{ key: string; state: PresentationState }>({ key: '', state: IDLE_STATE });
   useEffect(() => {
     if (!key || !productId) return;
@@ -84,6 +93,7 @@ function useRemotePresentation(productId: string | undefined, enabled: boolean, 
       for (const u of made) URL.revokeObjectURL(u);
     };
   }, [key, productId]);
+  if (enabled && productId && legacyState) return legacyState;
   if (!key) return IDLE_STATE;
   return held.key === key ? held.state : LOADING_STATE;
 }

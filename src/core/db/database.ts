@@ -3158,7 +3158,14 @@ const saver = createSaveCoalescer({
   // Vorgang, dessen Save nach dem COMMIT scheiterte, wurde nur geloggt — die Sperre unten hätte
   // nie ausgelöst. Jetzt setzt JEDER fehlgeschlagene Persist die Schuld und jeder gelungene löscht sie.
   persist: async (data) => { await persistDb(data); noteDurableWrite(); },
-  isReady: () => db !== null,
+  // R5B FINAL — gemessen: der Speicherdurchlauf zog sein Abbild (`db.export()`) auch dann, wenn
+  // inzwischen eine Transaktion offen war — etwa weil ein Speichern von VOR der Transaktion noch
+  // lief, als ein Fernauftrag sein BEGIN setzte. `export()` beendet die offene sql.js-Transaktion
+  // STILL: alles danach lief ohne Klammer, das spätere ROLLBACK ging ins Leere, und ein Artikel
+  // blieb ohne seine Kommission stehen. Also: in einer offenen Transaktion wird NIE exportiert.
+  // Der Stand bleibt „schmutzig" und wird nach dem äußeren COMMIT geschrieben (dort ist ein
+  // Speichern ohnehin vorgemerkt); nach einem ROLLBACK schreibt ihn der nächste Speicherpunkt.
+  isReady: () => db !== null && !isTransactionActive(),
   onError: (err) => {
     markDurabilityDegraded(err instanceof Error ? err.message : String(err), new Date().toISOString());
     if (err instanceof StaleWriteError) {
@@ -3221,6 +3228,9 @@ export async function saveDatabaseDurably(): Promise<void> {
   await saver.requestSave();        // kick + drain: persistiert den aktuellen Voll-Stand
   const err = saver.getLastError(); // Coalescer resolved auch bei Fehler → hier pruefen
   if (err) throw err instanceof Error ? err : new Error(String(err));
+  // R5B FINAL — hat inzwischen eine Transaktion begonnen, hat der Durchlauf NICHT geschrieben
+  // (siehe `isReady`). Dann darf hier auch kein „ist durabel" herauskommen.
+  if (saver.isDirty()) throw new Error('the durable save was deferred by an open transaction');
 }
 
 /**

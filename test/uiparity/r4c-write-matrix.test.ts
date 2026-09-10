@@ -340,6 +340,24 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     'R5B …über die bestehende Auskunft und die angemeldete Medienroute, ohne Datenbank');
 }
 
+// ── R5B FINAL — die vier nachgezogenen Test-Harnesses stellen NUR Infrastruktur ──
+{
+  for (const f of ['commercial-documents', 'commercial-revision-coverage', 'lifecycle-actions', 'financial-actions']) {
+    const t = src(`test/bridge/${f}.test.ts`);
+    // Gestellt wird nur der Weg zu Rust (dieselbe IPC-Stelle wie im Produkttest) …
+    ok(/if \(specifier === '@tauri-apps\/api\/core'\) \{\s*return \{ url: pathToFileURL\(resolvePath\(repo, 'test\/bridge\/_tauri-shim\.ts'\)\)/.test(t),
+      `HARNESS ${f}: nur die IPC-Grenze zu Rust ist gestellt`);
+    // … und die Datenbank ist die ECHTE sql.js-Testdatenbank, auch auf dem Weg des Medien-Orchestrators.
+    ok(/specifier === '@\/core\/db\/database' \|\| specifier === '\.\.\/db\/database\.ts'\) \{\s*return \{ url: pathToFileURL\(resolvePath\(repo, 'test\/sync\/_db-shim\.ts'\)\)/.test(t),
+      `HARNESS ${f}: …die Datenbank ist dieselbe echte Testdatenbank, für jeden Importweg`);
+    ok(/applyMediaSchema\(db as never\);/.test(t) && /media-schema\.ts/.test(t),
+      `HARNESS ${f}: …mit dem ECHTEN Medienschema, keinem Ersatz`);
+    ok(!/\.skip\(|\bskip\(|process\.exit\(0\)/.test(t), `HARNESS ${f}: kein Überspringen`);
+  }
+  const shim = src('test/bridge/_tauri-shim.ts');
+  ok(!/INSERT INTO|UPDATE |DELETE FROM/i.test(shim), 'HARNESS der Stellvertreter schreibt keine Geschäftsdaten — er transportiert nur');
+}
+
 // ── Der Stand, offen benannt ────────────────────────────────────────────
 const verdrahtet = R4C_MATRIX.filter((z) => z.verdrahtet);
 const offenExakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet);
@@ -369,3 +387,4 @@ console.log('CENTRAL_UI_R5B_SCOPE_FROZEN');
 console.log('CENTRAL_UI_R5B_PRODUCT_CREATE_SEMANTICS_AUDITED');
 console.log('CENTRAL_UI_R5B_CONSIGNMENT_CREATE_SEMANTICS_AUDITED');
 console.log('CENTRAL_UI_R5B_CONSIGNMENT_CREATE_ATOMIC_DOMAIN_PROVED');
+console.log('CENTRAL_UI_R5B_TEST_HARNESSES_AUDITED');
