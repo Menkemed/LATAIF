@@ -20,9 +20,10 @@
 //
 // Drei Entscheidungen, die den Client bewusst entmachten:
 //
-//  • **Die SKU vergibt der Primary.** Es gibt kein `sku`-Feld im Rumpf. Sie kommt aus demselben
-//    durablen Zähler, aus dem sie auch lokal und für das Handy kommt (`allocateSkuOnCreate`);
-//    zwei Rechner, die gleichzeitig anlegen, bekommen deshalb zwei Nummern und nicht dieselbe.
+//  • **Die SKU prüft und vergibt der Primary.** Ohne Eingabe kommt sie aus demselben durablen
+//    Zähler, aus dem sie auch lokal und für das Handy kommt (`allocateSkuOnCreate`); zwei Rechner,
+//    die gleichzeitig anlegen, bekommen deshalb zwei Nummern. R5B: eine EINGETIPPTE SKU gilt wie an
+//    der Anlegemaske des Primary — getrimmt und gegen den Bestand geprüft (`planProductCreate`).
 //  • **Ein unvollständiger Medienweg ist KEIN Erfolg.** Bleibt auch nur ein Bild aus, wird der
 //    ganze Auftrag zurückgenommen: kein halbes Produkt, kein eingefrorenes „ok". Dieselbe Kennung
 //    darf danach wiederholt werden, weil nichts durabel geworden ist.
@@ -53,19 +54,35 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { PRODUCT_CREATE_FIELDS, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
+import {
+  MAX_REMOTE_IMAGES, isStagingId, invokeReadStaged, invokeDiscardStaged, assertHouseBranch,
+  parseStagingIds, readStagedAsDataUrls, discardStagedAfterSuccess,
+  type StagingOwner, type StagedMediaReader,
+} from './remote-create-support';
+import { planProductCreate, productCreateRefusal } from '@/core/products/product-create';
+
+// R5B — die Bausteine der Zwischenablage wohnen jetzt in `remote-create-support` (die Kommission
+// braucht dieselben). Die Namen bleiben hier erreichbar, damit kein Leser umziehen muss.
+export { MAX_REMOTE_IMAGES, isStagingId };
+export type { StagingOwner, StagedMediaReader };
 
 export const OP_PRODUCTS_CREATE = 'products.create';
 export const OP_PRODUCTS_UPDATE = 'products.update';
 
-/** Höchstens so viele Bilder pro Anlage — dieselbe Zahl wie am mobilen Eingang. */
-export const MAX_REMOTE_IMAGES = 8;
-
 /**
- * Was ein Mensch im Anlageformular eingibt. `sku` fehlt mit Absicht: sie ist keine Eingabe,
- * sondern eine Vergabe. `images` fehlt ebenfalls — Bilder kommen als Kennungen der Zwischenablage,
- * nie als Daten-URL im Auftrag.
+ * Was ein Mensch im Anlageformular eingibt. `images` fehlt — Bilder kommen als Kennungen der
+ * Zwischenablage, nie als Daten-URL im Auftrag. Die SKU steht SEPARAT (siehe `parseProductCreate`).
  */
 const CREATE_FIELDS = new Set<string>(PRODUCT_CREATE_FIELDS);
+
+/**
+ * R5B — nicht „unbekannt", sondern „steht fest": das Anlegeformular bietet beides nicht an, ein
+ * neuer Artikel ist am Primary immer eigene Ware im Bestand.
+ */
+const FIXED_ON_CREATE: Record<string, string> = {
+  stockStatus: 'the primary decides stockStatus — a new product is in stock',
+  sourceType: 'the primary decides sourceType — a new product is our own stock',
+};
 
 /**
  * Was ein Änderungsauftrag anfassen darf. Enger als das Anlegen, und aus denselben Gründen, aus
@@ -142,46 +159,45 @@ function fields(raw: Record<string, unknown>, allowed: Set<string>): Record<stri
   return out;
 }
 
-/** Eine Kennung der Zwischenablage ist der SHA-256 ihres Inhalts: 64 Hex-Zeichen, sonst nichts. */
-export function isStagingId(v: unknown): v is string {
-  return typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
-}
-
 export interface ProductCreateRequest {
   categoryId: string;
   data: Record<string, unknown>;
+  /** R5B — eine eingetippte SKU, getrimmt. Fehlt sie, vergibt der Primary eine. */
+  sku?: string;
   stagingIds: string[];
 }
 
 /**
- * Anlegen: eine Kategorie, ein Name, und eine Liste von Bildkennungen. Die Kategorie steht
- * SEPARAT und nicht in den Feldern — sie ist beim Anlegen erlaubt und beim Ändern verboten, und
- * zwei Listen mit einem Sonderfall wären schwerer zu prüfen als ein eigenes Feld.
+ * Anlegen: eine Kategorie, die Felder der Maske, optional eine eingetippte SKU, und eine Liste von
+ * Bildkennungen. Die Kategorie steht SEPARAT — sie ist beim Anlegen erlaubt und beim Ändern
+ * verboten.
+ *
+ * R5B — ob Marke und Name Pflicht sind, entscheidet hier NICHT mehr ein eigener Satz, sondern die
+ * Pflichtfeldregel des Hauses (`planProductCreate` im Auftrag): eine Goldkette ohne Namen ist am
+ * Primary gültig, also auch aus der Ferne. Die SKU ist eine Eingabe wie am Primary — getrimmt und
+ * gegen den Bestand geprüft; ohne Eingabe vergibt der Primary sie aus dem durablen Zähler.
  */
 export function parseProductCreate(raw: unknown): ProductCreateRequest {
   if (!isPlain(raw)) throw new ProductPayloadError('payload must be an object');
-  const { categoryId, stagingIds, ...rest } = raw as {
-    categoryId?: unknown; stagingIds?: unknown;
+  const { categoryId, stagingIds, sku, ...rest } = raw as {
+    categoryId?: unknown; stagingIds?: unknown; sku?: unknown;
   };
   if (typeof categoryId !== 'string' || categoryId.trim() === '') {
     throw new ProductPayloadError('categoryId is required');
   }
+  for (const [k, why] of Object.entries(FIXED_ON_CREATE)) {
+    if (k in (rest as Record<string, unknown>)) throw new ProductPayloadError(why);
+  }
   const data = fields(rest as Record<string, unknown>, CREATE_FIELDS);
-  if (typeof data.name !== 'string' || data.name.trim() === '') {
-    throw new ProductPayloadError('a product needs a name');
+  let typed: string | undefined;
+  if (sku !== undefined && sku !== null) {
+    if (typeof sku !== 'string') throw new ProductPayloadError('sku must be text');
+    typed = sku.trim() || undefined;
   }
-  const ids = stagingIds === undefined || stagingIds === null ? [] : stagingIds;
-  if (!Array.isArray(ids)) throw new ProductPayloadError('stagingIds must be a list');
-  if (ids.length > MAX_REMOTE_IMAGES) throw new ProductPayloadError(`at most ${MAX_REMOTE_IMAGES} images`);
-  for (const id of ids) {
-    // Kein Pfad, kein Dateiname, keine URL — nur ein Inhaltshash. Was das nicht ist, wird
-    // abgewiesen, bevor daraus irgendwo ein Dateizugriff wird.
-    if (!isStagingId(id)) throw new ProductPayloadError('a staged image is named by its content hash');
-  }
-  if (new Set(ids as string[]).size !== ids.length) {
-    throw new ProductPayloadError('the same staged image twice is not an order');
-  }
-  return { categoryId, data, stagingIds: ids as string[] };
+  // Kein Pfad, kein Dateiname, keine URL — nur ein Inhaltshash; abgewiesen, bevor daraus irgendwo
+  // ein Dateizugriff wird.
+  const ids = parseStagingIds(stagingIds, (m) => new ProductPayloadError(m));
+  return { categoryId, data, sku: typed, stagingIds: ids };
 }
 
 /** Ein Platz in der gewünschten Galerie: ein behaltenes Bild oder ein neues aus der Ablage. */
@@ -252,34 +268,6 @@ export type ProductCommandResult = {
   name: string;
   imageCount: number;
 };
-
-/**
- * Wem eine Ablage gehört. Die drei Angaben kommen aus der GEPRÜFTEN Identität des Auftrags — nie
- * aus seiner Nutzlast. Rust leitet daraus denselben Eigentümerschlüssel ab wie beim Ablegen; eine
- * Ablage eines anderen Mandanten, einer anderen Filiale oder eines anderen Benutzers ist von hier
- * aus schlicht nicht vorhanden.
- *
- * Der Inhaltshash allein wäre eine Berechtigung, die man erraten oder aus einem Protokoll ablesen
- * kann. Er benennt die Bytes; er öffnet sie nicht.
- */
-export interface StagingOwner {
-  tenantId: string;
-  branchId: string;
-  userId: string;
-}
-
-/** Wie der Primary an die abgelegten Bytes kommt. Injizierbar, damit ein Test ohne Tauri läuft. */
-export type StagedMediaReader = (stagingId: string, owner: StagingOwner) => Promise<{ mime: string; dataBase64: string }>;
-
-async function invokeReadStaged(stagingId: string, owner: StagingOwner): Promise<{ mime: string; dataBase64: string }> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke('staging_media_read', { stagingId, ...owner });
-}
-
-async function invokeDiscardStaged(stagingId: string, owner: StagingOwner): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('staging_media_discard', { stagingId, ...owner });
-}
 
 export interface ProductEngineExtras {
   readStaged?: StagedMediaReader;
@@ -352,30 +340,30 @@ export async function runProductCreate(
   };
 
   const outcome = await runRemoteCommand(deps, identity, async () => {
-    // Die Bytes werden INNERHALB des Auftrags geholt, und das ist keine Kleinigkeit: eine
-    // Wiederholung mit derselben Kennung führt den Handler gar nicht mehr aus. Läge das Lesen
-    // davor, scheiterte genau die Wiederholung, für die es die Kennung gibt — die Ablage ist nach
-    // dem ersten Erfolg geräumt, und der Client bekäme statt seines eingefrorenen Ergebnisses ein
-    // „das Bild ist weg".
-    const images: string[] = [];
-    for (const id of req.stagingIds) {
-      let blob: { mime: string; dataBase64: string };
-      try {
-        blob = await readStaged(id, owner);
-      } catch (e) {
-        // Kein Urteil der Domäne: es wird nichts festgehalten, die Transaktion geht zurück. Der
-        // Client kann dieselben Bytes erneut ablegen — sie bekommen dieselbe Kennung, weil die
-        // Kennung ihr Inhalt ist — und es mit derselben Auftragskennung erneut versuchen.
-        throw new ProductPayloadError(`staged image is gone: ${id} (${String(e)})`);
-      }
-      images.push(`data:${blob.mime};base64,${blob.dataBase64}`);
-    }
+    // R5B — in die Bücher DIESER Filiale, oder gar nicht.
+    assertHouseBranch(identity);
+    // Die Bytes werden INNERHALB des Auftrags geholt (siehe `readStagedAsDataUrls`): eine
+    // Wiederholung mit derselben Kennung führt den Handler gar nicht mehr aus.
+    const images = await readStagedAsDataUrls(req.stagingIds, owner, readStaged, (m) => new ProductPayloadError(m));
     const store = useProductStore.getState();
-    // Die Nummer vergibt der Primary aus dem durablen Zähler — INNERHALB der Transaktion, damit
-    // sie mit dem Produkt zusammen durabel wird oder mit ihm zusammen verschwindet.
-    const sku = store.allocateSkuOnCreate(undefined, String(req.data.brand ?? ''), req.categoryId);
+    // R5B — DIESELBE Vorbereitung wie an der Anlegemaske des Primary: Pflichtfelder nach der Regel
+    // des Hauses, der SKU-Riegel gegen den FRISCH geladenen Bestand, das Streichen veralteter
+    // Attribute, und — ohne Eingabe — die Nummer aus dem durablen Zähler, INNERHALB der
+    // Transaktion, damit sie mit dem Produkt zusammen durabel wird oder mit ihm verschwindet.
+    store.loadProducts();
+    store.loadCategories();
+    const plan = planProductCreate({ ...req.data, categoryId: req.categoryId, sku: req.sku } as never, {
+      category: useProductStore.getState().getCategory(req.categoryId),
+      isSkuTaken: (s) => useProductStore.getState().isSkuTaken(s),
+      allocateSku: (brand, categoryId) => useProductStore.getState().allocateSkuOnCreate(undefined, brand, categoryId),
+    });
+    if (plan.kind !== 'ok') {
+      const refusal = productCreateRefusal(plan);
+      throw new CommandRejected(refusal.code, refusal.message);
+    }
+    const sku = plan.data.sku;
     const result = await store.createProductWithMedia(
-      { ...req.data, categoryId: req.categoryId, sku } as never,
+      plan.data as never,
       undefined,
       undefined,
       { kind: 'data_urls', images },
@@ -393,19 +381,14 @@ export async function runProductCreate(
     const value: ProductCommandResult = {
       productId: result.productId,
       sku,
-      name: String(req.data.name ?? ''),
+      name: String(plan.data.name ?? ''),
       imageCount: images.length,
     };
     return value;
   });
 
-  // Erst wenn der Auftrag wirklich durch ist, verliert die Ablage ihren Zweck. Scheitert das
-  // Aufräumen, ist das kein Fehler des Auftrags: der Kehrbesen beim nächsten Start holt es nach.
-  if (outcome.kind === 'ok') {
-    for (const id of req.stagingIds) {
-      try { await discard(id, owner); } catch { /* der Start räumt auf */ }
-    }
-  }
+  // Erst wenn der Auftrag wirklich durch ist, verliert die Ablage ihren Zweck.
+  if (outcome.kind === 'ok') await discardStagedAfterSuccess(req.stagingIds, owner, discard);
   return outcome;
 }
 

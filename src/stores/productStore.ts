@@ -31,7 +31,7 @@ import { findProductsNeedingEmbedding } from '@/core/media/embedding-reconcile';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { isSyncConfigured } from '@/core/sync/sync-service';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
@@ -1439,6 +1439,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   nextAvailableSku: (prefix) => nextSkuFrom(prefix, get().products.map(p => p.sku || '')),
 
   peekSku: (seed) => {
+    // R5B — die Vorschau liest den Zähler der LOKALEN Datenbank. Ein Rechner ohne Datenbank hat
+    // keinen; er zeigt deshalb keine Vorschau (die Nummer nennt die Antwort des Primary), statt
+    // an einer Datenbank zu rütteln, die es nicht gibt.
+    if (readsFromPrimary()) return '';
     try { return peekNextSku(getDatabase() as unknown as SkuSequenceDb, seed); } catch { return ''; }
   },
   allocateSkuOnCreate: (current, brand, categoryId) =>

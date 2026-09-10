@@ -21,7 +21,13 @@ import { dirname, resolve as resolvePath } from 'node:path';
 const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 registerHooks({
   resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
-    if (specifier === '@/core/db/database') {
+    // R5B — die Kommission legt ihren Artikel jetzt über den Medienweg an (wie jede andere Anlage);
+    // dessen Orchestrator lädt die Datenbank über `../db/database.ts` und spricht mit Rust. Beides
+    // wird hier gestellt — dieselben Stellvertreter wie im Produkttest.
+    if (specifier === '@tauri-apps/api/core') {
+      return { url: pathToFileURL(resolvePath(repo, 'test/bridge/_tauri-shim.ts')).href, shortCircuit: true };
+    }
+    if (specifier === '@/core/db/database' || specifier === '../db/database.ts') {
       return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
     }
     if ((specifier === './database' || specifier === '../db/database') && context.parentURL) {
@@ -69,6 +75,7 @@ const { executeCommand, ALLOWED_MUTATIONS, knownCommands } =
 await import('../../src/core/bridge/read-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
+const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 const { usePurchaseStore } = await import('../../src/stores/purchaseStore.ts');
 const { useConsignmentStore } = await import('../../src/stores/consignmentStore.ts');
 const { useOrderStore } = await import('../../src/stores/orderStore.ts');
@@ -114,6 +121,7 @@ function freshDb(): Db {
     VALUES ('sup-1','branch-main','Geneva Trading',1,?,?)`, [NOW, NOW]);
   db.run(`INSERT INTO suppliers (id, branch_id, name, active, created_at, updated_at)
     VALUES ('sup-other','branch-other','Fremde Filiale',1,?,?)`, [NOW, NOW]);
+  applyMediaSchema(db as never);
   setTestDatabase(db as never);
   installWriteGuard(db as never);
   useProductStore.getState().loadProducts();
@@ -424,7 +432,13 @@ const CONSIGN_BODY = {
 {
   const bad = [
     ['eine Belegnummer', { ...CONSIGN_BODY, consignmentNumber: 'CON-2026-00099' }],
-    ['eine SKU', { ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, sku: 'ERZWUNGEN-1' } }],
+    // R5B — eine eingetippte SKU ist eine Eingabe wie an der Maske (ob sie frei ist, prueft der
+    // Primary: SKU_TAKEN). Was die Kommission FEST setzt, bleibt verboten:
+    ['eine Menge des Artikels', { ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, quantity: 3 } }],
+    ['eine Artikelkennung', { ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, id: 'p-erfunden' } }],
+    ['eine Herkunft des Artikels', { ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, sourceType: 'OWN' } }],
+    ['Bilder als Daten', { ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, images: ['data:image/jpeg;base64,AAAA'] } }],
+    ['einen Bildpfad', { ...CONSIGN_BODY, stagingIds: ['../../media/evil.jpg'] }],
     ['eine Filiale', { ...CONSIGN_BODY, branchId: 'branch-other' }],
     ['eine Kennung', { ...CONSIGN_BODY, id: 'con-erfunden' }],
     ['einen Status', { ...CONSIGN_BODY, status: 'sold' }],
@@ -441,8 +455,13 @@ const CONSIGN_BODY = {
     ok(threw !== '', `AUTHORITY der Kommissionsrumpf nimmt ${what} nicht an (${threw || 'DURCHGELASSEN'})`);
   }
   const parsed = cmd.parseConsignmentCreate(CONSIGN_BODY);
-  ok(Object.keys(parsed.product).sort().join(',') === 'brand,categoryId,condition,name,notes',
-    `AUTHORITY …und der Artikel traegt genau fuenf Felder (${Object.keys(parsed.product).join(',')})`);
+  // R5B — der Artikel traegt, was die Kommissionsmaske fuer ihn erfasst — und nichts, was die
+  // Kommission fest setzt (Einstand, Menge, Bestandsstatus, Herkunft).
+  ok(Object.keys(parsed.product).sort().join(',')
+    === 'attributes,brand,categoryId,condition,name,notes,scopeOfDelivery,sku,storageLocation,taxScheme',
+    `AUTHORITY …und der Artikel traegt genau die Felder der Maske (${Object.keys(parsed.product).sort().join(',')})`);
+  const getippt = cmd.parseConsignmentCreate({ ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, sku: '  R5B-1  ' } });
+  ok(getippt.product.sku === 'R5B-1', `AUTHORITY eine eingetippte SKU reist getrimmt mit (${getippt.product.sku})`);
 }
 
 // ── 8) Kommission: ändern — ein Save, zwei Verträge, eine Transaktion ─────
@@ -831,7 +850,10 @@ const ORDER_BODY = {
     'REUSE er ruft die bestehenden Domaenenfunktionen');
   ok(/buildPayoutPatch|payoutModelLock/.test(body),
     'REUSE …und die SSOT des Auszahlungsmodells statt einer Nachbildung');
-  ok(/allocateSkuOnCreate/.test(body), 'REUSE die SKU kommt aus dem durablen Zaehler');
+  // R5B — die Vergabe wohnt jetzt im gemeinsamen Vorgang, den Maske und Fernweg beide rufen.
+  ok(/createConsignmentWithProduct\(/.test(body)
+    && /allocateSkuOnCreate/.test(src('src/core/consignment/consignment-create.ts')),
+  'REUSE die SKU kommt aus dem durablen Zaehler — ueber den gemeinsamen Vorgang');
 
   // Die aeussere Klammer: die drei Anlege-Funktionen oeffnen KEINE eigene Transaktion — genau
   // deshalb muss der Fernweg eine haben.

@@ -189,7 +189,8 @@ const SALES = { sub: 'user-staff', tenant_id: 'tenant-1', branch_id: 'branch-mai
   // R4C.2 hat die Matrix nach dem argumentgenauen Vergleich neu gestellt: 20 verdrahtet,
   // keine offenen deckungsgleichen mehr, 18 Klasse-B-Luecken. Der Rollenvertrag ist davon
   // unberuehrt — er prueft die Zahlen nur, damit niemand ihn heimlich mitverschiebt.
-  ok(verdrahtet === 22 && offen === 0 && luecken === 16 && ohneUi === 2,
+  // R5B hat `products.create` und `consignments.create` geschlossen (24/0/14/2) — ohne Rollenarbeit.
+  ok(verdrahtet === 24 && offen === 0 && luecken === 14 && ohneUi === 2,
     `8 die Matrix ist unveraendert (${verdrahtet}/${offen}/${luecken}/${ohneUi})`);
   const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/
     .exec(src('src/core/bridge/command-registry.ts'))?.[1] ?? '').matchAll(/'([^']+)'/g)].length;

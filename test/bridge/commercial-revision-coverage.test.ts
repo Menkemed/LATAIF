@@ -23,7 +23,12 @@ import { dirname, resolve as resolvePath } from 'node:path';
 const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 registerHooks({
   resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
-    if (specifier === '@/core/db/database') {
+    // R5B — die Kommission legt ihren Artikel über den Medienweg an; dessen Orchestrator lädt die
+    // Datenbank über `../db/database.ts` und spricht mit Rust. Beides wird hier gestellt.
+    if (specifier === '@tauri-apps/api/core') {
+      return { url: pathToFileURL(resolvePath(repo, 'test/bridge/_tauri-shim.ts')).href, shortCircuit: true };
+    }
+    if (specifier === '@/core/db/database' || specifier === '../db/database.ts') {
       return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
     }
     if ((specifier === './database' || specifier === '../db/database') && context.parentURL) {
@@ -70,6 +75,7 @@ await import('../../src/core/bridge/financial-commands.ts');
 const { executeCommand } = await import('../../src/core/bridge/command-registry.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
+const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 const { useOrderStore } = await import('../../src/stores/orderStore.ts');
 const { useOrderPaymentStore } = await import('../../src/stores/orderPaymentStore.ts');
 const { useConsignmentStore } = await import('../../src/stores/consignmentStore.ts');
@@ -112,6 +118,7 @@ function freshDb(): Db {
     VALUES ('cust-1','branch-main','Ali','Hassan','BH','en',0,'[]','collector','active',?,?)`, [NOW, NOW]);
   db.run(`INSERT INTO suppliers (id, branch_id, name, active, created_at, updated_at)
     VALUES ('sup-1','branch-main','Geneva',1,?,?)`, [NOW, NOW]);
+  applyMediaSchema(db as never);
   setTestDatabase(db as never);
   installWriteGuard(db as never);
   useProductStore.getState().loadProducts();
@@ -300,9 +307,14 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   let threw = false;
   try { cmd.parseConsignmentCreate({ ...ack, agreedPrice: 0 }); } catch { threw = true; }
   ok(threw, 'OVERRIDE ein fehlender Preis bleibt ein Nein');
+  // R5B — eine eingetippte SKU ist eine Eingabe wie an der Maske; ob sie frei ist, prueft der
+  // Primary im Auftrag (SKU_TAKEN, siehe product-remote-write §12). Was die Kommission FEST setzt,
+  // bleibt abgewiesen.
+  const getippt = cmd.parseConsignmentCreate({ ...ack, product: { ...CONSIGN.product, sku: ' GETIPPT ' } });
+  ok(getippt.product.sku === 'GETIPPT', 'OVERRIDE eine eingetippte SKU reist getrimmt mit');
   threw = false;
-  try { cmd.parseConsignmentCreate({ ...ack, product: { ...CONSIGN.product, sku: 'ERZWUNGEN' } }); } catch { threw = true; }
-  ok(threw, 'OVERRIDE und eine erzwungene SKU bleibt abgewiesen');
+  try { cmd.parseConsignmentCreate({ ...ack, product: { ...CONSIGN.product, purchasePrice: 5 } }); } catch { threw = true; }
+  ok(threw, 'OVERRIDE und ein erzwungener Einstand bleibt abgewiesen');
 
   // Und die Sperre des Auszahlungsmodells kennt die Bestaetigung gar nicht — sie gehoert zum
   // Aendern, und dort gibt es kein solches Feld.

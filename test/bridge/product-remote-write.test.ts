@@ -7,7 +7,8 @@
 // (`_tauri-shim`) — Transport, keine Entscheidung.
 //
 // Die vier Fragen, an denen dieser Weg hängt:
-//   • Wer vergibt die SKU? (Nicht der Client. Nie.)
+//   • Wer vergibt die SKU? (Der Primary. R5B: eine EINGETIPPTE gilt wie an der Maske — getrimmt und
+//     gegen den Bestand geprüft; eine vergebene Nummer kommt nicht durch.)
 //   • Was passiert, wenn ein Bild nicht durchkommt? (Kein halber Artikel.)
 //   • Was passiert bei einer verlorenen Antwort? (Kein zweiter Artikel.)
 //   • Wo kommen die Bytes her? (Aus einer Ablage, deren Name ihr Inhalt ist.)
@@ -156,7 +157,10 @@ const links = (db: Db, pid: string): number =>
 // ── 1) Der Rumpf ist ein Wunsch — und die SKU steht nicht darin ───────────
 {
   for (const [field, raw] of [
-    ['sku', { ...WISH, sku: 'RLX-001' }],
+    // R5B — die SKU ist eine Eingabe wie an der Maske (siehe §11). Bestandsstatus und Herkunft
+    // dagegen bietet die Anlegemaske gar nicht an: die bestimmt der Primary.
+    ['stockStatus', { ...WISH, stockStatus: 'consignment' }],
+    ['sourceType', { ...WISH, sourceType: 'CONSIGNMENT' }],
     ['id', { ...WISH, id: 'p-forged' }],
     ['branchId', { ...WISH, branchId: 'branch-fremd' }],
     ['createdBy', { ...WISH, createdBy: 'user-boss' }],
@@ -177,8 +181,9 @@ const links = (db: Db, pid: string): number =>
 
   for (const [what, raw] of [
     ['ohne Kategorie', { brand: 'Rolex', name: 'X' }],
-    ['ohne Namen', { categoryId: 'cat-watch', brand: 'Rolex' }],
-    ['leerer Name', { categoryId: 'cat-watch', name: '   ' }],
+    // R5B — „ohne Namen" ist keine Formfrage mehr, sondern die Pflichtfeldregel des Hauses: sie
+    // gilt im Auftrag, gegen die Kategorie (§11). Eine Goldkette ohne Namen ist gültig.
+    ['eine SKU als Zahl', { ...WISH, sku: 42 }],
     ['negativer Preis', { ...WISH, purchasePrice: -1 }],
     ['Preis als Text', { ...WISH, purchasePrice: '100' }],
   ] as const) {
@@ -480,12 +485,11 @@ const links = (db: Db, pid: string): number =>
   ok(commandCount(db as never) === 0 && Number(one(db, 'SELECT COUNT(*) FROM products')) === 2,
     'CONTROL a ohne die Maschine gibt es keinen Nachweis und zwei Artikel');
 
-  // (b) Eine clientseitige SKU KAeME durch, wenn die Verbotsliste sie nicht faenge.
-  const forged = { ...WISH, sku: 'RLX-999' };
-  let blocked = false;
-  try { parseProductCreate(forged); } catch { blocked = true; }
-  ok(blocked && 'sku' in forged,
-    'CONTROL b der Rumpf ENTHIELT die erfundene Nummer — die Pruefung hat sie geworfen');
+  // (b) R5B — eine eingetippte SKU reist mit (wie an der Maske), getrimmt. Dass eine schon
+  //     vergebene Nummer trotzdem nicht durchkommt, prueft §11 im Auftrag gegen den Bestand.
+  const typedSku = parseProductCreate({ ...WISH, sku: '  RLX-999  ' });
+  ok(typedSku.sku === 'RLX-999' && !('sku' in typedSku.data),
+    `CONTROL b die eingetippte Nummer reist getrimmt und SEPARAT mit (${typedSku.sku})`);
 
   // (c) Ein Medien-Zielpfad vom Client: es gibt kein Feld dafuer, und der Weg ueber `stagingIds`
   //     nimmt nur Inhaltshashes. Beides zusammen ist die Sperre.
@@ -496,9 +500,223 @@ const links = (db: Db, pid: string): number =>
   ok(pathRejected && fieldRejected, 'CONTROL c weder als Kennung noch als Feld kommt ein Pfad durch');
 }
 
+
+// ── 11) R5B — dieselbe Vorbereitung wie an der Anlegemaske ────────────────
+{
+  resetDurabilityStateForTest();
+  resetTransactionHealthForTest();
+  tauriState.reset();
+  const db = freshDb();
+  const { deps: d } = deps(db);
+  const code = (o: unknown): string => String((o as { code?: string }).code ?? '');
+
+  // (a) Eine eingetippte SKU gilt — getrimmt, wie an der Maske.
+  const typed = await runProductCreate(d, identity('201', 'products.create'), { ...WISH, sku: '  RLX-TYPED-1 ' });
+  ok(typed.kind === 'ok', `R5B eine eingetippte SKU wird angelegt (${JSON.stringify(typed).slice(0, 120)})`);
+  const tid = (typed as { value: { productId: string } }).value?.productId;
+  ok(String(one(db, 'SELECT sku FROM products WHERE id = ?', [tid])) === 'RLX-TYPED-1',
+    `R5B …getrimmt (${String(one(db, 'SELECT sku FROM products WHERE id = ?', [tid]))})`);
+
+  // (b) Eine schon vergebene Nummer (auch in anderer Schreibweise) kommt nicht durch — der Riegel
+  //     sitzt im Auftrag, gegen den frisch geladenen Bestand. Ein Urteil, eingefroren.
+  const taken = await runProductCreate(d, identity('202', 'products.create'), { ...WISH, name: 'Zweiter', sku: 'rlx-typed-1' });
+  ok(taken.kind === 'rejected' && code(taken) === 'SKU_TAKEN' && (taken as { frozen: boolean }).frozen === true,
+    `R5B eine vergebene SKU ist ein Nein (${JSON.stringify(taken).slice(0, 140)})`);
+  ok(Number(one(db, 'SELECT COUNT(*) FROM products')) === 1, 'R5B …und es entsteht kein zweiter Artikel');
+
+  // (c) Pflichtfelder nach der Regel des Hauses: eine Uhr ohne Namen ist auch aus der Ferne ungültig…
+  const noName = await runProductCreate(d, identity('203', 'products.create'), { categoryId: 'cat-watch', brand: 'Rolex' });
+  ok(noName.kind === 'rejected' && code(noName) === 'PRODUCT_FIELDS_REQUIRED',
+    `R5B eine Uhr ohne Namen ist ein Nein (${code(noName)})`);
+  // …eine Goldkette ohne Marke und Namen dagegen gültig — genau wie an der Maske.
+  db.run("INSERT INTO categories (id, branch_id, name, icon, color, created_at, updated_at) VALUES ('cat-gold-jewelry','branch-main','Gold','g','#000',?,?)", [NOW, NOW]);
+  const gold = await runProductCreate(d, identity('204', 'products.create'), { categoryId: 'cat-gold-jewelry' });
+  ok(gold.kind === 'ok', `R5B eine Goldkette ohne Marke/Namen ist gültig wie an der Maske (${JSON.stringify(gold).slice(0, 120)})`);
+
+  // (d) Ein Attribut, dessen Bedingung nicht erfüllt ist, wird nicht gespeichert.
+  db.run(`INSERT INTO categories (id, branch_id, name, icon, color, attributes, created_at, updated_at)
+    VALUES ('cat-dep','branch-main','Dep','d','#000',?,?,?)`, [JSON.stringify([
+    { key: 'material', label: 'Material', type: 'select', options: ['Steel', 'Gold'] },
+    { key: 'karat_color', label: 'Karat', type: 'select', options: ['18K Yellow'], dependsOn: { key: 'material', valueIncludes: ['Gold'] } },
+  ]), NOW, NOW]);
+  const stale = await runProductCreate(d, identity('205', 'products.create'),
+    { categoryId: 'cat-dep', brand: 'X', name: 'Steel One', attributes: { material: 'Steel', karat_color: '18K Yellow' } });
+  const sid = (stale as { value: { productId: string } }).value?.productId;
+  const attrs = JSON.parse(String(one(db, 'SELECT attributes FROM products WHERE id = ?', [sid]) ?? '{}'));
+  ok(stale.kind === 'ok' && attrs.material === 'Steel' && !('karat_color' in attrs),
+    `R5B ein veraltetes Attribut wird gestrichen, wie an der Maske (${JSON.stringify(attrs)})`);
+
+  // (e) Die Filiale des Auftrags muss die dieses Rechners sein.
+  const fremd = await runProductCreate(d, { ...identity('206', 'products.create'), branchId: 'branch-other' }, { ...WISH, name: 'Fremd' });
+  ok(fremd.kind === 'rejected' && code(fremd) === 'BRANCH_MISMATCH', `R5B ein Ausweis einer anderen Filiale legt nichts an (${code(fremd)})`);
+
+  // (f) Eine Ablage eines ANDEREN Benutzers ist von hier aus nicht vorhanden.
+  const foreign = stageForTest(new Uint8Array([9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 9, 8, 7, 6, 5, 4]),
+    { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-other' });
+  const vorher = Number(one(db, 'SELECT COUNT(*) FROM products'));
+  let fremdeAblage = '';
+  try { await runProductCreate(d, identity('207', 'products.create'), { ...WISH, name: 'Fremdbild', stagingIds: [foreign] }); }
+  catch (e) { fremdeAblage = String(e); }
+  ok(/staged image is gone/.test(fremdeAblage) && Number(one(db, 'SELECT COUNT(*) FROM products')) === vorher,
+    `R5B eine fremde Ablage öffnet nichts, und es entsteht nichts (${fremdeAblage.slice(0, 80)})`);
+}
+
+// ── 12) R5B — die Kommission: EIN Vorgang, Artikel + Bilder + Kommission ──
+{
+  const cmdC = await import('../../src/core/bridge/commercial-commands.ts');
+  const { createConsignmentOnPrimary } = await import('../../src/core/consignment/consignment-create.ts');
+  const { useConsignmentStore } = await import('../../src/stores/consignmentStore.ts');
+  const code = (o: unknown): string => String((o as { code?: string }).code ?? '');
+  const seedConsignor = (db: Db): void => {
+    db.run(`INSERT INTO customers (id, branch_id, first_name, last_name, country, language, vip_level,
+        preferences, customer_type, sales_stage, created_at, updated_at)
+      VALUES ('cust-1','branch-main','Ali','Hassan','BH','en',0,'[]','collector','active',?,?)`, [NOW, NOW]);
+  };
+  const BODY = {
+    consignorId: 'cust-1',
+    product: {
+      categoryId: 'cat-watch', brand: 'Patek', name: 'Nautilus', condition: 'Pre-Owned',
+      sku: ' PP-5711 ', attributes: { dial: 'Blue' }, taxScheme: 'MARGIN',
+      storageLocation: 'Safe 2', scopeOfDelivery: ['Box', 'Papers'],
+    },
+    agreedPrice: 1000,
+    payout: { model: 'percent', commissionRate: 20 },
+    staffId: 'emp-7',
+    acknowledgeDuplicate: true,
+  };
+  const zaehle = (db: Db) => ({
+    artikel: Number(one(db, 'SELECT COUNT(*) FROM products')),
+    kommissionen: Number(one(db, 'SELECT COUNT(*) FROM consignments')),
+    verknuepfungen: Number(one(db, 'SELECT COUNT(*) FROM media_links')),
+    auftraege: Number(one(db, 'SELECT COUNT(*) FROM media_ingest_jobs')),
+    nachweise: commandCount(db as never),
+  });
+
+  // (a) Der echte Weg vom zweiten Rechner: Artikel mit Bild im Medienspeicher, Kommission daran.
+  {
+    resetDurabilityStateForTest();
+    resetTransactionHealthForTest();
+    tauriState.reset();
+    const db = freshDb();
+    seedConsignor(db);
+    const { deps: d } = deps(db);
+    const img = image('consign-a');
+    const out = await cmdC.runConsignmentCreate(d, identity('301', 'consignments.create'), { ...BODY, stagingIds: [img] });
+    ok(out.kind === 'ok', `R5B-K die Kommission entsteht vom zweiten Rechner (${JSON.stringify(out).slice(0, 160)})`);
+    const v = (out as { value: { productId: string; consignmentId: string; sku: string; imageCount: number } }).value;
+    const p = db.exec('SELECT stock_status, source_type, quantity, purchase_price, images, sku, tax_scheme, storage_location, scope_of_delivery, attributes FROM products WHERE id = ?', [v.productId])[0].values[0];
+    ok(String(p[0]) === 'consignment' && String(p[1]) === 'CONSIGNMENT' && Number(p[2]) === 1,
+      `R5B-K der Artikel trägt die festen Werte des Kommissionseingangs (${p[0]}/${p[1]}/${p[2]})`);
+    ok(Math.abs(Number(p[3]) - 800) < 0.001, `R5B-K …und den erwarteten Einstand aus dem Modell (${p[3]})`);
+    ok(String(p[4]) === '[]' && links(db, v.productId) === 1,
+      `R5B-K das Bild liegt im Medienspeicher, nicht als Text in der Zeile (${p[4]} / ${links(db, v.productId)})`);
+    ok(Number(one(db, 'SELECT is_primary FROM media_links WHERE entity_id = ?', [v.productId])) === 1, 'R5B-K …als Hauptbild');
+    ok(String(p[5]) === 'PP-5711' && v.sku === 'PP-5711', `R5B-K die eingetippte SKU, getrimmt (${p[5]})`);
+    ok(String(p[6]) === 'MARGIN' && String(p[7]) === 'Safe 2' && String(p[8]).includes('Papers') && String(p[9]).includes('Blue'),
+      `R5B-K Steuer, Lagerort, Lieferumfang und Attribute kommen an (${p[6]}/${p[7]}/${p[8]}/${p[9]})`);
+    const c = db.exec('SELECT product_id, staff_id, status, revision, commission_type, commission_rate FROM consignments WHERE id = ?', [v.consignmentId])[0].values[0];
+    ok(String(c[0]) === v.productId && String(c[1]) === 'emp-7' && String(c[2]) === 'active' && Number(c[3]) === 1,
+      `R5B-K die Kommission hängt am Artikel, mit Mitarbeiter und Fassung 1 (${c.join('/')})`);
+    ok(String(c[4]) === 'percent' && Number(c[5]) === 20, `R5B-K …und dem Modell der Maske (${c[4]}/${c[5]})`);
+    ok(tauriState.discarded.length === 1 && v.imageCount === 1, 'R5B-K die Ablage ist nach dem Erfolg geräumt');
+
+    // (b) Verlorene Antwort: dieselbe Kennung — keine zweite Kombination.
+    const again = await cmdC.runConsignmentCreate(d, identity('301', 'consignments.create'), { ...BODY, stagingIds: [img] });
+    ok(again.kind === 'ok' && (again as { replayed: boolean }).replayed === true, 'R5B-K die Wiederholung antwortet');
+    const z = zaehle(db);
+    ok(z.artikel === 1 && z.kommissionen === 1 && z.verknuepfungen === 1,
+      `R5B-K …kein zweiter Artikel, keine zweite Kommission, kein zweites Bild (${JSON.stringify(z)})`);
+
+    // (c) Dieselbe SKU noch einmal: der Riegel des Hauses.
+    const dup = await cmdC.runConsignmentCreate(d, identity('302', 'consignments.create'),
+      { ...BODY, product: { ...BODY.product, name: 'Anders', sku: 'pp-5711' } });
+    ok(dup.kind === 'rejected' && code(dup) === 'SKU_TAKEN', `R5B-K eine vergebene SKU ist ein Nein (${code(dup)})`);
+
+    // (d) Ein fremder Ausweis, eine fremde Ablage.
+    const fremd = await cmdC.runConsignmentCreate(d, { ...identity('303', 'consignments.create'), branchId: 'branch-other' },
+      { ...BODY, product: { ...BODY.product, sku: 'X-1' } });
+    ok(fremd.kind === 'rejected' && code(fremd) === 'BRANCH_MISMATCH', `R5B-K ein Ausweis einer anderen Filiale legt nichts an (${code(fremd)})`);
+    const foreign = stageForTest(new Uint8Array([1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]),
+      { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-other' });
+    let fremdeAblage = '';
+    try {
+      await cmdC.runConsignmentCreate(d, identity('304', 'consignments.create'),
+        { ...BODY, product: { ...BODY.product, sku: 'X-2' }, stagingIds: [foreign] });
+    } catch (e) { fremdeAblage = String(e); }
+    const z2 = zaehle(db);
+    ok(/staged image is gone/.test(fremdeAblage) && z2.artikel === 1 && z2.kommissionen === 1,
+      `R5B-K eine fremde Ablage öffnet nichts (${fremdeAblage.slice(0, 70)})`);
+  }
+
+  // (e) Ein Fehler ZWISCHEN Artikel und Kommission — vom zweiten Rechner.
+  {
+    resetDurabilityStateForTest();
+    resetTransactionHealthForTest();
+    tauriState.reset();
+    const db = freshDb();
+    seedConsignor(db);
+    const { deps: d } = deps(db);
+    const echt = useConsignmentStore.getState().createConsignment;
+    let artikelDa = -1;
+    useConsignmentStore.setState({ createConsignment: (() => {
+      artikelDa = Number(one(db, 'SELECT COUNT(*) FROM products')) + Number(one(db, 'SELECT COUNT(*) FROM media_links')) * 10;
+      throw new Error('INJECTED: the consignment fails after the product and its image exist');
+    }) as never });
+    let geworfen = '';
+    try { await cmdC.runConsignmentCreate(d, identity('311', 'consignments.create'), { ...BODY, stagingIds: [image('consign-e')] }); }
+    catch (e) { geworfen = String(e); }
+    finally { useConsignmentStore.setState({ createConsignment: echt }); }
+    ok(artikelDa === 11, `R5B-K der Fehler fiel NACH Artikel und Bild (${artikelDa})`);
+    const z = zaehle(db);
+    ok(/INJECTED/.test(geworfen) && z.artikel === 0 && z.kommissionen === 0 && z.verknuepfungen === 0 && z.auftraege === 0 && z.nachweise === 0,
+      `R5B-K kein halbfertiger Zustand: kein Artikel, keine Kommission, keine Bildverknüpfung, kein Nachweis (${JSON.stringify(z)})`);
+    // Dieselbe Kennung darf es danach erneut versuchen — nichts wurde festgehalten.
+    const retry = await cmdC.runConsignmentCreate(d, identity('311', 'consignments.create'), { ...BODY, stagingIds: [image('consign-e')] });
+    ok(retry.kind === 'ok' && (retry as { replayed: boolean }).replayed === false,
+      `R5B-K die Wiederholung derselben Kennung legt sie jetzt an (${JSON.stringify(retry).slice(0, 100)})`);
+  }
+
+  // (f) Derselbe Vorgang an der Maske des Primary: EINE Klammer — auch dort.
+  {
+    resetDurabilityStateForTest();
+    resetTransactionHealthForTest();
+    tauriState.reset();
+    const db = freshDb();
+    seedConsignor(db);
+    const bytes = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) bytes[i] = (i * 13 + 5) & 0xff;
+    const dataUrl = 'data:image/jpeg;base64,' + Buffer.from(bytes).toString('base64');
+    const input = {
+      consignorId: 'cust-1',
+      product: { categoryId: 'cat-watch', brand: 'Patek', name: 'Aquanaut', sku: 'PP-5167' },
+      agreedPrice: 1000,
+      payout: { model: 'consignor_fixed' },
+    };
+    const echt = useConsignmentStore.getState().createConsignment;
+    useConsignmentStore.setState({ createConsignment: (() => { throw new Error('INJECTED-LOCAL'); }) as never });
+    let geworfen = '';
+    try { await createConsignmentOnPrimary(input, { kind: 'data_urls', images: [dataUrl] }); }
+    catch (e) { geworfen = String(e); }
+    finally { useConsignmentStore.setState({ createConsignment: echt }); }
+    const z = zaehle(db);
+    ok(/INJECTED-LOCAL/.test(geworfen) && z.artikel === 0 && z.kommissionen === 0 && z.verknuepfungen === 0,
+      `R5B-K am Primary: ein Fehler nach dem Artikel nimmt ALLES zurück (${JSON.stringify(z)})`);
+    const made = await createConsignmentOnPrimary(input, { kind: 'data_urls', images: [dataUrl] });
+    const z2 = zaehle(db);
+    ok(z2.artikel === 1 && z2.kommissionen === 1 && links(db, made.productId) === 1
+      && String(one(db, 'SELECT images FROM products WHERE id = ?', [made.productId])) === '[]',
+      `R5B-K am Primary: Artikel mit Bild im Medienspeicher + Kommission (${JSON.stringify(z2)})`);
+    ok(String(one(db, 'SELECT commission_type FROM consignments')) === 'consignor_fixed'
+      && Math.abs(Number(one(db, 'SELECT purchase_price FROM products WHERE id = ?', [made.productId])) - 1000) < 0.001,
+      'R5B-K …mit dem Modell der Maske und dem erwarteten Einstand');
+  }
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3c product remote write: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_C3C_PRODUCT_DOMAIN_REUSE_PROVED');
 console.log('CENTRAL_C3C_PRODUCT_SKU_AUTHORITY_PROVED');
 console.log('CENTRAL_C3C_PRODUCT_MEDIA_ATOMICITY_PROVED');
 console.log('CENTRAL_C3C_NEUTRAL_STAGING_INGRESS_PROVED');
+console.log('CENTRAL_UI_R5B_PRODUCT_MEDIA_FAILURE_CONTRACT_PROVED');
+console.log('CENTRAL_UI_R5B_CONSIGNMENT_CREATE_ATOMIC_DOMAIN_PROVED');

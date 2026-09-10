@@ -47,9 +47,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'products.create', handlung: 'Neuen Artikel anlegen', ort: 'pages/watches/WatchList.tsx',
-    lokal: 'createProductWithMedia', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske legt Artikel MIT Bildern an; die Fernbuchung nimmt nur zwischengespeicherte '
-      + 'Bildkennungen. Ohne den Zwischenspeicher-Weg waere es die halbe Handlung.',
+    lokal: 'createProductWithMedia', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5B — dieselbe Vorbereitung auf beiden Seiten (core/products/product-create: Pflichtfelder nach der Regel des Hauses, veraltete Attribute gestrichen, eine eingetippte SKU getrimmt und gegen den Bestand geprueft, sonst aus dem durablen Zaehler), derselbe Anlageweg mit Medienspeicher. Die Bilder legt der Client ueber die vorhandene Zwischenablage ab; der Auftrag nennt nur ihre Inhaltskennungen. Bestandsstatus und Herkunft bestimmt der Primary.',
   },
   {
     op: 'products.update', handlung: 'Artikel aendern (Text)', ort: 'pages/watches/ProductDetail.tsx',
@@ -122,9 +121,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Kommission ───────────────────────────────────────────────────────────
   {
     op: 'consignments.create', handlung: 'Kommission anlegen', ort: 'pages/consignments/ConsignmentList.tsx',
-    lokal: 'createConsignment', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske legt in derselben Handlung auch den ARTIKEL an (createProduct) und haengt '
-      + 'die Kommission daran; die Fernbuchung erwartet einen vorhandenen Artikel.',
+    lokal: 'createConsignmentOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5B — EIN Vorgang fuer beide Seiten (core/consignment/consignment-create): Artikel ueber denselben Anlageweg mit Medienspeicher (vorher als Text in products.images), dann die Kommission, in EINER Transaktion (vorher zwei getrennte Schreibvorgaenge ohne Klammer). Der Fernbefehl nimmt jetzt, was die Maske erfasst: SKU, Attribute, Steuer, Lagerort, Lieferumfang, Mitarbeiter, Bildkennungen.',
   },
   {
     op: 'consignments.update', handlung: 'Kommission aendern', ort: 'pages/consignments/ConsignmentDetail.tsx',

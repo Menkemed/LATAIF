@@ -1479,3 +1479,62 @@ Abgelehnt: fremde Position (eines anderen Auftrags), leeres/unbekanntes/Alt-Sche
 oder Abschluss als Nicht-Boolean, und jede Summe, Zeile, Kosten, Übertrags-, Bezahlt- oder
 Lagerangabe. Beträge, Kosten, Lager, Übertrag und Buchung bestimmt allein der Primary.
 
+---
+
+## R5B — Artikel und Kommission anlegen, mit Bild (11.09.2026)
+
+### Umfang
+
+Aus den 16 Klasse-B-Zeilen genau zwei: `products.create` und `consignments.create`. Nicht angefasst:
+Verkauf/Auszahlung der Kommission, Aufträge, Reparaturen, Retouren, Einkauf, Transfers.
+
+### Artikel: was fehlte
+
+```
+Maske (Primary)                         Fernbefehl (vorher)
+Pflichtfelder nach field-contract       nur „Kategorie + Name"   → Goldkette ohne Namen abgelehnt,
+                                                                    Pflichtattribut nie geprüft
+veraltete Attribute gestrichen          nicht gestrichen
+eingetippte SKU (getrimmt, Riegel)      sku verboten             → Maske auf PC2 halb
+stockStatus/sourceType nicht angeboten  vom Rumpf setzbar        → Kommissionsware ohne Kommission
+```
+
+Jetzt EINE Vorbereitung (`core/products/product-create.ts`, `planProductCreate`) für Maske und
+Fernbefehl; `stockStatus`/`sourceType` bestimmt beim Anlegen der Primary. Der Anlageweg selbst
+(`createProductWithMedia`) war schon gemeinsam.
+
+### Bilder: vorhandene Pipeline, kein zweiter Weg
+
+Die Maske hält ihre Bilder als Daten-URL. Auf PC2 gehen genau diese Bytes über die vorhandene
+Zwischenablage (`/api/staging/media`, Inhaltshash, Eigentümer aus dem Ausweis); der Auftrag nennt nur
+die Kennungen. Der Primary holt die Bytes INNERHALB des Auftrags und fährt denselben
+Medienweg. Ein unvollständiger Bilderweg nimmt beim Fernbefehl alles zurück; eine Wiederholung
+derselben Kennung erzeugt weder Artikel noch Bild doppelt. Verwaiste Dateien → bestehende
+Müllabfuhr (Staging-TTL beim Start, Orphan-GC).
+
+Nebenfund: die gemeinsame Oberfläche zeigte auf PC2 zu **keinem** Artikel ein Bild — der
+Resolver fragt die lokale Datenbank. `useProductMediaPresentation` liest dort jetzt über die
+bestehende Auskunft `products.get` (Speicherschlüssel) und die angemeldete Medienroute.
+
+### Kommission: ein Vorgang statt zwei
+
+Die Maske rief `createProduct` und danach `createConsignment` — zwei getrennte Schreibvorgänge
+ohne Klammer (scheiterte der zweite, blieb ein Artikel „in Kommission" ohne Kommission), die
+Bilder als Text in `products.images`. Der Fernbefehl nahm weder Bilder noch SKU, Attribute, Steuer,
+Lagerort, Lieferumfang oder Mitarbeiter. Jetzt: `core/consignment/consignment-create.ts` —
+Artikel über den Medienweg, Kommission, Modell über `buildPayoutPatch`, in EINER Transaktion; am
+Primary klammert `createConsignmentOnPrimary`, beim Fernbefehl der Auftrag. PC2 schickt EINEN
+Auftrag, nie `products.create` + `consignments.create`.
+
+### Beweise
+
+```
+Unit  product-remote-write 119/0  (SKU getippt/vergeben, Pflichtfelder, Streichen, Filiale,
+                                   fremde Ablage, Kommission remote+lokal, Fehler zwischen
+                                   Artikel und Kommission → nichts bleibt, Replay)
+E2E   r5b-create-parity 54/0      (PC2: Artikel + Kommission mit echtem Foto, je genau einmal,
+                                   Bild auf beiden Rechnern, verlorene Antwort ohne Doppel,
+                                   Kommission PC2 == Primary-Maske inkl. Bildbytes)
+Registry 107 · Matrix 24 / 0 / 14 / 2
+```
+

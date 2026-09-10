@@ -21,7 +21,12 @@ import { dirname, resolve as resolvePath } from 'node:path';
 const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 registerHooks({
   resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
-    if (specifier === '@/core/db/database') {
+    // R5B — die Kommission legt ihren Artikel über den Medienweg an; dessen Orchestrator lädt die
+    // Datenbank über `../db/database.ts` und spricht mit Rust. Beides wird hier gestellt.
+    if (specifier === '@tauri-apps/api/core') {
+      return { url: pathToFileURL(resolvePath(repo, 'test/bridge/_tauri-shim.ts')).href, shortCircuit: true };
+    }
+    if (specifier === '@/core/db/database' || specifier === '../db/database.ts') {
       return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
     }
     if ((specifier === './database' || specifier === '../db/database') && context.parentURL) {
@@ -77,6 +82,7 @@ await import('../../src/core/bridge/return-commands.ts');
 await import('../../src/core/bridge/lifecycle-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
+const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 const { useInvoiceStore } = await import('../../src/stores/invoiceStore.ts');
 const { useOrderStore } = await import('../../src/stores/orderStore.ts');
 const { useProductStore } = await import('../../src/stores/productStore.ts');
@@ -126,6 +132,7 @@ function freshDb(): Db {
   }
   db.run(`INSERT INTO suppliers (id, branch_id, name, active, created_at, updated_at)
     VALUES ('sup-1','branch-main','Workshop',1,?,?)`, [NOW, NOW]);
+  applyMediaSchema(db as never);
   setTestDatabase(db as never);
   installWriteGuard(db as never);
   useProductStore.getState().loadProducts();

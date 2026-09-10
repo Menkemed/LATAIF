@@ -19,13 +19,29 @@ export const CUSTOMER_EDITABLE = [
   'vatAccountNumber', 'personalId',
 ] as const;
 
-/** Artikel anlegen. */
+/**
+ * Artikel anlegen.
+ *
+ * R5B — `stockStatus` und `sourceType` stehen hier NICHT mehr: das Anlegeformular bietet sie gar
+ * nicht an, ein neuer Artikel ist am Primary immer eigene Ware im Bestand. Ein Rumpf, der sie
+ * mitbrächte, könnte einen Artikel als Kommissionsware ausgeben, ohne dass es eine Kommission gibt.
+ */
 export const PRODUCT_CREATE_FIELDS = [
   'categoryId', 'brand', 'name', 'quantity', 'condition', 'scopeOfDelivery',
   'storageLocation', 'purchaseDate', 'purchasePrice', 'purchaseCurrency',
   'plannedSalePrice', 'minSalePrice', 'maxSalePrice',
-  'stockStatus', 'taxScheme', 'supplierName', 'purchaseSource', 'paidFrom',
-  'sourceType', 'notes', 'attributes',
+  'taxScheme', 'supplierName', 'purchaseSource', 'paidFrom',
+  'notes', 'attributes',
+] as const;
+
+/**
+ * R5B — der Artikel einer Kommission: was die Kommissionsmaske für ihn erfasst. Die SKU fehlt hier
+ * mit Absicht, weil sie getrimmt und geprüft wird, bevor sie mitfährt; Einstand, Menge,
+ * Bestandsstatus und Herkunft fehlen, weil eine Kommission sie FEST setzt.
+ */
+export const CONSIGNMENT_PRODUCT_FIELDS = [
+  'categoryId', 'brand', 'name', 'condition', 'notes', 'attributes',
+  'taxScheme', 'storageLocation', 'scopeOfDelivery',
 ] as const;
 
 /**

@@ -293,6 +293,53 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     'R5A.2 auch `save` legt den Grund in die Anzeige — kein Ausgang verschwindet still');
 }
 
+// ── R5B — Artikel und Kommission anlegen: EINE Vorbereitung, EIN Vorgang ──
+{
+  const pc = codeOf(src('src/core/products/product-create.ts'));
+  ok(/export function planProductCreate\(/.test(pc) && /validateProductFields\(/.test(pc)
+    && /stripStaleAttributes\(/.test(pc) && /isSkuTaken\(typed\)/.test(pc),
+    'R5B die Vorbereitung eines Artikels ist EINE Funktion: Pflichtfelder, Streichen, SKU-Riegel, Vergabe');
+  const wl = codeOf(src('src/pages/watches/WatchList.tsx'));
+  const prod = codeOf(src('src/core/bridge/product-commands.ts'));
+  ok(/planProductCreate\(/.test(wl) && /planProductCreate\(/.test(prod),
+    'R5B …Anlegemaske und Fernbefehl rufen sie beide');
+  ok(!/stripStaleAttributes\(/.test(wl) && !/allocateSkuOnCreate\(undefined, form\.brand/.test(wl),
+    'R5B …und in der Maske steht keine zweite Vorbereitung');
+  ok(/assertHouseBranch\(identity\)/.test(prod), 'R5B der Fernbefehl legt nur in DIESER Filiale an');
+  ok(/stockStatus: 'the primary decides stockStatus/.test(prod) && /sourceType: 'the primary decides sourceType/.test(prod),
+    'R5B …Bestandsstatus und Herkunft eines neuen Artikels bestimmt der Primary');
+  ok(/stageDataUrls\(form\.images/.test(wl) && /productCreateRequest\(form, stagingIds\)/.test(wl),
+    'R5B die Maske legt ihre Bilder in die vorhandene Zwischenablage — der Auftrag nennt nur Kennungen');
+
+  const cc = codeOf(src('src/core/consignment/consignment-create.ts'));
+  ok(/export async function createConsignmentWithProduct\(/.test(cc) && /createProductWithMedia\(/.test(cc)
+    && /createConsignment\(/.test(cc) && /buildPayoutPatch\(/.test(cc) && /planProductCreate\(/.test(cc),
+    'R5B die Kommission ist EIN Vorgang: Artikel über den Medienweg, Kommission, Modell über die SSOT');
+  ok(/beginLedgerTransaction\(\)/.test(cc) && /rollbackLedgerTransaction\(\)/.test(cc) && /runExclusive\(/.test(cc),
+    'R5B …am Primary in EINER Klammer, exklusiv');
+  const com = codeOf(src('src/core/bridge/commercial-commands.ts'));
+  ok(/createConsignmentWithProduct\(/.test(com) && !/store\.createProduct\(/.test(com),
+    'R5B …und der Fernbefehl ruft DENSELBEN Vorgang, keinen eigenen Produktweg');
+  ok(/assertHouseBranch\(identity\)/.test(com) && /parseStagingIds\(raw\.stagingIds/.test(com),
+    'R5B …mit derselben Filialregel und denselben Bildkennungen');
+  const cl = codeOf(src('src/pages/consignments/ConsignmentList.tsx'));
+  ok(!/createProduct\(\{/.test(cl) && !/setTimeout\(\(\) => \{\s*try \{\s*const newProduct/.test(cl),
+    'R5B die Kommissionsmaske schreibt nicht mehr in zwei getrennten Schritten');
+  ok(/stageDataUrls\(bilder\)/.test(cl) && /consignmentCreateRequest\(input, stagingIds\)/.test(cl),
+    'R5B …und legt ihre Bilder in dieselbe Zwischenablage');
+  const ps = codeOf(src('src/stores/productStore.ts'));
+  ok(/peekSku: \(seed\) => \{\s*[\s\S]{0,400}?if \(readsFromPrimary\(\)\) return '';/.test(ps),
+    'R5B die SKU-Vorschau rüttelt auf einem Rechner ohne Datenbank nicht an einer Datenbank');
+  // Das angelegte Bild muss auf dem zweiten Rechner auch SICHTBAR sein: die Galerie kommt dort
+  // über die bestehende Auskunft (`products.get`) und die angemeldete Medienroute — kein neuer Weg.
+  const hook = codeOf(src('src/hooks/useProductMediaPresentation.ts'));
+  const cms = codeOf(src('src/core/media/client-media-source.ts'));
+  ok(/const remote = readsFromPrimary\(\);/.test(hook) && /enabled && !remote/.test(hook) && /loadRemoteGallery\(/.test(hook),
+    'R5B die Galerie liest auf dem zweiten Rechner beim Primary, der lokale Resolver bleibt aus');
+  ok(/remoteRead<[^>]*>\('products\.get'/.test(cms) && /\/api\/media\?key=/.test(cms) && !/getDatabase|acquireDbLease/.test(cms),
+    'R5B …über die bestehende Auskunft und die angemeldete Medienroute, ohne Datenbank');
+}
+
 // ── Der Stand, offen benannt ────────────────────────────────────────────
 const verdrahtet = R4C_MATRIX.filter((z) => z.verdrahtet);
 const offenExakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet);
@@ -318,3 +365,7 @@ console.log('CENTRAL_UI_R5A_SHARED_ORDER_PAYMENT_DOMAIN_PROVED');
 console.log('CENTRAL_UI_R5A_MATRIX_UPDATED');
 console.log('CENTRAL_UI_R5A1_CONVERSION_PRECOMMAND_BLOCKER_AUDITED');
 console.log('CENTRAL_UI_R5A1_BILLABLE_LINE_PARITY_PROVED');
+console.log('CENTRAL_UI_R5B_SCOPE_FROZEN');
+console.log('CENTRAL_UI_R5B_PRODUCT_CREATE_SEMANTICS_AUDITED');
+console.log('CENTRAL_UI_R5B_CONSIGNMENT_CREATE_SEMANTICS_AUDITED');
+console.log('CENTRAL_UI_R5B_CONSIGNMENT_CREATE_ATOMIC_DOMAIN_PROVED');

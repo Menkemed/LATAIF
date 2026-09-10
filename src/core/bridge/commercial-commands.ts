@@ -50,12 +50,23 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { useProductStore } from '@/stores/productStore';
-import { buildPayoutPatch, payoutModelLock, PayoutPatchError } from '@/core/consignment/payout-edit';
+import { payoutModelLock, PayoutPatchError } from '@/core/consignment/payout-edit';
 import { rowToConsignment } from '@/stores/consignmentStore';
 import { CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { CommandNotEvaluated } from './mutation-engine';
+import {
+  invokeReadStaged, invokeDiscardStaged, assertHouseBranch, parseStagingIds, readStagedAsDataUrls,
+  discardStagedAfterSuccess, stagingOwnerOf, type StagedMediaReader, type StagedMediaDiscard,
+} from './remote-create-support';
+import {
+  createConsignmentWithProduct, houseConsignmentPort, ConsignmentCreateRejected, ConsignmentMediaIncomplete,
+  type ConsignmentCreateInput,
+} from '@/core/consignment/consignment-create';
+import { CONSIGNMENT_PRODUCT_FIELDS } from '@/core/data/write-payloads';
+// Die Schemata des Hauses — nicht die engere Einkaufsliste weiter unten (Einkauf kennt kein MARGIN).
+import { TAX_SCHEMES as HOUSE_TAX_SCHEMES } from '@/core/models/types';
 
 export const OP_PURCHASES_CREATE = 'purchases.create';
 export const OP_CONSIGNMENTS_CREATE = 'consignments.create';
@@ -289,35 +300,51 @@ const PAYOUT_MODELS = ['percent', 'consignor_fixed', 'cost_split'] as const;
 
 export interface ConsignmentCreateRequest {
   consignorId: string;
-  product: { brand: string; name: string; categoryId: string; condition?: string; notes?: string };
+  product: {
+    categoryId: string;
+    brand?: string;
+    name?: string;
+    condition?: string;
+    notes?: string;
+    /** R5B — eine eingetippte SKU, wie an der Maske. Fehlt sie, vergibt der Primary eine. */
+    sku?: string;
+    attributes?: Record<string, unknown>;
+    taxScheme?: string;
+    storageLocation?: string;
+    scopeOfDelivery?: string[];
+  };
   agreedPrice: number;
   minimumPrice?: number;
   payout: { model: string; commissionRate?: unknown; excessSplitPct?: unknown };
   expiryDate?: string;
   notes?: string;
+  /** R5B — wer den Artikel angenommen hat (die Mitarbeiterauswahl der Maske). */
+  staffId?: string;
+  /** R5B — die Bilder des Artikels, als Kennungen der Zwischenablage. Nie als Bytes im Auftrag. */
+  stagingIds: string[];
   /** „Trotzdem anlegen" — die bewusste Antwort auf einen Duplikatsverdacht. */
   acknowledgeDuplicate?: boolean;
 }
 
 /**
- * Die Kommission legt IMMER auch ihren Artikel an — genau wie der Bildschirm am Primary, der
- * `createProduct` und `createConsignment` nacheinander ruft. Das ist kein zweiter Produktweg,
- * sondern derselbe: dieselbe Funktion, dieselbe Nummernvergabe, dieselben festen Werte
- * (`stockStatus: 'consignment'`, `sourceType: 'CONSIGNMENT'`, Einstand 0 — die Ware gehört uns
- * nicht, und was sie uns kostet, entscheidet erst der Verkauf).
+ * Die Kommission legt IMMER auch ihren Artikel an — genau wie die Maske am Primary. R5B: beide
+ * Seiten fahren dafür DENSELBEN Vorgang (`core/consignment/consignment-create`): dieselben
+ * Prüfungen, derselbe Anlageweg mit Medienspeicher, dieselben festen Werte (`stockStatus:
+ * 'consignment'`, `sourceType: 'CONSIGNMENT'`, Einstand 0, ein Stück), dieselbe Kommission — in
+ * EINER Transaktion.
  *
- * Die SKU steht NICHT im Rumpf: sie kommt aus dem durablen Zähler. Damit kann ein zweiter Rechner
- * auch keine bereits vergebene Nummer erzwingen — der harte SKU-Riegel des Bildschirms wird
- * dadurch gegenstandslos, nicht umgangen.
+ * Der Rumpf trägt deshalb, was die Maske erfasst: die Felder des Artikels (Attribute, Steuer,
+ * Lagerort, Lieferumfang, eine eingetippte SKU), den Mitarbeiter, die Bildkennungen. Was die
+ * Kommission FEST setzt — Einstand, Menge, Bestandsstatus, Herkunft — steht nicht darin.
  */
 export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
   if (!isPlain(raw)) throw new CommercialPayloadError('payload must be an object');
   onlyKnownFields(raw, [
     'consignorId', 'product', 'agreedPrice', 'minimumPrice', 'payout',
-    'expiryDate', 'notes', 'acknowledgeDuplicate',
+    'expiryDate', 'notes', 'staffId', 'stagingIds', 'acknowledgeDuplicate',
   ]);
   if (!isPlain(raw.product)) throw new CommercialPayloadError('product is required');
-  onlyKnownFields(raw.product, ['brand', 'name', 'categoryId', 'condition', 'notes']);
+  onlyKnownFields(raw.product, [...CONSIGNMENT_PRODUCT_FIELDS, 'sku']);
   if (!isPlain(raw.payout)) throw new CommercialPayloadError('payout is required');
   onlyKnownFields(raw.payout, ['model', 'commissionRate', 'excessSplitPct']);
   const model = String(raw.payout.model ?? '');
@@ -325,14 +352,33 @@ export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
     // Fail-closed und ausdrücklich: `fixed` ist ein Altmodell, das kein Bildschirm mehr anbietet.
     throw new CommercialPayloadError(`unknown payout model: ${model || '(none)'}`);
   }
+  const p = raw.product;
+  if (p.attributes !== undefined && p.attributes !== null && !isPlain(p.attributes)) {
+    throw new CommercialPayloadError('product.attributes must be an object');
+  }
+  if (p.scopeOfDelivery !== undefined && p.scopeOfDelivery !== null
+    && (!Array.isArray(p.scopeOfDelivery) || p.scopeOfDelivery.some((x) => typeof x !== 'string'))) {
+    throw new CommercialPayloadError('product.scopeOfDelivery must be a list of words');
+  }
+  const taxScheme = optString(p.taxScheme, 'product.taxScheme');
+  if (taxScheme !== undefined && !(HOUSE_TAX_SCHEMES as readonly string[]).includes(taxScheme)) {
+    throw new CommercialPayloadError(`unknown tax scheme: ${taxScheme}`);
+  }
   return {
     consignorId: reqString(raw.consignorId, 'consignorId'),
     product: {
-      brand: reqString(raw.product.brand, 'product.brand'),
-      name: reqString(raw.product.name, 'product.name'),
-      categoryId: reqString(raw.product.categoryId, 'product.categoryId'),
-      condition: optString(raw.product.condition, 'product.condition'),
-      notes: optString(raw.product.notes, 'product.notes'),
+      categoryId: reqString(p.categoryId, 'product.categoryId'),
+      // Ob Marke und Name Pflicht sind, entscheidet die Pflichtfeldregel des Hauses — nicht der
+      // Rumpf. Eine Goldkette ohne Marke ist an der Maske gültig, also auch hier.
+      brand: optString(p.brand, 'product.brand'),
+      name: optString(p.name, 'product.name'),
+      condition: optString(p.condition, 'product.condition'),
+      notes: optString(p.notes, 'product.notes'),
+      sku: optString(p.sku, 'product.sku'),
+      attributes: isPlain(p.attributes) ? p.attributes : undefined,
+      taxScheme,
+      storageLocation: optString(p.storageLocation, 'product.storageLocation'),
+      scopeOfDelivery: Array.isArray(p.scopeOfDelivery) ? (p.scopeOfDelivery as string[]) : undefined,
     },
     // Dieselbe Pflicht wie am Bildschirm: ohne vereinbarten Preis gibt es keine Kommission.
     agreedPrice: money(raw.agreedPrice, 'agreedPrice', { min: 0.001 }),
@@ -341,50 +387,42 @@ export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
     payout: { model, commissionRate: raw.payout.commissionRate, excessSplitPct: raw.payout.excessSplitPct },
     expiryDate: optString(raw.expiryDate, 'expiryDate'),
     notes: optString(raw.notes, 'notes'),
+    staffId: optString(raw.staffId, 'staffId'),
+    stagingIds: parseStagingIds(raw.stagingIds, (m) => new CommercialPayloadError(m)),
     acknowledgeDuplicate: raw.acknowledgeDuplicate === true,
   };
 }
 
-export function runConsignmentCreate(
-  deps: EngineDeps, identity: CommandIdentity, raw: unknown,
+/** Nur für Tests: wie der Primary an die abgelegten Bytes kommt und wie er aufräumt. */
+export interface ConsignmentEngineExtras {
+  readStaged?: StagedMediaReader;
+  discardStaged?: StagedMediaDiscard;
+}
+
+export async function runConsignmentCreate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: ConsignmentEngineExtras = {},
 ): Promise<CommandOutcome> {
   const req = parseConsignmentCreate(raw);
-  return runRemoteCommand(deps, identity, () => {
-    const branch = identity.branchId;
-    const consignor = query(
-      "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'",
-      [req.consignorId, branch],
-    )[0];
-    if (!consignor) throw new CommandRejected('CONSIGNOR_NOT_FOUND', 'no such client in this branch');
-    const cat = query('SELECT id FROM categories WHERE id = ?', [req.product.categoryId])[0];
-    if (!cat) throw new CommandRejected('CATEGORY_NOT_FOUND', 'no such category');
-
-    // Das Modell wird von der SSOT gebaut, nicht vom Rumpf übernommen: sie erzwingt den
-    // Prozentbereich, den Shop-Anteil zwischen 1 und 99, und sie setzt die Parameter FREMDER
-    // Modelle ausdrücklich auf `null`. Ein Client kann damit keine Kombination erzwingen, die der
-    // Primary ablehnen würde — und keine, bei der der Anteil eines vorigen Modells weiterwirkt.
-    let patch;
-    try {
-      patch = buildPayoutPatch(req.payout);
-    } catch (e) {
-      if (e instanceof PayoutPatchError) throw new CommandRejected('PAYOUT_MODEL_INVALID', e.message);
-      throw e;
+  const owner = stagingOwnerOf(identity);
+  const outcome = await runRemoteCommand(deps, identity, async () => {
+    // R5B — in die Bücher DIESER Filiale, oder gar nicht.
+    assertHouseBranch(identity);
+    // Die Bytes INNERHALB des Auftrags — eine Wiederholung derselben Kennung liest sie nie wieder.
+    const images = await readStagedAsDataUrls(
+      req.stagingIds, owner, extras.readStaged ?? invokeReadStaged, (m) => new CommercialPayloadError(m),
+    );
+    const port = houseConsignmentPort(identity.branchId);
+    if (!port.consignorExists(req.consignorId)) {
+      throw new CommandRejected('CONSIGNOR_NOT_FOUND', 'no such client in this branch');
     }
 
-    const store = useProductStore.getState();
     // Die Duplikatserkennung des Hauses, mit derselben Bedeutung wie am Bildschirm: sie BLOCKIERT
     // nicht, sie FRAGT. Am Primary heißt die Antwort „Create anyway"; hier heißt sie
-    // `acknowledgeDuplicate`. Ohne sie wird abgelehnt — mit Nennung dessen, was ähnlich aussieht,
-    // damit der Mensch am zweiten Rechner dieselbe Entscheidung treffen kann.
+    // `acknowledgeDuplicate`. Verglichen wird gegen den FRISCH geladenen Bestand (der Port lädt).
     if (!req.acknowledgeDuplicate) {
-      // Gemessen und behoben: `findPossibleDuplicates` vergleicht gegen die GELADENE Liste des
-      // Stores, nicht gegen die Datenbank. Am Primary lädt der Bildschirm sie beim Öffnen; ein
-      // Fernauftrag hat keinen Bildschirm — die Liste wäre der Stand irgendeines anderen
-      // Zeitpunkts, im Zweifel leer, und die Prüfung fände nie etwas. Also erst laden, dann
-      // fragen: dieselbe Funktion, aber auf dem Stand, der wirklich gilt.
-      store.loadProducts();
       const hits = useProductStore.getState().findPossibleDuplicates({
         brand: req.product.brand, name: req.product.name, categoryId: req.product.categoryId,
+        sku: req.product.sku, attributes: req.product.attributes,
       } as never);
       if (hits.length > 0) {
         throw new CommandRejected(
@@ -395,47 +433,48 @@ export function runConsignmentCreate(
       }
     }
 
-    const product = store.createProduct({
-      brand: req.product.brand,
-      name: req.product.name,
-      categoryId: req.product.categoryId,
-      condition: req.product.condition,
-      notes: req.product.notes,
-      // Die Nummer kommt aus dem durablen Zähler — nie aus dem Rumpf.
-      sku: store.allocateSkuOnCreate(undefined, req.product.brand, req.product.categoryId),
-      // Die vier festen Werte des Kommissions-Eingangs, wortgleich zum Bildschirm.
-      purchasePrice: 0,
-      stockStatus: 'consignment',
-      sourceType: 'CONSIGNMENT',
-      quantity: 1,
-    } as never);
-
-    const created = useConsignmentStore.getState().createConsignment({
+    const input: ConsignmentCreateInput = {
       consignorId: req.consignorId,
-      productId: product.id,
+      product: { ...req.product } as never,
       agreedPrice: req.agreedPrice,
       minimumPrice: req.minimumPrice,
-      commissionType: patch.commissionType,
-      commissionRate: patch.commissionRate,
-      excessSplitPct: patch.excessSplitPct ?? undefined,
+      payout: req.payout,
       expiryDate: req.expiryDate,
       notes: req.notes,
-    });
+      staffId: req.staffId,
+    };
+    let made;
+    try {
+      // DERSELBE Vorgang wie an der Maske des Primary — die Klammer hält hier der Auftrag.
+      made = await createConsignmentWithProduct(input, { kind: 'data_urls', images }, port);
+    } catch (e) {
+      if (e instanceof ConsignmentCreateRejected) throw new CommandRejected(e.code, e.message);
+      // Ein unvollständiger Bilderweg ist kein Urteil: nichts bleibt, dieselbe Kennung darf es
+      // erneut versuchen.
+      if (e instanceof ConsignmentMediaIncomplete) throw new CommandNotEvaluated(e.code, e.message);
+      throw e;
+    }
+    const created = made.consignment;
 
     const value: CommercialResult = {
       consignmentId: created.id,
       consignmentNumber: created.consignmentNumber,
-      productId: product.id,
-      sku: product.sku,
+      productId: made.productId,
+      sku: made.sku,
       payoutModel: created.commissionType,
       commissionRate: created.commissionRate,
       excessSplitPct: created.excessSplitPct ?? null,
       agreedPrice: created.agreedPrice,
       status: created.status,
+      imageCount: images.length,
       revision: Number(query('SELECT revision FROM consignments WHERE id = ?', [created.id])[0]?.revision ?? 1),
     };
     return value as unknown as Record<string, unknown>;
   });
+  if (outcome.kind === 'ok') {
+    await discardStagedAfterSuccess(req.stagingIds, owner, extras.discardStaged ?? invokeDiscardStaged);
+  }
+  return outcome;
 }
 
 // ── Kommission: ändern ────────────────────────────────────────────────────

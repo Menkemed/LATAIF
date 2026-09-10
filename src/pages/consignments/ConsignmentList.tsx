@@ -28,6 +28,10 @@ import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/mod
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
 import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
+import { useSharedWrites } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { createConsignmentOnPrimary, consignmentCreateRequest, type ConsignmentCreateInput } from '@/core/consignment/consignment-create';
 
 // SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
 // fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
@@ -44,11 +48,11 @@ type StatusFilter = '' | ConsignmentStatus;
 export function ConsignmentList() {
   const navigate = useNavigate();
   const {
-    consignments, loadConsignments, createConsignment,
+    consignments, loadConsignments,
     recordSale, markPaidOut, markReturned,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { products, loadProducts, categories, loadCategories, createProduct, allocateSkuOnCreate, isSkuTaken, findPossibleDuplicates } = useProductStore();
+  const { products, loadProducts, categories, loadCategories, isSkuTaken, findPossibleDuplicates } = useProductStore();
   const { loadEmployees } = useEmployeeStore();
   const [searchParams] = useSearchParams();
   const staffFilter = searchParams.get('staff') || '';
@@ -114,6 +118,9 @@ export function ConsignmentList() {
   // Klicks in einem Tick lesen alle denselben Wert aus ihrem Render und laufen alle drei. Ein Ref
   // aendert sich bei der Zuweisung — dieselbe Loesung wie in der Collection (`createInFlight`).
   const createInFlight = useRef(false);
+  const [createBusy, setCreateBusy] = useState(false);
+  // CENTRAL-UI-PARITY R5B — dieselbe Maske, zwei Anschlüsse hinter dem Anlegen.
+  const w = useSharedWrites();
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
 
@@ -266,6 +273,7 @@ export function ConsignmentList() {
       scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
       images: [],
     });
+    w.clear();
     setShowNew(true);
   }
 
@@ -329,87 +337,69 @@ export function ConsignmentList() {
     doCreate();
   }
 
-  function doCreate() {
-    // Die Anlage laeuft gleich in einem eigenen Tick — bis dahin darf kein zweiter Klick
-    // (Doppelklick auf "Create" oder auf "Create anyway") einen zweiten Auftrag einreihen.
+  async function doCreate() {
+    // Ein bewusster Klick (auch auf „Create anyway") darf genau EINE Anlage auslösen.
     if (createInFlight.current) return;
     createInFlight.current = true;
-    // Snapshot der Form-Daten BEVOR React was reseted — die DB-Saves laufen
-    // gleich in einem Defer-Tick, da darf das Form schon weg sein.
-    const snapshot = {
-      product: { ...productForm },
-      consignorId: form.consignorId,
-      agreedPrice: form.agreedPrice,
-      minimumPrice: form.minimumPrice,
-      commissionRate: form.commissionRate,
-      expiryDate: form.expiryDate,
-      notes: form.notes,
-      staffId: form.staffId,
-      commissionType,
-      // v0.7.10 — nur bei cost_split relevant. Range-Clamp passiert beim Senden
-      // in den Store; hier nimm einfach den User-Input.
-      excessSplitPct: Number(excessSplitPct) || 50,
-    };
-
-    // Modal sofort zu + Form leeren in DIESEM Tick — React commit'tet den
-    // leeren-Modal-State, bevor wir die ~3-4 synchronen DB-Saves anstoßen.
-    // Sonst rendert React während der DB-Operation noch den vollen Modal-Tree
-    // (Photos, Inputs, AI-Identify-Box) und unter Tauri/sql.js wirkt das wie
-    // ein Hänger / führt zur weißen Seite.
-    setShowNew(false);
-    setDuplicateMatches([]);
-    setForm({
-      consignorId: '', agreedPrice: '', minimumPrice: '',
-      commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '', staffId: '',
-    });
-    setProductForm({
-      condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [],
-      purchaseCurrency: 'BHD', attributes: {},
-    });
-    setSelectedCat(null);
-
-    // DB-Schreiben in den nächsten Macrotask schieben — gibt React Zeit, den
-    // modal-close-Render zu commiten, BEVOR der Main-Thread für die synchronen
-    // SQLite-Saves blockiert wird.
-    setTimeout(() => {
-      try {
-        const newProduct = createProduct({
-          ...snapshot.product,
-          // SKU-UNIFY — claimed at the create from the shared durable counter, never carried over
-          // from whatever the form was previewing.
-          sku: allocateSkuOnCreate(snapshot.product.sku, snapshot.product.brand, snapshot.product.categoryId),
-          purchasePrice: 0,
-          stockStatus: 'consignment',
-          sourceType: 'CONSIGNMENT',
-          quantity: 1,
-        });
-        const rateVal = Number(snapshot.commissionRate) || 0;
-        createConsignment({
-          consignorId: snapshot.consignorId,
-          productId: newProduct.id,
-          agreedPrice: snapshot.agreedPrice ? Number(snapshot.agreedPrice) : 0,
-          minimumPrice: snapshot.minimumPrice ? Number(snapshot.minimumPrice) : undefined,
-          commissionType: snapshot.commissionType,
-          // Model 2 (consignor_fixed): kein separates commission_value — agreedPrice IST der Payout.
-          // Model 1 (percent): commissionRate = % to us.
-          // Model 3 (cost_split): commissionRate ignoriert; agreedPrice = Cost, excessSplitPct = Shop's Profit-Share.
-          commissionRate: snapshot.commissionType === 'percent' ? rateVal : 0,
-          excessSplitPct: snapshot.commissionType === 'cost_split'
-            ? Math.max(0, Math.min(100, snapshot.excessSplitPct))
-            : undefined,
-          expiryDate: snapshot.expiryDate || undefined,
-          notes: snapshot.notes || undefined,
-          staffId: snapshot.staffId || undefined,
-        });
-      } catch (err) {
-        console.error('[Consignment] create failed:', err);
-        alert(`Failed to create consignment: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        // Auch nach einem Fehlschlag wieder freigeben — sonst bliebe der Bildschirm fuer immer
-        // gesperrt und ein zweiter Versuch waere unmoeglich.
-        createInFlight.current = false;
+    setCreateBusy(true);
+    try {
+      // CENTRAL-UI-PARITY R5B — EIN Vorgang für beide Rechner (`core/consignment/consignment-create`):
+      // der Artikel über denselben Anlageweg wie jede andere Anlage (Bilder in den Medienspeicher,
+      // nicht mehr als Text in `products.images`), dann die Kommission — in EINER Transaktion. Bis
+      // hierher waren das zwei getrennte Schreibvorgänge; scheiterte der zweite, blieb ein Artikel
+      // „in Kommission" ohne Kommission stehen. Die Maske bleibt offen, bis der Vorgang durch ist —
+      // ein Fehler lässt die Eingaben stehen, statt sie mit dem geschlossenen Fenster zu verlieren.
+      const { images, ...produkt } = productForm;
+      const bilder = images || [];
+      const input: ConsignmentCreateInput = {
+        consignorId: form.consignorId,
+        product: produkt,
+        agreedPrice: form.agreedPrice ? Number(form.agreedPrice) : 0,
+        minimumPrice: form.minimumPrice ? Number(form.minimumPrice) : undefined,
+        // Das Auszahlungsmodell baut die SSOT (`buildPayoutPatch`) — dieselbe wie beim Ändern.
+        payout: {
+          model: commissionType,
+          commissionRate: Number(form.commissionRate) || 0,
+          excessSplitPct: Number(excessSplitPct) || 50,
+        },
+        expiryDate: form.expiryDate || undefined,
+        notes: form.notes || undefined,
+        staffId: form.staffId || undefined,
+      };
+      // Auf einem verbundenen Rechner zuerst die Bilder in die Zwischenablage des Primary.
+      let stagingIds: string[] = [];
+      if (w.remote) {
+        try {
+          stagingIds = await stageDataUrls(bilder);
+        } catch (e) {
+          alert(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was created — please try again.`);
+          return;
+        }
       }
-    }, 0);
+      const geklappt = await w.ok('consignments.create', {
+        local: () => createConsignmentOnPrimary(input, { kind: 'data_urls', images: bilder }),
+        remote: () => consignmentCreateRequest(input, stagingIds),
+      });
+      // Nicht geglückt: der Grund steht in `w.fehler`, die Maske und ihre Eingaben bleiben, und
+      // derselbe Klick wiederholt DIESELBE Absicht.
+      if (!geklappt) return;
+      setShowNew(false);
+      setDuplicateMatches([]);
+      setForm({
+        consignorId: '', agreedPrice: '', minimumPrice: '',
+        commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '', staffId: '',
+      });
+      setProductForm({
+        condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [],
+        purchaseCurrency: 'BHD', attributes: {},
+      });
+      setSelectedCat(null);
+      loadConsignments();
+      loadProducts();
+    } finally {
+      createInFlight.current = false;
+      setCreateBusy(false);
+    }
   }
 
   // Sold-Flow Validierung: nur Model 2 + sale < agreed verlangt Acknowledge.
@@ -1225,11 +1215,12 @@ export function ConsignmentList() {
           </div>
 
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
+            <WriteError text={w.fehler} />
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={handleCreate}
               data-cn-create
-              disabled={!form.consignorId || !productForm.categoryId}
-            >Create Consignment</Button>
+              disabled={!form.consignorId || !productForm.categoryId || createBusy || w.busy}
+            >{createBusy ? 'Saving…' : 'Create Consignment'}</Button>
           </div>
         </div>
       </Modal>

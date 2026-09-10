@@ -20,6 +20,10 @@ import {
   IDLE_STATE,
   type PresentationState,
 } from '@/core/media/presentation';
+import { readsFromPrimary } from '@/core/data/primary-source';
+import { loadRemoteGallery } from '@/core/media/client-media-source';
+
+const LOADING_STATE: PresentationState = { status: 'loading', srcs: [] };
 
 /**
  * Resolve and present the ordered media gallery for one product.
@@ -39,6 +43,57 @@ export function useProductMediaPresentation(
    *  after a durable edit save, so the new gallery replaces the old one and the
    *  previous Object-URLs are revoked exactly once (3B2C2-R2). */
   reloadNonce = 0,
+): PresentationState {
+  // CENTRAL-UI-PARITY R5B — ein Rechner ohne Datenbank hat weder die Verknüpfungen noch den
+  // Medienspeicher. Er liest die Galerie beim Primary (`core/media/client-media-source`); der lokale
+  // Resolver bleibt dort ausgeschaltet und greift nie nach einer Datenbank, die es nicht gibt.
+  const remote = readsFromPrimary();
+  const local = useLocalPresentation(productId, tenantId, branchId, enabled && !remote, reloadNonce);
+  const fern = useRemotePresentation(productId, enabled && remote, reloadNonce);
+  return remote ? fern : local;
+}
+
+/**
+ * Die Galerie vom Primary: dieselbe Ordnung (Hauptbild zuerst), dieselben Zustände. Jede
+ * Objekt-URL wird genau einmal wieder freigegeben — beim Wechsel des Artikels und beim Abbau.
+ */
+function useRemotePresentation(productId: string | undefined, enabled: boolean, reloadNonce: number): PresentationState {
+  const key = enabled && productId ? `${productId}#${reloadNonce}` : '';
+  const [held, setHeld] = useState<{ key: string; state: PresentationState }>({ key: '', state: IDLE_STATE });
+  useEffect(() => {
+    if (!key || !productId) return;
+    let dead = false;
+    const made: string[] = [];
+    (async () => {
+      try {
+        const items = await loadRemoteGallery(productId);
+        if (dead) return;
+        if (items.length === 0) { setHeld({ key, state: { status: 'empty', srcs: [] } }); return; }
+        const presented = items.map((i) => {
+          const url = URL.createObjectURL(i.blob);
+          made.push(url);
+          return { url, mimeType: i.mimeType, mediaId: i.mediaId, sortOrder: i.sortOrder, isPrimary: i.isPrimary };
+        });
+        setHeld({ key, state: { status: 'media', srcs: presented.map((p) => p.url), items: presented } });
+      } catch (e) {
+        if (!dead) setHeld({ key, state: { status: 'error', code: e instanceof Error ? e.message : 'REMOTE_MEDIA_FAILED', srcs: [] } });
+      }
+    })();
+    return () => {
+      dead = true;
+      for (const u of made) URL.revokeObjectURL(u);
+    };
+  }, [key, productId]);
+  if (!key) return IDLE_STATE;
+  return held.key === key ? held.state : LOADING_STATE;
+}
+
+function useLocalPresentation(
+  productId: string | undefined,
+  tenantId: string | undefined,
+  branchId: string | undefined,
+  enabled: boolean,
+  reloadNonce: number,
 ): PresentationState {
   const [state, setState] = useState<PresentationState>(IDLE_STATE);
   const controllerRef = useRef<ProductMediaPresentationController | null>(null);

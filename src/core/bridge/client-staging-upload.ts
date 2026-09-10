@@ -91,3 +91,25 @@ export async function stageImage(
     height: Number(body.height ?? 0),
   };
 }
+
+/**
+ * CENTRAL-UI-PARITY R5B — die Bilder einer Anlegemaske ablegen, in ihrer Reihenfolge.
+ *
+ * Die Maske hält ihre Bilder als Daten-URL (so, wie `ImageUpload` sie verkleinert). Genau diese
+ * Bytes gehen in die Ablage — dieselben, die der Primary an seiner eigenen Maske in den
+ * Medienspeicher schriebe. Dieselben Bytes ergeben dieselbe Kennung: ein zweites Ablegen nach
+ * einer verlorenen Antwort erzeugt keine zweite Ablage und keinen anderen Auftrag.
+ */
+export async function stageDataUrls(urls: readonly string[], fetchFn: typeof fetch = fetch): Promise<string[]> {
+  const ids: string[] = [];
+  for (const url of urls) {
+    const m = /^data:([^;,]+);base64,(.*)$/s.exec(url);
+    if (!m) throw new StagingUploadError('NOT_A_LOCAL_IMAGE', 'an image in the form is not a local picture');
+    const bin = atob(m[2]);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const staged = await stageImage({ type: m[1], arrayBuffer: async () => bytes.buffer }, fetchFn);
+    ids.push(staged.stagingId);
+  }
+  return ids;
+}

@@ -16,14 +16,18 @@ import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/
 import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
-import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
+import { validateProductFields, blockingIssues, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { useAuthStore } from '@/stores/authStore';
 import { currentBranchId } from '@/core/db/helpers';
 import { resolvePrimaryImageForExport } from '@/core/media/product-image-export';
 import { buildCollectionWorkbookBuffer } from '@/core/media/collection-workbook';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
-import { decideProductCreateUi } from '@/core/media/product-media-create';
+import { decideProductCreateUi, type ProductCreateResult } from '@/core/media/product-media-create';
+import { planProductCreate, productCreateRefusal, productCreateRequest } from '@/core/products/product-create';
+import { useSharedWrites } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { getStockAggregates, summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
@@ -152,6 +156,8 @@ export function WatchList() {
   const [retrySku, setRetrySku] = useState<string>('');
   /** Synchronous double-submit guard — see `runCreate`. */
   const createInFlight = useRef(false);
+  // CENTRAL-UI-PARITY R5B — dieselbe Maske, zwei Anschlüsse hinter dem Anlegen.
+  const w = useSharedWrites();
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -314,6 +320,7 @@ export function WatchList() {
     setCreateWarning(null);
     setRetryProductId(null);
     setRetrySku('');
+    w.clear();
     setShowNew(true);
   }
 
@@ -398,22 +405,51 @@ export function WatchList() {
     createInFlight.current = true;
     setCreateBusy(true);
     try {
-      // DESKTOP-CONTRACT: an attribute whose dependsOn is unsatisfied must never be persisted
-      // (a Steel watch keeps no karat_color) — same strip as the edit path and the mobile gate.
-      // SKU-UNIFY — the number is CLAIMED here, at the create, never taken from the preview the
-      // form was showing: between opening the dialog and pressing Save another surface may have
-      // taken it. A retry reuses the SKU it already claimed, so one successful create consumes
-      // exactly one number no matter how often the images had to be retried.
-      // A typed SKU is trimmed before it is anything else — `" RLX-WCH-001 "` and `"RLX-WCH-001"`
-      // have to be the same number, or the second one slips past every uniqueness check that
-      // compares strings. Whitespace alone is not a SKU, so it falls through to the allocator.
-      const typed = skuIsEmpty(form.sku) ? '' : String(form.sku).trim();
-      const sku = typed || retrySku || allocateSkuOnCreate(undefined, form.brand, form.categoryId);
-      if (!typed && sku !== retrySku) setRetrySku(sku);
-      const payload = { ...form, sku, attributes: stripStaleAttributes(selectedCat ?? undefined, form.attributes) as typeof form.attributes };
-      const result = await createProductWithMedia(payload, retryProductId ?? undefined);
-      const ui = decideProductCreateUi(result);
+      // R5B — auf einem verbundenen Rechner gehen die Bilder zuerst in die Zwischenablage des
+      // Primary (sie entscheidet nichts und schreibt keine Zeile); der Auftrag nennt nur ihre
+      // Inhaltskennungen. Dieselben Bytes ergeben dieselben Kennungen — ein zweiter Klick nach
+      // einer verlorenen Antwort ist derselbe Auftrag.
+      let stagingIds: string[] = [];
+      if (w.remote) {
+        try {
+          stagingIds = await stageDataUrls(form.images || []);
+        } catch (e) {
+          setCreateWarning(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was created — please try again.`);
+          return;
+        }
+      }
+      // DESKTOP-CONTRACT + SKU-UNIFY, jetzt in `planProductCreate` — DERSELBEN Vorbereitung, die
+      // auch der Fernbefehl fährt: Pflichtfelder nach der Regel des Hauses, veraltete Attribute
+      // gestrichen (eine Stahluhr trägt keine Goldfarbe), eine eingetippte SKU getrimmt und gegen
+      // den Bestand geprüft, sonst die Nummer HIER beansprucht — nie aus der Vorschau. Ein Retry
+      // nutzt die schon beanspruchte weiter: eine Anlage verbraucht genau eine Nummer.
+      const r = await w.save('products.create', {
+        local: async () => {
+          const plan = planProductCreate(form, {
+            category: selectedCat ?? undefined,
+            isSkuTaken: (s) => isSkuTaken(s),
+            allocateSku: (brand, categoryId) => allocateSkuOnCreate(undefined, brand, categoryId),
+          }, retrySku);
+          if (plan.kind !== 'ok') throw new Error(productCreateRefusal(plan).message);
+          if (plan.allocated) setRetrySku(plan.data.sku);
+          return createProductWithMedia(plan.data, retryProductId ?? undefined);
+        },
+        remote: () => productCreateRequest(form, stagingIds),
+      });
+      // Nicht geglückt: der Grund steht in `w.fehler`, die Maske bleibt offen, und derselbe Klick
+      // wiederholt DIESELBE Absicht (ein offener Ausgang behält seine Kennung).
+      if (r.kind !== 'ok') return;
       setErrors({});
+      if (w.remote) {
+        // Der Primary hat Artikel, Nummer und Bilder in EINER Transaktion angelegt.
+        setCreateWarning(null);
+        setRetryProductId(null);
+        setRetrySku('');
+        setShowNew(false);
+        loadProducts();
+        return;
+      }
+      const ui = decideProductCreateUi(r.value as ProductCreateResult);
       if (ui.closeModal) {
         setCreateWarning(null);
         setRetryProductId(null);
@@ -1093,9 +1129,11 @@ export function WatchList() {
               {createWarning}
             </div>
           )}
+          {/* R5B — der Ausgang des Anlegens, auf beiden Rechnern an derselben Stelle. */}
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={createBusy}>
+            <Button variant="primary" onClick={handleCreate} disabled={createBusy || w.busy} data-create-product>
               {createBusy ? 'Saving…' : retryProductId ? 'Retry images' : 'Add to Collection'}
             </Button>
           </div>
