@@ -358,6 +358,39 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   ok(!/INSERT INTO|UPDATE |DELETE FROM/i.test(shim), 'HARNESS der Stellvertreter schreibt keine Geschäftsdaten — er transportiert nur');
 }
 
+// ── R5C — Reparatur anlegen, ändern, abrechnen: EINE Regelstelle, EIN Anschluss je Seite ──
+{
+  const rules = codeOf(src('src/core/repairs/repair-rules.ts'));
+  ok(/export function planRepairCreate\(/.test(rules) && /export function buildRepairEditPatch\(/.test(rules)
+    && /export function repairInvoiceBlocker\(/.test(rules), 'R5C die Regeln der Reparatur stehen an EINER Stelle');
+  ok(!/getDatabase|\bquery\(|useRepairStore/.test(rules),
+    'R5C …ohne Datenbank und ohne Store — auch der Rechner ohne Datenbank laedt sie');
+  const house = codeOf(src('src/core/repairs/repair-house.ts'));
+  ok(/beginLedgerTransaction\(\)/.test(house) && /rollbackLedgerTransaction\(\)/.test(house) && /runExclusive\(/.test(house),
+    'R5C am Primary laufen alle drei in EINER Klammer, exklusiv');
+  const sc = codeOf(src('src/core/bridge/service-commands.ts'));
+  ok(/planRepairCreate\(/.test(sc) && /buildRepairEditPatch\(/.test(sc), 'R5C der Fernbefehl ruft DIESELBEN Regeln');
+  ok(!/const TAX_SCHEMES = \[/.test(sc) && !/const REPAIR_TYPES = \[/.test(sc), 'R5C …und hat keine eigenen Listen mehr');
+  const lc = codeOf(src('src/core/bridge/lifecycle-commands.ts'));
+  ok(/repairInvoiceBlocker\(/.test(lc) && !/REPAIR_INVOICE_VERDICTS/.test(lc),
+    'R5C die Rechnung fragt dieselbe Regel „abrechenbar" — keine Textmuster mehr');
+  ok(/repairInvoiceBlocker\(r\)/.test(codeOf(src('src/stores/repairStore.ts'))), 'R5C …ebenso der Store');
+  const list = codeOf(src('src/pages/repairs/RepairList.tsx'));
+  const detail = codeOf(src('src/pages/repairs/RepairDetail.tsx'));
+  ok(/canInvoiceRepair\(/.test(list) && /canInvoiceRepair\(/.test(detail),
+    'R5C Liste und Detailseite zeigen den Rechnungsknopf nach derselben Regel');
+  for (const [datei, s] of [['RepairList', list], ['RepairDetail', detail]] as const) {
+    ok(!/\['internal', 'external', 'hybrid'\]/.test(s) && !/\['ZERO', 'VAT_10'\]/.test(s),
+      `R5C ${datei} zeichnet Reparaturart und Steuer aus den Listen des Hauses`);
+    for (const f of ['createRepair', 'updateRepair', 'createCombinedRepairInvoice', 'createDirectInvoice']) {
+      ok(!new RegExp(`\\b${f}\\(`).test(s), `R5C ${datei} ruft ${f}() nicht mehr direkt — nur ueber den Anschluss`);
+    }
+  }
+  ok(/\[null, \.\.\.REPAIR_INTERNAL_PAID_FROM\]/.test(detail) && /\[null, \.\.\.REPAIR_CUSTOMER_PAID_FROM\]/.test(detail)
+    && /CARD_BRANDS\.map\(/.test(detail),
+    'R5C Zahlwege und Kartenarten der Maske sind genau die Listen, gegen die der Fernbefehl prueft');
+}
+
 // ── Der Stand, offen benannt ────────────────────────────────────────────
 const verdrahtet = R4C_MATRIX.filter((z) => z.verdrahtet);
 const offenExakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet);

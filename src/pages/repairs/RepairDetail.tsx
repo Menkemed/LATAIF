@@ -28,14 +28,24 @@ import { usePermission } from '@/hooks/usePermission';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import type { Repair, RepairLine, RepairStatus } from '@/core/models/types';
-import { REPAIR_WORK_TYPES } from '@/core/models/types';
+import type { Repair, RepairLine, RepairStatus, RepairTaxScheme } from '@/core/models/types';
+import {
+  REPAIR_CUSTOMER_PAID_FROM, REPAIR_INTERNAL_PAID_FROM, REPAIR_TAX_SCHEMES, REPAIR_TYPES, REPAIR_WORK_TYPES,
+} from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
-import { internalCostOnEdit, repairInvoiceLineCost, repairMargin } from '@/core/repairs/repair-cost';
+import { CARD_BRANDS } from '@/core/finance/card-fees';
+// CENTRAL-UI-PARITY R5C — „Save" und „Create Invoice": dieselben Regeln wie der Fernbefehl
+// (repair-rules), am Primary in EINER Klammer (repair-house).
+import {
+  REPAIR_MAX_PHOTOS, canInvoiceRepair, repairEditBody, repairEditHasChanges, repairInvoiceBody,
+  repairPhotoPlan, repairPhotosChanged, type RepairPhotoSlot,
+} from '@/core/repairs/repair-rules';
+import { invoiceRepairsOnPrimary, updateRepairOnPrimary } from '@/core/repairs/repair-house';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -91,7 +101,7 @@ export function RepairDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/repairs');
   const {
-    repairs, loadRepairs, updateRepair, updateStatus, deleteRepair,
+    repairs, loadRepairs, updateStatus, deleteRepair,
     repairLines, loadRepairLines, getRepairLines, addRepairLine, cancelRepairLine,
   } = useRepairStore();
   // v0.4.3 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
@@ -118,7 +128,7 @@ export function RepairDetail() {
   // v0.7.6 — Tax-Scheme Picker vor Convert. User soll vor Invoice-Erstellung
   // ZERO ↔ VAT_10 wechseln koennen ohne erst den Repair zu editieren.
   const [taxSchemeDialog, setTaxSchemeDialog] = useState(false);
-  const [pendingTaxScheme, setPendingTaxScheme] = useState<'ZERO' | 'VAT_10'>('ZERO');
+  const [pendingTaxScheme, setPendingTaxScheme] = useState<RepairTaxScheme>('ZERO');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -137,7 +147,7 @@ export function RepairDetail() {
 
   // v0.7.6 — Explizite In-house-Option als ersten Eintrag, damit User nicht
   // versehentlich "leer" laesst und still als own-work bucht wird. Sentinel-
-  // ID '__INHOUSE__' wird beim Save zu undefined (= null in DB) uebersetzt.
+  // ID '__INHOUSE__' wird beim Save zu undefined (= null in DB) uebersetzt.
   // CENTRAL-UI-PARITY R4A — Guthaben je Ausgabe aus der gemeinsamen Kernauskunft.
   const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, []);
   const supplierOptions = useMemo(() => [
@@ -409,92 +419,54 @@ export function RepairDetail() {
   async function executeRepairInvoiceCreate(specialMark: boolean) {
     setNumberDialogOpen(false);
     if (!repair || !id || !customer) return;
-    const { getOrCreateRepairServiceProductId, sumOpenRepairLineCosts } = await import('@/stores/repairStore');
-    const { currentBranchId: getBranch } = await import('@/core/db/helpers');
-    let branchId: string;
-    try { branchId = getBranch(); } catch { branchId = 'branch-main'; }
-    const productId = getOrCreateRepairServiceProductId(branchId);
-
-    const grossCharge = repair.chargeToCustomer!;
-    // v0.7.6 — User-bestaetigtes Schema (aus taxSchemeDialog) statt repair.taxScheme.
-    // Wenn anders als gespeicherten, wird der Repair auch auf das neue Schema
-    // persistiert damit nachfolgende Views konsistent sind.
-    const scheme = pendingTaxScheme;
-    if (scheme !== repair.taxScheme) {
-      updateRepair(id, { taxScheme: scheme });
-    }
-    const rate = scheme === 'VAT_10' ? 10 : 0;
-    // chargeToCustomer ist gross-incl-VAT. Bei VAT_10 → Net = gross/1.1.
-    const netAmount = scheme === 'VAT_10' ? grossCharge / (1 + rate / 100) : grossCharge;
-    const vatAmount = grossCharge - netAmount;
-
-    const invoice = useInvoiceStore.getState().createDirectInvoice(
-      repair.customerId,
-      [{
-        productId,
-        unitPrice: netAmount,
-        // CENTRAL-C3H — gemessen: hier stand `repair.internalCost` allein, waehrend der
-        // gebuendelte Weg ausdruecklich internalCost + offene Arbeitszeilen schreibt. Bei einer
-        // Reparatur mit Arbeitszeilen wies dieser Weg einen zu kleinen Einstand aus — und damit
-        // einen zu hohen Rohertrag. Beide Wege benutzen jetzt dieselbe Ableitung.
-        purchasePrice: repairInvoiceLineCost(repair, sumOpenRepairLineCosts(repair.id)),
-        taxScheme: scheme,
-        vatRate: rate,
-        vatAmount,
-        lineTotal: grossCharge,
-      }],
-      `Repair Service · ${repair.repairNumber}${repair.issueDescription ? ' · ' + repair.issueDescription : ''}`,
-      undefined,
-      'repair',
-      undefined,
-      specialMark,
-    );
-    if (invoice) {
-      updateRepair(id, { invoiceId: invoice.id });
-      navigate(`/invoices/${invoice.id}`);
-    }
+    // CENTRAL-UI-PARITY R5C — EIN Weg fuer jede Reparaturrechnung. Hier stand eine eigene Kopie
+    // (Service-Artikel, Netto/Steuer, Einstand, `createDirectInvoice`, danach Schema und
+    // Verknuepfung als zwei weitere Schreibvorgaenge ohne Klammer). Jetzt dieselbe Hausfunktion wie
+    // die Liste (`createCombinedRepairInvoice`) mit der Wahl der beiden Dialoge (v0.7.6 Schema, das
+    // an der Reparatur gespeichert wird; Nummernart) — am Primary in EINER Transaktion, am zweiten
+    // Rechner als EIN Auftrag mit der gesehenen Fassung.
+    const fassung = fassungOderNichts('creating the repair invoice');
+    if (fassung === null) return;
+    const wahl = { taxScheme: pendingTaxScheme, specialMark };
+    const r = await w.save('repairs.create_invoice', {
+      local: () => invoiceRepairsOnPrimary([id], wahl),
+      remote: () => repairInvoiceBody([{ id, revision: fassung }], wahl),
+    });
+    if (r.kind !== 'ok') return;
+    loadRepairs(); loadInvoices();
+    navigate(`/invoices/${r.value.invoiceId}`);
   }
 
-  function handleSave() {
-    if (!id) return;
+  async function handleSave() {
+    if (!id || !repair) return;
     // v0.7.4 — Workshop optional bei Edit (consistent mit Create). Discovery-Pattern:
     // Workshop kommt evtl. erst spaeter via "Add Work Line". Status-Transition
     // (handleStatusAdvance) warnt freundlich wenn man fortfaehrt ohne Workshop.
-    // Internal cost mirrors actual (or estimated if actual not yet set) unless explicitly overridden.
-    // Bei Hybrid ist der Fallback aber nicht erlaubt: dort ist estimatedCost = Workshop Fee
-    // (separate Größe), und darf nicht in internalCost gespiegelt werden — sonst doppelt
-    // gezählt in der Margin.
-    // CENTRAL-C3F FINAL — dieselbe Ableitung wie der Fernauftrag, aus derselben Quelle.
-    const effectiveInternal = internalCostOnEdit(form);
-    const computedMargin = repairMargin(form) ?? undefined;
-    updateRepair(id, {
-      diagnosis: form.diagnosis,
-      estimatedCost: form.estimatedCost,
-      actualCost: form.actualCost,
-      internalCost: effectiveInternal,
-      chargeToCustomer: form.chargeToCustomer,
-      customerPaidFrom: form.customerPaidFrom ?? null,
-      // v0.7.26 — Brand nur bei Card relevant; sonst NULL (steuert die Gebuehren-Rate).
-      customerCardBrand: form.customerPaidFrom === 'card' ? (form.customerCardBrand ?? 'normal') : null,
-      internalPaidFrom: form.internalPaidFrom ?? null,
-      margin: computedMargin,
-      repairType: form.repairType,
-      externalVendor: form.externalVendor,
-      workshopSupplierId: form.workshopSupplierId,
-      estimatedReady: form.estimatedReady,
-      notes: form.notes,
-      // Plan §Repair §Item-Details: kategoriebasierte Item-Attribute beim Save mitnehmen
-      itemCategoryId: form.itemCategoryId,
-      itemAttributes: form.itemAttributes,
-      itemBrand: form.itemBrand,
-      itemModel: form.itemModel,
-      itemReference: form.itemReference,
-      itemSerial: form.itemSerial,
-      itemDescription: form.itemDescription,
-      issueDescription: form.issueDescription,
-      taxScheme: form.taxScheme,
-      images: form.images,
-    });
+    // CENTRAL-UI-PARITY R5C — EIN Schreibsatz fuer beide Rechner (`buildRepairEditPatch`): jedes
+    // Feld der Maske, dazu die abgeleiteten eigenen Kosten (C3F FINAL: bei Hybrid kein Rueckfall
+    // auf die Werkstattgebuehr), die Marge und die Kartenart (v0.7.26: nur bei Karte, sonst NULL).
+    // Am Primary in EINER Klammer — die Umbuchung der Kundenzahlung samt Kartengebuehr
+    // eingeschlossen; am zweiten Rechner reist nur der Unterschied samt gesehener Fassung, neue
+    // Fotos vorab ueber die Zwischenablage.
+    const fassung = fassungOderNichts('saving the repair');
+    if (fassung === null) return;
+    let photos: RepairPhotoSlot[] | undefined;
+    if (w.remote) {
+      if (!repairEditHasChanges(repair, form)) { setEditing(false); return; }
+      if (repairPhotosChanged(repair, form)) {
+        try {
+          photos = await repairPhotoPlan(repair.images ?? [], form.images ?? [], (urls) => stageDataUrls(urls));
+        } catch (e) {
+          alert(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was saved — please try again.`);
+          return;
+        }
+      }
+    }
+    if (!await w.ok('repairs.update', {
+      local: () => updateRepairOnPrimary(id, form),
+      remote: () => repairEditBody(id, fassung, repair, form, photos),
+    })) return;
+    loadRepairs(); loadRepairLines();
     setEditing(false);
   }
 
@@ -596,6 +568,8 @@ export function RepairDetail() {
                 <Button
                   variant="primary"
                   onClick={handleSave}
+                  disabled={w.busy}
+                  data-repair-save
                 >
                   <Save size={14} /> Save
                 </Button>
@@ -625,8 +599,10 @@ export function RepairDetail() {
                     <MessageCircle size={14} /> AI Notify
                   </Button>
                 )}
-                {repair.repairScope !== 'OWN' && customer && !repair.invoiceId && repair.chargeToCustomer != null && repair.chargeToCustomer > 0 && perm.canCreateInvoices && (
-                  <Button variant="primary" onClick={handleCreateRepairInvoice}>
+                {/* R5C — dieselbe Regel wie die Liste und der Fernbefehl (`canInvoiceRepair`): eigene
+                    Ware nie, ohne Preis nie, schon abgerechnet nie — und erst, wenn sie fertig ist. */}
+                {canInvoiceRepair(repair) && customer && perm.canCreateInvoices && (
+                  <Button variant="primary" onClick={handleCreateRepairInvoice} disabled={w.busy} data-repair-invoice>
                     <FileText size={14} /> Create Invoice
                   </Button>
                 )}
@@ -824,7 +800,7 @@ export function RepairDetail() {
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>INTERNAL PAID FROM</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {([null, 'cash', 'bank', 'benefit'] as const).map(o => {
+                      {[null, ...REPAIR_INTERNAL_PAID_FROM].map(o => {
                         const active = (form.internalPaidFrom ?? null) === o;
                         return (
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, internalPaidFrom: o })}
@@ -841,7 +817,7 @@ export function RepairDetail() {
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>CUSTOMER PAID WITH</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {([null, 'cash', 'bank', 'card', 'benefit'] as const).map(o => {
+                      {[null, ...REPAIR_CUSTOMER_PAID_FROM].map(o => {
                         const active = (form.customerPaidFrom ?? null) === o;
                         return (
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, customerPaidFrom: o })}
@@ -857,7 +833,7 @@ export function RepairDetail() {
                     {/* v0.7.26 — Karten-Brand bestimmt die Gebuehren-Rate (Normal 2,2% / Amex 2,5%). */}
                     {form.customerPaidFrom === 'card' && (
                       <div className="flex gap-2" style={{ marginTop: 8 }}>
-                        {(['normal', 'amex'] as const).map(b => {
+                        {CARD_BRANDS.map(b => {
                           const active = (form.customerCardBrand ?? 'normal') === b;
                           return (
                             <button key={b} type="button" onClick={() => setForm({ ...form, customerCardBrand: b })}
@@ -945,7 +921,7 @@ export function RepairDetail() {
                   <div>
                     <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Repair Type</span>
                     <div className="flex flex-wrap gap-1">
-                      {(['internal', 'external', 'hybrid'] as Repair['repairType'][]).map(t => (
+                      {REPAIR_TYPES.map(t => (
                         <button key={t} onClick={() => setForm({ ...form, repairType: t })}
                           className="cursor-pointer" style={{
                             padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
@@ -1126,7 +1102,7 @@ export function RepairDetail() {
                   <ImageUpload
                     images={form.images || []}
                     onChange={imgs => setForm({ ...form, images: imgs })}
-                    maxImages={6}
+                    maxImages={REPAIR_MAX_PHOTOS}
                   />
                 ) : (repair.images && repair.images.length > 0) ? (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1499,7 +1475,7 @@ export function RepairDetail() {
           charge into net + VAT. <strong>Zero</strong> treats the full amount as VAT-free.
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
-          {(['ZERO', 'VAT_10'] as const).map(s => (
+          {REPAIR_TAX_SCHEMES.map(s => (
             <label key={s}
               style={{ display: 'flex', gap: 10, padding: 12, borderRadius: 6,
                        border: `1px solid ${pendingTaxScheme === s ? '#0F0F10' : '#D5D9DE'}`,

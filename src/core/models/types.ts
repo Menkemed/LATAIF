@@ -459,6 +459,19 @@ export function canonicalRepairStatus(s: RepairStatus | string | undefined | nul
   return (String(s || 'RECEIVED').toUpperCase() as CanonicalRepairStatus);
 }
 
+// CENTRAL-UI-PARITY R5C — der Wortschatz der Reparatur als WERTE, aus denen die Typen folgen.
+// Vorher stand jede dieser Listen mehrfach abgeschrieben in den Masken und im Fernbefehl — und
+// dort teils anders (der Fernbefehl nahm z. B. `MARGIN` als Reparatursteuer an, die keine Maske
+// anbietet und `rowToRepair` beim Lesen still zu `VAT_10` macht).
+export const REPAIR_TYPES = ['internal', 'external', 'hybrid'] as const;
+/** Die Steuer einer Reparaturleistung — genau die zwei, die Anlegemaske und Rechnungsdialog anbieten. */
+export const REPAIR_TAX_SCHEMES = ['ZERO', 'VAT_10'] as const;
+export type RepairTaxScheme = typeof REPAIR_TAX_SCHEMES[number];
+/** Womit der Kunde die Reparatur bezahlt hat (Detailseite, „Customer paid with"). */
+export const REPAIR_CUSTOMER_PAID_FROM = ['cash', 'bank', 'card', 'benefit'] as const;
+/** Womit das Haus die eigenen Kosten bezahlt hat (Detailseite, „Internal paid from"). */
+export const REPAIR_INTERNAL_PAID_FROM = ['cash', 'bank', 'benefit'] as const;
+
 export interface Repair {
   /** R4C — die gesehene Fassung; jede fassungsbasierte Buchung nennt sie. */
   revision?: number;
@@ -482,7 +495,7 @@ export interface Repair {
   itemAttributes?: Record<string, string | number | boolean>;
   // Plan §Repair §Tax: Service-Invoice-Tax-Scheme. Default VAT_10, kann auf
   // ZERO gesetzt werden falls Service nicht VAT-pflichtig ist.
-  taxScheme?: 'VAT_10' | 'ZERO';
+  taxScheme?: RepairTaxScheme;
   itemBrand?: string;
   itemModel?: string;
   itemReference?: string;
@@ -490,7 +503,7 @@ export interface Repair {
   itemDescription?: string;
   issueDescription: string;
   diagnosis?: string;
-  repairType: 'internal' | 'external' | 'hybrid';
+  repairType: typeof REPAIR_TYPES[number];
   externalVendor?: string;
   // Plan §Repair §Workshop-as-Supplier: Workshop/Goldsmith ist ein Supplier-FK,
   // nicht mehr ein freier Text. Bei externer Repair-Auto-Expense wird supplier_id
@@ -500,8 +513,8 @@ export interface Repair {
   actualCost?: number;
   internalCost: number;
   chargeToCustomer?: number;
-  customerPaidFrom?: 'cash' | 'bank' | 'card' | 'benefit' | null;
-  internalPaidFrom?: 'cash' | 'bank' | 'benefit' | null;
+  customerPaidFrom?: typeof REPAIR_CUSTOMER_PAID_FROM[number] | null;
+  internalPaidFrom?: typeof REPAIR_INTERNAL_PAID_FROM[number] | null;
   // v0.7.26 — Karten-Brand fuer die Repair-Kundenzahlung (Gebuehren-Rate normal/amex).
   customerCardBrand?: 'normal' | 'amex' | null;
   // Plan §8 — Repair customer payment tracking

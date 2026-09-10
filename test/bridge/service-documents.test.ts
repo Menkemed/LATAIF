@@ -369,7 +369,7 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   ok(v.status === 'received', `REPAIR der Anfangsstatus kommt vom Haus (${v.status})`);
   ok(v.voucherCode.length === 8, `REPAIR der Gutscheincode auch (${v.voucherCode})`);
   ok(s(db, 'SELECT repair_scope FROM repairs WHERE id = ?', [v.repairId]) === 'CUSTOMER',
-    'REPAIR aus der Ferne entsteht nur die KUNDEN-Reparatur');
+    'REPAIR der Kundenrumpf ergibt eine KUNDEN-Reparatur (die eigene Ware hat seit R5C ihren eigenen Rumpf)');
 
   // Wiederholung.
   const again = await cmd.runRepairCreate(d, identity('40', 'repairs.create'), REPAIR);
@@ -394,8 +394,10 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
     ['eine Filiale', { ...REPAIR, branchId: 'branch-other' }],
     ['eine Kennung', { ...REPAIR, id: 'rep-erfunden' }],
     ['eine Rechnung', { ...REPAIR, invoiceId: 'inv-1' }],
-    ['einen Bereich', { ...REPAIR, repairScope: 'OWN' }],
-    ['ein Produkt', { ...REPAIR, productId: 'p1' }],
+    // R5C — die eigene Ware ist ein eigener Rumpf: dort gibt es keinen Kunden, bei der
+    // Kundenreparatur keinen Artikel.
+    ['eine eigene Reparatur MIT Kunde', { ...REPAIR, repairScope: 'OWN' }],
+    ['einen Artikel an einer Kundenreparatur', { ...REPAIR, productId: 'p1' }],
     ['einen Geldweg', { ...REPAIR, customerPaidFrom: 'cash' }],
     ['einen Zeitpunkt', { ...REPAIR, receivedAt: NOW }],
   ];
@@ -405,10 +407,20 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
     ok(threw !== '', `AUTHORITY der Reparaturrumpf nimmt ${what} nicht an (${threw || 'DURCHGELASSEN'})`);
   }
   for (const f of ['status', 'repairNumber', 'voucherCode', 'margin', 'invoiceId', 'repairScope',
-    'productId', 'customerId', 'customerPaidFrom', 'internalPaidFrom', 'receivedAt']) {
+    'productId', 'customerId', 'receivedAt', 'taxScheme', 'externalVendor']) {
     let threw = false;
     try { cmd.parseRepairUpdate({ id: 'r1', expectedRevision: 1, [f]: 'x' }); } catch { threw = true; }
     ok(threw, `AUTHORITY ein Reparatur-Aenderungsauftrag kann ${f} nicht setzen`);
+  }
+  // R5C — die Zahlwege sind jetzt Felder der Maske und damit des Auftrags: aber nur die Wege, die
+  // die Maske anbietet.
+  for (const [f, gut] of [['customerPaidFrom', 'card'], ['internalPaidFrom', 'benefit']] as const) {
+    let threw = false;
+    try { cmd.parseRepairUpdate({ id: 'r1', expectedRevision: 1, [f]: 'x' }); } catch { threw = true; }
+    ok(threw, `AUTHORITY ${f} nimmt keinen erfundenen Weg an`);
+    let nimmt = true;
+    try { cmd.parseRepairUpdate({ id: 'r1', expectedRevision: 1, [f]: gut }); } catch { nimmt = false; }
+    ok(nimmt, `AUTHORITY …aber ${f} = ${gut}, wie die Maske es anbietet`);
   }
   let threw = false;
   try { cmd.parseRepairUpdate({ id: 'r1', diagnosis: 'x' }); } catch { threw = true; }

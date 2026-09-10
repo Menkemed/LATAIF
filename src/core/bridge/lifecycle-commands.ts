@@ -30,6 +30,8 @@ import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import { CARD_BRANDS, type CardBrand } from '@/core/finance/card-fees';
 import { nextOrderStatus, isAllowedOrderAdvance } from '@/core/orders/order-status-flow';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
+import { RepairActionRejected, isRepairTaxScheme, repairInvoiceBlocker } from '@/core/repairs/repair-rules';
+import { assertHouseBranch } from './remote-create-support';
 import { useOrderStore } from '@/stores/orderStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
@@ -48,7 +50,7 @@ import {
   FinancialPayloadError, assertRevision, execFinancial, expectedRevisionOf,
   invoiceState, isPlain, onlyKnownFields, optString, positive, reqString,
 } from './financial-commands';
-import type { OrderStatus, RepairStatus } from '@/core/models/types';
+import type { OrderStatus, RepairStatus, RepairTaxScheme } from '@/core/models/types';
 
 export const OP_ORDERS_UPDATE_STATUS = 'orders.update_status';
 export const OP_ORDERS_ADD_PAYMENT = 'orders.add_payment';
@@ -511,7 +513,7 @@ export function repairState(id: string): Record<string, unknown> {
 }
 
 function liveRepair(id: string, branchId: string): Record<string, unknown> {
-  const r = query('SELECT id, status, repair_type, repair_scope, invoice_id, charge_to_customer, customer_id '
+  const r = query('SELECT id, repair_number, status, repair_type, repair_scope, invoice_id, charge_to_customer, customer_id '
     + 'FROM repairs WHERE id = ? AND branch_id = ?', [id, branchId])[0];
   if (!r) throw new CommandRejected('REPAIR_NOT_FOUND', 'no such repair in this branch');
   return r;
@@ -571,70 +573,105 @@ export function runUpdateRepairStatus(deps: EngineDeps, identity: CommandIdentit
 // ── 7) Die Reparaturrechnung ──────────────────────────────────────────────
 
 export interface CreateRepairInvoiceRequest {
-  repairId: string;
-  expectedRevision: number;
+  repairs: Array<{ repairId: string; expectedRevision: number }>;
+  taxScheme?: RepairTaxScheme;
+  specialMark: boolean;
 }
 
+/** Höchstens so viele Reparaturen auf einer Sammelrechnung. */
+const MAX_INVOICE_REPAIRS = 50;
+
 /**
- * Kein Feld außer Kennung und Fassung. Weder Betrag noch Steuerschema noch Nummernkreis: den
- * Betrag trägt die Reparatur (`chargeToCustomer`), das Schema steht an ihr, und die Nummer zieht
- * das Haus. Ein Client, der etwas davon mitschickte, könnte eine Rechnung stellen, die zu einer
- * anderen Reparatur gehört als der, die er gesehen hat.
+ * R5C — EINE Reparatur oder MEHRERE desselben Kunden auf EINE Rechnung: genau wie die Liste
+ * (Auswahl + „Create Combined Invoice", das Kürzel je Zeile) und die Detailseite (mit der Wahl
+ * ihrer beiden Dialoge: Steuer und Nummernart). Alle drei rufen am Primary dieselbe Hausfunktion
+ * (`createCombinedRepairInvoice`); dieser Befehl ruft sie auch.
+ *
+ * Jede Reparatur reist mit ihrer GESEHENEN Fassung. Weder Betrag noch Steuerbetrag noch Zeilen
+ * noch Nummer: den Betrag trägt die Reparatur (`chargeToCustomer`), den Einstand rechnet das Haus
+ * (`repairInvoiceLineCost`), die Nummer zieht es selbst. `{ repairId, expectedRevision }` bleibt
+ * als Form für genau eine Reparatur gültig.
  */
 export function parseCreateRepairInvoice(raw: unknown): CreateRepairInvoiceRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['repairId', 'expectedRevision']);
+  onlyKnownFields(raw, ['repairId', 'expectedRevision', 'repairs', 'taxScheme', 'specialMark']);
+  let repairs: CreateRepairInvoiceRequest['repairs'];
+  if (raw.repairs !== undefined) {
+    if (raw.repairId !== undefined || raw.expectedRevision !== undefined) {
+      throw new FinancialPayloadError('name the repairs as a list OR as one — not both');
+    }
+    if (!Array.isArray(raw.repairs) || raw.repairs.length === 0) {
+      throw new FinancialPayloadError('repairs must be a non-empty list');
+    }
+    if (raw.repairs.length > MAX_INVOICE_REPAIRS) {
+      throw new FinancialPayloadError(`at most ${MAX_INVOICE_REPAIRS} repairs on one invoice`);
+    }
+    repairs = raw.repairs.map((x: unknown) => {
+      if (!isPlain(x)) throw new FinancialPayloadError('each repair is { repairId, expectedRevision }');
+      onlyKnownFields(x, ['repairId', 'expectedRevision']);
+      return { repairId: reqString(x.repairId, 'repairId'), expectedRevision: expectedRevisionOf(x.expectedRevision) };
+    });
+    if (new Set(repairs.map((r) => r.repairId)).size !== repairs.length) {
+      throw new FinancialPayloadError('the same repair twice is not an invoice');
+    }
+  } else {
+    repairs = [{ repairId: reqString(raw.repairId, 'repairId'), expectedRevision: expectedRevisionOf(raw.expectedRevision) }];
+  }
+  if (raw.taxScheme !== undefined && !isRepairTaxScheme(raw.taxScheme)) {
+    throw new FinancialPayloadError(`unknown tax scheme: ${String(raw.taxScheme)}`);
+  }
+  if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
+    throw new FinancialPayloadError('specialMark is yes or no');
+  }
   return {
-    repairId: reqString(raw.repairId, 'repairId'),
-    expectedRevision: expectedRevisionOf(raw.expectedRevision),
+    repairs,
+    taxScheme: raw.taxScheme as RepairTaxScheme | undefined,
+    specialMark: raw.specialMark === true,
   };
 }
-
-const REPAIR_INVOICE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/already linked to an invoice/i, 'REPAIR_ALREADY_INVOICED'],
-  [/is not READY/i, 'REPAIR_NOT_READY'],
-  [/has no charge/i, 'REPAIR_HAS_NO_CHARGE'],
-];
 
 export function runCreateRepairInvoice(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseCreateRepairInvoice(raw);
   return runRemoteCommand(deps, identity, () => {
-    const r = liveRepair(req.repairId, identity.branchId);
-    if (s(r.invoice_id) !== '') {
-      throw new CommandRejected('REPAIR_ALREADY_INVOICED', 'this repair already has an invoice');
+    // R5C — die Rechnung entsteht in der Filiale der Sitzung; also nur für einen Ausweis DIESER Filiale.
+    assertHouseBranch(identity);
+    const ids = req.repairs.map((x) => x.repairId);
+    const kunden = new Set<string>();
+    for (const x of req.repairs) {
+      const r = liveRepair(x.repairId, identity.branchId);
+      // Dieselbe Regel wie der Knopf der Liste und der Detailseite (`repairInvoiceBlocker`): schon
+      // abgerechnet, eigene Ware, kein Preis, kein Kunde, noch nicht fertig — keine dritte Fassung.
+      const nein = repairInvoiceBlocker({
+        repairNumber: s(r.repair_number), status: s(r.status), invoiceId: s(r.invoice_id),
+        chargeToCustomer: n(r.charge_to_customer), repairScope: s(r.repair_scope), customerId: s(r.customer_id),
+      });
+      if (nein) throw new CommandRejected(nein.code, nein.message);
+      assertRevision('repairs', x.repairId, x.expectedRevision, 'REPAIR_NOT_FOUND');
+      kunden.add(s(r.customer_id));
     }
-    if (s(r.repair_scope) === 'OWN') {
-      // Eigene Ware wird nicht dem Kunden berechnet — ihre Kosten sind auf den Artikel
-      // kapitalisiert. Es gibt hier nichts zu fakturieren.
-      throw new CommandRejected('REPAIR_IS_OWN_STOCK', 'a repair on our own stock is not invoiced');
+    if (kunden.size > 1) {
+      throw new CommandRejected('REPAIRS_DIFFERENT_CUSTOMERS', 'All selected repairs must belong to the same client.');
     }
-    if (!(n(r.charge_to_customer) > 0)) {
-      throw new CommandRejected('REPAIR_HAS_NO_CHARGE', 'this repair has no charge to the client');
-    }
-    if (s(r.customer_id) === '') {
-      throw new CommandRejected('REPAIR_HAS_NO_CUSTOMER', 'this repair has no client');
-    }
-    assertRevision('repairs', req.repairId, req.expectedRevision, 'REPAIR_NOT_FOUND');
     const rs = useRepairStore.getState();
     rs.loadRepairs();
     rs.loadRepairLines();
     let created: { invoiceId: string };
     try {
-      // GENAU der Weg des Hauses — mit EINEM Beleg für diese eine Reparatur. Der Einstand der
-      // Zeile ist `internalCost + offene Arbeitszeilen`; genau diese Ableitung benutzt seit
-      // C3H auch der Einzelweg am Primary, der vorher zu wenig auswies.
-      created = rs.createCombinedRepairInvoice([req.repairId]);
+      // GENAU der Weg des Hauses — derselbe für eine und für mehrere Reparaturen, mit der Wahl der
+      // Dialoge. Der Einstand jeder Zeile ist `internalCost + offene Arbeitszeilen` (C3H).
+      created = rs.createCombinedRepairInvoice(ids, { taxScheme: req.taxScheme, specialMark: req.specialMark });
     } catch (err) {
-      const verdict = asVerdict(err, REPAIR_INVOICE_VERDICTS);
-      if (verdict) throw verdict;
+      if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
       throw err;
     }
-    const after = repairState(req.repairId);
-    if (s(after.invoiceId) === '') {
-      throw new CommandNotEvaluated('REPAIR_INVOICE_NOT_LINKED', 'the repair carries no invoice');
+    const states = ids.map((id) => repairState(id));
+    if (states.some((st) => s(st.invoiceId) !== created.invoiceId)) {
+      // Nie beobachtet — aber eine Rechnung, an der nicht ALLE Reparaturen hängen, wird nicht als
+      // Erfolg eingefroren.
+      throw new CommandNotEvaluated('REPAIR_INVOICE_NOT_LINKED', 'not every repair carries the invoice');
     }
     useInvoiceStore.getState().loadInvoices();
-    return { ...after, invoiceId: created.invoiceId, invoice: invoiceState(created.invoiceId) };
+    return { ...states[0], invoiceId: created.invoiceId, invoice: invoiceState(created.invoiceId), repairs: states };
   });
 }
 

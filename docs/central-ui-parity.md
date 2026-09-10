@@ -1592,3 +1592,48 @@ E2E   r5b-create-parity 74/0 ×3  (Altbestand + neu auf beiden Rechnern, Primary
 Registry 107 · Matrix 24 / 0 / 14 / 2
 ```
 
+---
+
+## R5C — Reparatur anlegen, ändern, abrechnen (10.09.2026)
+
+### Befund
+
+- **Anlegen:** der Fernbefehl legte fest eine Kundenreparatur an. Die Reparatur an eigener Ware
+  (Artikel, Los, Platzhalter-Kunde, `in_repair`) fehlte, ebenso Kategorie, Pflichtfelder der Kategorie,
+  Merkmale, Referenz, Beschreibung, Mitarbeiter und Fotos. Dafür nahm er `MARGIN` und `externalVendor` an,
+  die keine Maske anbietet.
+- **Ändern:** elf Felder der „Save"-Maske fehlten (Zahlwege, Kartenart, Kategorie, Merkmale, Referenz,
+  Beschreibung, Problem, Fotos …); die Matrix nannte sechs.
+- **Abrechnen:** drei Wege, drei Regeln — die Liste nur „fertig", die Detailseite jeder Status mit einer
+  eigenen Kopie der Rechnungslogik, das Kürzel zeigte „abgeholt" und der Store lehnte es ab. Der
+  Fernbefehl kannte nur genau eine Reparatur.
+
+### Lösung — eine Regelstelle, ein Anschluss je Seite, keine neue Buchung
+
+- `core/repairs/repair-rules` (rein, ohne Datenbank): Pflichtfelder, OWN-Regel, `normalizeRepairCreate` /
+  `planRepairCreate`, `buildRepairEditPatch` (eigene Kosten, Marge, Kartenart), `repairInvoiceBlocker`,
+  die Rümpfe des zweiten Rechners. Der Wortschatz steht als Wert in `types.ts` (`REPAIR_TYPES`,
+  `REPAIR_TAX_SCHEMES`, `REPAIR_CUSTOMER_PAID_FROM`, `REPAIR_INTERNAL_PAID_FROM`); Masken und Fernbefehle lesen ihn.
+- `core/repairs/repair-house`: der Primary-Anschluss aller drei Handlungen in EINER Klammer (exklusiv,
+  Ledger-Transaktion, danach durabel). Vorher schrieb er ohne Klammer.
+- Erweitert, nicht neu: `repairs.create` (OWN, alle Felder, Fotos über die vorhandene Zwischenablage),
+  `repairs.update` (alle Felder; Fotos als `{ keep }` / `{ stagingId }`), `repairs.create_invoice` (eine
+  oder mehrere Reparaturen desselben Kunden, jede mit ihrer Fassung, dazu die Wahl der Dialoge).
+
+### Bewusste Änderungen am Primary
+
+1. „Abrechenbar" heißt überall: fertig oder abgeholt. Die Detailseite zeigt den Knopf erst ab „fertig";
+   Liste und Store rechnen „abgeholt" jetzt wirklich ab.
+2. Die Einzelrechnung aus der Liste trägt den Vermerk der Detailseite (`Repair Service · Nr · Problem`).
+3. Verborgene, liegengebliebene Maskenfelder werden nicht mehr gespeichert (eigene Ware: Kunde, Preis,
+   Steuer, Artikelangaben; Arbeit im Haus: Werkstatt).
+4. Texte werden getrimmt, leere Texte sind NULL (das Problem bleibt `''`); negative Beträge sind ein Nein.
+5. „Save" schreibt `externalVendor` und `taxScheme` nicht mehr mit — die Maske hat dafür kein Feld.
+
+```
+Unit  r5c/repair-parity 200/0 (lokal == fern für Anlegen/Ändern/Abrechnen inkl. Buchungen,
+      Fehlerinjektion, Autorität) · Nachbarn und Matrixgates grün
+E2E   r5c-repair-parity 99/0 ×3 (Kunde + eigene Ware, Ändern mit Zahlwegen/Foto, Sammel- und Einzelrechnung, verlorene Antworten, Fehler + Wiederholung, Primary == PC2)
+Registry 107 · Matrix 27 / 0 / 11 / 2
+```
+

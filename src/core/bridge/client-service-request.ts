@@ -63,7 +63,9 @@ export const EMPTY_REPAIR: RepairDraft = {
   estimatedReady: '', taxScheme: 'VAT_10', notes: '',
 };
 
-const REPAIR_CREATE_TEXT = ['itemBrand', 'itemModel', 'itemSerial', 'externalVendor',
+// R5C — ohne `externalVendor`: keine Maske des Hauses hat dieses Feld, und der Fernbefehl nimmt es
+// nicht mehr an.
+const REPAIR_CREATE_TEXT = ['itemBrand', 'itemModel', 'itemSerial',
   'workshopSupplierId', 'estimatedReady', 'notes'] as const;
 const REPAIR_CREATE_MONEY = ['estimatedCost', 'internalCost', 'chargeToCustomer'] as const;
 
@@ -92,7 +94,7 @@ export function repairComplete(d: RepairDraft): boolean {
 /** Genau die Felder, die der „Save"-Knopf der Reparaturseite schreibt — ohne die abgeleiteten. */
 export const REPAIR_EDIT_FIELDS = [
   'diagnosis', 'estimatedCost', 'actualCost', 'internalCost', 'chargeToCustomer',
-  'repairType', 'externalVendor', 'workshopSupplierId', 'estimatedReady',
+  'repairType', 'workshopSupplierId', 'estimatedReady',
   'itemBrand', 'itemModel', 'itemSerial', 'notes',
 ] as const;
 const REPAIR_EDIT_MONEY: readonly string[] = ['estimatedCost', 'actualCost', 'internalCost', 'chargeToCustomer'];

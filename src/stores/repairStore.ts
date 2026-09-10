@@ -6,7 +6,12 @@ import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
 import { repairInvoiceLineCost } from '@/core/repairs/repair-cost';
-import { canonicalRepairStatus } from '@/core/models/types';
+import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } from '@/core/models/types';
+// CENTRAL-UI-PARITY R5C — die Regel „abrechenbar" und der Rechnungsvermerk: EINE Quelle für
+// Liste, Detailseite und Fernbefehl.
+import {
+  RepairActionRejected, repairInvoiceBlocker, repairInvoiceNotes, type RepairInvoiceOptions,
+} from '@/core/repairs/repair-rules';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
@@ -81,7 +86,7 @@ function syncRepairCustomerPayment(repairId: string, prevBrand?: string | null):
   const paidFrom = (r.customer_paid_from as string | null) || null;
   const scope = (r.repair_scope as string | null) || null;
   const invoiceId = (r.invoice_id as string | null) || null;
-  const VALID = ['cash', 'bank', 'card', 'benefit'];
+  const VALID: readonly string[] = REPAIR_CUSTOMER_PAID_FROM;
 
   // Gewünschter (Soll-)Zustand:
   const eligible = !invoiceId && scope !== 'OWN' && charge > 0 && !!paidFrom && VALID.includes(paidFrom);
@@ -489,7 +494,8 @@ interface RepairStore {
   // User-Spec §Repair Bulk-Invoice: mehrere READY-Repairs eines Customers in
   // EINE gemeinsame Multi-Line-Invoice. Validiert atomisch: alle ready, kein
   // invoiceId, alle gleicher Customer, charge>0. Linkt invoiceId auf jedem Repair.
-  createCombinedRepairInvoice: (repairIds: string[]) => { invoiceId: string };
+  // R5C — auch der Einzelweg der Detailseite (mit Steuer- und Nummernwahl) laeuft hier.
+  createCombinedRepairInvoice: (repairIds: string[], opts?: RepairInvoiceOptions) => { invoiceId: string };
 }
 
 function rowToRepairLine(row: Record<string, unknown>): RepairLine {
@@ -1174,30 +1180,39 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     get().loadRepairLines();
   },
 
-  createCombinedRepairInvoice: (repairIds) => {
+  createCombinedRepairInvoice: (repairIds, opts = {}) => {
     if (!repairIds || repairIds.length === 0) {
-      throw new Error('No repairs selected.');
+      throw new RepairActionRejected('NO_REPAIRS_SELECTED', 'No repairs selected.');
+    }
+    if (new Set(repairIds).size !== repairIds.length) {
+      throw new RepairActionRejected('REPAIR_LISTED_TWICE', 'A repair is listed twice.');
     }
 
     // Atomische Validation VOR jeder Mutation — sonst halb-erzeugte Invoice.
+    // R5C — die Regel steht in `repair-rules` (`repairInvoiceBlocker`): dieselbe fuer die Liste,
+    // das Kuerzel, die Detailseite und den Fernbefehl. Vorher fragte die Detailseite gar nicht nach
+    // dem Status, und dieser Weg lehnte „abgeholt" ab, obwohl das Kuerzel der Liste es anbot.
     const reps = repairIds.map(rid => {
       const r = get().getRepair(rid);
-      if (!r) throw new Error(`Repair ${rid} not found.`);
-      if (r.status !== 'ready' && r.status !== 'READY') {
-        throw new Error(`Repair ${r.repairNumber} is not READY — only ready repairs can be combined.`);
-      }
-      if (r.invoiceId) {
-        throw new Error(`Repair ${r.repairNumber} is already linked to an invoice.`);
-      }
-      if (!r.chargeToCustomer || r.chargeToCustomer <= 0) {
-        throw new Error(`Repair ${r.repairNumber} has no charge — nothing to invoice.`);
-      }
+      if (!r) throw new RepairActionRejected('REPAIR_NOT_FOUND', `Repair ${rid} not found.`);
+      const nein = repairInvoiceBlocker(r);
+      if (nein) throw new RepairActionRejected(nein.code, nein.message);
       return r;
     });
 
     const customerId = reps[0].customerId;
     if (reps.some(r => r.customerId !== customerId)) {
-      throw new Error('All selected repairs must belong to the same client.');
+      throw new RepairActionRejected('REPAIRS_DIFFERENT_CUSTOMERS', 'All selected repairs must belong to the same client.');
+    }
+    if (opts.taxScheme !== undefined && !(REPAIR_TAX_SCHEMES as readonly string[]).includes(opts.taxScheme)) {
+      throw new RepairActionRejected('INVALID_TAX_SCHEME', `Unknown tax scheme: ${String(opts.taxScheme)}.`);
+    }
+    // v0.7.6 (Detailseite) — das im Dialog bestaetigte Schema wird an der Reparatur gespeichert,
+    // damit nachfolgende Ansichten konsistent sind. Ohne Wahl gilt das gespeicherte je Reparatur.
+    if (opts.taxScheme) {
+      for (const r of reps) {
+        if (r.taxScheme !== opts.taxScheme) get().updateRepair(r.id, { taxScheme: opts.taxScheme });
+      }
     }
 
     let branchId: string;
@@ -1213,7 +1228,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // ergibt die Gross-Margin auf dem Invoice ein zu hohes Profit (Bug-Fix
     // gegen das Stille-Drift-Risiko aus dem Plan-Review).
     const lines = reps.map(r => {
-      const scheme = r.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10';
+      const scheme = opts.taxScheme ?? (r.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10');
       const rate = scheme === 'VAT_10' ? 10 : 0;
       const gross = r.chargeToCustomer || 0;
       const net = scheme === 'VAT_10' ? gross / (1 + rate / 100) : gross;
@@ -1232,13 +1247,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       };
     });
 
-    const refs = reps.map(r => r.repairNumber).join(', ');
+    // R5C — der Vermerk wie bisher je Weg: eine Reparatur wie die Detailseite, mehrere gesammelt.
+    // Die Nummernart (`specialMark`) waehlt nur der Dialog der Detailseite.
     const invoice = useInvoiceStore.getState().createDirectInvoice(
       customerId,
       lines,
-      `Combined Repair Service · ${refs}`,
+      repairInvoiceNotes(reps),
       undefined,
       'repair',
+      undefined,
+      opts.specialMark === true,
     );
 
     // Pro Repair invoiceId koppeln. updateRepair lädt bereits neu am Ende.

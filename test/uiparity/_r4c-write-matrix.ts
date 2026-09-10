@@ -181,14 +181,13 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Reparaturen ──────────────────────────────────────────────────────────
   {
     op: 'repairs.create', handlung: 'Reparatur anlegen', ort: 'pages/repairs/RepairList.tsx',
-    lokal: 'createRepair', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske legt Kunden- UND Eigenreparaturen an (repairScope OWN mit Losauswahl und '
-      + 'Kapitalisierung); die Fernbuchung setzt repairScope fest auf CUSTOMER.',
+    lokal: 'createRepairOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5C — EINE Vorbereitung fuer beide Seiten (core/repairs/repair-rules: planRepairCreate), Kunden- UND Eigenreparatur. Bei eigener Ware nennt der Auftrag nur Artikel und Los; Platzhalter-Kunde, `in_repair`, die Angaben des Artikels und die Nummern setzt der Primary. Dazu Kategorie mit ihren Pflichtfeldern, Merkmale, Referenz, Beschreibung, Mitarbeiter und Fotos (ueber die vorhandene Zwischenablage). Am Primary in EINER Klammer (repair-house).',
   },
   {
     op: 'repairs.update', handlung: 'Reparatur aendern', ort: 'pages/repairs/RepairDetail.tsx',
-    lokal: 'updateRepair', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske schickt sechs Felder, die die Fernbuchung nicht kennt: `customerPaidFrom`, `customerCardBrand`, `internalPaidFrom`, `margin`, `itemCategoryId`, `itemAttributes`. Darunter die Zahlwege — das ist Geld, nicht Beschriftung.',
+    lokal: 'updateRepairOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5C — EIN Schreibsatz (buildRepairEditPatch) fuer „Save" am Primary und den Fernbefehl: jedes Feld der Maske, auch Zahlwege, Kartenart, Kategorie, Merkmale, Referenz, Beschreibung und Fotos. Eigene Kosten, Marge und Kartenart leitet der Primary aus dem Stand NACH der Aenderung ab; die Umbuchung der Kundenzahlung samt Kartengebuehr macht dieselbe Hausfunktion (updateRepair) in derselben Klammer.',
   },
   {
     op: 'repairs.update_status', handlung: 'Reparaturstatus setzen', ort: 'pages/repairs/RepairDetail.tsx',
@@ -197,10 +196,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'repairs.create_invoice', handlung: 'Rechnung zur Reparatur', ort: 'pages/repairs/RepairList.tsx',
-    lokal: 'createCombinedRepairInvoice', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Liste rechnet auch MEHRERE Reparaturen in EINE Rechnung ab (Sammelabrechnung ueber '
-      + 'die Auswahl); die Fernbuchung kennt nur genau eine Reparatur. Zwei verschiedene Handlungen '
-      + 'unter einem Knopf — deshalb erst trennen, dann verdrahten.',
+    lokal: 'invoiceRepairsOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5C — EINE Hausfunktion (createCombinedRepairInvoice) fuer Sammelrechnung, Kuerzel und Detailseite; der Fernbefehl nimmt eine oder mehrere Reparaturen desselben Kunden, jede mit ihrer gesehenen Fassung, dazu die Wahl der Dialoge (Steuer, Nummernart). EINE Regel „abrechenbar" (repairInvoiceBlocker). Beleg, alle Verknuepfungen und Buchung in EINER Klammer.',
   },
   {
     op: 'repairs.add_line', handlung: 'Reparaturposition hinzufuegen', ort: 'pages/repairs/RepairDetail.tsx',

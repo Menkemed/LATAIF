@@ -191,7 +191,9 @@ const REQ = 'src/core/bridge/client-lifecycle-request.ts';
     'ROUNDTRIP unverkauft zurueck');
   ok(life.parseUpdateRepairStatus(ui.repairStatusRequest('r1', 5, 'ready')).status === 'ready',
     'ROUNDTRIP Reparaturstatus');
-  ok(life.parseCreateRepairInvoice(ui.repairInvoiceRequest('r1', 5)).repairId === 'r1',
+  // R5C — der Pruefer nimmt jetzt auch mehrere Reparaturen; die Einzelform bleibt gueltig und
+  // ergibt eine Liste mit genau dieser einen.
+  ok(life.parseCreateRepairInvoice(ui.repairInvoiceRequest('r1', 5)).repairs[0].repairId === 'r1',
     'ROUNDTRIP Reparaturrechnung');
   ok(life.parseAddRepairLine(ui.addRepairLineRequest('r1', 5, { costAmount: '25', supplierId: 'sup-1', workType: 'service', description: '' })).costAmount === 25,
     'ROUNDTRIP Arbeitszeile anlegen');

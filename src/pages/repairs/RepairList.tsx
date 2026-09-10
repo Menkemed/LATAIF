@@ -22,9 +22,19 @@ import { formatLotLabel } from '@/core/lots/lot-queries';
 import { useSharedRead } from '@/core/data/shared-read';
 import { productLotsFor, LEERE_LOSE } from '@/core/data/domain-reads';
 import type { Repair, RepairStatus } from '@/core/models/types';
+import { REPAIR_TAX_SCHEMES, REPAIR_TYPES } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { Bhd } from '@/components/ui/Bhd';
-import { internalCostOnCreate } from '@/core/repairs/repair-cost';
+// CENTRAL-UI-PARITY R5C — die Regeln der Reparatur (repair-rules) und ihr Anschluss am Primary
+// (repair-house, EINE Klammer); am zweiten Rechner derselbe Rumpf über die gemeinsame Weiche.
+import {
+  REPAIR_MAX_PHOTOS, canInvoiceRepair, isRepairableOwnProduct, missingRepairItemFields,
+  repairCreateBody, repairInvoiceBody,
+} from '@/core/repairs/repair-rules';
+import { createRepairOnPrimary, invoiceRepairsOnPrimary } from '@/core/repairs/repair-house';
+import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { quickRepairNext } from '@/core/repairs/repair-status-flow';
 
 function fmt(v: number): string {
@@ -68,7 +78,7 @@ const PAY_STYLE = {
 
 export function RepairList() {
   const navigate = useNavigate();
-  const { repairs, loadRepairs, createRepair, updateStatus, createCombinedRepairInvoice } = useRepairStore();
+  const { repairs, loadRepairs, updateStatus } = useRepairStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
   const { customers, loadCustomers } = useCustomerStore();
@@ -95,6 +105,8 @@ export function RepairList() {
     itemAttributes: {},
   });
   const [searchParams, setSearchParams] = useSearchParams();
+  // R5C — dieselbe Liste, zwei Anschluesse hinter jeder Handlung (anlegen, abrechnen, weiterschalten).
+  const w = useSharedWrites();
 
   useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); loadEmployees(); loadOrders(); }, [loadRepairs, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers, loadEmployees, loadOrders]);
 
@@ -130,7 +142,7 @@ export function RepairList() {
   }
 
   const ownProductOptions = useMemo(() => products
-    .filter(p => p.sourceType === 'OWN' && !p.id.startsWith('svc-repair-'))
+    .filter(p => isRepairableOwnProduct(p))
     .map(p => {
       const res = productReservations.get(p.id);
       const resHint = res && res.qty > 0
@@ -186,8 +198,8 @@ export function RepairList() {
     return c ? `${c.firstName} ${c.lastName}` : '—';
   };
 
-  const isEligibleForBulk = (r: Repair) =>
-    r.status === 'ready' && !r.invoiceId && (r.chargeToCustomer || 0) > 0;
+  // R5C — dieselbe Regel wie der Store und der Fernbefehl (`repairInvoiceBlocker`).
+  const isEligibleForBulk = (r: Repair) => canInvoiceRepair(r);
 
   const validSelectedIds = useMemo(() => {
     const ids = new Set<string>();
@@ -219,20 +231,28 @@ export function RepairList() {
   };
   const clearSelection = () => setSelectedIds(new Set());
 
-  function handleBulkConfirm() {
+  async function handleBulkConfirm() {
     if (validSelectedIds.size === 0) return;
     if (!sameCustomer) {
       setBulkError('All selected repairs must belong to the same client.');
       return;
     }
-    try {
-      const res = createCombinedRepairInvoice(Array.from(validSelectedIds));
-      setBulkModal(false);
-      setSelectedIds(new Set());
-      navigate(`/invoices/${res.invoiceId}`);
-    } catch (err) {
-      setBulkError(err instanceof Error ? err.message : String(err));
-    }
+    setBulkError('');
+    // R5C — EINE Rechnung fuer die ganze Auswahl, auf beiden Rechnern derselbe Weg: am Primary in
+    // EINER Klammer (Beleg, alle Verknuepfungen, Buchung), am zweiten Rechner EIN Auftrag, der jede
+    // Reparatur mit ihrer gesehenen Fassung nennt. Die Reihenfolge bleibt die der Auswahl.
+    const auswahl = Array.from(validSelectedIds)
+      .map((rid) => repairs.find((x) => x.id === rid))
+      .filter((x): x is Repair => !!x);
+    const r = await w.save('repairs.create_invoice', {
+      local: () => invoiceRepairsOnPrimary(auswahl.map((x) => x.id)),
+      remote: () => repairInvoiceBody(auswahl),
+    });
+    if (r.kind !== 'ok') { setBulkError(fehlertext(r)); return; }
+    setBulkModal(false);
+    setSelectedIds(new Set());
+    loadRepairs();
+    navigate(`/invoices/${r.value.invoiceId}`);
   }
 
   const filtered = useMemo(() => {
@@ -267,7 +287,7 @@ export function RepairList() {
     setForm(f => ({ ...f, [field]: value }));
   }
 
-  function handleCreate() {
+  async function handleCreate() {
     if (!form.issueDescription) return;
     if (form.repairScope === 'OWN') {
       if (!form.productId) return;
@@ -278,26 +298,9 @@ export function RepairList() {
     // Vorher war die rote * nur visuell, Submit ging trotzdem durch ohne
     // Brand/Name/etc. — fuer OWN-Scope skip wir die Validierung (Produkt
     // ist schon ausgewaehlt, seine Daten sind komplett).
-    if (form.repairScope !== 'OWN' && form.itemCategoryId) {
-      const missing: string[] = [];
-      for (const f of activeFields) {
-        if (!f.required) continue;
-        // dependsOn beachten — wenn Parent nicht passt, Feld nicht required.
-        if (f.dependsOn) {
-          const dep = form.itemAttributes?.[f.dependsOn.key];
-          if (!dep || !f.dependsOn.valueIncludes.includes(String(dep))) continue;
-        }
-        const v = f.coreField
-          ? (form[f.coreField] as string | undefined) || ''
-          : form.itemAttributes?.[f.key];
-        if (f.type === 'number') {
-          if (typeof v !== 'number' || isNaN(v) || v === 0) missing.push(f.label);
-        } else if (f.type === 'boolean') {
-          if (v === undefined || v === null) missing.push(f.label);
-        } else {
-          if (!String(v ?? '').trim()) missing.push(f.label);
-        }
-      }
+    // R5C — die Regel steht jetzt in `repair-rules` und gilt genauso am Eingang des Fernbefehls.
+    if (form.repairScope !== 'OWN') {
+      const missing = missingRepairItemFields(form);
       if (missing.length > 0) {
         alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
         return;
@@ -308,30 +311,52 @@ export function RepairList() {
     // auf der Detail-Seite via "Add Work Line" ein wenn die Werkstatt
     // Bescheid gibt. RepairDetail.handleStatusAdvance warnt freundlich
     // wenn man Status flippt ohne Workshop + ohne Lines.
-    // CENTRAL-C3F FINAL — dieselbe Ableitung wie der Fernauftrag, aus derselben Quelle. Sie
-    // stand hier als Ausdruck; ein zweiter Rechner haette sie nachtippen muessen, und genau
-    // daran ist sie auseinandergelaufen.
-    createRepair({ ...form, internalCost: internalCostOnCreate(form) });
+    // CENTRAL-UI-PARITY R5C — dieselbe Handlung auf beiden Rechnern. Am Primary die Vorbereitung des
+    // Hauses (`planRepairCreate`: Kunde oder eigener Artikel samt Los, Pflichtfelder, eigene Kosten)
+    // und `createRepair` in EINER Klammer; am zweiten Rechner derselbe Rumpf als Auftrag, die Fotos
+    // vorab in der Zwischenablage — der Auftrag nennt nur ihre Inhaltskennungen.
+    let fotos: string[] = [];
+    if (w.remote && (form.images?.length ?? 0) > 0) {
+      try {
+        fotos = await stageDataUrls(form.images ?? []);
+      } catch (e) {
+        alert(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was created — please try again.`);
+        return;
+      }
+    }
+    const r = await w.save('repairs.create', {
+      local: () => createRepairOnPrimary(form),
+      remote: () => repairCreateBody(form, fotos),
+    });
+    if (r.kind !== 'ok') return;
+    loadRepairs();
     setShowNew(false);
   }
 
-  function handleQuickStatus(e: React.MouseEvent, repairId: string, newStatus: RepairStatus) {
+  async function handleQuickStatus(e: React.MouseEvent, rep: Repair, newStatus: RepairStatus) {
     e.stopPropagation();
-    try {
-      updateStatus(repairId, newStatus);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
+    // R5C — die Abkuerzung der Liste ist dieselbe Buchung wie der Knopf der Detailseite.
+    if (w.remote && !rep.revision) {
+      alert(fehlertext(nichtAmClient('changing the repair status (no revision loaded)')));
+      return;
     }
+    if (!await w.ok('repairs.update_status', {
+      local: () => { updateStatus(rep.id, newStatus); return {}; },
+      remote: () => ({ repairId: rep.id, status: newStatus, expectedRevision: rep.revision }),
+    })) return;
+    loadRepairs();
   }
 
-  function handleQuickInvoice(e: React.MouseEvent, repairId: string) {
+  async function handleQuickInvoice(e: React.MouseEvent, rep: Repair) {
     e.stopPropagation();
-    try {
-      const res = createCombinedRepairInvoice([repairId]);
-      navigate(`/invoices/${res.invoiceId}`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
-    }
+    // R5C — das Kuerzel ist die Sammelrechnung mit genau einer Reparatur.
+    const r = await w.save('repairs.create_invoice', {
+      local: () => invoiceRepairsOnPrimary([rep.id]),
+      remote: () => repairInvoiceBody([rep]),
+    });
+    if (r.kind !== 'ok') return;
+    loadRepairs();
+    navigate(`/invoices/${r.value.invoiceId}`);
   }
 
   const activeCount = repairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled').length;
@@ -360,6 +385,8 @@ export function RepairList() {
         </div>
       }
     >
+      {/* R5C — der Ausgang jeder Handlung dieser Liste, an einer Stelle. */}
+      <WriteError text={w.fehler} />
       {/* Bulk-Action-Toolbar */}
       {validSelectedIds.size > 0 && (
         <div style={{
@@ -474,10 +501,9 @@ export function RepairList() {
         // Create Invoice Shortcut bleibt auch nach Pick-up sichtbar, solange noch
         // keine Invoice verknuepft ist und ein Charge anfaellt — Kunde kann nach
         // Abholung trotzdem noch fakturiert werden (z.B. spaetere Zahlung).
-        const showInvoiceShortcut =
-          (rep.status === 'ready' || rep.status === 'picked_up') &&
-          !rep.invoiceId &&
-          (rep.chargeToCustomer || 0) > 0;
+        // R5C — dieselbe Regel wie ueberall (`canInvoiceRepair`); „abgeholt" rechnet der Store jetzt
+        // auch wirklich ab, statt das Kuerzel mit einer Fehlermeldung zu beantworten.
+        const showInvoiceShortcut = canInvoiceRepair(rep);
         const checked = validSelectedIds.has(rep.id);
         const statusStyle = REPAIR_STATUS_STYLE[rep.status] ?? { label: rep.status, fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' };
         const payStyle = getPaymentStyle(rep);
@@ -597,7 +623,9 @@ export function RepairList() {
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
               {showInvoiceShortcut && (
                 <button
-                  onClick={(e) => handleQuickInvoice(e, rep.id)}
+                  onClick={(e) => { void handleQuickInvoice(e, rep); }}
+                  disabled={w.busy}
+                  data-repair-quick-invoice
                   title="Create Invoice from this repair"
                   // Konsistenz zum Approval-Modul: lila gefüllter Primary-Style.
                   style={{
@@ -624,7 +652,8 @@ export function RepairList() {
               )}
               {next && (
                 <button
-                  onClick={(e) => handleQuickStatus(e, rep.id, next.status)}
+                  onClick={(e) => { void handleQuickStatus(e, rep, next.status); }}
+                  disabled={w.busy}
                   style={{
                     padding: '4px 10px', fontSize: 11, borderRadius: 999,
                     border: '1px solid #D5D9DE',
@@ -938,14 +967,14 @@ export function RepairList() {
             <ImageUpload
               images={form.images || []}
               onChange={imgs => setForm({ ...form, images: imgs })}
-              maxImages={6}
+              maxImages={REPAIR_MAX_PHOTOS}
             />
           </div>
 
           <div>
             <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>REPAIR TYPE</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {(['internal', 'external', 'hybrid'] as Repair['repairType'][]).map(type => (
+              {REPAIR_TYPES.map(type => (
                 <button key={type} onClick={() => setForm({ ...form, repairType: type })}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
@@ -1023,7 +1052,7 @@ export function RepairList() {
               <div style={{ marginTop: 16 }}>
                 <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SERVICE TAX SCHEME (FOR INVOICE)</span>
                 <div className="flex gap-2" style={{ marginTop: 8 }}>
-                  {(['ZERO', 'VAT_10'] as const).map(scheme => (
+                  {REPAIR_TAX_SCHEMES.map(scheme => (
                     <button key={scheme} onClick={() => setForm({ ...form, taxScheme: scheme })}
                       className="cursor-pointer rounded transition-all duration-200"
                       style={{
@@ -1124,11 +1153,15 @@ export function RepairList() {
             />
           </div>
 
+          {/* R5C — der Ausgang des Anlegens, auf beiden Rechnern an derselben Stelle. */}
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button
               variant="primary"
               onClick={handleCreate}
+              disabled={w.busy}
+              data-create-repair
             >
               Create Repair
             </Button>
@@ -1221,7 +1254,7 @@ export function RepairList() {
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setBulkModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleBulkConfirm} disabled={!sameCustomer || validSelectedIds.size === 0}>
+            <Button variant="primary" onClick={handleBulkConfirm} disabled={!sameCustomer || validSelectedIds.size === 0 || w.busy} data-combined-invoice-confirm>
               <FileText size={14} /> Create Invoice
             </Button>
           </div>

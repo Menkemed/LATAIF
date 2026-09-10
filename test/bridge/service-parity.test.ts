@@ -184,15 +184,20 @@ const REPAIR_COMPARE = [
   const detail = codeOf('src/pages/repairs/RepairDetail.tsx');
   const storeSrc = codeOf('src/stores/repairStore.ts');
 
-  ok(/createRepair\(\{ \.\.\.form, internalCost: internalCostOnCreate\(form\) \}\)/.test(list),
+  // R5C — beide Masken rufen jetzt die Vorbereitung des Hauses (`repair-rules`) über den
+  // Primary-Anschluss (`repair-house`); DORT sitzen die geteilten Primitive, und der Fernauftrag
+  // ruft dieselben.
+  const rules = codeOf('src/core/repairs/repair-rules.ts');
+  const service = codeOf('src/core/bridge/service-commands.ts');
+  ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: internalCostOnCreate\(input\)/.test(rules),
     'CALLPATH die Aufnahme leitet die eigenen Kosten mit der GETEILTEN Primitive ab');
-  ok(/internalCostOnEdit\(form\)/.test(detail) && /repairMargin\(form\)/.test(detail),
+  ok(/updateRepairOnPrimary\(id, form\)/.test(detail) && /internalCost: internalCostOnEdit\(cost\)/.test(rules)
+    && /repairMargin\(cost\)/.test(rules),
     'CALLPATH …und die Detailseite ebenso');
-  for (const f of ['repair-cost']) {
-    ok(src('src/pages/repairs/RepairList.tsx').includes(f) && src('src/pages/repairs/RepairDetail.tsx').includes(f),
-      'CALLPATH beide Bildschirme laden dieselbe Quelle');
-  }
-  ok(src('src/core/bridge/service-commands.ts').includes('repair-cost'),
+  ok(src('src/pages/repairs/RepairList.tsx').includes('repair-rules') && src('src/pages/repairs/RepairDetail.tsx').includes('repair-rules')
+    && src('src/core/repairs/repair-rules.ts').includes("from './repair-cost'"),
+    'CALLPATH beide Bildschirme laden dieselbe Quelle');
+  ok(/planRepairCreate\(/.test(service) && /buildRepairEditPatch\(/.test(service),
     'CALLPATH …und der Fernauftrag auch');
   ok(src('src/core/bridge/client-service-request.ts').includes('repair-cost'),
     'CALLPATH …und die Vorschau des Clients rechnet nicht selbst');

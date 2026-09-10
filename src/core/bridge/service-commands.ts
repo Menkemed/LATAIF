@@ -38,7 +38,20 @@ import {
 import { useRepairStore } from '@/stores/repairStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { useCustomerStore } from '@/stores/customerStore';
-import { internalCostOnCreate, internalCostOnEdit, repairMargin } from '@/core/repairs/repair-cost';
+import { CARD_BRANDS } from '@/core/finance/card-fees';
+import { SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
+import {
+  REPAIR_CUSTOMER_PAID_FROM, REPAIR_INTERNAL_PAID_FROM, REPAIR_TAX_SCHEMES, REPAIR_TYPES, type Repair,
+} from '@/core/models/types';
+import {
+  REPAIR_EDIT_INPUTS, REPAIR_MAX_PHOTOS, RepairActionRejected, assertRepairEditRefs, buildRepairEditPatch,
+  normalizeRepairCreate, planRepairCreate, type RepairCreateInput, type RepairEditInput, type RepairPhotoSlot,
+} from '@/core/repairs/repair-rules';
+import { houseRepairPort } from '@/core/repairs/repair-house';
+import {
+  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStaged, isStagingId,
+  readStagedAsDataUrls, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader, type StagingOwner,
+} from './remote-create-support';
 import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
 } from './mutation-engine';
@@ -131,24 +144,84 @@ export type ServiceResult = { readonly [k: string]: unknown };
 
 // ── Reparatur: anlegen ────────────────────────────────────────────────────
 
-const REPAIR_TYPES = ['internal', 'external', 'hybrid'] as const;
-const TAX_SCHEMES = ['VAT_10', 'ZERO', 'MARGIN'] as const;
-
+/**
+ * R5C — die Eingabe der Anlegemaske in DER Form, die auch der Primary an seiner eigenen Maske baut
+ * (`normalizeRepairCreate`), dazu die Fotos als Kennungen der Zwischenablage.
+ */
 export interface RepairCreateRequest {
-  customerId: string;
-  itemBrand?: string;
-  itemModel?: string;
-  itemSerial?: string;
-  issueDescription: string;
-  repairType: typeof REPAIR_TYPES[number];
-  externalVendor?: string;
-  workshopSupplierId?: string;
-  estimatedCost?: number;
-  internalCost?: number;
-  chargeToCustomer?: number;
-  estimatedReady?: string;
-  taxScheme: typeof TAX_SCHEMES[number];
-  notes?: string;
+  input: RepairCreateInput;
+  photos: Array<{ stagingId: string }>;
+}
+
+/** Was es bei einer Reparatur an EIGENER Ware nicht gibt: die Maske zeigt es dort nicht. */
+const OWN_HAS_NO = [
+  'customerId', 'chargeToCustomer', 'taxScheme', 'itemCategoryId', 'itemAttributes',
+  'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription',
+] as const;
+
+/** Eine flache Merkmalsliste: Text, Zahl oder Ja/Nein — geprüft, BEVOR etwas bewertet wird. */
+function plainAttributes(v: unknown, name: string): void {
+  if (!isPlain(v)) throw new ServicePayloadError(`${name} must be an object`);
+  for (const [k, x] of Object.entries(v)) {
+    const flach = typeof x === 'string' || typeof x === 'boolean' || (typeof x === 'number' && Number.isFinite(x));
+    if (!flach) throw new ServicePayloadError(`${name}.${k} must be text, a number or yes/no`);
+  }
+}
+
+/** R5C — Fotos im Auftrag: vorhandene nach ihrer Stelle, neue nach ihrer Ablagekennung. Nie Bytes. */
+function parsePhotos(raw: unknown, allowKeep: boolean): RepairPhotoSlot[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) throw new ServicePayloadError('photos must be a list');
+  if (raw.length > REPAIR_MAX_PHOTOS) throw new ServicePayloadError(`at most ${REPAIR_MAX_PHOTOS} photos`);
+  return raw.map((slot): RepairPhotoSlot => {
+    if (isPlain(slot)) {
+      const keys = Object.keys(slot);
+      if (keys.length === 1 && keys[0] === 'stagingId' && isStagingId(slot.stagingId)) return { stagingId: slot.stagingId };
+      if (allowKeep && keys.length === 1 && keys[0] === 'keep'
+        && typeof slot.keep === 'number' && Number.isInteger(slot.keep) && slot.keep >= 0) return { keep: slot.keep };
+    }
+    throw new ServicePayloadError(allowKeep
+      ? 'a photo is { keep: <position> } or { stagingId: <content hash> }'
+      : 'a new repair has only new photos: { stagingId: <content hash> }');
+  });
+}
+
+/**
+ * Die Fotos auflösen — INNERHALB des Auftrags: neue Bytes aus der Zwischenablage (Eigentümer ist
+ * die geprüfte Identität), vorhandene aus der Liste, die die Fassung gerade bestätigt hat.
+ */
+async function resolvePhotos(
+  slots: readonly RepairPhotoSlot[], current: readonly string[], owner: StagingOwner, read: StagedMediaReader,
+): Promise<string[]> {
+  const ids = [...new Set(slots.flatMap((x) => ('stagingId' in x ? [x.stagingId] : [])))];
+  const data = await readStagedAsDataUrls(ids, owner, read, (m) => new ServicePayloadError(m));
+  const byId = new Map(ids.map((id, i) => [id, data[i]]));
+  return slots.map((x) => {
+    if ('stagingId' in x) return String(byId.get(x.stagingId));
+    if (x.keep >= current.length) {
+      throw new CommandRejected('PHOTO_NOT_FOUND', 'this photo is not on the repair (any more)');
+    }
+    return current[x.keep];
+  });
+}
+
+const stagedIdsOf = (slots: readonly RepairPhotoSlot[] | undefined): string[] =>
+  [...new Set((slots ?? []).flatMap((x) => ('stagingId' in x ? [x.stagingId] : [])))];
+
+/** Ein Nein der geteilten Regeln ist ein eingefrorenes Nein des Auftrags — mit demselben Code. */
+function house<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof RepairActionRejected) throw new CommandRejected(e.code, e.message);
+    throw e;
+  }
+}
+
+/** Nur für Tests: die Zwischenablage ohne Tauri. Voreingestellt sind die echten Aufrufe. */
+export interface RepairEngineExtras {
+  readStaged?: StagedMediaReader;
+  discardStaged?: StagedMediaDiscard;
 }
 
 /**
@@ -156,52 +229,72 @@ export interface RepairCreateRequest {
  *
  * Ausdrücklich NICHT dabei: `repairNumber` und `voucherCode` (beide vergibt der Primary),
  * `status` (jede neue Reparatur beginnt bei `received`, das ist kein Feld), `margin` (rechnet der
- * Primary aus Preis minus Kosten), `invoiceId`, `productId` und `lotId`.
+ * Primary aus Preis minus Kosten), `invoiceId`, die Zahlwege.
  *
- * `productId` fehlt mit Grund: eine Reparatur an EIGENER Ware (`repairScope: 'OWN'`) setzt den
- * Artikel auf `in_repair` und braucht einen Los-Bezug. Das ist ein zweiter Vertrag mit
- * Bestandswirkung; aus der Ferne wird deshalb nur die Kundenreparatur angelegt, und `repairScope`
- * ist entsprechend auch kein Feld.
+ * R5C — die Reparatur an EIGENER Ware ist jetzt dabei, mit genau dem Vertrag der Maske: der
+ * Artikel (`productId`) und optional sein Los (`lotId`). Kunde, Preis, Steuerwahl und
+ * Artikelangaben gibt es dort nicht — den Platzhalter-Kunden, `in_repair` am Artikel und dessen
+ * Angaben setzt der Primary. Bei der Kundenreparatur umgekehrt: kein Artikel, kein Los. Dazu die
+ * übrigen Felder der Maske (Kategorie, Merkmale, Referenz, Beschreibung, Mitarbeiter, Fotos).
+ * `externalVendor` und die Steuer `MARGIN` sind nicht mehr dabei: keine Maske bietet sie an.
  */
 export function parseRepairCreate(raw: unknown): RepairCreateRequest {
   if (!isPlain(raw)) throw new ServicePayloadError('payload must be an object');
   onlyKnownFields(raw, [
-    'customerId', 'itemBrand', 'itemModel', 'itemSerial', 'issueDescription', 'repairType',
-    'externalVendor', 'workshopSupplierId', 'estimatedCost', 'internalCost', 'chargeToCustomer',
-    'estimatedReady', 'taxScheme', 'notes',
+    'repairScope', 'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemAttributes',
+    'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription',
+    'repairType', 'workshopSupplierId', 'estimatedCost', 'internalCost', 'chargeToCustomer',
+    'estimatedReady', 'taxScheme', 'staffId', 'notes', 'photos',
   ]);
+  const scope = raw.repairScope === undefined ? 'CUSTOMER' : String(raw.repairScope);
+  if (scope !== 'CUSTOMER' && scope !== 'OWN') throw new ServicePayloadError(`unknown repair scope: ${scope || '(none)'}`);
+  if (scope === 'OWN') {
+    for (const k of OWN_HAS_NO) {
+      if (raw[k] !== undefined) {
+        throw new ServicePayloadError(`${k} does not belong to a repair of our own stock — the item is the product`);
+      }
+    }
+    reqString(raw.productId, 'productId');
+  } else {
+    for (const k of ['productId', 'lotId']) {
+      if (raw[k] !== undefined) throw new ServicePayloadError(`${k} belongs to a repair of our own stock`);
+    }
+    reqString(raw.customerId, 'customerId');
+  }
   const repairType = raw.repairType === undefined ? 'internal' : String(raw.repairType);
   if (!(REPAIR_TYPES as readonly string[]).includes(repairType)) {
     throw new ServicePayloadError(`unknown repair type: ${repairType || '(none)'}`);
   }
-  const taxScheme = raw.taxScheme === undefined ? 'VAT_10' : String(raw.taxScheme);
-  if (!(TAX_SCHEMES as readonly string[]).includes(taxScheme)) {
-    throw new ServicePayloadError(`unknown tax scheme: ${taxScheme || '(none)'}`);
+  if (raw.taxScheme !== undefined && !(REPAIR_TAX_SCHEMES as readonly unknown[]).includes(raw.taxScheme)) {
+    throw new ServicePayloadError(`unknown tax scheme: ${String(raw.taxScheme) || '(none)'}`);
   }
-  const out: RepairCreateRequest = {
-    customerId: reqString(raw.customerId, 'customerId'),
-    issueDescription: reqString(raw.issueDescription, 'issueDescription'),
-    repairType: repairType as RepairCreateRequest['repairType'],
-    taxScheme: taxScheme as RepairCreateRequest['taxScheme'],
-    itemBrand: optString(raw.itemBrand, 'itemBrand'),
-    itemModel: optString(raw.itemModel, 'itemModel'),
-    itemSerial: optString(raw.itemSerial, 'itemSerial'),
-    externalVendor: optString(raw.externalVendor, 'externalVendor'),
-    workshopSupplierId: optString(raw.workshopSupplierId, 'workshopSupplierId'),
-    estimatedReady: optString(raw.estimatedReady, 'estimatedReady'),
-    notes: optString(raw.notes, 'notes'),
-  };
-  if (raw.estimatedCost !== undefined && raw.estimatedCost !== null) out.estimatedCost = money(raw.estimatedCost, 'estimatedCost');
-  if (raw.internalCost !== undefined && raw.internalCost !== null) out.internalCost = money(raw.internalCost, 'internalCost');
-  if (raw.chargeToCustomer !== undefined && raw.chargeToCustomer !== null) {
-    out.chargeToCustomer = money(raw.chargeToCustomer, 'chargeToCustomer');
+  for (const k of ['estimatedCost', 'internalCost', 'chargeToCustomer'] as const) {
+    if (raw[k] !== undefined && raw[k] !== null) money(raw[k], k);
   }
-  return out;
+  for (const k of ['customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel',
+    'itemReference', 'itemSerial', 'itemDescription', 'workshopSupplierId', 'estimatedReady', 'staffId', 'notes'] as const) {
+    optString(raw[k], k);
+  }
+  if (raw.itemAttributes !== undefined) plainAttributes(raw.itemAttributes, 'itemAttributes');
+  const issueDescription = reqString(raw.issueDescription, 'issueDescription');
+  const photos = (parsePhotos(raw.photos, false) ?? []) as Array<{ stagingId: string }>;
+  let input: RepairCreateInput;
+  try {
+    // DIESELBE Aufbereitung wie an der Maske des Primary — nicht eine zweite.
+    input = normalizeRepairCreate({
+      ...(raw as unknown as Partial<Repair>), repairScope: scope, repairType: repairType as Repair['repairType'], issueDescription,
+    });
+  } catch (e) {
+    if (e instanceof RepairActionRejected) throw new ServicePayloadError(e.message);
+    throw e;
+  }
+  return { input, photos };
 }
 
 function repairState(id: string): ServiceResult {
   const r = query(
-    'SELECT id, repair_number, customer_id, status, repair_type, estimated_cost, actual_cost, '
+    'SELECT id, repair_number, customer_id, status, repair_type, repair_scope, product_id, lot_id, '
+    + 'tax_scheme, invoice_id, estimated_cost, actual_cost, '
     + 'internal_cost, charge_to_customer, margin, voucher_code, revision, updated_at '
     + 'FROM repairs WHERE id = ?', [id],
   )[0];
@@ -211,6 +304,11 @@ function repairState(id: string): ServiceResult {
     customerId: String(r?.customer_id ?? ''),
     status: String(r?.status ?? ''),
     repairType: String(r?.repair_type ?? ''),
+    repairScope: String(r?.repair_scope ?? ''),
+    productId: String(r?.product_id ?? ''),
+    lotId: String(r?.lot_id ?? ''),
+    taxScheme: String(r?.tax_scheme ?? ''),
+    invoiceId: String(r?.invoice_id ?? ''),
     estimatedCost: r?.estimated_cost === null || r?.estimated_cost === undefined ? null : Number(r.estimated_cost),
     actualCost: r?.actual_cost === null || r?.actual_cost === undefined ? null : Number(r.actual_cost),
     internalCost: Number(r?.internal_cost ?? 0),
@@ -223,163 +321,152 @@ function repairState(id: string): ServiceResult {
   };
 }
 
-export function runRepairCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+export async function runRepairCreate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: RepairEngineExtras = {},
+): Promise<CommandOutcome> {
   const req = parseRepairCreate(raw);
-  return runRemoteCommand(deps, identity, () => {
-    const branch = identity.branchId;
-    const customer = query(
-      "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'",
-      [req.customerId, branch],
-    )[0];
-    if (!customer) throw new CommandRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');
-    if (req.workshopSupplierId) {
-      const sup = query('SELECT id FROM suppliers WHERE id = ? AND branch_id = ?', [req.workshopSupplierId, branch])[0];
-      if (!sup) throw new CommandRejected('SUPPLIER_NOT_FOUND', 'no such workshop supplier in this branch');
-    }
+  const read = extras.readStaged ?? invokeReadStaged;
+  const discard = extras.discardStaged ?? invokeDiscardStaged;
+  const owner = stagingOwnerOf(identity);
+  const outcome = await runRemoteCommand(deps, identity, async () => {
+    // R5C — in die Bücher DIESER Filiale, oder gar nicht: Belegnummer und der Platzhalter-Kunde
+    // der eigenen Ware entstehen in der Filiale der Sitzung.
+    assertHouseBranch(identity);
+    // Dieselbe Vorbereitung wie an der Maske des Primary (`createRepairOnPrimary`): Kunde — oder
+    // eigener Artikel samt Los —, Pflichtfelder der Kategorie, Werkstatt, Mitarbeiter, die eigenen
+    // Kosten aus der geteilten Ableitung (C3F FINAL), und bei eigener Ware die Angaben DES ARTIKELS.
+    const data = house(() => planRepairCreate(req.input, houseRepairPort(identity.branchId)));
+    // Die Fotos INNERHALB des Auftrags: eine Wiederholung derselben Kennung kommt gar nicht bis hierher.
+    const images = await resolvePhotos(req.photos, [], owner, read);
     // Ab hier rechnet das Haus: Belegnummer und Gutscheincode aus seinen eigenen Quellen, der
-    // Anfangsstatus, und — wenn Werkstatt und Kosten zusammenkommen — die erste Arbeitszeile.
-    const repair = useRepairStore.getState().createRepair({
-      customerId: req.customerId,
-      repairScope: 'CUSTOMER',
-      issueDescription: req.issueDescription,
-      repairType: req.repairType,
-      taxScheme: req.taxScheme,
-      itemBrand: req.itemBrand,
-      itemModel: req.itemModel,
-      itemSerial: req.itemSerial,
-      externalVendor: req.externalVendor,
-      workshopSupplierId: req.workshopSupplierId,
-      estimatedCost: req.estimatedCost,
-      // Gemessen und behoben: der Aufnahmebildschirm leitet die eigenen Kosten AB, bevor er den
-      // Store ruft — bei einer Fremdarbeit ohne eigene Angabe gilt der Voranschlag. Der Fernweg
-      // speicherte hier 0, also bei derselben Eingabe eine andere Zeile. Jetzt dieselbe Quelle.
-      internalCost: internalCostOnCreate(req),
-      chargeToCustomer: req.chargeToCustomer,
-      estimatedReady: req.estimatedReady,
-      notes: req.notes,
-    } as never);
+    // Anfangsstatus, bei eigener Ware `in_repair` am Artikel und der Platzhalter-Kunde, und — wenn
+    // Werkstatt und Kosten zusammenkommen — die erste Arbeitszeile.
+    const repair = useRepairStore.getState().createRepair({ ...data, images });
     return repairState(repair.id) as unknown as Record<string, unknown>;
   });
+  // Erst wenn der Auftrag wirklich durch ist, verliert die Ablage ihren Zweck.
+  if (outcome.kind === 'ok') await discardStagedAfterSuccess(stagedIdsOf(req.photos), owner, discard);
+  return outcome;
 }
 
 // ── Reparatur: ändern ─────────────────────────────────────────────────────
 
+/**
+ * R5C — genau die Eingaben der „Save"-Maske (`REPAIR_EDIT_INPUTS`), jede nur, wenn sie sich
+ * geändert hat; `null` heißt „geleert". Die Fotos reisen als Plan.
+ */
 export interface RepairUpdateRequest {
   id: string;
   expectedRevision: number;
-  diagnosis?: string | null;
-  estimatedCost?: number | null;
-  actualCost?: number | null;
-  internalCost?: number;
-  chargeToCustomer?: number | null;
-  repairType?: typeof REPAIR_TYPES[number];
-  externalVendor?: string | null;
-  workshopSupplierId?: string | null;
-  estimatedReady?: string | null;
-  itemBrand?: string | null;
-  itemModel?: string | null;
-  itemSerial?: string | null;
-  notes?: string | null;
+  changes: Partial<Record<RepairEditInput, unknown>>;
+  photos?: RepairPhotoSlot[];
 }
 
+const EDIT_FIELDS = REPAIR_EDIT_INPUTS.filter((k) => k !== 'images');
+
 /**
- * Genau die Felder, die der „Save"-Knopf der Reparaturseite schreibt — abzüglich der beiden, die
- * er AUSRECHNET: `internalCost` in seiner abgeleiteten Form und `margin`. Beides leitet hier der
- * Primary ab, aus dem Stand, der NACH dieser Änderung gilt; zwei Rechner, die je ein Feld ändern,
- * kämen sonst zu zwei verschiedenen Margen.
+ * Genau die Felder, die der „Save"-Knopf der Reparaturseite schreibt — seit R5C ALLE davon: dazu
+ * die Zahlwege (Kunde, Kartenart, eigene Kosten), Kategorie und Merkmale, Referenz,
+ * Beschreibung, Problem und Fotos. Was er AUSRECHNET, reist nie mit: `internalCost` in seiner
+ * abgeleiteten Form, `margin` und die Kartenart außerhalb einer Kartenzahlung. Das leitet der
+ * Primary aus dem Stand ab, der NACH dieser Änderung gilt — mit DERSELBEN Funktion wie die Maske
+ * (`buildRepairEditPatch`); zwei Rechner, die je ein Feld ändern, kommen so zur selben Marge.
  *
  * Nicht dabei: `status` (eigener Vertrag mit Buchungen), `repairNumber`, `voucherCode`,
- * `invoiceId`, `customerPaidFrom`/`internalPaidFrom` (Geldwege), `repairScope`, `productId`.
+ * `invoiceId`, `repairScope`, `productId`, `customerId`, `taxScheme` (wählt der Rechnungsdialog)
+ * und `externalVendor` (kein Feld der Maske).
  */
 export function parseRepairUpdate(raw: unknown): RepairUpdateRequest {
   if (!isPlain(raw)) throw new ServicePayloadError('payload must be an object');
-  onlyKnownFields(raw, [
-    'id', 'expectedRevision', 'diagnosis', 'estimatedCost', 'actualCost', 'internalCost',
-    'chargeToCustomer', 'repairType', 'externalVendor', 'workshopSupplierId', 'estimatedReady',
-    'itemBrand', 'itemModel', 'itemSerial', 'notes',
-  ]);
+  onlyKnownFields(raw, ['id', 'expectedRevision', ...EDIT_FIELDS, 'photos']);
   const out: RepairUpdateRequest = {
     id: reqString(raw.id, 'id'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
+    changes: {},
   };
-  // Der Umweg über `unknown` ist kein Kunstgriff, sondern die ehrliche Aussage: hier wird ein
-  // benannter Vertrag als Feldablage benutzt, und TypeScript soll das nicht stillschweigend
-  // durchwinken.
-  const slot = out as unknown as Record<string, unknown>;
-  const nullableText = (k: keyof RepairUpdateRequest, name: string): void => {
-    if (raw[name] === undefined) return;
-    slot[k] = raw[name] === null ? null : reqString(raw[name], name);
+  const c = out.changes as Record<string, unknown>;
+  const nullableText = (k: string): void => {
+    if (raw[k] === undefined) return;
+    c[k] = raw[k] === null ? null : reqString(raw[k], k);
   };
-  const nullableMoney = (k: keyof RepairUpdateRequest, name: string): void => {
-    if (raw[name] === undefined) return;
-    slot[k] = raw[name] === null ? null : money(raw[name], name);
+  const nullableMoney = (k: string): void => {
+    if (raw[k] === undefined) return;
+    c[k] = raw[k] === null ? null : money(raw[k], k);
   };
-  nullableText('diagnosis', 'diagnosis');
-  nullableText('externalVendor', 'externalVendor');
-  nullableText('workshopSupplierId', 'workshopSupplierId');
-  nullableText('estimatedReady', 'estimatedReady');
-  nullableText('itemBrand', 'itemBrand');
-  nullableText('itemModel', 'itemModel');
-  nullableText('itemSerial', 'itemSerial');
-  nullableMoney('estimatedCost', 'estimatedCost');
-  nullableMoney('actualCost', 'actualCost');
-  nullableMoney('chargeToCustomer', 'chargeToCustomer');
-  if (raw.internalCost !== undefined && raw.internalCost !== null) out.internalCost = money(raw.internalCost, 'internalCost');
-  if (raw.notes !== undefined) out.notes = raw.notes === null ? null : String(raw.notes);
+  const nullableOneOf = (k: string, list: readonly string[]): void => {
+    if (raw[k] === undefined) return;
+    if (raw[k] !== null && !list.includes(raw[k] as string)) throw new ServicePayloadError(`unknown ${k}: ${String(raw[k])}`);
+    c[k] = raw[k];
+  };
+  for (const k of ['diagnosis', 'workshopSupplierId', 'estimatedReady', 'itemCategoryId', 'itemBrand',
+    'itemModel', 'itemReference', 'itemSerial', 'itemDescription']) nullableText(k);
+  for (const k of ['estimatedCost', 'actualCost', 'chargeToCustomer']) nullableMoney(k);
+  if (raw.internalCost !== undefined && raw.internalCost !== null) c.internalCost = money(raw.internalCost, 'internalCost');
+  if (raw.notes !== undefined) c.notes = raw.notes === null ? null : String(raw.notes);
+  if (raw.issueDescription !== undefined) {
+    // Die Maske lässt das Feld leeren; die Spalte trägt dann '' — kein NULL, kein Nein.
+    if (typeof raw.issueDescription !== 'string') throw new ServicePayloadError('issueDescription must be text');
+    c.issueDescription = raw.issueDescription;
+  }
   if (raw.repairType !== undefined) {
     const rt = String(raw.repairType);
     if (!(REPAIR_TYPES as readonly string[]).includes(rt)) throw new ServicePayloadError(`unknown repair type: ${rt}`);
-    out.repairType = rt as RepairUpdateRequest['repairType'];
+    c.repairType = rt;
   }
-  const touched = Object.keys(out).filter((k) => k !== 'id' && k !== 'expectedRevision');
-  if (touched.length === 0) throw new ServicePayloadError('an edit must change something');
+  nullableOneOf('customerPaidFrom', REPAIR_CUSTOMER_PAID_FROM);
+  nullableOneOf('internalPaidFrom', REPAIR_INTERNAL_PAID_FROM);
+  nullableOneOf('customerCardBrand', CARD_BRANDS);
+  if (raw.itemAttributes !== undefined) {
+    plainAttributes(raw.itemAttributes, 'itemAttributes');
+    c.itemAttributes = raw.itemAttributes;
+  }
+  out.photos = parsePhotos(raw.photos, true);
+  if (Object.keys(c).length === 0 && !out.photos) throw new ServicePayloadError('an edit must change something');
   return out;
 }
 
-export function runRepairUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+export async function runRepairUpdate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: RepairEngineExtras = {},
+): Promise<CommandOutcome> {
   const req = parseRepairUpdate(raw);
-  return runRemoteCommand(deps, identity, () => {
-    const live = query(
-      'SELECT id, repair_type, estimated_cost, actual_cost, internal_cost, charge_to_customer '
-      + 'FROM repairs WHERE id = ? AND branch_id = ?', [req.id, identity.branchId],
-    )[0];
+  const read = extras.readStaged ?? invokeReadStaged;
+  const discard = extras.discardStaged ?? invokeDiscardStaged;
+  const owner = stagingOwnerOf(identity);
+  const outcome = await runRemoteCommand(deps, identity, async () => {
+    assertHouseBranch(identity);
+    const live = query('SELECT id FROM repairs WHERE id = ? AND branch_id = ?', [req.id, identity.branchId])[0];
     if (!live) throw new CommandRejected('REPAIR_NOT_FOUND', 'no such repair in this branch');
     assertRevision('repairs', req.id, req.expectedRevision, 'REPAIR_NOT_FOUND');
-    if (req.workshopSupplierId) {
-      const sup = query('SELECT id FROM suppliers WHERE id = ? AND branch_id = ?',
-        [req.workshopSupplierId, identity.branchId])[0];
-      if (!sup) throw new CommandRejected('SUPPLIER_NOT_FOUND', 'no such workshop supplier in this branch');
-    }
+    const rs = useRepairStore.getState();
+    rs.loadRepairs();
+    const seen = rs.getRepair(req.id);
+    if (!seen) throw new CommandNotEvaluated('REPAIR_NOT_LOADED', 'the repair could not be read');
 
     // Der Stand, der NACH dieser Änderung gilt — Feld für Feld: was der Auftrag mitbringt, sonst
-    // das, was in der Zeile steht. Die Ableitung ist wortgleich die des Bildschirms.
-    const numOr = (v: unknown, fallback: number | null): number | null => {
-      if (v === undefined) return fallback;
-      return v === null ? null : Number(v);
-    };
-    // Der Stand, der NACH dieser Änderung gilt — was der Auftrag mitbringt, sonst die Zeile.
-    const effective = {
-      repairType: req.repairType ?? String(live.repair_type ?? 'internal'),
-      estimatedCost: numOr(req.estimatedCost, live.estimated_cost === null ? null : Number(live.estimated_cost)),
-      actualCost: numOr(req.actualCost, live.actual_cost === null ? null : Number(live.actual_cost)),
-      internalCost: req.internalCost ?? Number(live.internal_cost ?? 0),
-      chargeToCustomer: numOr(req.chargeToCustomer, live.charge_to_customer === null ? null : Number(live.charge_to_customer)),
-    };
+    // das, was in der Zeile steht. Die Fassung hat eben bestätigt, dass die Zeile genau das ist,
+    // was der Client gesehen hat — also ist das hier derselbe Stand wie seine Maske.
+    const effective: Partial<Repair> = { ...seen };
+    for (const [k, v] of Object.entries(req.changes)) (effective as Record<string, unknown>)[k] = v === null ? undefined : v;
+    if (req.photos) effective.images = await resolvePhotos(req.photos, seen.images ?? [], owner, read);
 
-    const patch: Record<string, unknown> = {};
-    for (const k of ['diagnosis', 'estimatedCost', 'actualCost', 'chargeToCustomer', 'repairType',
-      'externalVendor', 'workshopSupplierId', 'estimatedReady', 'itemBrand', 'itemModel',
-      'itemSerial', 'notes'] as const) {
-      if (req[k] !== undefined) patch[k] = req[k];
+    // DIESELBE Funktion wie „Save" am Primary: jedes Feld der Maske, dazu die eigenen Kosten, die
+    // Marge und die Kartenart — nie aus dem Rumpf.
+    const patch = house(() => buildRepairEditPatch(effective));
+    house(() => assertRepairEditRefs(patch, seen, houseRepairPort(identity.branchId)));
+    try {
+      // Der Weg des Hauses: die Zeile, dazu die Umbuchung der Kundenzahlung samt Kartengebühr
+      // (`syncRepairCustomerPayment`) und das Nachziehen einer spät gesetzten Werkstatt.
+      rs.updateRepair(req.id, patch);
+    } catch (e) {
+      if (e instanceof Error && e.message === SUPPLIER_CREDIT_LOCK_MESSAGE) {
+        throw new CommandRejected('SUPPLIER_CREDIT_LOCKED', e.message);
+      }
+      throw e;
     }
-    // Die beiden abgeleiteten Werte kommen IMMER vom Primary, nie aus dem Rumpf — und aus
-    // derselben Quelle wie der Bildschirm der Detailseite.
-    patch.internalCost = internalCostOnEdit(effective);
-    patch.margin = repairMargin(effective);
-
-    useRepairStore.getState().updateRepair(req.id, patch as never);
     return repairState(req.id) as unknown as Record<string, unknown>;
   });
+  if (outcome.kind === 'ok') await discardStagedAfterSuccess(stagedIdsOf(req.photos), owner, discard);
+  return outcome;
 }
 
 // ── Agenten-Transfer: anlegen ─────────────────────────────────────────────
