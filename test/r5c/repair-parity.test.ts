@@ -426,6 +426,9 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
     estimatedCost: 40, chargeToCustomer: 100, taxScheme: 'VAT_10', images: [alsDataUrl(bild(2))],
   } as never);
   const rid = r.id;
+  // Altbestand ohne Feld in der „Save"-Maske: ein freier Werkstattname und die Steuer MARGIN. Vor R5C
+  // schrieb Save beides aus dem Formular zurück — MARGIN dabei still als VAT_10 (`rowToRepair`).
+  db.run("UPDATE repairs SET external_vendor = 'Alt-Werkstatt', tax_scheme = 'MARGIN' WHERE id = ?", [rid]);
   const rs = useRepairStore.getState();
   const schritte: Array<(seen: Record<string, unknown>) => Record<string, unknown>> = [
     (seen) => ({
@@ -439,6 +442,8 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
     (seen) => ({ ...seen, customerCardBrand: 'normal' }),
     // Bar statt Karte, Foto entfernt, Kategorie geleert.
     (seen) => ({ ...seen, customerPaidFrom: 'cash', itemCategoryId: undefined, itemAttributes: {}, images: [] }),
+    // Zurück auf Karte: die versteckte alte Kartenart kommt NICHT wieder — die Maske zeigt „Normal".
+    (seen) => ({ ...seen, customerPaidFrom: 'card' }),
   ];
   const bilder: Array<ReturnType<typeof bildDerReparatur> & { buchungen: string; gebuehren: string }> = [];
   let k = 400;
@@ -467,7 +472,8 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
 {
   const lokal = await aendernZwilling('lokal');
   const fern = await aendernZwilling('fern');
-  for (let i = 0; i < 3; i++) {
+  ok(lokal.bilder.length === 4 && fern.bilder.length === 4, 'EDIT vier Speichervorgaenge auf beiden Wegen');
+  for (let i = 0; i < lokal.bilder.length; i++) {
     const d = unterschiede(lokal.bilder[i].zeile, fern.bilder[i].zeile);
     ok(d.length === 0, `EDIT Schritt ${i + 1}: lokal == fern, Spalte fuer Spalte${d.length ? ' — ' + d.join(' | ') : ''}`);
     ok(lokal.bilder[i].buchungen === fern.bilder[i].buchungen,
@@ -494,6 +500,12 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
   const z3 = fern.bilder[2].zeile;
   ok(z3.customer_paid_from === 'cash' && z3.customer_card_brand === null && z3.item_category_id === null && z3.images === '[]',
     'EDIT bar statt Karte: keine Kartenart mehr; Kategorie und Fotos geleert');
+  const z4 = fern.bilder[3].zeile;
+  ok(z4.customer_paid_from === 'card' && z4.customer_card_brand === 'normal' && lokal.bilder[3].zeile.customer_card_brand === 'normal',
+    'HIDDEN zurueck auf Karte: die versteckte alte Kartenart (amex) kommt nicht wieder — es gilt die angezeigte');
+  ok(z4.external_vendor === 'Alt-Werkstatt' && z4.tax_scheme === 'MARGIN'
+    && lokal.bilder[3].zeile.external_vendor === 'Alt-Werkstatt' && lokal.bilder[3].zeile.tax_scheme === 'MARGIN',
+    'HIDDEN nach vier Mal „Save": gespeicherte Daten ohne Feld in der Maske bleiben unberuehrt (lokal und fern)');
 
   // §8 — was ein Änderungsauftrag nicht darf, und was der Primary ablehnt.
   const db = fern.db; const rid = fern.rid;
@@ -599,6 +611,14 @@ async function abrechnenZwilling(weg: 'lokal' | 'fern') {
   ok(n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [inv1]) === 1, 'INVOICE die Nummernart des Dialogs erreicht die Rechnung');
   ok(/^Repair Service · REP-[\d-]+ · Batterie$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [inv1])),
     `INVOICE der Einzelvermerk wie an der Detailseite (${s(db, 'SELECT notes FROM invoices WHERE id = ?', [inv1])})`);
+  // R5C FINAL — ohne Dialog (das Kürzel der Liste) bleibt es beim Vermerk der Liste, wie vor R5C.
+  const q = await reparatur({ chargeToCustomer: 35, issueDescription: 'Band' });
+  schalten(q, 'in_progress', 'ready');
+  const quick = await life.runCreateRepairInvoice(deps(db), identity('515', 'repairs.create_invoice'), { repairId: q, expectedRevision: rev(db, q) });
+  const invQ = String(val<Record<string, unknown>>(quick).invoiceId);
+  ok(/^Combined Repair Service · REP-[\d-]+$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [invQ]))
+    && n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [invQ]) === 0,
+    `INVOICE das Kuerzel der Liste traegt den Vermerk der Liste (${s(db, 'SELECT notes FROM invoices WHERE id = ?', [invQ])})`);
 
   // §8 — die Neins.
   const d2 = await reparatur({ customerId: 'cust-2', chargeToCustomer: 50 });
@@ -643,6 +663,8 @@ async function abrechnenZwilling(weg: 'lokal' | 'fern') {
     ['einen Einstand', { repairs: [{ repairId: e, expectedRevision: 1, purchasePrice: 0 }] }],
     ['die Steuer MARGIN', { repairId: e, expectedRevision: 1, taxScheme: 'MARGIN' }],
     ['eine Nummernart als Text', { repairId: e, expectedRevision: 1, specialMark: 'yes' }],
+    ['einen Dialog ueber mehrere Reparaturen', { repairs: [{ repairId: e, expectedRevision: 1 }, { repairId: f, expectedRevision: 1 }], taxScheme: 'ZERO' }],
+    ['eine Nummernart ohne Steuerdialog', { repairId: e, expectedRevision: 1, specialMark: true }],
   ] as const) {
     let t = '';
     try { life.parseCreateRepairInvoice(body); } catch (x) { t = x instanceof Error ? x.message : String(x); }
@@ -666,9 +688,9 @@ for (const weg of ['fern', 'lokal'] as const) {
     const rs = useRepairStore.getState();
     if (weg === 'fern') {
       await life.runCreateRepairInvoice(deps(db), identity('600', 'repairs.create_invoice'),
-        { ...rules.repairInvoiceBody([rs.getRepair(a)!, rs.getRepair(b)!]), taxScheme: 'ZERO' });
+        rules.repairInvoiceBody([rs.getRepair(a)!, rs.getRepair(b)!]));
     } else {
-      await house.invoiceRepairsOnPrimary([a, b], { taxScheme: 'ZERO' });
+      await house.invoiceRepairsOnPrimary([a, b]);
     }
   } catch { warf = true; }
   ok(warf, `ATOMIC-INV (${weg}) der Fehler bei der zweiten Verknuepfung bricht die Rechnung ab`);
@@ -677,12 +699,161 @@ for (const weg of ['fern', 'lokal'] as const) {
   ok(n(db, 'SELECT COUNT(*) FROM ledger_entries') === ledgerVorher, `ATOMIC-INV (${weg}) keine Buchung`);
   ok(s(db, 'SELECT invoice_id FROM repairs WHERE id = ?', [a]) === '' && s(db, 'SELECT invoice_id FROM repairs WHERE id = ?', [b]) === '',
     `ATOMIC-INV (${weg}) auch die ERSTE Verknuepfung ist zurueckgenommen`);
-  ok(s(db, 'SELECT tax_scheme FROM repairs WHERE id = ?', [a]) === 'VAT_10',
-    `ATOMIC-INV (${weg}) …und die gespeicherte Steuerwahl des Dialogs ebenso`);
   db.run('DROP TRIGGER r5c_fail_link');
   const nachher = await house.invoiceRepairsOnPrimary([a, b]);
   ok(/-0*1$/.test(s(db, 'SELECT invoice_number FROM invoices WHERE id = ?', [nachher.invoiceId])),
     `ATOMIC-INV (${weg}) die Rechnungsnummer ist nicht verbraucht (${s(db, 'SELECT invoice_number FROM invoices WHERE id = ?', [nachher.invoiceId])})`);
+}
+
+// ── §6 Einzelrechnung über die Dialoge atomar: Steuerwahl, Beleg, Verknüpfung — oder nichts ──
+for (const weg of ['fern', 'lokal'] as const) {
+  const db = freshDb();
+  const c = await reparatur({ chargeToCustomer: 45, taxScheme: 'VAT_10' });
+  schalten(c, 'in_progress', 'ready');
+  const ledgerVorher = n(db, 'SELECT COUNT(*) FROM ledger_entries');
+  // Die Steuerwahl wird zuerst an der Reparatur gespeichert, dann der Beleg, dann die Verknüpfung —
+  // und genau die scheitert.
+  db.run(`CREATE TRIGGER r5c_fail_one BEFORE UPDATE OF invoice_id ON repairs
+    WHEN NEW.id = '${c}' AND NEW.invoice_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'r5c injected'); END;`);
+  const wahl = { taxScheme: 'ZERO', specialMark: true } as const;
+  let warf = false;
+  try {
+    if (weg === 'fern') {
+      await life.runCreateRepairInvoice(deps(db), identity('610', 'repairs.create_invoice'), { repairId: c, expectedRevision: rev(db, c), ...wahl });
+    } else {
+      await house.invoiceRepairsOnPrimary([c], wahl);
+    }
+  } catch { warf = true; }
+  ok(warf, `ATOMIC-DLG (${weg}) der Fehler bei der Verknuepfung bricht die Einzelrechnung ab`);
+  ok(n(db, 'SELECT COUNT(*) FROM invoices') === 0 && n(db, 'SELECT COUNT(*) FROM ledger_entries') === ledgerVorher
+    && s(db, 'SELECT invoice_id FROM repairs WHERE id = ?', [c]) === '', `ATOMIC-DLG (${weg}) kein Beleg, keine Buchung, keine Verknuepfung`);
+  ok(s(db, 'SELECT tax_scheme FROM repairs WHERE id = ?', [c]) === 'VAT_10',
+    `ATOMIC-DLG (${weg}) …und die gespeicherte Steuerwahl des Dialogs ist zurueckgenommen`);
+  db.run('DROP TRIGGER r5c_fail_one');
+}
+
+// ══ R5C FINAL — die Verträge des Primary, festgenagelt ═════════════════════
+// Vermerk: je Handlung genau der des Hauses vor R5C — Detailseite (Dialog) „Repair Service · Nr ·
+// Problem", Liste (Auswahl UND Kürzel, ohne Dialog) „Combined Repair Service · Nr, …".
+{
+  const bilder: Array<{ dlg: ReturnType<typeof rechnungsBild>; quick: ReturnType<typeof rechnungsBild>; tax: string }> = [];
+  for (const weg of ['lokal', 'fern'] as const) {
+    const db = freshDb();
+    const d1 = await reparatur({ chargeToCustomer: 45, taxScheme: 'VAT_10', issueDescription: 'Glas' });
+    const q1 = await reparatur({ chargeToCustomer: 35, issueDescription: 'Band' });
+    schalten(d1, 'in_progress', 'ready');
+    schalten(q1, 'in_progress', 'ready');
+    let dlg = ''; let quick = '';
+    if (weg === 'lokal') {
+      dlg = (await house.invoiceRepairsOnPrimary([d1], { taxScheme: 'ZERO', specialMark: true })).invoiceId;
+      quick = (await house.invoiceRepairsOnPrimary([q1])).invoiceId;
+    } else {
+      const rs = useRepairStore.getState();
+      const o1 = await life.runCreateRepairInvoice(deps(db), identity('700', 'repairs.create_invoice'),
+        rules.repairInvoiceBody([rs.getRepair(d1)!], { taxScheme: 'ZERO', specialMark: true }));
+      const o2 = await life.runCreateRepairInvoice(deps(db), identity('701', 'repairs.create_invoice'),
+        rules.repairInvoiceBody([rs.getRepair(q1)!]));
+      dlg = String(val<Record<string, unknown>>(o1).invoiceId);
+      quick = String(val<Record<string, unknown>>(o2).invoiceId);
+    }
+    ok(/^Repair Service · REP-[\d-]+ · Glas$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [dlg])),
+      `NOTES (${weg}) Detailseite: der Vermerk der Detailseite`);
+    ok(/^Combined Repair Service · REP-[\d-]+$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [quick])),
+      `NOTES (${weg}) Kuerzel der Liste: der Sammelvermerk der Liste, auch bei EINER Reparatur`);
+    bilder.push({ dlg: rechnungsBild(db, dlg), quick: rechnungsBild(db, quick), tax: s(db, 'SELECT tax_scheme FROM repairs WHERE id = ?', [d1]) });
+  }
+  ok(unterschiede(bilder[0].dlg.kopf, bilder[1].dlg.kopf).length === 0 && bilder[0].dlg.zeilen === bilder[1].dlg.zeilen,
+    'NOTES Einzelrechnung ueber die Dialoge: lokal == fern (Kopf, Vermerk, Nummernart, Zeilen)');
+  ok(unterschiede(bilder[0].quick.kopf, bilder[1].quick.kopf).length === 0 && bilder[0].quick.zeilen === bilder[1].quick.zeilen,
+    'NOTES Kuerzel der Liste: lokal == fern');
+  ok(bilder[0].tax === 'ZERO' && bilder[1].tax === 'ZERO', 'NOTES …und die Steuerwahl steht auf beiden Wegen an der Reparatur');
+  {
+    const db = freshDb();
+    const a = await reparatur({}); const b = await reparatur({});
+    schalten(a, 'in_progress', 'ready'); schalten(b, 'in_progress', 'ready');
+    for (const [was, ids, opts, erwartet] of [
+      ['ein Dialog ueber zwei Reparaturen', [a, b], { taxScheme: 'ZERO' }, 'DIALOG_IS_SINGLE'],
+      ['eine Nummernart ohne Steuerdialog', [a], { specialMark: true }, 'DIALOG_INCOMPLETE'],
+    ] as const) {
+      let c = '';
+      try { await house.invoiceRepairsOnPrimary(ids, opts as never); } catch (e) { c = code(e) || String(e); }
+      ok(c === erwartet, `NOTES am Primary: ${was} → ${erwartet} (${c})`);
+    }
+    ok(n(db, 'SELECT COUNT(*) FROM invoices') === 0, 'NOTES …und es entstand kein Beleg');
+  }
+}
+
+// Ausgeblendete Felder: was die Maske in ihrem Modus NICHT zeigt, schreibt der Klick nicht.
+{
+  const faelle: Array<[string, Record<string, unknown>]> = [
+    ['Kundenreparatur mit Artikel und Los vom Umschalten', {
+      repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'Umschalten 1', productId: 'p2', lotId: 'lot-p2',
+      repairType: 'internal', estimatedCost: 10, chargeToCustomer: 40,
+    }],
+    ['Arbeit im Haus mit einer Werkstatt vom Umschalten', {
+      repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'Umschalten 2', repairType: 'internal',
+      workshopSupplierId: 'sup-1', estimatedCost: 25, chargeToCustomer: 60,
+    }],
+  ];
+  let k = 720;
+  for (const [was, form] of faelle) {
+    const bild: Array<ReturnType<typeof bildDerReparatur> & { lager: string; zeilen: number }> = [];
+    for (const weg of ['lokal', 'fern'] as const) {
+      const db = freshDb();
+      let id = '';
+      if (weg === 'lokal') {
+        id = (await house.createRepairOnPrimary(form as never)).id;
+      } else {
+        k += 1;
+        const out = await cmd.runRepairCreate(deps(db), identity(String(k), 'repairs.create'), rules.repairCreateBody(form as never, []));
+        id = val<{ repairId: string }>(out).repairId;
+      }
+      bild.push({ ...bildDerReparatur(db, id), lager: s(db, "SELECT stock_status FROM products WHERE id = 'p2'"), zeilen: n(db, 'SELECT COUNT(*) FROM repair_lines') });
+    }
+    const [l, f] = bild;
+    ok(unterschiede(l.zeile, f.zeile).length === 0 && l.arbeit === f.arbeit, `HIDDEN ${was}: lokal == fern`);
+    ok(f.zeile.product_id === null && f.zeile.lot_id === null && f.zeile.workshop_supplier_id === null
+      && f.lager === 'in_stock' && f.zeilen === 0, `HIDDEN ${was}: nichts Verstecktes geschrieben, kein Artikel angefasst`);
+  }
+}
+
+// Beträge: genau die vier Geldfelder — und kein Pauschalverbot für Zahlen.
+{
+  const db = freshDb();
+  for (const f of ['estimatedCost', 'internalCost', 'chargeToCustomer'] as const) {
+    let c = '';
+    try {
+      await house.createRepairOnPrimary({ repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'minus', repairType: 'external', [f]: -5 } as never);
+    } catch (e) { c = code(e); }
+    ok(c === 'INVALID_AMOUNT', `AMOUNT am Primary: ${f} < 0 beim Anlegen ist ein Nein (${c || 'DURCHGELASSEN'})`);
+    let t = false;
+    try { cmd.parseRepairCreate({ customerId: 'cust-1', issueDescription: 'x', [f]: -5 }); } catch { t = true; }
+    ok(t, `AMOUNT fern: ${f} < 0 beim Anlegen ist ein Nein`);
+  }
+  ok(n(db, 'SELECT COUNT(*) FROM repairs') === 0, 'AMOUNT …und keine Reparatur ist entstanden');
+  const r = await house.createRepairOnPrimary({
+    repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'plus', repairType: 'internal', estimatedCost: 10, chargeToCustomer: 30,
+  } as never);
+  for (const f of ['estimatedCost', 'actualCost', 'internalCost', 'chargeToCustomer'] as const) {
+    const rs = useRepairStore.getState();
+    rs.loadRepairs();
+    const seen = rs.getRepair(r.id) as unknown as Record<string, unknown>;
+    let c = '';
+    try { await house.updateRepairOnPrimary(r.id, { ...seen, [f]: -1 } as never); } catch (e) { c = code(e); }
+    ok(c === 'INVALID_AMOUNT', `AMOUNT am Primary: ${f} < 0 beim Speichern ist ein Nein (${c || 'DURCHGELASSEN'})`);
+    let t = false;
+    try { cmd.parseRepairUpdate({ id: r.id, expectedRevision: 1, [f]: -1 }); } catch { t = true; }
+    ok(t, `AMOUNT fern: ${f} < 0 beim Speichern ist ein Nein`);
+  }
+  ok(n(db, 'SELECT charge_to_customer FROM repairs WHERE id = ?', [r.id]) === 30, 'AMOUNT …und die Zeile ist unveraendert');
+  const nullen = await house.createRepairOnPrimary({
+    repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'null', repairType: 'internal', estimatedCost: 0, chargeToCustomer: 0,
+  } as never);
+  ok(!!nullen.id, 'AMOUNT 0 bleibt erlaubt („enter later" / kostenlose Reparatur)');
+  const merkmal = await house.createRepairOnPrimary({
+    repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'Merkmal', itemAttributes: { case_diameter_mm: -1 },
+  } as never);
+  ok(!!merkmal.id, 'AMOUNT ein Zahlenmerkmal der Kategorie faellt nicht unter die Betragsregel');
 }
 
 // ── §5 Eine Domäne: die Masken benutzen die Regeln, nicht eine Kopie ─────
@@ -736,3 +907,5 @@ console.log('CENTRAL_UI_R5C_REPAIR_INVOICE_SEMANTICS_AUDITED');
 console.log('CENTRAL_UI_R5C_SHARED_REPAIR_DOMAIN_PROVED');
 console.log('CENTRAL_UI_R5C_REPAIR_ATOMICITY_PROVED');
 console.log('CENTRAL_UI_R5C_REPAIR_INPUT_AUTHORITY_PROVED');
+console.log('CENTRAL_UI_R5C_INVOICE_DESCRIPTION_CONTRACT_PINNED');
+console.log('CENTRAL_UI_R5C_AMOUNT_SIGN_CONTRACT_PINNED');

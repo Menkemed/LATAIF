@@ -1207,6 +1207,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     if (opts.taxScheme !== undefined && !(REPAIR_TAX_SCHEMES as readonly string[]).includes(opts.taxScheme)) {
       throw new RepairActionRejected('INVALID_TAX_SCHEME', `Unknown tax scheme: ${String(opts.taxScheme)}.`);
     }
+    // R5C FINAL — die Dialogwahl gibt es nur an der Detailseite, fuer genau EINE Reparatur, und die
+    // Nummernart nur zusammen mit dem Steuerdialog. Alles andere ist keine Handlung des Hauses.
+    const ausDemDialog = opts.taxScheme !== undefined;
+    if (!ausDemDialog && opts.specialMark === true) {
+      throw new RepairActionRejected('DIALOG_INCOMPLETE', 'The number type is chosen together with the tax scheme.');
+    }
+    if (ausDemDialog && reps.length !== 1) {
+      throw new RepairActionRejected('DIALOG_IS_SINGLE', 'The tax and number dialogs belong to a single repair invoice.');
+    }
     // v0.7.6 (Detailseite) — das im Dialog bestaetigte Schema wird an der Reparatur gespeichert,
     // damit nachfolgende Ansichten konsistent sind. Ohne Wahl gilt das gespeicherte je Reparatur.
     if (opts.taxScheme) {
@@ -1247,12 +1256,12 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       };
     });
 
-    // R5C — der Vermerk wie bisher je Weg: eine Reparatur wie die Detailseite, mehrere gesammelt.
-    // Die Nummernart (`specialMark`) waehlt nur der Dialog der Detailseite.
+    // R5C FINAL — der Vermerk je Handlung wie vor R5C: Detailseite (Dialog) oder Liste (Sammelvermerk,
+    // auch fuer das Kuerzel mit einer Reparatur). Die Nummernart waehlt nur der Dialog der Detailseite.
     const invoice = useInvoiceStore.getState().createDirectInvoice(
       customerId,
       lines,
-      repairInvoiceNotes(reps),
+      repairInvoiceNotes(reps, ausDemDialog),
       undefined,
       'repair',
       undefined,

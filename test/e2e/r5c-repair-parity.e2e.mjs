@@ -418,6 +418,47 @@ async function bearbeiten(c) {
   const schlecht = r.filter((x) => x !== 'OK');
   return schlecht.length ? 'FELD:' + schlecht.join(',') : 'OK';
 }
+/** Ein Knopf innerhalb einer Gruppe mit Überschrift (z. B. „CUSTOMER PAID WITH"). */
+const inGruppe = (c, titel, text) => c.ev(
+  `const t=[...document.querySelectorAll('span')].find(x=>x.textContent.trim()===${S(titel)}); if(!t) return 'NO-GRUPPE:'+${S(titel)};`
+  + `const b=[...t.parentElement.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(text)}); if(!b) return 'NO:'+${S(text)};`
+  + `b.click(); return 'OK';`);
+/** R5C FINAL — erst sichtbar Werte setzen, dann den Modus wechseln: „Own Item" und „Internal". */
+async function umschaltMaske(c, productId, issue) {
+  if (await neueReparatur(c) !== 'OK') return 'KEINE-MASKE';
+  const r = [];
+  await click(c, '[data-ss-trigger="Search clients by name, company, phone..."]'); await sleep(500);
+  await click(c, '[data-ss-option="r5c-kunde"]'); await sleep(300);
+  r.push(await clickText(c, WATCH)); await sleep(400);
+  r.push(await setByLabel(c, 'BRAND', 'Cartier'));
+  r.push(await setByLabel(c, 'NAME / MODEL', 'Tank'));
+  r.push(await setByLabel(c, 'SERIAL NUMBER', 'STALE-1'));
+  r.push(await clickText(c, 'Steel'));
+  r.push(await setByLabel(c, 'ITEM DESCRIPTION (OPTIONAL)', 'veraltet'));
+  r.push(await clickText(c, '0% (no VAT)'));
+  r.push(await clickText(c, 'External')); await sleep(300);
+  await click(c, '[data-ss-trigger="Pick: In-house OR a workshop / goldsmith"]'); await sleep(500);
+  await click(c, '[data-ss-option="r5c-werkstatt"]'); await sleep(300);
+  r.push(await c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.firstElementChild&&x.firstElementChild.textContent.trim()==='Own Item'); if(!b) return 'NO-OWN'; b.click(); return 'OK';`));
+  await sleep(400);
+  await click(c, '[data-ss-trigger="Search by brand, name, SKU, reference, attributes..."]'); await sleep(500);
+  await click(c, `[data-ss-option="${productId}"]`); await sleep(600);
+  r.push(await clickText(c, 'Internal')); await sleep(300);
+  r.push(await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue));
+  const schlecht = r.filter((x) => x !== 'OK');
+  return schlecht.length ? 'FELD:' + schlecht.join(',') : 'OK';
+}
+/** R5C FINAL — an einer bestehenden Reparatur nur den Zahlweg des Kunden wechseln und speichern. */
+async function zahlweg(c, weg) {
+  if (!(await warteBis(c, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Edit')", 30000))) return 'KEIN-EDIT';
+  if (await clickText(c, 'Edit') !== 'OK') return 'KEIN-EDIT';
+  if (!(await warteBis(c, "document.querySelector('[data-repair-save]')", 15000))) return 'KEINE-MASKE';
+  const g = await inGruppe(c, 'CUSTOMER PAID WITH', weg);
+  if (g !== 'OK') return g;
+  await sleep(300);
+  await click(c, '[data-repair-save]');
+  return (await warteBis(c, "!document.querySelector('[data-repair-save]')", 45000)) ? 'OK' : 'NICHT-GESPEICHERT:' + (await fehlerAnzeige(c));
+}
 /** Eine Handlung in der Zeile einer Reparatur der Liste. */
 const inZeile = (c, nr, was) => c.ev(
   `const row=[...document.querySelectorAll('div.cursor-pointer')].find(d=>d.style&&d.style.gridTemplateColumns&&d.textContent.includes(${S(nr)}));`
@@ -636,6 +677,27 @@ try {
     ok(!!pEigen && repNorm(pEigen, ['product_id', 'lot_id', 'item_reference']) === repNorm(pc2Eigen, ['product_id', 'lot_id', 'item_reference']),
       `OWN-PARITAET Zeile: Primary-Maske == PC2${pEigen ? '' : ' (keine Zeile)'}`);
     ok(dbQ(BIZ_DB, "SELECT stock_status FROM products WHERE id = 'r5c-own-b'")[0]?.stock_status === 'in_repair', 'OWN-PARITAET …und derselbe Bestandsstatus');
+
+    // R5C FINAL — sichtbar gesetzte Werte, dann ein anderer Modus, dann speichern: auf BEIDEN Rechnern.
+    for (const [c, wer, pid, issue] of [[client, 'PC2', 'r5c-own-a', 'R5C PC2 Umschalten'], [primary, 'Primary', 'r5c-own-b', 'R5C Primary Umschalten']]) {
+      const m = await umschaltMaske(c, pid, issue);
+      ok(m === 'OK', `HIDDEN (${wer}) Kundenreparatur mit Werten, dann „Own Item" und „Internal" (${m})`);
+      await click(c, '[data-create-repair]');
+      ok(await warteBis(c, "!document.querySelector('[data-create-repair]')", 45000), `HIDDEN (${wer}) gespeichert (Hinweis: ${String(await fehlerAnzeige(c)).slice(0, 160) || 'keiner'})`);
+    }
+    const u1 = (await warteAufZeile('R5C PC2 Umschalten'))[0] || {};
+    const u2 = (await warteAufZeile('R5C Primary Umschalten'))[0] || {};
+    const cu = (await buchungen(client)).filter((x) => x.op === 'repairs.create').pop()?.payload || {};
+    ok(!['customerId', 'itemSerial', 'itemDescription', 'itemAttributes', 'taxScheme', 'workshopSupplierId', 'chargeToCustomer'].some((k) => k in cu),
+      `HIDDEN der Auftrag traegt keinen versteckten Wert (${Object.keys(cu).join(',')})`);
+    ok(u1.repair_scope === 'OWN' && u1.item_serial === null && u1.item_description === null && u1.item_attributes === '{}'
+      && u1.tax_scheme === 'VAT_10' && u1.workshop_supplier_id === null && u1.charge_to_customer === null && u1.customer_id === `sys-own-shop-${HAUS}`,
+      `HIDDEN nichts Verstecktes steht in der Zeile (${S({ s: u1.item_serial, d: u1.item_description, a: u1.item_attributes, t: u1.tax_scheme, w: u1.workshop_supplier_id })})`);
+    ok(u1.item_brand === 'Omega' && u1.item_model === 'R5C Eigen', 'HIDDEN die Artikelangaben sind die des gewaehlten Artikels, nicht die getippten');
+    ok(Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ?', [u1.id ?? ''])[0]?.n) === 0,
+      'HIDDEN keine Arbeitszeile fuer eine versteckte Werkstatt');
+    ok(!!u2.id && repNorm(u1, ['product_id', 'lot_id', 'item_reference']) === repNorm(u2, ['product_id', 'lot_id', 'item_reference']),
+      'HIDDEN Primary-Maske == PC2');
     ok((await treffer(client)).length === 0, 'LOKAL kein Griff zur lokalen Datenbank');
   }
 
@@ -693,6 +755,32 @@ try {
     ok(ausgaben(pKunde?.id) === ausgaben(pc2Kunde?.id), `EDIT-PARITAET dieselben Ausgaben (Werkstatt, Kartengebuehr) (${ausgaben(pKunde?.id)})`);
     ok(zahlungsbuchung(pKunde?.id) === zahlungsbuchung(pc2Kunde?.id) && zahlungsbuchung(pc2Kunde?.id) !== '[]',
       `EDIT-PARITAET dieselbe Buchung der Kundenzahlung (${zahlungsbuchung(pc2Kunde?.id)})`);
+
+    // R5C FINAL — ausgeblendetes Feld beim Ändern: Karte (Amex) → Bar → Karte. Die Kartenart geht nur
+    // durch die sichtbare Handlung (Bar), und die alte kommt beim Zurückwechseln nicht wieder.
+    for (const [c, wer] of [[client, 'PC2'], [primary, 'Primary']]) {
+      const g = await zahlweg(c, 'Cash');
+      ok(g === 'OK', `HIDDEN-EDIT (${wer}) Karte → Bar gespeichert (${g})`);
+    }
+    await warteAuf(() => dbQ(BIZ_DB, 'SELECT customer_paid_from FROM repairs WHERE id = ?', [pKunde?.id])[0]?.customer_paid_from === 'cash');
+    const b1 = dbQ(BIZ_DB, 'SELECT customer_paid_from, customer_card_brand, customer_payment_method FROM repairs WHERE id = ?', [pc2Kunde?.id])[0] || {};
+    ok(b1.customer_paid_from === 'cash' && b1.customer_card_brand === null && b1.customer_payment_method === 'cash',
+      `HIDDEN-EDIT Bar: keine Kartenart mehr, die Zahlung ist bar umgebucht (${S(b1)})`);
+    for (const [c, wer] of [[client, 'PC2'], [primary, 'Primary']]) {
+      const g = await zahlweg(c, 'Card');
+      ok(g === 'OK', `HIDDEN-EDIT (${wer}) Bar → Karte gespeichert (${g})`);
+    }
+    await warteAuf(() => dbQ(BIZ_DB, 'SELECT customer_paid_from FROM repairs WHERE id = ?', [pKunde?.id])[0]?.customer_paid_from === 'card');
+    const b2 = dbQ(BIZ_DB, 'SELECT customer_paid_from, customer_card_brand FROM repairs WHERE id = ?', [pc2Kunde?.id])[0] || {};
+    ok(b2.customer_paid_from === 'card' && b2.customer_card_brand === 'normal',
+      `HIDDEN-EDIT zurueck auf Karte: es gilt die angezeigte Kartenart (Normal), nicht die alte (Amex) (${S(b2)})`);
+    const letzte = (await buchungen(client)).filter((x) => x.op === 'repairs.update').pop()?.payload || {};
+    ok(letzte.customerPaidFrom === 'card' && letzte.customerCardBrand === 'normal', `HIDDEN-EDIT …und genau das reist mit (${S(letzte)})`);
+    const zc = dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE id = ?', [pc2Kunde?.id])[0] || {};
+    const zq = dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE id = ?', [pKunde?.id])[0] || {};
+    ok(repNorm(zq) === repNorm(zc), `HIDDEN-EDIT Primary-Maske == PC2 (Zeile)${repNorm(zq) !== repNorm(zc) ? ` (${repNorm(zq)} / ${repNorm(zc)})` : ''}`);
+    ok(ausgaben(pKunde?.id) === ausgaben(pc2Kunde?.id) && zahlungsbuchung(pKunde?.id) === zahlungsbuchung(pc2Kunde?.id),
+      `HIDDEN-EDIT …dieselben Kartengebuehren und dieselbe Zahlungsbuchung (${ausgaben(pc2Kunde?.id)})`);
     ok((await treffer(client)).length === 0, 'LOKAL kein Griff zur lokalen Datenbank');
   }
 
@@ -817,7 +905,8 @@ try {
     await spuelen(primary);
     const r6 = rechnungVon('r5c-rep-6');
     ok(!!r6 && Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM invoices')[0]?.n) === invVorher + 1, 'WIEDERHOLT genau EINE Rechnung');
-    ok(/^Repair Service · R5C-0006/.test(String(dbQ(BIZ_DB, 'SELECT notes FROM invoices WHERE id = ?', [r6])[0]?.notes)), 'WIEDERHOLT …fuer genau diese Reparatur');
+    ok(/^Combined Repair Service · R5C-0006$/.test(String(dbQ(BIZ_DB, 'SELECT notes FROM invoices WHERE id = ?', [r6])[0]?.notes)),
+      'WIEDERHOLT …fuer genau diese Reparatur, mit dem Vermerk der Liste (das Kuerzel wie vor R5C)');
   }
 
   // ── Der Client besitzt weiterhin nichts ────────────────────────────────
@@ -846,3 +935,4 @@ if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1);
 console.log('CENTRAL_UI_R5C_REPAIR_CREATE_RUNTIME_PROVED');
 console.log('CENTRAL_UI_R5C_REPAIR_UPDATE_RUNTIME_PROVED');
 console.log('CENTRAL_UI_R5C_REPAIR_INVOICE_RUNTIME_PROVED');
+console.log('CENTRAL_UI_R5C_HIDDEN_FIELD_SEMANTICS_PROVED');

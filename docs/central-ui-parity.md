@@ -1604,36 +1604,63 @@ Registry 107 · Matrix 24 / 0 / 14 / 2
   die keine Maske anbietet.
 - **Ändern:** elf Felder der „Save"-Maske fehlten (Zahlwege, Kartenart, Kategorie, Merkmale, Referenz,
   Beschreibung, Problem, Fotos …); die Matrix nannte sechs.
-- **Abrechnen:** drei Wege, drei Regeln — die Liste nur „fertig", die Detailseite jeder Status mit einer
-  eigenen Kopie der Rechnungslogik, das Kürzel zeigte „abgeholt" und der Store lehnte es ab. Der
-  Fernbefehl kannte nur genau eine Reparatur.
+- **Abrechnen:** der Fernbefehl kannte nur genau eine Reparatur; die Detailseite hatte eine eigene Kopie der
+  Rechnungslogik mit zwei Schreibvorgängen ohne Klammer.
 
 ### Lösung — eine Regelstelle, ein Anschluss je Seite, keine neue Buchung
 
 - `core/repairs/repair-rules` (rein, ohne Datenbank): Pflichtfelder, OWN-Regel, `normalizeRepairCreate` /
   `planRepairCreate`, `buildRepairEditPatch` (eigene Kosten, Marge, Kartenart), `repairInvoiceBlocker`,
-  die Rümpfe des zweiten Rechners. Der Wortschatz steht als Wert in `types.ts` (`REPAIR_TYPES`,
-  `REPAIR_TAX_SCHEMES`, `REPAIR_CUSTOMER_PAID_FROM`, `REPAIR_INTERNAL_PAID_FROM`); Masken und Fernbefehle lesen ihn.
+  `repairInvoiceNotes`, die Rümpfe des zweiten Rechners. Der Wortschatz steht als Wert in `types.ts`.
 - `core/repairs/repair-house`: der Primary-Anschluss aller drei Handlungen in EINER Klammer (exklusiv,
-  Ledger-Transaktion, danach durabel). Vorher schrieb er ohne Klammer.
+  Ledger-Transaktion, danach durabel).
 - Erweitert, nicht neu: `repairs.create` (OWN, alle Felder, Fotos über die vorhandene Zwischenablage),
   `repairs.update` (alle Felder; Fotos als `{ keep }` / `{ stagingId }`), `repairs.create_invoice` (eine
-  oder mehrere Reparaturen desselben Kunden, jede mit ihrer Fassung, dazu die Wahl der Dialoge).
+  oder mehrere Reparaturen desselben Kunden, jede mit ihrer Fassung; die Dialogwahl nur bei genau einer).
 
-### Bewusste Änderungen am Primary
+### R5C FINAL — die Verträge des Primary, einzeln geprüft
 
-1. „Abrechenbar" heißt überall: fertig oder abgeholt. Die Detailseite zeigt den Knopf erst ab „fertig";
-   Liste und Store rechnen „abgeholt" jetzt wirklich ab.
-2. Die Einzelrechnung aus der Liste trägt den Vermerk der Detailseite (`Repair Service · Nr · Problem`).
-3. Verborgene, liegengebliebene Maskenfelder werden nicht mehr gespeichert (eigene Ware: Kunde, Preis,
-   Steuer, Artikelangaben; Arbeit im Haus: Werkstatt).
-4. Texte werden getrimmt, leere Texte sind NULL (das Problem bleibt `''`); negative Beträge sind ein Nein.
-5. „Save" schreibt `externalVendor` und `taxScheme` nicht mehr mit — die Maske hat dafür kein Feld.
+**Abrechenbar — OFFEN, Geschäftsentscheidung.** Vor R5C galten drei Regeln nebeneinander:
+
+| Weg | sichtbar | erzeugt wirklich |
+|---|---|---|
+| Store, Listenauswahl, Fernbefehl (C3H-Test „GATE") | Auswahl nur bei „fertig" | nur „fertig" |
+| Kürzel je Listenzeile (seit 6e8048b) | „fertig" oder „abgeholt" (Kommentar: nach Abholung fakturierbar) | nur „fertig" — bei „abgeholt" Fehlermeldung des Stores |
+| Detailseite (seit dem Initial-Commit) | ohne Statusprüfung | in JEDEM Status (auch empfangen, in Arbeit, zurückgegeben) |
+
+R5C hat daraus EINE Regel „fertig oder abgeholt" gemacht. Das ist keine bestehende Regel des Hauses, sondern
+eine Entscheidung — sie ist nicht still übernommen: bis sie getroffen ist, wird R5C nicht gepusht.
+
+**Rechnungsvermerk — wieder wie vor R5C, je Handlung:** Detailseite (Einzelrechnung über die Dialoge)
+`Repair Service · Nr · Problem`; Liste — Auswahl UND Kürzel, beide ohne Dialog, das Kürzel rief schon immer die
+Sammelfunktion — `Combined Repair Service · Nr, …`. Die Dialogwahl (Steuer, Nummernart) gibt es nur bei genau einer
+Reparatur; eine Nummernart ohne Steuerdialog oder ein Dialog über mehrere ist keine Handlung des Hauses.
+
+**Ausgeblendete Felder — nur beim Anlegen, nur liegengebliebene Werte:**
+
+| Feld | sichtbar | ausgeblendet | vor R5C gespeichert | R5C |
+|---|---|---|---|---|
+| Kunde, Kundenpreis | Kundenreparatur | eigene Ware | nie (die Maske leerte beides beim Umschalten) | unverändert |
+| Artikel | eigene Ware | Kundenreparatur | nie (die Maske leerte ihn) | unverändert |
+| Los | eigene Ware mit >1 Los | Kundenreparatur | ja — `lot_id` an einer Kundenreparatur | nicht mehr |
+| Steuerwahl | Kundenreparatur | eigene Ware | der zuletzt gewählte Wert | Vorgabe des Hauses `VAT_10` |
+| Seriennummer, Beschreibung, Merkmale | Kundenreparatur | eigene Ware | ja, liegengeblieben | nicht mehr |
+| Marke, Modell, Referenz, Kategorie | Kundenreparatur | eigene Ware (vom Artikel) | vom Artikel beim Auswählen | vom Artikel, frisch gelesen |
+| Werkstatt | Fremd-/Mischarbeit | Arbeit im Haus | ja, ohne Arbeitszeile | nicht mehr |
+
+Beim **Ändern** löscht R5C nichts, was gespeichert ist: die Kartenart geht nur, wenn der Mensch den Zahlweg sichtbar
+wechselt (vor R5C genauso), und sie kommt beim Zurückwechseln nicht wieder; `externalVendor` und die Steuer, für die die
+Maske kein Feld hat, bleiben unberührt — vor R5C schrieb „Save" sie zurück, `MARGIN` dabei still als `VAT_10`.
+
+**Beträge:** geprüft werden genau `estimatedCost`, `actualCost`, `internalCost`, `chargeToCustomer` (≥ 0; 0 bleibt
+erlaubt). Das ist der Vertrag des Fernbefehls seit C3F (`money()`); die Maske des Primary prüfte nichts. Die Spalten sind
+Voranschlag, Kosten und Preis; jeder Verbraucher bucht nur Werte > 0 (Kundenzahlung, Rechnung, Werkstattgebühr,
+Arbeitszeile), eine CHECK-Regel gibt es nicht, einen negativen Fachfall auch nicht. Zahlenmerkmale einer Kategorie
+sind keine Beträge und bleiben ungeprüft.
 
 ```
-Unit  r5c/repair-parity 200/0 (lokal == fern für Anlegen/Ändern/Abrechnen inkl. Buchungen,
-      Fehlerinjektion, Autorität) · Nachbarn und Matrixgates grün
-E2E   r5c-repair-parity 99/0 ×3 (Kunde + eigene Ware, Ändern mit Zahlwegen/Foto, Sammel- und Einzelrechnung, verlorene Antworten, Fehler + Wiederholung, Primary == PC2)
+Unit  r5c/repair-parity 248/0 (lokal == fern inkl. Buchungen, Fehlerinjektion, Autorität, die vier Verträge)
+E2E   r5c-repair-parity 117/0 (dazu Umschalten in der Maske und Karte → Bar → Karte, Primary == PC2)
 Registry 107 · Matrix 27 / 0 / 11 / 2
 ```
 

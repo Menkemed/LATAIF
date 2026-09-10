@@ -508,15 +508,26 @@ export function canInvoiceRepair(r: RepairInvoiceCandidate): boolean {
   return repairInvoiceBlocker(r) === null;
 }
 
-/** Die Wahl der beiden Dialoge der Detailseite (Steuer, Nummernart). Die Liste fragt nicht. */
+/**
+ * Die Wahl der beiden Dialoge der Detailseite (Steuer, Nummernart). Es gibt sie NUR dort, und die
+ * Detailseite rechnet genau EINE Reparatur ab; die Liste (Auswahl und Kürzel) fragt nicht.
+ */
 export interface RepairInvoiceOptions {
   taxScheme?: RepairTaxScheme;
   specialMark?: boolean;
 }
 
-/** Der Vermerk auf der Rechnung — bei einer Reparatur wie die Detailseite, bei mehreren gesammelt. */
-export function repairInvoiceNotes(reps: ReadonlyArray<{ repairNumber: string; issueDescription?: string }>): string {
-  if (reps.length === 1) {
+/**
+ * R5C FINAL — der Vermerk auf der Rechnung, je Handlung genau der, den das Haus vor R5C schrieb:
+ *
+ *  • Detailseite (Einzelrechnung über die Dialoge): `Repair Service · Nr · Problem`;
+ *  • Liste — die Auswahl UND das Kürzel je Zeile, beide ohne Dialog: `Combined Repair Service · Nr, …`,
+ *    auch bei einer einzigen Reparatur (das Kürzel rief schon immer die Sammelfunktion).
+ */
+export function repairInvoiceNotes(
+  reps: ReadonlyArray<{ repairNumber: string; issueDescription?: string }>, ausDemDialog: boolean,
+): string {
+  if (ausDemDialog) {
     const r = reps[0];
     return `Repair Service · ${r.repairNumber}${r.issueDescription ? ' · ' + r.issueDescription : ''}`;
   }
