@@ -480,7 +480,12 @@ export default function App() {
               reason="Settings change this machine: data location, backups, updates, users and maintenance. They only work where the database lives, so open them on the main computer."
             />
           ) : <SettingsPage />} />
-          <Route path="/import" element={<ImportPage />} />
+          {/* CENTRAL-UI-PARITY R6B — der Excel-Import legt Artikel an und sichert vorher die
+              Datenbank DIESES Rechners. Ohne eigene Datenbank gibt es beides nicht: die Route
+              sagt es, statt eine lokale Sicherung zu versuchen und „0 imported" zu melden. */}
+          <Route path="/import" element={clientMode ? (
+            <PrimaryOnlyNotice title="Import" reason="The Excel import creates items and backs up the database first. It runs where the database lives, so open it on the main computer." />
+          ) : <ImportPage />} />
           <Route path="/ledger-debug" element={clientMode ? (
             <PrimaryOnlyNotice title="Ledger debug" reason="This diagnostic view reads raw ledger rows from the database. Open it on the main computer." />
           ) : <LedgerDebugPage />} />

@@ -7,6 +7,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Trash2, Factory, ArrowDownCircle, ArrowUpCircle } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import { Modal } from '@/components/ui/Modal';
@@ -67,7 +68,7 @@ export function ProductionDetail() {
       actions={
         <div style={{ display: 'flex', gap: 8 }}>
           <Button variant="ghost" icon={<ArrowLeft size={14} />} onClick={() => navigate('/production')}>Back</Button>
-          <Button variant="danger" icon={<Trash2 size={14} />} onClick={() => setConfirmDelete(true)}>Delete Record</Button>
+          <Button variant="danger" icon={<Trash2 size={14} />} {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>Delete Record</Button>
         </div>
       }
     >
@@ -187,6 +188,7 @@ export function ProductionDetail() {
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
           <Button variant="danger" onClick={() => {
+            if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
             if (record) deleteRecord(record.id);
             navigate('/production');
           }}>Delete</Button>

@@ -19,6 +19,8 @@ import { exportNbrVatReport, invoiceFinalizationDate } from '@/core/tax/nbr-expo
 import { matchesDeep } from '@/core/utils/deep-search';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedRead } from '@/core/data/shared-read';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 import { invoiceListExtrasFor } from '@/core/data/page-reads';
 
 function fmtDate(iso?: string): string {
@@ -56,6 +58,8 @@ const STATUS_STYLE: Record<DisplayStatus, { fg: string; bg: string }> = {
 export function InvoiceList() {
   const navigate = useNavigate();
   const { invoices, loadInvoices, recordPayment } = useInvoiceStore();
+  // CENTRAL-UI-PARITY R6B — „Pay" in der Liste ist dieselbe Buchung wie auf der Rechnung selbst.
+  const w = useSharedWrites();
   const { loadReturns: loadSalesReturns, getInvoiceReturnSummary } = useSalesReturnStore();
   const { offers, loadOffers } = useOfferStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -238,7 +242,11 @@ export function InvoiceList() {
     navigate(`/offers/${offerId}`);
   }
 
-  function handlePayment() {
+  // CENTRAL-UI-PARITY R6B — beide Einstiege dieser Liste (Zahlung, und die Nummernwahl, wenn sie
+  // die Rechnung schliesst) fahren `invoices.record_payment`: am Primary dieselbe Domaenenfunktion
+  // wie bisher, fern dieselbe Buchung wie auf der Rechnungsseite. Der Sonderkreis ist kein Feld der
+  // Fernbuchung — am Client ein ehrliches Nein, nie still der Normalkreis.
+  async function handlePayment() {
     if (!showPayment || payAmount <= 0) return;
     const inv = invoices.find(i => i.id === showPayment);
     if (!inv) return;
@@ -247,16 +255,28 @@ export function InvoiceList() {
       setPendingFinalPayment({ invoiceId: showPayment, amount: payAmount, method: payMethod });
       return;
     }
-    recordPayment(showPayment, payAmount, payMethod);
+    const invoiceId = showPayment;
+    const amount = payAmount;
+    const method = payMethod;
+    if (!await w.ok('invoices.record_payment', {
+      local: () => { recordPayment(invoiceId, amount, method); return {}; },
+      remote: () => ({ invoiceId, amount, method }),
+    })) return;
+    loadInvoices();
     setShowPayment(null);
     setPayAmount(0);
   }
 
-  function executeFinalPayment(specialMark: boolean) {
+  async function executeFinalPayment(specialMark: boolean) {
     const p = pendingFinalPayment;
     setPendingFinalPayment(null);
     if (!p) return;
-    recordPayment(p.invoiceId, p.amount, p.method, undefined, specialMark);
+    if (w.remote && specialMark) { alert(fehlertext(nichtAmClient('the special number circle'))); return; }
+    if (!await w.ok('invoices.record_payment', {
+      local: () => { recordPayment(p.invoiceId, p.amount, p.method, undefined, specialMark); return {}; },
+      remote: () => ({ invoiceId: p.invoiceId, amount: p.amount, method: p.method }),
+    })) return;
+    loadInvoices();
     setShowPayment(null);
     setPayAmount(0);
   }
@@ -427,7 +447,7 @@ export function InvoiceList() {
                 {displayStatus}
               </span>
               {isOpenPayment && (
-                <button onClick={(e) => { e.stopPropagation(); setShowPayment(inv.id); setPayAmount(remaining); }}
+                <button data-pay-invoice={inv.id} onClick={(e) => { e.stopPropagation(); w.clear(); setShowPayment(inv.id); setPayAmount(remaining); }}
                   className="cursor-pointer" style={{
                     padding: '3px 8px', fontSize: 10, border: '1px solid #16A34A',
                     color: '#16A34A', borderRadius: 4, background: 'none',
@@ -509,9 +529,10 @@ export function InvoiceList() {
               ))}
             </div>
           </div>
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowPayment(null)}>Cancel</Button>
-            <Button variant="primary" onClick={handlePayment}>Record Payment</Button>
+            <Button variant="primary" onClick={() => void handlePayment()} disabled={w.busy} data-invoice-list-pay>Record Payment</Button>
           </div>
         </div>
       </Modal>
@@ -601,7 +622,7 @@ export function InvoiceList() {
         })()}
         title="Final Number Type"
         onCancel={() => setPendingFinalPayment(null)}
-        onConfirm={executeFinalPayment}
+        onConfirm={(special) => { void executeFinalPayment(special); }}
       />
     </PageLayout>
   );

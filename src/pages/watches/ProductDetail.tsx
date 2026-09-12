@@ -14,6 +14,8 @@ import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useProductStore, type EditProductResult } from '@/stores/productStore';
 import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { confirmAiIdentificationInHouse } from '@/core/products/ai-confirm';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { updatePayload, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -45,13 +47,28 @@ export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/collection');
-  const { products, categories, loadProducts, loadCategories, updateProduct, editProductWithMedia, editProductTextDurably, deleteProduct, isSkuTaken, getProductLinks } = useProductStore();
+  const { products, categories, loadProducts, loadCategories, editProductWithMedia, editProductTextDurably, deleteProduct, isSkuTaken, getProductLinks } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
   const [editing, setEditing] = useState(false);
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
   const aendern = useSharedWrite<EditProductResult>('products.update');
+  // CENTRAL-UI-PARITY R6B — „KI-Identifikation bestätigen": eine eigene Absicht auf derselben
+  // Buchung (`products.update`, allein mit `aiConfirmedAt: true`). Die Zeit stempelt das Haus.
+  const bestaetigen = useSharedWrite<{ aiConfirmedAt: string }>('products.update');
+  const [aiFehler, setAiFehler] = useState('');
+  async function aiBestaetigen() {
+    if (!id) return;
+    setAiFehler('');
+    const r = await bestaetigen.save({
+      local: () => confirmAiIdentificationInHouse(id),
+      remote: () => ({ id, aiConfirmedAt: true }),
+      shape: (v) => ({ aiConfirmedAt: String(v.aiConfirmedAt ?? '') }),
+    });
+    if (r.kind !== 'ok') { setAiFehler(fehlertext(r)); return; }
+    loadProducts();
+  }
   // MEDIA-04A-3B2C2-R2: bump to force the resolver to re-resolve after a durable
   // edit save (new gallery in, old Object-URLs revoked once). Refs guard the
   // async save from applying UI updates onto a different/unmounted product.
@@ -474,6 +491,7 @@ export function ProductDetail() {
 
   function handleDelete() {
     if (!id) return;
+    if (blockDeleteOnClient()) return;
     try {
       deleteProduct(id);
       navigate('/collection');
@@ -853,10 +871,9 @@ export function ProductDetail() {
                       </span>
                     ) : (
                       <button
-                        onClick={() => {
-                          if (!id) return;
-                          updateProduct(id, { aiConfirmedAt: new Date().toISOString() } as Partial<Product>);
-                        }}
+                        data-ai-confirm
+                        disabled={bestaetigen.busy}
+                        onClick={() => { void aiBestaetigen(); }}
                         className="cursor-pointer transition-all"
                         title="Mark AI Identification as correct — used as positive example next time"
                         style={{
@@ -868,6 +885,9 @@ export function ProductDetail() {
                       >
                         ✓ Confirm AI Identification
                       </button>
+                    )}
+                    {aiFehler && (
+                      <div data-save-error style={{ fontSize: 11, color: '#AA6E6E', marginTop: 6 }}>{aiFehler}</div>
                     )}
                   </div>
                 )}
@@ -1516,7 +1536,7 @@ export function ProductDetail() {
 
             {editing && perm.canDeleteProducts && (
               <div className="flex gap-2" style={{ marginTop: 20 }}>
-                <Button variant="danger" onClick={() => setConfirmDelete(true)}>
+                <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>
                   <Trash2 size={14} /> Delete Item
                 </Button>
               </div>

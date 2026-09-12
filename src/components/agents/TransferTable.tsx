@@ -6,6 +6,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FileText } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
@@ -599,7 +600,8 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
               style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+              if (blockDeleteOnClient()) return;
               if (editTransfer && window.confirm(`Delete transfer ${editTransfer.transferNumber}?`)) {
                 deleteTransfer(editTransfer.id);
                 setEditTransfer(null);

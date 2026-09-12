@@ -29,6 +29,7 @@ import {
 import {
   latestStockChecks,
   recordStockCheck,
+  stockCheckAvailableHere,
   prepareNotes,
   stockCheckLabel,
   MAX_STOCK_CHECK_NOTES,
@@ -82,6 +83,10 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   // Fresh draft every time the modal opens: a stocktake is a session, not a stored document.
   useEffect(() => {
     if (!open) return;
+    // CENTRAL-UI-PARITY R6B — ohne eigene Datenbank beginnt hier KEIN Lauf: kein Arbeitsblatt, kein
+    // Verlauf aus dem Kern dieses Rechners (dort läge höchstens eine alte, falsche Datei). Bis R6D
+    // den Weg über den Primary baut, sagt die Maske es — und schreibt nichts.
+    if (!stockCheckAvailableHere()) return;               // the notice below says it; nothing is read or written
     // INVENTORY-SESSION — reopen where the operator stopped, even days later. The worksheet is the
     // truth about the RUN; the columns are rebuilt from it instead of starting blank.
     //
@@ -233,6 +238,11 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
 
   const save = async () => {
     if (saving) return;                                   // §F — a second click never starts a second run
+    // R6B — no stock check, no worksheet on a machine without its own database (see the open effect).
+    if (!stockCheckAvailableHere()) {
+      setMsg({ text: 'Inventory is only available on the main computer.', bad: true });
+      return;
+    }
     // `dirty` is derived from the draft, which only ever holds decided cards — the narrowing is
     // what tells the type system that, since SessionItemStatus also covers the parked state.
     const entries: Array<[string, DraftEntry]> = dirty
@@ -274,6 +284,9 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
     }
     // INVENTORY-SESSION — the worksheet is written for everything that actually landed, so reopening
     // shows the same three columns. A failed item stays OUT of it: its verdict was never observed.
+    // R6B — and a worksheet that could NOT be stored is said, not closed away: before, the dialog
+    // closed on "all items saved" and took the warning with it (a success that was only half one).
+    let sheetStored = true;
     try {
       const db = getDatabase() as unknown as InventorySessionDb;
       const nowIso = new Date().toISOString();
@@ -299,11 +312,13 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
         return next;
       });
     } catch {
+      sheetStored = false;
       setMsg({ text: 'Saved to the history, but the worksheet could not be stored — reopening may start blank.', bad: true });
     }
     setSaved(ok);
     setFailed(bad);
     setSaving(false);
+    if (!sheetStored) return;
     if (bad.size === 0) {
       onClose();
       return;
@@ -321,6 +336,12 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
   const [confirmFinish, setConfirmFinish] = useState(false);
   const finishInventory = async () => {
     if (saving) return;
+    // R6B — kein „finished" ohne Wirkung: ohne eigene Datenbank gibt es hier keinen Lauf zu beenden.
+    if (!stockCheckAvailableHere()) {
+      setMsg({ text: 'Inventory is only available on the main computer.', bad: true });
+      setConfirmFinish(false);
+      return;
+    }
     try {
       if (sessionId) {
         closeSession(getDatabase() as unknown as InventorySessionDb, sessionId, new Date().toISOString());
@@ -459,6 +480,9 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
           {column('Not available', notAvailables, 'not_available', '#AA6E6E')}
         </div>
 
+        {!stockCheckAvailableHere() && (
+          <div data-primary-only="inventory" className="text-xs mt-3 text-red-400">Inventory is only available on the main computer.</div>
+        )}
         {msg && <div className={`text-xs mt-3 ${msg.bad ? 'text-red-400' : 'text-emerald-400'}`}>{msg.text}</div>}
 
         <div className="flex items-center justify-between gap-2 mt-4">

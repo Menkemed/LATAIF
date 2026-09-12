@@ -53,6 +53,8 @@ import {
 } from './financial-commands';
 import type { OrderStatus, RepairStatus, RepairTaxScheme } from '@/core/models/types';
 
+import { consignmentReturnBlocker, consignmentReturnMessage } from '@/core/consignment/consignment-return';
+
 export const OP_ORDERS_UPDATE_STATUS = 'orders.update_status';
 export const OP_ORDERS_ADD_PAYMENT = 'orders.add_payment';
 export const OP_ORDERS_DELETE_PAYMENT = 'orders.delete_payment';
@@ -440,10 +442,9 @@ export function runMarkConsignmentReturned(deps: EngineDeps, identity: CommandId
     // Nur die UNVERKAUFTE Ware geht so zurück. Eine Rückgabe NACH dem Verkauf ist ein anderer
     // Vorgang mit Gutschrift und Storno (`markReturnedAfterSale`) — in C3G als Klasse C am
     // Primary geblieben, und daran ändert dieser Schnitt nichts.
-    if (s(con.status) !== 'active') {
-      throw new CommandRejected('CONSIGNMENT_NOT_ACTIVE',
-        `this consignment is "${s(con.status)}" — only an unsold one is handed back this way`);
-    }
+    // R6B — dieselbe Regel wie der lokale Weg aller drei Einstiege (core/consignment/consignment-return).
+    const nichtRueckgabe = consignmentReturnBlocker(con.status);
+    if (nichtRueckgabe) throw new CommandRejected(nichtRueckgabe, consignmentReturnMessage(con.status));
     assertRevision('consignments', req.consignmentId, req.expectedRevision, 'CONSIGNMENT_NOT_FOUND');
     useConsignmentStore.getState().loadConsignments();
     useConsignmentStore.getState().markReturned(req.consignmentId);

@@ -3,6 +3,7 @@ import { Copy, RefreshCw, Download, Send, Sparkles } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useCustomerMessageStore } from '@/stores/customerMessageStore';
+import { readsFromPrimary } from '@/core/data/primary-source';
 
 export type MessageType = 'follow_up' | 'repair_ready' | 'order_arrived' | 'promotion' | 'thank_you';
 
@@ -52,12 +53,21 @@ export function MessagePreviewModal({
 
   const waNumber = sanitizePhone(customerWhatsapp || customerPhone);
 
+  // CENTRAL-UI-PARITY R6B — kein Schein-Erfolg beim Protokoll. Kopieren und WhatsApp gehen immer;
+  // ob die Nachricht in der Kundenhistorie steht, wird GESAGT: auf einem Rechner ohne Datenbank gibt
+  // es dort (noch) keinen Eintrag, und ein gescheiterter Eintrag am Primary wird nicht verschwiegen.
+  const [logNote, setLogNote] = useState('');
   function log(channel: 'whatsapp' | 'ai_copy') {
     if (!customerId || !text.trim()) return;
-    logMessage({
+    if (readsFromPrimary()) {
+      setLogNote('Not added to the customer history — message logs are only recorded on the main computer.');
+      return;
+    }
+    const eintrag = logMessage({
       customerId, channel, body: text,
       kind: type, linkedEntityType, linkedEntityId,
     });
+    setLogNote(eintrag ? '' : 'The message could not be added to the customer history.');
   }
 
   async function generate(t: MessageType) {
@@ -84,7 +94,7 @@ export function MessagePreviewModal({
   useEffect(() => {
     if (open) {
       setType(initialType);
-      setText(''); setError(null); setCopied(false);
+      setText(''); setError(null); setCopied(false); setLogNote('');
       generate(initialType);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -222,6 +232,9 @@ export function MessagePreviewModal({
               <Send size={14} /> WhatsApp
             </Button>
           </div>
+          {logNote && (
+            <div data-message-log-note style={{ fontSize: 11, color: '#AA6E6E', marginTop: 8, textAlign: 'right' }}>{logNote}</div>
+          )}
         </div>
       </div>
     </Modal>

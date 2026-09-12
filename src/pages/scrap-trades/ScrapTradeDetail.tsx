@@ -5,6 +5,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Edit2, Ban, Trash2 } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Modal } from '@/components/ui/Modal';
 import { ScrapTradeForm } from './ScrapTradeForm';
 import { useScrapTradeStore, type ScrapTradeInput } from '@/stores/scrapTradeStore';
@@ -60,7 +61,7 @@ export function ScrapTradeDetail() {
             </>
           )}
           {isCancelled && (
-            <Button variant="danger" icon={<Trash2 size={14} />} onClick={() => setConfirmDelete(true)}>Delete</Button>
+            <Button variant="danger" icon={<Trash2 size={14} />} {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>Delete</Button>
           )}
         </div>
       }
@@ -99,6 +100,7 @@ export function ScrapTradeDetail() {
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20 }}>
             <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Keep Record</Button>
             <Button variant="danger" onClick={() => {
+              if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
               deleteTrade(trade.id);
               setConfirmDelete(false);
               navigate('/scrap-trades');

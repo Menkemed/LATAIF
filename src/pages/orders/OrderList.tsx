@@ -15,6 +15,8 @@ import type { OrderStatus, OrderPaymentStatus, OrderType } from '@/core/models/t
 import { deriveOrderPaymentStatus } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedRead } from '@/core/data/shared-read';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
 import { orderPaidTotalsFor } from '@/core/data/page-reads';
 
 function fmtDate(iso?: string): string {
@@ -67,6 +69,8 @@ export function OrderList() {
   const navigate = useNavigate();
   const { orders, loadOrders, getOrderIdsNeedingPurchase } = useOrderStore();
   const { addPayment } = useOrderPaymentStore();
+  // CENTRAL-UI-PARITY R6B — „Pay" in der Liste ist dieselbe Buchung wie auf dem Auftrag selbst.
+  const w = useSharedWrites();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { loadCategories, loadProducts, products } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -145,14 +149,21 @@ export function OrderList() {
 
   const activeCount = orders.filter(o => o.status !== 'completed' && o.status !== 'cancelled').length;
 
-  function handlePay() {
+  // CENTRAL-UI-PARITY R6B — am Primary dieselbe Domaenenfunktion wie bisher (Karten-Gebuehr und
+  // Guthaben rechnet `addPayment`), fern `orders.add_payment` mit der gesehenen Fassung des Auftrags.
+  async function handlePay() {
     if (!payOrderId || payAmount <= 0) return;
-    addPayment({
-      orderId: payOrderId,
-      amount: payAmount,
-      paidAt: new Date().toISOString().split('T')[0],
-      method: payMethod,
-    });
+    const orderId = payOrderId;
+    const amount = payAmount;
+    const method = payMethod;
+    const paidAt = new Date().toISOString().split('T')[0];
+    const fassung = orders.find(o => o.id === orderId)?.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('recording a deposit (no revision loaded)'))); return; }
+    if (!await w.ok('orders.add_payment', {
+      local: () => { addPayment({ orderId, amount, paidAt, method }); return {}; },
+      remote: () => ({ orderId, amount, method, expectedRevision: fassung, paidAt }),
+    })) return;
+    loadOrders();
     setPayOrderId(null);
     setPayAmount(0);
   }
@@ -302,7 +313,7 @@ export function OrderList() {
                 {PAYMENT_STATUS_LABELS[paymentStatus]}
               </span>
               {isOpenPayment && total > 0 && (
-                <button onClick={(e) => { e.stopPropagation(); setPayOrderId(order.id); setPayAmount(remaining); }}
+                <button data-pay-order={order.id} onClick={(e) => { e.stopPropagation(); w.clear(); setPayOrderId(order.id); setPayAmount(remaining); }}
                   className="cursor-pointer" style={{
                     padding: '3px 8px', fontSize: 10, border: '1px solid #16A34A',
                     color: '#16A34A', borderRadius: 4, background: 'none',
@@ -368,9 +379,10 @@ export function OrderList() {
               <option value="card">Card</option>
             </select>
           </div>
+          <WriteError text={w.fehler} />
           <div className="flex gap-2 justify-end" style={{ marginTop: 8 }}>
             <Button variant="ghost" onClick={() => setPayOrderId(null)}>Cancel</Button>
-            <Button variant="primary" onClick={handlePay}>Save Payment</Button>
+            <Button variant="primary" onClick={() => void handlePay()} disabled={w.busy} data-order-list-pay>Save Payment</Button>
           </div>
         </div>
       </Modal>

@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import { query } from '@/core/db/helpers';
 import { getDatabase, saveDatabase } from '@/core/db/database';
+import { readsFromPrimary } from '@/core/data/primary-source';
 import type { CountryCode } from './country-codes';
 
 const SETTING_KEY = 'contacts.custom_countries';
@@ -34,6 +35,10 @@ export const useCountryCodesStore = create<CountryCodesState>((set, get) => ({
   loaded: false,
 
   load: () => {
+    // CENTRAL-UI-PARITY R6B — auf einem Rechner ohne eigene Datenbank wird die Einstellungstabelle
+    // gar nicht erst gefragt (vorher: Griff ins Leere, abgefangen). Das Ergebnis ist dasselbe wie
+    // bisher — die eingebauten Vorwahlen; eigene Vorwahlen sind Hauskonfiguration am Primary.
+    if (readsFromPrimary()) { set({ customCountries: [], loaded: true }); return; }
     try {
       const rows = query(
         'SELECT value FROM settings WHERE branch_id = ? AND key = ?',

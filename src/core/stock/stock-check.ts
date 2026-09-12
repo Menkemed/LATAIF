@@ -11,6 +11,10 @@
 // path by construction.
 // ════════════════════════════════════════════════════════════════════════════
 
+// Die Weiche selbst, ohne Umweg: `client-mode` hat keine Abhängigkeiten, und dieses Modul muss
+// ohne Alias-Auflösung ladbar bleiben (test/stock/stock-check.test.ts lädt es direkt).
+import { isClientMode } from '../bridge/client-mode.ts';
+
 export type StockCheckStatus = 'available' | 'not_available';
 
 export interface StockCheck {
@@ -59,7 +63,23 @@ export function latestOf(checks: readonly StockCheck[]): StockCheck | null {
   return sortNewestFirst(checks)[0] ?? null;
 }
 
+/**
+ * CENTRAL-UI-PARITY R6B — der Stock-Check spricht mit dem Rust-Kern DIESES Rechners: dessen
+ * Konfig-Datenbank, dessen Geschäftsdatei. Auf einem Rechner ohne eigene Datenbank ist das die
+ * falsche Stelle — liegt dort zufällig noch eine alte `lataif.db`, entstünde eine zweite Wahrheit.
+ * Bis der Weg über den Primary gebaut ist (R6D), wird hier gar nichts aufgerufen: kein Lesen,
+ * kein Schreiben.
+ */
+export const STOCK_CHECK_PRIMARY_ONLY = 'STOCK_CHECK_PRIMARY_ONLY';
+
+export function stockCheckAvailableHere(): boolean {
+  return !isClientMode();
+}
+
 async function invoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
+  if (!stockCheckAvailableHere()) {
+    throw Object.assign(new Error('Stock checks are only available on the main computer.'), { code: STOCK_CHECK_PRIMARY_ONLY });
+  }
   const core = await import('@tauri-apps/api/core');
   return core.invoke(cmd, args) as Promise<T>;
 }

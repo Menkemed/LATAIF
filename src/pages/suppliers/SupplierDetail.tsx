@@ -6,6 +6,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import { KPICard } from '@/components/ui/KPICard';
@@ -226,6 +227,7 @@ export function SupplierDetail() {
 
   function handleDelete() {
     if (!id) return;
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     try {
       deleteSupplier(id);
       setConfirmDelete(false);
@@ -719,7 +721,7 @@ export function SupplierDetail() {
             <Button variant="secondary" onClick={handleToggleActive}>
               {supplier.active ? 'Deactivate Supplier' : 'Reactivate Supplier'}
             </Button>
-            <Button variant="danger" onClick={() => setConfirmDelete(true)}>
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>
               <Trash2 size={14} /> Delete Supplier
             </Button>
           </div>

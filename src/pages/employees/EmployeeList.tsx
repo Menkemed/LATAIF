@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Users, Trash2, Pause, Play } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -81,6 +82,7 @@ export function EmployeeList() {
 
   function handleDelete() {
     if (!confirmDelete) return;
+    if (blockDeleteOnClient()) { setConfirmDelete(null); return; }
     try {
       deleteEmployee(confirmDelete);
       setConfirmDelete(null);
@@ -201,7 +203,7 @@ export function EmployeeList() {
                       <Play size={12} />
                     </button>
                   )}
-                  <button onClick={(ev) => { ev.stopPropagation(); setConfirmDelete(e.id); }}
+                  <button {...primaryOnlyDeleteProps()} onClick={(ev) => { ev.stopPropagation(); setConfirmDelete(e.id); }}
                     className="cursor-pointer"
                     style={{ background: 'none', border: 'none', color: '#6B7280' }}>
                     <Trash2 size={14} />

@@ -2130,24 +2130,24 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | UI-Handlung | Ort | Laufweg am Primary | PC2 heute | Kat. | vorh. Buchung | nächster Schritt | Domäne · Risiko |
 |---|---|---|---|---|---|---|---|
 | Rechnung anlegen mit Zahlung > 0 | pages/invoices/InvoiceCreate:907 | createDirectInvoice + recordPayment | NAC | A | invoices.create + record_payment (zwei Schritte, nicht atomar) | atomare Folge „anlegen + zahlen“ | Verkauf/Geld · hoch |
-| Rechnung ändern (Edit-Seite) | InvoiceCreate:907 (Edit-Modus) | invoiceStore.editInvoice (Zeilen, Kopf, Zahlungsdelta, Grund) | NAC | B | invoices.update (ohne Zahlungsdelta) | anschließen; Zahlungsdelta getrennt bewerten | Verkauf · mittel |
+| Rechnung ändern (Edit-Seite) | InvoiceCreate:907 (Edit-Modus) | invoiceStore.editInvoice (Zeilen, Kopf, Zahlungsdelta, Grund) | **angeschlossen (R6B)** | B | invoices.update (ohne Zahlungsdelta) | **geschlossen (R6B)** | Verkauf · mittel |
 | Kopf speichern | pages/invoices/InvoiceDetail:649 | updateInvoice | UNERR (`editing` wird nie true) | D | — | toter Zweig | — |
 | Status-Override | InvoiceDetail:766 | updateInvoice({status}) | UNERR | D | — | toter Zweig | — |
 | Zeilen bearbeiten (Detail) | InvoiceDetail:784→1499 | editInvoice | UNERR | D | invoices.update | toter Zweig | — |
 | Butterfly-Schalter | InvoiceDetail:657 | updateInvoice({butterfly}) | TOT | A | — | Feld-Buchung | Verkauf · niedrig |
 | Schlusszahlung mit Sondernummer | InvoiceDetail:2095 | recordPayment(…, specialMark) | NAC | A | — (record_payment ohne specialMark) | Sondernummer-Vertrag | Nummernkreis · hoch |
-| „Mark as Picked Up“ | InvoiceDetail:669 | repairStore.updateStatus('picked_up') je Reparatur | TOT (Alert) | B | repairs.update_status | anschließen | Reparatur · niedrig |
+| „Mark as Picked Up“ | InvoiceDetail:669 | repairStore.updateStatus('picked_up') je Reparatur | **angeschlossen (R6B)** | B | repairs.update_status | **geschlossen (R6B)** | Reparatur · niedrig |
 | Retoure stornieren | InvoiceDetail:1345→1858 | salesReturnStore.cancelReturn | TOT (Alert) | A | — | neue Buchung | Retoure/Geld · hoch |
-| Rechnung löschen | InvoiceDetail:697→1671 | invoiceStore.deleteInvoice | TOT | E | — | auf PC2 als Primary-only sperren | Löschen |
-| „Pay“ in der Rechnungsliste | pages/invoices/InvoiceList:430→514 | recordPayment | TOT | B | invoices.record_payment | anschließen | Geld · mittel |
-| Nummernwahl nach „Pay“ | InvoiceList:595–604 | recordPayment(…, specialMark) | TOT | B | invoices.record_payment (nur Normalnummer) | anschließen; Sondernummer wie oben | Nummernkreis · mittel |
-| Gutschrift löschen | pages/credit-notes/CreditNoteDetail:103 | deleteCreditNote | TOT | E | — | sperren | Löschen |
+| Rechnung löschen | InvoiceDetail:697→1671 | invoiceStore.deleteInvoice | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| „Pay“ in der Rechnungsliste | pages/invoices/InvoiceList:430→514 | recordPayment | **angeschlossen (R6B)** | B | invoices.record_payment | **geschlossen (R6B)** | Geld · mittel |
+| Nummernwahl nach „Pay“ | InvoiceList:595–604 | recordPayment(…, specialMark) | **angeschlossen (R6B)** | B | invoices.record_payment (nur Normalnummer) | **geschlossen (R6B)** | Nummernkreis · mittel |
+| Gutschrift löschen | pages/credit-notes/CreditNoteDetail:103 | deleteCreditNote | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Angebot speichern | pages/offers/OfferDetail:220 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
 | Angebot senden | OfferDetail:227 | updateOffer({status:'sent'}) | TOT | A | — | offers.* | Angebot · mittel |
 | Angebot annehmen | OfferDetail:243 | updateOffer({status:'accepted'}) | TOT | A | — | offers.* | Angebot · mittel |
 | Angebot ablehnen | OfferDetail:244 | updateOffer({status:'rejected'}) | TOT | A | — | offers.* | Angebot · mittel |
 | Angebot → Rechnung | OfferDetail:248→520 | invoiceStore.createInvoiceFromOffer | TOT | A | — (invoices.create verliert Angebotsbezug/-status) | eigene Folge | Verkauf · hoch |
-| Angebot löschen | OfferDetail:251→530 | deleteOffer | TOT | E | — | sperren | Löschen |
+| Angebot löschen | OfferDetail:251→530 | deleteOffer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Position hinzufügen | OfferDetail:281→541 | addOfferLine | TOT | A | — | offers.* | Angebot · mittel |
 | Positionspreis ändern | OfferDetail:349 | updateOfferLine (je Tastendruck) | TOT (wirft je Tastendruck) | A | — | offers.* | Angebot · mittel |
 | Position entfernen | OfferDetail:359 | removeOfferLine | TOT | A | — | offers.* | Angebot · mittel |
@@ -2155,27 +2155,27 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Senden (Liste) | OfferList:201 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
 | Annehmen (Liste) | OfferList:206 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
 | Ablehnen (Liste) | OfferList:208 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
-| Löschen (Liste) | OfferList:213 | deleteOffer | TOT | E | — | sperren | Löschen |
-| Kunde löschen | pages/customers/CustomerDetail:588→1066 | deleteCustomer | TOT | E | — | sperren | Löschen |
+| Löschen (Liste) | OfferList:213 | deleteOffer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| Kunde löschen | pages/customers/CustomerDetail:588→1066 | deleteCustomer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Kundengold zurückgeben | CustomerDetail:752→SettleGoldModal:288 | goldStore.returnCustomerCredit | TOT (Fehler im Modal) | A | — | gold.* | Gold · hoch |
 | Kundengold → BHD | CustomerDetail:756→SettleGoldModal:288 | convertCustomerCreditToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
-| Nachricht kopieren (Protokoll) | components/ai/MessagePreviewModal:218 | customerMessageStore.logMessage | SCHEIN (Protokoll still verworfen) | A | — | messages.log | CRM · niedrig |
-| WhatsApp (Protokoll) | MessagePreviewModal:221 | logMessage | SCHEIN | A | — | messages.log | CRM · niedrig |
+| Nachricht kopieren (Protokoll) | components/ai/MessagePreviewModal:218 | customerMessageStore.logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
+| WhatsApp (Protokoll) | MessagePreviewModal:221 | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
 | Spotpreis aktualisieren | pages/dashboard/Dashboard:612 | getSpotPrices (localStorage) | geht | C | — | — | — |
 
 **Artikel · Inventur · Einkauf · Lieferant**
 
 | UI-Handlung | Ort | Laufweg am Primary | PC2 heute | Kat. | vorh. Buchung | nächster Schritt | Domäne · Risiko |
 |---|---|---|---|---|---|---|---|
-| Mehrfach löschen | pages/watches/WatchList:539→1232 | deleteProducts | TOT (alle wirken unverknüpft) | E | — | sperren | Löschen |
+| Mehrfach löschen | pages/watches/WatchList:539→1232 | deleteProducts | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Etiketten drucken | WatchList:1266 | printRawZpl (Drucker am Platz) | geht | C | — | — | — |
 | Artikel speichern mit Bildänderung | pages/watches/ProductDetail:515 (Zweig 417) | editProductWithMedia | NAC | A | — (products.update ohne Medienweg) | Medienweg | Artikel/Medien · hoch |
-| KI-Identifikation bestätigen | ProductDetail:856 | updateProduct({aiConfirmedAt}) | TOT | B | products.update (Feld fehlt in `PRODUCT_UPDATE_FIELDS`) | Feldliste + anschließen | Artikel · niedrig |
-| Artikel löschen | ProductDetail:1519→1621 | deleteProduct | TOT | E | — | sperren | Löschen |
-| Inventur öffnen (Lauf beginnen) | components/products/StockCheckInventoryModal:83–176 | ensureOpenSession + persistSessionItems | SCHEIN | A | — | inventory.* | Inventur · hoch |
-| Inventur speichern | StockCheckInventoryModal:471 | recordStockCheck (Tauri, lokale Konfig-DB) + persistSessionItems | TOT je Artikel; mit Alt-DB zweite Wahrheit | A | — | inventory.* / stock_checks über Primary | Inventur · hoch |
-| Inventur abschließen | StockCheckInventoryModal:503 | closeSession | SCHEIN | A | — | inventory.* | Inventur · hoch |
-| Einzel-Check Verfügbar/Nicht | components/products/StockCheckPanel:119 (ProductDetail:1585) | recordStockCheck | wie „Inventur speichern“, Fehler sichtbar | A | — | stock_checks über Primary | Inventur · mittel |
+| KI-Identifikation bestätigen | ProductDetail:856 | updateProduct({aiConfirmedAt}) | **angeschlossen (R6B)** | B | products.update (Feld fehlt in `PRODUCT_UPDATE_FIELDS`) | **geschlossen (R6B)** | Artikel · niedrig |
+| Artikel löschen | ProductDetail:1519→1621 | deleteProduct | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| Inventur öffnen (Lauf beginnen) | components/products/StockCheckInventoryModal:83–176 | ensureOpenSession + persistSessionItems | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | inventory.* | Inventur · hoch |
+| Inventur speichern | StockCheckInventoryModal:471 | recordStockCheck (Tauri, lokale Konfig-DB) + persistSessionItems | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | inventory.* / stock_checks über Primary | Inventur · hoch |
+| Inventur abschließen | StockCheckInventoryModal:503 | closeSession | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | inventory.* | Inventur · hoch |
+| Einzel-Check Verfügbar/Nicht | components/products/StockCheckPanel:119 (ProductDetail:1585) | recordStockCheck | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | stock_checks über Primary | Inventur · mittel |
 | „+ New Supplier“ im Einkauf | pages/purchases/PurchaseCreate:391→845 | createSupplier | TOT (ungefangen) | A | — | suppliers.create | Stammdaten · mittel |
 | Einkauf: Zahlung erfassen | pages/purchases/PurchaseDetail:177→424 | purchaseStore.addPayment | TOT | A | — | purchases.record_payment | Geld · hoch |
 | Einkauf: Guthaben verrechnen | PurchaseDetail:424 (credit) | getOpenCredits + applyCreditToPurchase (FIFO) | TOT | A | — | purchases.apply_credit | Geld · hoch |
@@ -2185,12 +2185,12 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Lieferant anlegen | pages/suppliers/SupplierList:80→182 | createSupplier | TOT | A | — | suppliers.create | Stammdaten · mittel |
 | Lieferant ändern | pages/suppliers/SupplierDetail:285→280 | updateSupplier | TOT | A | — | suppliers.update | Stammdaten · mittel |
 | Lieferant (de)aktivieren | SupplierDetail:719 | updateSupplier({active}) | TOT | A | — | suppliers.update | Stammdaten · niedrig |
-| Lieferant löschen | SupplierDetail:722→735 | deleteSupplier | TOT (Alert) | E | — | sperren | Löschen |
+| Lieferant löschen | SupplierDetail:722→735 | deleteSupplier | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Lieferantenguthaben erstatten | SupplierDetail:696→760 | deleteStandaloneSupplierCredit | VERST (zufällig: Guthabenliste leer) | A | — | suppliers.refund_credit | Geld · mittel |
 | „Pay Supplier — Bulk“ (Öffner) | SupplierDetail:425 → PaySupplierModal | siehe Finanzen | TOT | A | — | siehe Finanzen | Geld · hoch |
 | Werkstatt-Ausgabe zahlen (Öffner) | SupplierDetail:509 → PayExpenseModal | recordExpensePayment | TOT | A | — | expenses.record_payment | Geld · hoch |
 | Gold zurück / Shop-Gold / → BHD | SupplierDetail:586/590/594 → SettleGoldModal | settleGoldReturn / applyShopGold… / convertGoldPayableToMoney | TOT | A | — | gold.* | Gold · hoch |
-| Excel-Import | pages/settings/ImportPage:463 (`/import`, nicht gesperrt) | Vor-Sicherung + createProduct je Zeile | TOT je Zeile („0 imported“); Vor-Sicherung versucht lokal | E | products.create (nur zeilenweise) | Route Primary-only | Werkzeug · mittel |
+| Excel-Import | pages/settings/ImportPage:463 (`/import`, nicht gesperrt) | Vor-Sicherung + createProduct je Zeile | **NOTICE + Riegel (R6B)** | E | products.create (nur zeilenweise) | bleibt am Primary | Werkzeug · mittel |
 | Dubletten-Guard bestätigen | components/sync/SyncDuplicateGuard:601 | mergeIntoExisting + updateProduct | UNERR (Ereignis nur aus dem im Client verweigerten Alt-Abgleich) | D | — | — | — |
 | Dubletten-Guard übernehmen/ablehnen | SyncDuplicateGuard:586–598 | allocateSkuOnCreate + updateProduct | UNERR | D | — | — | — |
 | Dubletten-Guard Hintergrund | SyncDuplicateGuard:247 | roher UPDATE `products` | UNERR | D | — | — | — |
@@ -2200,7 +2200,7 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | UI-Handlung | Ort | Laufweg am Primary | PC2 heute | Kat. | vorh. Buchung | nächster Schritt | Domäne · Risiko |
 |---|---|---|---|---|---|---|---|
 | Auftrag stornieren (mit Geld) | pages/orders/OrderDetail:798→CancelOrderModal:198 | cancelOrderWithMoney (+ deleteOrder) | TOT | A | — (update_status weist 'cancelled' ab) | orders.cancel | Auftrag/Geld · hoch |
-| Auftrag löschen | OrderDetail:1116→1880 | deleteOrder | TOT | E | — | sperren | Löschen |
+| Auftrag löschen | OrderDetail:1116→1880 | deleteOrder | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Zeilenstatus PENDING/ARRIVED/DELIVERED | OrderDetail:1207–1226 (ohne Rechteprüfung) | updateOrderLineStatus | TOT | A | — | orders.line_status | Auftrag · mittel |
 | Zeilenstatus zurück | OrderDetail:1197 | updateOrderLineStatus | TOT | A | — | orders.line_status | Auftrag · mittel |
 | Position bearbeiten | OrderDetail:1232→OrderLineEditModal:179 | updateOrderLine (legt ggf. Artikel an) | TOT | A | — | orders.update_line | Auftrag/Bestand · hoch |
@@ -2210,9 +2210,9 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | A/P zahlen (Auftrag) | OrderDetail:1422→PayExpenseModal:60 | recordExpensePayment | TOT | A | — | expenses.record_payment | Geld · hoch |
 | Shop-Gold geben | OrderDetail:1506→SettleGoldModal:288 | applyShopGoldToSupplierPayable / …CrossKarat… | TOT | A | — | gold.* | Gold · hoch |
 | Gold → Geld (Auftrag) | OrderDetail:1511→SettleGoldModal:288 | convertGoldPayableToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
-| Gold-Verbindlichkeit ✕ | OrderDetail:1516 | deleteGoldPayable | TOT | E | — | sperren | Löschen |
-| AI-Benachrichtigung (Protokoll) | OrderDetail:789→MessagePreviewModal | logMessage | SCHEIN | A | — | messages.log | CRM · niedrig |
-| „Pay“ in der Auftragsliste | pages/orders/OrderList:305→373 | orderPaymentStore.addPayment | TOT | B | orders.add_payment | anschließen | Geld · mittel |
+| Gold-Verbindlichkeit ✕ | OrderDetail:1516 | deleteGoldPayable | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| AI-Benachrichtigung (Protokoll) | OrderDetail:789→MessagePreviewModal | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
+| „Pay“ in der Auftragsliste | pages/orders/OrderList:305→373 | orderPaymentStore.addPayment | **angeschlossen (R6B)** | B | orders.add_payment | **geschlossen (R6B)** | Geld · mittel |
 | Material hinzufügen | pages/repairs/RepairDetail:1194→AddMaterialModal:528 | addRepairLine(Material) + createGoldPayable | TOT | A | — (repairs.add_line zu eng) | repairs.add_material | Reparatur/Gold · hoch |
 | A/P zahlen (Reparatur) | RepairDetail:1276→PayExpenseModal:60 | recordExpensePayment | TOT | A | — | expenses.record_payment | Geld · hoch |
 | Goldverbrauch erfassen | RepairDetail:1333→1652 | createGoldPayable / createCustomerGoldCredit / creditShopGold | TOT | A | — | gold.* | Gold · hoch |
@@ -2220,32 +2220,32 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Werkstatt-Gold → BHD | RepairDetail:1373→SettleGoldModal | convertGoldPayableToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
 | Kundengold zurück (Reparatur) | RepairDetail:1406→SettleGoldModal | returnCustomerCredit | TOT | A | — | gold.* | Gold · hoch |
 | Kundengold → BHD (Reparatur) | RepairDetail:1410→SettleGoldModal | convertCustomerCreditToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
-| Reparatur löschen | RepairDetail:1163→1451 | deleteRepair | TOT | E | — | sperren | Löschen |
-| AI-Benachrichtigung (Reparatur) | RepairDetail:598→MessagePreviewModal | logMessage | SCHEIN | A | — | messages.log | CRM · niedrig |
+| Reparatur löschen | RepairDetail:1163→1451 | deleteRepair | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| AI-Benachrichtigung (Reparatur) | RepairDetail:598→MessagePreviewModal | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
 | „+ New Supplier“ (Werkstatt) | pages/repairs/RepairList:1008→1189 | createSupplier | TOT | A | — | suppliers.create | Stammdaten · mittel |
 | Produktion anlegen | pages/production/ProductionPage:143→299 | productionStore.createRecord | TOT | A | — | production.create | Produktion/Bestand · hoch |
-| Produktion löschen (Liste) | ProductionPage:369→332 | deleteRecord | TOT | E | — | sperren | Löschen |
-| Produktion löschen (Detail) | pages/production/ProductionDetail:70→189 | deleteRecord | TOT | E | — | sperren | Löschen |
+| Produktion löschen (Liste) | ProductionPage:369→332 | deleteRecord | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| Produktion löschen (Detail) | pages/production/ProductionDetail:70→189 | deleteRecord | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Rückgabe nach Verkauf | pages/consignments/ConsignmentDetail:476/487→1004 | markReturnedAfterSale | TOT | A | — | consignments.return_after_sale | Kommission/Geld · hoch |
 | Verkauf stornieren | ConsignmentDetail:478/483/491→1049 | cancelSale | TOT | A | — (invoices.cancel deckt nur die Rechnung) | consignments.cancel_sale | Kommission/Geld · hoch |
-| Kommission löschen | ConsignmentDetail:500→1060 | deleteConsignment | TOT | E | — | sperren | Löschen |
-| Rückgabe (Kommissionsliste) | pages/consignments/ConsignmentList:716 | markReturned | TOT | B | consignments.mark_returned | anschließen | Kommission · niedrig |
-| Rückgabe (Kommittent) | pages/consignors/ConsignorDetail:258 | markReturned | TOT | B | consignments.mark_returned | anschließen | Kommission · niedrig |
+| Kommission löschen | ConsignmentDetail:500→1060 | deleteConsignment | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| Rückgabe (Kommissionsliste) | pages/consignments/ConsignmentList:716 | markReturned | **angeschlossen (R6B)** | B | consignments.mark_returned | **geschlossen (R6B)** | Kommission · niedrig |
+| Rückgabe (Kommittent) | pages/consignors/ConsignorDetail:258 | markReturned | **angeschlossen (R6B)** | B | consignments.mark_returned | **geschlossen (R6B)** | Kommission · niedrig |
 | Agent ändern | pages/agents/AgentList:243→548 | updateAgent | TOT | A | — | agents.update | Stammdaten · niedrig |
-| Agent löschen | AgentList:243→536 | deleteAgent | TOT | E | — | sperren | Löschen |
+| Agent löschen | AgentList:243→536 | deleteAgent | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Umwandlung rückgängig (Tabelle) | components/agents/TransferTable:455 | undoTransferInvoiceConvert (löscht Rechnung) | TOT | A | — | transfers.undo_convert | Transfer/Verkauf · hoch |
-| Transfer löschen (Tabelle) | TransferTable:602 | deleteTransfer | TOT | E | — | sperren | Löschen |
+| Transfer löschen (Tabelle) | TransferTable:602 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Umwandlung rückgängig (Detail) | pages/agents/TransferDetail:285 | undoTransferInvoiceConvert | TOT | A | — | transfers.undo_convert | Transfer/Verkauf · hoch |
-| Transfer löschen (Detail) | TransferDetail:300→579 | deleteTransfer | TOT | E | — | sperren | Löschen |
+| Transfer löschen (Detail) | TransferDetail:300→579 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Metall anlegen | pages/metals/MetalList:181→514 | createMetal | TOT | A | — | metals.* | Metall/Bestand · mittel |
 | Metall verkaufen | MetalList:344→547 | updateMetal | TOT | A | — | metals.* | Metall/Geld · mittel |
 | Metall schmelzen | MetalList:349→570 | updateMetal | TOT | A | — | metals.* | Metall · mittel |
-| Metall löschen | MetalList:356 | deleteMetal | TOT | E | — | sperren | Löschen |
+| Metall löschen | MetalList:356 | deleteMetal | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Spotpreis/g | MetalList:220 (je Tastendruck) | setSpotPrice (settings) | TOT (wirft je Tastendruck) | A | — | metals.set_spot | Filialeinstellung · niedrig |
 | Schrotthandel anlegen | pages/scrap-trades/ScrapTradeNew → ScrapTradeForm:394 | createTrade | TOT | A | — | scrap_trades.* | Gold/Geld · hoch |
 | Schrotthandel ändern | ScrapTradeDetail:58 → ScrapTradeForm:394 | updateTrade | TOT | A | — | scrap_trades.* | Gold/Geld · hoch |
 | Schrotthandel stornieren | ScrapTradeDetail:59→85 | cancelTrade (Buchungsstorno) | TOT | A | — | scrap_trades.* | Buchung · hoch |
-| Schrotthandel löschen | ScrapTradeDetail:63→101 | deleteTrade | TOT | E | — | sperren | Löschen |
+| Schrotthandel löschen | ScrapTradeDetail:63→101 | deleteTrade | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 
 **Finanzen · Steuer · Buchhaltung**
 
@@ -2257,22 +2257,22 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Wiederkehrende Ausgabe anlegen | ExpenseList:661 (Recurring) | recurringExpenseStore.createTemplate | TOT (Alert) | A | — | expenses.template_* | Ausgaben · mittel |
 | Vorlage pausieren/fortsetzen | ExpenseList:393 | setActive → updateTemplate + runDueGenerator | TOT | A | — | expenses.template_* | Ausgaben · niedrig |
 | Vorlage speichern | ExpenseList:771 | updateTemplate | TOT | A | — | expenses.template_* | Ausgaben · niedrig |
-| Vorlage löschen | ExpenseList:795 | deleteTemplate | TOT | E | — | sperren | Löschen |
+| Vorlage löschen | ExpenseList:795 | deleteTemplate | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Ausgabe zahlen | ExpenseList:481→PayExpenseModal:139 | recordExpensePayment | TOT (Alert) | A | — | expenses.record_payment | Geld · hoch |
-| Ausgabe löschen (Liste) | ExpenseList:489→890 | deleteExpense (Storno + Guthaben zurück) | TOT | E | — | sperren | Löschen |
-| Ausgabe löschen (Maske) | ExpenseList:853 | deleteExpense | TOT | E | — | sperren | Löschen |
+| Ausgabe löschen (Liste) | ExpenseList:489→890 | deleteExpense (Storno + Guthaben zurück) | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| Ausgabe löschen (Maske) | ExpenseList:853 | deleteExpense | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Ausgabe speichern | ExpenseList:861 | updateExpense | TOT (Alert) | A | — | expenses.update | Ausgaben · mittel |
 | Fällige Ausgaben erzeugen (beim Öffnen) | ExpenseList:123 | runDueGenerator | still, nichts | C | — | bleibt Sache des Primary | — |
 | Umbuchung Kasse ↔ Bank | pages/banking/BankingPage:343 | bankingStore.createTransfer | TOT | A | — (transfers.* sind Agenten-Transfers) | banking.transfer | Geld · hoch |
 | Partner anlegen | pages/partners/PartnersPage:187 | createPartner | TOT | A | — | partners.* | Stammdaten · niedrig |
 | Einlage / Entnahme / Gewinnverteilung | PartnersPage:222 | recordInvestment / recordWithdrawal / recordProfitDistribution | TOT | A | — | partners.record_tx | Geld/Buchung · hoch |
-| Partnerbewegung ✕ | PartnersPage:162 | deleteTransaction (+ Storno über safePost) | TOT | E | — | sperren | Löschen |
+| Partnerbewegung ✕ | PartnersPage:162 | deleteTransaction (+ Storno über safePost) | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Partner speichern | PartnersPage:279 | updatePartner | TOT | A | — | partners.* | Stammdaten · niedrig |
-| Partner löschen | PartnersPage:267 | deletePartner | TOT (Alert) | E | — | sperren | Löschen |
+| Partner löschen | PartnersPage:267 | deletePartner | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Schuld anlegen | pages/debts/DebtsPage:674 | createDebt | TOT | A | — | debts.* | Geld · hoch |
 | Rückzahlung erfassen | DebtsPage:757 | recordDebtPayment | TOT | A | — | debts.* | Geld · hoch |
 | Schuld speichern | DebtsPage:811 | updateDebt | TOT | A | — | debts.* | Geld · mittel |
-| Schuld löschen | DebtsPage:763→842 | deleteDebt (Zahlungsstorno + Löschen) | TOT | E | — | sperren | Löschen |
+| Schuld löschen | DebtsPage:763→842 | deleteDebt (Zahlungsstorno + Löschen) | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Steuerzahlung eintragen | pages/analytics/AnalyticsPage:801→1015 | roher INSERT `tax_payments` (ohne Buchung) | VERST | A | — | tax.record_payment **mit** Buchung | Steuer · hoch |
 | „Storniere alle Orphans“ | pages/reports/ReconciliationPage:251 | hasReversalFor + reverseSource | VERST | E | — | bleibt am Primary | Buchhaltungsreparatur |
 | Nachbuchung (20 Knöpfe) | pages/reports/BackfillPage:169–188 | backfillAll / backfill* | NOTICE | E | — | bleibt am Primary | Buchhaltungsreparatur |
@@ -2284,16 +2284,16 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 |---|---|---|---|---|---|---|---|
 | Mitarbeiter anlegen | pages/employees/EmployeeList:257 | createEmployee | TOT (Alert) | A | — | employees.* | Stammdaten · niedrig |
 | Beurlauben/Reaktivieren (Liste) | EmployeeList:189/197 | updateEmployee | TOT | A | — | employees.* | Stammdaten · niedrig |
-| Mitarbeiter löschen | EmployeeList:272 | deleteEmployee | TOT (Alert) | E | — | sperren | Löschen |
+| Mitarbeiter löschen | EmployeeList:272 | deleteEmployee | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Beurlauben/Reaktivieren (Detail) | pages/employees/EmployeeDetail:152/156 | updateEmployee | TOT | A | — | employees.* | Stammdaten · niedrig |
 | Mitarbeiter speichern | EmployeeDetail:700 | updateEmployee | TOT | A | — | employees.* | Stammdaten · niedrig |
 | Aufgabe anlegen/ändern | pages/tasks/TaskList:313 | createTask / updateTask | TOT | A | — | tasks.* | Büro · niedrig |
 | Aufgabe erledigt | TaskList:595 | completeTask | TOT | A | — | tasks.* | Büro · niedrig |
-| Aufgabe löschen | TaskList:627 | deleteTask | TOT | E | — | sperren | Löschen |
+| Aufgabe löschen | TaskList:627 | deleteTask | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Dokument hochladen | pages/documents/DocumentList:358 | uploadDocument | TOT (unbehandelte Ablehnung) | A | — | documents.* (Medienweg) | Büro · niedrig |
-| Dokument löschen | DocumentList:476 | deleteDocument | TOT | E | — | sperren | Löschen |
+| Dokument löschen | DocumentList:476 | deleteDocument | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Texterkennung (OCR) | DocumentList:430 | extractOcr | TOT (Fehler im Feld) | A | — | documents.* | Büro · niedrig |
-| **Abmelden** | components/layout/Sidebar:372 | authService.logout → `getDatabase` + DELETE `sessions` | **TOT**: wirft, BEVOR die Sitzung geleert wird → auf PC2 kann man sich nicht abmelden | C | — | Client-Zweig: lokale Sitzung und Client-Ausweis verwerfen | Sitzung · hoch (Oberfläche) |
+| **Abmelden** | components/layout/Sidebar:372 | authService.logout → `getDatabase` + DELETE `sessions` | **geht — lokal abgemeldet, zurück zur Anmeldung (R6B)** | C | — | erledigt (R6B) | Sitzung · hoch (Oberfläche) |
 | Filiale wechseln | Sidebar:221 | switchBranch | VERST (eine Filiale) | C | — | — | — |
 | Update installieren | components/shared/UpdateBanner:193 | prepareAndInstallUpdate (Flush ohne DB ist wirkungslos) | geht (aus Code gelesen) | C | — | — | — |
 | Anmelden | components/startup/ClientShell:421 | clientLogin | geht | C | — | — | — |
@@ -2369,3 +2369,121 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 
 `CENTRAL_UI_R6A_WRITE_ENTRYPOINT_AUDIT_COMPLETE`
 
+## R6B — Sicherheit und die acht vorhandenen Buchungen (12.09.2026)
+
+Grundlage ist die R6A-SSOT. Registry **108** (unverändert), keine neue Buchung. Die ursprüngliche 40er-Matrix bleibt
+**36 / 0 / 0 / 4**, `invoices.cancel` getrennt. A-Lücken sind nicht nebenbei verändert: Die Tabelle oben trägt nur in
+„PC2 heute" und „nächster Schritt" den neuen Stand.
+
+### Umfang, eingefroren (`CENTRAL_UI_R6B_CATEGORY_B_SCOPE_FROZEN`)
+
+Aus der R6A-SSOT gelesen, nicht aus der Erinnerung: acht Einstiege, sechs vorhandene Buchungen.
+
+| Einstieg | Buchung | Anschluss |
+|---|---|---|
+| Rechnung ändern (Edit-Seite) | `invoices.update` | lokal `editInvoice` wie bisher; fern Rechnung, gesehene Fassung, Grund, Kunde, Zeilen (mit Los), Notiz, Datum, Mitarbeiter. Eine Zahlung im Ändern bleibt ein ehrliches Nein, weil sie eine eigene Buchung ist. |
+| „Pay" in der Rechnungsliste | `invoices.record_payment` | derselbe Rumpf wie auf der Rechnungsseite (Rechnung, Betrag, Weg) |
+| Nummernwahl nach „Pay" | `invoices.record_payment` | derselbe Anschluss (zweiter Einstieg); der Sonderkreis bleibt fern ein ehrliches Nein und fällt nie still in den Normalkreis |
+| „Mark as Picked Up" | `repairs.update_status` | eine Buchung je Reparatur, jede mit ihrer Fassung |
+| KI-Identifikation bestätigen | `products.update` | nur `{ id, aiConfirmedAt: true }` |
+| „Pay" in der Auftragsliste | `orders.add_payment` | mit der gesehenen Fassung des Auftrags |
+| Rückgabe (Kommissionsliste) | `consignments.mark_returned` | gemeinsamer Rumpf `consignmentReturnBody` |
+| Rückgabe (Einlieferer) | `consignments.mark_returned` | derselbe Anschluss (zweiter Einstieg) |
+
+### Primary zuerst — was am Primary falsch war, gemeinsam behoben (`CENTRAL_UI_R6B_PRIMARY_CONTRACTS_AUDITED`)
+
+- **Abholen übersprang „ready".** Der Knopf auf der Rechnung setzte JEDE verbundene Reparatur auf `picked_up`, auch
+  eine „in Arbeit". An „ready" hängen die Werkstatt-Forderung, die Kapitalisierung eigener Ware und die Marge
+  (`repairStore.updateStatus` bucht nur beim Zielstatus). Jetzt gilt auf der Rechnungsseite dieselbe Regel wie auf
+  der Reparaturseite und im Fernbefehl (`allowedRepairStatusTargets`). Eine Reparatur, die noch nicht fertig ist,
+  bleibt stehen, und der Bestätigungsdialog nennt sie.
+- **Das Rechnungsdatum hing am Rechner.** Beim Ändern gab die Maske `…T00:00:00.000Z`, der Fernauftrag
+  `YYYY-MM-DD`, und `editInvoice` legte beides roh ab. Jetzt legt `issuedAtIso` (die Regel des Anlegens) auf beiden
+  Wegen denselben Wert ab.
+- **Rückgabe aus Liste und Einlieferer ohne Prüfung.** Der lokale Weg rief `markReturned` ohne Statusprüfung. Jetzt
+  fragen alle drei Einstiege und der Fernbefehl dieselbe Funktion `consignmentReturnBlocker`: Zurück geht nur eine
+  aktive, unverkaufte Kommission. `markReturnedAfterSale` bleibt unberührt.
+- **KI-Bestätigung mit der Uhr des Rechners, ohne Prüfung.** Jetzt schreibt EINE Hausfunktion
+  (`confirmAiIdentificationInHouse`):
+  - Bestätigt wird nur, was die KI identifiziert hat.
+  - Die Zeit stempelt der Primary.
+  - Ein zweites Bestätigen ändert nichts.
+
+  Keine Feldöffnung: `aiConfirmedAt` steht nicht in `PRODUCT_UPDATE_FIELDS`. Fern reist nur die Absicht `true`, und
+  zwar allein — ein Zeitwert, ein Textfeld oder eine Galerie daneben werden abgewiesen.
+- **Zahlungsfehler in den Listen verschwanden.** Der lokale Aufruf warf ungefangen. Jetzt steht der Grund in der
+  Zahlmaske (`WriteError`).
+- **Inventur am Primary, halber Erfolg.** Konnte das Arbeitsblatt nicht gespeichert werden, schloss die Maske trotzdem
+  wie bei Erfolg und nahm die Warnung mit. Jetzt bleibt sie offen.
+- **Nachrichtenprotokoll.** Ein gescheiterter Eintrag wurde verschwiegen; jetzt wird er gesagt.
+
+### Sicherheit auf dem Rechner ohne Datenbank
+
+- **Inventur und Stock-Check** (`CENTRAL_UI_R6B_INVENTORY_CLIENT_FAIL_CLOSED_PROVED`): Die eine Stelle ist
+  `core/stock/stock-check.ts`. Auf dem Client ruft sie den Rust-Kern des eigenen Rechners gar nicht auf — kein
+  Lesen, kein Schreiben. Das gilt ausdrücklich auch, wenn im Datenordner noch eine alte `lataif.db` liegt; dort wäre
+  sonst eine zweite Wahrheit entstanden. Dazu:
+  - Die Knöpfe sind gesperrt und erklärt.
+  - Die Maske beginnt keinen Lauf.
+  - „Inventur abschließen" meldet kein „finished" ohne Wirkung.
+  - Der Einzel-Check zeigt einen Satz statt zweier Knöpfe.
+
+  Der Weg über den Primary ist R6D.
+- **Ländervorwahlen** (Telefonfeld, z. B. beim Bearbeiten eines Kunden): Der Zwei-Rechner-Lauf fand den Griff auf
+  dem Client — `country-codes-store.load` fragte die lokale Einstellungstabelle (ins Leere, abgefangen). Jetzt gibt es
+  keinen Griff mehr. Der Client zeigt wie bisher die eingebauten Vorwahlen; eigene Vorwahlen sind Hauskonfiguration
+  am Primary, sie aus der Ferne zu lesen bleibt offen.
+- **Import** (`CENTRAL_UI_R6B_IMPORT_CLIENT_FAIL_CLOSED_PROVED`): `/import` zeigt die Primary-Notiz,
+  „Import Excel" ist gesperrt, und im Handler steht ein Riegel vor Sicherung und Anlegen.
+- **Abmelden** (`CENTRAL_UI_R6B_CLIENT_LOGOUT_PROVED`): Auf dem Client ist `authService.logout` rein lokal — Sitzung
+  und Ausweis weg, zurück zu Verbinden/Anmelden, die Serveradresse bleibt. Kein Datenbankgriff. Der Primary-Weg ist
+  unverändert.
+- **Kein Schein-Erfolg** (`CENTRAL_UI_R6B_NO_FALSE_SUCCESS_PROVED`):
+  - Inventur wie oben.
+  - Das Nachrichtenprotokoll sagt auf dem Client „nicht protokolliert", statt still zu verwerfen.
+- **Die 28 Löschknöpfe** (`CENTRAL_UI_R6B_UNSUPPORTED_DELETES_FAIL_CLOSED`): Jeder ist auf dem Client gesperrt,
+  erklärt und markiert (`primaryOnlyDeleteProps`), und jeder Handler hat den Riegel `blockDeleteOnClient`. Am Primary
+  bleibt jeder Knopf, wie er war. Löschen bleibt nach §5 bewusst nie fern.
+
+### Test-Delta (alte Pins, bewusst geändert)
+
+- `r4b-write-adapter` §6, zwei Pins:
+  - „Ändern einer Rechnung gesperrt" heißt jetzt: Ändern geht fern über `invoices.update`, nur eine Zahlung darin
+    bleibt ein ehrliches Nein.
+  - Der Pin „Zahlung beim Anlegen" folgt der neuen Bedingung `!isEditMode`.
+- `stock-check.ts` importiert die Weiche als `../bridge/client-mode.ts`. So bleibt das Modul ohne Alias-Auflösung
+  ladbar (`test/stock/stock-check.test.ts`).
+
+**Vorbestehend rot, nicht R6B** — an `e33e950` in einem unberührten Arbeitsbaum nachgewiesen und nicht angefasst:
+
+- `bridge/client-masterdata-ui` („the primary decides stockStatus")
+- `bridge/command-scheduler` (Pin „genau diese vierzig", seit R5F.1 einundvierzig)
+
+### Beweise
+
+```
+Unit  r6b/safety-existing-commands 97/0 (Umfang, Primary-Verträge, Inventur, Import, Abmelden, Schein-Erfolg, 28 Löschknöpfe, Registry)
+E2E   r6b-safety-existing-commands 83/0 auf neu gebauten Programmen:
+      acht B-Einstiege Primary == PC2, je genau EIN Auftrag
+      Sonderkreis fern ehrlich abgewiesen
+      Abholen ohne Stufensprung (auch am Primary)
+      alte lataif.db im Datenordner des Clients unberührt, kein Stock-Check-Aufruf des lokalen Kerns
+      kein Datenbankgriff, keine neue Datei, keine Warteschlange
+      Abmelden → Anmeldung
+Nachbarn r4b 140/0 · stock-check 32/0 · r5e-Pins 70/0 · lifecycle-actions 203/0 · return-chain 77/0 · r4a 15/0
+      r5f · invoice-cancel · invoice-lifecycle · invoice-revision · product-remote-write · r4c · r4c1 · r2c-Scan · r2d (grün)
+TS    tsconfig.app 0 · tsconfig.node 0 · Lint-Delta 0
+Registry 108 · Matrix 36/0/0/4 + invoices.cancel · keine neue Buchung
+```
+
+### Stand der R6A-SSOT nach R6B
+
+```
+B   8 → 0 offen (alle angeschlossen)
+A  95 unverändert (Inventur 4 + Protokoll 4 jetzt ehrlich gesperrt bzw. gesagt, Lücke bleibt A)
+C  15 (Abmelden erledigt)   D 12   E 41 (28 Löschknöpfe gesperrt + erklärt, Import mit Notiz + Riegel)
+Registry 108 · Matrix 36/0/0/4 + invoices.cancel · keine neue Buchung
+```
+
+Offen bleibt aus der R6A-Liste nur Punkt 7: zwei zufällig verborgene Guthaben-Aktionen. Sie sind A, und ihre Stelle ist
+R6E. Die „unverknüpft"-Anzeige der Mehrfach-Auswahl (Punkt 6) ist mit dem gesperrten „Select" nicht mehr erreichbar.

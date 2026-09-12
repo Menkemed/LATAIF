@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import { Factory, Trash2, Plus, Edit2 } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -329,7 +330,7 @@ export function ProductionPage() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { if (confirmDelete) { deleteRecord(confirmDelete); setConfirmDelete(null); } }}>Delete</Button>
+          <Button variant="danger" onClick={() => { if (blockDeleteOnClient()) { setConfirmDelete(null); return; } if (confirmDelete) { deleteRecord(confirmDelete); setConfirmDelete(null); } }}>Delete</Button>
         </div>
       </Modal>
     </PageLayout>
@@ -366,6 +367,7 @@ function ProductionRow({
       <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={record.totalValue}/></span>
       <span style={{ fontSize: 12, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.notes || '—'}</span>
       <button
+        {...primaryOnlyDeleteProps()}
         onClick={(e) => { e.stopPropagation(); onDelete(); }}
         className="cursor-pointer"
         style={{ background: 'none', border: 'none', color: '#6B7280' }}

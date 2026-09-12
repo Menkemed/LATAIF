@@ -3,6 +3,7 @@ import { CircleDollarSign } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { KPICard } from '@/components/ui/KPICard';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { useMetalStore } from '@/stores/metalStore';
@@ -353,7 +354,8 @@ export function MetalList() {
                 </>
               )}
               <button
-                onClick={() => { if (confirm('Delete this item?')) deleteMetal(metal.id); }}
+                {...primaryOnlyDeleteProps()}
+                onClick={() => { if (blockDeleteOnClient()) return; if (confirm('Delete this item?')) deleteMetal(metal.id); }}
                 className="cursor-pointer transition-all duration-200"
                 style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = '#AA6E6E'; e.currentTarget.style.color = '#AA6E6E'; }}

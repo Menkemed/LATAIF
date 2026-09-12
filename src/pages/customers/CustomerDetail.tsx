@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { VIPBadge } from '@/components/ui/VIPBadge';
 import { Modal } from '@/components/ui/Modal';
@@ -242,6 +243,7 @@ export function CustomerDetail() {
 
   function handleDelete() {
     if (!id) return;
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteCustomer(id);
     navigate('/clients');
   }
@@ -585,7 +587,7 @@ export function CustomerDetail() {
               </div>
               {perm.canDeleteCustomers && (
                 <div className="flex justify-start" style={{ marginTop: 12 }}>
-                  <Button variant="danger" onClick={() => setConfirmDelete(true)}><Trash2 size={14} /> Delete Client</Button>
+                  <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}><Trash2 size={14} /> Delete Client</Button>
                 </div>
               )}
             </div>

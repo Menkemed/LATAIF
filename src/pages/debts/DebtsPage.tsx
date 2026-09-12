@@ -8,6 +8,7 @@ import { StaffSelect } from '@/components/employees/StaffSelect';
 import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -760,7 +761,7 @@ export function DebtsPage() {
             )}
 
             <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-              <Button variant="danger" onClick={() => setConfirmDelete(detail.id)}><Trash2 size={14} /> Delete</Button>
+              <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(detail.id)}><Trash2 size={14} /> Delete</Button>
               <div className="flex gap-2">
                 <Button variant="ghost" onClick={() => {
                   setEditForm({
@@ -840,6 +841,7 @@ export function DebtsPage() {
           <div className="flex justify-end gap-3">
             <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
             <Button variant="danger" onClick={() => {
+              if (blockDeleteOnClient()) { setConfirmDelete(null); return; }
               if (confirmDelete) {
                 deleteDebt(confirmDelete);
                 if (detailId === confirmDelete) setDetailId(null);

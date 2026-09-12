@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText, RotateCcw } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -499,6 +500,7 @@ export function RepairDetail() {
 
   function handleDelete() {
     if (!id) return;
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteRepair(id);
     navigate('/repairs');
   }
@@ -1160,7 +1162,7 @@ export function RepairDetail() {
             {/* Delete button in edit mode */}
             {editing && repair.status !== 'picked_up' && perm.canDeleteRepairs && (
               <div className="flex gap-2" style={{ marginTop: 20 }}>
-                <Button variant="danger" onClick={() => setConfirmDelete(true)}>
+                <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>
                   <Trash2 size={14} /> Delete Repair
                 </Button>
               </div>

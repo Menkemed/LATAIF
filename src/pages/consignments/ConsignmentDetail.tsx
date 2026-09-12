@@ -20,6 +20,7 @@ import { useExpenseStore } from '@/stores/expenseStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { usePermission } from '@/hooks/usePermission';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
@@ -330,6 +331,7 @@ export function ConsignmentDetail() {
 
   function handleDelete() {
     if (!id) return;
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteConsignment(id);
     navigate('/consignments');
   }
@@ -497,7 +499,7 @@ export function ConsignmentDetail() {
               <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
               <div style={{ flex: 1 }} />
               {consignment.status === 'active' && (
-                <Button variant="ghost" onClick={() => setConfirmDelete(true)}>
+                <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>
                   <Trash2 size={14} color="#DC2626" /> <span style={{ color: '#DC2626' }}>Delete</span>
                 </Button>
               )}

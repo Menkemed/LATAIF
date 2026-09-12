@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, XCircle, ShoppingBag, MessageCircle, Download, Plus } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
@@ -474,6 +475,7 @@ export function OrderDetail() {
 
   function handleDelete() {
     if (!id || !order) return;
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     // v0.7.0 — Delete einer paid Order: erst Geld klar machen (Modal), dann
     // Hard-Delete. Bei totalPaid=0 direkt loeschen wie heute.
     if (totalPaid > 0.005) {
@@ -1113,7 +1115,7 @@ export function OrderDetail() {
 
             {editing && perm.canDeleteOrders && (
               <div className="flex gap-2" style={{ marginTop: 20 }}>
-                <Button variant="danger" onClick={() => setConfirmDelete(true)}>
+                <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>
                   <Trash2 size={14} /> Delete Order
                 </Button>
               </div>
@@ -1515,12 +1517,14 @@ export function OrderDetail() {
                             </button>
                             <button type="button"
                               onClick={() => {
+                                if (blockDeleteOnClient()) return;
                                 if (!window.confirm('Gold-Verbindlichkeit löschen? Nur nutzen wenn sie versehentlich/verwaist ist — die Kostenzeile selbst bleibt unberührt.')) return;
                                 try { deleteGoldPayable(gp.id); }
                                 catch (e) { alert(e instanceof Error ? e.message : String(e)); }
                               }}
                               className="cursor-pointer"
                               title="Verbindlichkeit löschen (nur offene)"
+                              {...primaryOnlyDeleteProps()}
                               style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, border: '1px solid rgba(220,38,38,0.3)', color: '#DC2626', background: 'transparent' }}>
                               ✕
                             </button>

@@ -29,6 +29,7 @@ import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
 import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { assertConsignmentReturnable, consignmentReturnBody } from '@/core/consignment/consignment-return';
 import {
   CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, consignmentSaleBody, payoutOpenAmount, type ConsignmentSaleInput,
 } from '@/core/consignment/consignment-finance';
@@ -125,6 +126,20 @@ export function ConsignmentList() {
   const [createBusy, setCreateBusy] = useState(false);
   // CENTRAL-UI-PARITY R5B — dieselbe Maske, zwei Anschlüsse hinter dem Anlegen.
   const w = useSharedWrites();
+
+  // CENTRAL-UI-PARITY R6B — „Return" in der Liste ist dieselbe Buchung wie auf der Kommission
+  // selbst (`consignments.mark_returned`, mit der gesehenen Fassung). Am Primary dieselbe
+  // Domaenenfunktion — jetzt mit derselben Regel wie fern: nur eine aktive, unverkaufte Kommission.
+  async function rueckgabe(con: { id: string; status: string; revision?: number }) {
+    const fassung = con.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('returning this consignment (no revision loaded)'))); return; }
+    const r = await w.save('consignments.mark_returned', {
+      local: () => { assertConsignmentReturnable(con.status); markReturned(con.id); return {}; },
+      remote: () => consignmentReturnBody(con.id, Number(fassung)),
+    });
+    if (r.kind !== 'ok') { alert(fehlertext(r)); return; }
+    loadConsignments();
+  }
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
 
@@ -713,7 +728,9 @@ export function ConsignmentList() {
                               onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = '#D5D9DE'; }}
                             >Sold</button>
                             <button
-                              onClick={(e) => { e.stopPropagation(); markReturned(con.id); }}
+                              data-consignment-list-return={con.id}
+                              disabled={w.busy}
+                              onClick={(e) => { e.stopPropagation(); void rueckgabe(con); }}
                               className="cursor-pointer transition-all duration-200"
                               style={{
                                 padding: '4px 10px', fontSize: 11, borderRadius: 6,

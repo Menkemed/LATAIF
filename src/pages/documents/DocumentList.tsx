@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, Image, File, Trash2, Upload, Grid, List } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { SearchSelect } from '@/components/ui/SearchSelect';
@@ -109,6 +110,7 @@ export function DocumentList() {
   }
 
   function handleDelete(id: string) {
+    if (blockDeleteOnClient()) { setShowDeleteConfirm(null); return; }
     deleteDocument(id);
     setShowDeleteConfirm(null);
   }
@@ -248,6 +250,7 @@ export function DocumentList() {
                 {formatDate(doc.createdAt)}
               </span>
               <button
+                {...primaryOnlyDeleteProps()}
                 onClick={e => { e.stopPropagation(); setShowDeleteConfirm(doc.id); }}
                 className="cursor-pointer transition-colors"
                 style={{ background: 'none', border: 'none', color: '#6B7280', padding: 4 }}
@@ -457,7 +460,7 @@ export function DocumentList() {
 
             {/* Actions */}
             <div className="flex justify-end gap-3" style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
-              <Button variant="danger" onClick={() => { setShowDeleteConfirm(showPreview.id); setShowPreview(null); }}>
+              <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => { setShowDeleteConfirm(showPreview.id); setShowPreview(null); }}>
                 Delete
               </Button>
               <Button variant="ghost" onClick={() => setShowPreview(null)}>Close</Button>

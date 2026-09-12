@@ -9,6 +9,7 @@ import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment 
 import { trackChange } from '@/core/sync/sync-service';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
+import { issuedAtIso } from '@/core/invoices/issued-at';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
@@ -734,7 +735,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   editInvoice: (id, input) => {
     const db = getDatabase();
     const now = new Date().toISOString();
-    const { lines, customerId, notes, issuedAt, staffId, deltaPayment, reason } = input;
+    const { lines, customerId, notes, staffId, deltaPayment, reason } = input;
+    // CENTRAL-UI-PARITY R6B — dasselbe Datum, egal wer es schickt. Die Maske gab `…T00:00:00.000Z`,
+    // der Fernauftrag `YYYY-MM-DD`: in der Rechnung stand je nach Rechner ein anderer Wert. Die Regel
+    // ist die des Anlegens (`createDirectInvoice`): ein reines Datum wird Mitternacht UTC.
+    const issuedAt = issuedAtIso(input.issuedAt);
 
     const inv0 = get().getInvoice(id);
     if (!inv0) throw new Error(`editInvoice: invoice ${id} not found`);

@@ -15,6 +15,7 @@ import { useAuthStore } from '@/stores/authStore';
 import {
   listStockChecks,
   recordStockCheck,
+  stockCheckAvailableHere,
   prepareNotes,
   stockCheckLabel,
   MAX_STOCK_CHECK_NOTES,
@@ -40,6 +41,8 @@ export function StockCheckPanel({ productId }: { productId: string }) {
   const [loaded, setLoaded] = useState(false);
 
   const reload = useCallback(async () => {
+    // R6B — ohne eigene Datenbank wird der Kern DIESES Rechners gar nicht gefragt (siehe unten).
+    if (!stockCheckAvailableHere()) { setLoaded(true); return; }
     try {
       setChecks(await listStockChecks(productId, 20));
     } catch {
@@ -54,6 +57,10 @@ export function StockCheckPanel({ productId }: { productId: string }) {
 
   const save = async (status: StockCheckStatus) => {
     if (busy) return;
+    if (!stockCheckAvailableHere()) {
+      setMsg({ text: 'Stock checks are only available on the main computer.', bad: true });
+      return;
+    }
     const prepared = prepareNotes(notes);
     if (!prepared.ok) {
       setMsg({ text: `Notes are limited to ${MAX_STOCK_CHECK_NOTES} characters.`, bad: true });
@@ -79,6 +86,19 @@ export function StockCheckPanel({ productId }: { productId: string }) {
       setBusy(false);
     }
   };
+
+  // CENTRAL-UI-PARITY R6B — der Stock-Check spricht mit dem Kern DIESES Rechners (dessen Konfig-DB,
+  // dessen Geschäftsdatei). Ohne eigene Datenbank ist das die falsche Stelle: bis R6D den Weg über
+  // den Primary baut, steht hier ein Satz statt zweier Knöpfe, die ins Leere oder in eine alte Datei
+  // schrieben.
+  if (!stockCheckAvailableHere()) {
+    return (
+      <div className="mt-6 border-t border-white/10 pt-4" data-primary-only="stock-check">
+        <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-2">Stock check</div>
+        <div className="text-sm text-gray-500">Stock checks are only available on the main computer.</div>
+      </div>
+    );
+  }
 
   const latest = checks[0] ?? null;
   const earlier = checks.slice(1);

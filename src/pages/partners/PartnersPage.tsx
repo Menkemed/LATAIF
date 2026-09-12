@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Users, TrendingUp, TrendingDown, Gift } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -159,7 +160,7 @@ export function PartnersPage() {
                         <span style={{
                           color: t.type === 'WITHDRAWAL' ? '#DC2626' : '#16A34A',
                         }}>{t.type === 'WITHDRAWAL' ? '−' : '+'}<Bhd v={t.amount}/> BHD</span>
-                        <button onClick={() => deleteTransaction(t.id)} className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }}>×</button>
+                        <button {...primaryOnlyDeleteProps()} onClick={() => { if (blockDeleteOnClient()) return; deleteTransaction(t.id); }} className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }}>×</button>
                       </div>
                     </div>
                   ))}
@@ -264,7 +265,8 @@ export function PartnersPage() {
               style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+              if (blockDeleteOnClient()) return;
               if (editPartner && window.confirm(`Delete partner "${editPartner.name}"?`)) {
                 try {
                   deletePartner(editPartner.id);

@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { FileText } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -210,7 +211,7 @@ export function OfferList() {
                 </>
               )}
               {(offer.status === 'draft' || offer.status === 'rejected' || offer.status === 'expired') && (
-                <button onClick={(e) => { e.stopPropagation(); deleteOffer(offer.id); }}
+                <button {...primaryOnlyDeleteProps()} onClick={(e) => { e.stopPropagation(); if (blockDeleteOnClient()) return; deleteOffer(offer.id); }}
                   className="cursor-pointer" style={{ padding: '2px 8px', fontSize: 10, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Delete</button>
               )}
             </div>

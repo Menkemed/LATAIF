@@ -7,6 +7,7 @@ import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '../db/database';
 import type { UserRole } from '../models/types';
 import { roleHasPermission } from './role-permissions';
+import { isClientMode, setClientToken } from '../bridge/client-mode';
 
 export interface AuthUser {
   id: string;
@@ -199,6 +200,16 @@ export class AuthService {
   }
 
   logout(): void {
+    // CENTRAL-UI-PARITY R6B — ein Rechner ohne eigene Datenbank hat keine `sessions`-Tabelle: der
+    // Griff danach warf, BEVOR die Sitzung geleert war, und niemand kam mehr hinaus. Abmelden ist
+    // dort rein lokal — Sitzung und Ausweis weg, zurück zum Verbinden/Anmelden. Der Primary prüft
+    // ohnehin jede Anfrage; ein vergessener Ausweis kann nichts mehr.
+    if (isClientMode()) {
+      this.currentSession = null;
+      try { localStorage.removeItem('lataif_session'); } catch { /* kein Speicher */ }
+      setClientToken(null);
+      return;
+    }
     if (this.currentSession) {
       const db = getDatabase();
       db.run(`DELETE FROM sessions WHERE token = ?`, [this.currentSession.token]);

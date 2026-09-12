@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
@@ -486,7 +487,7 @@ export function TaskList() {
                 overdue={overdue}
                 onEdit={() => openEdit(task)}
                 onComplete={() => completeTask(task.id)}
-                onDelete={() => deleteTask(task.id)}
+                onDelete={() => { if (blockDeleteOnClient()) return; deleteTask(task.id); }}
               />
             );
           })
@@ -627,6 +628,7 @@ function TaskRow({ task, overdue, onEdit, onComplete, onDelete }: {
         <button
           onClick={onDelete}
           title="Delete"
+          {...primaryOnlyDeleteProps()}
           style={{
             background: 'none',
             border: 'none',

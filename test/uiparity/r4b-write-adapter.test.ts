@@ -317,9 +317,12 @@ function gehe(root: string): string[] {
   ok(/aendern\.remote[\s\S]{0,200}nichtAmClient\('editing product images'\)/.test(prod),
     '6 der Bildweg meldet sich am Client als nicht verfuegbar');
   const inv = codeOf(src('src/pages/invoices/InvoiceCreate.tsx'));
-  ok(/anlegen\.remote && isEditMode[\s\S]{0,120}nichtAmClient/.test(inv),
-    '6 das Aendern einer Rechnung ebenso');
-  ok(/anlegen\.remote && paidAmount > 0[\s\S]{0,160}nichtAmClient/.test(inv),
+  // R6B — das Aendern der Rechnung geht jetzt fern ueber die vorhandene Buchung `invoices.update`;
+  // gesperrt bleibt nur, was diese Buchung nicht kennt: eine Zahlung im Aendern.
+  ok(/aendernRechnung\.remote && deltaPayment\)[\s\S]{0,120}nichtAmClient\('recording a payment while editing an invoice'\)/.test(inv)
+    && /aendernRechnung\.save\(\{/.test(inv),
+    '6 das Aendern einer Rechnung geht fern ueber invoices.update — nur eine Zahlung darin bleibt ein ehrliches Nein');
+  ok(/anlegen\.remote && !isEditMode && paidAmount > 0[\s\S]{0,160}nichtAmClient/.test(inv),
     '6 …und eine Zahlung beim Anlegen ebenso — sie waere sonst Geld, das liegen bleibt');
 }
 

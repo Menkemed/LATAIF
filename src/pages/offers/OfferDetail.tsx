@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Save, Trash2, Plus, X, FileText, Download, Sparkles } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
@@ -103,6 +104,7 @@ export function OfferDetail() {
 
   function handleDelete() {
     if (!id) return;
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteOffer(id);
     navigate('/offers');
   }
@@ -248,7 +250,7 @@ export function OfferDetail() {
                   <Button variant="primary" onClick={handleCreateInvoice}><FileText size={14} /> Create Invoice</Button>
                 )}
                 {canDelete && perm.canDeleteOffers && (
-                  <Button variant="danger" onClick={() => setConfirmDelete(true)}><Trash2 size={14} /> Delete</Button>
+                  <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}><Trash2 size={14} /> Delete</Button>
                 )}
               </>
             )}

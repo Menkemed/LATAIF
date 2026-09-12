@@ -29,6 +29,7 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import type { Agent } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites } from '@/core/data/shared-write';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { clampTransferSplitPct, isTransferableStock, transferCreateBody } from '@/core/agents/transfer-rules';
 import { createTransferOnPrimary } from '@/core/agents/transfer-house';
@@ -533,7 +534,8 @@ export function AgentList() {
               style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+              if (blockDeleteOnClient()) return;
               if (editAgent && window.confirm(`Delete approval "${editAgent.name}"?`)) {
                 try {
                   deleteAgent(editAgent.id);

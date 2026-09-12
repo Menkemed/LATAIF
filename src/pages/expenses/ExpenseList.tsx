@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Wallet, Trash2, CreditCard, Repeat, Pause, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import { Modal } from '@/components/ui/Modal';
@@ -411,6 +412,7 @@ export function ExpenseList() {
                     <button
                       onClick={() => setConfirmDeleteTemplate(t.id)}
                       title="Delete template"
+                      {...primaryOnlyDeleteProps()}
                       className="cursor-pointer"
                       style={{ background: 'none', border: 'none', color: '#6B7280' }}>
                       <Trash2 size={13} />
@@ -486,7 +488,7 @@ export function ExpenseList() {
                       }}><CreditCard size={11} /></button>
                   )}
                 </div>
-                <button onClick={(ev) => { ev.stopPropagation(); setConfirmDelete(e.id); }} className="cursor-pointer"
+                <button {...primaryOnlyDeleteProps()} onClick={(ev) => { ev.stopPropagation(); setConfirmDelete(e.id); }} className="cursor-pointer"
                   style={{ background: 'none', border: 'none', color: '#6B7280' }}>
                   <Trash2 size={14} />
                 </button>
@@ -793,6 +795,7 @@ export function ExpenseList() {
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setConfirmDeleteTemplate(null)}>Cancel</Button>
             <Button variant="primary" onClick={() => {
+              if (blockDeleteOnClient()) { setConfirmDeleteTemplate(null); return; }
               if (confirmDeleteTemplate) deleteRecurringTemplate(confirmDeleteTemplate);
               setConfirmDeleteTemplate(null);
             }} style={{ background: '#DC2626' }}>Delete Template</Button>
@@ -850,7 +853,8 @@ export function ExpenseList() {
           <Input label="DESCRIPTION"
             value={editForm.description || ''} onChange={e => setEditForm({ ...editForm, description: e.target.value })} />
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+              if (blockDeleteOnClient()) return;
               if (editId && window.confirm('Delete this expense?')) {
                 deleteExpense(editId);
                 setEditId(null);
@@ -887,7 +891,7 @@ export function ExpenseList() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { if (confirmDelete) { deleteExpense(confirmDelete); setConfirmDelete(null); } }}>Delete</Button>
+          <Button variant="danger" onClick={() => { if (blockDeleteOnClient()) { setConfirmDelete(null); return; } if (confirmDelete) { deleteExpense(confirmDelete); setConfirmDelete(null); } }}>Delete</Button>
         </div>
       </Modal>
     </PageLayout>

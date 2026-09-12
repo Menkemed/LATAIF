@@ -10,6 +10,7 @@ import { ArrowLeft, FileText, History as HistoryIcon, Trash2 } from 'lucide-reac
 import { useGoBack } from '@/hooks/useGoBack';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -297,7 +298,7 @@ export function TransferDetail() {
               Edit
             </Button>
             <div style={{ flex: 1 }} />
-            <Button variant="ghost" onClick={() => setConfirmDelete(true)}>
+            <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>
               <Trash2 size={14} color="#DC2626" /> <span style={{ color: '#DC2626' }}>Delete</span>
             </Button>
           </div>
@@ -577,6 +578,7 @@ export function TransferDetail() {
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
           <Button variant="danger" onClick={() => {
+            if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
             deleteTransfer(transfer.id);
             setConfirmDelete(false);
             goBack();

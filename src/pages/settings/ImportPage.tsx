@@ -8,6 +8,7 @@ import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { useProductStore } from '@/stores/productStore';
 import { createPreDestructiveBackup } from '@/core/settings/pre-destructive-backup';
+import { primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
 import {
   classifyRows, summarize, canStartImport, runProductImport, buildExistingIndex, cleanStr, getCol,
   VAT_SCHEMES,
@@ -207,6 +208,9 @@ export function ImportPage() {
   // Import: Backup-first → ohne Erfolg KEIN createProduct. Danach per-Row (nicht atomar).
   async function handleImport() {
     if (!importReady) return;
+    // CENTRAL-UI-PARITY R6B — die Route ist auf einem Rechner ohne Datenbank gesperrt (App.tsx);
+    // dieser Riegel hält, falls die Seite doch erreicht wird: keine lokale Sicherung, kein Anlegen.
+    if (primaryOnlyLocked()) { setBackupError(primaryOnlyText('The Excel import')); return; }
     setStep('importing');
     setBackupError('');
 

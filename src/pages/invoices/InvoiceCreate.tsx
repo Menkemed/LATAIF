@@ -91,6 +91,8 @@ export function InvoiceCreate() {
   const [paidAmount, setPaidAmount] = useState<number>(0);
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
   const anlegen = useSharedWrite<{ invoiceId: string }>('invoices.create');
+  // CENTRAL-UI-PARITY R6B — das Ändern dieser Seite geht fern über die vorhandene Buchung.
+  const aendernRechnung = useSharedWrite<Record<string, unknown>>('invoices.update');
   const [notes, setNotes] = useState('');
   const [staffId, setStaffId] = useState<string>('');
   const [editReason, setEditReason] = useState('');  // Pflicht-Grund im Edit-Modus (Audit)
@@ -286,13 +288,10 @@ export function InvoiceCreate() {
   async function performSave(thenPrint: boolean, specialMark: boolean) {
     // R4B — was auf einem verbundenen Rechner noch NICHT geht, sagt es. Kein stilles Nichts, und
     // vor allem kein Rueckfall auf die lokale Datenbank:
-    //   • Aendern ist ein eigener Vertrag (`invoices.update`) und in dieser Scheibe nicht dabei.
     //   • `invoices.create` kennt keine Zahlung; sie waere ein zweiter Vorsatz. Eine Rechnung
     //     anzulegen und das Geld liegen zu lassen waere schlimmer als ein ehrliches Nein.
-    if (anlegen.remote && isEditMode) {
-      setError(fehlertext(nichtAmClient('editing an invoice'))); return;
-    }
-    if (anlegen.remote && paidAmount > 0) {
+    //   • R6B — Aendern geht jetzt fern (`invoices.update`, unten); nur eine Zahlung im Aendern nicht.
+    if (anlegen.remote && !isEditMode && paidAmount > 0) {
       setError(fehlertext(nichtAmClient('recording a payment while creating an invoice'))); return;
     }
     // CENTRAL-C3B — dieselbe Ableitung, die der Fernauftrag benutzt. Phase 3 (Cost-Snapshot aus
@@ -326,20 +325,48 @@ export function InvoiceCreate() {
       const deltaPayment = delta > 0.001
         ? { amount: delta, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined }
         : undefined;
-      try {
-        editInvoiceFn(editInvoice.id, {
-          lines: payload,
-          customerId,
-          notes: notes || undefined,
-          issuedAt: issuedIso,
-          staffId: staffId || undefined,
-          deltaPayment,
-          reason,
-        });
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        return;
+      // CENTRAL-UI-PARITY R6B — dieselbe Absicht, zwei Anschluesse: am Primary `editInvoice` wie
+      // bisher (EINE Transaktion), am Client die vorhandene Buchung `invoices.update`, die GENAU diese
+      // Funktion faehrt. Eine Zahlung ist dort bewusst kein Feld (eigene Buchung) — ehrliches Nein.
+      if (aendernRechnung.remote && deltaPayment) {
+        setError(fehlertext(nichtAmClient('recording a payment while editing an invoice'))); return;
       }
+      const fassung = editInvoice.revision;
+      if (aendernRechnung.remote && !fassung) {
+        setError(fehlertext(nichtAmClient('editing this invoice (no revision loaded)'))); return;
+      }
+      const invId = editInvoice.id;
+      const r = await aendernRechnung.save({
+        local: () => {
+          editInvoiceFn(invId, {
+            lines: payload,
+            customerId,
+            notes: notes || undefined,
+            issuedAt: issuedIso,
+            staffId: staffId || undefined,
+            deltaPayment,
+            reason,
+          });
+          return {};
+        },
+        remote: () => ({
+          id: invId,
+          expectedRevision: fassung,
+          reason,
+          customerId,
+          lines: lines.map((l, i) => ({
+            productId: l.productId,
+            lotId: computed[i]?.selectedLot?.id ?? null,
+            quantity: l.quantity,
+            unitPrice: l.unitPrice,
+            scheme: l.scheme,
+          })),
+          ...(notes ? { notes } : {}),
+          ...(issuedDate ? { issuedDate } : {}),
+          ...(staffId ? { staffId } : {}),
+        }),
+      });
+      if (r.kind !== 'ok') { setError(fehlertext(r)); return; }
       if (thenPrint) {
         navigate(`/invoices/${editInvoice.id}?print=1`);
       } else {
@@ -903,8 +930,8 @@ export function InvoiceCreate() {
         <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate(isEditMode && editInvoice ? `/invoices/${editInvoice.id}` : '/invoices')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => handleSave(true)} disabled={anlegen.busy}><Printer size={14} /> Save & Print</Button>
-            <Button variant="primary" onClick={() => handleSave(false)} disabled={anlegen.busy} data-save-invoice><Save size={14} /> {anlegen.busy ? 'Saving…' : (isEditMode ? 'Save Changes' : 'Save Invoice')}</Button>
+            <Button variant="secondary" onClick={() => handleSave(true)} disabled={anlegen.busy || aendernRechnung.busy}><Printer size={14} /> Save & Print</Button>
+            <Button variant="primary" onClick={() => handleSave(false)} disabled={anlegen.busy || aendernRechnung.busy} data-save-invoice><Save size={14} /> {anlegen.busy || aendernRechnung.busy ? 'Saving…' : (isEditMode ? 'Save Changes' : 'Save Invoice')}</Button>
           </div>
         </div>
       </div>

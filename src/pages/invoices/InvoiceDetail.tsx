@@ -35,6 +35,8 @@ import { INVOICE_CANCEL_REFUND_METHODS, invoiceCancelBlocker, invoiceCancelBody 
 import { cancelInvoiceOnPrimary } from '@/core/invoices/invoice-cancel-house';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { computeCardFee } from '@/core/finance/card-fees';
@@ -224,7 +226,38 @@ export function InvoiceDetail() {
   // R5F.1 — dieselbe Regel wie das Haus: nicht storniert, nicht endgueltig, nicht zurueckgegeben.
   const canCancel = invoiceCancelBlocker(invoice.status) === null;
 
-  const canMarkRepairPickedUp = pendingRepairs.length > 0 && isPaid;
+  // CENTRAL-UI-PARITY R6B — abgeholt wird nur, was das Haus wirklich abholen laesst: derselbe
+  // Uebergang wie auf der Reparaturseite und in der Fernbuchung (`allowedRepairStatusTargets`).
+  // Vorher sprang hier auch eine Reparatur „in Arbeit" direkt auf picked_up — und uebersprang
+  // „ready", an dem Werkstatt-Forderung, Kapitalisierung und Marge haengen.
+  const pickupReady = pendingRepairs.filter(r => allowedRepairStatusTargets(r.status, r.repairType, r.repairScope).includes('picked_up'));
+  const pickupNotReady = pendingRepairs.filter(r => !pickupReady.includes(r));
+  const canMarkRepairPickedUp = pickupReady.length > 0 && isPaid;
+
+  // Eine Buchung je Reparatur (`repairs.update_status`), jede mit ihrer gesehenen Fassung — am
+  // Primary dieselbe Domaenenfunktion wie bisher. Die erste, die nicht glueckt, haelt an und sagt es.
+  async function markRepairsPickedUp() {
+    const refs = pickupReady.map(r => r.repairNumber).join(', ');
+    const frage = pickupReady.length === 1
+      ? `Mark repair ${refs} as picked up?`
+      : `Mark all ${pickupReady.length} linked repairs as picked up? (${refs})`;
+    const rest = pickupNotReady.length
+      ? `\n\nNot ready yet — they stay as they are: ${pickupNotReady.map(r => r.repairNumber).join(', ')}`
+      : '';
+    if (!window.confirm(frage + rest)) return;
+    for (const r of pickupReady) {
+      const fassung = r.revision;
+      if (w.remote && !fassung) {
+        w.clear(); alert(fehlertext(nichtAmClient('marking a repair as picked up (no revision loaded)'))); break;
+      }
+      const geglueckt = await w.ok('repairs.update_status', {
+        local: () => { updateRepairStatus(r.id, 'picked_up'); return {}; },
+        remote: () => ({ repairId: r.id, status: 'picked_up', expectedRevision: fassung }),
+      });
+      if (!geglueckt) break;
+    }
+    loadRepairs();
+  }
 
   function handleSaveEdit() {
     if (!id) return;
@@ -372,6 +405,8 @@ export function InvoiceDetail() {
 
   function handleDeleteInvoice() {
     if (!id) return;
+    // R6B — Löschen bleibt am Primary (eigener Referenzvertrag, bewusst nie fern).
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteInvoice(id);
     navigate('/invoices');
   }
@@ -666,22 +701,9 @@ export function InvoiceDetail() {
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}
                 {canMarkRepairPickedUp && (
-                  <Button variant="primary" onClick={() => {
-                    const refs = pendingRepairs.map(r => r.repairNumber).join(', ');
-                    const msg = pendingRepairs.length === 1
-                      ? `Mark repair ${refs} as picked up?`
-                      : `Mark all ${pendingRepairs.length} linked repairs as picked up? (${refs})`;
-                    if (!window.confirm(msg)) return;
-                    try {
-                      for (const r of pendingRepairs) {
-                        updateRepairStatus(r.id, 'picked_up');
-                      }
-                    } catch (err) {
-                      alert(err instanceof Error ? err.message : String(err));
-                    }
-                  }}>
+                  <Button variant="primary" data-repair-pickup disabled={w.busy} onClick={() => { void markRepairsPickedUp(); }}>
                     <ExternalLink size={14} /> Mark as Picked Up
-                    {pendingRepairs.length > 1 ? ` (${pendingRepairs.length})` : ''}
+                    {pickupReady.length > 1 ? ` (${pickupReady.length})` : ''}
                   </Button>
                 )}
                 {(() => {
@@ -694,7 +716,7 @@ export function InvoiceDetail() {
                   return <Button variant="secondary" onClick={openReturnModal}><RotateCcw size={14} /> Create Return</Button>;
                 })()}
                 {canCancel && perm.canEditInvoices && <Button variant="danger" onClick={() => setConfirmCancel(true)}><XCircle size={14} /> Cancel</Button>}
-                {perm.canDeleteInvoices && !isPaid && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
+                {perm.canDeleteInvoices && !isPaid && <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>Delete</Button>}
               </>
             )}
           </div>

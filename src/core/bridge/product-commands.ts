@@ -54,6 +54,7 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { PRODUCT_CREATE_FIELDS, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
+import { confirmAiIdentificationInHouse } from '@/core/products/ai-confirm';
 import {
   MAX_REMOTE_IMAGES, isStagingId, invokeReadStaged, invokeDiscardStaged, assertHouseBranch,
   parseStagingIds, readStagedAsDataUrls, discardStagedAfterSuccess,
@@ -215,12 +216,27 @@ export interface ProductUpdateRequest {
    * Aussage: „diese Galerie soll leer sein".
    */
   gallery?: GallerySlot[];
+  /**
+   * CENTRAL-UI-PARITY R6B — „KI-Identifikation bestätigen". Keine Feldöffnung: der Client schickt
+   * nur die Absicht (`aiConfirmedAt: true`), die ZEIT stempelt der Primary, und die Absicht reist
+   * allein — kein Textfeld, keine Galerie daneben.
+   */
+  confirmAi?: true;
 }
 
 export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
   if (!isPlain(raw)) throw new ProductPayloadError('payload must be an object');
-  const { id, gallery, ...rest } = raw as { id?: unknown; gallery?: unknown };
+  const { id, gallery, aiConfirmedAt, ...rest } = raw as { id?: unknown; gallery?: unknown; aiConfirmedAt?: unknown };
   if (typeof id !== 'string' || !id.trim()) throw new ProductPayloadError('id is required');
+  if (aiConfirmedAt !== undefined) {
+    if (aiConfirmedAt !== true) {
+      throw new ProductPayloadError('aiConfirmedAt is a confirmation (true) — the primary stamps the time, not the client');
+    }
+    if (gallery !== undefined || Object.keys(rest as Record<string, unknown>).length > 0) {
+      throw new ProductPayloadError('confirming the AI identification is its own change — send it alone');
+    }
+    return { id, fields: {}, confirmAi: true };
+  }
   for (const [k, why] of Object.entries(IMMUTABLE_ON_UPDATE)) {
     if (k in (rest as Record<string, unknown>)) throw new ProductPayloadError(why);
   }
@@ -450,7 +466,7 @@ export async function runProductUpdate(
   raw: unknown,
   extras: ProductEngineExtras = {},
 ): Promise<CommandOutcome> {
-  const { id, fields: patch, gallery } = parseProductUpdate(raw);
+  const { id, fields: patch, gallery, confirmAi } = parseProductUpdate(raw);
   const readStaged = extras.readStaged ?? invokeReadStaged;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
   const readGallery = extras.readGallery ?? resolveGallery;
@@ -464,6 +480,24 @@ export async function runProductUpdate(
     // Den Artikel muss es geben — sonst liefe ein Edit still ins Leere und meldete Erfolg.
     if (query('SELECT id FROM products WHERE id = ?', [id]).length === 0) {
       throw new CommandRejected('PRODUCT_NOT_FOUND', 'no such product');
+    }
+
+    // R6B — die Bestätigung der KI-Identifikation: dieselbe Hausfunktion wie am Primary-Knopf.
+    if (confirmAi) {
+      let stamp: string;
+      try {
+        stamp = confirmAiIdentificationInHouse(id).aiConfirmedAt;
+      } catch (err) {
+        const code = (err as { code?: unknown }).code;
+        if (code === 'AI_NOT_IDENTIFIED' || code === 'PRODUCT_NOT_FOUND') {
+          throw new CommandRejected(String(code), (err as Error).message);
+        }
+        throw err;
+      }
+      const row = query('SELECT sku, name FROM products WHERE id = ?', [id])[0];
+      return {
+        productId: id, sku: String(row?.sku ?? ''), name: String(row?.name ?? ''), imageCount: 0, aiConfirmedAt: stamp,
+      } as ProductCommandResult;
     }
 
     // ZWEI Wege, und der Unterschied ist wichtig genug für eine Verzweigung: ohne `gallery` läuft

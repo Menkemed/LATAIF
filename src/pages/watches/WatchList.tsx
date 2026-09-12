@@ -26,6 +26,8 @@ import { CollectionProductThumb } from '@/components/products/CollectionProductT
 import { decideProductCreateUi, type ProductCreateResult } from '@/core/media/product-media-create';
 import { planProductCreate, productCreateRefusal, productCreateRequest } from '@/core/products/product-create';
 import { useSharedWrites } from '@/core/data/shared-write';
+import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
+import { stockCheckAvailableHere } from '@/core/stock/stock-check';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { matchesDeep } from '@/core/utils/deep-search';
@@ -234,6 +236,7 @@ export function WatchList() {
   };
 
   function performDelete() {
+    if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     const ids = Array.from(selectedIds);
     if (ids.length === 0) { setConfirmDelete(false); return; }
     const { deleted, blocked } = deleteProducts(ids);
@@ -527,7 +530,13 @@ export function WatchList() {
               </Button>
               {/* POST-V0838 §C1 — the inventory modal takes the CURRENT working set: whatever the
                   search and the filters above have narrowed the page down to, never the whole stock. */}
-              <Button variant="ghost" data-testid="open-inventory" disabled={filtered.length === 0} onClick={() => setInventoryOpen(true)}>
+              {/* CENTRAL-UI-PARITY R6B — die Inventur schreibt (noch) in den Kern DIESES Rechners; ohne
+                  eigene Datenbank ist sie gesperrt und sagt es, bis R6D den Weg über den Primary baut. */}
+              <Button variant="ghost" data-testid="open-inventory"
+                disabled={filtered.length === 0 || !stockCheckAvailableHere()}
+                title={stockCheckAvailableHere() ? undefined : primaryOnlyText('Inventory')}
+                data-primary-only={stockCheckAvailableHere() ? undefined : 'inventory'}
+                onClick={() => setInventoryOpen(true)}>
                 Stock Check ({filtered.length})
               </Button>
               <Button variant="ghost" onClick={() => exportProductsToExcel(filtered, categories)}>
@@ -536,10 +545,14 @@ export function WatchList() {
               <Button variant="ghost" onClick={() => navigate('/settings?tab=duplicates')}>
                 Find Duplicates
               </Button>
-              <Button variant="ghost" onClick={() => setSelectMode(true)}>
+              <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={() => setSelectMode(true)}>
                 <Trash2 size={14} /> Select
               </Button>
-              <Button variant="secondary" onClick={() => navigate('/import')}>Import Excel</Button>
+              <Button variant="secondary"
+                disabled={primaryOnlyLocked()}
+                title={primaryOnlyLocked() ? primaryOnlyText('The Excel import') : undefined}
+                data-primary-only={primaryOnlyLocked() ? 'import' : undefined}
+                onClick={() => navigate('/import')}>Import Excel</Button>
               <Button variant="primary" onClick={() => openNew()}>New Item</Button>
             </>
           )}
@@ -1229,7 +1242,7 @@ export function WatchList() {
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
-            <Button variant="primary" onClick={performDelete}>
+            <Button variant="primary" {...primaryOnlyDeleteProps()} onClick={performDelete}>
               <Trash2 size={14} /> Delete {selectedIds.size} item{selectedIds.size === 1 ? '' : 's'}
             </Button>
           </div>

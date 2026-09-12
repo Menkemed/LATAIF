@@ -5,6 +5,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Download, Trash2, ExternalLink } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -83,6 +84,7 @@ export function CreditNoteDetail() {
 
   function handleDelete() {
     if (!cn) return;
+    if (blockDeleteOnClient()) return;
     if (!confirm(`Delete credit note ${cn.creditNoteNumber}? This is destructive — only do this if it was created by mistake.`)) return;
     deleteCreditNote(cn.id);
     navigate('/credit-notes');
@@ -100,7 +102,7 @@ export function CreditNoteDetail() {
           </button>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={handleDownload}><Download size={14} /> Download PDF</Button>
-            <Button variant="ghost" onClick={handleDelete} style={{ color: '#DC2626' }}><Trash2 size={14} /> Delete</Button>
+            <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={handleDelete} style={{ color: '#DC2626' }}><Trash2 size={14} /> Delete</Button>
           </div>
         </div>
 

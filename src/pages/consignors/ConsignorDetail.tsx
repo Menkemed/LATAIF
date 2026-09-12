@@ -19,12 +19,26 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { commissionModelLabel } from '@/core/consignment/economics';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { assertConsignmentReturnable, consignmentReturnBody } from '@/core/consignment/consignment-return';
 
 export function ConsignorDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/consignments');
   const { consignments, loadConsignments, markReturned } = useConsignmentStore();
+  // CENTRAL-UI-PARITY R6B — derselbe Anschluss wie in Liste und Detail: `consignments.mark_returned`.
+  const w = useSharedWrites();
+  async function rueckgabe(con: { id: string; status: string; revision?: number }) {
+    const fassung = con.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('returning this consignment (no revision loaded)'))); return; }
+    const r = await w.save('consignments.mark_returned', {
+      local: () => { assertConsignmentReturnable(con.status); markReturned(con.id); return {}; },
+      remote: () => consignmentReturnBody(con.id, Number(fassung)),
+    });
+    if (r.kind !== 'ok') { alert(fehlertext(r)); return; }
+    loadConsignments();
+  }
   const { customers, loadCustomers } = useCustomerStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
@@ -255,7 +269,9 @@ export function ConsignorDetail() {
                             <div className="flex gap-1">
                               {con.status === 'active' && (
                                 <button
-                                  onClick={() => markReturned(con.id)}
+                                  data-consignor-return={con.id}
+                                  disabled={w.busy}
+                                  onClick={() => { void rueckgabe(con); }}
                                   className="cursor-pointer transition-all duration-200"
                                   style={{
                                     padding: '4px 10px', fontSize: 11, borderRadius: 6,
