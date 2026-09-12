@@ -240,6 +240,10 @@ function revertDisposition(
   }
 }
 
+// R5F FINAL — Geld auf Fils (BHD, 3 Stellen). Ein Drittel einer Zeile ist 333,333…; ohne Runden blieb nach
+// einem Storno ein Gleitkomma-Rest (5,7e-14), den eine offene Retoure noch „erstatten" konnte.
+const r3 = (v: number): number => Math.round(v * 1000) / 1000;
+
 // Berechnet Cash-Refundability nach Industriestandard (SAP/Xero/QuickBooks):
 //   cashRefund = max(0, customerPaid − (invoiceGross − allReturns) − otherRefundsAlreadyPaid)
 // d. h. nur was Customer NACH Returns überzahlt hat ist cash-pflichtig zurückzugeben.
@@ -270,8 +274,8 @@ function computeRefundSplit(
 
   const owedAfterAllReturns = Math.max(0, invoiceGross - otherReturnsTotal - totalAmount);
   const surplus = Math.max(0, customerPaid - owedAfterAllReturns - otherRefundsAlreadyPaid);
-  const cashRefundCap = Math.min(totalAmount, surplus);
-  const receivableCancel = Math.max(0, totalAmount - cashRefundCap);
+  const cashRefundCap = r3(Math.min(totalAmount, surplus));
+  const receivableCancel = r3(Math.max(0, totalAmount - cashRefundCap));
 
   return { cashRefundCap, receivableCancel, customerPaid, invoiceGross };
 }
@@ -581,11 +585,11 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
 
     // 2) Cap berechnen — wieviel Cash kann tatsächlich zurückfließen.
     const { cashRefundCap } = computeRefundSplit(id, r2.invoiceId, r2.totalAmount);
-    const remainingCashRefundable = Math.max(0, cashRefundCap - (r2.refundPaidAmount || 0));
+    const remainingCashRefundable = Math.max(0, r3(cashRefundCap - (r2.refundPaidAmount || 0)));
     const requestedAmount = typeof partialAmount === 'number' && partialAmount >= 0 && partialAmount <= r2.totalAmount
       ? partialAmount
       : r2.totalAmount;
-    const refundAmount = Math.min(requestedAmount, remainingCashRefundable);
+    const refundAmount = r3(Math.min(requestedAmount, remainingCashRefundable));
 
     // 3a) Cash fließt → recordRefundPayment.
     if (refundAmount > 0) {
@@ -649,15 +653,15 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
 
     // Cap: Cash-Refundability laut Industriestandard (Customer-Surplus nach allen Returns).
     const { cashRefundCap } = computeRefundSplit(returnId, r.invoiceId, r.totalAmount);
-    const refundableNow = Math.max(0, cashRefundCap - (r.refundPaidAmount || 0));
-    const cappedAmount = Math.min(amount, refundableNow, remaining);
+    const refundableNow = Math.max(0, r3(cashRefundCap - (r.refundPaidAmount || 0)));
+    const cappedAmount = r3(Math.min(amount, refundableNow, remaining));
 
     if (cappedAmount <= 0) {
       console.warn('[Return] no cash refundable now — customer surplus exhausted');
       return;
     }
 
-    const newPaid = (r.refundPaidAmount || 0) + cappedAmount;
+    const newPaid = r3((r.refundPaidAmount || 0) + cappedAmount);
     const newRefundStatus: RefundStatus = newPaid >= r.totalAmount - 0.005 ? 'REFUNDED'
       : newPaid > 0 ? 'PARTIALLY_REFUNDED'
       : 'PENDING_REFUND';

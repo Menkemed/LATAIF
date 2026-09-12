@@ -589,6 +589,8 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
     catch (e) { threw = String(e); }
     ok(threw !== null && /refusing to register/.test(threw), `ALLOWLIST ${op} wird abgewiesen`);
   }
+  // R5F.1 — `invoices.cancel` ist die EINE seither ausdruecklich freigegebene Buchung (Rechnungsstorno).
+  ok(known.includes('invoices.cancel') && mutations.includes('invoices.cancel'), 'ALLOWLIST invoices.cancel ist freigegeben und angemeldet — als einzige neue');
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));

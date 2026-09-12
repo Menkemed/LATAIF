@@ -2013,3 +2013,38 @@ Registry-Pins angepasst (40→41 Buchungen, 107→108): c3g, c4 ×2, c2, c3b–c
 Registry 108 · Vierziger-Matrix 36 / 0 / 0 / 4 + invoices.cancel
 ```
 
+### R5F FINAL GATE — Betrag, Teilzahlung, Storno-Wächter, Notiz, Registry
+
+- **Betrag:** Eine Rechnung hat kein Rabattfeld. Ein angepasster Preis IST der Zeilenbetrag, und die Retoure rechnet
+  daraus (`returnLineAmounts`), nicht aus Stückpreis × Menge. Gepinnt:
+  - Menge 3 → Restmenge 3, genau 1000 mit anteiliger Steuer 90,909.
+  - 1 von 3 schon zurück → Restmenge 2 (666,667); beide Retouren ergeben zusammen genau die Zeile.
+  - Dialog „Refund of 400" = Erstattung 400 = Gutschrift bar 400 = Buchung (Erlös 909,091 + Steuer 90,909 zurück,
+    Kasse −400, Forderung −600).
+- **Echter Befund dabei:** Nach einem Storno blieb ein Gleitkomma-Rest (`399,9999999999999`). Eine frühere, offene
+  Retoure konnte danach noch `5,7e-14` „erstatten" und meldete Erfolg. Die Beträge im Retourengeld
+  (`computeRefundSplit`, `refundReturn`, `recordRefundPayment`) werden jetzt auf Fils (3 Stellen) gerundet. Danach
+  zahlt die frühere Retoure nichts mehr aus (`NO_CASH_REFUNDABLE`).
+- **Teilzahlung 500 von 1330:**
+  - bar erstattet genau 500, kein Guthaben;
+  - die Zahlung bleibt als Beleg;
+  - jedes Konto steht danach bei null (Forderung, Kasse, Erlös, Steuer, Wareneinsatz, Bestand);
+  - Soll = Haben, keine negative Restforderung.
+- **Storno-Wächter:** `reverseSource`/`reverseTransaction` werfen wie bisher. Neu ist nur, dass ein gescheiterter
+  Gegenposten gezählt wird — auch einer, den ein Aufrufer abfängt. Und zwar nur innerhalb des Fensters, das der Wächter
+  beobachtet. Scheitert der ZWEITE Gegenposten, bleibt kein Teil-Storno und kein Erfolg. Danach gibt es genau einen
+  Gegenposten je Buchung, und eine Wiederholung erzeugt keinen zweiten. Die legitimen Storno-Pfade bleiben grün
+  (Gutschrift-Neubuchung, Rechnungsstorno, B2-Guthaben-Abbau).
+- **Notiz:** Im Zwei-App-Vergleich wird nur die Rechnungsnummer des Zwillings zu `<INVOICE_NO>`; der Rest der Notiz
+  (Retoure und Gutschrift) muss wortgleich sein.
+- **Registry:** Vorher 40, jetzt 41 Buchungen, die einzige neue ist `invoices.cancel` (Rust: einzig
+  `OP_INVOICES_CANCEL`, 107 → 108). Eine nicht freigegebene Buchung bleibt fail-closed. Die geänderten Zähl-Pins
+  enthalten kein `skip`. Aus der Abweisungsliste ist nur `invoices.cancel` herausgenommen und positiv gepinnt; die
+  Klasse-C-Probe prüft Löschen und Sondermarke der Rechnung weiter.
+
+```
+Unit  r5f/invoice-cancel 131/0 (+ §8 Betrag, §9 Teilzahlung, §10 Storno-Wächter, §11 Registry)
+E2E   r5f1-invoice-cancel 36/0 auf neu gebauten Programmen (mit Fils-Rundung; Notiz nur mit normalisierter Rechnungsnummer verglichen)
+Nachbarn return-chain 77/0 · invoice-lifecycle 136/0 · b2 credit-teardown 21/21 · c3h-stage 44/0 · r5f 173/0 · c4 ×2 · c3h-ui · c3a · r4c · r1
+```
+

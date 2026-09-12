@@ -438,7 +438,10 @@ async function retoureOhneMitarbeiter(c) {
   const schlecht = r.filter((x) => x !== 'OK');
   return { m: schlecht.length ? 'FELD:' + schlecht.join(',') : 'OK', staff };
 }
-const STO_OHNE = /^(id|return_number|invoice_id|notes|created_by|revision|version|sync_status)$|_at$/;
+// R5F FINAL — die Notiz wird NICHT ausgeblendet: nur die Rechnungsnummer des jeweiligen Zwillings wird zu
+// <INVOICE_NO>, der Rest muss wortgleich sein.
+const STO_OHNE = /^(id|return_number|invoice_id|created_by|revision|version|sync_status)$|_at$/;
+const mitNr = (zeile, nr) => ({ ...zeile, notes: zeile && zeile.notes != null ? String(zeile.notes).split(nr).join('<INVOICE_NO>') : zeile?.notes });
 const warenG = (pid) => S([dbQ(BIZ_DB, 'SELECT quantity, stock_status FROM products WHERE id = ?', [pid])[0], dbQ(BIZ_DB, 'SELECT qty_remaining, status FROM stock_lots WHERE id = ?', [`${pid}-lot`])[0]]);
 const statusVon = (inv) => (dbQ(BIZ_DB, 'SELECT status FROM invoices WHERE id = ?', [inv])[0] || {}).status;
 
@@ -532,10 +535,13 @@ try {
     await click(primary, '[data-invoice-cancel]');
     ok(await warteAuf(() => statusVon('r5g-inv-F') === 'CANCELLED'), 'CANCEL-PARITAET der Primary storniert');
     const rp = retoureVon('r5g-inv-F')[0] || {};
-    ok(norm(rp, STO_OHNE) === norm(r, STO_OHNE), `CANCEL-PARITAET Retoure: Primary == PC2${norm(rp, STO_OHNE) !== norm(r, STO_OHNE) ? ` (${norm(rp, STO_OHNE)} / ${norm(r, STO_OHNE)})` : ''}`);
-    // Die Notiz der Gutschrift nennt die Rechnungsnummer — sie ist je Beleg verschieden, alles andere nicht.
-    const ohneNotiz = (inv) => gutschriftVon(inv).map((x) => { const o = JSON.parse(x); delete o.notes; return S(o); });
-    ok(S(ohneNotiz('r5g-inv-F')) === S(ohneNotiz('r5g-inv-G')) && buchungVonGutschrift('r5g-inv-F') === buchungVonGutschrift('r5g-inv-G')
+    const rpN = norm(mitNr(rp, 'R5G-INV-F'), STO_OHNE);
+    const rN = norm(mitNr(r, 'R5G-INV-G'), STO_OHNE);
+    ok(rpN === rN && /<INVOICE_NO>/.test(rN), `CANCEL-PARITAET Retoure samt Notiz (nur die Nummer normalisiert): Primary == PC2${rpN !== rN ? ` (${rpN} / ${rN})` : ''}`);
+    // Die Notiz der Gutschrift nennt die Rechnungsnummer: NUR sie wird zu <INVOICE_NO>, der Rest muss gleich sein.
+    const cnMitNr = (inv, nr) => gutschriftVon(inv).map((x) => S(mitNr(JSON.parse(x), nr)));
+    ok(S(cnMitNr('r5g-inv-F', 'R5G-INV-F')) === S(cnMitNr('r5g-inv-G', 'R5G-INV-G')) && /<INVOICE_NO>/.test(S(cnMitNr('r5g-inv-G', 'R5G-INV-G')))
+      && buchungVonGutschrift('r5g-inv-F') === buchungVonGutschrift('r5g-inv-G')
       && rechnungVon('r5g-inv-F') === rechnungVon('r5g-inv-G') && warenG('r5g-pF') === warenG('r5g-pG'),
     `CANCEL-PARITAET Gutschrift, Buchung, Rechnung, Bestand${rechnungVon('r5g-inv-F') !== rechnungVon('r5g-inv-G') ? ` (${rechnungVon('r5g-inv-F')} / ${rechnungVon('r5g-inv-G')})` : ''}`);
   }
@@ -616,3 +622,4 @@ console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — central ui parity r5f.1: invo
 if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R5F1_INVOICE_CANCEL_RUNTIME_PROVED');
 console.log('CENTRAL_UI_R5F1_RETURN_STAFF_RESET_PROVED');
+console.log('CENTRAL_UI_R5F_CANCEL_NOTE_PARITY_PROVED');

@@ -518,6 +518,146 @@ for (const [was, bezahlt, weg, vorab] of FAELLE) {
     'PIN R5F: mehr als offen ist ein Nein (die Maske sendet genau den Rest), mit Rechnung zahlt der Einkauf — ueber dieselbe Store-Funktion');
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// R5F FINAL GATE — Betrag, Teilzahlung, Storno-Waechter, Registry
+// ════════════════════════════════════════════════════════════════════════════
+const ret5 = await import('../../src/core/bridge/return-commands.ts');
+const reg5 = await import('../../src/core/bridge/command-registry.ts');
+const netto = (db: Db, where: string, p: unknown[] = []): Record<string, number> => Object.fromEntries(
+  rows(db, `SELECT account, ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3) AS netto
+    FROM ledger_entries WHERE ${where} GROUP BY account`, p).map((r) => [String(r.account), Number(r.netto)]));
+const nah = (a: unknown, b: number): boolean => Math.abs(Number(a) - b) < 0.0006;
+/** p9 ×3 mit einem von Hand gesetzten Zeilenpreis (1000 brutto, 90,909 Steuer) — optional p1 (330). */
+function dreier(db: Db, bezahlt: number, mitP1 = false): { inv: string; l9: string } {
+  const lines = [{ productId: 'p9', quantity: 3, unitPrice: 303.03, purchasePrice: 100, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 90.909, lineTotal: 1000 }];
+  if (mitP1) lines.push({ productId: 'p1', quantity: 1, unitPrice: 300, purchasePrice: 100, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 30, lineTotal: 330 });
+  const inv = useInvoiceStore.getState().createDirectInvoice('cust-1', lines, 'R5F-GATE');
+  if (bezahlt > 0) useInvoiceStore.getState().recordPayment(inv.id, bezahlt, 'cash');
+  useInvoiceStore.getState().loadInvoices();
+  return { inv: inv.id, l9: s(db, "SELECT id FROM invoice_lines WHERE invoice_id = ? AND product_id = 'p9'", [inv.id]) };
+}
+
+// ── §8 Der Betrag: EINE Preisregel — Dialog == Erstattung == Gutschrift == Buchung ──
+{
+  // Einen Rabatt als eigenes Feld kennt der Rechnungsvertrag nicht; ein angepasster Preis steht in
+  // `unit_price`/`line_total` der Zeile — genau daraus rechnet die Retoure (`returnLineAmounts`).
+  ok(!/discount/i.test(src('src/core/db/schema.sql').slice(src('src/core/db/schema.sql').indexOf('CREATE TABLE IF NOT EXISTS invoice_lines'), src('src/core/db/schema.sql').indexOf('CREATE TABLE IF NOT EXISTS invoice_lines') + 1500)),
+    'AMOUNT die Rechnungszeile hat kein Rabattfeld — ein angepasster Preis IST ihr Zeilenbetrag');
+  for (const weg of ['primary', 'fern'] as const) {
+    const db = welt();
+    const r = dreier(db, 400);
+    const aus = await storno(weg, db, r.inv, 'cash');
+    const rt = row(db, 'SELECT * FROM sales_returns WHERE invoice_id = ?', [r.inv]);
+    const zl = rows(db, 'SELECT quantity, unit_price, vat_amount, line_total FROM sales_return_lines WHERE return_id = ?', [String(rt.id ?? '')]);
+    const cn = row(db, 'SELECT * FROM credit_notes WHERE invoice_id = ?', [r.inv]);
+    const nt = netto(db, "source_module = 'CREDIT_NOTE'");
+    ok(aus.ok && zl.length === 1 && Number(zl[0].quantity) === 3 && nah(zl[0].line_total, 1000) && nah(zl[0].vat_amount, 90.909),
+      `AMOUNT ${weg} A/D: Menge 3 → genau der Zeilenbetrag 1000, nicht Stueckpreis × Menge (${S(zl)})`);
+    ok(nah(rt.total_amount, 1000) && nah(rt.vat_corrected, 90.909) && nah(cn.total_amount, 1000) && nah(cn.vat_amount, 90.909),
+      `AMOUNT ${weg} C: Retoure und Gutschrift tragen den Rechnungsbetrag samt anteiliger Steuer (${S([rt.total_amount, rt.vat_corrected, cn.total_amount, cn.vat_amount])})`);
+    ok(Number(rt.refund_paid_amount) === 400 && Number(cn.cash_refund_amount) === 400 && nah(cn.receivable_cancel_amount, 600),
+      `AMOUNT ${weg}: der Dialog sagt „Refund of 400" — erstattet 400, Gutschrift bar 400, Forderung 600 storniert`);
+    ok(nah(nt.REVENUE, 909.091) && nah(nt.VAT_OUTPUT, 90.909) && nah(nt.CASH, -400) && nah(nt.ACCOUNTS_RECEIVABLE, -600),
+      `AMOUNT ${weg}: …und genau so gebucht (Erloes 909,091 + Steuer 90,909 zurueck, 400 aus der Kasse, 600 Forderung) ${S(nt)}`);
+  }
+  for (const weg of ['primary', 'fern'] as const) {
+    const db = welt();
+    const r = dreier(db, 400);
+    const erste = await returnHouse.createReturnOnPrimary({ invoiceId: r.inv, lines: [{ invoiceLineId: r.l9, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', refundNow: false });
+    const aus = await storno(weg, db, r.inv, 'cash');
+    const zweite = row(db, 'SELECT * FROM sales_returns WHERE invoice_id = ? AND id != ?', [r.inv, erste.returnId]);
+    const zl = rows(db, 'SELECT quantity, line_total FROM sales_return_lines WHERE return_id = ?', [String(zweite.id ?? '')]);
+    ok(aus.ok && zl.length === 1 && Number(zl[0].quantity) === 2 && nah(zl[0].line_total, 666.667),
+      `AMOUNT ${weg} B: 1 von 3 schon zurueck → der Storno nimmt nur die Restmenge 2 (${S(zl)})`);
+    ok(nah(n(db, 'SELECT SUM(total_amount) FROM sales_returns WHERE invoice_id = ?', [r.inv]), 1000)
+      && nah(n(db, 'SELECT SUM(refund_paid_amount) FROM sales_returns WHERE invoice_id = ?', [r.inv]), 400),
+    'AMOUNT B: beide Retouren zusammen genau die Zeile (1000), erstattet genau das Gezahlte (400)');
+    const spaeter = await fern(() => ret5.runRecordRefundPayment(deps(db), identity(nextId(), 'returns.record_refund_payment'),
+      { returnId: erste.returnId, amount: 100, method: 'cash', expectedRevision: n(db, 'SELECT revision FROM sales_returns WHERE id = ?', [erste.returnId]) }));
+    ok(!spaeter.ok && nah(n(db, 'SELECT SUM(refund_paid_amount) FROM sales_returns WHERE invoice_id = ?', [r.inv]), 400),
+      `AMOUNT B: die fruehere, offene Retoure zahlt danach nichts mehr aus — kein doppeltes Geld (${spaeter.code} · ${S(spaeter.value ?? {}).slice(0, 160)} · ${S(rows(db, 'SELECT status, refund_status, total_amount, refund_paid_amount FROM sales_returns WHERE invoice_id = ?', [r.inv]))} · paid ${n(db, 'SELECT paid_amount FROM invoices WHERE id = ?', [r.inv])})`);
+  }
+}
+
+// ── §9 Teilzahlung: nur, was zusteht; alles saldiert ───────────────────────
+for (const weg of ['primary', 'fern'] as const) {
+  const db = welt();
+  const r = dreier(db, 500, true);
+  const aus = await storno(weg, db, r.inv, 'cash');
+  const alle = Object.entries(netto(db, '1 = 1')).filter(([, v]) => Math.abs(v) > 0.0006);
+  ok(aus.ok && alle.length === 0, `PAY ${weg}: nach dem Storno steht jedes Konto wieder bei null — Forderung, Kasse, Erloes, Steuer, Wareneinsatz, Bestand (${S(alle)})`);
+  const dc = row(db, "SELECT ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE 0 END), 3) AS d, ROUND(SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE 0 END), 3) AS c FROM ledger_entries");
+  ok(nah(dc.d, Number(dc.c)), `PAY ${weg}: Soll == Haben (${S(dc)})`);
+  const ar = netto(db, "account = 'ACCOUNTS_RECEIVABLE' AND counterparty_id = 'cust-1'").ACCOUNTS_RECEIVABLE ?? 0;
+  ok(Math.abs(ar) < 0.0006, `PAY ${weg}: keine (negative) Restforderung beim Kunden (${ar})`);
+  const rt = row(db, 'SELECT refund_paid_amount, total_amount FROM sales_returns WHERE invoice_id = ?', [r.inv]);
+  ok(Number(rt.refund_paid_amount) === 500 && nah(rt.total_amount, 1330) && n(db, 'SELECT COUNT(*) FROM customer_credits') === 0
+    && n(db, 'SELECT COUNT(*) FROM payments WHERE invoice_id = ?', [r.inv]) === 1,
+  `PAY ${weg}: genau die 500 fliessen bar zurueck, kein Guthaben, die Zahlung bleibt als Beleg (die Erstattung gleicht sie aus)`);
+}
+
+// ── §10 Der Storno-Waechter: Fehler propagiert, kein Teil-Storno, kein zweiter Gegenposten ──
+{
+  for (const [name, lauf] of [['reverseSource', () => posting.reverseSource('INVOICE', 'gibt-es-nicht', NOW)],
+    ['reverseTransaction', () => posting.reverseTransaction('gibt-es-nicht', NOW)]] as Array<[string, () => unknown]>) {
+    const w1 = posting.watchLedgerPosts('probe');
+    let geworfen = false;
+    try { lauf(); } catch { geworfen = true; }
+    let sieht = false;
+    try { w1(); } catch { sieht = true; }
+    const w2 = posting.watchLedgerPosts('danach');
+    let spaeter = false;
+    try { w2(); } catch { spaeter = true; }
+    ok(geworfen && sieht && !spaeter, `REVERSAL ${name}: der Fehler wirft weiter wie bisher, der Waechter sieht ihn — nur in seinem Fenster`);
+  }
+  for (const weg of ['primary', 'fern'] as const) {
+    const db = welt();
+    const r = rechnung(db, 0);
+    const orig = n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'INVOICE' AND source_id = ? AND reverses_entry_id IS NULL", [r.inv]);
+    db.run(`CREATE TRIGGER r5f_teil BEFORE INSERT ON ledger_entries
+      WHEN NEW.reverses_entry_id IS NOT NULL AND (SELECT COUNT(*) FROM ledger_entries WHERE reverses_entry_id IS NOT NULL) >= 1
+      BEGIN SELECT RAISE(ABORT, 'R5F: second reversal row'); END`);
+    const x = nextId();
+    let aus: Ausgang;
+    try { aus = await storno(weg, db, r.inv, 'bank', x); } finally { db.run('DROP TRIGGER IF EXISTS r5f_teil'); }
+    const reste = n(db, 'SELECT COUNT(*) FROM ledger_entries WHERE reverses_entry_id IS NOT NULL');
+    ok(orig >= 2 && !aus.ok && reste === 0 && s(db, 'SELECT status FROM invoices WHERE id = ?', [r.inv]) !== 'CANCELLED',
+      `REVERSAL ${weg}: der ZWEITE Gegenposten scheitert → kein Teil-Storno, kein Erfolg (${aus.code.slice(0, 50)} · ${reste} Reste von ${orig})`);
+    const heil = await storno(weg, db, r.inv, 'bank', x);
+    const gegen = (): number => n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'INVOICE' AND source_id = ? AND reverses_entry_id IS NOT NULL", [r.inv]);
+    ok(heil.ok && gegen() === orig, `REVERSAL ${weg}: danach genau EIN Gegenposten je Buchung (${gegen()}/${orig})`);
+    const nochmal = weg === 'fern' ? await storno('fern', db, r.inv, 'bank', x, irev(db, r.inv)) : await storno('primary', db, r.inv, 'bank');
+    ok((weg === 'fern' ? nochmal.ok && nochmal.replayed === true : nochmal.code === 'INVOICE_CANCELLED') && gegen() === orig,
+      `REVERSAL ${weg}: die Wiederholung erzeugt keinen zweiten Gegenposten (${nochmal.code || 'wiederholt'})`);
+  }
+}
+
+// ── §11 Registry: 40 → 41, einzig invoices.cancel, fremdes bleibt draussen ──
+{
+  const vorher = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(vor5f('src/core/bridge/command-registry.ts'))?.[1] ?? '')
+    .matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const jetzt = [...ALLOWED_MUTATIONS];
+  ok(vorher.length === 40 && jetzt.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel']) && vorher.every((o) => jetzt.includes(o)),
+    `REGISTRY vorher 40, jetzt 41 — die einzige neue ist invoices.cancel, keine faellt weg (${vorher.length} → ${jetzt.length})`);
+  const zaehle = (t: string): number => [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
+  const rustVorher = vor5f('src-tauri/src/bridge.rs');
+  const rustJetzt = src('src-tauri/src/bridge.rs');
+  const neuRust = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rustJetzt)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].map((m) => m[0])
+    .filter((o) => !(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rustVorher)?.[1] ?? '').includes(o));
+  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 108 && S(neuRust) === S(['OP_INVOICES_CANCEL']), `REGISTRY Rust 107 → 108, einzig OP_INVOICES_CANCEL (${S(neuRust)})`);
+  let zu = '';
+  try { reg5.registerCommand('invoices.delete', { kind: 'mutation', handler: () => ({}) } as never); } catch (e) { zu = String(e); }
+  ok(/refusing to register/.test(zu), 'REGISTRY eine nicht freigegebene Buchung bleibt fail-closed');
+  const diff = execSync('git diff 247aa4d 4a8a68d -- test', { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const plus = diff.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+  ok(!plus.some((l) => /\.skip\(|\bxit\(|if \(false\)/.test(l)), 'REGISTRY die geaenderten Pins enthalten kein skip');
+  const lc = src('test/bridge/invoice-lifecycle.test.ts');
+  ok(/\['invoices\.delete', 'payments\.delete', 'payments\.update', 'anything\.write'\]/.test(lc) && /invoices\.cancel ist freigegeben und angemeldet/.test(lc),
+    'REGISTRY die Abweisung fremder Namen steht weiter — nur die freigegebene invoices.cancel ist herausgenommen und positiv gepinnt');
+  const c3g = src('test/bridge/c3g-scope-completeness.test.ts');
+  ok(/a\.module === 'invoice' \? \[\] : \[`\$\{a\.module\}s\.cancel`\]/.test(c3g), 'REGISTRY die Klasse-C-Probe nimmt nur invoices.cancel aus — Loeschen und Sondermarke der Rechnung bleiben geprueft');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r5f.1 invoice cancel + return closure: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R5F1_RETURN_SUBACTION_CLASSIFICATION_PROVED');
@@ -525,3 +665,7 @@ console.log('CENTRAL_UI_R5F1_INVOICE_CANCEL_SEMANTICS_AUDITED');
 console.log('CENTRAL_UI_R5F1_INVOICE_CANCEL_COMMAND_DECISION_PROVED');
 console.log('CENTRAL_UI_R5F1_INVOICE_CANCEL_ATOMIC_DOMAIN_PROVED');
 console.log('CENTRAL_UI_R5F1_FINANCIAL_CONTRACTS_PINNED');
+console.log('CENTRAL_UI_R5F_CANCEL_AMOUNT_CONTRACT_PINNED');
+console.log('CENTRAL_UI_R5F_CANCEL_PAYMENT_ACCOUNTING_PROVED');
+console.log('CENTRAL_UI_R5F_REVERSAL_FAILURE_CONTRACT_PROVED');
+console.log('CENTRAL_UI_R5F_REGISTRY_108_AUDITED');
