@@ -219,8 +219,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Agenten-Transfers ────────────────────────────────────────────────────
   {
     op: 'transfers.create', handlung: 'Transfer an einen Kunden', ort: 'pages/agents/AgentList.tsx',
-    lokal: 'createTransferForCustomer', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske schickt `staffId` mit (wer den Transfer verantwortet); die Fernbuchung kennt das Feld nicht.',
+    lokal: 'createTransferOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5D — EINE Folge fuer beide Seiten (core/agents/transfer-house: createTransferInHouse, Regeln in transfer-rules): Kunde der Auswahl, das Stueck im Lager und nicht schon draussen, Our Price > 0, Abrechnungsmodell mit Anteil 0–100 (sonst 50), Rueckgabedatum und — der alte Grund — der Mitarbeiter (`staffId`, nur ein aktiver der Filiale). Agent, Nummer, Bestandswechsel und Zeitpunkte setzt der Primary; am Primary in EINER Klammer.',
   },
   {
     op: 'transfers.update', handlung: 'Transfer aendern', ort: 'components/agents/TransferTable.tsx',
@@ -245,12 +245,12 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'transfers.convert_to_invoice', handlung: 'Transfer in Rechnung wandeln', ort: 'components/agents/TransferTable.tsx',
-    lokal: 'convertTransferToInvoice', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske legt im Modus „auto\' in derselben Handlung erst den KUNDEN aus dem Agenten an (`createCustomer` mit Name, Firma, Telefon, E-Mail) und wandelt dann um. Die Fernbuchung wandelt nur um. Erst trennen, dann verdrahten.',
+    lokal: 'convertTransferOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5D — „Auto-create from agent" ist Teil DERSELBEN Buchung: der Auftrag sagt nur `autoCustomer: true`, den Kunden legt der Primary aus den Angaben des Agenten an (Name, Firma, Kontakte und Vermerk wie die Maske, ohne Abgleich) — in EINER Klammer mit Rechnung, Verknuepfung und Storno der Verkaufsforderung. Sonst ein gewaehlter Kunde der Filiale. Liste und Detailseite rufen dieselbe Folge (convertTransferInHouse).',
   },
   {
     op: 'transfers.convert_many_to_invoice', handlung: 'Mehrere Transfers in eine Rechnung', ort: 'components/agents/TransferTable.tsx',
-    lokal: 'convertTransfersToInvoice', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Dieselbe Handlung fuer mehrere Transfers — und derselbe Grund: im Modus „auto\' entsteht zuerst ein neuer Kunde aus dem Agenten.',
+    lokal: 'convertTransfersOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5D — dieselbe Folge fuer mehrere VERKAUFTE Transfers EINES Agenten (canCombineTransfer): EINE Rechnung, Zeilen in der Reihenfolge der Auswahl, jeder Transfer mit seiner gesehenen Fassung, ggf. der neue Kunde aus dem Agenten — alles oder nichts (convertTransfersInHouse).',
   },
 ];

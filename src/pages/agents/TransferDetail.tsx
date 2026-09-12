@@ -25,6 +25,9 @@ import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import type { AgentTransfer, Invoice } from '@/core/models/types';
+import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { canConvertTransfer, transferBillTo, transferConvertBody } from '@/core/agents/transfer-rules';
+import { convertTransferOnPrimary } from '@/core/agents/transfer-house';
 
 type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned';
 
@@ -49,12 +52,14 @@ export function TransferDetail() {
   const goBack = useGoBack('/agents');
   const {
     agents, transfers, loadAgents, loadTransfers,
-    markTransferSold, markTransferReturned, convertTransferToInvoice,
+    markTransferSold, markTransferReturned,
     undoTransferInvoiceConvert, updateTransfer, deleteTransfer,
   } = useAgentStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
-  const { customers, createCustomer, loadCustomers } = useCustomerStore();
+  const { customers, loadCustomers } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
+  // CENTRAL-UI-PARITY R5D — „Create Invoice" hat hier dieselben zwei Anschlüsse wie in der Liste.
+  const w = useSharedWrites();
 
   useEffect(() => {
     loadAgents(); loadTransfers(); loadProducts(); loadCategories(); loadCustomers(); loadInvoices();
@@ -130,28 +135,23 @@ export function TransferDetail() {
     setConvertOpen(true);
   }
 
-  function handleConvertConfirm() {
+  async function handleConvertConfirm() {
     if (!agent) { setConvertError('Agent not found.'); return; }
-    let customerId = convertCustomerId;
-    if (convertMode === 'auto') {
-      const parts = (agent.name || '').trim().split(/\s+/);
-      const firstName = parts[0] || agent.name || 'Agent';
-      const lastName = parts.slice(1).join(' ') || '';
-      const newCust = createCustomer({
-        firstName, lastName, company: agent.company,
-        phone: agent.phone, whatsapp: agent.whatsapp, email: agent.email,
-        notes: `Auto-created from agent ${agent.name} for transfer settlements.`,
-      });
-      customerId = newCust.id;
+    const billTo = transferBillTo(convertMode, convertCustomerId);
+    if (!billTo) { setConvertError('Please pick a customer or choose auto-create.'); return; }
+    const t = transfer!;
+    if (w.remote && !t.revision) {
+      setConvertError(fehlertext(nichtAmClient('creating this invoice (no revision loaded)')));
+      return;
     }
-    if (!customerId) { setConvertError('Please pick a customer or choose auto-create.'); return; }
-    try {
-      const inv = convertTransferToInvoice(transfer!.id, customerId);
-      setConvertOpen(false);
-      navigate(`/invoices/${inv.id}`);
-    } catch (err) {
-      setConvertError(err instanceof Error ? err.message : String(err));
-    }
+    const r = await w.save('transfers.convert_to_invoice', {
+      local: () => convertTransferOnPrimary(t.id, billTo),
+      remote: () => transferConvertBody({ id: t.id, revision: t.revision }, billTo),
+    });
+    if (r.kind !== 'ok') { setConvertError(fehlertext(r)); return; }
+    setConvertOpen(false);
+    loadTransfers();
+    navigate(`/invoices/${r.value.invoiceId}`);
   }
 
   const formattedTransferred = (transfer.transferredAt || transfer.createdAt || '').split('T')[0];
@@ -224,7 +224,7 @@ export function TransferDetail() {
                 </Button>
               </>
             )}
-            {(transfer.status === 'sold' || transfer.status === 'settled') && !transfer.invoiceId && (
+            {canConvertTransfer(transfer) && (
               <Button variant="primary" onClick={openConvertModal}>
                 <FileText size={14} /> Create Invoice
               </Button>
@@ -491,7 +491,7 @@ export function TransferDetail() {
           )}
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setConvertOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleConvertConfirm}>
+            <Button variant="primary" onClick={() => void handleConvertConfirm()} disabled={w.busy} data-transfer-convert-confirm>
               <FileText size={14} /> Create Invoice
             </Button>
           </div>

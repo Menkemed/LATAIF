@@ -1661,3 +1661,47 @@ E2E   r5c-billable 27/0 (fertig und abgeholt abgerechnet, empfangen/in Arbeit/zu
 Registry 107 · Matrix 27 / 0 / 11 / 2
 ```
 
+## R5D — Agenten-Transfer: anlegen, umwandeln, gesammelt umwandeln (12.09.2026)
+
+### Befund
+
+- **Anlegen:** die Maske („New Transfer") schickt den Mitarbeiter (`staffId`) — die Fernbuchung kannte das Feld nicht
+  (der alte Klasse-B-Grund, bestätigt). Der Primary schrieb Agent, Bestandswechsel und Transfer in drei Schritten ohne
+  Klammer und prüfte weder Lagerstand noch „schon draußen"; der Fernbefehl ließ den Anteil nur mit 1–99 % zu, die Maske
+  mit 0–100 %.
+- **Einzeln umwandeln:** „Auto-create from agent" legte **immer** einen neuen Kunden aus dem Agenten an (Vorname = erstes
+  Wort, Rest Nachname, Firma, Telefon, WhatsApp, E-Mail, Vermerk) — ohne Abgleich, auch wenn der Agent schon einen Kunden
+  kennt, und VOR der Umwandlung: scheiterte sie, blieb der Kunde stehen. Die Fernbuchung kannte nur einen gewählten Kunden.
+- **Gesammelt:** dieselbe Handlung für mehrere Transfers EINES Agenten, EINE Rechnung. Die Auswahl der Liste nimmt nur
+  verkaufte ohne Rechnung; der Fernbefehl nahm auch abgerechnete.
+
+### Lösung — eine Regelstelle, eine Folge, keine neue Buchung
+
+- `core/agents/transfer-rules` (rein): `normalizeTransferCreate` / `planTransferCreate`, `canConvertTransfer`,
+  `canCombineTransfer`, `transferConvertBlocker`, `agentAutoCustomer` (der Kunde aus dem Agenten — an genau einer
+  Stelle), die Rümpfe des zweiten Rechners.
+- `core/agents/transfer-house`: `createTransferInHouse`, `convertTransferInHouse`, `convertTransfersInHouse` — die EINE
+  Folge, die der Fernbefehl in seiner Transaktion ruft; `…OnPrimary` fährt dieselbe Folge für die Masken des Primary,
+  exklusiv, in EINER Transaktion, danach durabel.
+- Erweitert, nicht neu: `transfers.create` (+ `staffId`), `transfers.convert_to_invoice` und
+  `transfers.convert_many_to_invoice` (+ `autoCustomer: true` — Name, Firma und Kontakte nimmt der Primary vom Agenten,
+  nicht aus dem Rumpf). Liste und Detailseite rufen dieselbe Umwandlung.
+
+### Verträge des Primary, die sich bewusst ändern
+
+| Punkt | vor R5D | R5D |
+|---|---|---|
+| Our Price | die Maske nahm auch negative Werte | > 0 (der Vertrag des Fernbefehls seit C3F) |
+| Anlegen | drei Schreibvorgänge ohne Klammer | eine Klammer; das Stück muss im Lager und nicht schon draußen sein |
+| Mitarbeiter | jede Kennung | nur ein aktiver der Filiale (die Auswahl der Maske) |
+| Auto-Kunde | vorab angelegt, blieb bei einem Fehler stehen | in derselben Klammer wie die Rechnung |
+| Sammelrechnung (fern) | nahm auch „settled" | nur „sold" — wie die Auswahl der Liste |
+| Anteil (fern) | 1–99 % | 0–100 %, ohne Eingabe 50 — wie die Maske |
+| Kunde (fern) | auch Platzhalter `sys-…` | nur Kunden der Auswahl |
+
+```
+Unit  r5d/transfer-parity 195/0 (lokal == fern inkl. Buchungen, Fehlerinjektion an vier Stellen, Autorität)
+E2E   r5d-transfer-parity 108/0 (anlegen, einzeln, auto, gesammelt, verlorene Antworten, Fehler mitten in der Sammelrechnung, Nachbarn, Primary == PC2)
+Registry 107 · Matrix 30 / 0 / 8 / 2
+```
+

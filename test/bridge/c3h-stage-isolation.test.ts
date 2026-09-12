@@ -388,7 +388,9 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
   const mine = codeOf('src/core/bridge/lifecycle-commands.ts');
   const at = mine.indexOf('export function runConvertTransfers');
   const body = mine.slice(at, at + 1400);
-  ok(body.indexOf('assertConvertible') < body.indexOf('convertTransfersToInvoice'),
+  // R5D — die Umwandlung selbst ist jetzt die geteilte Folge (`convertTransfersInHouse`).
+  ok(body.indexOf('assertConvertible') > 0
+    && body.indexOf('assertConvertible') < body.indexOf('convertTransfersInHouse'),
     'BULK-ATOMIC alle Voraussetzungen werden geprueft, BEVOR irgendetwas laeuft');
 }
 

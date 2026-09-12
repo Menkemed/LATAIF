@@ -37,7 +37,6 @@ import {
 } from '@/core/ledger/posting';
 import { useRepairStore } from '@/stores/repairStore';
 import { useAgentStore } from '@/stores/agentStore';
-import { useCustomerStore } from '@/stores/customerStore';
 import { CARD_BRANDS } from '@/core/finance/card-fees';
 import { SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 import {
@@ -48,6 +47,8 @@ import {
   normalizeRepairCreate, planRepairCreate, type RepairCreateInput, type RepairEditInput, type RepairPhotoSlot,
 } from '@/core/repairs/repair-rules';
 import { houseRepairPort } from '@/core/repairs/repair-house';
+import { TRANSFER_SETTLEMENT_MODELS, TransferActionRejected, normalizeTransferCreate } from '@/core/agents/transfer-rules';
+import { createTransferInHouse } from '@/core/agents/transfer-house';
 import {
   assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStaged, isStagingId,
   readStagedAsDataUrls, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader, type StagingOwner,
@@ -213,7 +214,7 @@ function house<T>(fn: () => T): T {
   try {
     return fn();
   } catch (e) {
-    if (e instanceof RepairActionRejected) throw new CommandRejected(e.code, e.message);
+    if (e instanceof RepairActionRejected || e instanceof TransferActionRejected) throw new CommandRejected(e.code, e.message);
     throw e;
   }
 }
@@ -471,67 +472,74 @@ export async function runRepairUpdate(
 
 // ── Agenten-Transfer: anlegen ─────────────────────────────────────────────
 
-const SETTLEMENT_MODELS = ['full', 'split'] as const;
-
 export interface TransferCreateRequest {
   customerId: string;
   productId: string;
   agentPrice: number;
-  settlementModel: typeof SETTLEMENT_MODELS[number];
+  settlementModel: typeof TRANSFER_SETTLEMENT_MODELS[number];
   excessSplitPct?: number;
   returnBy?: string;
   notes?: string;
+  /** R5D — wer das Stück übergeben hat (die Mitarbeiterauswahl der Maske). */
+  staffId?: string;
 }
 
 /**
  * Der Mensch wählt einen KUNDEN und ein Stück Ware — genau wie am Primary. Den Agenten dazu
  * findet oder legt das Haus an (`findOrCreateAgentForCustomer`); ein `agentId` im Rumpf gäbe es
  * hier nicht, und die Transfernummer schon gar nicht.
+ *
+ * R5D — die Werte prüft DIESELBE Regel wie die Maske des Primary (`normalizeTransferCreate`): dazu
+ * der Mitarbeiter, und der Anteil am Überschuss so, wie die Maske ihn zulässt (0–100, sonst 50).
  */
 export function parseTransferCreate(raw: unknown): TransferCreateRequest {
   if (!isPlain(raw)) throw new ServicePayloadError('payload must be an object');
-  onlyKnownFields(raw, ['customerId', 'productId', 'agentPrice', 'settlementModel', 'excessSplitPct', 'returnBy', 'notes']);
+  onlyKnownFields(raw, ['customerId', 'productId', 'agentPrice', 'settlementModel', 'excessSplitPct', 'returnBy', 'notes', 'staffId']);
   const model = raw.settlementModel === undefined ? 'full' : String(raw.settlementModel);
-  if (!(SETTLEMENT_MODELS as readonly string[]).includes(model)) {
-    throw new ServicePayloadError(`unknown settlement model: ${model || '(none)'}`);
-  }
   const price = raw.agentPrice;
   if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) {
     throw new ServicePayloadError('agentPrice must be a positive number');
   }
-  const out: TransferCreateRequest = {
-    customerId: reqString(raw.customerId, 'customerId'),
-    productId: reqString(raw.productId, 'productId'),
-    agentPrice: price,
-    settlementModel: model as TransferCreateRequest['settlementModel'],
-    returnBy: optString(raw.returnBy, 'returnBy'),
-    notes: optString(raw.notes, 'notes'),
-  };
-  if (model === 'split') {
-    const pct = raw.excessSplitPct === undefined ? 50 : Number(raw.excessSplitPct);
-    // Dieselbe Bedeutung wie beim Kommissionsmodell: 0 gäbe uns nichts, 100 wäre ein anderes
-    // Modell unter falschem Namen.
-    if (!Number.isFinite(pct) || pct <= 0 || pct >= 100) {
-      throw new ServicePayloadError("the shop's share must be between 1 and 99 percent");
-    }
-    out.excessSplitPct = pct;
-  } else if (raw.excessSplitPct !== undefined && raw.excessSplitPct !== null) {
+  if (model !== 'split' && raw.excessSplitPct !== undefined && raw.excessSplitPct !== null) {
     // Ein Anteil ohne sein Modell wäre ein Parameter, den niemand liest.
     throw new ServicePayloadError('excessSplitPct belongs to the split settlement model');
   }
-  return out;
+  if (raw.excessSplitPct !== undefined && typeof raw.excessSplitPct !== 'number') {
+    throw new ServicePayloadError("the shop's share must be a number");
+  }
+  try {
+    const input = normalizeTransferCreate({
+      customerId: reqString(raw.customerId, 'customerId'),
+      productId: reqString(raw.productId, 'productId'),
+      ourPrice: price,
+      settlementModel: model,
+      excessSplitPct: raw.excessSplitPct as number | undefined,
+      returnBy: optString(raw.returnBy, 'returnBy'),
+      notes: optString(raw.notes, 'notes'),
+      staffId: optString(raw.staffId, 'staffId'),
+    });
+    return {
+      customerId: input.customerId, productId: input.productId, agentPrice: input.ourPrice,
+      settlementModel: input.settlementModel, excessSplitPct: input.excessSplitPct,
+      returnBy: input.returnBy, notes: input.notes, staffId: input.staffId,
+    };
+  } catch (e) {
+    if (e instanceof TransferActionRejected) throw new ServicePayloadError(e.message);
+    throw e;
+  }
 }
 
 function transferState(id: string): ServiceResult {
   const r = query(
     'SELECT id, transfer_number, agent_id, product_id, agent_price, settlement_model, '
-    + 'excess_split_pct, status, transferred_at, return_by, returned_at, revision, updated_at '
+    + 'excess_split_pct, status, transferred_at, return_by, returned_at, staff_id, revision, updated_at '
     + 'FROM agent_transfers WHERE id = ?', [id],
   )[0];
   return {
     transferId: id,
     transferNumber: String(r?.transfer_number ?? ''),
     agentId: String(r?.agent_id ?? ''),
+    staffId: String(r?.staff_id ?? ''),
     productId: String(r?.product_id ?? ''),
     agentPrice: Number(r?.agent_price ?? 0),
     settlementModel: String(r?.settlement_model ?? ''),
@@ -548,43 +556,23 @@ function transferState(id: string): ServiceResult {
 export function runTransferCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseTransferCreate(raw);
   return runRemoteCommand(deps, identity, () => {
-    const branch = identity.branchId;
-    const customer = query(
-      "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'",
-      [req.customerId, branch],
-    )[0];
-    if (!customer) throw new CommandRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');
-    const product = query('SELECT id, stock_status FROM products WHERE id = ? AND branch_id = ?',
-      [req.productId, branch])[0];
-    if (!product) throw new CommandRejected('PRODUCT_NOT_FOUND', 'no such product in this branch');
-    // Ein Stück, das schon unterwegs ist, geht nicht ein zweites Mal hinaus. Das ist der eigentliche
-    // Wettlaufschutz dieses Vorgangs: die Ware ist EINE, und ihr Zustand entscheidet.
-    const status = String(product.stock_status ?? '');
-    if (status !== 'in_stock') {
-      throw new CommandRejected('PRODUCT_NOT_AVAILABLE',
-        `this item is not in stock (it is "${status}") — it cannot go out on approval`);
-    }
-    const already = query(
-      "SELECT id FROM agent_transfers WHERE product_id = ? AND status = 'transferred'",
-      [req.productId],
-    )[0];
-    if (already) {
-      throw new CommandRejected('PRODUCT_ALREADY_OUT', 'this item is already out on approval');
-    }
-    // Gemessen und behoben: `findOrCreateAgentForCustomer` sucht den Kunden in der GELADENEN
-    // Liste des Kundenstores, nicht in der Datenbank. Am Primary lädt ein Bildschirm sie; ein
-    // Fernauftrag hat keinen — der Kunde existiert, und die Domäne sagt trotzdem „Customer not
-    // found". Also erst laden, dann rufen: dieselbe Funktion, auf dem Stand, der wirklich gilt.
-    useCustomerStore.getState().loadCustomers();
-    const transfer = useAgentStore.getState().createTransferForCustomer({
+    // R5D — in die Bücher DIESER Filiale, oder gar nicht: Agent, Nummer und Transfer entstehen in
+    // der Filiale der Sitzung.
+    assertHouseBranch(identity);
+    // Dieselbe Folge wie „Transfer Item" am Primary (`createTransferOnPrimary`): Kunde der Auswahl,
+    // das Stück im Lager und nicht schon draußen (der eigentliche Wettlaufschutz: die Ware ist
+    // EINE, und ihr Zustand entscheidet), Mitarbeiter der Auswahl — dann die Hausfunktion, auf dem
+    // frisch gelesenen Stand ihrer Listen.
+    const transfer = house(() => createTransferInHouse({
       customerId: req.customerId,
       productId: req.productId,
       ourPrice: req.agentPrice,
       returnBy: req.returnBy,
       notes: req.notes,
+      staffId: req.staffId,
       settlementModel: req.settlementModel,
       excessSplitPct: req.excessSplitPct,
-    });
+    }, identity.branchId));
     return transferState(transfer.id) as unknown as Record<string, unknown>;
   });
 }

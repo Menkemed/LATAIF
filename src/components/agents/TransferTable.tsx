@@ -20,6 +20,10 @@ import type { AgentTransfer, Invoice } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
+import {
+  canCombineTransfer, canConvertTransfer, transferBillTo, transferConvertBody, transferConvertManyBody,
+} from '@/core/agents/transfer-rules';
+import { convertTransferOnPrimary, convertTransfersOnPrimary } from '@/core/agents/transfer-house';
 
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
@@ -69,7 +73,7 @@ interface TransferTableProps {
 export function TransferTable({ transfers, showAgentColumn = true, emptyMessage }: TransferTableProps) {
   const navigate = useNavigate();
   const { agents, transfers: allTransfers, markTransferSold, markTransferReturned,
-    convertTransferToInvoice, convertTransfersToInvoice, undoTransferInvoiceConvert, updateTransfer, deleteTransfer } = useAgentStore();
+    undoTransferInvoiceConvert, updateTransfer, deleteTransfer } = useAgentStore();
   // CENTRAL-UI-PARITY R4C.2 — dieselbe Tabelle, zwei Anschluesse hinter jeder Handlung.
   const { loadTransfers } = useAgentStore();
   const w = useSharedWrites();
@@ -120,7 +124,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
   }
 
   const { products } = useProductStore();
-  const { customers, createCustomer } = useCustomerStore();
+  const { customers } = useCustomerStore();
   const { invoices } = useInvoiceStore();
 
   const [filterStatus, setFilterStatus] = useState<'' | TransferDisplayStatus>('');
@@ -165,8 +169,9 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
     });
   }, [transfers, filterStatus, invoices]);
 
-  // Bulk-Convert (Combined Invoice): nur sold-Transfers ohne Invoice-Link.
-  const isEligibleForBulk = (t: AgentTransfer) => t.status === 'sold' && !t.invoiceId;
+  // Bulk-Convert (Combined Invoice): nur sold-Transfers ohne Invoice-Link — DIESELBE Regel, die auch
+  // der Fernbefehl fragt (R5D).
+  const isEligibleForBulk = (t: AgentTransfer) => canCombineTransfer(t);
 
   // Selektion gegen aktuelle Realität abgleichen — Transfers können sich
   // im Store geändert haben (Sold zu Settled konvertiert, gelöscht, …).
@@ -227,36 +232,32 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
     setBulkModal(true);
   }
 
-  function handleBulkConfirm() {
+  async function handleBulkConfirm() {
     const ids = Array.from(validSelectedIds);
     if (ids.length === 0) return;
     if (!sameAgent) { setBulkError('All selected items must be from the same approval / agent.'); return; }
     const agent = agents.find(a => a.id === selectedTransfers[0].agentId);
     if (!agent) { setBulkError('Agent not found.'); return; }
-    let customerId = bulkCustomerId;
-    if (bulkMode === 'auto') {
-      const parts = (agent.name || '').trim().split(/\s+/);
-      const firstName = parts[0] || agent.name || 'Agent';
-      const lastName = parts.slice(1).join(' ') || '';
-      const newCust = createCustomer({
-        firstName, lastName,
-        company: agent.company,
-        phone: agent.phone,
-        whatsapp: agent.whatsapp,
-        email: agent.email,
-        notes: `Auto-created from agent ${agent.name} for combined invoice.`,
-      });
-      customerId = newCust.id;
+    // R5D — „BILL TO": ein gewählter Kunde, oder „Auto-create from agent". Den neuen Kunden legt das
+    // Haus in DERSELBEN Klammer an wie die Rechnung — nicht mehr vorab und getrennt.
+    const billTo = transferBillTo(bulkMode, bulkCustomerId);
+    if (!billTo) { setBulkError('Please pick a customer or choose auto-create.'); return; }
+    // Jeder Transfer mit SEINER gesehenen Fassung, in der Reihenfolge der Auswahl — dieselbe
+    // Reihenfolge wie am Primary, sonst stuenden die Zeilen der Rechnung anders.
+    const auswahl = ids.map((id) => allTransfers.find((x) => x.id === id)).filter((x): x is AgentTransfer => !!x);
+    if (w.remote && auswahl.some((x) => !x.revision)) {
+      setBulkError(fehlertext(nichtAmClient('creating this invoice (no revision loaded)')));
+      return;
     }
-    if (!customerId) { setBulkError('Please pick a customer or choose auto-create.'); return; }
-    try {
-      const invoice = convertTransfersToInvoice(ids, customerId);
-      setBulkModal(false);
-      setSelectedIds(new Set());
-      navigate(`/invoices/${invoice.id}`);
-    } catch (err) {
-      setBulkError(err instanceof Error ? err.message : String(err));
-    }
+    const r = await w.save('transfers.convert_many_to_invoice', {
+      local: () => convertTransfersOnPrimary(ids, billTo),
+      remote: () => transferConvertManyBody(auswahl, billTo),
+    });
+    if (r.kind !== 'ok') { setBulkError(fehlertext(r)); return; }
+    setBulkModal(false);
+    setSelectedIds(new Set());
+    loadTransfers();
+    navigate(`/invoices/${r.value.invoiceId}`);
   }
 
   // Wenn allTransfers im Store geupdated wird (Sold/Settle/etc.), reflektieren
@@ -289,35 +290,25 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
     setConvertModal(transferId);
   }
 
-  function handleConvertConfirm() {
+  async function handleConvertConfirm() {
     if (!convertModal) return;
     const t = findTransfer(convertModal);
     if (!t) return;
     const agent = agents.find(a => a.id === t.agentId);
     if (!agent) { setConvertError('Agent not found.'); return; }
-    let customerId = convertCustomerId;
-    if (convertMode === 'auto') {
-      const parts = (agent.name || '').trim().split(/\s+/);
-      const firstName = parts[0] || agent.name || 'Agent';
-      const lastName = parts.slice(1).join(' ') || '';
-      const newCust = createCustomer({
-        firstName, lastName,
-        company: agent.company,
-        phone: agent.phone,
-        whatsapp: agent.whatsapp,
-        email: agent.email,
-        notes: `Auto-created from agent ${agent.name} for transfer settlements.`,
-      });
-      customerId = newCust.id;
-    }
-    if (!customerId) { setConvertError('Please pick a customer or choose auto-create.'); return; }
-    try {
-      const invoice = convertTransferToInvoice(convertModal, customerId);
-      setConvertModal(null);
-      navigate(`/invoices/${invoice.id}`);
-    } catch (err) {
-      setConvertError(err instanceof Error ? err.message : String(err));
-    }
+    // R5D — dieselbe Wahl wie bei der Sammelrechnung: gewählter Kunde oder neu aus dem Agenten.
+    const billTo = transferBillTo(convertMode, convertCustomerId);
+    if (!billTo) { setConvertError('Please pick a customer or choose auto-create.'); return; }
+    const fassung = fassungVon(t.id, 'creating this invoice');
+    if (fassung === null) return;
+    const r = await w.save('transfers.convert_to_invoice', {
+      local: () => convertTransferOnPrimary(t.id, billTo),
+      remote: () => transferConvertBody({ id: t.id, revision: fassung }, billTo),
+    });
+    if (r.kind !== 'ok') { setConvertError(fehlertext(r)); return; }
+    setConvertModal(null);
+    loadTransfers();
+    navigate(`/invoices/${r.value.invoiceId}`);
   }
 
   // Spalten-Layout — Checkbox vorne, Agent-Spalte optional (in Detail-Page redundant).
@@ -447,10 +438,10 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Return</button>
                 </>
               )}
-              {(t.status === 'sold' || t.status === 'settled') && !t.invoiceId && (
+              {canConvertTransfer(t) && (
                 // Sold ohne Invoice = Unpaid. Einziger Folge-Schritt: Create Invoice.
                 // Direkt-Settle-Pfad ist abgeschafft — Zahlungen laufen exklusiv über die Invoice.
-                <button onClick={() => openConvertModal(t.id)}
+                <button data-transfer-convert onClick={() => openConvertModal(t.id)}
                   className="cursor-pointer flex items-center gap-1"
                   style={{ padding: '4px 10px', fontSize: 11, border: '1px solid #715DE3', color: '#FFFFFF', borderRadius: 4, background: '#715DE3', fontWeight: 500 }}>
                   <FileText size={11} /> Create Invoice
@@ -590,7 +581,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
           })()}
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setConvertModal(null)}>Cancel</Button>
-            <Button variant="primary" onClick={handleConvertConfirm}>
+            <Button variant="primary" onClick={() => void handleConvertConfirm()} disabled={w.busy} data-transfer-convert-confirm>
               <FileText size={14} /> Create Invoice
             </Button>
           </div>
@@ -721,7 +712,8 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setBulkModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleBulkConfirm} disabled={!sameAgent || validSelectedIds.size === 0}>
+            <Button variant="primary" onClick={() => void handleBulkConfirm()} data-transfer-bulk-confirm
+              disabled={!sameAgent || validSelectedIds.size === 0 || w.busy}>
               <FileText size={14} /> Create Invoice
             </Button>
           </div>

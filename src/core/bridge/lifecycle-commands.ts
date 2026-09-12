@@ -31,12 +31,13 @@ import { CARD_BRANDS, type CardBrand } from '@/core/finance/card-fees';
 import { nextOrderStatus, isAllowedOrderAdvance } from '@/core/orders/order-status-flow';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { RepairActionRejected, isRepairTaxScheme, repairInvoiceBlocker } from '@/core/repairs/repair-rules';
+import { TransferActionRejected, transferConvertBlocker, type TransferBillTo } from '@/core/agents/transfer-rules';
+import { convertTransferInHouse, convertTransfersInHouse, type TransferConversion } from '@/core/agents/transfer-house';
 import { assertHouseBranch } from './remote-create-support';
 import { useOrderStore } from '@/stores/orderStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useRepairStore } from '@/stores/repairStore';
-import { useAgentStore } from '@/stores/agentStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -932,18 +933,38 @@ function parseTransferRefs(raw: Record<string, unknown>, field: string): Transfe
   });
 }
 
-export interface ConvertTransferRequest {
+/**
+ * R5D — „BILL TO" der Masken: ein gewählter Kunde ODER `autoCustomer: true` („Auto-create from
+ * agent"). Beim zweiten nennt der Client KEINE Angaben des Kunden: Name, Firma und Kontakte nimmt
+ * das Haus vom Agenten, wie es ihn kennt. Beides zugleich ist keine Wahl der Maske.
+ */
+interface BillToFields { customerId?: string; autoCustomer?: true }
+
+function parseBillTo(raw: Record<string, unknown>): BillToFields {
+  if (raw.autoCustomer !== undefined) {
+    if (raw.autoCustomer !== true) throw new FinancialPayloadError('autoCustomer can only be true');
+    if (raw.customerId !== undefined) {
+      throw new FinancialPayloadError('bill an existing client OR a new one from the agent — not both');
+    }
+    return { autoCustomer: true };
+  }
+  return { customerId: reqString(raw.customerId, 'customerId') };
+}
+
+const billToOf = (b: BillToFields): TransferBillTo =>
+  (b.autoCustomer ? { autoCustomer: true } : { customerId: String(b.customerId) });
+
+export interface ConvertTransferRequest extends BillToFields {
   transferId: string;
-  customerId: string;
   expectedRevision: number;
 }
 
 export function parseConvertTransfer(raw: unknown): ConvertTransferRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['transferId', 'customerId', 'expectedRevision']);
+  onlyKnownFields(raw, ['transferId', 'customerId', 'autoCustomer', 'expectedRevision']);
   return {
     transferId: reqString(raw.transferId, 'transferId'),
-    customerId: reqString(raw.customerId, 'customerId'),
+    ...parseBillTo(raw),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
   };
 }
@@ -955,105 +976,89 @@ const CONVERT_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/must belong to the same/i, 'TRANSFERS_NOT_SAME_AGENT'],
 ];
 
-/** Was für jeden der beiden Wege gleich gilt — geprüft, bevor irgendetwas läuft. */
-function assertConvertible(t: TransferRef, branchId: string): Record<string, unknown> {
+/**
+ * Was für jeden der beiden Wege gleich gilt — geprüft, bevor irgendetwas läuft. Das Urteil selbst
+ * fällt die GETEILTE Regel (`transferConvertBlocker`), die auch die Masken fragen; hier dazu die
+ * gesehene Fassung.
+ */
+function assertConvertible(t: TransferRef, branchId: string, combined: boolean): Record<string, unknown> {
   const row = query(
     'SELECT id, status, invoice_id, settlement_amount, agent_id FROM agent_transfers WHERE id = ? AND branch_id = ?',
     [t.id, branchId],
   )[0];
   if (!row) throw new CommandRejected('TRANSFER_NOT_FOUND', 'no such transfer in this branch');
-  if (s(row.invoice_id) !== '') {
-    throw new CommandRejected('TRANSFER_ALREADY_INVOICED', 'this transfer already has an invoice');
-  }
-  if (s(row.status) !== 'sold' && s(row.status) !== 'settled') {
-    throw new CommandRejected('TRANSFER_NOT_SOLD',
-      `this transfer is "${s(row.status)}" — only a sold or settled one becomes an invoice`);
-  }
-  if (!(n(row.settlement_amount) > 0)) {
-    throw new CommandRejected('TRANSFER_NO_SETTLEMENT',
-      'there is nothing to invoice — the settlement amount is not set');
-  }
+  const blocker = transferConvertBlocker({
+    status: s(row.status) as never, invoiceId: s(row.invoice_id) || null, settlementAmount: n(row.settlement_amount),
+  }, combined);
+  if (blocker) throw new CommandRejected(blocker.code, blocker.message);
   assertRevision('agent_transfers', t.id, t.expectedRevision, 'TRANSFER_NOT_FOUND');
   return row;
 }
 
-function loadAgentWorld(): void {
-  // Beide Umwandlungen schlagen Transfer UND Agent in ihren eigenen Listen nach — der Agent,
-  // um die Kundenverknüpfung zu merken. Dieselbe Fehlerklasse hat in C3G die Forderung aus
-  // einem Agentenverkauf still verschluckt.
-  useAgentStore.getState().loadAgents();
-  useAgentStore.getState().loadTransfers();
-  useCustomerStore.getState().loadCustomers();
-  useInvoiceStore.getState().loadInvoices();
-  useProductStore.getState().loadProducts();
+/** Ein Nein der geteilten Folge — oder eines der Hausfunktion — ist ein eingefrorenes Urteil. */
+function alsUrteil(err: unknown): unknown {
+  if (err instanceof TransferActionRejected) return new CommandRejected(err.code, err.message);
+  return asVerdict(err, CONVERT_VERDICTS) ?? err;
 }
 
 export function runConvertTransfer(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseConvertTransfer(raw);
   return runRemoteCommand(deps, identity, () => {
-    assertConvertible({ id: req.transferId, expectedRevision: req.expectedRevision }, identity.branchId);
-    if (!query('SELECT id FROM customers WHERE id = ? AND branch_id = ?', [req.customerId, identity.branchId])[0]) {
-      throw new CommandRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');
-    }
-    loadAgentWorld();
-    let invoice: { id: string };
+    // R5D — Kunde und Rechnung entstehen in der Filiale der Sitzung; also nur für DIESE Filiale.
+    assertHouseBranch(identity);
+    assertConvertible({ id: req.transferId, expectedRevision: req.expectedRevision }, identity.branchId, false);
+    let out: TransferConversion;
     try {
-      // Der Weg des Hauses: eine Rechnung über den Abrechnungsbetrag, die alte Forderung aus
-      // dem Verkauf zurückgenommen, bereits gezahlte Abrechnungsbeträge in die Rechnung
-      // umgezogen — damit dasselbe Geld nicht zweimal steht.
-      invoice = useAgentStore.getState().convertTransferToInvoice(req.transferId, req.customerId);
+      // Dieselbe Folge wie „Create Invoice" am Primary (`convertTransferOnPrimary`): ggf. der neue
+      // Kunde aus dem Agenten, dann der Weg des Hauses — eine Rechnung über den Abrechnungsbetrag,
+      // die alte Forderung aus dem Verkauf zurückgenommen, bereits gezahlte Abrechnungsbeträge in
+      // die Rechnung umgezogen. Alles in DIESER Transaktion.
+      out = convertTransferInHouse(req.transferId, billToOf(req), identity.branchId);
     } catch (err) {
-      const verdict = asVerdict(err, CONVERT_VERDICTS);
-      if (verdict) throw verdict;
-      throw err;
+      throw alsUrteil(err);
     }
     const after = transferState(req.transferId);
     if (s(after.invoiceId) === '') {
       throw new CommandNotEvaluated('TRANSFER_INVOICE_NOT_LINKED', 'the transfer carries no invoice');
     }
     useInvoiceStore.getState().loadInvoices();
-    return { ...after, invoiceId: invoice.id, invoice: invoiceState(invoice.id) };
+    return {
+      ...after, invoiceId: out.invoiceId, customerId: out.customerId, customerCreated: out.customerCreated,
+      invoice: invoiceState(out.invoiceId),
+    };
   });
 }
 
-export interface ConvertTransfersRequest {
+export interface ConvertTransfersRequest extends BillToFields {
   transfers: TransferRef[];
-  customerId: string;
 }
 
 export function parseConvertTransfers(raw: unknown): ConvertTransfersRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['transfers', 'customerId']);
+  onlyKnownFields(raw, ['transfers', 'customerId', 'autoCustomer']);
   return {
     transfers: parseTransferRefs(raw, 'transfers'),
-    customerId: reqString(raw.customerId, 'customerId'),
+    ...parseBillTo(raw),
   };
 }
 
 export function runConvertTransfers(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseConvertTransfers(raw);
   return runRemoteCommand(deps, identity, () => {
-    // ALLE Voraussetzungen zuerst, für jeden Vorgang — der Store tut dasselbe, und beide Male
+    assertHouseBranch(identity);
+    // ALLE Voraussetzungen zuerst, für jeden Vorgang — die Hausfolge tut dasselbe, und beide Male
     // aus demselben Grund: eine halb gebaute Sammelrechnung wäre schlimmer als keine.
-    const rows = req.transfers.map((t) => assertConvertible(t, identity.branchId));
+    const rows = req.transfers.map((t) => assertConvertible(t, identity.branchId, true));
     const agentIds = new Set(rows.map((r) => s(r.agent_id)));
     if (agentIds.size > 1) {
       throw new CommandRejected('TRANSFERS_NOT_SAME_AGENT',
         'a combined invoice covers transfers of ONE agent');
     }
-    if (!query('SELECT id FROM customers WHERE id = ? AND branch_id = ?', [req.customerId, identity.branchId])[0]) {
-      throw new CommandRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');
-    }
-    loadAgentWorld();
-    let invoice: { id: string };
+    let out: TransferConversion;
     try {
-      invoice = useAgentStore.getState().convertTransfersToInvoice(
-        req.transfers.map((t) => t.id), req.customerId,
-      );
+      out = convertTransfersInHouse(req.transfers.map((t) => t.id), billToOf(req), identity.branchId);
     } catch (err) {
-      const verdict = asVerdict(err, CONVERT_VERDICTS);
-      if (verdict) throw verdict;
-      throw err;
+      throw alsUrteil(err);
     }
     const after = req.transfers.map((t) => transferState(t.id));
     if (after.some((a) => s(a.invoiceId) === '')) {
@@ -1061,10 +1066,12 @@ export function runConvertTransfers(deps: EngineDeps, identity: CommandIdentity,
     }
     useInvoiceStore.getState().loadInvoices();
     return {
-      invoiceId: invoice.id,
+      invoiceId: out.invoiceId,
+      customerId: out.customerId,
+      customerCreated: out.customerCreated,
       transfers: after,
       transferCount: after.length,
-      invoice: invoiceState(invoice.id),
+      invoice: invoiceState(out.invoiceId),
     };
   });
 }

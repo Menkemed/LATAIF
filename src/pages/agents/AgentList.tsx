@@ -28,6 +28,10 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import type { Agent } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedWrites } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { transferCreateBody } from '@/core/agents/transfer-rules';
+import { createTransferOnPrimary } from '@/core/agents/transfer-house';
 
 
 interface NewTransferForm {
@@ -44,7 +48,10 @@ interface NewTransferForm {
 }
 
 export function AgentList() {
-  const { agents, transfers, loadAgents, loadTransfers, updateAgent, deleteAgent, createTransferForCustomer } = useAgentStore();
+  const { agents, transfers, loadAgents, loadTransfers, updateAgent, deleteAgent } = useAgentStore();
+  // CENTRAL-UI-PARITY R5D — „Transfer Item" hat zwei Anschlüsse: am Primary die Hausfolge in EINER
+  // Klammer, auf dem zweiten Rechner `transfers.create` mit genau den Werten dieser Maske.
+  const w = useSharedWrites();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   // v0.6.9 — Soft-Reservation: ein an Approval gegebenes Stueck koennte schon
   // in einer offenen Order versprochen sein. Hinweis im Picker.
@@ -115,19 +122,17 @@ export function AgentList() {
     return availableProducts.filter(p => productSearchText(p).includes(q));
   }, [availableProducts, transferSearch]);
 
-  function handleCreateTransfer() {
+  async function handleCreateTransfer() {
     if (!transferForm.customerId || !transferForm.productId || !transferForm.ourPrice) return;
-    createTransferForCustomer({
-      customerId: transferForm.customerId,
-      productId: transferForm.productId,
-      ourPrice: transferForm.ourPrice,
-      returnBy: transferForm.returnBy,
-      notes: transferForm.notes,
-      staffId: transferForm.staffId,
-      // v0.7.22 — Abrechnungsmodell durchreichen (default 'full').
-      settlementModel: transferForm.settlementModel || 'full',
-      excessSplitPct: transferForm.settlementModel === 'split' ? (transferForm.excessSplitPct ?? 50) : undefined,
+    // Die Werte der Maske so, wie sie sind: Modell (sonst „full") und Anteil (bei „split", sonst 50)
+    // setzt DIESELBE Regel auf beiden Seiten (`normalizeTransferCreate`).
+    const form = { ...transferForm };
+    const r = await w.save('transfers.create', {
+      local: () => createTransferOnPrimary(form),
+      remote: () => transferCreateBody(form),
     });
+    if (r.kind !== 'ok') return;
+    loadTransfers(); loadAgents(); loadProducts();
     setShowNewTransfer(false);
     setTransferForm({});
   }
@@ -144,7 +149,7 @@ export function AgentList() {
               <Printer size={14} /> Print All
             </Button>
           )}
-          <Button variant="primary" onClick={() => setShowNewTransfer(true)}>New Transfer</Button>
+          <Button variant="primary" onClick={() => { w.clear(); setShowNewTransfer(true); }}>New Transfer</Button>
         </div>
       }
     >
@@ -283,6 +288,7 @@ export function AgentList() {
           automatisch beim Speichern erzeugt/aktualisiert. */}
       <Modal open={showNewTransfer} onClose={() => setShowNewTransfer(false)} title="New Transfer" width={520}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={w.fehler} />
           {/* Customer Select + New Client */}
           <div>
             <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>CLIENT</span>
@@ -350,6 +356,7 @@ export function AgentList() {
                 return (
                   <div
                     key={p.id}
+                    data-transfer-product={p.id}
                     onClick={() => setTransferForm({ ...transferForm, productId: p.id, ourPrice: p.plannedSalePrice || p.purchasePrice })}
                     onMouseEnter={e => {
                       setTransferHovered({ id: p.id, rect: (e.currentTarget as HTMLDivElement).getBoundingClientRect() });
@@ -437,8 +444,8 @@ export function AgentList() {
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewTransfer(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreateTransfer}
-              disabled={!transferForm.customerId || !transferForm.productId || !transferForm.ourPrice}>
+            <Button variant="primary" onClick={() => void handleCreateTransfer()} data-create-transfer
+              disabled={!transferForm.customerId || !transferForm.productId || !transferForm.ourPrice || w.busy}>
               Transfer Item
             </Button>
           </div>

@@ -242,9 +242,15 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
     'useConsignmentStore.getState().recordSale(', 'useConsignmentStore.getState().markReturned(',
     'rs.updateStatus(', 'rs.createCombinedRepairInvoice(', 'rs.addRepairLine(',
     'rs.updateRepairLine(', 'rs.cancelRepairLine(',
-    'useAgentStore.getState().convertTransferToInvoice(', 'useAgentStore.getState().convertTransfersToInvoice(',
+    // R5D — die Umwandlungen laufen über die GETEILTE Folge, die auch die Masken des Primary rufen.
+    'convertTransferInHouse(', 'convertTransfersInHouse(',
   ]) {
     ok(mine.includes(call), `REUSE der Fernweg ruft ${call.replace(/\($/, '')} des Hauses`);
+  }
+  {
+    const folge = codeOf('src/core/agents/transfer-house.ts');
+    ok(folge.includes('as.convertTransferToInvoice(') && folge.includes('as.convertTransfersToInvoice('),
+      'REUSE …und die geteilte Folge ruft die Umwandlungen des Stores');
   }
   ok(!/INSERT INTO (orders|order_lines|order_payments|invoices|invoice_lines|expenses|repair_lines|ledger_entries|customer_credits)/i.test(mine),
     'REUSE der Fernweg legt keinen Beleg, keine Zeile und keine Buchung selbst an');
