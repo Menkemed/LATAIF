@@ -203,6 +203,8 @@ const today = (): string => new Date().toISOString().split('T')[0];
  * ohne Kundenpreis, Summe und sichtbare Steuer, Kopffelder aus der ersten Zeile oder der Spec.
  */
 export function planOrderCreate(input: OrderCreateInput, port: OrderCreatePort): OrderCreatePlan {
+  // Dieselben Wertebereiche wie der Fernbefehl — auch für die Maske des Primary (R5E FINAL).
+  assertOrderCreateValues(input);
   const invalid = validateOrderCreate(input);
   if (invalid) throw new OrderActionRejected('ORDER_INVALID', invalid);
   if (!port.customerExists(input.customerId)) throw new OrderActionRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');

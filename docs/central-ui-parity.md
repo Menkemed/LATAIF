@@ -90,6 +90,8 @@ Ohne Fernbuchung — und damit auf PC2 **nicht** ausführbar:
 - Mitarbeiter, Aufgaben, Dokumente, Kundennachrichten
 - Inventur/Stock-Check, Excel-Import, NBR-Export
 - Medienverwaltung (Galerie, Ersetzen, Müllabfuhr)
+- Lieferant anlegen — auch „+ New Supplier" in der Einkaufsmaske (keine Buchung `suppliers.create`; seit R5E FINAL
+  eigens geführt, siehe dort)
 
 Diese Seiten **zeigen** auf PC2 ihre Daten, ihre Schreibknöpfe laufen aber noch gegen die lokale
 Datenbank und damit ins Leere. Das ist die nächste Ausbaustufe und ausdrücklich **noch nicht**
@@ -1770,6 +1772,8 @@ Registry 107 · Matrix 30 / 0 / 8 / 2
 | Anlegen / Ändern / Einkauf | mehrere Schreibvorgänge ohne Klammer | EINE Transaktion |
 | Inbox-Foto „erledigt" | getrennt nach dem Einkauf | im selben Vorgang |
 | Beträge beim Ändern | negative Eingaben möglich | ≥ 0 (der Vertrag des Fernbefehls seit C3E) |
+| Beträge beim Anlegen | negative Eingaben möglich | ≥ 0 auf beiden Wegen (R5E FINAL, siehe unten) |
+| „Edit" am abgeschlossenen/stornierten Auftrag | Maske bot es nicht an, Store/Fern ohne Sperre | `ORDER_NOT_EDITABLE` am Ändern-Weg |
 | Neuer Artikel | Maske prüfte (Pflichtfelder, SKU) | dieselbe Prüfung zusätzlich am Haus |
 | Fern: Anzahlung über der Summe | abgewiesen | wie der Primary: Guthaben |
 
@@ -1777,5 +1781,78 @@ Registry 107 · Matrix 30 / 0 / 8 / 2
 Unit  r5e/order-purchase-parity 164/0 (lokal == fern inkl. Buchungen und Verbindlichkeit, Fehlerinjektion an acht Stellen, Autorität)
 E2E   r5e-order-purchase-parity 73/0 (normal + neuer Artikel, Sonderanfertigung mit Gold-Verbindlichkeit, Ändern inkl. Angebotszeile, Einkauf mit neuem Artikel, Wareneingang, verlorene Antworten, Primary == PC2)
 Registry 107 · Matrix 33 / 0 / 5 / 2
+```
+
+### R5E FINAL — die Verträge gegen den Stand vor R5E (`54ea905`)
+
+**Vorzeichen.** Jedes Feld, das R5E als ≥ 0 prüft — mit dem Stand davor:
+
+| Feld | Bedeutung | vor R5E | negativ fachlich? | was ein negativer Wert bewirkt hätte |
+|---|---|---|---|---|
+| Ändern `agreedPrice` | Verkaufspreis | Maske `Number(v) \|\| undefined`, ohne Vorzeichen; fern ≥ 0 seit C3E | nein | Rest und Marge verzerrt, negativer Preis in Umwandlung/Rechnung |
+| Ändern `depositAmount` | Anzahlung laut Kopf | Maske `Number(v) \|\| 0`; fern ≥ 0 | nein — Erstattung läuft über Zahlungen | Rest > Preis |
+| Ändern `supplierPrice` | erwarteter Einkauf | Maske `Number(v) \|\| undefined`; fern ≥ 0 | nein | Marge > Preis |
+| Anlegen `quotedPrice` | Angebot brutto | `parseFloat \|\| 0`, keine Vorzeichenprüfung; fern: Feld gab es nicht | nein | gemischter Auftrag: Summe sinkt OHNE Zeile (versteckter Nachlass, Rechnung ≠ Auftrag) |
+| Anlegen `customerGoldGrams` | Kundengold | wie oben | nein | ohne Wirkung (gelesen wird nur > 0) |
+| Anlegen `laborCost` | Goldschmied-Arbeit | wie oben | nein | Kopf `labor_cost` negativ, keine Zeile |
+| Anlegen `extraGoldGrams` | Extra-Gold in Gramm | wie oben | nein | keine Zeile, keine Verbindlichkeit — Eingabe verloren |
+| Anlegen `extraGoldCost` | Wert des Extra-Golds | wie oben (mit Gramm > 0 schon abgewiesen) | nein | Kopf `extra_gold_value` negativ |
+| Anlegen `depositAmount` | Anzahlung | `parseFloat \|\| 0`; fern ≥ 0 seit C3E | nein | keine Zahlung, Rest > Summe |
+| Anlegen Zeile `unitPrice` | Preis je Stück | Zeichenfilter lässt kein Minus zu; fern ≥ 0 seit C3E | nein | — (unverändert) |
+| Anlegen Material `totalCost` | Kosten Diamant/Stein/Gold | AddMaterialModal verlangt > 0 | nein | — (unverändert) |
+
+Negative Werte rutschten nur mangels Prüfung durch; kein Gutschrift- oder Korrekturfall hängt an ihnen. Der
+eine legitime Überschuss — Anzahlung über der Summe → Guthaben (`reconcileOrderOverpayCredit`) — bleibt, jetzt auch
+fern. Nachlass, Erstattung, Lieferantengutschrift und Goldausgleich haben eigene Wege. **Befund:** beim Anlegen prüfte
+R5E die Bereiche nur im Fernbefehl; R5E FINAL ruft `assertOrderCreateValues` in `planOrderCreate` — dieselbe Prüfung
+auf beiden Wegen.
+
+**Abgeschlossen / storniert.** Vor R5E zeigte die Auftragsseite „Edit" — den einzigen Einstieg in die sechs Felder —
+nur bei `!isCancelled && !isCompleted` (ebenso „Cancel Order"). `updateOrder` im Store hat keine Sperre, weil er der
+allgemeine Setzer für Status, Zahlung und Umwandlung ist. Der C3E-Fernbefehl hatte ebenfalls keine, war aber an keine
+Maske angeschlossen (Matrix: Klasse B). Storniert ist schon Domänenregel („a cancelled order takes no further action");
+abgeschlossen ist der Endzustand der Statusfolge und führt zur Rechnung. Also eine **bestehende Invariante** der einzigen
+Oberfläche: an einem solchen Auftrag war über die Maske kein Feld änderbar. R5E hält sie zentral, und zwar nur am
+Ändern-Weg (`updateOrderInHouse`), nicht im Store — Zeilen, Zahlungen, Goldausgleich und Umwandlung behalten ihre Regeln.
+
+**Gold-Verbindlichkeit.** Sie entsteht aus der Extra-Gold-Kostenzeile (`materialKind 'gold'`, „Extra Gold …"), und nur,
+wenn `extraGoldSupplierId` gesetzt und `extraGoldGrams > 0` ist. Gramm und Karat sind `extraGoldGrams`/`extraGoldKarat`
+der Maske. Gläubiger ist der Lieferant des Extra-Golds (Goldschmied): `we_owe`, `return_gold`, `OPEN`. Die Zeile trägt
+keinen Lieferanten, weil `commitOrderLineExpenses` nur Zeilen mit `supplier_id` als Geld-A/P bucht — sonst stünde
+dieselbe Schuld in Geld und in Gramm offen. Geld entsteht erst bei `convertGoldPayableToMoney`, als eine Ausgabe an den
+Goldschmied. Dieselbe Zeile finden:
+- die Auftragsseite (`sourceOrderId`) und die Lieferantenseite (`supplierId`);
+- `settleGoldReturn` und `convertGoldPayableToMoney` (Kennung);
+- das Löschen der Zeile (`source_order_line_id`).
+
+Einzige Änderung durch R5E: dieselbe Transaktion statt verschlucktem Fehler.
+
+**Test-Delta `test/bridge/commercial-documents`.**
+
+| früher abgewiesen | warum damals | warum jetzt Eingabe | was der Server weiter prüft |
+|---|---|---|---|
+| Einkauf: neues Produkt | zweiter Entstehungsweg neben `products.create` | Maske „New Item" | Feldliste (kein Einstand, Bestand, Los, keine Bildbytes), Kategorie, Pflichtfelder, SKU-Riegel; Los/Menge/Status rechnet `createPurchase` |
+| Einkauf: Auftragsverknüpfung | Wareneingang als eigener Vorgang | Maske „aus Auftrag" | Auftrag der Filiale, Position genau dieses Auftrags (`ORDER_LINE_NOT_ON_ORDER`); „Arrived" setzt das Haus |
+| Auftrag: Anfangsstatus | nur der normale Auftrag | Karte „6 · STATUS" (pending/arrived/notified/completed) | `cancelled` bleibt abgewiesen |
+| Auftrag: Sonderanfertigung | Doppelvertrag der Angebotszeile | ganzer Sonderauftrag über eine Vorbereitung | Spec-Feldliste (kein Einstand), Kategorie, Bezeichner; Angebotszeile, Steuer und Summe leitet das Haus ab |
+| Auftrag: neues Produkt | — | Maske | kein Bestand am Entwurf |
+| Ändern: Sonderauftrag (`ORDER_NOT_NORMAL`) | Angebotszeile fern nicht bedient | die Zeile wird wie am Primary gezogen | Filiale, Fassung, `ORDER_NOT_EDITABLE`, `QUOTE_LINE_INVOICED`; Marge/Rest nie im Rumpf |
+| Anzahlung über der Summe (`DEPOSIT_EXCEEDS_TOTAL`) | fern strenger als der Primary | der Primary bucht den Überschuss als Guthaben | Betrag ≥ 0, Zahlweg Pflicht; das Guthaben rechnet das Haus |
+
+- Nichts ist übersprungen.
+- Keine Absage wurde gestrichen: Summe, Rest, Marge, Typ, Rechnung, Steuer, Goldwert, Gold-Verbindlichkeit, bezahlter Betrag und Vorsteuer bleiben abgewiesen.
+- Filial- und Fassungsprüfung sind unverändert.
+- `PAYMENT_EXCEEDS_TOTAL`, `SUPPLIER_NOT_FOUND` und `PRODUCT_NOT_FOUND` des Einkaufs leben jetzt in `planPurchaseCreate`, auf beiden Wegen.
+- Die Notiz kommt ungetrimmt an, wie aus der Maske.
+
+**Neue Fern-Schreiblücke: „+ New Supplier" im Einkauf** (`CENTRAL_UI_R5E_NEW_SUPPLIER_WRITE_GAP_RECORDED`). Die
+Einkaufsmaske legt über „+ New Supplier" am Primary lokal einen Lieferanten an (`createSupplier`). Der datenbanklose PC2
+kann das nicht, denn es gibt keine Buchung `suppliers.create`. Die Lücke zählt nicht unter den 40 und ändert die Registry
+nicht; umgesetzt wird sie jetzt nicht. Auf PC2 bleibt: einen bestehenden Lieferanten wählen oder ihn am Primary anlegen.
+
+```
+Pins  r5e/order-contract-pins 70/0 (Vorzeichen 8 + 3 Felder auf beiden Wegen, Guthaben bleibt, Terminal-Sperre, Gold, Delta, Lücke)
+Unit  r5e/order-purchase-parity 164/0 (nach der Prüfungsverschiebung neu gelaufen) · commercial-documents 239/0
+Registry 107 · Matrix 33 / 0 / 5 / 2 · keine neue Buchung
 ```
 

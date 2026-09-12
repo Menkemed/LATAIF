@@ -112,6 +112,9 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
 
   // ── Einkauf ──────────────────────────────────────────────────────────────
+  // R5E FINAL: „+ New Supplier" in derselben Maske ist KEIN Teil dieser Zeile — der Primary legt den
+  // Lieferanten lokal an, fern gibt es kein `suppliers.create`. Eigene Schreiblücke ausserhalb der 40,
+  // geführt in docs/central-ui-parity.md (R5E FINAL); hier bewusst nicht mitgezählt.
   {
     op: 'purchases.create', handlung: 'Einkauf anlegen', ort: 'pages/purchases/PurchaseCreate.tsx',
     lokal: 'createPurchaseOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
