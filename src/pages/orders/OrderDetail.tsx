@@ -42,6 +42,8 @@ import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY R2D — die Anzeige liest ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { updateOrderOnPrimary } from '@/core/orders/order-house';
+import { orderEditBody } from '@/core/orders/order-edit';
 import { WriteError } from '@/components/shared/WriteError';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -77,7 +79,7 @@ export function OrderDetail() {
   const goBack = useGoBack('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
     getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable, updateOrderLineStatus,
-    addOrderLine, deleteOrderLine, updateOrderLinePrice, updateOrderLine,
+    addOrderLine, deleteOrderLine, updateOrderLine,
     markOrderLineOrdered, cancelOrderWithMoney } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -398,35 +400,18 @@ export function OrderDetail() {
     });
   }
 
-  function handleSave() {
-    if (!id) return;
-    // v0.5.0 — Quoted Price ändern: existiert eine Custom-Quote-Line, ziehen
-    // wir ihren Preis + agreed_price konsistent mit (sonst nähme der Convert
-    // den alten Wert). Bei Normal-Orders direkt der Header-Wert.
-    if (quoteLine && form.agreedPrice != null
-        && Math.abs(form.agreedPrice - (quoteLine.unitPrice || 0)) > 0.0005) {
-      try {
-        updateOrderLinePrice(quoteLine.id, form.agreedPrice);
-      } catch (e) {
-        alert(e instanceof Error ? e.message : String(e));
-        return;
-      }
-    }
-    const margin =
-      form.agreedPrice && form.supplierPrice
-        ? form.agreedPrice - form.supplierPrice
-        : undefined;
-    const rem = (form.agreedPrice || 0) - (form.depositAmount || 0);
-    updateOrder(id, {
-      ...(quoteLine ? {} : { agreedPrice: form.agreedPrice }),
-      depositAmount: form.depositAmount,
-      supplierName: form.supplierName,
-      supplierPrice: form.supplierPrice,
-      expectedMargin: margin,
-      expectedDelivery: form.expectedDelivery,
-      remainingAmount: rem,
-      notes: form.notes,
-    });
+  // CENTRAL-UI-PARITY R5E — „Save": die sechs Eingaben des Formulars. Marge und Rest leitet das Haus
+  // ab; beim Sonderauftrag zieht es den Preis der Angebotszeile (core/orders/order-edit) — am Primary
+  // wie fern, in EINER Klammer.
+  async function handleSave() {
+    if (!id || !order) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('editing this order (no revision loaded)'))); return; }
+    if (!await w.ok('orders.update', {
+      local: () => updateOrderOnPrimary(id, form),
+      remote: () => orderEditBody(id, fassung, form),
+    })) return;
+    loadOrders();
     setEditing(false);
   }
 
@@ -793,7 +778,7 @@ export function OrderDetail() {
             {editing ? (
               <>
                 <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...order }); }}>Cancel</Button>
-                <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
+                <Button variant="primary" onClick={() => void handleSave()} disabled={w.busy} data-order-save><Save size={14} /> Save</Button>
               </>
             ) : (
               <>

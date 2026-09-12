@@ -20,7 +20,6 @@ import { useMediaScope } from '@/hooks/useMediaScope';
 import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { NewProductModal } from '@/components/products/NewProductModal';
-import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useProductStore } from '@/stores/productStore';
 import { StaffSelect } from '@/components/employees/StaffSelect';
@@ -29,6 +28,11 @@ import { getProductSpecs, productSearchText } from '@/core/utils/product-format'
 // CENTRAL-UI-PARITY R2D — die Vorlage kommt aus der gemeinsamen Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { purchaseCreatePrefillFor, type PurchaseCreatePrefill } from '@/core/data/page-reads';
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { purchaseCreateBody, validatePurchaseCreate, type PurchaseCreateInput } from '@/core/purchases/purchase-create';
+import { createPurchaseOnPrimary } from '@/core/purchases/purchase-house';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -57,7 +61,9 @@ export function PurchaseCreate() {
   const navigate = useNavigate();
   const goBack = useGoBack('/purchases');
   const [searchParams] = useSearchParams();
-  const { createPurchase, markPurchaseInboxDone } = usePurchaseStore();
+  // CENTRAL-UI-PARITY R5E — „Save Purchase" hat zwei Anschluesse: am Primary die Hausfolge in EINER
+  // Klammer, auf dem zweiten Rechner `purchases.create` mit genau den Eingaben dieser Maske.
+  const w = useSharedWrites();
   const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
@@ -291,63 +297,48 @@ export function PurchaseCreate() {
     setError('');
   }
 
-  function validate(): string | null {
-    if (!supplierId) return 'Please select a supplier';
-    if (lines.length === 0) return 'Please add at least one line';
-    const bad = lines.findIndex(l =>
-      l.quantity <= 0 || l.unitPrice < 0 ||
-      (l.mode === 'new' ? (!l.brand || !l.name) : !l.productId)
-    );
-    if (bad !== -1) return `Line ${bad + 1}: Brand+Name (oder Product) + Qty > 0 + Price ≥ 0 erforderlich`;
-    if (paymentAmount < 0) return 'Payment cannot be negative';
-    if (paymentAmount > total) return `Payment (${fmt(paymentAmount)}) exceeds total (${fmt(total)})`;
-    return null;
+  // CENTRAL-UI-PARITY R5E — die Eingaben der Maske; den Einkauf (neue Artikel, Lose, Vorsteuer,
+  // Auftragsverknüpfung, Inbox „erledigt") baut EINE Vorbereitung (core/purchases/purchase-create),
+  // am Primary wie fern, in EINER Klammer.
+  function formInput(): PurchaseCreateInput {
+    return {
+      supplierId, purchaseDate, taxScheme: purchaseTaxScheme,
+      lines: lines.map(l => ({
+        mode: l.mode, productId: l.productId, newProduct: l.newProduct, brand: l.brand, name: l.name,
+        sku: l.sku, categoryId: l.categoryId, quantity: l.quantity, unitPrice: l.unitPrice,
+        sourceOrderLineId: l.sourceOrderLineId,
+      })),
+      paymentAmount, paymentMethod, notes, staffId,
+      sourceOrderId: sourceOrderId || undefined,
+      inboxId: inboxId || undefined,
+    };
   }
 
-  function handleSave(continueEditing: boolean) {
+  async function handleSave(continueEditing: boolean) {
     setError('');
-    const v = validate();
+    const input = formInput();
+    const v = validatePurchaseCreate(input);
     if (v) { setError(v); return; }
-
-    const payload = lines.map(l => l.mode === 'existing'
-      ? { productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice, taxScheme: purchaseTaxScheme, vatRate: inputVatRate, sourceOrderLineId: l.sourceOrderLineId }
-      : {
-          // Plan §Purchase §New-Item: Wenn Modal-Spec da ist, volle Product-Specs durchreichen.
-          // Sonst Legacy-Inline-Pfad mit nur Brand/Name/SKU/Kategorie.
-          newProduct: l.newProduct,
-          newProductBrand: l.brand,
-          newProductName: l.name,
-          newProductSku: l.sku || undefined,
-          newProductCategoryId: l.categoryId || undefined,
-          quantity: l.quantity,
-          unitPrice: l.unitPrice,
-          taxScheme: purchaseTaxScheme,
-          vatRate: inputVatRate,
-          sourceOrderLineId: l.sourceOrderLineId,
-        });
-
-    const purchase = createPurchase({
-      supplierId,
-      purchaseDate,
-      notes: notes || undefined,
-      staffId: staffId || undefined,
-      lines: payload,
-      initialPayment: paymentAmount > 0 ? { amount: paymentAmount, method: paymentMethod } : undefined,
-      sourceOrderId: sourceOrderId || undefined,
-    });
-
-    // v0.4.0 — Purchase aus einem Mobile-Inbox-Foto erstellt → Inbox-Item erledigt.
-    if (inboxId) {
-      try { markPurchaseInboxDone(inboxId); } catch { /* */ }
+    // Auf dem zweiten Rechner reisen die Fotos der neuen Artikel vorab in die Zwischenablage; der
+    // Auftrag nennt nur ihre Kennungen.
+    let body: Record<string, unknown> | null = null;
+    if (w.remote) {
+      try { body = await purchaseCreateBody(input, stageDataUrls); }
+      catch (e) { setError(e instanceof StagingUploadError ? e.message : String(e)); return; }
     }
-
+    const r = await w.save('purchases.create', {
+      local: async () => ({ id: (await createPurchaseOnPrimary(input)).id }),
+      remote: () => body as Record<string, unknown>,
+      shape: (res) => ({ id: String(res.purchaseId ?? '') }),
+    });
+    if (r.kind !== 'ok') { setError(fehlertext(r)); return; }
     if (continueEditing) {
       reset();
     } else if (sourceOrderId) {
       // Back-to-Back: zurueck zur Order — die Posten stehen jetzt auf „Arrived".
       navigate(`/orders/${sourceOrderId}`);
     } else {
-      navigate(`/purchases/${purchase.id}`);
+      navigate(`/purchases/${r.value.id}`);
     }
   }
 
@@ -769,7 +760,8 @@ export function PurchaseCreate() {
         </div>
 
         {/* Error */}
-        {error && (
+        <WriteError text={w.fehler} />
+        {error && !w.fehler && (
           <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 8, fontSize: 12, color: '#DC2626' }}>
             {error}
           </div>
@@ -779,8 +771,8 @@ export function PurchaseCreate() {
         <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate('/purchases')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => handleSave(true)}>Save &amp; New</Button>
-            <Button variant="primary" onClick={() => handleSave(false)}><Save size={14} /> Save Purchase</Button>
+            <Button variant="secondary" onClick={() => void handleSave(true)} disabled={w.busy}>Save &amp; New</Button>
+            <Button variant="primary" onClick={() => void handleSave(false)} disabled={w.busy} data-purchase-save><Save size={14} /> Save Purchase</Button>
           </div>
         </div>
       </div>

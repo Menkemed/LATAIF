@@ -1731,3 +1731,51 @@ E2E   r5d1-transfer-entrypoints 50/0 (Detailseite Edit/Sold/Sold unter Preis/Ret
 Registry 107 · Matrix 30 / 0 / 8 / 2
 ```
 
+## R5E — Auftrag anlegen, Auftrag ändern, Einkauf anlegen (12.09.2026)
+
+### Befund
+
+- **Auftrag anlegen:** die Maske („New Order") baute den Auftrag in der React-Komponente — Produktzeilen mit Steuerschema
+  (Auto = das des Artikels), NEUE Artikel, die Angebotszeile eines Sonderauftrags (brutto, mit Steuerwahl), Kostenzeilen
+  (Goldschmied-Arbeit, Extra-Gold, Diamanten/Steine), Kundenmaterial, Final-Product-Spec mit Foto, Kopffelder, Summe und
+  sichtbare Steuer — und legte DANACH, getrennt und mit verschlucktem Fehler, die **Gold-Verbindlichkeit** an: Extra-Gold,
+  das der Goldschmied stellt, als Schuld in Gramm und Karat beim Goldschmied (`gold_payables`, `we_owe`, `OPEN`),
+  verknüpft mit der Extra-Gold-Kostenzeile (die selbst KEINEN Lieferanten trägt, sonst stünde dasselbe Geld doppelt
+  offen); aufgelöst wird sie später auf der Auftragsseite in Gold oder Geld. Der Fernbefehl kannte nur den normalen
+  Auftrag mit bestehenden Artikeln und wies eine Anzahlung über der Summe ab, die der Primary als Guthaben bucht.
+- **Auftrag ändern:** „Save" schreibt sechs Eingaben (Preis, Anzahlung, Lieferant, Einkauf, Liefertermin, Notiz) und leitet
+  Marge (Preis − Einkauf) und Rest (Preis − Anzahlung) ab. Beim Sonderauftrag trägt die ANGEBOTSZEILE den Preis: ihr Preis
+  wird gezogen, der Kopfpreis folgt aus den Zeilen. Der Fernbefehl lehnte den Sonderauftrag ab.
+- **Einkauf anlegen:** die Maske legt in einer Zeile NEUE Artikel an (Maske „New Item" mit Foto), nennt den Mitarbeiter, kommt
+  aus einem Auftrag (Wareneingang: dessen Positionen gehen auf „Arrived") oder aus einem Inbox-Foto (danach „erledigt" —
+  getrennt geschrieben). Der Fernbefehl kannte nur bestehende Artikel.
+
+### Lösung — die Maske schickt Eingaben, EINE Vorbereitung leitet ab
+
+- `core/orders/order-create` (rein): Werte der Maske als Listen (Auftragsart, Anfangsstatus, Zahlweg, Schemata, Karat),
+  `validateOrderCreate` (die Sätze der Maske), `planOrderCreate` (Zeilen, Summe, Steuer, Kopf, Kundenmaterial,
+  Verbindlichkeit). `core/orders/order-edit`: `planOrderEdit`. `core/purchases/purchase-create`: `planPurchaseCreate`.
+  `core/products/embedded-product`: EINE Feldliste und EINE Prüfung (Pflichtfelder, SKU-Riegel) für neue Artikel in
+  Auftrag und Einkauf.
+- `core/orders/order-house`, `core/purchases/purchase-house`: die Folge für den Fernbefehl (in seiner Transaktion) und für
+  die Maske des Primary (`core/data/primary-action`: exklusiv, EINE Transaktion, danach durabel). Fotos reisen über die
+  vorhandene Zwischenablage; im Auftrag stehen nur ihre Kennungen.
+- Erweitert, nicht neu: `orders.create`, `orders.update`, `purchases.create`.
+
+### Verträge des Primary, die sich ändern
+
+| Punkt | vor R5E | R5E |
+|---|---|---|
+| Gold-Verbindlichkeit | nach dem Auftrag, Fehler verschluckt | in derselben Transaktion — ohne sie kein Auftrag |
+| Anlegen / Ändern / Einkauf | mehrere Schreibvorgänge ohne Klammer | EINE Transaktion |
+| Inbox-Foto „erledigt" | getrennt nach dem Einkauf | im selben Vorgang |
+| Beträge beim Ändern | negative Eingaben möglich | ≥ 0 (der Vertrag des Fernbefehls seit C3E) |
+| Neuer Artikel | Maske prüfte (Pflichtfelder, SKU) | dieselbe Prüfung zusätzlich am Haus |
+| Fern: Anzahlung über der Summe | abgewiesen | wie der Primary: Guthaben |
+
+```
+Unit  r5e/order-purchase-parity 164/0 (lokal == fern inkl. Buchungen und Verbindlichkeit, Fehlerinjektion an acht Stellen, Autorität)
+E2E   r5e-order-purchase-parity 73/0 (normal + neuer Artikel, Sonderanfertigung mit Gold-Verbindlichkeit, Ändern inkl. Angebotszeile, Einkauf mit neuem Artikel, Wareneingang, verlorene Antworten, Primary == PC2)
+Registry 107 · Matrix 33 / 0 / 5 / 2
+```
+

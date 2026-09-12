@@ -16,11 +16,13 @@
 //    sonst fände der Benutzer die Hälfte seiner Eingabe gespeichert. Hier laufen beide in EINER
 //    Transaktion; damit ist der Fernweg an dieser Stelle sogar strenger als der Primary, wo ein
 //    Fehler im zweiten Schritt den ersten stehen ließe.
-//  • **Auftrag: Anlegen und Ändern, aber nur der NORMALE.** Ein Sonderauftrag (`custom`/`mixed`)
-//    trägt seinen Preis in einer Angebotszeile, und der Kopfpreis wird beim Ändern bewusst NICHT
-//    geschrieben (`quoteLine`-Zweig am Primary). Diesen Doppelvertrag aus der Ferne zu bedienen
-//    wäre geraten. Ein Auftrag mit Gold, Goldschmied oder Sonderanfertigung wird deshalb hier
-//    abgelehnt statt halb unterstützt.
+//  • **Auftrag: Anlegen und Ändern.** Seit R5E JEDE Auftragsart — normal, Sonderanfertigung,
+//    gemischt — über DIESELBE Vorbereitung wie die Maske des Primary (`core/orders/order-create`,
+//    `order-edit`, Anschluss `order-house`): der Client schickt Eingaben, das Haus leitet Zeilen,
+//    Summe, Steuer, Kopf, Marge, Rest und die Gold-Verbindlichkeit ab — in EINER Transaktion.
+//    Beim Sonderauftrag zieht „Save" den Preis der Angebotszeile, nicht den Kopfpreis.
+//  • R5E — **Einkauf** ebenso (`core/purchases/purchase-create`, Anschluss `purchase-house`): neue
+//    Artikel über die Maske „New Item", Mitarbeiter, Herkunft aus Auftrag und Inbox-Foto.
 //
 // Was für alle fünf gilt:
 //
@@ -46,10 +48,20 @@ import { query } from '@/core/db/helpers';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
-import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
-import { useOrderStore } from '@/stores/orderStore';
 import { useProductStore } from '@/stores/productStore';
+import type { OrderStatus, Product } from '@/core/models/types';
+import {
+  GOLD_KARATS, ORDER_CREATE_STATUSES, ORDER_LINE_SCHEMES, ORDER_MATERIAL_KINDS, ORDER_PAYMENT_METHODS,
+  ORDER_QUOTE_SCHEMES, ORDER_TYPES, OrderActionRejected, assertOrderCreateValues, type OrderCreateInput,
+} from '@/core/orders/order-create';
+import { ORDER_EDIT_FIELDS, type OrderEditInput } from '@/core/orders/order-edit';
+import { createOrderInHouse, updateOrderInHouse } from '@/core/orders/order-house';
+import {
+  PURCHASE_PAYMENT_METHODS, PURCHASE_TAX_SCHEMES, PurchaseActionRejected, type PurchaseCreateInput,
+} from '@/core/purchases/purchase-create';
+import { createPurchaseInHouse } from '@/core/purchases/purchase-house';
+import { EMBEDDED_PRODUCT_FIELDS, FINAL_PRODUCT_FIELDS, EmbeddedProductRejected } from '@/core/products/embedded-product';
 import { payoutModelLock, PayoutPatchError } from '@/core/consignment/payout-edit';
 import { rowToConsignment } from '@/stores/consignmentStore';
 import { CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
@@ -58,7 +70,7 @@ import { BusinessError, registerCommand, type CommandActor } from './command-reg
 import { CommandNotEvaluated } from './mutation-engine';
 import {
   invokeReadStaged, invokeDiscardStaged, assertHouseBranch, parseStagingIds, readStagedAsDataUrls,
-  discardStagedAfterSuccess, stagingOwnerOf, type StagedMediaReader, type StagedMediaDiscard,
+  discardStagedAfterSuccess, stagingOwnerOf, type StagedMediaReader, type StagedMediaDiscard, type StagingOwner,
 } from './remote-create-support';
 import {
   createConsignmentWithProduct, houseConsignmentPort, ConsignmentCreateRejected, ConsignmentMediaIncomplete,
@@ -171,117 +183,174 @@ export function commercialDeps(): EngineDeps {
 
 // ── Einkauf: anlegen ──────────────────────────────────────────────────────
 
-const PURCHASE_METHODS = ['cash', 'bank', 'benefit'] as const;
-const TAX_SCHEMES = ['ZERO', 'VAT_10'] as const;
+/** Nur für Tests: wie der Primary an die abgelegten Bytes kommt und wie er aufräumt. */
+export interface StagingExtras {
+  readStaged?: StagedMediaReader;
+  discardStaged?: StagedMediaDiscard;
+}
 
-export interface PurchaseCreateRequest {
-  supplierId: string;
-  purchaseDate?: string;
-  notes?: string;
-  taxScheme: typeof TAX_SCHEMES[number];
-  lines: Array<{ productId: string; quantity: number; unitPrice: number; description?: string }>;
-  initialPayment?: { amount: number; method: typeof PURCHASE_METHODS[number] };
+/** Ein Nein der geteilten Regeln (Auftrag, Einkauf, Artikel-Entwurf) ist ein eingefrorenes Urteil. */
+function urteil<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof OrderActionRejected || e instanceof PurchaseActionRejected || e instanceof EmbeddedProductRejected) {
+      throw new CommandRejected(e.code, e.message);
+    }
+    throw e;
+  }
+}
+
+const SPEC_TEXT = ['categoryId', 'brand', 'name', 'sku', 'condition', 'taxScheme', 'purchaseCurrency', 'storageLocation', 'notes'];
+
+/**
+ * Ein Artikel-Entwurf im Rumpf: GENAU die Felder der Maske „New Item" — und statt der Fotos ihre
+ * Kennungen in der Zwischenablage. Einstand, Preise, Menge, Bestand, Herkunft stehen nicht darin.
+ */
+function parseSpec(raw: unknown, fields: readonly string[], what: string): { spec: Partial<Product>; stagingIds?: string[] } | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isPlain(raw)) throw new CommercialPayloadError(`${what} must be an object`);
+  onlyKnownFields(raw, [...fields.filter((f) => f !== 'images'), 'stagingIds']);
+  for (const k of SPEC_TEXT) {
+    if (raw[k] !== undefined && raw[k] !== null && typeof raw[k] !== 'string') {
+      throw new CommercialPayloadError(`${what}.${k} must be text`);
+    }
+  }
+  if (raw.attributes !== undefined && raw.attributes !== null && !isPlain(raw.attributes)) {
+    throw new CommercialPayloadError(`${what}.attributes must be an object`);
+  }
+  if (raw.scopeOfDelivery !== undefined && raw.scopeOfDelivery !== null
+    && (!Array.isArray(raw.scopeOfDelivery) || raw.scopeOfDelivery.some((x) => typeof x !== 'string'))) {
+    throw new CommercialPayloadError(`${what}.scopeOfDelivery must be a list of words`);
+  }
+  if (typeof raw.taxScheme === 'string' && !(HOUSE_TAX_SCHEMES as readonly string[]).includes(raw.taxScheme)) {
+    throw new CommercialPayloadError(`unknown tax scheme: ${raw.taxScheme}`);
+  }
+  const { stagingIds, ...spec } = raw;
+  return {
+    spec: spec as Partial<Product>,
+    stagingIds: stagingIds === undefined ? undefined : parseStagingIds(stagingIds, (m) => new CommercialPayloadError(m)),
+  };
+}
+
+/** Die Fotos eines Entwurfs — INNERHALB des Auftrags gelesen. Eine Wiederholung liest sie nie wieder. */
+async function mitFotos(
+  p: { spec: Partial<Product>; stagingIds?: string[] } | undefined, owner: StagingOwner, read: StagedMediaReader,
+): Promise<Partial<Product> | undefined> {
+  if (!p) return undefined;
+  if (p.stagingIds === undefined) return { ...p.spec };
+  const images = await readStagedAsDataUrls(p.stagingIds, owner, read, (m) => new CommercialPayloadError(m));
+  return { ...p.spec, images };
+}
+
+function num0(v: unknown, name: string): number {
+  if (v === undefined || v === null) return 0;
+  return money(v, name);
+}
+function text0(v: unknown, name: string): string {
+  if (v === undefined || v === null) return '';
+  if (typeof v !== 'string') throw new CommercialPayloadError(`${name} must be text`);
+  return v;
+}
+function oneOf<T extends string>(v: unknown, list: readonly T[], fallback: T, name: string): T {
+  if (v === undefined || v === null) return fallback;
+  const s = String(v);
+  if (!(list as readonly string[]).includes(s)) throw new CommercialPayloadError(`unknown ${name}: ${s || '(none)'}`);
+  return s as T;
+}
+
+export interface PurchaseCreateRequest extends PurchaseCreateInput {
+  /** Je Zeile der Entwurf mit den Kennungen seiner Fotos. */
+  specs: Array<{ spec: Partial<Product>; stagingIds?: string[] } | undefined>;
+  /** Die Anzahlung, wie `createPurchase` sie kennt (auch der Name des alten Rumpfs). */
+  initialPayment?: { amount: number; method: typeof PURCHASE_PAYMENT_METHODS[number] };
 }
 
 /**
- * Was ein Mensch am Einkaufsbildschirm eingibt — und nichts sonst.
- *
- * Bewusst NICHT dabei: neue Produkte. Der Bildschirm am Primary kann in einer Zeile ein Produkt
- * mit anlegen; aus der Ferne wäre das ein ZWEITER Weg, auf dem ein Artikel entsteht — neben
- * `products.create`, das eigene Beweise mitbringt (SKU aus dem durablen Zähler, Medienweg,
- * eingefrorenes Urteil). Ein Client legt erst den Artikel an und kauft ihn dann ein.
- *
- * Ebenfalls nicht dabei: `sourceOrderId`. Die Verknüpfung mit einem Auftrag (Back-to-Back) rollt
- * Auftragszeilen auf „angekommen" — ein eigener Vorgang mit eigener Bedeutung, nicht ein Feld.
+ * Was ein Mensch am Einkaufsbildschirm eingibt — und nichts sonst. R5E: auch NEUE Artikel (die
+ * Maske „New Item"), den Mitarbeiter, die Herkunft aus einem Auftrag (`sourceOrderId`, je Zeile die
+ * Auftragsposition) und aus einem Inbox-Foto. Belegnummer, Lose, Menge, Status, Vorsteuer,
+ * Verbindlichkeit und Buchung rechnet das Haus.
  */
 export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
   if (!isPlain(raw)) throw new CommercialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['supplierId', 'purchaseDate', 'notes', 'taxScheme', 'lines', 'initialPayment']);
-  const supplierId = reqString(raw.supplierId, 'supplierId');
-  const scheme = raw.taxScheme === undefined ? 'ZERO' : String(raw.taxScheme);
-  if (!(TAX_SCHEMES as readonly string[]).includes(scheme)) {
-    throw new CommercialPayloadError(`unknown tax scheme: ${scheme}`);
-  }
+  onlyKnownFields(raw, [
+    'supplierId', 'purchaseDate', 'taxScheme', 'lines', 'paymentAmount', 'paymentMethod',
+    'initialPayment', 'notes', 'staffId', 'sourceOrderId', 'inboxId',
+  ]);
   if (!Array.isArray(raw.lines) || raw.lines.length === 0) {
     throw new CommercialPayloadError('a purchase needs at least one line');
   }
   if (raw.lines.length > MAX_DOC_LINES) throw new CommercialPayloadError('too many lines');
+  const specs: PurchaseCreateRequest['specs'] = [];
   const lines = raw.lines.map((l, i) => {
     if (!isPlain(l)) throw new CommercialPayloadError(`line ${i + 1} must be an object`);
-    onlyKnownFields(l, ['productId', 'quantity', 'unitPrice', 'description']);
+    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'brand', 'name', 'sku', 'categoryId', 'quantity', 'unitPrice', 'sourceOrderLineId']);
+    const productId = optString(l.productId, `line ${i + 1}: productId`);
+    const spec = parseSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS, `line ${i + 1}: newProduct`);
+    specs.push(spec);
     return {
-      productId: reqString(l.productId, `line ${i + 1}: productId`),
+      mode: oneOf(l.mode, ['existing', 'new'] as const, productId ? 'existing' : 'new', `line ${i + 1} mode`),
+      productId,
+      newProduct: spec?.spec,
+      brand: text0(l.brand, `line ${i + 1}: brand`),
+      name: text0(l.name, `line ${i + 1}: name`),
+      sku: text0(l.sku, `line ${i + 1}: sku`),
+      categoryId: text0(l.categoryId, `line ${i + 1}: categoryId`),
       quantity: countOf(l.quantity, `line ${i + 1}: quantity`),
       // Ein Einkaufspreis von 0 ist eine gültige Aussage (Geschenk, Beigabe) — negativ nicht.
       unitPrice: money(l.unitPrice, `line ${i + 1}: unitPrice`),
-      description: optString(l.description, `line ${i + 1}: description`),
+      sourceOrderLineId: optString(l.sourceOrderLineId, `line ${i + 1}: sourceOrderLineId`),
     };
   });
-  let initialPayment: PurchaseCreateRequest['initialPayment'];
+  // Die Anzahlung: der Rumpf der Maske (`paymentAmount`/`paymentMethod`) oder der alte (`initialPayment`).
+  let paymentAmount = num0(raw.paymentAmount, 'paymentAmount');
+  let paymentMethod = oneOf(raw.paymentMethod, PURCHASE_PAYMENT_METHODS, 'bank', 'payment method');
   if (raw.initialPayment !== undefined && raw.initialPayment !== null) {
+    if (raw.paymentAmount !== undefined) throw new CommercialPayloadError('one payment, not two');
     if (!isPlain(raw.initialPayment)) throw new CommercialPayloadError('initialPayment must be an object');
     onlyKnownFields(raw.initialPayment, ['amount', 'method']);
-    const method = String(raw.initialPayment.method ?? '');
-    if (!(PURCHASE_METHODS as readonly string[]).includes(method)) {
-      throw new CommercialPayloadError(`unknown payment method: ${method || '(none)'}`);
-    }
-    initialPayment = {
-      amount: money(raw.initialPayment.amount, 'initialPayment.amount', { min: 0.001 }),
-      method: method as typeof PURCHASE_METHODS[number],
-    };
+    paymentAmount = money(raw.initialPayment.amount, 'initialPayment.amount', { min: 0.001 });
+    paymentMethod = oneOf(raw.initialPayment.method, PURCHASE_PAYMENT_METHODS, 'bank', 'payment method');
   }
-  return {
-    supplierId,
-    purchaseDate: optString(raw.purchaseDate, 'purchaseDate'),
-    notes: optString(raw.notes, 'notes'),
-    taxScheme: scheme as typeof TAX_SCHEMES[number],
+  const out: PurchaseCreateRequest = {
+    supplierId: reqString(raw.supplierId, 'supplierId'),
+    purchaseDate: optString(raw.purchaseDate, 'purchaseDate') ?? new Date().toISOString().split('T')[0],
+    taxScheme: oneOf(raw.taxScheme, PURCHASE_TAX_SCHEMES, 'ZERO', 'tax scheme'),
     lines,
-    initialPayment,
+    paymentAmount,
+    paymentMethod,
+    notes: text0(raw.notes, 'notes'),
+    staffId: text0(raw.staffId, 'staffId'),
+    sourceOrderId: optString(raw.sourceOrderId, 'sourceOrderId'),
+    inboxId: optString(raw.inboxId, 'inboxId'),
+    specs,
   };
+  if (paymentAmount > 0) out.initialPayment = { amount: paymentAmount, method: paymentMethod };
+  return out;
 }
 
 export type CommercialResult = { readonly [k: string]: unknown };
 
-export function runPurchaseCreate(
-  deps: EngineDeps, identity: CommandIdentity, raw: unknown,
+export async function runPurchaseCreate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: StagingExtras = {},
 ): Promise<CommandOutcome> {
   const req = parsePurchaseCreate(raw);
-  return runRemoteCommand(deps, identity, () => {
-    const branch = identity.branchId;
-    // Der Lieferant muss existieren UND zu dieser Filiale gehören. Ohne diese Prüfung entstünde
-    // ein Beleg mit einer Verbindlichkeit gegenüber niemandem.
-    const sup = query('SELECT id FROM suppliers WHERE id = ? AND branch_id = ?', [req.supplierId, branch])[0];
-    if (!sup) throw new CommandRejected('SUPPLIER_NOT_FOUND', 'no such supplier in this branch');
-    for (const l of req.lines) {
-      const p = query('SELECT id FROM products WHERE id = ? AND branch_id = ?', [l.productId, branch])[0];
-      if (!p) throw new CommandRejected('PRODUCT_NOT_FOUND', `no such product in this branch: ${l.productId}`);
+  const owner = stagingOwnerOf(identity);
+  const read = extras.readStaged ?? invokeReadStaged;
+  const staged = req.specs.flatMap((s) => s?.stagingIds ?? []);
+  const outcome = await runRemoteCommand(deps, identity, async () => {
+    // R5E — in die Bücher DIESER Filiale, oder gar nicht.
+    assertHouseBranch(identity);
+    const lines: Array<(typeof req.lines)[number]> = [];
+    for (let i = 0; i < req.lines.length; i++) {
+      lines.push({ ...req.lines[i], newProduct: await mitFotos(req.specs[i], owner, read) });
     }
-    // Dieselbe Regel wie am Bildschirm: eine Anzahlung, die über der Summe liegt, wird nicht
-    // angenommen. `createPurchase` selbst prüft das nicht — es rechnete stillschweigend einen
-    // negativen Rest, und daraus würde später eine Überzahlung, die niemand eingegeben hat.
-    const total = req.lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
-    if (req.initialPayment && req.initialPayment.amount > total + 1e-9) {
-      throw new CommandRejected('PAYMENT_EXCEEDS_TOTAL',
-        `the payment (${req.initialPayment.amount}) is more than the purchase (${total})`);
-    }
-    // Ab hier rechnet das Haus: Belegnummer aus dem durablen Zähler, ein Los je Zeile mit dem
-    // TATSÄCHLICHEN Einstandspreis, Mengensynchronisierung, Statusregel für bestehende Artikel,
-    // Vorsteuer aus dem Bruttobetrag, Verbindlichkeit und Buchung.
-    const vatRate = req.taxScheme === 'VAT_10' ? 10 : 0;
-    const purchase = usePurchaseStore.getState().createPurchase({
-      supplierId: req.supplierId,
-      purchaseDate: req.purchaseDate,
-      notes: req.notes,
-      lines: req.lines.map((l) => ({
-        productId: l.productId,
-        description: l.description,
-        quantity: l.quantity,
-        unitPrice: l.unitPrice,
-        taxScheme: req.taxScheme,
-        vatRate,
-      })),
-      initialPayment: req.initialPayment,
-    });
+    // Dieselbe Folge wie „Save Purchase" am Primary (`createPurchaseOnPrimary`): Lieferant, Artikel,
+    // Entwürfe, Mitarbeiter, Auftrag und Inbox geprüft — dann die Hausfunktion: Belegnummer aus dem
+    // durablen Zähler, ein Los je Zeile mit dem TATSÄCHLICHEN Einstand, neue Artikel, Menge,
+    // Statusregel, Vorsteuer, Verbindlichkeit, Buchung, Auftragspositionen auf „Arrived".
+    const purchase = urteil(() => createPurchaseInHouse({ ...req, lines }, identity.branchId));
     const value: CommercialResult = {
       purchaseId: purchase.id,
       purchaseNumber: purchase.purchaseNumber,
@@ -292,6 +361,8 @@ export function runPurchaseCreate(
     };
     return value as unknown as Record<string, unknown>;
   });
+  if (outcome.kind === 'ok') await discardStagedAfterSuccess(staged, owner, extras.discardStaged ?? invokeDiscardStaged);
+  return outcome;
 }
 
 // ── Kommission: anlegen ───────────────────────────────────────────────────
@@ -589,86 +660,118 @@ export function runConsignmentUpdate(
 
 // ── Auftrag: anlegen ──────────────────────────────────────────────────────
 
-const ORDER_METHODS = ['cash', 'bank', 'card', 'benefit'] as const;
-const ORDER_CARD_BRANDS = ['normal', 'amex'] as const;
+const ORDER_MATERIAL_FIELDS = ['materialKind', 'description', 'quantity', 'caratPerPiece', 'weightGrams', 'karat', 'totalCost', 'customerPrice', 'supplierId'];
 
-export interface OrderCreateRequest {
-  customerId: string;
-  lines: Array<{ productId: string; quantity: number; unitPrice: number; description?: string }>;
-  depositAmount?: number;
-  paymentMethod?: typeof ORDER_METHODS[number];
-  cardBrand?: typeof ORDER_CARD_BRANDS[number];
-  expectedDelivery?: string;
-  supplierName?: string;
-  supplierPrice?: number;
-  notes?: string;
+export interface OrderCreateRequest extends OrderCreateInput {
+  /** Je Zeile der Entwurf eines neuen Artikels mit den Kennungen seiner Fotos. */
+  specs: Array<{ spec: Partial<Product>; stagingIds?: string[] } | undefined>;
+  /** Die Spec des fertigen Stücks eines Sonderauftrags, ebenso. */
+  finalSpec?: { spec: Partial<Product>; stagingIds?: string[] };
 }
 
 /**
- * Ein NORMALER Auftrag: ein Kunde, Positionen auf bestehende Artikel, optional eine Anzahlung.
+ * Was ein Mensch an „New Order" eingibt — R5E: JEDE Auftragsart. Normal (bestehende und NEUE
+ * Artikel), Sonderanfertigung (Angebotspreis mit Steuerwahl, Final-Product-Spec mit Foto,
+ * Kundenmaterial, Goldschmied, Extra-Gold samt Goldschmied, Diamanten/Steine), gemischt; Anzahlung
+ * oder voll bezahlt, Zahlweg und Kartenart, Liefertermin, Anfangsstatus, Notiz.
  *
- * Nicht dabei und mit Absicht: `agreedPrice` (die Summe rechnet der Primary aus den Positionen),
- * `taxAmount`, `status`, `remainingAmount`, `expectedMargin`, `fullyPaid`, `type`, `customMeta`,
- * `customProductSpec`, `goldsmithSupplierId`, `laborCost`, `extraGoldValue`. Die letzten fünf
- * gehören zum Sonderauftrag; `type` leitet das Haus ohnehin aus den Zeilen ab, und ein Feld, das
- * überschrieben wird, ist ein Versprechen, das nicht gilt.
+ * NICHT dabei: Summe, Steuer, Rest, Marge, Typ, Kopffelder, die Zeilen selbst, die Gold-
+ * Verbindlichkeit — all das leitet das Haus aus den Eingaben ab (`planOrderCreate`).
  */
 export function parseOrderCreate(raw: unknown): OrderCreateRequest {
   if (!isPlain(raw)) throw new CommercialPayloadError('payload must be an object');
   onlyKnownFields(raw, [
-    'customerId', 'lines', 'depositAmount', 'paymentMethod', 'cardBrand',
-    'expectedDelivery', 'supplierName', 'supplierPrice', 'notes',
+    'customerId', 'orderType', 'lines', 'quotedPrice', 'customTaxScheme', 'finalProductDescription',
+    'customProductSpec', 'customerGoldGrams', 'customerGoldKarat', 'customerStones', 'goldsmithSupplierId',
+    'laborCost', 'extraGoldGrams', 'extraGoldKarat', 'extraGoldCost', 'extraGoldSupplierId', 'materials',
+    'depositAmount', 'paymentMethod', 'cardBrand', 'fullyPaid', 'expectedDelivery', 'status', 'notes',
   ]);
-  if (!Array.isArray(raw.lines) || raw.lines.length === 0) {
-    throw new CommercialPayloadError('an order needs at least one line');
-  }
+  if (!Array.isArray(raw.lines)) throw new CommercialPayloadError('lines must be a list');
   if (raw.lines.length > MAX_DOC_LINES) throw new CommercialPayloadError('too many lines');
+  const specs: OrderCreateRequest['specs'] = [];
   const lines = raw.lines.map((l, i) => {
     if (!isPlain(l)) throw new CommercialPayloadError(`line ${i + 1} must be an object`);
-    onlyKnownFields(l, ['productId', 'quantity', 'unitPrice', 'description']);
+    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'description', 'scheme', 'quantity', 'unitPrice']);
+    const productId = optString(l.productId, `line ${i + 1}: productId`);
+    const spec = parseSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS, `line ${i + 1}: newProduct`);
+    specs.push(spec);
     return {
-      productId: reqString(l.productId, `line ${i + 1}: productId`),
+      mode: oneOf(l.mode, ['existing', 'new'] as const, spec ? 'new' : 'existing', `line ${i + 1} mode`),
+      productId,
+      newProduct: spec?.spec,
+      description: text0(l.description, `line ${i + 1}: description`),
+      scheme: oneOf(l.scheme, ORDER_LINE_SCHEMES, 'auto', `line ${i + 1} tax scheme`),
       quantity: countOf(l.quantity, `line ${i + 1}: quantity`),
       unitPrice: money(l.unitPrice, `line ${i + 1}: unitPrice`),
-      description: optString(l.description, `line ${i + 1}: description`),
     };
   });
-  const out: OrderCreateRequest = {
-    customerId: reqString(raw.customerId, 'customerId'),
-    lines,
-    expectedDelivery: optString(raw.expectedDelivery, 'expectedDelivery'),
-    supplierName: optString(raw.supplierName, 'supplierName'),
-    notes: optString(raw.notes, 'notes'),
-  };
-  if (raw.supplierPrice !== undefined && raw.supplierPrice !== null) {
-    out.supplierPrice = money(raw.supplierPrice, 'supplierPrice');
+  const rawMaterials = raw.materials === undefined || raw.materials === null ? [] : raw.materials;
+  if (!Array.isArray(rawMaterials)) throw new CommercialPayloadError('materials must be a list');
+  if (rawMaterials.length > MAX_DOC_LINES) throw new CommercialPayloadError('too many materials');
+  const materials = rawMaterials.map((m, i) => {
+    if (!isPlain(m)) throw new CommercialPayloadError(`material ${i + 1} must be an object`);
+    onlyKnownFields(m, ORDER_MATERIAL_FIELDS);
+    const opt = (v: unknown, n: string): number | undefined => (v === undefined || v === null ? undefined : money(v, n));
+    return {
+      materialKind: oneOf(m.materialKind, ORDER_MATERIAL_KINDS, 'gold', `material ${i + 1} kind`),
+      description: text0(m.description, `material ${i + 1}: description`),
+      quantity: countOf(m.quantity, `material ${i + 1}: quantity`),
+      caratPerPiece: opt(m.caratPerPiece, `material ${i + 1}: caratPerPiece`),
+      weightGrams: opt(m.weightGrams, `material ${i + 1}: weightGrams`),
+      karat: m.karat === undefined || m.karat === null ? undefined : text0(m.karat, `material ${i + 1}: karat`),
+      totalCost: money(m.totalCost, `material ${i + 1}: totalCost`),
+      customerPrice: opt(m.customerPrice, `material ${i + 1}: customerPrice`),
+      supplierId: optString(m.supplierId, `material ${i + 1}: supplierId`),
+    };
+  });
+  if (raw.fullyPaid !== undefined && typeof raw.fullyPaid !== 'boolean') {
+    throw new CommercialPayloadError('fullyPaid is yes or no');
   }
-  if (raw.depositAmount !== undefined && raw.depositAmount !== null) {
-    out.depositAmount = money(raw.depositAmount, 'depositAmount');
-  }
-  if (raw.paymentMethod !== undefined) {
-    const m = String(raw.paymentMethod);
-    if (!(ORDER_METHODS as readonly string[]).includes(m)) {
-      throw new CommercialPayloadError(`unknown payment method: ${m || '(none)'}`);
-    }
-    out.paymentMethod = m as typeof ORDER_METHODS[number];
-  }
-  if (raw.cardBrand !== undefined) {
-    const b = String(raw.cardBrand);
-    if (!(ORDER_CARD_BRANDS as readonly string[]).includes(b)) {
-      throw new CommercialPayloadError('unknown card brand');
-    }
-    out.cardBrand = b as typeof ORDER_CARD_BRANDS[number];
-  }
-  if ((out.depositAmount ?? 0) > 0 && !out.paymentMethod) {
+  // Das alte Formular schickte ohne Anzahlung auch keine Zahlungsart — mit Anzahlung braucht es eine.
+  if (num0(raw.depositAmount, 'depositAmount') > 0 && raw.paymentMethod === undefined) {
     throw new CommercialPayloadError('a deposit needs a payment method');
   }
-  return out;
+  const finalSpec = parseSpec(raw.customProductSpec, FINAL_PRODUCT_FIELDS, 'customProductSpec');
+  const req: OrderCreateRequest = {
+    customerId: reqString(raw.customerId, 'customerId'),
+    orderType: oneOf(raw.orderType, ORDER_TYPES, 'normal', 'order type'),
+    lines,
+    quotedPrice: num0(raw.quotedPrice, 'quotedPrice'),
+    customTaxScheme: oneOf(raw.customTaxScheme, ORDER_QUOTE_SCHEMES, 'MARGIN', 'tax scheme'),
+    finalProductDescription: text0(raw.finalProductDescription, 'finalProductDescription'),
+    customProductSpec: finalSpec?.spec,
+    customerGoldGrams: num0(raw.customerGoldGrams, 'customerGoldGrams'),
+    customerGoldKarat: oneOf(raw.customerGoldKarat, GOLD_KARATS, '22K', 'karat'),
+    customerStones: text0(raw.customerStones, 'customerStones'),
+    goldsmithSupplierId: text0(raw.goldsmithSupplierId, 'goldsmithSupplierId'),
+    laborCost: num0(raw.laborCost, 'laborCost'),
+    extraGoldGrams: num0(raw.extraGoldGrams, 'extraGoldGrams'),
+    extraGoldKarat: oneOf(raw.extraGoldKarat, GOLD_KARATS, '22K', 'karat'),
+    extraGoldCost: num0(raw.extraGoldCost, 'extraGoldCost'),
+    extraGoldSupplierId: text0(raw.extraGoldSupplierId, 'extraGoldSupplierId'),
+    materials,
+    depositAmount: num0(raw.depositAmount, 'depositAmount'),
+    paymentMethod: oneOf(raw.paymentMethod, ORDER_PAYMENT_METHODS, 'cash', 'payment method'),
+    cardBrand: oneOf(raw.cardBrand, ['normal', 'amex'] as const, 'normal', 'card brand'),
+    fullyPaid: raw.fullyPaid === true,
+    expectedDelivery: text0(raw.expectedDelivery, 'expectedDelivery'),
+    status: oneOf(raw.status, ORDER_CREATE_STATUSES as readonly OrderStatus[], 'pending', 'initial status'),
+    notes: text0(raw.notes, 'notes'),
+    specs,
+    finalSpec,
+  };
+  try {
+    assertOrderCreateValues(req);
+  } catch (e) {
+    if (e instanceof OrderActionRejected) throw new CommercialPayloadError(e.message);
+    throw e;
+  }
+  return req;
 }
 
 function orderState(id: string): CommercialResult {
   const r = query(
-    'SELECT id, order_number, customer_id, status, type, agreed_price, deposit_amount, remaining_amount, '
+    'SELECT id, order_number, customer_id, status, type, agreed_price, tax_amount, deposit_amount, remaining_amount, '
     + 'supplier_name, supplier_price, expected_margin, expected_delivery, revision, updated_at '
     + 'FROM orders WHERE id = ?', [id],
   )[0];
@@ -680,6 +783,7 @@ function orderState(id: string): CommercialResult {
     status: String(r?.status ?? ''),
     type: String(r?.type ?? ''),
     agreedPrice: r?.agreed_price === null || r?.agreed_price === undefined ? null : Number(r.agreed_price),
+    taxAmount: Number(r?.tax_amount ?? 0),
     depositAmount: Number(r?.deposit_amount ?? 0),
     remainingAmount: Number(r?.remaining_amount ?? 0),
     supplierName: String(r?.supplier_name ?? ''),
@@ -692,113 +796,59 @@ function orderState(id: string): CommercialResult {
   };
 }
 
-export function runOrderCreate(
-  deps: EngineDeps, identity: CommandIdentity, raw: unknown,
+export async function runOrderCreate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: StagingExtras = {},
 ): Promise<CommandOutcome> {
   const req = parseOrderCreate(raw);
-  return runRemoteCommand(deps, identity, () => {
-    const branch = identity.branchId;
-    const customer = query(
-      "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'",
-      [req.customerId, branch],
-    )[0];
-    if (!customer) throw new CommandRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');
-    const products = req.lines.map((l) => {
-      const p = query('SELECT id, brand, name, sku, category_id FROM products WHERE id = ? AND branch_id = ?',
-        [l.productId, branch])[0];
-      if (!p) throw new CommandRejected('PRODUCT_NOT_FOUND', `no such product in this branch: ${l.productId}`);
-      return p;
-    });
-    // Die Summe rechnet der Primary aus den Positionen — dieselbe Ableitung, die `createOrder`
-    // benutzt, wenn kein Preis mitgeschickt wird. Genau deshalb wird auch keiner mitgeschickt.
-    const total = req.lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
-    const deposit = req.depositAmount ?? 0;
-    if (deposit > total + 1e-9) {
-      throw new CommandRejected('DEPOSIT_EXCEEDS_TOTAL',
-        `the deposit (${deposit}) is more than the order (${total})`);
+  const owner = stagingOwnerOf(identity);
+  const read = extras.readStaged ?? invokeReadStaged;
+  const staged = [...req.specs.flatMap((s) => s?.stagingIds ?? []), ...(req.finalSpec?.stagingIds ?? [])];
+  const outcome = await runRemoteCommand(deps, identity, async () => {
+    // R5E — in die Bücher DIESER Filiale, oder gar nicht.
+    assertHouseBranch(identity);
+    const lines: Array<(typeof req.lines)[number]> = [];
+    for (let i = 0; i < req.lines.length; i++) {
+      lines.push({ ...req.lines[i], newProduct: await mitFotos(req.specs[i], owner, read) });
     }
-    const first = products[0];
-    const order = useOrderStore.getState().createOrder({
-      customerId: req.customerId,
-      // Ohne `materialKind` sind das Produktzeilen — und damit ist der Auftrag `normal`. Der Typ
-      // wird vom Haus abgeleitet, nicht von hier behauptet.
-      lines: req.lines.map((l) => ({
-        productId: l.productId,
-        description: l.description ?? '',
-        quantity: l.quantity,
-        unitPrice: l.unitPrice,
-        isCustomerFacing: true,
-      })) as never,
-      // Die Kopffelder, die der Bildschirm aus dem ersten Artikel füllt.
-      requestedBrand: String(first?.brand ?? ''),
-      requestedModel: String(first?.name ?? ''),
-      requestedReference: first?.sku ? String(first.sku) : undefined,
-      categoryId: first?.category_id ? String(first.category_id) : undefined,
-      existingProductId: String(first?.id ?? ''),
-      depositAmount: deposit,
-      depositPaid: deposit > 0,
-      depositDate: deposit > 0 ? new Date().toISOString().split('T')[0] : undefined,
-      paymentMethod: req.paymentMethod,
-      cardBrand: req.cardBrand,
-      supplierName: req.supplierName,
-      supplierPrice: req.supplierPrice,
-      expectedDelivery: req.expectedDelivery,
-      notes: req.notes,
-    } as never);
-    if (String(order.type) !== 'normal') {
-      // Kann heute nicht eintreten (keine Zeile trägt `materialKind`) — steht hier trotzdem, weil
-      // der Ausgang eines Fernauftrags nie davon abhängen darf, dass eine Ableitung anderswo so
-      // bleibt, wie sie heute ist.
-      throw new CommandRejected('ORDER_NOT_NORMAL', 'this command only creates normal orders');
-    }
-    return orderState(order.id) as unknown as Record<string, unknown>;
+    const input: OrderCreateInput = { ...req, lines, customProductSpec: await mitFotos(req.finalSpec, owner, read) };
+    // Dieselbe Folge wie „Save Order" am Primary (`createOrderOnPrimary`): die Vorbereitung leitet
+    // Zeilen, Summe, Steuer, Kopf und Kundenmaterial ab, die Hausfunktion legt Auftrag, neue
+    // Artikel, Anzahlung, Buchung und Kartengebühr an — und die Gold-Verbindlichkeit beim
+    // Goldschmied entsteht in DERSELBEN Transaktion.
+    const made = urteil(() => createOrderInHouse(input, identity.branchId));
+    return { ...orderState(made.order.id), goldPayableId: made.goldPayableId ?? null } as unknown as Record<string, unknown>;
   });
+  if (outcome.kind === 'ok') await discardStagedAfterSuccess(staged, owner, extras.discardStaged ?? invokeDiscardStaged);
+  return outcome;
 }
 
 // ── Auftrag: ändern ───────────────────────────────────────────────────────
 
-export interface OrderUpdateRequest {
+export interface OrderUpdateRequest extends Partial<OrderEditInput> {
   id: string;
   expectedRevision: number;
-  agreedPrice?: number;
-  depositAmount?: number;
-  supplierName?: string | null;
-  supplierPrice?: number | null;
-  expectedDelivery?: string | null;
-  notes?: string | null;
 }
 
 /**
- * Genau die Felder des „Save"-Knopfs auf der Auftragsseite — abzüglich der beiden, die dort
- * AUSGERECHNET werden: `expectedMargin` (Preis minus Einkauf) und `remainingAmount` (Preis minus
- * Anzahlung). Die schickt der Client nicht mit; der Primary leitet sie aus dem Stand ab, der nach
- * dieser Änderung wirklich gilt. Zwei Rechner, die je ein Feld ändern, kämen sonst zu zwei
- * verschiedenen Resten.
+ * Genau die sechs Eingaben des „Save"-Knopfs auf der Auftragsseite — ohne die beiden, die dort
+ * AUSGERECHNET werden: `expectedMargin` und `remainingAmount`. Die leitet der Primary aus dem Stand
+ * ab, der nach dieser Änderung wirklich gilt (`planOrderEdit`). Ein geleertes Feld ist `null`.
+ * R5E: auch der Sonderauftrag — sein Preis steht in der Angebotszeile, und genau die zieht das Haus.
  */
 export function parseOrderUpdate(raw: unknown): OrderUpdateRequest {
   if (!isPlain(raw)) throw new CommercialPayloadError('payload must be an object');
-  onlyKnownFields(raw, [
-    'id', 'expectedRevision', 'agreedPrice', 'depositAmount',
-    'supplierName', 'supplierPrice', 'expectedDelivery', 'notes',
-  ]);
+  onlyKnownFields(raw, ['id', 'expectedRevision', ...ORDER_EDIT_FIELDS]);
   const out: OrderUpdateRequest = {
     id: reqString(raw.id, 'id'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
   };
-  if (raw.agreedPrice !== undefined) out.agreedPrice = money(raw.agreedPrice, 'agreedPrice');
-  if (raw.depositAmount !== undefined) out.depositAmount = money(raw.depositAmount, 'depositAmount');
-  if (raw.supplierName !== undefined) {
-    out.supplierName = raw.supplierName === null ? null : reqString(raw.supplierName, 'supplierName');
+  for (const k of ['agreedPrice', 'depositAmount', 'supplierPrice'] as const) {
+    if (raw[k] !== undefined) out[k] = raw[k] === null ? null : money(raw[k], k);
   }
-  if (raw.supplierPrice !== undefined) {
-    out.supplierPrice = raw.supplierPrice === null ? null : money(raw.supplierPrice, 'supplierPrice');
+  for (const k of ['supplierName', 'expectedDelivery', 'notes'] as const) {
+    if (raw[k] !== undefined) out[k] = raw[k] === null ? null : text0(raw[k], k);
   }
-  if (raw.expectedDelivery !== undefined) {
-    out.expectedDelivery = raw.expectedDelivery === null ? null : reqString(raw.expectedDelivery, 'expectedDelivery');
-  }
-  if (raw.notes !== undefined) out.notes = raw.notes === null ? null : String(raw.notes);
-  if (out.agreedPrice === undefined && out.depositAmount === undefined && out.supplierName === undefined
-    && out.supplierPrice === undefined && out.expectedDelivery === undefined && out.notes === undefined) {
+  if (!ORDER_EDIT_FIELDS.some((k) => out[k] !== undefined)) {
     throw new CommercialPayloadError('an edit must change something');
   }
   return out;
@@ -809,43 +859,27 @@ export function runOrderUpdate(
 ): Promise<CommandOutcome> {
   const req = parseOrderUpdate(raw);
   return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
     const live = query(
-      'SELECT id, type, agreed_price, deposit_amount, supplier_price FROM orders WHERE id = ? AND branch_id = ?',
-      [req.id, identity.branchId],
+      'SELECT agreed_price, deposit_amount, supplier_name, supplier_price, expected_delivery, notes '
+      + 'FROM orders WHERE id = ? AND branch_id = ?', [req.id, identity.branchId],
     )[0];
     if (!live) throw new CommandRejected('ORDER_NOT_FOUND', 'no such order in this branch');
-    if (String(live.type ?? 'normal') !== 'normal') {
-      // Beim Sonderauftrag trägt eine ANGEBOTSZEILE den Preis, und der Bildschirm am Primary
-      // schreibt den Kopfpreis dann bewusst NICHT — er zieht stattdessen die Zeile mit. Diesen
-      // doppelten Vertrag aus der Ferne zu bedienen hieße raten; also nein, und zwar deutlich.
-      throw new CommandRejected('ORDER_NOT_NORMAL',
-        'only a normal order can be edited from another machine — a custom order carries its price in a quote line');
-    }
     assertRevision('orders', req.id, req.expectedRevision, 'ORDER_NOT_FOUND');
-
-    // Der Stand, der NACH dieser Änderung gilt — Feld für Feld: was der Auftrag mitbringt, sonst
-    // das, was in der Zeile steht. Nur so stimmen Marge und Rest auch bei einer Teiländerung.
-    const agreed = req.agreedPrice ?? (live.agreed_price === null ? 0 : Number(live.agreed_price));
-    const deposit = req.depositAmount ?? Number(live.deposit_amount ?? 0);
-    const supplierPrice = req.supplierPrice !== undefined
-      ? req.supplierPrice
-      : (live.supplier_price === null || live.supplier_price === undefined ? null : Number(live.supplier_price));
-
-    const patch: Record<string, unknown> = {};
-    if (req.agreedPrice !== undefined) patch.agreedPrice = req.agreedPrice;
-    if (req.depositAmount !== undefined) patch.depositAmount = req.depositAmount;
-    if (req.supplierName !== undefined) patch.supplierName = req.supplierName;
-    if (req.supplierPrice !== undefined) patch.supplierPrice = req.supplierPrice;
-    if (req.expectedDelivery !== undefined) patch.expectedDelivery = req.expectedDelivery;
-    if (req.notes !== undefined) patch.notes = req.notes;
-    // Die beiden abgeleiteten Felder — wortgleich zur Ableitung des Bildschirms.
-    if (req.agreedPrice !== undefined || req.depositAmount !== undefined) {
-      patch.remainingAmount = agreed - deposit;
-    }
-    if (req.agreedPrice !== undefined || req.supplierPrice !== undefined) {
-      patch.expectedMargin = agreed && supplierPrice ? agreed - supplierPrice : undefined;
-    }
-    useOrderStore.getState().updateOrder(req.id, patch as never);
+    // Der Stand, der NACH dieser Änderung gilt — Feld für Feld: was der Auftrag mitbringt, sonst das,
+    // was in der Zeile steht. Nur so stimmen Marge und Rest auch bei einer Teiländerung.
+    const n = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+    const t = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
+    const effective: OrderEditInput = {
+      agreedPrice: req.agreedPrice !== undefined ? req.agreedPrice : n(live.agreed_price),
+      depositAmount: req.depositAmount !== undefined ? req.depositAmount : n(live.deposit_amount),
+      supplierName: req.supplierName !== undefined ? req.supplierName : t(live.supplier_name),
+      supplierPrice: req.supplierPrice !== undefined ? req.supplierPrice : n(live.supplier_price),
+      expectedDelivery: req.expectedDelivery !== undefined ? req.expectedDelivery : t(live.expected_delivery),
+      notes: req.notes !== undefined ? req.notes : t(live.notes),
+    };
+    // Dieselbe Folge wie „Save" am Primary (`updateOrderOnPrimary`).
+    urteil(() => updateOrderInHouse(req.id, effective, identity.branchId));
     return orderState(req.id) as unknown as Record<string, unknown>;
   });
 }

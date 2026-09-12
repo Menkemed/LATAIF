@@ -298,8 +298,12 @@ const PURCHASE_BODY = {
     ['einen Status', { ...PURCHASE_BODY, status: 'PAID' }],
     ['eine Summe', { ...PURCHASE_BODY, totalAmount: 1 }],
     ['einen bezahlten Betrag', { ...PURCHASE_BODY, paidAmount: 999 }],
-    ['ein neues Produkt', { ...PURCHASE_BODY, lines: [{ newProduct: { brand: 'X' }, quantity: 1, unitPrice: 1 }] }],
-    ['eine Auftragsverknuepfung', { ...PURCHASE_BODY, sourceOrderId: 'ord-1' }],
+    // R5E — ein neuer Artikel ist jetzt eine Eingabe der Maske („New Item") — aber nur mit ihren
+    // Feldern: Einstand, Bestand, Menge, Herkunft und Fotos als Bytes bestimmt nicht der Rumpf.
+    ['einen Einstand am neuen Artikel', { ...PURCHASE_BODY, lines: [{ newProduct: { brand: 'X', purchasePrice: 1 }, quantity: 1, unitPrice: 1 }] }],
+    ['einen Bestand am neuen Artikel', { ...PURCHASE_BODY, lines: [{ newProduct: { brand: 'X', stockStatus: 'in_stock' }, quantity: 1, unitPrice: 1 }] }],
+    ['Fotos als Bytes', { ...PURCHASE_BODY, lines: [{ newProduct: { brand: 'X', images: ['data:image/png;base64,AA=='] }, quantity: 1, unitPrice: 1 }] }],
+    ['eine Losnummer', { ...PURCHASE_BODY, lines: [{ productId: 'p1', quantity: 1, unitPrice: 1, lotId: 'lot-1' }] }],
     ['eine Vorsteuer', { ...PURCHASE_BODY, lines: [{ productId: 'p1', quantity: 1, unitPrice: 1, vatAmount: 0 }] }],
   ];
   for (const [what, body] of bad) {
@@ -307,10 +311,14 @@ const PURCHASE_BODY = {
     try { cmd.parsePurchaseCreate(body); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
     ok(threw !== '', `AUTHORITY der Einkaufsrumpf nimmt ${what} nicht an (${threw || 'DURCHGELASSEN'})`);
   }
-  // Und was er annimmt, ist genau die Eingabe eines Menschen.
+  // Und was er annimmt, ist genau die Eingabe eines Menschen — die Notiz wie getippt (wie die Maske).
   const parsed = cmd.parsePurchaseCreate({ ...PURCHASE_BODY, notes: '  hallo  ' });
-  ok(parsed.notes === 'hallo' && parsed.taxScheme === 'VAT_10' && parsed.lines.length === 1,
+  ok(parsed.notes === '  hallo  ' && parsed.taxScheme === 'VAT_10' && parsed.lines.length === 1,
     'AUTHORITY …und die echten Eingaben kommen sauber an');
+  const b2b = cmd.parsePurchaseCreate({ ...PURCHASE_BODY, sourceOrderId: 'ord-1',
+    lines: [{ productId: 'p1', quantity: 1, unitPrice: 1, sourceOrderLineId: 'ol-1' }] });
+  ok(b2b.sourceOrderId === 'ord-1' && b2b.lines[0].sourceOrderLineId === 'ol-1',
+    'AUTHORITY R5E — der Wareneingang eines Auftrags ist eine Eingabe (geprueft wird er am Primary)');
   ok(cmd.parsePurchaseCreate({ supplierId: 'sup-1', lines: [{ productId: 'p1', quantity: 1, unitPrice: 0 }] }).taxScheme === 'ZERO',
     'AUTHORITY ohne Angabe gilt das Steuerschema des Hauses (ZERO), nicht „irgendetwas"');
 }
@@ -605,10 +613,12 @@ const ORDER_BODY = {
     { ...ORDER_BODY, customerId: 'gibt-es-nicht' });
   ok(noCustomer.kind === 'rejected' && code(noCustomer) === 'CUSTOMER_NOT_FOUND',
     'ORDER ein unbekannter Kunde wird abgelehnt');
+  // R5E — die Maske des Primary nimmt eine Anzahlung ueber der Summe an; das Haus bucht den
+  // Ueberschuss als Guthaben (createOrder → reconcileOrderOverpayCredit). Der Fernweg jetzt ebenso.
   const overDeposit = await cmd.runOrderCreate(d, identity('42', 'orders.create'),
     { ...ORDER_BODY, depositAmount: 9999, paymentMethod: 'cash' as const });
-  ok(overDeposit.kind === 'rejected' && code(overDeposit) === 'DEPOSIT_EXCEEDS_TOTAL',
-    `ORDER eine Anzahlung ueber der Summe wird abgelehnt (${JSON.stringify(overDeposit)})`);
+  ok(overDeposit.kind === 'ok' && val<{ remainingAmount: number }>(overDeposit).remainingAmount < 0,
+    `ORDER eine Anzahlung ueber der Summe geht wie am Primary durch (${JSON.stringify(overDeposit).slice(0, 120)})`);
 }
 
 // ── 12) Auftrag: der Rumpf bestimmt nichts Abgeleitetes ───────────────────
@@ -618,12 +628,16 @@ const ORDER_BODY = {
     ['eine Summe', { ...ORDER_BODY, agreedPrice: 1 }],
     ['einen Rest', { ...ORDER_BODY, remainingAmount: 0 }],
     ['eine Marge', { ...ORDER_BODY, expectedMargin: 500 }],
-    ['einen Status', { ...ORDER_BODY, status: 'completed' }],
+    // R5E — Anfangsstatus, Auftragsart, Sonderanfertigung, Goldschmied und neue Artikel sind jetzt
+    // Eingaben der Maske; was das Haus daraus ABLEITET, bleibt draussen.
+    ['einen Stornostatus', { ...ORDER_BODY, status: 'cancelled' }],
     ['einen Typ', { ...ORDER_BODY, type: 'custom' }],
-    ['eine Sonderanfertigung', { ...ORDER_BODY, customProductSpec: { brand: 'X' } }],
-    ['Goldschmied-Gold', { ...ORDER_BODY, goldsmithSupplierId: 'sup-1', extraGoldValue: 10 }],
+    ['einen Einstand an der Spec', { ...ORDER_BODY, customProductSpec: { brand: 'X', purchasePrice: 5 } }],
+    ['einen Goldwert am Kopf', { ...ORDER_BODY, goldsmithSupplierId: 'sup-1', extraGoldValue: 10 }],
+    ['eine Gold-Verbindlichkeit', { ...ORDER_BODY, goldPayable: { supplierId: 'sup-1', weightGrams: 5 } }],
+    ['eine Steuer', { ...ORDER_BODY, taxAmount: 1 }],
     ['ein Material an der Position', { ...ORDER_BODY, lines: [{ productId: 'p1', quantity: 1, unitPrice: 1, materialKind: 'gold' }] }],
-    ['ein neues Produkt', { ...ORDER_BODY, lines: [{ newProduct: { brand: 'X' }, quantity: 1, unitPrice: 1 }] }],
+    ['einen Bestand am neuen Produkt', { ...ORDER_BODY, lines: [{ newProduct: { brand: 'X', stockStatus: 'in_stock' }, quantity: 1, unitPrice: 1 }] }],
     ['eine Rechnung', { ...ORDER_BODY, invoiceId: 'inv-1' }],
   ];
   for (const [what, body] of bad) {
@@ -671,16 +685,16 @@ const ORDER_BODY = {
   ok(n(db, 'SELECT agreed_price FROM orders WHERE id = ?', [oid]) === 700,
     'ORDER-STALE …und der Preis der anderen Aenderung steht noch');
 
-  // Ein Sonderauftrag wird ausdrücklich abgelehnt statt halb bedient.
+  // R5E — ein Sonderauftrag wird jetzt bedient wie am Primary: OHNE Angebotszeile gilt der Kopfpreis
+  // (die Angebotszeile selbst beweist test/r5e/order-purchase-parity).
   db.run("UPDATE orders SET type = 'custom' WHERE id = ?", [oid]);
   const fresh = n(db, 'SELECT revision FROM orders WHERE id = ?', [oid]);
   const custom = await cmd.runOrderUpdate(d, identity('53', 'orders.update'), {
     id: oid, expectedRevision: fresh, agreedPrice: 800,
   });
-  ok(custom.kind === 'rejected' && code(custom) === 'ORDER_NOT_NORMAL',
-    `ORDER-EDIT ein Sonderauftrag wird abgelehnt, nicht halb bedient (${JSON.stringify(custom)})`);
-  ok(n(db, 'SELECT agreed_price FROM orders WHERE id = ?', [oid]) === 700,
-    'ORDER-EDIT …und sein Preis bleibt unangetastet');
+  ok(custom.kind === 'ok', `ORDER-EDIT ein Sonderauftrag wird wie am Primary bedient (${JSON.stringify(custom).slice(0, 120)})`);
+  ok(n(db, 'SELECT agreed_price FROM orders WHERE id = ?', [oid]) === 800,
+    'ORDER-EDIT …ohne Angebotszeile mit dem Kopfpreis');
 }
 
 // ── 14) Auftrag ändern: der Feldsatz ──────────────────────────────────────

@@ -114,8 +114,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Einkauf ──────────────────────────────────────────────────────────────
   {
     op: 'purchases.create', handlung: 'Einkauf anlegen', ort: 'pages/purchases/PurchaseCreate.tsx',
-    lokal: 'createPurchase', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske legt Positionen mit NEUEN Artikeln an (`newProduct`, Marke/Name/SKU/Kategorie) und schickt `staffId` sowie `sourceOrderId` mit. Die Fernbuchung nimmt ausschliesslich Zeilen mit vorhandener Artikelkennung — der Einkauf beim Wareneingang eines Auftrags waere nicht derselbe.',
+    lokal: 'createPurchaseOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5E — EINE Vorbereitung fuer beide Seiten (core/purchases/purchase-create, Anschluss purchase-house): neue Artikel ueber die Maske „New Item" (Pflichtfelder und SKU-Riegel der Maske, Fotos ueber die Zwischenablage), `staffId` (aktiver Mitarbeiter der Filiale), `sourceOrderId` mit Positionen GENAU dieses Auftrags (danach „Arrived"), das Inbox-Foto („erledigt") — Belegnummer, Lose, Menge, Status, Vorsteuer, Verbindlichkeit und Buchung rechnet createPurchase. Am Primary in EINER Klammer.',
   },
 
   // ── Kommission ───────────────────────────────────────────────────────────
@@ -149,13 +149,13 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Auftraege ────────────────────────────────────────────────────────────
   {
     op: 'orders.create', handlung: 'Auftrag anlegen', ort: 'pages/orders/OrderCreate.tsx',
-    lokal: 'createOrder', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske legt in derselben Handlung eine GOLD-VERBINDLICHKEIT beim Goldschmied an (`createGoldPayable` mit Gramm und Karat, verknuepft an die eben entstandene Zeile). Die Fernbuchung legt nur den Auftrag an — das Gold bliebe unverbucht.',
+    lokal: 'createOrderOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5E — EINE Vorbereitung fuer jede Auftragsart (core/orders/order-create, Anschluss order-house): die Maske schickt Eingaben, das Haus leitet Produkt-, Angebots- und Kostenzeilen, Summe, Steuer, Kopf und Kundenmaterial ab und legt die GOLD-VERBINDLICHKEIT beim Goldschmied (Gramm, Karat, an der Extra-Gold-Zeile) in DERSELBEN Transaktion an. Neue Artikel und die Final-Product-Spec mit Fotos ueber die Zwischenablage.',
   },
   {
     op: 'orders.update', handlung: 'Auftrag aendern', ort: 'pages/orders/OrderDetail.tsx',
-    lokal: 'updateOrder', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske schickt `expectedMargin` und `remainingAmount` mit — beides abgeleitete Zahlen, die die Fernbuchung nicht entgegennimmt. Ohne sie stuende auf dem Auftrag etwas anderes als nach demselben Klick am Hauptrechner.',
+    lokal: 'updateOrderOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5E — „Save" schickt die sechs Eingaben (Preis, Anzahlung, Lieferant, Einkauf, Liefertermin, Notiz; geleert = null); `expectedMargin` und `remainingAmount` leitet das Haus ab (core/orders/order-edit), beim Sonderauftrag zieht es den Preis der ANGEBOTSZEILE statt des Kopfpreises. Am Primary wie fern in EINER Klammer.',
   },
   {
     op: 'orders.update_status', handlung: 'Auftragsstatus setzen', ort: 'pages/orders/OrderDetail.tsx',

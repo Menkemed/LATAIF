@@ -17,12 +17,11 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useSupplierStore } from '@/stores/supplierStore';
-import { useGoldStore } from '@/stores/goldStore';
 import { getSpotPrices } from '@/core/market/spot-prices';
 import { purityOf } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
-import type { OrderStatus, OrderType, CustomOrderMeta, MaterialDetails, Product } from '@/core/models/types';
+import type { OrderStatus, OrderType, Product } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { MaterialsCard, type MaterialLine } from '@/components/work-orders/MaterialsCard';
 import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
@@ -30,6 +29,11 @@ import { NewProductModal } from '@/components/products/NewProductModal';
 import { v4 as genId } from 'uuid';
 import { useSharedRead } from '@/core/data/shared-read';
 import { lotAggregatesFor } from '@/core/data/domain-reads';
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { ORDER_CREATE_STATUSES, orderCreateBody, orderCreateInput, validateOrderCreate } from '@/core/orders/order-create';
+import { createOrderOnPrimary } from '@/core/orders/order-house';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 
@@ -61,7 +65,8 @@ function unitNetFromGross(gross: number, qty: number, scheme: 'VAT_10' | 'ZERO' 
   return totalNet / qty;
 }
 
-const ALLOWED_STATUSES: OrderStatus[] = ['pending', 'arrived', 'notified', 'completed'];
+// R5E — dieselbe Liste, die das Haus prueft.
+const ALLOWED_STATUSES = ORDER_CREATE_STATUSES;
 const STATUS_LABELS: Record<OrderStatus, string> = {
   pending: 'Pending',
   arrived: 'Arrived',
@@ -73,12 +78,14 @@ const STATUS_LABELS: Record<OrderStatus, string> = {
 export function OrderCreate() {
   const navigate = useNavigate();
   const goBack = useGoBack('/orders');
-  const { createOrder, orders: existingOrders, loadOrders, getAllProductReservations } = useOrderStore();
+  const { orders: existingOrders, loadOrders, getAllProductReservations } = useOrderStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const { createGoldPayable } = useGoldStore();
+  // CENTRAL-UI-PARITY R5E — „Save Order" hat zwei Anschluesse: am Primary die Hausfolge in EINER
+  // Klammer, auf dem zweiten Rechner `orders.create` mit genau den Eingaben dieser Maske.
+  const w = useSharedWrites();
 
   useEffect(() => { loadCustomers(); loadProducts(); loadSuppliers(); loadCategories(); loadOrders(); }, [loadCustomers, loadProducts, loadSuppliers, loadCategories, loadOrders]);
   // v0.6.0 — Live-Goldpreis fuer die provisorische COGS-Bewertung von
@@ -310,311 +317,44 @@ export function OrderCreate() {
     setMaterialLines([]);
   }
 
-  function hasProductLines(): boolean {
-    return lines.some(l => l.productId || l.newProduct);
+  // CENTRAL-UI-PARITY R5E — die EINGABEN der Maske. Zeilen, Summe, Steuer, Kopf, Kundenmaterial und
+  // die Gold-Verbindlichkeit beim Goldschmied leitet EINE Vorbereitung ab (core/orders/order-create) —
+  // am Primary wie fern, in EINER Klammer. Die Vorschau oben rechnet weiterhin nur fuer die Anzeige.
+  function formInput() {
+    return orderCreateInput({
+      customerId, orderType, lines,
+      quotedPrice, customTaxScheme, finalProductDescription, customProductSpec,
+      customerGoldGrams, customerGoldKarat, customerStones,
+      goldsmithSupplierId, laborCost,
+      extraGoldGrams, extraGoldKarat, extraGoldCost, extraGoldSupplierId,
+      materialLines,
+      depositAmount, paymentMethod, cardBrand, fullyPaid, expectedDelivery, status, notes,
+    });
   }
 
-  // v0.5.0 — Quote-first Validierung. Ein Custom-Order braucht nur den approx.
-  // Preis + die Beschreibung; Labor-/Diamond-Kosten sind optional (kommen oft
-  // erst spaeter rein, wenn das Stueck fertig ist).
-  function validate(): string | null {
-    if (!customerId) return 'Please select a customer';
-    const wantsProduct = orderType === 'normal' || orderType === 'mixed';
-    const wantsCustom = orderType === 'custom' || orderType === 'mixed';
-    const quote = parseFloat(quotedPrice) || 0;
-
-    if (wantsCustom && !wantsProduct) {
-      // reiner Custom-Order
-      if (quote <= 0) return 'Bitte einen Quoted Price (approx.) angeben';
-      // v0.6.7 — Pflicht: strukturierte Produkt-Spec (Kategorie + Attribute) — sonst
-      // landet das Stueck in der Collection ohne Kategorie & nicht filterbar.
-      if (!customProductSpec?.categoryId) return 'Bitte Final Product definieren (Kategorie + Attribute).';
-      // v0.6.8 — Brand/Name sind bei unbranded Gold-Schmuck optional. Es muss aber
-      // irgendein Bezeichner da sein (Brand/Name oder Beleg-Bezeichnung), sonst hat
-      // die Quote-Line keine vernuenftige Beschreibung.
-      const hasLabel = !!(customProductSpec?.brand?.trim() || customProductSpec?.name?.trim() || finalProductDescription.trim());
-      if (!hasLabel) return 'Bitte mindestens einen Bezeichner setzen (Brand, Name oder Beleg-Bezeichnung).';
-      return null;
-    }
-    if (wantsProduct && !wantsCustom) {
-      // reiner Normal-Order — jede Zeile ist Existing (Produkt) oder New (Spec).
-      const realLines = lines.filter(l => l.productId || l.newProduct);
-      if (realLines.length === 0) return 'Bitte mindestens einen Artikel waehlen (Existing) oder anlegen (New)';
-      if (realLines.some(l => l.quantity <= 0)) return 'Jeder Artikel braucht eine Menge > 0';
-      return null;
-    }
-    // Mixed: Customer + (≥1 Produkt-Line ODER Quoted Price)
-    if (!hasProductLines() && quote <= 0) {
-      return 'Mixed Order braucht mindestens ein Produkt ODER einen Quoted Price';
-    }
-    if (lines.filter(l => l.productId || l.newProduct).some(l => l.quantity <= 0)) {
-      return 'Jeder Artikel braucht eine Menge > 0';
-    }
-    if (quote > 0 && !customProductSpec?.categoryId) {
-      return 'Custom-Teil im Mixed-Order: bitte Final Product definieren (Kategorie + Attribute).';
-    }
-    if (quote > 0) {
-      const hasLabel = !!(customProductSpec?.brand?.trim() || customProductSpec?.name?.trim() || finalProductDescription.trim());
-      if (!hasLabel) return 'Custom-Teil: bitte mindestens einen Bezeichner setzen (Brand, Name oder Beleg-Bezeichnung).';
-    }
-    return null;
-  }
-
-  type UnifiedLine = {
-    productId?: string;
-    newProduct?: Partial<Product>;
-    description: string;
-    quantity: number;
-    unitPrice: number;
-    taxScheme?: 'VAT_10' | 'ZERO' | 'MARGIN';
-    vatRate?: number;
-    supplierId?: string;
-    costAmount?: number;
-    isCustomerFacing?: boolean;
-    materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | 'custom' | null;
-    materialDetails?: MaterialDetails;
-  };
-
-  // v0.3.0 — sammelt die normalen Produkt-Lines (kein materialKind).
-  // Eine Zeile zaehlt nur wenn sie ein Produkt traegt (Existing oder New-Spec);
-  // ueber den Original-Index gemappt, damit computed[] korrekt zugeordnet ist.
-  function collectProductLines(): UnifiedLine[] {
-    return lines
-      .map((l, i) => ({ l, c: computed[i] }))
-      .filter(({ l }) => l.productId || l.newProduct)
-      .map(({ l, c }) => ({
-        productId: l.productId,
-        newProduct: l.newProduct,
-        description: l.description,
-        quantity: l.quantity,
-        unitPrice: l.unitPrice,
-        taxScheme: c.scheme,
-        vatRate: c.vatRate,
-      }));
-  }
-
-  // v0.3.0 — Custom-Meta separat (fuer Order.customMeta JSON).
-  function collectCustomMeta(): CustomOrderMeta {
-    const customGoldNum = parseFloat(customerGoldGrams) || 0;
-    return {
-      customerGoldWeight: customGoldNum > 0 ? customGoldNum : undefined,
-      customerGoldKarat: customGoldNum > 0 ? customerGoldKarat : undefined,
-      customerStones: customerStones.trim() || undefined,
-      finalProductDescription: finalProductDescription.trim() || undefined,
-      customerMaterialReceivedAt: customGoldNum > 0 ? new Date().toISOString().split('T')[0] : undefined,
-      diamondDetails: materialLines
-        .filter(m => m.materialKind === 'diamond' || m.materialKind === 'stone')
-        .map(m => ({
-          description: m.description,
-          quantity: m.quantity,
-          caratPerPiece: m.caratPerPiece || 0,
-          totalCost: m.totalCost,
-          customerPrice: m.customerPrice ?? m.totalCost,
-          supplierId: m.supplierId,
-        })),
-    };
-  }
-
-  // v0.5.0 — Quote-first: EINE kundenseitige Position (der approx. Preis als
-  // MARGIN-Line) + optionale reine Kostenpositionen (Labor / Extra-Gold /
-  // Materials) mit is_customer_facing = false. Der Quoted Price allein bestimmt
-  // was der Kunde zahlt; die Kosten sind interne Buchhaltung (A/P + Marge).
-  function collectCustomLines(): UnifiedLine[] {
-    const customLines: UnifiedLine[] = [];
-
-    // Quoted-Price-Line — die einzige kundenseitige Position des Custom-Teils.
-    // v0.6.7 — Quote IMMER brutto gespeichert (= was der Kunde zahlt). Default-
-    // Schema MARGIN; beim Convert-to-Invoice kann der User pro Zeile umschalten
-    // (ConfirmTaxSchemeModal). Bei VAT_10-Wahl im Convert wird die Quote-Line
-    // (materialKind 'custom') aus dem Brutto decomposed — Quote bleibt Endpreis.
-    const quote = parseFloat(quotedPrice) || 0;
-    if (quote > 0) {
-      const desc = (customProductSpec?.brand && customProductSpec?.name)
-        ? `${customProductSpec.brand} ${customProductSpec.name}`.trim()
-        : (finalProductDescription.trim() || 'Custom Order');
-      customLines.push({
-        description: desc,
-        quantity: 1,
-        unitPrice: quote,
-        // v0.7.24 — Schema aus der 3e-Vorwahl (Default MARGIN). Quote bleibt brutto;
-        // bei VAT_10 dekomponiert der Convert das Brutto (OrderDetail), KEINE Doppel-VAT.
-        taxScheme: customTaxScheme,
-        vatRate: customTaxScheme === 'ZERO' ? 0 : 10,
-        isCustomerFacing: true,
-        materialKind: 'custom',
-        costAmount: 0,
-      });
-    }
-
-    // Goldsmith Labor — reine Kostenposition (cost-only, nicht auf der Invoice).
-    const laborCostNum = parseFloat(laborCost) || 0;
-    if (laborCostNum > 0) {
-      const supName = goldsmithSupplierId ? suppliers.find(s => s.id === goldsmithSupplierId)?.name : undefined;
-      customLines.push({
-        description: `Goldsmith Labor${supName ? ' — ' + supName : ''}`,
-        quantity: 1,
-        unitPrice: 0,
-        supplierId: goldsmithSupplierId || undefined,
-        costAmount: laborCostNum,
-        isCustomerFacing: false,
-        materialKind: 'labor',
-      });
-    }
-
-    // Extra Gold — reine Kostenposition (COGS-Beitrag). Bei Goldschmied-Gold
-    // wird zusaetzlich (in handleSave) eine Gold-Verbindlichkeit angelegt; die
-    // Cost-Line traegt NIE einen supplier → kein doppeltes Geld-A/P.
-    // Cost = eingegebener Betrag, sonst Bewertung zum Live-Goldpreis × Reinheit.
-    // v0.6.4 — extraGoldCost ist immer befuellt (auto aus Live-Kurs ODER manuell).
-    // Die Kostenzeile wird IMMER erzeugt wenn Gramm vorhanden sind — exakt die
-    // gleiche Bedingung wie die Gold-Verbindlichkeit in handleSave. Damit kann nie
-    // wieder eine Gramm-Schuld ohne zugehoerige Kostenzeile entstehen.
-    const extraGramsNum = parseFloat(extraGoldGrams) || 0;
-    const extraGoldValue = parseFloat(extraGoldCost) || 0;
-    if (extraGramsNum > 0) {
-      const sup = extraGoldSupplierId ? suppliers.find(s => s.id === extraGoldSupplierId) : undefined;
-      customLines.push({
-        description: `Extra Gold ${extraGramsNum.toFixed(3)}g ${extraGoldKarat}${sup ? ' — ' + sup.name : ''}`.trim(),
-        quantity: 1,
-        unitPrice: 0,
-        costAmount: extraGoldValue,
-        isCustomerFacing: false,
-        materialKind: 'gold',
-        materialDetails: { weightGrams: extraGramsNum, karat: extraGoldKarat, supplierName: sup?.name },
-      });
-    }
-
-    // Material-Lines (Diamond / Stone / Gold-Piece) — reine Kostenpositionen.
-    for (const m of materialLines) {
-      const supName = m.supplierId ? suppliers.find(s => s.id === m.supplierId)?.name : m.supplierName;
-      const ctLabel = (m.materialKind === 'diamond' || m.materialKind === 'stone')
-        ? `${m.quantity}× ${(m.caratPerPiece || 0).toFixed(2)}ct `
-        : '';
-      customLines.push({
-        description: `${ctLabel}${m.description}${supName ? ' — ' + supName : ''}`,
-        quantity: 1,
-        unitPrice: 0,
-        supplierId: m.supplierId,
-        costAmount: m.totalCost,
-        isCustomerFacing: false,
-        materialKind: m.materialKind,
-        materialDetails: {
-          ct: m.caratPerPiece,
-          qty: m.quantity,
-          description: m.description,
-          karat: m.karat,
-          weightGrams: m.weightGrams,
-          supplierName: supName,
-        },
-      });
-    }
-
-    return customLines;
-  }
-
-  // v0.3.0 — Unified Payload-Builder. Merged Produkt-Lines + Custom-Lines
-  // je nach orderType. type wird vom Store aus den Lines abgeleitet.
-  function buildOrderPayload() {
-    const wantsProduct = orderType === 'normal' || orderType === 'mixed';
-    const wantsCustom = orderType === 'custom' || orderType === 'mixed';
-    const productLines = wantsProduct ? collectProductLines() : [];
-    const customLines = wantsCustom ? collectCustomLines() : [];
-    const allLines: UnifiedLine[] = [...productLines, ...customLines];
-
-    // v0.6.7 — Custom-Quote ist immer BRUTTO (was der Kunde zahlt). Bei VAT_10
-    // ist die Zeile selbst netto gespeichert, deshalb hier separat den Brutto-
-    // Quote dazurechnen statt aus den Line-unitPrice-Summen.
-    const customBruttoTotal = wantsCustom ? (parseFloat(quotedPrice) || 0) : 0;
-    const productLinesTotal = productLines
-      .filter(l => l.isCustomerFacing !== false)
-      .reduce((s, l) => s + (l.unitPrice * l.quantity), 0);
-    const grandTotal = productLinesTotal + customBruttoTotal;
-
-    const first = lines[0];
-    const product = first?.productId ? products.find(p => p.id === first.productId) : undefined;
-    const customMeta = wantsCustom ? collectCustomMeta() : undefined;
-    const customGoldNum = parseFloat(customerGoldGrams) || 0;
-
-    // v0.6.7 — Hero-Felder bei Custom-Order aus der Produkt-Spec (Brand/Name),
-    // damit die Order-Karte das tatsaechliche Stueck zeigt statt "Custom Order".
-    const heroBrand = wantsCustom && !wantsProduct
-      ? (customProductSpec?.brand?.trim() || 'Custom Order')
-      : (product?.brand || first?.description.split(' ')[0] || (orderType === 'mixed' ? 'Mixed Order' : ''));
-    const heroModel = wantsCustom && !wantsProduct
-      ? (customProductSpec?.name?.trim() || finalProductDescription.trim() || 'Sonderanfertigung')
-      : (product?.name || first?.description || (orderType === 'mixed' ? `${allLines.length} positions` : ''));
-
-    return {
-      customerId,
-      lines: allLines,
-      customMeta,
-      // v0.6.7 — Strukturierte Produkt-Spec (Kategorie + Attribute + Foto) fuer
-      // den Convert; Persistierung in orders.custom_product_spec (JSON).
-      customProductSpec: wantsCustom ? customProductSpec : undefined,
-      goldsmithSupplierId: goldsmithSupplierId || undefined,
-      laborCost: parseFloat(laborCost) || 0,
-      extraGoldValue: parseFloat(extraGoldCost) || 0,
-      requestedBrand: heroBrand,
-      requestedModel: heroModel,
-      requestedReference: !wantsCustom ? product?.sku : customProductSpec?.sku,
-      requestedDetails: customGoldNum > 0
-        ? `Customer-Gold ${customGoldNum}g ${customerGoldKarat}`
-        : (allLines.length > 1 ? `${allLines.length} positions` : undefined),
-      // v0.6.7 — Custom: Kategorie + Attribute + Condition aus der Produkt-Spec
-      // (Quelle der Wahrheit fuers Convert-Produkt).
-      categoryId: wantsCustom ? customProductSpec?.categoryId : product?.categoryId,
-      attributes: wantsCustom ? customProductSpec?.attributes : product?.attributes,
-      condition: wantsCustom ? customProductSpec?.condition : product?.condition,
-      existingProductId: !wantsCustom ? product?.id : undefined,
-      agreedPrice: grandTotal,
-      taxAmount: totalVat,
-      depositAmount: fullyPaid ? grandTotal : depositAmount,
-      depositPaid: depositAmount > 0 || fullyPaid,
-      depositDate: depositAmount > 0 || fullyPaid ? new Date().toISOString().split('T')[0] : undefined,
-      paymentMethod,
-      cardBrand: paymentMethod === 'card' ? cardBrand : undefined,
-      fullyPaid,
-      expectedDelivery: expectedDelivery || undefined,
-      status,
-      notes: notes || undefined,
-    };
-  }
-
-  function handleSave(continueEditing: boolean) {
+  async function handleSave(continueEditing: boolean) {
     setError('');
-    const v = validate();
+    const input = formInput();
+    const v = validateOrderCreate(input);
     if (v) { setError(v); return; }
-    // v0.6.4 — Gold ohne Bewertung blockieren: sonst entstuende eine Gold-
-    // Verbindlichkeit ohne Kostenzeile (Marge waere zu hoch).
-    if ((parseFloat(extraGoldGrams) || 0) > 0 && (parseFloat(extraGoldCost) || 0) <= 0) {
-      setError('Extra gold: gold price unavailable — please enter the cost (BHD) for the gold manually.');
-      return;
+    // Auf dem zweiten Rechner reisen die Fotos der Artikel-Entwuerfe vorab in die Zwischenablage;
+    // der Auftrag nennt nur ihre Kennungen.
+    let body: Record<string, unknown> | null = null;
+    if (w.remote) {
+      try { body = await orderCreateBody(input, stageDataUrls); }
+      catch (e) { setError(e instanceof StagingUploadError ? e.message : String(e)); return; }
     }
-    const order = createOrder(buildOrderPayload());
-    // v0.6.0 — Goldschmied-Gold → Gold-Verbindlichkeit (Gramm) an den Goldschmied,
-    // verknuepft mit der Order. Wird auf der Detail-Seite in Gold oder Geld beglichen.
-    const egGrams = parseFloat(extraGoldGrams) || 0;
-    if (extraGoldSupplierId && egGrams > 0) {
-      try {
-        // v0.6.5 — die eben angelegte Extra-Gold-Kostenzeile finden und die
-        // Gramm-Schuld damit verknuepfen (loescht dann mit der Zeile mit).
-        const egLine = useOrderStore.getState().getOrderLines(order.id)
-          .find(l => l.materialKind === 'gold' && (l.description || '').startsWith('Extra Gold'));
-        createGoldPayable({
-          supplierId: extraGoldSupplierId,
-          sourceOrderId: order.id,
-          sourceOrderLineId: egLine?.id,
-          weightGrams: egGrams,
-          karat: extraGoldKarat,
-        });
-      } catch (err) {
-        console.error('[order] createGoldPayable failed:', err);
-      }
-    }
+    const r = await w.save('orders.create', {
+      local: async () => ({ id: (await createOrderOnPrimary(input)).order.id }),
+      remote: () => body as Record<string, unknown>,
+      shape: (res) => ({ id: String(res.orderId ?? '') }),
+    });
+    if (r.kind !== 'ok') { setError(fehlertext(r)); return; }
+    loadOrders();
     if (continueEditing) {
       reset();
     } else {
-      navigate(`/orders/${order.id}`);
+      navigate(`/orders/${r.value.id}`);
     }
   }
 
@@ -1447,7 +1187,8 @@ export function OrderCreate() {
         </div>
 
         {/* Error */}
-        {error && (
+        <WriteError text={w.fehler} />
+        {error && !w.fehler && (
           <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 8, fontSize: 12, color: '#DC2626' }}>
             {error}
           </div>
@@ -1457,8 +1198,8 @@ export function OrderCreate() {
         <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate('/orders')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => handleSave(true)}>Save &amp; New</Button>
-            <Button variant="primary" onClick={() => handleSave(false)}><Save size={14} /> Save Order</Button>
+            <Button variant="secondary" onClick={() => void handleSave(true)} disabled={w.busy}>Save &amp; New</Button>
+            <Button variant="primary" onClick={() => void handleSave(false)} disabled={w.busy} data-order-create><Save size={14} /> Save Order</Button>
           </div>
         </div>
       </div>
