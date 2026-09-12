@@ -932,7 +932,21 @@ export function postCreditNote(cn: CreditNote): PostingResult {
 // schreibt eine spiegelverkehrte Buchung (DEBIT↔CREDIT) mit
 // reverses_entry_id zum jeweiligen Original.
 
+/** R5F.1 — auch ein gescheiterter Storno zählt (er schreibt ohne `postEntries` direkt). */
 export function reverseSource(
+  sourceModule: SourceModule,
+  sourceId: string,
+  occurredAt: string
+): PostingResult {
+  try {
+    return reverseSourceOnce(sourceModule, sourceId, occurredAt);
+  } catch (err) {
+    postFailures++;
+    throw err;
+  }
+}
+
+function reverseSourceOnce(
   sourceModule: SourceModule,
   sourceId: string,
   occurredAt: string
@@ -1052,7 +1066,17 @@ export function postInvoiceCancelled(invoice: Invoice): PostingResult {
 // Anders als reverseSource: kein source-weiter Reversal-Check, dafür ein
 // strikter Check, dass GENAU diese transaction_id noch unreversed ist.
 
+/** R5F.1 — auch ein gescheiterter Transaktions-Storno zählt (er schreibt direkt). */
 export function reverseTransaction(transactionId: string, occurredAt: string): PostingResult {
+  try {
+    return reverseTransactionOnce(transactionId, occurredAt);
+  } catch (err) {
+    postFailures++;
+    throw err;
+  }
+}
+
+function reverseTransactionOnce(transactionId: string, occurredAt: string): PostingResult {
   const db = getDatabase();
   const r = db.exec(
     `SELECT id, account, direction, amount, counterparty_type, counterparty_id,

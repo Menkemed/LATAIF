@@ -85,11 +85,13 @@ const MATRIX: Record<string, Zeile> = {
   'returns.approve': { ui: 'ReturnDetail — Retoure genehmigen', gleich: true },
   'returns.refund': { ui: 'ReturnDetail — erstatten', gleich: true },
   'returns.record_refund_payment': { ui: 'ReturnDetail — Erstattung auszahlen', gleich: true },
+  // R5F.1 — die eine seither freigegebene Buchung.
+  'invoices.cancel': { ui: 'InvoiceDetail — Rechnung stornieren', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 40, `A vierzig Buchungen (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 41, `A vierzig Buchungen (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

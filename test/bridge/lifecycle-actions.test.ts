@@ -791,7 +791,7 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
 // ── 10) Der Nachweis, dass nichts Zerstoerendes dabei ist ────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 40, `SCOPE genau 40 Mutationen (${list.length})`);
+  ok(list.length === 41, `SCOPE genau 41 Mutationen (${list.length})`);
   for (const op of life.C3H_LIFECYCLE_MUTATIONS) ok(list.includes(op), `SCOPE ${op} ist freigegeben`);
   // Klasse C — namentlich, nicht als Sammelbegriff. Auch nach sechzehn neuen Namen.
   for (const op of fin.C3G_PRIMARY_ONLY) ok(!list.includes(op), `SCOPE ${op} bleibt Primary-only`);

@@ -196,8 +196,9 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   // CENTRAL-UI-PARITY — die 47 Store-Auskuenfte gehoeren zum ausgelieferten Zustand: der
   // Bruecken-Zuhoerer laedt sie ebenfalls. Ohne diesen Import misst das Gate einen Teilstand.
   await import('../../src/core/bridge/store-read-commands.ts');
+  await import('../../src/core/bridge/invoice-cancel-command.ts');
   ok(Array.isArray(registry.ALLOWED_MUTATIONS)
-    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice',
+    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,invoices.cancel',
     `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
 
   for (const op of ['products.delete', 'invoice.delete', 'purchase.create', 'anything.write']) {
@@ -210,7 +211,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   // CENTRAL-UI-PARITY: dazu 47 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(known.length === 107, `ALLOWLIST produktiv einhundertsieben Namen (${known.length})`);
+  ok(known.length === 108, `ALLOWLIST produktiv einhundertacht Namen (${known.length})`);
   // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 48 typisierte Auskuenfte fuer die gemeinsame Oberflaeche.
   ok(reads.length === 66 && known.includes('bridge.probe') && known.includes('invoices.create'),
     `ALLOWLIST eine Probe, sechsundsechzig Lesevorgaenge, vierzig Mutationen (${reads.length})`);
@@ -219,7 +220,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 107, 'ALLOWLIST …und seine Liste ist genau einhundertsieben Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 108, 'ALLOWLIST …und seine Liste ist genau einhundertacht Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

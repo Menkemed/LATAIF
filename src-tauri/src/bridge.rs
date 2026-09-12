@@ -121,6 +121,8 @@ pub const OP_TRANSFERS_MARK_RETURNED: &str = "transfers.mark_returned";
 pub const OP_INVOICES_APPLY_CREDIT: &str = "invoices.apply_credit";
 pub const OP_INVOICES_UPDATE_PAYMENT: &str = "invoices.update_payment";
 pub const OP_INVOICES_DELETE_PAYMENT: &str = "invoices.delete_payment";
+// CENTRAL-UI-PARITY R5F.1 — der Rechnungsstorno: die eine ausdruecklich freigegebene neue Buchung.
+pub const OP_INVOICES_CANCEL: &str = "invoices.cancel";
 pub const OP_ORDERS_CONVERT_TO_INVOICE: &str = "orders.convert_to_invoice";
 pub const OP_CONSIGNMENTS_RECORD_PAYOUT: &str = "consignments.record_payout";
 pub const OP_TRANSFERS_MARK_SOLD: &str = "transfers.mark_sold";
@@ -273,6 +275,7 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_REPAIRS_CANCEL_LINE,
     OP_TRANSFERS_CONVERT_TO_INVOICE,
     OP_TRANSFERS_CONVERT_MANY_TO_INVOICE,
+    OP_INVOICES_CANCEL,
     OP_STORE_PRODUCTS_GET,
     OP_STORE_CUSTOMERS_GET,
     OP_STORE_INVOICES_GET,

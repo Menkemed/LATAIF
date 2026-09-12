@@ -109,6 +109,8 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'repairs.update_status', 'repairs.create_invoice',
   'repairs.add_line', 'repairs.update_line', 'repairs.cancel_line',
   'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',
+  // CENTRAL-UI-PARITY R5F.1 — der Rechnungsstorno, die EINE ausdrücklich freigegebene neue Buchung.
+  'invoices.cancel',
 ];
 
 export interface CommandSpec {

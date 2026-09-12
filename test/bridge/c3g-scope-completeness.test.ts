@@ -192,7 +192,7 @@ const ACTIONS: Action[] = [
 // ── 3) Keine Klasse-C-Aktion ist registriert ─────────────────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 40, `REGISTRY genau 40 Mutationen (${list.length}) — 24 aus C3G plus die 16 aus C3H`);
+  ok(list.length === 41, `REGISTRY genau 41 Mutationen (${list.length}) — 24 aus C3G plus die 16 aus C3H`);
   const known = knownCommands();
   // CENTRAL-C3H hat die sechzehn `B_DEFERRED`-Aktionen freigeschaltet. Diese Datei bleibt der
   // Nachweis der KLASSIFIKATION — die Zahlen ziehen mit, die Einordnung nicht.
@@ -202,7 +202,9 @@ const ACTIONS: Action[] = [
     // Kein Name dieser Aktion — in irgendeiner plausiblen Schreibweise — steht auf der Liste.
     const guesses = [
       `${a.module}s.${a.fn.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}`,
-      `${a.module}s.delete`, `${a.module}s.cancel`,
+      // R5F.1 — `invoices.cancel` ist der Rechnungsstorno (ausdruecklich freigegeben), keine der
+      // beiden Klasse-C-Aktionen der Rechnung (Sondermarke, Loeschen).
+      `${a.module}s.delete`, ...(a.module === 'invoice' ? [] : [`${a.module}s.cancel`]),
     ];
     ok(guesses.every((g) => !list.includes(g)),
       `REGISTRY ${a.module}.${a.fn} ist nicht registriert`);

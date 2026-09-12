@@ -96,14 +96,14 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
     grund: 'R5F — EINE Vorbereitung fuer beide Seiten (core/returns/return-create, Anschluss return-house): Zeile + Menge, Weg, fuenf Warenfolgen (auch „Under Repair"; „Return to Owner"/„Keep" nur mit Kommissionsware), Grund, Notiz, Mitarbeiter (aktiv, Filiale) und „sofort erstatten" (bei Guthaben IMMER) — Preis, Steuer, Gutschrift, Deckel, Bestand und Buchung rechnet das Haus. Retoure und Sofort-Erstattung in EINER Klammer.',
   },
   {
-    op: 'returns.approve', handlung: 'Retoure freigeben', ort: 'pages/invoices/InvoiceDetail.tsx',
-    lokal: 'approveReturn', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die gemeinsame Oberflaeche ruft `approveReturn` ausschliesslich INNERHALB des Storno-Vorgangs einer Rechnung (anlegen + freigeben + erstatten + Status CANCELLED + Bestandsfreigabe in EINER Absicht). R5F: die Freigabe beim Sofort-Erstatten traegt jetzt `returns.create`; der Storno braucht den Status CANCELLED, den keine der 40 Buchungen setzt — ohne neue Buchung (`invoices.cancel`) nicht zu schliessen.',
+    op: 'returns.approve', handlung: 'Retoure freigeben', ort: '(keine)',
+    lokal: 'approveReturn', paritaet: 'keine-ui', verdrahtet: false, luecke: null,
+    grund: 'R5F.1 — keine eigene Handlung der Oberflaeche: kein Knopf ruft nur die Freigabe. Sie ist Teilwirkung zweier Handlungen, die beide ueber EINE Folge laufen — „Confirm Return & Refund" sofort (`returns.create`, return-house) und „Cancel Invoice" (`invoices.cancel`, invoice-cancel-house). Die Buchung bleibt fuer Fernauftraege bestehen; zu verdrahten gibt es nichts.',
   },
   {
-    op: 'returns.refund', handlung: 'Retoure erstatten', ort: 'pages/invoices/InvoiceDetail.tsx',
-    lokal: 'refundReturn', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Ebenso: `refundReturn` steht nur noch im Storno-Vorgang (das Anlegen-mit-Sofort-Erstattung traegt seit R5F `returns.create`). Kein eigenstaendiger Vorsatz; der Storno selbst braucht eine neue Buchung (`invoices.cancel`).',
+    op: 'returns.refund', handlung: 'Retoure erstatten', ort: '(keine)',
+    lokal: 'refundReturn', paritaet: 'keine-ui', verdrahtet: false, luecke: null,
+    grund: 'R5F.1 — ebenso: kein Knopf ruft nur die Erstattung; sie ist Teilwirkung von „Confirm Return & Refund" (sofort, `returns.create`) und „Cancel Invoice" (`invoices.cancel`). Das spaetere Auszahlen einer offenen Erstattung ist `returns.record_refund_payment` (verdrahtet).',
   },
   {
     op: 'returns.record_refund_payment', handlung: 'Erstattung auszahlen', ort: 'pages/invoices/InvoiceDetail.tsx',
@@ -254,5 +254,17 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
     op: 'transfers.convert_many_to_invoice', handlung: 'Mehrere Transfers in eine Rechnung', ort: 'components/agents/TransferTable.tsx',
     lokal: 'convertTransfersOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
     grund: 'R5D — dieselbe Folge fuer mehrere VERKAUFTE Transfers EINES Agenten (canCombineTransfer): EINE Rechnung, Zeilen in der Reihenfolge der Auswahl, jeder Transfer mit seiner gesehenen Fassung, ggf. der neue Kunde aus dem Agenten — alles oder nichts (convertTransfersInHouse).',
+  },
+];
+
+/**
+ * CENTRAL-UI-PARITY R5F.1 — die Matrix oben bleibt die der URSPRUENGLICHEN vierzig Buchungen. Die
+ * eine seither ausdruecklich freigegebene Buchung steht hier daneben und wird genauso geprueft.
+ */
+export const R5F1_NEUE_BUCHUNGEN: readonly MatrixZeile[] = [
+  {
+    op: 'invoices.cancel', handlung: 'Rechnung stornieren', ort: 'pages/invoices/InvoiceDetail.tsx',
+    lokal: 'cancelInvoiceOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5F.1 — „Cancel Invoice" ist EINE Handlung (mit Geld: Retoure der Restmengen zum Rechnungspreis + Freigabe + Erstattung im gewaehlten Weg; ohne Geld: Warenfreigabe; dann CANCELLED mit Buchungsstorno, Losen, Zahlungen, Guthaben-Sperren) — EINE Folge (core/invoices/invoice-cancel-house), am Primary in EINER Klammer, fern ueber `invoices.cancel`.',
   },
 ];

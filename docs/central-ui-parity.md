@@ -1856,7 +1856,7 @@ Unit  r5e/order-purchase-parity 164/0 (nach der Prüfungsverschiebung neu gelauf
 Registry 107 · Matrix 33 / 0 / 5 / 2 · keine neue Buchung
 ```
 
-## R5F — Retoure anlegen, Kommission verkaufen und auszahlen (12.09.2026) · **BLOCKED (3 von 5 geschlossen)**
+## R5F — Retoure anlegen, Kommission verkaufen und auszahlen (12.09.2026) · **BLOCKED (3 von 5 geschlossen) → in R5F.1 eingeordnet**
 
 ### Befund
 
@@ -1935,5 +1935,81 @@ Unit  r5f/returns-consignment-parity 173/0 (lokal == fern, Fehlerinjektion an 11
 E2E   r5f-returns-consignment-finance 62/0 (Retoure später + sofort, Verkauf im Sonderkreis, Auszahlung des Rests, je Primary == PC2, drei verlorene Antworten, kein lokaler Schreibgriff)
 Nachbarn return-chain 77/0 · lifecycle-actions 203/0 · financial-actions 190/0 · c4-authorization 169/0 · r5e 164/0 + 70/0 · r5d 248/0 · Matrix-Gate 458/0 · Rollen 35/0
 Registry 107 · Matrix 36 / 0 / 2 / 2 · keine neue Buchung
+```
+
+## R5F.1 — der Rechnungsstorno als Buchung, die letzte Einordnung der Retoure (12.09.2026)
+
+### Klassifikation: Freigabe und Erstattung haben keinen eigenen Knopf
+
+Vor R5F (`0e522bf`) standen `approveReturn`/`refundReturn` in der Oberfläche nur an zwei Stellen:
+
+- im Storno (`handleCancelInvoice`);
+- im Sofort-Erstatten beim Anlegen einer Retoure.
+
+Heute ruft sie keine Seite und keine Komponente mehr. Beide sind Teilwirkungen zweier Handlungen, und jede davon läuft
+über EINE Folge: „Confirm Return & Refund" (`returns.create`) und „Cancel Invoice" (`invoices.cancel`). In der
+Vierziger-Matrix stehen sie deshalb als **„ohne Handlung"**, nicht als verdrahtet. Die Buchungen selbst bleiben für
+Fernaufträge bestehen. Matrix **36 / 0 / 0 / 4**; `invoices.cancel` steht daneben (`R5F1_NEUE_BUCHUNGEN`).
+
+### Der Storno am Primary — Audit des Stands vor R5F.1
+
+- **Knopf:** „Cancel" erscheint nur, wenn die Rechnung nicht storniert, nicht endgültig und nicht zurückgegeben ist
+  (also teilbezahlt oder Entwurf), und nur mit `canEditInvoices`.
+- **Mit erhaltenem Geld:** eine Retoure aller Zeilen — je Zeile **1 Stück zum Nettopreis** —, dann Freigabe und
+  Erstattung im gewählten Weg (bar, Bank, Benefit). Ein Fehler darin wurde **verschluckt**, und storniert wurde trotzdem.
+- **Ohne Geld:** je Zeile ein Stück zurück (`updateProduct`, „in_stock").
+- **`updateInvoice(…CANCELLED)`, wenn keine Gutschrift existiert:** Lose zurück, Reservierung aufheben,
+  Rechnungsbuchung stornieren, Zahlungen zurückbuchen. Dazu die Guthaben-Sperren (eingelöstes Überzahlungs- bzw.
+  Änderungsguthaben blockt), Guthaben-Rückgabe und -Abräumung.
+- **Mit Gutschrift:** Die Retoure hat bereits alles umgekehrt, deshalb kein zweiter Storno.
+- **Immer:** Auto-Ausgaben (z. B. Kartengebühr) werden storniert und rückgebucht, Angebot und Auftrag entkoppelt.
+- **Befund:** Der Dialog kündigt „Refund of <bezahlt>" an. Durch Nettopreis und 1 Stück je Zeile floss oft weniger
+  zurück (Mengen über 1 blieben ganz liegen). Scheiterte die Erstattung, stand die Rechnung trotzdem auf CANCELLED.
+
+### Entscheidung: EINE neue Buchung
+
+`invoices.update` ändert Zeilen mit Begründung und kennt keinen Status. `returns.approve`/`returns.refund` wären nur
+Bruchteile des Vorgangs. Deshalb gibt es genau eine neue Buchung, **`invoices.cancel`** (ausdrücklich freigegeben):
+
+- Registry **108**, eingetragen in Rust (`REMOTE_OPS` und die Tests) und in `ALLOWED_MUTATIONS`, dort am Ende.
+- Feste Feldliste `{ invoiceId, expectedRevision, refundMethod }`.
+- Recht wie der Knopf (`canEditInvoices`).
+- Die gesehene Fassung ist Pflicht; Nachweis und Idempotenz laufen über die Maschine; die Filiale kommt allein aus
+  dem Ausweis.
+
+### Lösung
+
+- `core/invoices/invoice-cancel` (rein): `invoiceCancelBlocker` ist zugleich die Regel des Knopfs; dazu Wegeliste
+  und Rumpf.
+- `core/invoices/invoice-cancel-house`: EINE Folge in EINER Transaktion. Mit Geld: Retoure der **Restmengen zum
+  Rechnungspreis** (`returnLineAmounts`), dann `approveReturn` und `refundReturn`. Ohne Geld: wie bisher. Danach
+  `updateInvoice(…CANCELLED)`. Dialog des Primary und `invoices.cancel` rufen dieselbe Folge.
+- Buchungswächter: auch `reverseSource`/`reverseTransaction` zählen Fehlschläge, denn sie schreiben direkt. Ein
+  abgefangener Storno-Posten lässt die ganze Handlung zurückfallen.
+- „Create Return" setzt beim Öffnen auch den Mitarbeiter auf „Unassigned" (wie jedes andere Feld).
+
+### Verträge, die sich ändern
+
+| Punkt | vor R5F.1 | R5F.1 |
+|---|---|---|
+| Storno mit Geld: Menge | je Zeile 1 Stück | Restmenge je Zeile |
+| Storno mit Geld: Preis | netto | Rechnungspreis (brutto), wie jede Retoure |
+| Storno: Erstattung | oft weniger als angekündigt | genau das Gezahlte, wie der Dialog sagt |
+| Storno: Fehler der Erstattung | verschluckt, trotzdem CANCELLED | ganze Handlung zurück |
+| Storno vom zweiten Rechner | nicht möglich | `invoices.cancel` |
+| zweite Retoure auf derselben Seite | erbt den Mitarbeiter | beginnt bei „Unassigned" |
+
+Die R5F-Verträge sind gegen `0e522bf` festgenagelt und sind alle Parität bzw. Fehlerbehebung, keine neue Regel:
+
+- „Return to Owner"/„Keep" gab es nur mit Kommissionsware.
+- Store-Guthaben wurde immer sofort erstattet.
+- „Pay Out" gab es nur ohne Rechnung, und die Maske sandte nie einen Betrag.
+- Ein Teilbetrag lässt „sold" stehen, erst der volle Betrag schließt.
+
+```
+Unit  r5f/invoice-cancel 94/0 (Klassifikation, Entscheidung, lokal == fern ×3, Regeln, Fehler an 6 Stellen × 2 Wege, Mitarbeiter, R5F-Pins)
+E2E   r5f1-invoice-cancel 36/0 (Storno mit Geld und ohne, Primary == PC2, verlorene Antwort ohne zweite Erstattung/Buchung/Bestand, kein lokaler Schreibgriff; zwei Retouren auf derselben Seite: A mit, B ohne Mitarbeiter)
+Registry-Pins angepasst (40→41 Buchungen, 107→108): c3g, c4 ×2, c2, c3b–c3f, c6, r3, r4b, r4c, r5c–r5f · Rust bridge 37/0
+Registry 108 · Vierziger-Matrix 36 / 0 / 0 / 4 + invoices.cancel
 ```
 

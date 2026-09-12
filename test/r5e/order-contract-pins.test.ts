@@ -420,14 +420,14 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
 
 // ── §5 „+ New Supplier" im Einkauf: eine NEUE Fern-Schreiblücke ───────────
 {
-  ok(!ALLOWED_MUTATIONS.includes('suppliers.create') && ALLOWED_MUTATIONS.length === 40, 'GAP es gibt keine Buchung suppliers.create — und keine neue (40)');
+  ok(!ALLOWED_MUTATIONS.includes('suppliers.create') && ALLOWED_MUTATIONS.length === 41, 'GAP es gibt keine Buchung suppliers.create — und keine weitere ausser invoices.cancel (41)');
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(!/suppliers\.create/.test(rust) && rustOps === 107, `GAP die Registry kennt sie nicht und bleibt bei 107 (${rustOps})`);
+  ok(!/suppliers\.create/.test(rust) && rustOps === 108, `GAP die Registry kennt sie nicht und steht bei 108 (R5F.1: invoices.cancel) (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
   // R5F schliesst weitere Zeilen — die Matrix bleibt bei 40, ohne offene „exakt"-Zeile und ohne Lieferanten.
-  ok(!R4C_MATRIX.some((z) => z.op.startsWith('suppliers.')) && stand[0] >= 33 && stand[1] === 0 && stand[3] === 2
+  ok(!R4C_MATRIX.some((z) => z.op.startsWith('suppliers.')) && stand[0] >= 33 && stand[1] === 0 && stand[3] >= 2
     && stand[0] + stand[1] + stand[2] + stand[3] === 40,
   `GAP die Matrix zaehlt sie nicht mit (${stand.join('/')})`);
   const pc = codeOf(src('src/pages/purchases/PurchaseCreate.tsx'));

@@ -58,6 +58,8 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'invoices.apply_credit': RECORD_PAYMENTS,
   'invoices.update_payment': RECORD_PAYMENTS,
   'invoices.delete_payment': RECORD_PAYMENTS,
+  // R5F.1 — „Cancel" steht nur, wenn `canCancel && perm.canEditInvoices`.
+  'invoices.cancel': EDIT_INVOICES,
 
   // ── Stammdaten ──────────────────────────────────────────────────────────
   // ProductDetail: perm.canEditProducts / CustomerDetail: perm.canEditCustomers.

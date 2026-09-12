@@ -200,7 +200,7 @@ function giveCredit(db: Db, customerId: string, amount: number, id = 'cr-1'): vo
   // CENTRAL-C3H hat sechzehn weitere freigeschaltet — die, die C3G ausdruecklich als
   // `B_DEFERRED` liegen liess. Was diese Datei prueft, bleibt: die SIEBEN aus C3G stehen drauf,
   // und die zehn Klasse-C-Namen stehen es weiterhin NICHT.
-  ok(list.length === 40, `SCOPE genau 40 Mutationen (${list.length})`);
+  ok(list.length === 41, `SCOPE genau 41 Mutationen (${list.length})`);
   for (const op of ['invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',
     'orders.convert_to_invoice', 'consignments.record_payout', 'transfers.mark_sold', 'transfers.mark_settled']) {
     ok(list.includes(op), `SCOPE ${op} ist freigegeben`);

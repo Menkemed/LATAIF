@@ -85,6 +85,7 @@ const { runInvoiceCreate } = await import('../../src/core/bridge/invoice-command
 const fin = await import('../../src/core/bridge/financial-commands.ts');
 // CENTRAL-UI-PARITY — die 47 Store-Auskuenfte gehoeren zum ausgelieferten Zustand.
 await import('../../src/core/bridge/store-read-commands.ts');
+await import('../../src/core/bridge/invoice-cancel-command.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { useInvoiceStore } = await import('../../src/stores/invoiceStore.ts');
@@ -195,11 +196,11 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 107, `COVER die Registrierung zaehlt 107 Namen (${known.length})`);
+  ok(known.length === 108, `COVER die Registrierung zaehlt 107 Namen (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 66 && mutations.length === 40,
+  ok(probes.length === 1 && reads.length === 66 && mutations.length === 41,
     `COVER 1 Probe + 23 Auskuenfte (18 + 27 typisierte) + 40 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.

@@ -258,8 +258,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        107,
-        "Probe, sechsundsechzig Lesevorgaenge und vierzig Buchungen"
+        108,
+        "Probe, sechsundsechzig Lesevorgaenge und einundvierzig Buchungen (R5F.1: invoices.cancel)"
     );
     for op in [
         OP_INVOICES_CREATE,
@@ -302,6 +302,7 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         OP_REPAIRS_CANCEL_LINE,
         OP_TRANSFERS_CONVERT_TO_INVOICE,
         OP_TRANSFERS_CONVERT_MANY_TO_INVOICE,
+        OP_INVOICES_CANCEL,
     ] {
         assert!(REMOTE_OPS.contains(&op), "die freigegebene Buchung {op} fehlt");
     }
@@ -352,6 +353,7 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
             &OP_REPAIRS_CANCEL_LINE,
             &OP_TRANSFERS_CONVERT_TO_INVOICE,
             &OP_TRANSFERS_CONVERT_MANY_TO_INVOICE,
+            &OP_INVOICES_CANCEL,
         ],
         "und NUR diese vierzig veraendern etwas — kein Loeschen von aussen, kein Storno mit Geld,
          keine Sondermarke, kein Rueckgaengigmachen einer Umwandlung"
@@ -679,9 +681,9 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     let registry = registry.as_str();
     assert!(
         allow_listed_names(registry).contains(
-            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n  'repairs.create', 'repairs.update',\n  'transfers.create', 'transfers.update', 'transfers.mark_returned',\n  'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',\n  'orders.convert_to_invoice',\n  'consignments.record_payout',\n  'transfers.mark_sold', 'transfers.mark_settled',\n  'returns.create', 'returns.approve', 'returns.refund', 'returns.record_refund_payment',\n  'orders.update_status', 'orders.add_payment', 'orders.delete_payment',\n  'consignments.record_sale', 'consignments.mark_returned',\n  'repairs.update_status', 'repairs.create_invoice',\n  'repairs.add_line', 'repairs.update_line', 'repairs.cancel_line',\n  'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',\n];"
+            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n  'repairs.create', 'repairs.update',\n  'transfers.create', 'transfers.update', 'transfers.mark_returned',\n  'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',\n  'orders.convert_to_invoice',\n  'consignments.record_payout',\n  'transfers.mark_sold', 'transfers.mark_settled',\n  'returns.create', 'returns.approve', 'returns.refund', 'returns.record_refund_payment',\n  'orders.update_status', 'orders.add_payment', 'orders.delete_payment',\n  'consignments.record_sale', 'consignments.mark_returned',\n  'repairs.update_status', 'repairs.create_invoice',\n  'repairs.add_line', 'repairs.update_line', 'repairs.cancel_line',\n  'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',\n  'invoices.cancel',\n];"
         ),
-        "genau diese vierzig veraendernden Namen sind freigegeben — und keiner mehr"
+        "genau diese einundvierzig veraendernden Namen sind freigegeben — und keiner mehr (R5F.1: invoices.cancel)"
     );
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),

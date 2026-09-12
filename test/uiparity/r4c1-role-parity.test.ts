@@ -194,11 +194,12 @@ const SALES = { sub: 'user-staff', tenant_id: 'tenant-1', branch_id: 'branch-mai
   // R5D die drei Transferhandlungen anlegen, umwandeln, gesammelt umwandeln (30/0/8/2) — ebenso.
   // R5E Auftrag anlegen/aendern und Einkauf anlegen (33/0/5/2) — ebenso.
   // R5F Retoure anlegen, Kommissionsverkauf und -auszahlung (36/0/2/2) — ebenso.
-  ok(verdrahtet === 36 && offen === 0 && luecken === 2 && ohneUi === 2,
+  // R5F.1 Freigabe/Erstattung sind Teilwirkungen ohne eigene Handlung (36/0/0/4); invoices.cancel steht daneben.
+  ok(verdrahtet === 36 && offen === 0 && luecken === 0 && ohneUi === 4,
     `8 die Matrix ist unveraendert (${verdrahtet}/${offen}/${luecken}/${ohneUi})`);
   const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/
     .exec(src('src/core/bridge/command-registry.ts'))?.[1] ?? '').matchAll(/'([^']+)'/g)].length;
-  ok(erlaubt === 40, `8 vierzig Buchungen, keine neue (${erlaubt})`);
+  ok(erlaubt === 41, `8 vierzig Buchungen plus die freigegebene invoices.cancel (${erlaubt})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r4c.1: role authority parity: ${PASS} passed, ${fails.length} failed`);

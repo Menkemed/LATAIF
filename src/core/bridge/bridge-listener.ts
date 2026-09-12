@@ -25,6 +25,7 @@ import './commercial-commands';
 import './service-commands';
 import './financial-commands';
 import './return-commands';
+import './invoice-cancel-command';
 import './lifecycle-commands';
 // CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche
 // fuellt wie der Primary. Ohne diesen Import kennt der Renderer sie nicht, und jede Seite auf PC2

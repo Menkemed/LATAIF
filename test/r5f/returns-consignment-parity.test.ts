@@ -319,28 +319,28 @@ function bildDerRetoure(db: Db, inv: string) {
     const z = R4C_MATRIX.find((x) => x.op === op);
     ok(!!z && z.paritaet === 'exakt' && z.verdrahtet && z.luecke === null, `SCOPE ${op} ist geschlossen`);
   }
-  const nochB = R4C_MATRIX.filter((z) => z.luecke === 'B').map((z) => z.op).sort();
-  ok(S(nochB) === S(['returns.approve', 'returns.refund']), `SCOPE offen bleiben genau Freigabe und Erstattung (${nochB.join(', ')})`);
+  // R5F.1 — Freigabe und Erstattung sind keine eigenen Handlungen (kein Knopf ruft nur sie): „ohne
+  // Handlung". Der Storno, in dem sie am Primary standen, ist die EINE neue Buchung `invoices.cancel`.
+  const nochB = R4C_MATRIX.filter((z) => z.luecke === 'B').map((z) => z.op);
+  ok(nochB.length === 0, `SCOPE keine Klasse-B-Zeile mehr (${nochB.join(', ') || 'keine'})`);
   for (const op of ['returns.approve', 'returns.refund']) {
-    ok(/invoices\.cancel/.test(R4C_MATRIX.find((x) => x.op === op)!.grund), `SCOPE ${op}: der Grund nennt die fehlende Buchung (Storno)`);
+    const z = R4C_MATRIX.find((x) => x.op === op)!;
+    ok(z.paritaet === 'keine-ui' && z.ort === '(keine)' && /invoices\.cancel/.test(z.grund), `SCOPE ${op}: ohne eigene Handlung — Teil von Anlegen/Storno`);
   }
-  ok(ALLOWED_MUTATIONS.length === 40 && !ALLOWED_MUTATIONS.includes('invoices.cancel'), `SCOPE keine neue Buchung (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 41 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `SCOPE genau EINE neue Buchung, invoices.cancel (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 107 && !/invoices\.cancel/.test(rust), `SCOPE die Registry bleibt bei 107 (${rustOps})`);
+  ok(rustOps === 108 && /OP_INVOICES_CANCEL/.test(rust), `SCOPE die Registry steht bei 108 (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
-  ok(S(stand) === S([36, 0, 2, 2]), `SCOPE die Matrix steht bei 36/0/2/2 (${stand.join('/')})`);
+  ok(S(stand) === S([36, 0, 0, 4]), `SCOPE die Matrix steht bei 36/0/0/4 (${stand.join('/')})`);
   for (const op of ['returns.record_refund_payment', 'consignments.update', 'consignments.mark_returned', 'invoices.record_payment']) {
     ok(!!R4C_MATRIX.find((x) => x.op === op)?.verdrahtet, `SCOPE Nachbar ${op} bleibt verdrahtet`);
   }
-  // Freigabe und Erstattung: ihr einziger eigener Einstieg ist der Rechnungsstorno — der bleibt am
-  // Primary (Status CANCELLED setzt keine der 40 Buchungen), wie vor R5F.
   const idc = codeOf(src('src/pages/invoices/InvoiceDetail.tsx'));
-  const storno = /function handleCancelInvoice\(\) \{[\s\S]*?\n {2}\}/.exec(idc)?.[0] ?? '';
-  ok(/\.approveReturn\(ret\.id\)/.test(storno) && /\.refundReturn\(ret\.id\)/.test(storno) && /updateInvoice\(id, \{ status: 'CANCELLED' \}\)/.test(storno),
-    'SCOPE der Storno ruft Freigabe + Erstattung + Status CANCELLED — ein Vorgang, den keine vorhandene Buchung traegt');
-  ok(!/'returns\.(approve|refund)'/.test(idc), 'SCOPE …und er wird nicht heimlich halb ueber den Fernweg gerufen');
+  ok(!/approveReturn\(|refundReturn\(|status: 'CANCELLED'/.test(idc) && /w\.ok\('invoices\.cancel'/.test(idc),
+    'SCOPE die Seite ruft weder Freigabe noch Erstattung noch den Status selbst — der Storno ist EINE Buchung');
+  ok(!/'returns\.(approve|refund)'/.test(idc), 'SCOPE …und Freigabe/Erstattung werden nicht einzeln ueber den Fernweg gerufen');
 }
 
 // ── §2 Retoure anlegen: dieselbe Wirkung auf beiden Wegen ─────────────────

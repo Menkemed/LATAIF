@@ -31,6 +31,8 @@ import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { grossUnitPrice } from '@/core/returns/return-lines';
 import { returnCreateBody, returnCreateInput } from '@/core/returns/return-create';
 import { createReturnOnPrimary } from '@/core/returns/return-house';
+import { INVOICE_CANCEL_REFUND_METHODS, invoiceCancelBlocker, invoiceCancelBody } from '@/core/invoices/invoice-cancel';
+import { cancelInvoiceOnPrimary } from '@/core/invoices/invoice-cancel-house';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
@@ -219,7 +221,8 @@ export function InvoiceDetail() {
   const isPaid = invoice.status === 'FINAL';
   const isReturned = invoice.status === 'RETURNED';
   const canRecordPayment = !isDraft && !isCancelled && !isPaid && !isReturned && remaining > 0.005;
-  const canCancel = !isCancelled && !isPaid && !isReturned;
+  // R5F.1 — dieselbe Regel wie das Haus: nicht storniert, nicht endgueltig, nicht zurueckgegeben.
+  const canCancel = invoiceCancelBlocker(invoice.status) === null;
 
   const canMarkRepairPickedUp = pendingRepairs.length > 0 && isPaid;
 
@@ -349,47 +352,21 @@ export function InvoiceDetail() {
     setLineEditReason('');
   }
 
-  function handleCancelInvoice() {
+  async function handleCancelInvoice() {
     if (!id || !invoice) return;
-    // Plan §Sales §14: Cancel PARTIAL → Status=CANCELLED + Refund (if paid) + Produkte freigeben.
-    if (invoice.paidAmount > 0) {
-      try {
-        const ret = useSalesReturnStore.getState().createReturn({
-          invoiceId: id,
-          refundMethod: cancelRefundMethod,
-          productDisposition: 'IN_STOCK',
-          notes: `Auto-refund on invoice cancellation (${invoice.invoiceNumber})`,
-          lines: invoice.lines.map(l => ({
-            invoiceLineId: l.id,
-            productId: l.productId,
-            quantity: 1,
-            unitPrice: l.unitPrice,
-            vatAmount: l.vatAmount,
-          })),
-        });
-        // Refund tatsächlich durchführen — approve + refund → Cash/Bank -= refundAmount
-        useSalesReturnStore.getState().approveReturn(ret.id);
-        useSalesReturnStore.getState().refundReturn(ret.id);
-      } catch (e) {
-        console.warn('Cancel-refund failed, continuing with status change:', e);
-      }
-    } else {
-      // Plan §Sales §14: Produkt wieder freigeben. Kein Geld erhalten → nur Stock-Release.
-      // Quantity-aware: pro Line wird 1 Stück zurück ins Lager gebucht.
-      const ps = useProductStore.getState();
-      for (const l of invoice.lines) {
-        try {
-          const p = ps.getProduct(l.productId);
-          if (p) {
-            ps.updateProduct(l.productId, {
-              quantity: (p.quantity || 0) + 1,
-              stockStatus: 'in_stock',
-            });
-          }
-        } catch { /* */ }
-      }
-    }
-    updateInvoice(id, { status: 'CANCELLED' });
+    // Plan §Sales §14 — CENTRAL-UI-PARITY R5F.1: EIN Vorgang (Retoure + Freigabe + Erstattung bzw.
+    // Warenfreigabe, dann CANCELLED) in EINER Klammer, am Primary wie fern (`invoices.cancel`).
+    // Die Seite sagt nur, welche Rechnung und welcher Erstattungsweg — alles andere rechnet das Haus.
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('cancelling this invoice (no revision loaded)'))); return; }
+    const input = { invoiceId: id, refundMethod: cancelRefundMethod };
+    if (!await w.ok('invoices.cancel', {
+      local: () => cancelInvoiceOnPrimary(input),
+      remote: () => invoiceCancelBody(input, Number(fassung)),
+    })) return;
+    loadInvoices();
+    loadSalesReturns();
+    loadCreditNotes();
     setConfirmCancel(false);
   }
 
@@ -417,6 +394,9 @@ export function InvoiceDetail() {
     setReturnNotes('');
     setReturnReason('');
     setReturnRefundNow(true);
+    // R5F.1 — auch der Mitarbeiter beginnt jede neue Retoure frisch (wie beim ersten Oeffnen:
+    // „Unassigned"); sonst erbte eine zweite Retoure auf derselben Seite den vorigen.
+    setReturnStaffId('');
     setShowReturn(true);
   }
 
@@ -1662,7 +1642,7 @@ export function InvoiceDetail() {
           <div style={{ marginBottom: 20 }}>
             <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>REFUND METHOD</span>
             <div className="flex gap-2">
-              {(['cash', 'bank', 'benefit'] as const).map(m => (
+              {INVOICE_CANCEL_REFUND_METHODS.map(m => (
                 <button key={m} onClick={() => setCancelRefundMethod(m)}
                   className="cursor-pointer rounded" style={{
                     padding: '6px 14px', fontSize: 12,
@@ -1674,9 +1654,10 @@ export function InvoiceDetail() {
             </div>
           </div>
         )}
+        <WriteError text={w.fehler} />
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmCancel(false)}>Keep Invoice</Button>
-          <Button variant="danger" onClick={handleCancelInvoice}>Cancel Invoice</Button>
+          <Button variant="danger" onClick={() => void handleCancelInvoice()} disabled={w.busy} data-invoice-cancel>Cancel Invoice</Button>
         </div>
       </Modal>
 

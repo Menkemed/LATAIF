@@ -22,18 +22,27 @@ const ok = (c: boolean, m: string) => { if (c) PASS++; else { fails.push(m); con
 const src = (p: string) => readFileSync(resolvePath(repo, p), 'utf8');
 const codeOf = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
-const { R4C_MATRIX } = await import('./_r4c-write-matrix.ts');
+const { R4C_MATRIX, R5F1_NEUE_BUCHUNGEN } = await import('./_r4c-write-matrix.ts');
+// R5F.1 — die Matrix bleibt die der ursprünglichen vierzig; die EINE seither freigegebene Buchung
+// (`invoices.cancel`) steht daneben und läuft durch dieselben Prüfungen ihres Anschlusses.
+const ALLE = [...R4C_MATRIX, ...R5F1_NEUE_BUCHUNGEN];
+const NEU = R5F1_NEUE_BUCHUNGEN.map((z) => z.op);
 
 // ── §1 Die Matrix deckt sich mit der Freigabeliste ──────────────────────
 const registry = src('src/core/bridge/command-registry.ts');
 const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/
   .exec(registry)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
 
-ok(erlaubt.length === 40, `1 die Freigabeliste zaehlt vierzig Buchungen (${erlaubt.length})`);
+ok(erlaubt.length === 40 + NEU.length && JSON.stringify(NEU) === JSON.stringify(['invoices.cancel']),
+  `1 die Freigabeliste zaehlt die vierzig plus invoices.cancel (${erlaubt.length})`);
 ok(R4C_MATRIX.length === 40, `1 die Matrix zaehlt vierzig Zeilen (${R4C_MATRIX.length})`);
+for (const z of R5F1_NEUE_BUCHUNGEN) {
+  ok(erlaubt.includes(z.op) && !R4C_MATRIX.some((x) => x.op === z.op), `1 ${z.op}: freigegeben, und NICHT in der Vierziger-Matrix`);
+  ok(new RegExp(`\\b${z.lokal}\\(`).test(codeOf(src('src/' + z.ort))), `1 ${z.op}: ${z.lokal}() steht wirklich in ${z.ort.split('/').pop()}`);
+}
 {
   const inMatrix = new Set(R4C_MATRIX.map((z) => z.op));
-  const fehlend = erlaubt.filter((o) => !inMatrix.has(o));
+  const fehlend = erlaubt.filter((o) => !inMatrix.has(o) && !NEU.includes(o));
   const erfunden = R4C_MATRIX.map((z) => z.op).filter((o) => !erlaubt.includes(o));
   ok(fehlend.length === 0, `1 keine Buchung fehlt in der Matrix (${fehlend.join(', ') || 'keine'})`);
   ok(erfunden.length === 0, `1 und keine Zeile erfindet einen Namen (${erfunden.join(', ') || 'keine'})`);
@@ -74,7 +83,7 @@ for (const z of R4C_MATRIX) {
 // ── §3 „verdrahtet" ist im Quelltext nachweisbar ────────────────────────
 const RUFT = (s: string, op: string) =>
   new RegExp(`(useSharedWrite<[^>]*>\\(|\\w+\\.(ok|save)(<[^>]*>)?\\()\\s*'${op.replace(/\./g, '\\.')}'`).test(s);
-for (const z of R4C_MATRIX.filter((x) => x.verdrahtet)) {
+for (const z of ALLE.filter((x) => x.verdrahtet)) {
   const s = codeOf(src('src/' + z.ort));
   ok(RUFT(s, z.op), `3 ${z.op}: ${z.ort.split('/').pop()} ruft die Buchung ueber die gemeinsame Weiche`);
   // Und die lokale Funktion steht im SPEICHERWEG nur im Primary-Anschluss. Ausserhalb darf sie
@@ -96,7 +105,7 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
 
 // ── §4 Der asynchrone Vertrag an jeder verdrahteten Stelle ──────────────
 {
-  const dateien = [...new Set(R4C_MATRIX.filter((z) => z.verdrahtet).map((z) => z.ort))];
+  const dateien = [...new Set(ALLE.filter((z) => z.verdrahtet).map((z) => z.ort))];
   for (const f of dateien) {
     const s = codeOf(src('src/' + f));
     ok(/await \w+\.ok\(|await \w+\.save\(/.test(s), `4 ${f.split('/').pop()}: gespeichert wird mit await`);
@@ -118,7 +127,7 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     .filter((m) => m[1].includes("'expectedRevision'")).length;
   ok(REVISION_OPS >= 15, `5 die meisten Geldbuchungen verlangen die gesehene Fassung (${REVISION_OPS})`);
 
-  for (const z of R4C_MATRIX.filter((x) => x.verdrahtet)) {
+  for (const z of ALLE.filter((x) => x.verdrahtet)) {
     const s = codeOf(src('src/' + z.ort));
     const treffer = new RegExp(`\\w+\\.ok\\('${z.op.replace(/\./g, '\\.')}'[\\s\\S]{0,1200}`).exec(s)?.[0] ?? '';
     // Das Fenster reicht bewusst UEBER den Aufruf hinaus: das frische Lesen steht danach.
@@ -170,11 +179,11 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
   ok(parity === 48, `10 achtundvierzig typisierte Auskuenfte (${parity})`);
-  ok(erlaubt.length === 40, `10 vierzig Buchungen — R4C fuegt keine hinzu (${erlaubt.length})`);
+  ok(erlaubt.length === 41, `10 vierzig Buchungen plus die eine aus R5F.1 (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 107, `10 und Rust laesst dieselben 107 Namen durch (${rustOps})`);
+  ok(rustOps === 108, `10 und Rust laesst dieselben 108 Namen durch (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────
@@ -392,7 +401,7 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
 }
 
 // ── Der Stand, offen benannt ────────────────────────────────────────────
-const verdrahtet = R4C_MATRIX.filter((z) => z.verdrahtet);
+const verdrahtet = ALLE.filter((z) => z.verdrahtet);
 const offenExakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet);
 const luecken = R4C_MATRIX.filter((z) => z.luecke !== null);
 const ohneUi = R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui');
