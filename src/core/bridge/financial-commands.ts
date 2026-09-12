@@ -47,8 +47,9 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { carryOverOrderPaymentsToInvoice } from '@/core/orders/order-payment-carryover';
 import { useProductStore } from '@/stores/productStore';
-import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useAgentStore } from '@/stores/agentStore';
+import { ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
+import { payOutConsignmentInHouse } from '@/core/consignment/consignment-finance-house';
 import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
 import {
   buildOrderInvoiceLines, orderCustomCostBasis, markConvertedLinesDelivered,
@@ -116,6 +117,12 @@ export function optString(v: unknown, name: string): string | undefined {
   if (typeof v !== 'string') throw new FinancialPayloadError(`${name} must be a string`);
   const t = v.trim();
   return t === '' ? undefined : t;
+}
+/** R5F — ein Freitext der Maske, WIE getippt (die Maske trimmt nicht); leer heisst „keiner". */
+export function optText(v: unknown, name: string): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'string') throw new FinancialPayloadError(`${name} must be a string`);
+  return v === '' ? undefined : v;
 }
 export function positive(v: unknown, name: string): number {
   if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
@@ -562,12 +569,10 @@ export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw
 
 // ── Einlieferer auszahlen ─────────────────────────────────────────────────
 
-const PAYOUT_METHODS = ['cash', 'bank', 'benefit'] as const;
-
 export interface RecordPayoutRequest {
   consignmentId: string;
   amount: number;
-  method: typeof PAYOUT_METHODS[number];
+  method: string;
   expectedRevision: number;
   reference?: string;
 }
@@ -575,46 +580,40 @@ export interface RecordPayoutRequest {
 /**
  * Ein ausdrücklicher Betrag, kein „zahl den Rest". Derselbe Grund wie bei der Rechnungszahlung:
  * „der Rest" ist eine Zahl, die sich zwischen Lesen und Ankommen ändert, und wer Geld auszahlt,
- * meint einen Betrag. Das Haus deckelt ihn auf den offenen Auszahlungsbetrag.
+ * meint einen Betrag. R5F: die Maske „Pay Out Consignor" schickt den offenen Rest, den sie gesehen
+ * hat (samt Fassung); die Wege stehen EINMAL in `core/consignment/consignment-finance`, und die
+ * Regeln (nur ohne Rechnung, nie mehr als offen, erst null schliesst) in der Hausfolge.
  */
 export function parseRecordPayout(raw: unknown): RecordPayoutRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
   onlyKnownFields(raw, ['consignmentId', 'amount', 'method', 'expectedRevision', 'reference']);
   const method = String(raw.method ?? '');
-  if (!(PAYOUT_METHODS as readonly string[]).includes(method)) {
+  if (!ACCEPTED_PAYOUT_METHODS.includes(method)) {
     throw new FinancialPayloadError(`unknown payout method: ${method || '(none)'}`);
   }
   return {
     consignmentId: reqString(raw.consignmentId, 'consignmentId'),
     amount: positive(raw.amount, 'amount'),
-    method: method as RecordPayoutRequest['method'],
+    method,
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
-    reference: optString(raw.reference, 'reference'),
+    reference: optText(raw.reference, 'reference'),
   };
 }
 
 export function runRecordPayout(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseRecordPayout(raw);
   return runRemoteCommand(deps, identity, () => {
-    const con = query(
-      'SELECT id, status, payout_status, payout_amount, payout_paid_amount FROM consignments WHERE id = ? AND branch_id = ?',
-      [req.consignmentId, identity.branchId],
-    )[0];
-    if (!con) throw new CommandRejected('CONSIGNMENT_NOT_FOUND', 'no such consignment in this branch');
-    const target = Number(con.payout_amount ?? 0);
-    if (!(target > 0)) {
-      // Vor dem Verkauf gibt es nichts auszuzahlen — der Betrag entsteht erst dort.
-      throw new CommandRejected('NOTHING_TO_PAY_OUT',
-        'this consignment has no payout amount yet — it is set when the item is sold');
+    const already = Number(query(
+      'SELECT payout_paid_amount FROM consignments WHERE id = ? AND branch_id = ?', [req.consignmentId, identity.branchId],
+    )[0]?.payout_paid_amount ?? 0);
+    try {
+      // Dieselbe Folge wie „Confirm Payout" am Primary; die gesehene Fassung ist der letzte Wächter.
+      payOutConsignmentInHouse(req.consignmentId, { amount: req.amount, method: req.method, reference: req.reference },
+        identity.branchId, () => assertRevision('consignments', req.consignmentId, req.expectedRevision, 'CONSIGNMENT_NOT_FOUND'));
+    } catch (e) {
+      if (e instanceof ConsignmentActionRejected) throw new CommandRejected(e.code, e.message);
+      throw e;
     }
-    const already = Number(con.payout_paid_amount ?? 0);
-    if (already >= target - 0.005) {
-      throw new CommandRejected('ALREADY_PAID_OUT', 'this consignment is already paid out in full');
-    }
-    assertRevision('consignments', req.consignmentId, req.expectedRevision, 'CONSIGNMENT_NOT_FOUND');
-    // Auch hier: der Store schlägt in seiner eigenen Liste nach.
-    useConsignmentStore.getState().loadConsignments();
-    useConsignmentStore.getState().recordPartialPayout(req.consignmentId, req.amount, req.method, req.reference);
 
     const after = query(
       'SELECT payout_status, payout_paid_amount, payout_amount, status, revision FROM consignments WHERE id = ?',

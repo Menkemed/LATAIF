@@ -34,14 +34,14 @@ import { RepairActionRejected, isRepairTaxScheme, repairInvoiceBlocker } from '@
 import { TransferActionRejected, transferConvertBlocker, type TransferBillTo } from '@/core/agents/transfer-rules';
 import { convertTransferInHouse, convertTransfersInHouse, type TransferConversion } from '@/core/agents/transfer-house';
 import { assertHouseBranch } from './remote-create-support';
+import { ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
+import { recordConsignmentSaleInHouse, type ConsignmentSold } from '@/core/consignment/consignment-finance-house';
 import { useOrderStore } from '@/stores/orderStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
-import { useCustomerStore } from '@/stores/customerStore';
-import { useSupplierStore } from '@/stores/supplierStore';
 import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
 } from './mutation-engine';
@@ -49,7 +49,7 @@ import type { CommandIdentity } from './command-ledger';
 import { registerCommand, type CommandActor } from './command-registry';
 import {
   FinancialPayloadError, assertRevision, execFinancial, expectedRevisionOf,
-  invoiceState, isPlain, onlyKnownFields, optString, positive, reqString,
+  invoiceState, isPlain, onlyKnownFields, optString, optText, positive, reqString,
 } from './financial-commands';
 import type { OrderStatus, RepairStatus, RepairTaxScheme } from '@/core/models/types';
 
@@ -355,77 +355,50 @@ export interface RecordSaleRequest {
   saleDate?: string;
   notes?: string;
   acknowledgeShortfall?: boolean;
+  specialMark: boolean;
 }
 
 /**
- * `specialMark` fehlt mit Absicht. Es wählt bei der erzeugten Rechnung den Nummernkreis — ein
- * steuerlicher Marker, kein Kassenvorgang, und in C3G ausdrücklich als Klasse C am Primary
- * geblieben. Ein Fernverkauf bekommt den regulären Kreis.
+ * R5F — `specialMark` ist jetzt eine Eingabe: „Record Sale" fragt im Nummerndialog IMMER nach dem
+ * Belegkreis der entstehenden Rechnung, und der Mensch am zweiten Rechner wählt dasselbe. Was daraus
+ * folgt (Kreis der Rechnung, Nummer beim Abschluss), entscheidet weiter `createDirectInvoice`.
  */
 export function parseRecordSale(raw: unknown): RecordSaleRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall']);
+  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall', 'specialMark']);
+  if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
+    throw new FinancialPayloadError('specialMark is yes or no');
+  }
   const out: RecordSaleRequest = {
     consignmentId: reqString(raw.consignmentId, 'consignmentId'),
     buyerId: reqString(raw.buyerId, 'buyerId'),
     salePrice: positive(raw.salePrice, 'salePrice'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
+    specialMark: raw.specialMark === true,
   };
   out.saleDate = optString(raw.saleDate, 'saleDate');
-  out.notes = optString(raw.notes, 'notes');
+  out.notes = optText(raw.notes, 'notes');
   // Dieselbe Bedeutung wie am Bildschirm: ein Verkauf unter dem Boden des Einlieferers
   // erzeugt einen Verlust und braucht eine ausdrückliche Bestätigung. Sie bestätigt genau das.
   out.acknowledgeShortfall = raw.acknowledgeShortfall === true;
   return out;
 }
 
-const SALE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/below consignor floor/i, 'SALE_BELOW_FLOOR'],
-  [/Buyer cannot be the same as the consignor/i, 'BUYER_IS_CONSIGNOR'],
-  [/Unsupported commission type/i, 'UNSUPPORTED_PAYOUT_MODEL'],
-  [/cannot record sale/i, 'CONSIGNMENT_NOT_ACTIVE'],
-];
-
 export function runRecordSale(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseRecordSale(raw);
   return runRemoteCommand(deps, identity, () => {
-    const con = query('SELECT id, status, invoice_id FROM consignments WHERE id = ? AND branch_id = ?',
-      [req.consignmentId, identity.branchId])[0];
-    if (!con) throw new CommandRejected('CONSIGNMENT_NOT_FOUND', 'no such consignment in this branch');
-    if (s(con.status) !== 'active') {
-      throw new CommandRejected('CONSIGNMENT_NOT_ACTIVE',
-        `this consignment is "${s(con.status)}" — only an active one is sold`);
-    }
-    if (s(con.invoice_id) !== '') {
-      throw new CommandRejected('CONSIGNMENT_ALREADY_SOLD', 'this consignment already has an invoice');
-    }
-    if (!query('SELECT id FROM customers WHERE id = ? AND branch_id = ?', [req.buyerId, identity.branchId])[0]) {
-      throw new CommandRejected('BUYER_NOT_FOUND', 'no such client in this branch');
-    }
-    assertRevision('consignments', req.consignmentId, req.expectedRevision, 'CONSIGNMENT_NOT_FOUND');
-    // Der Store schlägt die Kommission in SEINER Liste nach — und ruft danach den Einkaufs-,
-    // den Rechnungs- und ggf. den Ausgabenweg, die es ebenso tun.
-    useConsignmentStore.getState().loadConsignments();
-    useSupplierStore.getState().loadSuppliers();
-    useCustomerStore.getState().loadCustomers();
-    useProductStore.getState().loadProducts();
-    useInvoiceStore.getState().loadInvoices();
-    let result: { invoiceId: string; purchaseId: string; consignorPayout: number; ourCommission: number; consignorLossAmount: number };
+    let result: ConsignmentSold;
     try {
-      // Ein Zug des Hauses: Einkauf beim Einlieferer (damit ein Los entsteht), Rechnung an den
-      // Käufer (die es verbraucht), bei Unterdeckung eine Verlust-Ausgabe, und der
-      // Auszahlungsbetrag, gegen den später `consignments.record_payout` läuft.
-      result = useConsignmentStore.getState().recordSale(req.consignmentId, {
-        salePrice: req.salePrice,
-        buyerId: req.buyerId,
-        saleDate: req.saleDate,
-        notes: req.notes,
-        acknowledgeShortfall: req.acknowledgeShortfall,
-      });
-    } catch (err) {
-      const verdict = asVerdict(err, SALE_VERDICTS);
-      if (verdict) throw verdict;
-      throw err;
+      // R5F — dieselbe Folge wie „Record Sale" am Primary: Einkauf beim Einlieferer (damit ein Los
+      // entsteht), Rechnung an den Käufer im gewählten Kreis, bei Unterdeckung die Verlust-Ausgabe,
+      // Status und Menge — in DIESER Transaktion. Die gesehene Fassung ist der letzte Wächter.
+      result = recordConsignmentSaleInHouse(req.consignmentId, {
+        salePrice: req.salePrice, buyerId: req.buyerId, saleDate: req.saleDate, notes: req.notes,
+        acknowledgeShortfall: req.acknowledgeShortfall === true, specialMark: req.specialMark,
+      }, identity.branchId, () => assertRevision('consignments', req.consignmentId, req.expectedRevision, 'CONSIGNMENT_NOT_FOUND'));
+    } catch (e) {
+      if (e instanceof ConsignmentActionRejected) throw new CommandRejected(e.code, e.message);
+      throw e;
     }
     const after = consignmentState(req.consignmentId);
     if (s(after.status) !== 'sold') {

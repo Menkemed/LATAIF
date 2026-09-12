@@ -92,18 +92,18 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Retouren ─────────────────────────────────────────────────────────────
   {
     op: 'returns.create', handlung: 'Verkaufsretoure anlegen', ort: 'pages/invoices/InvoiceDetail.tsx',
-    lokal: 'createReturn', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske schickt zusaetzlich `staffId` (die Fernbuchung kennt das Feld nicht) UND fuehrt bei „sofort erstatten\' — bei Guthaben-Retouren ZWANGSLAEUFIG — direkt `refundReturn` mit aus. Eine Handlung, zwei Buchungen ohne gemeinsame Klammer.',
+    lokal: 'createReturnOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5F — EINE Vorbereitung fuer beide Seiten (core/returns/return-create, Anschluss return-house): Zeile + Menge, Weg, fuenf Warenfolgen (auch „Under Repair"; „Return to Owner"/„Keep" nur mit Kommissionsware), Grund, Notiz, Mitarbeiter (aktiv, Filiale) und „sofort erstatten" (bei Guthaben IMMER) — Preis, Steuer, Gutschrift, Deckel, Bestand und Buchung rechnet das Haus. Retoure und Sofort-Erstattung in EINER Klammer.',
   },
   {
     op: 'returns.approve', handlung: 'Retoure freigeben', ort: 'pages/invoices/InvoiceDetail.tsx',
     lokal: 'approveReturn', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die gemeinsame Oberflaeche ruft `approveReturn` ausschliesslich INNERHALB des Storno-Vorgangs einer Rechnung (anlegen + freigeben + erstatten + Status + Bestandsfreigabe in EINER Absicht). Es gibt keinen eigenstaendigen Knopf dafuer — die Buchung allein waere ein Fuenftel der Handlung.',
+    grund: 'Die gemeinsame Oberflaeche ruft `approveReturn` ausschliesslich INNERHALB des Storno-Vorgangs einer Rechnung (anlegen + freigeben + erstatten + Status CANCELLED + Bestandsfreigabe in EINER Absicht). R5F: die Freigabe beim Sofort-Erstatten traegt jetzt `returns.create`; der Storno braucht den Status CANCELLED, den keine der 40 Buchungen setzt — ohne neue Buchung (`invoices.cancel`) nicht zu schliessen.',
   },
   {
     op: 'returns.refund', handlung: 'Retoure erstatten', ort: 'pages/invoices/InvoiceDetail.tsx',
     lokal: 'refundReturn', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Ebenso: `refundReturn` steht nur im Storno-Vorgang und im Anlegen-mit-Sofort-Erstattung. Kein eigenstaendiger Vorsatz, den man einzeln verdrahten koennte.',
+    grund: 'Ebenso: `refundReturn` steht nur noch im Storno-Vorgang (das Anlegen-mit-Sofort-Erstattung traegt seit R5F `returns.create`). Kein eigenstaendiger Vorsatz; der Storno selbst braucht eine neue Buchung (`invoices.cancel`).',
   },
   {
     op: 'returns.record_refund_payment', handlung: 'Erstattung auszahlen', ort: 'pages/invoices/InvoiceDetail.tsx',
@@ -134,8 +134,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'consignments.record_sale', handlung: 'Kommissionsverkauf erfassen', ort: 'pages/consignments/ConsignmentDetail.tsx',
-    lokal: 'recordSale', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske entscheidet mit `specialMark` ueber den Belegnummernkreis der entstehenden Rechnung; die Fernbuchung kennt das Feld nicht und nimmt stillschweigend den normalen Kreis.',
+    lokal: 'recordConsignmentSaleOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5F — EINE Folge fuer beide Seiten (core/consignment/consignment-finance-house): Kaeufer, Preis, Datum, Notiz, Verlust-Bestaetigung und die Wahl im Nummerndialog (`specialMark` → Kreis der Rechnung) — Einkauf beim Einlieferer, Rechnung, ggf. Verlust-Ausgabe, Status und Menge in EINER Klammer. Auch die Liste (normaler Kreis) laeuft ueber dieselbe Buchung.',
   },
   {
     op: 'consignments.mark_returned', handlung: 'Kommission zurueckgeben', ort: 'pages/consignments/ConsignmentDetail.tsx',
@@ -144,9 +144,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'consignments.record_payout', handlung: 'Auszahlung an den Eigentuemer', ort: 'pages/consignments/ConsignmentDetail.tsx',
-    lokal: 'markPaidOut', paritaet: 'enger', verdrahtet: false, luecke: 'B',
-    grund: 'Die Maske zahlt VOLLSTAENDIG aus (markPaidOut, ohne Betrag); die Fernbuchung kennt nur '
-      + 'die TEILAUSZAHLUNG mit Betrag (recordPartialPayout). Zwei verschiedene Handlungen.',
+    lokal: 'payOutConsignmentOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5F — EINE Folge fuer beide Seiten (core/consignment/consignment-finance-house): die Masken (Detail und Liste, „Pay Out (legacy)") zahlen den OFFENEN Rest, den sie gesehen haben — mit Weg und Referenz aus EINER Liste. Nur ohne Rechnung (sonst zahlt der Einkauf), nie mehr als offen, ein Teil bleibt „sold", erst null schliesst; Status, Rest und Buchung in EINER Klammer.',
   },
 
   // ── Auftraege ────────────────────────────────────────────────────────────

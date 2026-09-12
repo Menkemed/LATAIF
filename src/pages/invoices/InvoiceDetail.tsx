@@ -28,7 +28,9 @@ import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-fo
 import { usePermission } from '@/hooks/usePermission';
 import logoUrl from '@/assets/logo.png';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import { grossUnitPrice, returnLineAmounts } from '@/core/returns/return-lines';
+import { grossUnitPrice } from '@/core/returns/return-lines';
+import { returnCreateBody, returnCreateInput } from '@/core/returns/return-create';
+import { createReturnOnPrimary } from '@/core/returns/return-house';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
@@ -91,7 +93,7 @@ export function InvoiceDetail() {
   const [paidExpanded, setPaidExpanded] = useState(true);
 
   // Sales Return state
-  const { returns: salesReturns, loadReturns: loadSalesReturns, createReturn: createSalesReturn, refundReturn: refundSalesReturn,
+  const { returns: salesReturns, loadReturns: loadSalesReturns,
     getInvoiceReturnSummary, recordRefundPayment, getReturnedQtyForLine, getInvoiceCardInfo,
     cancelReturn, getReturnCancelability } = useSalesReturnStore();
   const { creditNotes, loadCreditNotes } = useCreditNoteStore();
@@ -418,53 +420,30 @@ export function InvoiceDetail() {
     setShowReturn(true);
   }
 
-  function handleCreateSalesReturn() {
+  async function handleCreateSalesReturn() {
     if (!id || !invoice) return;
-    const included = invoice.lines
-      .filter(l => returnLines[l.id]?.include)
-      .map(l => {
-        const rl = returnLines[l.id];
-        // CENTRAL-C3H — Brutto-Stueckpreis und anteilige Steuer aus der Rechnungszeile: EINE
-        // Ableitung fuer diesen Bildschirm und fuer den Fernauftrag.
-        const amounts = returnLineAmounts(l, rl.quantity);
-        return {
-          invoiceLineId: l.id,
-          productId: l.productId,
-          quantity: amounts.quantity,
-          unitPrice: amounts.unitPrice,
-          vatAmount: amounts.vatAmount,
-        };
-      });
-    if (included.length === 0) {
+    // CENTRAL-UI-PARITY R5F — die Maske schickt ihre EINGABEN (Zeile + Menge, Weg, Warenfolge,
+    // Grund, Notiz, Mitarbeiter, sofort/später). Preis und Steuer aus der Rechnungszeile, Deckel,
+    // Gutschrift und Buchung rechnet das Haus; Retoure und Sofort-Erstattung (bei 'credit' IMMER)
+    // in EINER Klammer — am Primary wie fern.
+    const input = returnCreateInput(id, invoice.lines, returnLines, {
+      refundMethod: returnRefundMethod, productDisposition: returnDisposition,
+      reason: returnReason, notes: returnNotes, staffId: returnStaffId, refundNow: returnRefundNow,
+    });
+    if (input.lines.length === 0) {
       alert('Please select at least one position via the checkbox.');
       return;
     }
-    try {
-      const ret = createSalesReturn({
-        invoiceId: id,
-        refundMethod: returnRefundMethod,
-        productDisposition: returnDisposition,
-        reason: returnReason || undefined,
-        notes: returnNotes || undefined,
-        staffId: returnStaffId || undefined,
-        lines: included,
-      });
-      // Plan §Returns: Refund optional sofort durchführen oder offen lassen.
-      // UI-Slice 2: bei 'credit' IMMER sofort — Guthaben entsteht bei approve (CN);
-      // ein offener REQUESTED-Credit-Return könnte später per Cash ausgezahlt werden,
-      // ohne dass die customer_credits-Row abgebaut wird (Divergenz). Nach refundReturn
-      // steht refund_status=REFUNDED → recordRefundPayment-Guard blockt den Cash-Pfad.
-      if (returnRefundNow || returnRefundMethod === 'credit') {
-        refundSalesReturn(ret.id);
-      }
-      // Invoice-Store reloaden damit paid_amount/Status nach Refund frisch sind.
-      loadInvoices();
-      setShowReturn(false);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('[Return] failed:', e);
-      alert(`Return konnte nicht angelegt werden:\n\n${msg}`);
-    }
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('creating a return (no revision loaded)'))); return; }
+    if (!await w.ok('returns.create', {
+      local: () => createReturnOnPrimary(input),
+      remote: () => returnCreateBody(input, Number(fassung)),
+    })) return;
+    // Rechnung und Retouren frisch — paid_amount/Status nach der Erstattung.
+    loadInvoices();
+    loadSalesReturns();
+    setShowReturn(false);
   }
 
   async function handleRecordPayment() {
@@ -2115,10 +2094,11 @@ export function InvoiceDetail() {
             );
           })()}
 
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3">
             <Button variant="ghost" onClick={() => setShowReturn(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreateSalesReturn}
-              disabled={!Object.values(returnLines).some(r => r.include)}>Confirm Return &amp; Refund</Button>
+            <Button variant="primary" onClick={() => void handleCreateSalesReturn()} data-return-save
+              disabled={w.busy || !Object.values(returnLines).some(r => r.include)}>Confirm Return &amp; Refund</Button>
           </div>
         </div>
       </Modal>

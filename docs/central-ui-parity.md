@@ -1856,3 +1856,84 @@ Unit  r5e/order-purchase-parity 164/0 (nach der Prüfungsverschiebung neu gelauf
 Registry 107 · Matrix 33 / 0 / 5 / 2 · keine neue Buchung
 ```
 
+## R5F — Retoure anlegen, Kommission verkaufen und auszahlen (12.09.2026) · **BLOCKED (3 von 5 geschlossen)**
+
+### Befund
+
+- **Retoure anlegen:** die Maske („Return from Customer") schickt Zeile + Menge, Weg, eine von FÜNF Warenfolgen
+  (auch „Under Repair"; „Return to Owner"/„Keep" nur, wenn Kommissionsware zurückkommt), Grund, Notiz und den
+  Mitarbeiter. Bei „Refund jetzt zahlen" — und bei Store-Guthaben IMMER — lief danach, getrennt, `refundReturn`:
+  Genehmigung mit Gutschrift, Deckel auf den bar erstattbaren Überschuss, Auszahlung, Buchung. Der Fernbefehl
+  kannte weder Mitarbeiter noch „Under Repair" noch das sofortige Erstatten.
+- **Freigabe und Erstattung** (`approveReturn`, `refundReturn`) ruft die Maske nur an zwei Stellen: im Anlegen mit
+  Sofort-Erstattung (jetzt `returns.create`) und im **Rechnungsstorno** (`handleCancelInvoice`: Retoure + Freigabe +
+  Erstattung + Status `CANCELLED`, ohne Zahlung stattdessen die Bestandsfreigabe). Einen eigenen Knopf gibt es nicht.
+- **Kommissionsverkauf:** Detailseite (mit Nummerndialog, `specialMark` → Kreis der Rechnung) und Liste (ohne Dialog,
+  normaler Kreis). Einkauf beim Einlieferer, Rechnung, ggf. Verlust-Ausgabe, Status und Menge ohne Klammer.
+- **Auszahlung:** die Masken (Detail und Liste, „Pay Out (legacy)" nur ohne Rechnung) zahlten den OFFENEN Rest
+  (`markPaidOut`). Fern: nur ein Teilbetrag, still gedeckelt, eine andere Wegeliste — und auch MIT Rechnung, wo der
+  Einkauf beim Einlieferer die Schuld schon trägt (doppelte Auszahlung).
+- In allen drei Folgen wurde ein gescheiterter Buchungsposten abgefangen und nur protokolliert: die Handlung stand
+  ohne ihre Buchung.
+
+### Lösung — die Maske schickt Eingaben, EINE Folge rechnet
+
+- `core/returns/return-create` (rein: Listen der Maske, `returnCreateInput`, Rumpf) und `return-house`
+  (`createReturnInHouse`/`createReturnOnPrimary`): Preis und Steuer aus der Rechnungszeile, dann `createReturn` und
+  bei „sofort" `refundReturn` des Stores — in EINER Transaktion.
+- `core/consignment/consignment-finance` (rein: Wegeliste, offener Rest, Rümpfe) und `consignment-finance-house`
+  (`recordConsignmentSaleInHouse`, `payOutConsignmentInHouse`, je `…OnPrimary`): `recordSale` bzw.
+  `recordPartialPayout` des Stores, je EINE Transaktion. Detail UND Liste laufen darüber.
+- `postEntries` zählt Fehlschläge; `watchLedgerPosts` lässt jede der drei Folgen scheitern, wenn darin ein Posten
+  scheiterte — auch ein abgefangener. Die ganze Handlung fällt zurück.
+- Erweitert, nicht neu: `returns.create` (+ `staffId`, `refundNow`, „Under Repair"), `consignments.record_sale`
+  (+ `specialMark`), `consignments.record_payout` (Wege der Maske + `bank`, Regeln der Folge).
+
+### Verträge, die sich ändern
+
+| Punkt | vor R5F | R5F |
+|---|---|---|
+| Retoure + Sofort-Erstattung | zwei Schreibvorgänge | EINE Transaktion, fern EINE Buchung |
+| Retoure: Mitarbeiter | fern unbekannt | aktiv, diese Filiale (`EMPLOYEE_NOT_FOUND`) |
+| Retoure: Grund/Notiz fern | getrimmt | wie getippt |
+| Retoure: Rechnungsstatus | fern alles außer storniert | endgültig oder teilbezahlt (wie „Create Return") |
+| Retoure: „Return to Owner"/„Keep" | ohne Prüfung | nur mit Kommissionsware (`DISPOSITION_NOT_ALLOWED`) |
+| Retoure: dieselbe Zeile zweimal | umging den Mengendeckel | `INVALID_INPUT` |
+| Retoure: Zeile mit Menge 0 | wurde mitgeschrieben | zählt als nicht gewählt |
+| Verkauf: Nummernkreis fern | immer normal | Wahl des Nummerndialogs |
+| Verkauf / Auszahlung am Primary | ohne Klammer | EINE Transaktion |
+| Auszahlung mit Rechnung (fern) | zahlte zusätzlich zum Einkauf | `PAYOUT_VIA_PURCHASE` |
+| Auszahlung über dem offenen Rest | still gedeckelt | `PAYOUT_EXCEEDS_OPEN` |
+| Auszahlung am Primary | `markPaidOut` (setzt „paid") | dieselbe Folge: ein Teil bleibt „sold", erst null schließt |
+| Abgefangener Buchungsfehler | Handlung ohne Buchung | ganze Handlung zurück |
+
+### STOPP vor der Registry: `returns.approve` / `returns.refund`
+
+Ihr einziger eigener Einstieg ist der Rechnungsstorno. Er setzt den Status `CANCELLED`. Dazu gehören
+Ledger-Storno, Rückbuchung der Zahlungen, Guthaben-Sperren und die Entkopplung von Angebot und Auftrag. Keine der
+40 Buchungen setzt diesen Status (`invoices.update` ändert Zeilen mit Grund). Freigabe oder Erstattung allein
+wären ein Bruchteil des Vorgangs. Zu schließen ist das nur mit einer **neuen** Buchung (`invoices.cancel`), also nicht
+in R5F. Der Storno bleibt am Primary.
+
+Nebenbefund für diesen Schnitt: er verschluckt Fehler der Erstattung und storniert trotzdem, nimmt je Zeile 1 Stück
+und den Nettopreis. Ein weiterer, kleiner Befund aus dem Zwei-App-Lauf: „Create Return" setzt beim Öffnen den
+Mitarbeiter nicht zurück, eine zweite Retoure auf derselben Seite erbt den vorigen (auf beiden Rechnern gleich).
+Er ist nicht behoben. Ebenfalls ohne Fernbuchung und außerhalb der 40 bleiben „Post-Sale Return" und „Cancel Sale"
+der Kommission.
+
+### Test-Delta (alte Pins, bewusst geändert)
+
+- `lifecycle-actions`: der Nummernkreis ist eine Eingabe (vorher „kein Feld"); die Kette Verkauf-mit-Rechnung →
+  Auszahlung ist jetzt `PAYOUT_VIA_PURCHASE` (vorher zahlte sie doppelt); REUSE nennt die geteilte Folge.
+- `financial-actions`: mehr als offen ist ein Nein (vorher gedeckelt), der genaue Rest schließt.
+- `return-chain`: REUSE/SHARED zeigen auf die geteilte Folge statt auf Bridge bzw. Bildschirm.
+- `r4c1-role-parity` 36/0/2/2; die Matrix-Pins von R5D/R5E prüfen jetzt „fällt nicht zurück" statt eines festen Stands
+  (der R5D-Pin stand seit R5E still auf 30/0/8/2).
+
+```
+Unit  r5f/returns-consignment-parity 173/0 (lokal == fern, Fehlerinjektion an 11 Stellen × 2 Wege, Autorität)
+E2E   r5f-returns-consignment-finance 62/0 (Retoure später + sofort, Verkauf im Sonderkreis, Auszahlung des Rests, je Primary == PC2, drei verlorene Antworten, kein lokaler Schreibgriff)
+Nachbarn return-chain 77/0 · lifecycle-actions 203/0 · financial-actions 190/0 · c4-authorization 169/0 · r5e 164/0 + 70/0 · r5d 248/0 · Matrix-Gate 458/0 · Rollen 35/0
+Registry 107 · Matrix 36 / 0 / 2 / 2 · keine neue Buchung
+```
+

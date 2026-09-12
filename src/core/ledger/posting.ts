@@ -290,7 +290,31 @@ export function rollbackLedgerTransaction(): void {
   catch (err) { console.error('[ledger] rollbackLedgerTransaction failed:', err); }
 }
 
-export function postEntries(
+// CENTRAL-UI-PARITY R5F — gezählte Fehlschläge. Viele Wege fangen einen gescheiterten Post ab und
+// protokollieren ihn nur (Drift statt Abbruch). Eine Hausfolge, die EINE Handlung ganz oder gar
+// nicht ausführen muss, fragt diesen Zähler über `watchLedgerPosts` — und bricht dann ab.
+let postFailures = 0;
+
+export function postEntries(entries: LedgerEntryInput[], ctx: PostContext): PostingResult {
+  try {
+    return postEntriesOnce(entries, ctx);
+  } catch (err) {
+    postFailures++;
+    throw err;
+  }
+}
+
+/** Ein Wächter über eine Handlung: der Rückruf wirft, wenn darin eine Buchung scheiterte — auch eine abgefangene. */
+export function watchLedgerPosts(what: string): () => void {
+  const vorher = postFailures;
+  return () => {
+    if (postFailures !== vorher) {
+      throw new Error(`${what}: a ledger posting failed inside this action — the whole action is undone`);
+    }
+  };
+}
+
+function postEntriesOnce(
   entries: LedgerEntryInput[],
   ctx: PostContext
 ): PostingResult {

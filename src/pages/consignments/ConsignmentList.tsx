@@ -28,7 +28,11 @@ import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/mod
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
 import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
-import { useSharedWrites } from '@/core/data/shared-write';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import {
+  CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, consignmentSaleBody, payoutOpenAmount, type ConsignmentSaleInput,
+} from '@/core/consignment/consignment-finance';
+import { payOutConsignmentOnPrimary, recordConsignmentSaleOnPrimary } from '@/core/consignment/consignment-finance-house';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { createConsignmentOnPrimary, consignmentCreateRequest, type ConsignmentCreateInput } from '@/core/consignment/consignment-create';
@@ -49,7 +53,7 @@ export function ConsignmentList() {
   const navigate = useNavigate();
   const {
     consignments, loadConsignments,
-    recordSale, markPaidOut, markReturned,
+    markReturned,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories, isSkuTaken, findPossibleDuplicates } = useProductStore();
@@ -420,7 +424,7 @@ export function ConsignmentList() {
     return { ...empty, agreed, buyerIsConsignor };
   }, [soldModal, soldPrice, soldBuyerId, consignments]);
 
-  function handleRecordSale() {
+  async function handleRecordSale() {
     if (!soldModal || !soldPrice || !soldBuyerId) return;
     if (soldValidation.buyerIsConsignor) {
       alert('Buyer cannot be the same as the consignor. Use "Return" if the consignor is taking the item back.');
@@ -430,29 +434,47 @@ export function ConsignmentList() {
       alert('Please confirm the consignor-loss shortfall before saving.');
       return;
     }
-    try {
-      recordSale(soldModal, {
-        salePrice: Number(soldPrice),
-        buyerId: soldBuyerId,
-        saleDate: soldDate || new Date().toISOString().split('T')[0],
-        notes: soldNotes || undefined,
-        acknowledgeShortfall: soldAckShortfall,
-      });
-      // Modal schließen + Form reset
-      setSoldModal(null);
-      setSoldPrice('');
-      setSoldBuyerId('');
-      setSoldDate('');
-      setSoldNotes('');
-      setSoldAckShortfall(false);
-    } catch (e) {
-      alert(`Sale failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    const cid = soldModal;
+    const fassung = consignments.find(c => c.id === cid)?.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('recording this sale (no revision loaded)'))); return; }
+    // CENTRAL-UI-PARITY R5F — dieselbe Folge wie auf der Detailseite; die Liste fragt keinen
+    // Nummernkreis (der normale Kreis, wie bisher).
+    const input: ConsignmentSaleInput = {
+      salePrice: Number(soldPrice),
+      buyerId: soldBuyerId,
+      saleDate: soldDate || new Date().toISOString().split('T')[0],
+      notes: soldNotes || undefined,
+      acknowledgeShortfall: soldAckShortfall,
+      specialMark: false,
+    };
+    if (!await w.ok('consignments.record_sale', {
+      local: () => recordConsignmentSaleOnPrimary(cid, input),
+      remote: () => consignmentSaleBody(cid, Number(fassung), input),
+    })) return;
+    loadConsignments();
+    // Modal schließen + Form reset
+    setSoldModal(null);
+    setSoldPrice('');
+    setSoldBuyerId('');
+    setSoldDate('');
+    setSoldNotes('');
+    setSoldAckShortfall(false);
   }
 
-  function handleMarkPaid() {
+  async function handleMarkPaid() {
     if (!paidModal) return;
-    markPaidOut(paidModal, paidMethod, paidRef || undefined);
+    const cid = paidModal;
+    const con = consignments.find(c => c.id === cid);
+    if (!con) return;
+    const fassung = con.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('paying out this consignment (no revision loaded)'))); return; }
+    // R5F — der offene Rest, den die Liste gesehen hat; die Regeln stehen in der Hausfolge.
+    const input = { amount: payoutOpenAmount(con), method: paidMethod, reference: paidRef || undefined };
+    if (!await w.ok('consignments.record_payout', {
+      local: () => payOutConsignmentOnPrimary(cid, input),
+      remote: () => consignmentPayoutBody(cid, Number(fassung), input),
+    })) return;
+    loadConsignments();
     setPaidModal(null);
     setPaidMethod('bank_transfer');
     setPaidRef('');
@@ -1352,8 +1374,9 @@ export function ConsignmentList() {
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setSoldModal(null); setSoldAckShortfall(false); }}>Cancel</Button>
-            <Button variant="primary" onClick={handleRecordSale}
+            <Button variant="primary" onClick={() => void handleRecordSale()} data-consignment-sale
               disabled={
+                w.busy ||
                 !soldPrice ||
                 !soldBuyerId ||
                 soldValidation.buyerIsConsignor ||
@@ -1415,7 +1438,7 @@ export function ConsignmentList() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>PAYMENT METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {['bank_transfer', 'cash', 'card', 'benefit'].map(m => (
+              {CONSIGNMENT_PAYOUT_METHODS.map(m => (
                 <button key={m} onClick={() => setPaidMethod(m)}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
@@ -1430,9 +1453,10 @@ export function ConsignmentList() {
           <Input label="REFERENCE" placeholder="Optional reference..."
             value={paidRef}
             onChange={e => setPaidRef(e.target.value)} />
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setPaidModal(null)}>Cancel</Button>
-            <Button variant="primary" onClick={handleMarkPaid}>Confirm Payout</Button>
+            <Button variant="primary" onClick={() => void handleMarkPaid()} disabled={w.busy} data-consignment-payout>Confirm Payout</Button>
           </div>
         </div>
       </Modal>

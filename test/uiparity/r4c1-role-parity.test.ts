@@ -193,7 +193,8 @@ const SALES = { sub: 'user-staff', tenant_id: 'tenant-1', branch_id: 'branch-mai
   // R5C die drei Reparaturhandlungen anlegen, aendern, abrechnen (27/0/11/2) — ebenso.
   // R5D die drei Transferhandlungen anlegen, umwandeln, gesammelt umwandeln (30/0/8/2) — ebenso.
   // R5E Auftrag anlegen/aendern und Einkauf anlegen (33/0/5/2) — ebenso.
-  ok(verdrahtet === 33 && offen === 0 && luecken === 5 && ohneUi === 2,
+  // R5F Retoure anlegen, Kommissionsverkauf und -auszahlung (36/0/2/2) — ebenso.
+  ok(verdrahtet === 36 && offen === 0 && luecken === 2 && ohneUi === 2,
     `8 die Matrix ist unveraendert (${verdrahtet}/${offen}/${luecken}/${ohneUi})`);
   const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/
     .exec(src('src/core/bridge/command-registry.ts'))?.[1] ?? '').matchAll(/'([^']+)'/g)].length;

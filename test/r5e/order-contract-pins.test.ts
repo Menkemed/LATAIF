@@ -426,8 +426,10 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
   ok(!/suppliers\.create/.test(rust) && rustOps === 107, `GAP die Registry kennt sie nicht und bleibt bei 107 (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
-  ok(!R4C_MATRIX.some((z) => z.op.startsWith('suppliers.')) && S(stand) === S([33, 0, 5, 2]),
-    `GAP die Matrix zaehlt sie nicht mit (${stand.join('/')})`);
+  // R5F schliesst weitere Zeilen — die Matrix bleibt bei 40, ohne offene „exakt"-Zeile und ohne Lieferanten.
+  ok(!R4C_MATRIX.some((z) => z.op.startsWith('suppliers.')) && stand[0] >= 33 && stand[1] === 0 && stand[3] === 2
+    && stand[0] + stand[1] + stand[2] + stand[3] === 40,
+  `GAP die Matrix zaehlt sie nicht mit (${stand.join('/')})`);
   const pc = codeOf(src('src/pages/purchases/PurchaseCreate.tsx'));
   ok(/function handleCreateSupplier\(\)[\s\S]{0,300}createSupplier\(newSupplierForm\)/.test(pc) && !/'suppliers\./.test(pc),
     'GAP „+ New Supplier" legt am Primary lokal an — einen Fernweg gibt es nicht');

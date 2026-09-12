@@ -27,6 +27,10 @@ import { getProductSpecs } from '@/core/utils/product-format';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
 import { PAYOUT_MODELS, payoutModelLock, payoutFieldsFor, normalizePayoutModel, bookedCommissionInput, HISTORICAL_MARGIN_LABEL } from '@/core/consignment/payout-edit';
+import {
+  CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, consignmentSaleBody, payoutOpenAmount, type ConsignmentSaleInput,
+} from '@/core/consignment/consignment-finance';
+import { payOutConsignmentOnPrimary, recordConsignmentSaleOnPrimary } from '@/core/consignment/consignment-finance-house';
 
 function daysUntil(dateStr: string): number {
   const now = new Date();
@@ -42,7 +46,7 @@ export function ConsignmentDetail() {
   const goBack = useGoBack('/consignments');
   const {
     consignments, loadConsignments, updateConsignment, updateConsignmentPayoutModel,
-    recordSale, cancelSale, markPaidOut, markReturned, markReturnedAfterSale, deleteConsignment,
+    cancelSale, markReturned, markReturnedAfterSale, deleteConsignment,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -248,28 +252,47 @@ export function ConsignmentDetail() {
     setNumberDialogOpen(true);
   }
 
-  function executeRecordSale(specialMark: boolean) {
-    if (!id) return;
-    try {
-      recordSale(id, {
-        salePrice: Number(soldPrice),
-        buyerId: soldBuyer,
-        saleDate: soldDate || new Date().toISOString().split('T')[0],
-        notes: soldNotes || undefined,
-        acknowledgeShortfall: soldAck,
-        specialMark,
-      });
-      setNumberDialogOpen(false);
-      setSoldModal(false);
-      setSoldPrice(''); setSoldBuyer(''); setSoldDate(''); setSoldNotes(''); setSoldAck(false);
-    } catch (e) {
-      alert(`Sale failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  async function executeRecordSale(specialMark: boolean) {
+    if (!id || !consignment) return;
+    setNumberDialogOpen(false);
+    const fassung = consignment.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('recording this sale (no revision loaded)'))); return; }
+    // CENTRAL-UI-PARITY R5F — die Eingaben der Maske samt Wahl im Nummerndialog. Einkauf beim
+    // Einlieferer, Rechnung im gewählten Kreis, Verlust, Status und Menge schreibt das Haus in EINER
+    // Klammer — am Primary wie fern.
+    const input: ConsignmentSaleInput = {
+      salePrice: Number(soldPrice),
+      buyerId: soldBuyer,
+      saleDate: soldDate || new Date().toISOString().split('T')[0],
+      notes: soldNotes || undefined,
+      acknowledgeShortfall: soldAck,
+      specialMark,
+    };
+    if (!await w.ok('consignments.record_sale', {
+      local: () => recordConsignmentSaleOnPrimary(id, input),
+      remote: () => consignmentSaleBody(id, Number(fassung), input),
+    })) return;
+    loadConsignments();
+    loadInvoices();
+    loadPurchases();
+    loadExpenses();
+    loadProducts();
+    setSoldModal(false);
+    setSoldPrice(''); setSoldBuyer(''); setSoldDate(''); setSoldNotes(''); setSoldAck(false);
   }
 
-  function handleMarkPaid() {
-    if (!id) return;
-    markPaidOut(id, paidMethod, paidRef || undefined);
+  async function handleMarkPaid() {
+    if (!id || !consignment) return;
+    const fassung = consignment.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('paying out this consignment (no revision loaded)'))); return; }
+    // R5F — die Maske zahlt den offenen Rest, den sie gesehen hat. Status, Rest und Buchung schreibt
+    // das Haus: nur ohne Rechnung, nie mehr als offen, erst der Rest auf null schliesst.
+    const input = { amount: payoutOpenAmount(consignment), method: paidMethod, reference: paidRef || undefined };
+    if (!await w.ok('consignments.record_payout', {
+      local: () => payOutConsignmentOnPrimary(id, input),
+      remote: () => consignmentPayoutBody(id, Number(fassung), input),
+    })) return;
+    loadConsignments();
     setPaidModal(false);
     setPaidMethod('bank_transfer');
     setPaidRef('');
@@ -872,10 +895,11 @@ export function ConsignmentDetail() {
           }}>
             On save: <strong>Auto-Invoice</strong> for buyer · <strong>Auto-Purchase</strong> for consignor (as supplier).
           </div>
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setSoldModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleRecordSale}
-              disabled={!soldPrice || !soldBuyer || buyerIsConsignor || (saleNeedsAck && !soldAck)}
+            <Button variant="primary" onClick={handleRecordSale} data-consignment-sale
+              disabled={w.busy || !soldPrice || !soldBuyer || buyerIsConsignor || (saleNeedsAck && !soldAck)}
             >Confirm Sale</Button>
           </div>
         </div>
@@ -906,7 +930,7 @@ export function ConsignmentDetail() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>PAYMENT METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {['bank_transfer', 'cash', 'card', 'benefit'].map(m => (
+              {CONSIGNMENT_PAYOUT_METHODS.map(m => (
                 <button key={m} onClick={() => setPaidMethod(m)}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
@@ -921,9 +945,10 @@ export function ConsignmentDetail() {
           <Input label="REFERENCE" placeholder="Optional reference..."
             value={paidRef}
             onChange={e => setPaidRef(e.target.value)} />
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setPaidModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleMarkPaid}>Confirm Payout</Button>
+            <Button variant="primary" onClick={() => void handleMarkPaid()} disabled={w.busy} data-consignment-payout>Confirm Payout</Button>
           </div>
         </div>
       </Modal>

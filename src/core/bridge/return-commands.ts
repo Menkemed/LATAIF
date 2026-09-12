@@ -27,7 +27,11 @@
 //     täte keine der drei irgendetwas — still.
 
 import { query } from '@/core/db/helpers';
-import { returnLineAmounts } from '@/core/returns/return-lines';
+import {
+  RETURN_DISPOSITIONS, RETURN_REFUND_METHODS, ReturnActionRejected, type ReturnRefundMethod,
+} from '@/core/returns/return-create';
+import { createReturnInHouse } from '@/core/returns/return-house';
+import type { ProductDisposition } from '@/core/models/types';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
@@ -38,7 +42,7 @@ import type { CommandIdentity } from './command-ledger';
 import { registerCommand, type CommandActor } from './command-registry';
 import {
   FinancialPayloadError, assertRevision, execFinancial, expectedRevisionOf, financialDeps,
-  invoiceState, isPlain, liveInvoice, onlyKnownFields, optString, positive, reqString,
+  invoiceState, isPlain, liveInvoice, onlyKnownFields, optString, optText, positive, reqString,
 } from './financial-commands';
 
 export const OP_RETURNS_CREATE = 'returns.create';
@@ -51,13 +55,10 @@ export const C3H_RETURN_MUTATIONS = [
   OP_RETURNS_CREATE, OP_RETURNS_APPROVE, OP_RETURNS_REFUND, OP_RETURNS_RECORD_REFUND_PAYMENT,
 ] as const;
 
-/**
- * Die Art, wie die Ware weiterbehandelt wird. Vier Werte, und alle vier haben eine andere
- * buchhalterische Folge — deshalb eine feste Liste und kein freier Text.
- */
-const DISPOSITIONS = ['IN_STOCK', 'KEEP_AS_OWN', 'WRITE_OFF', 'RETURN_TO_OWNER'] as const;
-/** Wie erstattet wird. `credit` erzeugt Guthaben statt Bargeld — es steht bewusst mit drin. */
-const REFUND_METHODS = ['cash', 'bank', 'benefit', 'card', 'credit', 'other'] as const;
+// R5F — Warenfolgen und Erstattungswege stehen EINMAL, in `core/returns/return-create` (die Listen
+// der Maske): fünf Warenfolgen (auch „Under Repair"), sechs Wege (`credit` = Store-Guthaben).
+const DISPOSITIONS: readonly ProductDisposition[] = RETURN_DISPOSITIONS;
+const REFUND_METHODS = RETURN_REFUND_METHODS;
 
 // ── Der Zustand einer Rückgabe, wie ihn auch der Lesebefehl zeigt ─────────
 
@@ -105,15 +106,17 @@ export interface CreateReturnRequest {
   invoiceId: string;
   expectedRevision: number;
   lines: Array<{ invoiceLineId: string; quantity: number }>;
-  refundMethod?: typeof REFUND_METHODS[number];
-  productDisposition?: typeof DISPOSITIONS[number];
+  refundMethod?: ReturnRefundMethod;
+  productDisposition?: ProductDisposition;
   reason?: string;
   notes?: string;
+  staffId?: string;
+  refundNow: boolean;
 }
 
 export function parseCreateReturn(raw: unknown): CreateReturnRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['invoiceId', 'expectedRevision', 'lines', 'refundMethod', 'productDisposition', 'reason', 'notes']);
+  onlyKnownFields(raw, ['invoiceId', 'expectedRevision', 'lines', 'refundMethod', 'productDisposition', 'reason', 'notes', 'staffId', 'refundNow']);
   if (!Array.isArray(raw.lines) || raw.lines.length === 0) {
     throw new FinancialPayloadError('a return needs at least one line');
   }
@@ -130,6 +133,7 @@ export function parseCreateReturn(raw: unknown): CreateReturnRequest {
     invoiceId: reqString(raw.invoiceId, 'invoiceId'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
     lines,
+    refundNow: false,
   };
   if (raw.refundMethod !== undefined) {
     const m = String(raw.refundMethod);
@@ -145,22 +149,32 @@ export function parseCreateReturn(raw: unknown): CreateReturnRequest {
     }
     out.productDisposition = d as CreateReturnRequest['productDisposition'];
   }
-  out.reason = optString(raw.reason, 'reason');
-  out.notes = optString(raw.notes, 'notes');
+  // R5F — Grund und Notiz WIE getippt (die Maske trimmt nicht); Mitarbeiter und „sofort erstatten"
+  // sind Eingaben der Maske. Ob der Mitarbeiter aktiv ist und was „sofort" auszahlt, sagt das Haus.
+  out.reason = optText(raw.reason, 'reason');
+  out.notes = optText(raw.notes, 'notes');
+  out.staffId = optString(raw.staffId, 'staffId');
+  if (raw.refundNow !== undefined && typeof raw.refundNow !== 'boolean') {
+    throw new FinancialPayloadError('refundNow is yes or no');
+  }
+  out.refundNow = raw.refundNow === true;
   return out;
 }
-
-/** Die Urteile, die `createReturn` wirklich fällt — als Liste, nicht als „klingt fachlich". */
-const CREATE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/exceeds remaining/i, 'RETURN_QUANTITY_EXCEEDED'],
-  [/at least one line/i, 'RETURN_NO_LINES'],
-  [/non-negative|must be non-negative/i, 'RETURN_INVALID_QUANTITY'],
-];
 
 function asVerdict(err: unknown, table: ReadonlyArray<readonly [RegExp, string]>): CommandRejected | null {
   const msg = err instanceof Error ? err.message : String(err);
   for (const [pattern, code] of table) if (pattern.test(msg)) return new CommandRejected(code, msg);
   return null;
+}
+
+/** Ein Nein der geteilten Regeln wird ein eingefrorenes Urteil; alles andere bleibt eine Störung. */
+function urteil<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof ReturnActionRejected) throw new CommandRejected(e.code, e.message);
+    throw e;
+  }
 }
 
 export function runCreateReturn(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
@@ -172,49 +186,23 @@ export function runCreateReturn(deps: EngineDeps, identity: CommandIdentity, raw
     // sich darunter etwas bewegt hat.
     assertRevision('invoices', req.invoiceId, req.expectedRevision, 'INVOICE_NOT_FOUND');
 
-    // Preis und Steuer aus der RECHNUNG, nicht aus dem Rumpf.
-    const lines = req.lines.map((l) => {
-      const src = query(
-        'SELECT id, product_id, quantity, line_total, vat_amount FROM invoice_lines WHERE id = ? AND invoice_id = ?',
-        [l.invoiceLineId, req.invoiceId],
-      )[0];
-      if (!src) {
-        throw new CommandRejected('RETURN_LINE_NOT_ON_INVOICE',
-          'one of these lines does not belong to this invoice');
-      }
-      const amounts = returnLineAmounts(
-        { quantity: Number(src.quantity ?? 1), lineTotal: Number(src.line_total ?? 0), vatAmount: Number(src.vat_amount ?? 0) },
-        l.quantity,
-      );
-      return {
-        invoiceLineId: l.invoiceLineId,
-        productId: String(src.product_id ?? '') || undefined,
-        quantity: amounts.quantity,
-        unitPrice: amounts.unitPrice,
-        vatAmount: amounts.vatAmount,
-      };
-    });
-
-    useSalesReturnStore.getState().loadReturns();
-    let created: { id: string };
-    try {
-      created = useSalesReturnStore.getState().createReturn({
-        invoiceId: req.invoiceId,
-        refundMethod: req.refundMethod,
-        productDisposition: req.productDisposition ?? 'IN_STOCK',
-        reason: req.reason,
-        notes: req.notes,
-        lines,
-      });
-    } catch (err) {
-      const verdict = asVerdict(err, CREATE_VERDICTS);
-      if (verdict) throw verdict;
-      throw err;
-    }
+    // R5F — dieselbe Folge wie „Confirm Return & Refund" am Primary (`return-house`): Preis und
+    // Steuer aus der RECHNUNG, Mengendeckel, Warenfolge — und bei „sofort" die Erstattung mit
+    // Gutschrift und Buchung, in DIESER Transaktion.
+    const made = urteil(() => createReturnInHouse({
+      invoiceId: req.invoiceId,
+      lines: req.lines,
+      refundMethod: req.refundMethod,
+      productDisposition: req.productDisposition ?? 'IN_STOCK',
+      reason: req.reason,
+      notes: req.notes,
+      staffId: req.staffId,
+      refundNow: req.refundNow,
+    }, identity.branchId));
     useInvoiceStore.getState().loadInvoices();
     useProductStore.getState().loadProducts();
     return {
-      ...returnState(created.id),
+      ...returnState(made.returnId),
       invoiceRevision: Number(query('SELECT revision FROM invoices WHERE id = ?', [req.invoiceId])[0]?.revision ?? 0),
     };
   });

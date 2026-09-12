@@ -177,15 +177,20 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
 {
   const mine = codeOf('src/core/bridge/return-commands.ts');
   ok((mine.match(/runRemoteCommand\(/g) ?? []).length === 4, 'TX alle vier laufen durch die eine Maschine');
-  for (const fn of ['createReturn(', 'approveReturn(', 'refundReturn(', 'recordRefundPayment(']) {
+  // R5F — das Anlegen laeuft ueber die geteilte Hausfolge (`return-house`), die Maske und Fernweg
+  // gemeinsam rufen; sie ruft `createReturn` (und bei „sofort" `refundReturn`) des Stores.
+  const haus = codeOf('src/core/returns/return-house.ts');
+  ok(/createReturnInHouse\(/.test(mine) && /\.createReturn\(/.test(haus), 'REUSE der Fernweg ruft createReturn des Hauses (ueber die geteilte Folge)');
+  for (const fn of ['approveReturn(', 'refundReturn(', 'recordRefundPayment(']) {
     ok(mine.includes(`useSalesReturnStore.getState().${fn}`), `REUSE der Fernweg ruft ${fn.slice(0, -1)} des Hauses`);
   }
+  ok(!/INSERT INTO|UPDATE \w+ SET|getNextDocumentNumber/i.test(haus), 'REUSE …und die Folge schreibt nichts selbst');
   ok(!/INSERT INTO (sales_returns|sales_return_lines|credit_notes|customer_credits|ledger_entries)/i.test(mine),
     'REUSE der Fernweg legt keine Rueckgabe, keine Gutschrift und keine Buchung selbst an');
   ok(!/UPDATE (invoices|sales_returns|credit_notes|products|stock_lots) SET/i.test(mine),
     'REUSE …und schreibt keine Wirkung selbst');
   ok(!/getNextDocumentNumber/.test(mine), 'REUSE die Rueckgabenummer vergibt das Haus');
-  ok(/returnLineAmounts\(/.test(mine), 'REUSE Preis und Steuer aus der GETEILTEN Ableitung');
+  ok(/returnLineAmounts\(/.test(haus), 'REUSE Preis und Steuer aus der GETEILTEN Ableitung (in der geteilten Folge)');
   // Der Preis ist kein Feld — das ist eine Aussage ueber den Vertrag, also am Vertrag geprueft.
   const parsed = ret.parseCreateReturn({
     invoiceId: 'i', expectedRevision: 1, lines: [{ invoiceLineId: 'l', quantity: 1 }],
@@ -212,8 +217,10 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
   ok(Math.abs(a.vatAmount - 10) < 0.0001, 'SHARED die Steuer ist anteilig (10 von 20)');
   ok(Math.abs(grossUnitPrice({ quantity: 2, lineTotal: 220 }) - 110) < 0.0001, 'SHARED …und dieselbe Zahl schlaegt die Maske vor');
   // Sie steht in EINER Datei, und der Bildschirm des Primary benutzt sie.
-  ok(/returnLineAmounts\(/.test(codeOf('src/pages/invoices/InvoiceDetail.tsx')),
-    'SHARED der Bildschirm des Primary rechnet mit derselben Funktion');
+  // R5F — der Bildschirm rechnet nicht mehr selbst: er geht ueber dieselbe Folge wie der Fernweg.
+  ok(/createReturnOnPrimary\(/.test(codeOf('src/pages/invoices/InvoiceDetail.tsx'))
+    && /returnLineAmounts\(/.test(codeOf('src/core/returns/return-house.ts')),
+  'SHARED der Bildschirm des Primary geht ueber dieselbe Folge — sie rechnet mit derselben Funktion');
 }
 
 // ── 2) Anlegen: Wirkung vollstaendig ─────────────────────────────────────

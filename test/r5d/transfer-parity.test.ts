@@ -277,9 +277,11 @@ async function verkaufterTransfer(db: Db, nth: string, customerId: string, produ
     ok(!!z && z.paritaet === 'exakt' && z.verdrahtet && z.luecke === null, `SCOPE ${op} ist geschlossen`);
     ok(ALLOWED_MUTATIONS.includes(op), `SCOPE ${op} ist eine VORHANDENE Buchung`);
   }
+  // R5E/R5F schliessen weitere Zeilen — gepinnt wird, dass kein Transfer zurueckfaellt und nur aus
+  // dem R5D-Rest weiter geschlossen wird.
   const nochB = R4C_MATRIX.filter((z) => z.luecke === 'B').map((z) => z.op).sort();
-  ok(S(nochB) === S(vorher.filter((op) => !op.startsWith('transfers.')).sort()),
-    `SCOPE die uebrigen acht Klasse-B-Zeilen sind unberuehrt (${nochB.join(', ')})`);
+  ok(nochB.every((op) => vorher.includes(op) && !op.startsWith('transfers.')),
+    `SCOPE die uebrigen Klasse-B-Zeilen stammen aus dem R5D-Rest (${nochB.join(', ')})`);
   ok(ALLOWED_MUTATIONS.length === 40, `SCOPE keine neue Buchung (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
@@ -291,7 +293,8 @@ async function verkaufterTransfer(db: Db, nth: string, customerId: string, produ
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
-  ok(S(stand) === S([30, 0, 8, 2]), `SCOPE die Matrix steht bei 30/0/8/2 (${stand.join('/')})`);
+  ok(stand[0] >= 30 && stand[1] === 0 && stand[3] === 2 && stand[0] + stand[2] + stand[3] === 40,
+    `SCOPE die Matrix faellt nicht hinter 30/0/8/2 zurueck (${stand.join('/')})`);
 }
 
 // ── §2 Anlegen: dieselbe Zeile auf beiden Wegen ──────────────────────────

@@ -239,7 +239,8 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   ok((mine.match(/runRemoteCommand\(/g) ?? []).length === 12, 'TX alle zwoelf laufen durch die eine Maschine');
   for (const call of [
     'os.updateStatus(', 'ops.addPayment(', 'ops.deletePayment(',
-    'useConsignmentStore.getState().recordSale(', 'useConsignmentStore.getState().markReturned(',
+    // R5F — der Verkauf laeuft ueber die GETEILTE Folge (sie ruft `recordSale` des Stores).
+    'recordConsignmentSaleInHouse(', 'useConsignmentStore.getState().markReturned(',
     'rs.updateStatus(', 'rs.createCombinedRepairInvoice(', 'rs.addRepairLine(',
     'rs.updateRepairLine(', 'rs.cancelRepairLine(',
     // R5D — die Umwandlungen laufen über die GETEILTE Folge, die auch die Masken des Primary rufen.
@@ -301,10 +302,13 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   try { life.parseUpdateRepairStatus({ repairId: 'r', status: 'cancelled', expectedRevision: 1 }); }
   catch (e) { repairCancelBlocked = /deletes records/.test(String(e)); }
   ok(repairCancelBlocked, 'PAYLOAD …und eine Reparatur ebenso wenig');
+  // R5F — die Wahl im Nummerndialog von „Record Sale" ist jetzt eine Eingabe des Fernverkaufs (sie
+  // waehlt den Kreis der Rechnung, wie am Primary); ein anderer Wert als ja/nein bleibt ein Nein.
+  const mitMarke = life.parseRecordSale({ consignmentId: 'c', buyerId: 'b', salePrice: 1, expectedRevision: 1, specialMark: true });
   let markBlocked = false;
-  try { life.parseRecordSale({ consignmentId: 'c', buyerId: 'b', salePrice: 1, expectedRevision: 1, specialMark: true }); }
-  catch (e) { markBlocked = /unknown field: specialMark/.test(String(e)); }
-  ok(markBlocked, 'PAYLOAD der Nummernkreis (Sondermarke) ist KEIN Feld des Fernverkaufs');
+  try { life.parseRecordSale({ consignmentId: 'c', buyerId: 'b', salePrice: 1, expectedRevision: 1, specialMark: 'ja' }); }
+  catch (e) { markBlocked = /specialMark is yes or no/.test(String(e)); }
+  ok(mitMarke.specialMark === true && markBlocked, 'PAYLOAD R5F der Nummernkreis ist eine Eingabe des Verkaufs — ja oder nein, nichts sonst');
   let statusFieldBlocked = false;
   try { life.parseUpdateRepairLine({ repairId: 'r', lineId: 'l', expectedRevision: 1, status: 'CANCELLED' }); }
   catch (e) { statusFieldBlocked = /unknown field: status/.test(String(e)); }
@@ -458,11 +462,15 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
     'SALE der Fernverkauf hat KEINE Sondermarke gesetzt — regulaerer Nummernkreis');
 
   // Und JETZT geht die bereits in C3G freigegebene Auszahlung — ohne Zwischenschritt am Primary.
+  // R5F — mit Rechnung traegt der EINKAUF beim Einlieferer die Schuld (die Maske bietet „Pay Out"
+  // nur ohne Rechnung an). Eine Auszahlung hier zahlte ihn ein zweites Mal — sie ist ein Nein.
   const payout = await fin.runRecordPayout(d, identity('4', 'consignments.record_payout'),
     { consignmentId: cid, amount: 400, method: 'cash', expectedRevision: crev(db, cid) });
-  ok(payout.kind === 'ok', 'CHAIN nach dem Verkauf laeuft die Auszahlung aus C3G');
-  ok(n(db, 'SELECT payout_paid_amount FROM consignments WHERE id = ?', [cid]) === 400,
-    'CHAIN …und der Einlieferer hat sein Geld');
+  ok(payout.kind === 'rejected' && (payout as { code?: string }).code === 'PAYOUT_VIA_PURCHASE',
+    `CHAIN R5F nach einem Verkauf mit Rechnung wird die Kommission nicht zusaetzlich ausgezahlt (${JSON.stringify(payout).slice(0, 120)})`);
+  ok(n(db, 'SELECT payout_paid_amount FROM consignments WHERE id = ?', [cid]) === 0
+    && n(db, 'SELECT COUNT(*) FROM purchases WHERE total_amount = 400') === 1,
+  'CHAIN …der Einlieferer bekommt seine 400 ueber den Einkauf');
 
   // Zweimal verkaufen geht nicht.
   const twice = await life.runRecordSale(d, identity('5', 'consignments.record_sale'),

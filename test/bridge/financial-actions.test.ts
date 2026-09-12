@@ -503,13 +503,19 @@ const CONSIGN = {
   ok(n(db, 'SELECT payout_paid_amount FROM consignments WHERE id = ?', [cid]) === 100,
     'PAYOUT-RETRY es wurde nicht zweimal ausgezahlt');
 
-  // Der Rest, und danach ein Nein.
+  // Der Rest, und danach ein Nein. R5F: mehr als offen ist ein Nein (vorher still gedeckelt) — die
+  // Maske schickt genau den offenen Rest, den sie gesehen hat.
   const r2 = n(db, 'SELECT revision FROM consignments WHERE id = ?', [cid]);
-  const rest = await fin.runRecordPayout(d, identity('53', 'consignments.record_payout'),
+  const zuViel = await fin.runRecordPayout(d, identity('55', 'consignments.record_payout'),
     { consignmentId: cid, amount: target, method: 'bank', expectedRevision: r2 });
+  ok(zuViel.kind === 'rejected' && code(zuViel) === 'PAYOUT_EXCEEDS_OPEN'
+    && n(db, 'SELECT payout_paid_amount FROM consignments WHERE id = ?', [cid]) === 100,
+  `PAYOUT R5F mehr als offen ist ein Nein — nichts wird ausgezahlt (${JSON.stringify(zuViel)})`);
+  const rest = await fin.runRecordPayout(d, identity('53', 'consignments.record_payout'),
+    { consignmentId: cid, amount: target - 100, method: 'bank', expectedRevision: r2 });
   ok(rest.kind === 'ok', `PAYOUT der Rest geht (${JSON.stringify(rest)})`);
   ok(n(db, 'SELECT payout_paid_amount FROM consignments WHERE id = ?', [cid]) === target,
-    'PAYOUT …und das Haus deckelt auf den Auszahlungsbetrag — kein Cent mehr');
+    'PAYOUT …genau bis zum Auszahlungsbetrag — kein Cent mehr');
   ok(s(db, 'SELECT payout_status FROM consignments WHERE id = ?', [cid]) === 'paid', 'PAYOUT der Stand ist „paid"');
   const r3 = n(db, 'SELECT revision FROM consignments WHERE id = ?', [cid]);
   const over = await fin.runRecordPayout(d, identity('54', 'consignments.record_payout'),
