@@ -1620,16 +1620,12 @@ Registry 107 · Matrix 24 / 0 / 14 / 2
 
 ### R5C FINAL — die Verträge des Primary, einzeln geprüft
 
-**Abrechenbar — OFFEN, Geschäftsentscheidung.** Vor R5C galten drei Regeln nebeneinander:
-
-| Weg | sichtbar | erzeugt wirklich |
-|---|---|---|
-| Store, Listenauswahl, Fernbefehl (C3H-Test „GATE") | Auswahl nur bei „fertig" | nur „fertig" |
-| Kürzel je Listenzeile (seit 6e8048b) | „fertig" oder „abgeholt" (Kommentar: nach Abholung fakturierbar) | nur „fertig" — bei „abgeholt" Fehlermeldung des Stores |
-| Detailseite (seit dem Initial-Commit) | ohne Statusprüfung | in JEDEM Status (auch empfangen, in Arbeit, zurückgegeben) |
-
-R5C hat daraus EINE Regel „fertig oder abgeholt" gemacht. Das ist keine bestehende Regel des Hauses, sondern
-eine Entscheidung — sie ist nicht still übernommen: bis sie getroffen ist, wird R5C nicht gepusht.
+**Abrechenbar — entschieden (12.09.2026):** abrechenbar ist eine Reparatur, wenn sie **fertig** (`ready`/`READY`) oder
+**abgeholt** (`picked_up`/`DELIVERED`) ist; alle übrigen Bedingungen bleiben (nicht schon fakturiert, keine eigene Ware, ein
+Preis, ein Kunde). Nicht abrechenbar: empfangen, in Arbeit, zurückgegeben und jeder andere offene Status. Die EINE Liste
+`REPAIR_INVOICEABLE_STATUSES` in `repair-rules` entscheidet für Listenauswahl, Kürzel, Detailknopf, Hausfunktion und
+Fernbefehl. Vor R5C galten drei Regeln (Store/Auswahl/Fernbefehl nur fertig; Kürzel sichtbar auch bei abgeholt, dort
+aber abgelehnt; Detailseite ohne Statusprüfung).
 
 **Rechnungsvermerk — wieder wie vor R5C, je Handlung:** Detailseite (Einzelrechnung über die Dialoge)
 `Repair Service · Nr · Problem`; Liste — Auswahl UND Kürzel, beide ohne Dialog, das Kürzel rief schon immer die
@@ -1659,8 +1655,9 @@ Arbeitszeile), eine CHECK-Regel gibt es nicht, einen negativen Fachfall auch nic
 sind keine Beträge und bleiben ungeprüft.
 
 ```
-Unit  r5c/repair-parity 248/0 (lokal == fern inkl. Buchungen, Fehlerinjektion, Autorität, die vier Verträge)
+Unit  r5c/repair-parity 286/0 (lokal == fern inkl. Buchungen, Fehlerinjektion, Autorität, die vier Verträge)
 E2E   r5c-repair-parity 117/0 (dazu Umschalten in der Maske und Karte → Bar → Karte, Primary == PC2)
+E2E   r5c-billable 27/0 (fertig und abgeholt abgerechnet, empfangen/in Arbeit/zurückgegeben nicht angeboten, Primary == PC2)
 Registry 107 · Matrix 27 / 0 / 11 / 2
 ```
 

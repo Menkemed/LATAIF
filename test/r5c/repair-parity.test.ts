@@ -856,6 +856,75 @@ for (const weg of ['fern', 'lokal'] as const) {
   ok(!!merkmal.id, 'AMOUNT ein Zahlenmerkmal der Kategorie faellt nicht unter die Betragsregel');
 }
 
+// ══ R5C BILLABLE — verbindlich (12.09.2026): abrechenbar ist „fertig" ODER „abgeholt" ══════
+// Alle übrigen Bedingungen bleiben: nicht schon fakturiert, keine eigene Ware, ein Preis, ein Kunde.
+{
+  const erlaubt = ['ready', 'READY', 'picked_up', 'DELIVERED'];
+  const verboten = ['received', 'diagnosed', 'in_progress', 'sent_to_workshop', 'returned', 'cancelled',
+    'RECEIVED', 'IN_PROGRESS', 'SENT_TO_WORKSHOP', 'CANCELLED'];
+  ok(JSON.stringify([...rules.REPAIR_INVOICEABLE_STATUSES].sort()) === JSON.stringify([...erlaubt].sort()),
+    'BILLABLE die EINE Liste: fertig oder abgeholt, in beiden Schreibweisen des Hauses');
+  const basis = { repairNumber: 'REP-X', invoiceId: '', chargeToCustomer: 50, repairScope: 'CUSTOMER', customerId: 'cust-1' };
+  for (const st of erlaubt) ok(rules.repairInvoiceBlocker({ ...basis, status: st }) === null, `BILLABLE ${st} → abrechenbar`);
+  for (const st of verboten) {
+    ok(rules.repairInvoiceBlocker({ ...basis, status: st })?.code === 'REPAIR_NOT_READY', `BILLABLE ${st} → nicht abrechenbar`);
+  }
+  for (const st of ['ready', 'picked_up']) {
+    ok(rules.repairInvoiceBlocker({ ...basis, status: st, invoiceId: 'inv-1' })?.code === 'REPAIR_ALREADY_INVOICED',
+      `BILLABLE ${st}, schon fakturiert → weiterhin verboten`);
+    ok(rules.repairInvoiceBlocker({ ...basis, status: st, chargeToCustomer: 0 })?.code === 'REPAIR_HAS_NO_CHARGE'
+      && rules.repairInvoiceBlocker({ ...basis, status: st, repairScope: 'OWN' })?.code === 'REPAIR_IS_OWN_STOCK',
+      `BILLABLE ${st}: die uebrigen Bedingungen gelten weiter (Preis, eigene Ware)`);
+  }
+
+  // Derselbe Vertrag an beiden Anschlüssen: Primary (Liste, Kürzel, Detailseite) und Fernbefehl.
+  let k = 800;
+  for (const [st, erwartet] of [['ready', 'ok'], ['picked_up', 'ok'], ['received', 'REPAIR_NOT_READY'],
+    ['in_progress', 'REPAIR_NOT_READY'], ['returned', 'REPAIR_NOT_READY']] as const) {
+    const ergebnis: string[] = [];
+    for (const weg of ['lokal', 'fern'] as const) {
+      const db = freshDb();
+      const id = await reparatur({ chargeToCustomer: 50 });
+      db.run('UPDATE repairs SET status = ? WHERE id = ?', [st, id]);
+      useRepairStore.getState().loadRepairs();
+      let aus = '';
+      if (weg === 'lokal') {
+        try { await house.invoiceRepairsOnPrimary([id]); aus = 'ok'; } catch (e) { aus = code(e) || String(e); }
+      } else {
+        k += 1;
+        const out = await life.runCreateRepairInvoice(deps(db), identity(String(k), 'repairs.create_invoice'), { repairId: id, expectedRevision: rev(db, id) });
+        aus = out.kind === 'ok' ? 'ok' : code(out);
+      }
+      ergebnis.push(`${aus}/${n(db, 'SELECT COUNT(*) FROM invoices')}`);
+      if (aus === 'ok') {
+        k += 1;
+        const zweiter = await life.runCreateRepairInvoice(deps(db), identity(String(k), 'repairs.create_invoice'), { repairId: id, expectedRevision: rev(db, id) });
+        let lokalZweiter = '';
+        try { await house.invoiceRepairsOnPrimary([id]); lokalZweiter = 'ok'; } catch (e) { lokalZweiter = code(e); }
+        ok(zweiter.kind === 'rejected' && code(zweiter) === 'REPAIR_ALREADY_INVOICED' && lokalZweiter === 'REPAIR_ALREADY_INVOICED'
+          && n(db, 'SELECT COUNT(*) FROM invoices') === 1, `BILLABLE (${weg}) ${st}: danach bereits fakturiert — keine zweite Rechnung`);
+      }
+    }
+    ok(ergebnis[0] === ergebnis[1] && ergebnis[0] === (erwartet === 'ok' ? 'ok/1' : `${erwartet}/0`),
+      `BILLABLE ${st}: Primary == Fernbefehl (${ergebnis.join(' | ')})`);
+  }
+
+  // Keine zweite Statusliste: jede Stelle, die „abrechenbar" entscheidet, fragt die eine Regel.
+  const list = codeOf(src('src/pages/repairs/RepairList.tsx'));
+  const detail = codeOf(src('src/pages/repairs/RepairDetail.tsx'));
+  ok(/const isEligibleForBulk = \(r: Repair\) => canInvoiceRepair\(r\);/.test(list), 'BILLABLE die Auswahl der Liste fragt die Regel');
+  ok(/const showInvoiceShortcut = canInvoiceRepair\(rep\);/.test(list), 'BILLABLE …das Kuerzel je Zeile auch');
+  ok(/\{canInvoiceRepair\(repair\) && customer && perm\.canCreateInvoices && \(/.test(detail), 'BILLABLE …und der Knopf der Detailseite');
+  ok(/const nein = repairInvoiceBlocker\(r\);/.test(codeOf(src('src/stores/repairStore.ts'))), 'BILLABLE …und die Hausfunktion (Primary)');
+  ok(/const nein = repairInvoiceBlocker\(\{/.test(codeOf(src('src/core/bridge/lifecycle-commands.ts'))), 'BILLABLE …und der Fernbefehl');
+  for (const f of ['src/pages/repairs/RepairList.tsx', 'src/pages/repairs/RepairDetail.tsx', 'src/stores/repairStore.ts',
+    'src/core/bridge/lifecycle-commands.ts', 'src/core/repairs/repair-house.ts']) {
+    const t = codeOf(src(f));
+    ok(!/REPAIR_INVOICEABLE_STATUSES|is not READY|\(r\.status === 'ready'|status === 'ready' \|\| \w+\.status === 'picked_up'\) &&\s*!\w+\.invoiceId/.test(t),
+      `BILLABLE ${f.split('/').pop()}: keine eigene Statusliste fuer „abrechenbar"`);
+  }
+}
+
 // ── §5 Eine Domäne: die Masken benutzen die Regeln, nicht eine Kopie ─────
 {
   const list = codeOf(src('src/pages/repairs/RepairList.tsx'));
@@ -909,3 +978,4 @@ console.log('CENTRAL_UI_R5C_REPAIR_ATOMICITY_PROVED');
 console.log('CENTRAL_UI_R5C_REPAIR_INPUT_AUTHORITY_PROVED');
 console.log('CENTRAL_UI_R5C_INVOICE_DESCRIPTION_CONTRACT_PINNED');
 console.log('CENTRAL_UI_R5C_AMOUNT_SIGN_CONTRACT_PINNED');
+console.log('CENTRAL_UI_R5C_BILLABLE_CONTRACT_PINNED');
