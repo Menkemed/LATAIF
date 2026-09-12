@@ -193,18 +193,29 @@ const UPLOAD = 'src/core/bridge/client-staging-upload.ts';
     `PAYLOAD das Artikelformular kennt weder SKU noch Menge noch Bilder als Feld (${productUi.CLIENT_PRODUCT_FIELDS.join(', ')})`);
   const pDraft: Record<string, string> = {};
   for (const f of productUi.CLIENT_PRODUCT_FIELDS) pDraft[f] = f.includes('Price') ? '' : `wert-${f}`;
+  const pAlle = productUi.changedFields(
+    Object.fromEntries(productUi.CLIENT_PRODUCT_FIELDS.map((f) => [f, ''])) as never,
+    pDraft as never,
+  ) as Record<string, unknown>;
+  // Seit R5B (`bc8220e`) entscheidet der Primary beim ANLEGEN Lagerstatus und Herkunft selbst (ein neuer
+  // Artikel ist eigener Bestand, auf Lager). Diese beiden Felder gehoeren beim Anlegen nicht in den Rumpf —
+  // die Erwartung „jedes Formularfeld ist erlaubt" war hier veraltet. Dass sie ABGEWIESEN werden, wird
+  // unten ausdruecklich geprueft; alle uebrigen Felder muessen weiterhin durchgehen.
+  const VOM_PRIMARY_BEIM_ANLEGEN = ['stockStatus', 'sourceType'];
   const pBody = {
     categoryId: 'cat-1',
-    ...productUi.changedFields(
-      Object.fromEntries(productUi.CLIENT_PRODUCT_FIELDS.map((f) => [f, ''])) as never,
-      pDraft as never,
-    ),
+    ...Object.fromEntries(Object.entries(pAlle).filter(([k]) => !VOM_PRIMARY_BEIM_ANLEGEN.includes(k))),
     stagingIds: ['a'.repeat(64)],
   };
   let pAccepted = true;
   let pWhy = '';
   try { parseProductCreate(pBody); } catch (e) { pAccepted = false; pWhy = String(e); }
-  ok(pAccepted, `PAYLOAD jedes Feld des Artikelformulars ist erlaubt (${pWhy})`);
+  ok(pAccepted, `PAYLOAD jedes Feld des Artikelformulars ist erlaubt — ausser den zwei, die der Primary beim Anlegen entscheidet (${pWhy})`);
+  for (const k of VOM_PRIMARY_BEIM_ANLEGEN.filter((f) => f in pAlle)) {
+    let why = '';
+    try { parseProductCreate({ ...pBody, [k]: pAlle[k] }); } catch (e) { why = String(e); }
+    ok(/the primary decides/.test(why), `PAYLOAD ${k} beim Anlegen wird vom Primary abgewiesen (${why || 'ANGENOMMEN'})`);
+  }
 
   const form = code(PRODUCT_FORM);
   ok(!/peekSku|nextAvailableSku|allocateSku/.test(form),

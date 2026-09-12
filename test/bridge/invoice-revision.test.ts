@@ -286,6 +286,24 @@ const editBody = (id: string, revision: number, qty: number, reason: string, pri
     'RACE-A und die Antwort nennt die NEUE Fassung fuer den naechsten Auftrag');
 }
 
+// ── R6B) Das Rechnungsdatum beim Aendern: eine Regel, egal wer es schickt ─────
+{
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  const d = deps(db);
+  seedProduct(db, 'p1', 9);
+  const inv = await makeInvoice(d, '31', 'p1');
+  const issued = (): string => String(db.exec('SELECT issued_at FROM invoices WHERE id = ?', [inv])[0]?.values?.[0]?.[0] ?? '');
+  // Der Fernauftrag schickt ein reines Datum (so prueft ihn `parseInvoicePayload`) …
+  const fern = await runInvoiceUpdate(d, identity('32', 'invoices.update'), { ...editBody(inv, rev(db, inv), 1, 'datum fern'), issuedDate: '2026-08-15' });
+  ok(fern.kind === 'ok' && issued() === '2026-08-15T00:00:00.000Z',
+    `R6B-DATUM fern: ein reines Datum steht als Mitternacht UTC in der Rechnung (${issued()})`);
+  // … die Maske am Primary den ISO-Wert — in der Rechnung steht dasselbe.
+  const zeilen = useInvoiceStore.getState().getInvoice(inv)!.lines.map((l) => ({ ...l }));
+  useInvoiceStore.getState().editInvoice(inv, { lines: zeilen as never, customerId: 'cust-1', issuedAt: '2026-08-16T00:00:00.000Z', reason: 'datum lokal' });
+  ok(issued() === '2026-08-16T00:00:00.000Z', `R6B-DATUM lokal: der ISO-Wert der Maske bleibt, wie er ist (${issued()})`);
+}
+
 // ── 4) Rennen B: zwei Clients, dieselbe Ausgangsfassung ───────────────────
 {
   resetDurabilityStateForTest();

@@ -599,6 +599,14 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   ok(st.kind === 'ok', 'FLOW die Abkuerzung der Liste geht auch aus der Ferne');
   ok(n(db, "SELECT COUNT(*) FROM expenses WHERE related_module = 'repair' AND related_entity_id = ?", [rid]) > 0,
     'FLOW …und an dieser Stufe entsteht die Lieferanten-Verbindlichkeit — vom Haus gebucht');
+  // CENTRAL-UI-PARITY R6B — kein Sprung von „in Arbeit" auf „abgeholt": an „ready" haengen Werkstatt-Forderung,
+  // Kapitalisierung und Marge. Dieselbe Regel fragt jetzt auch die Rechnungsseite („Mark as Picked Up").
+  const sprungVorher = prev(db, rid);
+  const sprung = await life.runUpdateRepairStatus(d, identity('66', 'repairs.update_status'),
+    { repairId: rid, status: 'picked_up', expectedRevision: sprungVorher });
+  ok(sprung.kind === 'rejected' && code(sprung) === 'REPAIR_TRANSITION_NOT_ALLOWED'
+    && s(db, 'SELECT status FROM repairs WHERE id = ?', [rid]) === 'in_progress' && prev(db, rid) === sprungVorher,
+  `R6B-FLOW „in Arbeit" → „abgeholt" wird abgewiesen, nichts geschrieben (${JSON.stringify(sprung)})`);
   const ready = await life.runUpdateRepairStatus(d, identity('7', 'repairs.update_status'),
     { repairId: rid, status: 'ready', expectedRevision: prev(db, rid) });
   ok(ready.kind === 'ok', 'FLOW …und weiter auf fertig');

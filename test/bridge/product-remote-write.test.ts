@@ -383,6 +383,21 @@ const links = (db: Db, pid: string): number =>
     { id: pid, name: 'Datejust 41', notes: 'geprueft' });
   ok(replay.kind === 'ok' && (replay as { replayed: boolean }).replayed === true,
     'UPDATE die Wiederholung liefert das eingefrorene Ergebnis');
+
+  // CENTRAL-UI-PARITY R6B — „KI-Identifikation bestätigen" über dieselbe Buchung: nur die Absicht reist,
+  // die Zeit stempelt das Haus, ein zweites Bestätigen ändert nichts, ohne Identifikation ein Nein.
+  db.run('UPDATE products SET ai_identified_snapshot = ? WHERE id = ?', ['{"brand":"Rolex"}', pid]);
+  const conf = await runProductUpdate(d, identity('10', 'products.update', 'h10'), { id: pid, aiConfirmedAt: true });
+  const stamp = String(one(db, 'SELECT ai_confirmed_at FROM products WHERE id = ?', [pid]) ?? '');
+  ok(conf.kind === 'ok' && /^\d{4}-\d{2}-\d{2}T/.test(stamp), `R6B-AI die Bestätigung geht durch, der Primary stempelt (${stamp})`);
+  const conf2 = await runProductUpdate(d, identity('11', 'products.update', 'h11'), { id: pid, aiConfirmedAt: true });
+  ok(conf2.kind === 'ok' && String(one(db, 'SELECT ai_confirmed_at FROM products WHERE id = ?', [pid])) === stamp,
+    'R6B-AI ein zweites Bestätigen (neuer Auftrag) ändert den ersten Stempel nicht');
+  db.run('UPDATE products SET ai_identified_snapshot = NULL, ai_confirmed_at = NULL WHERE id = ?', [pid]);
+  const nichts = await runProductUpdate(d, identity('12', 'products.update', 'h12'), { id: pid, aiConfirmedAt: true });
+  ok(nichts.kind === 'rejected' && (nichts as { code: string }).code === 'AI_NOT_IDENTIFIED' && (nichts as { frozen: boolean }).frozen === true
+    && (one(db, 'SELECT ai_confirmed_at FROM products WHERE id = ?', [pid]) ?? null) === null,
+  `R6B-AI ohne KI-Identifikation: eingefrorenes Nein, nichts geschrieben (${JSON.stringify(nichts)})`);
 }
 
 // ── 7) Die Preissperre gilt auch von außen ────────────────────────────────
