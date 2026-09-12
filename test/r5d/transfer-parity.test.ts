@@ -16,6 +16,7 @@
 //   §9 Autorität: fremde Filiale/Kunde/Stück/Mitarbeiter/Transfer, nichts Abgeleitetes aus dem Rumpf.
 // ════════════════════════════════════════════════════════════════════════════
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { registerHooks } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve as resolvePath, join } from 'node:path';
@@ -778,6 +779,128 @@ async function bruchWelt(weg: 'primary' | 'fern', sammel: boolean, brich: (db: D
   ok((h.match(/return amPrimary\(/g) || []).length === 3, 'DOMAIN …fuer alle drei Handlungen');
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// R5D.1 — die drei Verträge des Primary, gegen den Stand VOR R5D (27768c0) gepinnt, und die zwei
+// übrigen Einstiege der gemeinsamen Oberfläche (Detailseite, „+ New Client").
+// ════════════════════════════════════════════════════════════════════════════
+const VOR_R5D = '27768c0';
+const damals = (p: string): string => execFileSync('git', ['show', `${VOR_R5D}:${p}`], { cwd: repo, encoding: 'utf8' });
+const economics = await import('../../src/core/agent/economics.ts');
+
+// ── PRICE: „Our Price" > 0 war der Vertrag — nur ein Minus ging mangels Prüfung durch ──
+{
+  const maske = damals('src/pages/agents/AgentList.tsx');
+  ok(/ourPrice: Number\(e\.target\.value\) \|\| undefined/.test(maske)
+    && /disabled=\{!transferForm\.customerId \|\| !transferForm\.productId \|\| !transferForm\.ourPrice\}/.test(maske),
+  'PRICE vor R5D: die Anlegemaske machte aus 0 und einem leeren Feld „kein Preis" und sperrte den Knopf');
+  ok(!/ourPrice\s*[<>]=?\s*0|ourPrice < 0/.test(maske), 'PRICE vor R5D: …ein Minus prueft sie nirgends — eine fehlende Pruefung, kein Fachfall');
+  const fern = damals('src/core/bridge/service-commands.ts');
+  ok(/price <= 0\) \{\s*throw new ServicePayloadError\('agentPrice must be a positive number'\)/.test(fern)
+    && /p <= 0\) \{\s*throw new ServicePayloadError\('agentPrice must be a positive number'\)/.test(fern),
+  'PRICE vor R5D: der Fernbefehl verlangte > 0 seit C3F — beim Anlegen UND beim Aendern');
+  // Was nachgelagert einen positiven Boden voraussetzt: beim Modell „split" ist Our Price der Boden.
+  for (const [boden, erwartet] of [[-500, 'TRANSFER_NO_SETTLEMENT'], [0, 'TRANSFER_NO_SETTLEMENT'], [300, null]] as Array<[number, string | null]>) {
+    const s0 = economics.computeAgentTransferSale({ settlementModel: 'split', agentPrice: boden, excessSplitPct: 0 }, 400).ourSettlement;
+    const b = rules.transferConvertBlocker({ status: 'sold', settlementAmount: s0 });
+    ok((b?.code ?? null) === erwartet, `PRICE Boden ${boden} bei „split" 0 %: Abrechnung ${s0} → ${b?.code ?? 'Rechnung moeglich'}`);
+  }
+  // Heute: EINE Regel fuer Anlegen und Aendern, Primary wie fern.
+  for (const v of [0, -1, Number.NaN]) {
+    let code = '';
+    try { rules.transferEditPatch({ agentPrice: v }); } catch (e) { code = (e as { code?: string }).code ?? ''; }
+    let fern = '';
+    try { cmd.parseTransferUpdate({ id: 't1', expectedRevision: 1, agentPrice: v }); } catch (e) { fern = String(e); }
+    ok(code === 'INVALID_AMOUNT' && fern !== '', `PRICE Aendern auf ${v}: am Primary INVALID_AMOUNT, fern abgewiesen`);
+  }
+  const voll = { id: 't1', status: 'sold', settlementAmount: 999, agentPrice: 750, returnBy: '', notes: 'n', invoiceId: 'x', staffId: 'e' };
+  const patch = rules.transferEditPatch(voll as never);
+  ok(S(patch) === S({ agentPrice: 750, returnBy: null, notes: 'n' }),
+    `PRICE der Schreibsatz der Aenderungsmaske traegt genau Preis, Rueckgabe (leer = keins) und Notiz (${S(patch)})`);
+  for (const f of ['src/components/agents/TransferTable.tsx', 'src/pages/agents/TransferDetail.tsx']) {
+    const t = codeOf(src(f));
+    ok(/local: \(\) => \{ updateTransfer\(\w+(\.id)?, transferEditPatch\(\w+\)/.test(t) && /expectedRevision: fassung, \.\.\.transferEditPatch\(/.test(t),
+      `PRICE ${f.split('/').pop()}: beide Anschluesse schreiben denselben Satz`);
+  }
+}
+
+// ── STOCK: nur ein Stück im Lager — das war die Liste der Maske und die Prüfung des Fernbefehls ──
+{
+  ok(/products\.filter\(p => p\.stockStatus === 'in_stock'\)/.test(damals('src/pages/agents/AgentList.tsx')),
+    'STOCK vor R5D: die Artikelliste der Anlegemaske zeigte NUR, was im Lager liegt');
+  const fern = damals('src/core/bridge/service-commands.ts');
+  ok(/status !== 'in_stock'/.test(fern) && /PRODUCT_ALREADY_OUT/.test(fern), 'STOCK vor R5D: der Fernbefehl pruefte Lager und „schon draussen" seit C3F');
+  ok(/PRODUCT_NOT_AVAILABLE/.test(damals('test/bridge/service-documents.test.ts')),
+    'STOCK vor R5D: …und ein Test hielt es fest („verkaufte Ware geht nicht auf Kommission")');
+  for (const st of ['in_stock', 'with_agent', 'sold', 'in_repair', 'reserved', 'consignment', 'returned', '']) {
+    ok(rules.isTransferableStock(st) === (st === 'in_stock'), `STOCK „${st || '(leer)'}" ${st === 'in_stock' ? 'geht' : 'geht nicht'} hinaus`);
+  }
+  ok(/products\.filter\(p => isTransferableStock\(p\.stockStatus\)\)/.test(codeOf(src('src/pages/agents/AgentList.tsx'))),
+    'STOCK heute: die Liste der Maske fragt DIESELBE Regel wie das Haus');
+  ok(/if \(!isTransferableStock\(stock\)\)/.test(codeOf(src('src/core/agents/transfer-rules.ts'))), 'STOCK …und die Pruefung beim Anlegen ebenso');
+}
+
+// ── SHARE: 0–100 % war die Maske — nicht die Regel der Kommission ──
+{
+  const maske = damals('src/pages/agents/AgentList.tsx');
+  ok(/excessSplitPct: Math\.max\(0, Math\.min\(100, Number\(e\.target\.value\) \|\| 0\)\)/.test(maske)
+    && /excessSplitPct \?\? 50/.test(maske), 'SHARE vor R5D: die Maske begrenzte auf 0–100 und nahm ohne Eingabe 50');
+  ok(/data\.excessSplitPct \?\? 50/.test(damals('src/stores/agentStore.ts')), 'SHARE vor R5D: das Haus speicherte den Wert ohne weitere Grenze');
+  ok(/pct <= 0 \|\| pct >= 100/.test(damals('src/core/bridge/service-commands.ts')),
+    'SHARE vor R5D: nur der Fernbefehl wich ab (1–99, mit Verweis auf die Kommission) — die Abweichung ist geschlossen');
+  let pinnte = '';
+  try { pinnte = execFileSync('git', ['grep', '-l', '1 and 99', VOR_R5D, '--', 'test'], { cwd: repo, encoding: 'utf8' }); } catch { pinnte = ''; }
+  ok(pinnte.trim() === '', 'SHARE vor R5D: kein Test hielt 1–99 fuer Transfers fest');
+  const e0 = economics.computeAgentTransferSale({ settlementModel: 'split', agentPrice: 1000, excessSplitPct: 0 }, 1200);
+  const e100 = economics.computeAgentTransferSale({ settlementModel: 'split', agentPrice: 1000, excessSplitPct: 100 }, 1200);
+  ok(e0.ourSettlement === 1000 && e0.customerShare === 200 && e100.ourSettlement === 1200 && e100.customerShare === 0,
+    'SHARE beide Raender sind Fachfaelle: 0 % — der Kunde behaelt den Ueberschuss, 100 % — das Haus');
+  ok(S(['150', '-5', 'abc', '55.5', '0', '100'].map(rules.clampTransferSplitPct)) === S([100, 0, 0, 55.5, 0, 100]),
+    'SHARE heute: dieselbe Begrenzung wie die Maske, als EINE Funktion');
+  ok(/clampTransferSplitPct\(e\.target\.value\)/.test(codeOf(src('src/pages/agents/AgentList.tsx'))), 'SHARE …und die Maske benutzt sie');
+  for (const [pct, gut] of [[0, true], [100, true], [55.5, true], [100.5, false], [-0.5, false]] as Array<[number, boolean]>) {
+    let p = true; try { rules.normalizeTransferCreate({ ...FORM, excessSplitPct: pct }); } catch { p = false; }
+    let r = true; try { cmd.parseTransferCreate({ customerId: 'c', productId: 'p', agentPrice: 1, settlementModel: 'split', excessSplitPct: pct }); } catch { r = false; }
+    ok(p === gut && r === gut, `SHARE ${pct} %: ${gut ? 'erlaubt' : 'abgewiesen'} — Primary und fern dieselbe Regel`);
+  }
+  ok(!/consignment/i.test(src('src/core/agents/transfer-rules.ts').replace(/Kommission/g, '')), 'SHARE die Regel des Transfers leiht nichts von der Kommission');
+}
+
+// ── DETAIL: Edit, Sold, Return der Detailseite über die geteilten Buchungen ──
+{
+  const d = codeOf(src('src/pages/agents/TransferDetail.tsx'));
+  const ohneAnschluss = d.replace(/local: \(\) => \{[^\n]*\n/g, '');
+  for (const [op, fn] of [['transfers.update', 'updateTransfer'], ['transfers.mark_sold', 'markTransferSold'], ['transfers.mark_returned', 'markTransferReturned']]) {
+    ok(new RegExp(`w\\.ok\\('${op.replace('.', '\\.')}'`).test(d), `DETAIL ${op} ueber die gemeinsame Weiche`);
+    ok(!new RegExp(`\\b${fn}\\(`).test(ohneAnschluss), `DETAIL ${fn}() steht nur noch im Primary-Anschluss`);
+  }
+  ok(/acknowledgeBelowPrice: true/.test(d), 'DETAIL die Bestaetigung unter Our Price reist mit — wie die Maske sie verlangt');
+  ok((d.match(/loadTransfers\(\)/g) || []).length >= 4, 'DETAIL nach jedem Erfolg wird frisch gelesen');
+  ok(/<WriteError text=\{w\.fehler\} \/>/.test(d) && /disabled=\{w\.busy\}/.test(d), 'DETAIL Ausgang sichtbar, Knopf waehrenddessen gesperrt');
+}
+
+// ── NEW CLIENT: „+ New Client" legt über `customers.create` an — genau einmal ──
+{
+  const m = codeOf(src('src/components/customers/QuickCustomerModal.tsx'));
+  ok(/useSharedWrite<\{ customerId: string \}>\('customers\.create'\)/.test(m), 'CLIENT die Schnellanlage benutzt die vorhandene Buchung');
+  ok((m.match(/createCustomer\(/g) || []).length === 1 && /local: \(\) => \(\{ customerId: createCustomer\(felder\)\.id \}\)/.test(m),
+    'CLIENT createCustomer() nur im Primary-Anschluss');
+  ok(/remote: \(\) => createPayload\(felder, CUSTOMER_EDITABLE\)/.test(m), 'CLIENT fern derselbe Rumpf wie die Kundenliste');
+  const custCmd = await import('../../src/core/bridge/customer-commands.ts');
+  const { createPayload, CUSTOMER_EDITABLE } = await import('../../src/core/data/write-payloads.ts');
+  const db = freshDb();
+  const rumpf = createPayload({ firstName: 'Lina', lastName: 'Client', phone: undefined, whatsapp: undefined, vatAccountNumber: undefined, personalId: undefined }, CUSTOMER_EDITABLE);
+  const vor = n(db, 'SELECT COUNT(*) FROM customers');
+  const a = await fern(() => custCmd.runCustomerCreate(deps(db), identity('701', 'customers.create'), rumpf));
+  const b = await fern(() => custCmd.runCustomerCreate(deps(db), identity('701', 'customers.create'), rumpf));
+  ok(a.ok && b.ok && b.replayed === true && a.value?.customerId === b.value?.customerId,
+    'CLIENT die verlorene Antwort: dieselbe Kennung liefert denselben Kunden');
+  ok(n(db, 'SELECT COUNT(*) FROM customers') === vor + 1, 'CLIENT …und es gibt ihn genau einmal');
+  const neu = String(a.value?.customerId);
+  const t = await fern(() => cmd.runTransferCreate(deps(db), identity('702', 'transfers.create'),
+    rules.transferCreateBody({ customerId: neu, productId: 'p1', ourPrice: 500 })));
+  ok(t.ok, `CLIENT …und sofort als Empfaenger eines Transfers waehlbar (${t.code || 'ok'})`);
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r5d transfer parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R5D_TRANSFER_SCOPE_FROZEN');
@@ -788,3 +911,6 @@ console.log('CENTRAL_UI_R5D_SHARED_TRANSFER_DOMAIN_PROVED');
 console.log('CENTRAL_UI_R5D_TRANSFER_CREATE_ATOMICITY_PROVED');
 console.log('CENTRAL_UI_R5D_TRANSFER_CONVERSION_ATOMICITY_PROVED');
 console.log('CENTRAL_UI_R5D_TRANSFER_INPUT_AUTHORITY_PROVED');
+console.log('CENTRAL_UI_R5D_TRANSFER_PRICE_CONTRACT_PINNED');
+console.log('CENTRAL_UI_R5D_TRANSFER_STOCK_CONTRACT_PINNED');
+console.log('CENTRAL_UI_R5D_TRANSFER_SHARE_CONTRACT_PINNED');

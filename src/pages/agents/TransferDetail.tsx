@@ -26,7 +26,8 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import type { AgentTransfer, Invoice } from '@/core/models/types';
 import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
-import { canConvertTransfer, transferBillTo, transferConvertBody } from '@/core/agents/transfer-rules';
+import { canConvertTransfer, transferBillTo, transferConvertBody, transferEditPatch } from '@/core/agents/transfer-rules';
+import { WriteError } from '@/components/shared/WriteError';
 import { convertTransferOnPrimary } from '@/core/agents/transfer-house';
 
 type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned';
@@ -154,6 +155,50 @@ export function TransferDetail() {
     navigate(`/invoices/${r.value.invoiceId}`);
   }
 
+  // R5D.1 — „Edit", „Sold", „Return" dieser Seite: dieselben geteilten Buchungen wie die Zeile der
+  // Transferliste (`transfers.update` / `.mark_sold` / `.mark_returned`), am Primary dieselben
+  // Hausfunktionen. Ohne gelesene Fassung schickt der Client gar nicht erst.
+  function fassungVon(was: string): number | null {
+    const rev = transfer?.revision;
+    if (w.remote && !rev) { alert(fehlertext(nichtAmClient(was + ' (no revision loaded)'))); return null; }
+    return rev ?? 0;
+  }
+  async function verkaufen() {
+    const t = transfer!;
+    const fassung = fassungVon('marking this transfer sold');
+    if (fassung === null) return;
+    if (!await w.ok('transfers.mark_sold', {
+      local: () => { markTransferSold(t.id, soldPrice, undefined, soldAck); return {}; },
+      remote: () => ({
+        transferId: t.id, salePrice: soldPrice, expectedRevision: fassung,
+        ...(soldAck ? { acknowledgeBelowPrice: true } : {}),
+      }),
+    })) return;
+    setSoldOpen(false); setSoldAck(false);
+    loadTransfers();
+  }
+  async function zuruecknehmen() {
+    const t = transfer!;
+    const fassung = fassungVon('returning this transfer');
+    if (fassung === null) return;
+    if (!await w.ok('transfers.mark_returned', {
+      local: () => { markTransferReturned(t.id); return {}; },
+      remote: () => ({ id: t.id, expectedRevision: fassung }),
+    })) return;
+    loadTransfers(); loadProducts();
+  }
+  async function speichern() {
+    const t = transfer!;
+    const fassung = fassungVon('editing this transfer');
+    if (fassung === null) return;
+    if (!await w.ok('transfers.update', {
+      local: () => { updateTransfer(t.id, transferEditPatch(editForm) as Partial<AgentTransfer>); return {}; },
+      remote: () => ({ id: t.id, expectedRevision: fassung, ...transferEditPatch(editForm) }),
+    })) return;
+    setEditOpen(false);
+    loadTransfers();
+  }
+
   const formattedTransferred = (transfer.transferredAt || transfer.createdAt || '').split('T')[0];
   const formattedSold = transfer.soldAt ? transfer.soldAt.split('T')[0] : '';
   const formattedReturned = transfer.returnedAt ? transfer.returnedAt.split('T')[0] : '';
@@ -174,6 +219,7 @@ export function TransferDetail() {
       }
     >
       <div style={{ maxWidth: 1100, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <WriteError text={w.fehler} />
         {/* Hero / KPI strip */}
         <Card style={{ padding: 18 }}>
           <div className="flex items-center justify-between" style={{ marginBottom: 14 }}>
@@ -216,10 +262,11 @@ export function TransferDetail() {
           <div className="flex flex-wrap gap-2">
             {transfer.status === 'transferred' && (
               <>
-                <Button variant="primary" onClick={() => { setSoldPrice(transfer.agentPrice); setSoldOpen(true); }}>
+                <Button variant="primary" onClick={() => { w.clear(); setSoldPrice(transfer.agentPrice); setSoldOpen(true); }}
+                  data-transfer-detail-sold>
                   Mark as Sold
                 </Button>
-                <Button variant="ghost" onClick={() => markTransferReturned(transfer.id)}>
+                <Button variant="ghost" onClick={() => void zuruecknehmen()} disabled={w.busy} data-transfer-detail-return>
                   Mark as Returned
                 </Button>
               </>
@@ -245,7 +292,8 @@ export function TransferDetail() {
                 )}
               </>
             )}
-            <Button variant="ghost" onClick={() => { setEditForm({ ...transfer }); setEditOpen(true); }}>
+            <Button variant="ghost" onClick={() => { w.clear(); setEditForm({ ...transfer }); setEditOpen(true); }}
+              data-transfer-detail-edit>
               Edit
             </Button>
             <div style={{ flex: 1 }} />
@@ -385,6 +433,7 @@ export function TransferDetail() {
                   </div>
                 )}
               </div>
+              <WriteError text={w.fehler} />
               <Input required label="ACTUAL SALE PRICE (BHD)" type="number"
                 placeholder="Actually sold — may differ"
                 value={soldPrice || ''}
@@ -431,8 +480,8 @@ export function TransferDetail() {
               <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
                 <Button variant="ghost" onClick={() => { setSoldOpen(false); setSoldAck(false); }}>Cancel</Button>
                 <Button variant="primary" onClick={() => {
-                  if (soldPrice > 0) { markTransferSold(transfer.id, soldPrice, undefined, soldAck); setSoldOpen(false); setSoldAck(false); }
-                }} disabled={soldPrice <= 0 || (needsAck && !soldAck)}>Confirm Sale</Button>
+                  if (soldPrice > 0) void verkaufen();
+                }} disabled={soldPrice <= 0 || (needsAck && !soldAck) || w.busy} data-transfer-sold-confirm>Confirm Sale</Button>
               </div>
             </div>
           );
@@ -501,6 +550,7 @@ export function TransferDetail() {
       {/* Edit Modal */}
       <Modal open={editOpen} onClose={() => setEditOpen(false)} title={`Edit Transfer — ${transfer.transferNumber}`} width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <WriteError text={w.fehler} />
           <Input required label="OUR PRICE (BHD)" type="number" value={editForm.agentPrice ?? ''}
             onChange={e => setEditForm({ ...editForm, agentPrice: Number(e.target.value) || 0 })} />
           <Input label="RETURN BY (DATE)" type="date" value={(editForm.returnBy || '').split('T')[0]}
@@ -514,10 +564,7 @@ export function TransferDetail() {
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={() => {
-              updateTransfer(transfer.id, editForm);
-              setEditOpen(false);
-            }}>Save</Button>
+            <Button variant="primary" onClick={() => void speichern()} disabled={w.busy} data-transfer-save>Save</Button>
           </div>
         </div>
       </Modal>

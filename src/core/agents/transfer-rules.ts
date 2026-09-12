@@ -32,6 +32,40 @@ export type TransferSettlementModel = typeof TRANSFER_SETTLEMENT_MODELS[number];
 /** Aus diesen Zuständen wird ein Transfer zur Rechnung (Knopf „Create Invoice"). */
 export const TRANSFER_CONVERTIBLE_STATUSES: readonly string[] = ['sold', 'settled'];
 
+/**
+ * R5D.1 — das Stück, das auf Kommission hinausgehen darf: es liegt im Lager. Genau das zeigte die
+ * Artikelliste der Anlegemaske schon immer (und nur das); der Fernbefehl prüfte es seit C3F.
+ */
+export const TRANSFERABLE_STOCK_STATUS = 'in_stock';
+export const isTransferableStock = (stockStatus: string | null | undefined): boolean =>
+  stockStatus === TRANSFERABLE_STOCK_STATUS;
+
+/**
+ * R5D.1 — der Anteil des Hauses am Überschuss („split"): die Maske begrenzte ihn schon immer auf
+ * 0–100 und nahm ohne Eingabe 50. Beide Ränder sind Fachfälle (`computeAgentTransferSale`): 0 % —
+ * der Kunde behält den ganzen Überschuss, 100 % — das Haus. Nicht die Regel der Kommission.
+ */
+export const TRANSFER_SPLIT_PCT_MIN = 0;
+export const TRANSFER_SPLIT_PCT_MAX = 100;
+/** Die Eingabe der Maske, wie sie sie immer begrenzt hat: keine Zahl → 0, darüber hinaus der Rand. */
+export function clampTransferSplitPct(raw: string): number {
+  return Math.max(TRANSFER_SPLIT_PCT_MIN, Math.min(TRANSFER_SPLIT_PCT_MAX, Number(raw) || 0));
+}
+
+/**
+ * R5D.1 — „Our Price" ist größer als 0, beim Anlegen wie beim Ändern. Die Anlegemaske sperrte 0
+ * und ein leeres Feld schon immer; der Fernbefehl verlangte > 0 seit C3F (anlegen UND ändern). Nur
+ * ein eingetipptes Minus ging an der Maske durch — und damit rechnet das Haus falsch: beim Modell
+ * „split" ist Our Price der Boden, ein Boden ≤ 0 macht den Abrechnungsbetrag ≤ 0, und daraus wird
+ * keine Rechnung (TRANSFER_NO_SETTLEMENT).
+ */
+function ourPriceOf(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+    throw new TransferActionRejected('INVALID_AMOUNT', 'our price must be a positive number');
+  }
+  return v;
+}
+
 // ── Anlegen ───────────────────────────────────────────────────────────────
 
 /** Was die Anlegemaske („New Transfer") erfasst. */
@@ -72,10 +106,7 @@ export function normalizeTransferCreate(form: TransferCreateForm): TransferCreat
   if (!customerId || !productId) {
     throw new TransferActionRejected('REQUIRED_FIELDS_MISSING', 'a transfer needs a client and an item');
   }
-  const price = form.ourPrice;
-  if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) {
-    throw new TransferActionRejected('INVALID_AMOUNT', 'our price must be a positive number');
-  }
+  const price = ourPriceOf(form.ourPrice);
   const model = form.settlementModel ?? 'full';
   if (!(TRANSFER_SETTLEMENT_MODELS as readonly string[]).includes(model)) {
     throw new TransferActionRejected('INVALID_SETTLEMENT_MODEL', `unknown settlement model: ${model || '(none)'}`);
@@ -86,7 +117,7 @@ export function normalizeTransferCreate(form: TransferCreateForm): TransferCreat
   };
   if (model === 'split') {
     const pct = form.excessSplitPct ?? DEFAULT_AGENT_SPLIT_PCT;
-    if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < 0 || pct > 100) {
+    if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < TRANSFER_SPLIT_PCT_MIN || pct > TRANSFER_SPLIT_PCT_MAX) {
       throw new TransferActionRejected('INVALID_SPLIT_PCT', "the shop's share must be between 0 and 100 percent");
     }
     out.excessSplitPct = pct;
@@ -115,7 +146,7 @@ export function planTransferCreate(input: TransferCreateInput, port: TransferHou
   if (stock === undefined) throw new TransferActionRejected('PRODUCT_NOT_FOUND', 'no such product in this branch');
   // Die Artikelliste der Maske zeigt nur, was im Lager liegt. Ein Stück, das inzwischen verkauft,
   // in Reparatur oder schon draußen ist, geht nicht (noch einmal) hinaus.
-  if (stock !== 'in_stock') {
+  if (!isTransferableStock(stock)) {
     throw new TransferActionRejected('PRODUCT_NOT_AVAILABLE',
       `this item is not in stock (it is "${stock}") — it cannot go out on approval`);
   }
@@ -140,6 +171,29 @@ export function transferCreateBody(form: TransferCreateForm): Record<string, unk
   if (input.notes) body.notes = input.notes;
   if (input.staffId) body.staffId = input.staffId;
   return body;
+}
+
+// ── Ändern ────────────────────────────────────────────────────────────────
+
+/** Was „Save" der Änderungsmaske schreibt — genau die drei Felder der Maske, sonst nichts. */
+export interface TransferEditPatch {
+  agentPrice?: number;
+  returnBy?: string | null;
+  notes?: string | null;
+}
+
+/**
+ * R5D.1 — der EINE Schreibsatz der Änderungsmaske (Liste und Detailseite), am Primary wie fern:
+ * Preis (> 0), Rückgabedatum (ein geleertes Feld heißt „keins"), Notiz. Vorher schrieb der Primary
+ * den ganzen geladenen Transfer zurück — Status und Abrechnung inklusive, auch wenn sie inzwischen
+ * ein anderer Vorgang verändert hatte.
+ */
+export function transferEditPatch(form: { agentPrice?: number; returnBy?: string | null; notes?: string | null }): TransferEditPatch {
+  const out: TransferEditPatch = {};
+  if (form.agentPrice !== undefined) out.agentPrice = ourPriceOf(form.agentPrice);
+  if (form.returnBy !== undefined) out.returnBy = form.returnBy ? form.returnBy : null;
+  if (form.notes !== undefined) out.notes = form.notes;
+  return out;
 }
 
 // ── Umwandeln ─────────────────────────────────────────────────────────────

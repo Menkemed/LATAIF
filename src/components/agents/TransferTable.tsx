@@ -21,7 +21,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import {
-  canCombineTransfer, canConvertTransfer, transferBillTo, transferConvertBody, transferConvertManyBody,
+  canCombineTransfer, canConvertTransfer, transferBillTo, transferConvertBody, transferConvertManyBody, transferEditPatch,
 } from '@/core/agents/transfer-rules';
 import { convertTransferOnPrimary, convertTransfersOnPrimary } from '@/core/agents/transfer-house';
 
@@ -106,18 +106,14 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
     loadTransfers();
   }
 
-  /** R4C.2 — Stammdaten des Transfers: Preis, Rueckgabedatum, Notiz. */
-  async function transferAendern(transferId: string, patch: Partial<AgentTransfer>) {
+  /** R4C.2 — Stammdaten des Transfers: Preis, Rueckgabedatum, Notiz. R5D.1 — auf beiden Seiten
+   *  derselbe Schreibsatz (`transferEditPatch`): genau diese drei Felder, Preis > 0. */
+  async function transferAendern(transferId: string, form: Partial<AgentTransfer>) {
     const fassung = fassungVon(transferId, 'editing this transfer');
     if (fassung === null) return false;
     if (!await w.ok('transfers.update', {
-      local: () => { updateTransfer(transferId, patch); return {}; },
-      remote: () => ({
-        id: transferId, expectedRevision: fassung,
-        ...(patch.agentPrice !== undefined ? { agentPrice: patch.agentPrice } : {}),
-        ...(patch.returnBy !== undefined ? { returnBy: patch.returnBy } : {}),
-        ...(patch.notes !== undefined ? { notes: patch.notes } : {}),
-      }),
+      local: () => { updateTransfer(transferId, transferEditPatch(form) as Partial<AgentTransfer>); return {}; },
+      remote: () => ({ id: transferId, expectedRevision: fassung, ...transferEditPatch(form) }),
     })) return false;
     loadTransfers();
     return true;

@@ -8,6 +8,9 @@ import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBa
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { createPayload, CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
+import { WriteError } from '@/components/shared/WriteError';
 
 interface Props {
   open: boolean;
@@ -23,7 +26,11 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
   const [whatsapp, setWhatsapp] = useState('');
   const [vatAccountNumber, setVatAccountNumber] = useState('');
   const [personalId, setPersonalId] = useState('');
-  const [saving, setSaving] = useState(false);
+  // CENTRAL-UI-PARITY R5D.1 — „Create & Select" hat zwei Anschlüsse: am Primary `createCustomer`
+  // wie bisher, auf dem zweiten Rechner die vorhandene Buchung `customers.create` (wie die
+  // Kundenliste). Eine Absicht — eine Kennung: eine verlorene Antwort legt keinen zweiten Kunden an.
+  const anlegen = useSharedWrite<{ customerId: string }>('customers.create');
+  const [fehler, setFehler] = useState('');
 
   useEffect(() => { if (open) loadCustomers(); }, [open, loadCustomers]);
 
@@ -40,28 +47,29 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
     );
   }, [firstName, lastName, phone, whatsapp, customers]);
 
-  function handleSave() {
+  async function handleSave() {
     if (!firstName.trim() && !lastName.trim()) {
       alert('Please enter at least a first or last name.');
       return;
     }
-    setSaving(true);
-    try {
-      const c = createCustomer({
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
-        phone: phone.trim() || undefined,
-        whatsapp: whatsapp.trim() || undefined,
-        vatAccountNumber: vatAccountNumber.trim() || undefined,
-        personalId: personalId.trim() || undefined,
-      });
-      onCreated(c.id);
-      reset();
-      onClose();
-    } catch (e) {
-      alert(`Could not create customer: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    setSaving(false);
+    setFehler('');
+    const felder = {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      phone: phone.trim() || undefined,
+      whatsapp: whatsapp.trim() || undefined,
+      vatAccountNumber: vatAccountNumber.trim() || undefined,
+      personalId: personalId.trim() || undefined,
+    };
+    const r = await anlegen.save({
+      local: () => ({ customerId: createCustomer(felder).id }),
+      remote: () => createPayload(felder, CUSTOMER_EDITABLE),
+      shape: (v) => ({ customerId: String(v.customerId ?? '') }),
+    });
+    if (r.kind !== 'ok') { setFehler(`Could not create customer: ${fehlertext(r)}`); return; }
+    onCreated(r.value.customerId);
+    reset();
+    onClose();
   }
 
   return (
@@ -72,6 +80,7 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
       width={460}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <WriteError text={fehler} />
         {duplicateMatches.length > 0 && (
           <DuplicateWarningBanner
             matches={duplicateMatches}
@@ -98,7 +107,7 @@ export function QuickCustomerModal({ open, onClose, onCreated }: Props) {
         <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={vatAccountNumber} onChange={e => setVatAccountNumber(e.target.value)} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => { reset(); onClose(); }}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave} disabled={saving}>
+          <Button variant="primary" onClick={() => void handleSave()} disabled={anlegen.busy} data-quick-customer-save>
             {duplicateMatches.length > 0 ? 'Create anyway' : 'Create & Select'}
           </Button>
         </div>

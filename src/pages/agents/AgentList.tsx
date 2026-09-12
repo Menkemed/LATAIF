@@ -30,7 +30,7 @@ import type { Agent } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
-import { transferCreateBody } from '@/core/agents/transfer-rules';
+import { clampTransferSplitPct, isTransferableStock, transferCreateBody } from '@/core/agents/transfer-rules';
 import { createTransferOnPrimary } from '@/core/agents/transfer-house';
 
 
@@ -112,7 +112,8 @@ export function AgentList() {
     subtitle: c.phone || c.email || undefined,
   })), [customers]);
 
-  const availableProducts = useMemo(() => products.filter(p => p.stockStatus === 'in_stock'), [products]);
+  // R5D.1 — dieselbe Regel, die auch das Haus beim Anlegen prüft: nur was im Lager liegt.
+  const availableProducts = useMemo(() => products.filter(p => isTransferableStock(p.stockStatus)), [products]);
 
   // Deep-Match über Brand / Name / SKU / Condition + alle Attribut-Werte —
   // key-agnostisch via productSearchText (gleiche Suche wie Sales/Order/Purchase).
@@ -430,7 +431,7 @@ export function AgentList() {
             <div>
               <Input label="SHOP'S SHARE OF EXCESS (%)" type="number" placeholder="50"
                 value={transferForm.excessSplitPct ?? 50}
-                onChange={e => setTransferForm({ ...transferForm, excessSplitPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })} />
+                onChange={e => setTransferForm({ ...transferForm, excessSplitPct: clampTransferSplitPct(e.target.value) })} />
               <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
                 Above Our Price: shop keeps {transferForm.excessSplitPct ?? 50}%, customer keeps {Math.max(0, 100 - (transferForm.excessSplitPct ?? 50))}%.
               </div>

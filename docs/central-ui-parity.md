@@ -1705,3 +1705,29 @@ E2E   r5d-transfer-parity 108/0 (anlegen, einzeln, auto, gesammelt, verlorene An
 Registry 107 · Matrix 30 / 0 / 8 / 2
 ```
 
+### R5D.1 — die übrigen Einstiege, die Verträge gegen den Stand vor R5D (`27768c0`)
+
+- **Detailseite:** „Edit", „Mark as Sold" (auch unter Our Price mit Bestätigung) und „Mark as Returned" laufen über
+  dieselben Buchungen wie die Transferliste (`transfers.update` / `.mark_sold` / `.mark_returned`). Liste und
+  Detailseite schreiben beim Ändern denselben Satz (`transferEditPatch`): genau Preis, Rückgabedatum (leer = keins) und
+  Notiz. Vorher schrieb der Primary den ganzen geladenen Transfer zurück, Status und Abrechnung inklusive.
+- **„+ New Client"** der Anlegemaske: die Schnellanlage legt über die vorhandene Buchung `customers.create` an (derselbe
+  Rumpf wie die Kundenliste, eine Kennung je Absicht); der neue Kunde ist sofort in der Maske gewählt. Das gilt für
+  jede Maske mit dieser Schnellanlage.
+- **Our Price > 0:** Die Anlegemaske machte aus 0 und einem leeren Feld „kein Preis" und sperrte den Knopf; der
+  Fernbefehl verlangte > 0 seit C3F, beim Anlegen und Ändern. Ein negativer Wert ging nur durch, weil nichts prüfte.
+  Beim Modell „split" ist Our Price der Boden: ein Boden ≤ 0 macht den Abrechnungsbetrag ≤ 0, und daraus wird keine
+  Rechnung. Neu ist nur, dass auch „Edit" am Primary 0 und negative Werte abweist.
+- **Bestand:** Nur ein Stück im Lager (`in_stock`) geht hinaus — die Artikelliste der Maske zeigte nie etwas anderes,
+  der Fernbefehl prüfte Lager und „schon draußen" seit C3F, ein Test hielt es fest. Liste und Prüfung fragen jetzt
+  dieselbe Regel (`isTransferableStock`). Keine neue Geschäftsregel.
+- **Anteil 0–100 %:** Die Maske begrenzte schon immer auf 0–100 (ohne Eingabe 50), das Haus speicherte ohne weitere
+  Grenze; beide Ränder sind Fachfälle (0 %: der Kunde behält den Überschuss, 100 %: das Haus). Nur der Fernbefehl wich
+  ab (1–99, mit Verweis auf die Kommission) — kein Test hielt das fest. Primary und fern: dieselbe Regel.
+
+```
+Unit  r5d/transfer-parity 248/0 (dazu die drei Verträge gegen 27768c0, Detailseite, Schnellanlage)
+E2E   r5d1-transfer-entrypoints 50/0 (Detailseite Edit/Sold/Sold unter Preis/Return, „+ New Client" mit verlorener Antwort, Primary == PC2)
+Registry 107 · Matrix 30 / 0 / 8 / 2
+```
+
