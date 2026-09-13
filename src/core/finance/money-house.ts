@@ -63,6 +63,7 @@ export const MONEY_ID_REQUIRED = 'MONEY_ID_REQUIRED';
 export const TAX_PERIOD_INVALID = 'TAX_PERIOD_INVALID';
 export const TAX_QUARTER_SETTLED = 'TAX_QUARTER_SETTLED';
 export const TAX_QUARTER_REFUND_DUE = 'TAX_QUARTER_REFUND_DUE';
+export const TAX_OVERPAYMENT = 'TAX_OVERPAYMENT';
 export const BANK_TRANSFER_DIRECTION_INVALID = 'BANK_TRANSFER_DIRECTION_INVALID';
 export const PARTNER_TX_KIND_INVALID = 'PARTNER_TX_KIND_INVALID';
 export const PARTNER_NOT_FOUND = 'PARTNER_NOT_FOUND';
@@ -248,9 +249,13 @@ export interface TaxPaymentResult {
 
 /**
  * „Record VAT Payment": die Zahlung und ihre Buchung (TAX_PAID an Kasse/Bank) — zusammen oder gar
- * nicht. Teilzahlungen sind erlaubt (die Maske lässt den Betrag frei); eine Obergrenze je Zahlung
- * kennt der vorhandene Vertrag nicht, also gibt es hier auch keine. Welches Quartal offen ist,
- * rechnet DIESELBE Funktion, die die Auswertung zeigt (`financeFor`) — nachgebaut wird nichts.
+ * nicht. Welches Quartal offen ist, rechnet DIESELBE Funktion, die die Auswertung zeigt
+ * (`financeFor`) — nachgebaut wird nichts. Teilzahlungen sind erlaubt.
+ *
+ * R6D Accounting-Gate — höchstens der offene Rest des Quartals: die Quartalsrechnung ordnet eine
+ * Zahlung ihrem Quartal zu und trägt einen Überschuss NICHT ins nächste Quartal vor; das nächste
+ * zeigte wieder die volle Schuld und der Mehrbetrag hinge als Forderung gegen das Finanzamt, die
+ * kein Vertrag verarbeitet. Deshalb wird eine Überzahlung abgewiesen (`TAX_OVERPAYMENT`).
  */
 export function recordTaxPaymentInHouse(raw: TaxPaymentInput, ctx: MoneyCtx): TaxPaymentResult {
   assertBooksHere();
@@ -264,6 +269,10 @@ export function recordTaxPaymentInHouse(raw: TaxPaymentInput, ctx: MoneyCtx): Ta
   }
   if (state.isSettled) {
     throw new MoneyRejected(TAX_QUARTER_SETTLED, `${v.year} Q${v.quarter} is already settled`);
+  }
+  if (Math.round(v.amount * 1000) > Math.round(state.remaining * 1000)) {
+    throw new MoneyRejected(TAX_OVERPAYMENT,
+      `${v.year} Q${v.quarter} has ${state.remaining.toFixed(3)} BHD open — a payment cannot be more than that`);
   }
 
   const id = uuid();

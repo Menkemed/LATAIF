@@ -190,6 +190,25 @@ marker('CENTRAL_UI_R6D_ACCOUNTING_CLASSIFICATION_PROVED');
 }
 marker('CENTRAL_UI_R6D_SSOT_UPDATED');
 
+// ══ §6 — tax_payments: Sync nicht erforderlich (NOT REQUIRED) ════════════════
+{
+  const manifest = JSON.parse(src('src/core/sync/sync-business-schema.json')) as { tables: Record<string, unknown> };
+  ok(!('tax_payments' in manifest.tables), 'SYNC tax_payments steht nicht im Sync-Manifest — der Sync-Server nimmt die Tabelle nicht an');
+  ok(/"tax_payments"/.test(src('src-tauri/src/sync/sync_schema.rs')), 'SYNC der Rust-Vertrag führt tax_payments ausdrücklich als unbekannt (abgewiesen)');
+  const { readdirSync } = await import('node:fs');
+  const walk = (dir: string): string[] => readdirSync(resolvePath(repo, dir), { withFileTypes: true })
+    .flatMap((e) => (e.isDirectory() ? walk(`${dir}/${e.name}`) : /\.(ts|tsx)$/.test(e.name) ? [`${dir}/${e.name}`] : []));
+  const dateien = walk('src').filter((p) => /tax_payments/.test(codeOf(src(p))));
+  ok(!dateien.some((p) => /track(Insert|Update|Delete|Change)\(\s*'tax_payments'/.test(src(p))), 'SYNC kein Schreibweg meldet tax_payments an den Sync');
+  const erlaubt = ['src/core/finance/money-house.ts', 'src/core/reports/analytics-snapshot.ts', 'src/core/reports/context.ts',
+    'src/core/reports/reconciliation-snapshot.ts', 'src/core/ledger/backfill.ts', 'src/core/db/database.ts', 'src/core/sync/track.ts'];
+  ok(dateien.every((p) => erlaubt.includes(p)),
+    `SYNC jeder Leser und Schreiber sitzt am Primary (Hausfolge, Auswertung, Abgleich, Nachbuchung, Schema) (${dateien.filter((p) => !erlaubt.includes(p)).join(', ') || 'keine anderen'})`);
+  ok(readOps.STORE_READ_OPS.includes('store.analytics.get') && !/tax_payments/.test(codeOf(src('src/pages/analytics/AnalyticsPage.tsx'))),
+    'SYNC PC2 sieht die Steuerzahlungen nur über die Auskunft des Primary (store.analytics.get), die Seite fragt keine Tabelle');
+}
+marker('CENTRAL_UI_R6D_TAX_PAYMENT_SYNC_CONTRACT_PINNED');
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — r6d final gate: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R6D_FINAL_GATE_PROVED');

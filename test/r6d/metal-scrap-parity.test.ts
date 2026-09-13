@@ -405,13 +405,20 @@ marker('CENTRAL_UI_R6D_METAL_CREATE_REMOTE_PROVED');
 
   // Parität Primary == PC2
   const dbP = freshDb(); const a = mk('21K', 3);
-  await actions.changeMetalStatusOnPrimary({ metalId: a.id, status: 'sold', salePrice: 12.5, expectedRevision: 1 });
+  await actions.changeMetalStatusOnPrimary({ metalId: a.id, status: 'sold', salePrice: 12.5, paymentMethod: 'bank', expectedRevision: 1 });
   const pRow = rows(dbP, 'SELECT * FROM precious_metals')[0];
+  const pLedger = rows(dbP, "SELECT account, direction, amount FROM ledger_entries WHERE source_module = 'METAL_PAYMENT' ORDER BY account");
   const dbC = freshDb(); const b = mk('21K', 3);
-  await fern(() => mc.runMetalStatus(deps(dbC), identity(nextId(), 'metals.update_status'), actions.metalStatusBody(b.id, 1, 'sold', 12.5)));
+  await fern(() => mc.runMetalStatus(deps(dbC), identity(nextId(), 'metals.update_status'), actions.metalStatusBody(b.id, 1, 'sold', 12.5, 'bank')));
   const cRow = rows(dbC, 'SELECT * FROM precious_metals')[0];
+  const cLedger = rows(dbC, "SELECT account, direction, amount FROM ledger_entries WHERE source_module = 'METAL_PAYMENT' ORDER BY account");
   const d = /^(id|created_at|updated_at)$/;
   ok(norm(pRow, d) === norm(cRow, d), 'PARITY Verkauf Primary == PC2');
+  ok(S(pLedger) === S(cLedger) && S(pLedger) === S([{ account: 'BANK', direction: 'DEBIT', amount: 12.5 }, { account: 'REVENUE', direction: 'CREDIT', amount: 12.5 }])
+    && pRow.payment_status === 'PAID' && Number(pRow.paid_amount) === 12.5,
+    `PARITY der Verkauf bucht das Geld: Soll Bank / Haben Erlös, bezahlt — auf beiden Rechnern gleich (${S(pLedger)})`);
+  const ohne = await fern(() => mc.runMetalStatus(deps(dbC), identity(nextId(), 'metals.update_status'), actions.metalStatusBody(mk('21K', 3).id, 1, 'sold', 9)));
+  ok(ohne.kind === 'rejected' && ohne.code === 'METAL_PAYMENT_METHOD_REQUIRED', `REJECT ein Verkauf mit Preis nennt den Zahlweg (${ohne.code})`);
   const dbP2 = freshDb(); const a2 = mk('22K', 3);
   await actions.changeMetalStatusOnPrimary({ metalId: a2.id, status: 'melted', expectedRevision: 1 });
   const pMelt = rows(dbP2, 'SELECT * FROM precious_metals')[0];
@@ -789,6 +796,36 @@ marker('CENTRAL_UI_R6D_METALS_CLIENT_PROVED');
   ok(!/trackInsert\('scrap|trackUpdate\('scrap/.test(sh), 'SYNC die Altgold-Tabellen werden weiterhin nicht synchronisiert (Befund, unverändert)');
 }
 marker('CENTRAL_UI_R6D_METALS_UI_PROVED');
+
+// ══ Accounting-Gate — Metall: der vollständige Effekt von Kauf, Verkauf, Einschmelzen ════════════
+{
+  const { isCapitalizedExpenseCategory } = await import('../../src/core/models/types.ts');
+  const db = freshDb();
+  const saldo = (a: string): number => Math.round(n(db, "SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = ?", [a]) * 1000) / 1000;
+  const bestand = (): number => n(db, "SELECT COALESCE(SUM(weight_grams), 0) FROM precious_metals WHERE status = 'in_stock' AND metal_type = 'gold'");
+  // Kauf beim Lieferanten: 10 g 21K für 300.
+  const buy = house.inOneTransaction(() => house.createMetalInHouse({ metalType: 'gold', karat: '21K', weightGrams: 10, purchaseTotal: 300, supplierId: 's1' }, 'branch-main'));
+  const kat = String(one(db, 'SELECT category FROM expenses WHERE id = ?', [buy.linkedExpenseId]));
+  ok(bestand() === 10 && kat === 'Inventory' && isCapitalizedExpenseCategory(kat)
+    && saldo('EXPENSES_OPERATING') === 300 && saldo('ACCOUNTS_PAYABLE') === -300
+    && saldo('CASH') === 0 && saldo('BANK') === 0 && saldo('REVENUE') === 0,
+    `METAL-KAUF Bestand +10 g · Ausgabe „Inventory" (kapitalisiert = Wareneinsatz) 300 an Lieferanten-Verbindlichkeit · kein Geld · kein Erlös (${kat})`);
+  // Verkauf für 450 bar: Geld herein, Erlös — vorher nur Status und Preis.
+  house.inOneTransaction(() => house.changeMetalStatusInHouse({ metalId: buy.metal.id, status: 'sold', salePrice: 450, paymentMethod: 'cash', expectedRevision: buy.metal.revision }, 'branch-main'));
+  const m = rows(db, 'SELECT status, sale_price, paid_amount, payment_status FROM precious_metals WHERE id = ?', [buy.metal.id])[0];
+  ok(bestand() === 0 && m.status === 'sold' && m.payment_status === 'PAID' && Number(m.paid_amount) === 450
+    && n(db, 'SELECT COUNT(*) FROM metal_payments WHERE metal_id = ?', [buy.metal.id]) === 1
+    && saldo('CASH') === 450 && saldo('REVENUE') === -450,
+    `METAL-VERKAUF Bestand −10 g · Kasse +450 · Erlös 450 (METAL_PAYMENT) · bezahlt (${S(m)})`);
+  ok(saldo('REVENUE') * -1 - saldo('EXPENSES_OPERATING') === 150, 'METAL-ERGEBNIS Erlös 450 − Wareneinsatz 300 = Gewinn 150');
+  // Einschmelzen bewegt kein Geld.
+  const vorher = n(db, 'SELECT COUNT(*) FROM ledger_entries');
+  const m2 = house.inOneTransaction(() => house.createMetalInHouse({ metalType: 'gold', karat: '22K', weightGrams: 4 }, 'branch-main')).metal;
+  house.inOneTransaction(() => house.changeMetalStatusInHouse({ metalId: m2.id, status: 'melted', expectedRevision: m2.revision }, 'branch-main'));
+  ok(n(db, 'SELECT COUNT(*) FROM ledger_entries') === vorher, 'METAL-SCHMELZEN keine Buchung — kein Geld bewegt');
+  ok(balanced(db), 'METAL jede Buchung ausgeglichen');
+}
+marker('CENTRAL_UI_R6D_METAL_ACCOUNTING_CONTRACT_PINNED');
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — r6d metal + scrap parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

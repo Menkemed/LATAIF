@@ -115,6 +115,34 @@ for (const [table, values, change] of [
   ok(rows(db, "SELECT id FROM debts WHERE id = 'd-neu'").length === 1, 'VERGLEICH eine neue Zeile wird wie bisher eingefügt');
 }
 
+// §4 — der Vertrag: echte Fremdänderungen, Reihenfolge, Löschen, Metadaten
+{
+  const { applySyncChange } = await import('../../src/core/sync/apply-change.ts');
+  insert(db, 'debts', { id: 'd3', branch_id: 'b1', direction: 'we_lend', counterparty: 'R', amount: 100, source: 'cash', status: 'OPEN', created_at: NOW, updated_at: NOW });
+  const alt = snapshot('debts', 'd3');
+  // Eine echte Fremdänderung mit neuer Fassung (der andere Rechner hat 3× geändert): angewendet, Fassung übernommen.
+  applyUpsert(db as never, 'debts', 'd3', { ...alt, amount: 120, revision: 4, updated_at: '2026-09-13T11:00:00.000Z' });
+  ok(Number(snapshot('debts', 'd3').amount) === 120 && rev('debts', 'd3') === 4, `VERTRAG eine Fremdänderung mit neuer Fassung wird angewendet, die Fassung übernommen (${rev('debts', 'd3')})`);
+  // Nur die Fassung neu (alle Felder sonst gleich): KEIN No-op — die Fassung ist eine Spalte wie jede andere.
+  applyUpsert(db as never, 'debts', 'd3', { ...snapshot('debts', 'd3'), revision: 7 });
+  ok(rev('debts', 'd3') === 7, `VERTRAG eine abweichende Fassung allein wird nicht übersprungen (${rev('debts', 'd3')})`);
+  // Nur der Zeitstempel neu: ebenfalls kein No-op — Metadaten zählen als Abweichung.
+  applyUpsert(db as never, 'debts', 'd3', { ...snapshot('debts', 'd3'), updated_at: '2026-09-13T12:00:00.000Z' });
+  ok(String(snapshot('debts', 'd3').updated_at) === '2026-09-13T12:00:00.000Z' && rev('debts', 'd3') === 8,
+    'VERTRAG ein neuer Zeitstempel ist eine Abweichung — geschrieben, und der Trigger zählt wie bisher');
+  // Alt / außer der Reihe: unverändert „letzter Schreiber nach Ankunft" (M6-B3A stale-replay-unchanged).
+  applyUpsert(db as never, 'debts', 'd3', alt);
+  ok(Number(snapshot('debts', 'd3').amount) === 100 && rev('debts', 'd3') === Number(alt.revision),
+    'VERTRAG ein älterer Stand wird wie bisher angewendet — der Echo-Schutz ändert die Reihenfolge-Regel nicht');
+  // Der volle Dispatcher: Echo über applySyncChange (update) → kein Schreiben; Löschen → weg, wie bisher.
+  const r0 = rev('debts', 'd3');
+  applySyncChange(db as never, { table_name: 'debts', record_id: 'd3', action: 'update', data: JSON.stringify(snapshot('debts', 'd3')) });
+  ok(rev('debts', 'd3') === r0, 'VERTRAG über den Dispatcher: das Echo eines Updates schreibt nicht');
+  applySyncChange(db as never, { table_name: 'debts', record_id: 'd3', action: 'delete', data: '{}' });
+  ok(rows(db, "SELECT id FROM debts WHERE id = 'd3'").length === 0, 'VERTRAG Löschen läuft unverändert');
+}
+console.log('CENTRAL_UI_R6D_SYNC_ECHO_CONTRACT_PINNED');
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — r6d sync echo: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R6D_SYNC_ECHO_NO_REVISION_BUMP_PROVED');

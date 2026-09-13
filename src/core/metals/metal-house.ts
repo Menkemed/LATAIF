@@ -14,9 +14,13 @@
 //   • Spotpreis und Schmelzwert leitet das Haus aus SEINER Einstellung ab, nie aus dem Client.
 //   • Ein Nein ist ein `MetalRejected` mit festem Code — dieselbe Antwort an beiden Rechnern.
 //
-// Bewusst NICHT geändert (Befund, keine erfundene Buchhaltung): der Metallkauf wird als Aufwand
-// gebucht, nicht aktiviert; ein Verkauf bucht weder Erlös noch Wareneinsatz; Verkauf und
-// Einschmelzen schreiben keine Goldbewegung „out". Das steht so im Bestand und bleibt so.
+// Der Buchhaltungsvertrag (R6D Accounting-Gate): der Kauf beim Lieferanten ist eine Ausgabe der
+// Kategorie „Inventory" — Soll EXPENSES_OPERATING / Haben ACCOUNTS_PAYABLE; die Berichte führen diese
+// Kategorie als kapitalisiert (Wareneinsatz, nicht Betriebsausgabe), wie jede andere
+// Inventory-Ausgabe des Hauses. Der Verkauf ist ein normaler Verkauf: das Geld kommt über die
+// vorhandene Metallzahlung (`metal_payments`, Soll Kasse/Bank/Karte / Haben REVENUE, Quelle
+// METAL_PAYMENT) herein — vorher schrieb „Mark Sold" nur den Status, und weder Geld noch Erlös
+// erschienen im Hauptbuch. Einschmelzen bewegt kein Geld.
 // ════════════════════════════════════════════════════════════════════════════
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
@@ -24,7 +28,7 @@ import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate } from '@/core/sync/track';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
-  hasLedgerEntries, watchLedgerPosts,
+  hasLedgerEntries, watchLedgerPosts, postMetalPayment,
 } from '@/core/ledger/posting';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import type { BusinessReadContext } from '@/core/data/read-context';
@@ -345,9 +349,15 @@ export interface MetalStatusChange {
   status: 'sold' | 'melted';
   /** Nur bei „sold": der Verkaufspreis, ≥ 0 (die Maske lässt 0 zu). */
   salePrice?: number;
+  /** Nur bei „sold" mit Preis > 0: wie das Geld hereinkam — der Vertrag der Metallzahlung. */
+  paymentMethod?: MetalPaymentMethod;
   /** Die gesehene Fassung. Fern Pflicht; die Maske schickt sie ebenfalls mit. */
   expectedRevision?: number;
 }
+
+/** Die Zahlwege der vorhandenen Metallzahlung (`recordMetalPayment`). */
+export const METAL_PAYMENT_METHODS = ['cash', 'bank', 'card'] as const;
+export type MetalPaymentMethod = typeof METAL_PAYMENT_METHODS[number];
 
 export interface MetalStatusResult {
   metalId: string;
@@ -369,9 +379,9 @@ export function assertMetalRevision(metalId: string, expected: number): void {
 
 /**
  * „Mark Sold" / „Confirm Melt". Nur ein Stück AM LAGER wechselt den Status — vorher ließ sich ein
- * verkauftes Stück einschmelzen und ein zweites Mal verkaufen. Ein Verkauf schreibt, wie bisher,
- * nur Status und Preis (keine Buchung — Befund, nicht erfunden); beim Einschmelzen friert das
- * Haus SEINEN Spotpreis ein.
+ * verkauftes Stück einschmelzen und ein zweites Mal verkaufen. Ein Verkauf mit Preis > 0 bucht in
+ * derselben Transaktion die Metallzahlung (Zeile + `postMetalPayment`); beim Einschmelzen friert
+ * das Haus SEINEN Spotpreis ein.
  */
 export function changeMetalStatusInHouse(req: MetalStatusChange, branchId: string): MetalStatusResult {
   assertKeepsBooks();
@@ -393,8 +403,32 @@ export function changeMetalStatusInHouse(req: MetalStatusChange, branchId: strin
     if (typeof p !== 'number' || !Number.isFinite(p) || p < 0) {
       throw new MetalRejected('METAL_SALE_PRICE_INVALID', 'a sale price is a number of at least 0');
     }
-    db.run('UPDATE precious_metals SET status = ?, sale_price = ?, updated_at = ? WHERE id = ?', ['sold', p, now, req.metalId]);
-    trackUpdate('precious_metals', req.metalId, { status: 'sold', salePrice: p });
+    if (p > 0) {
+      const method = req.paymentMethod;
+      if (!method || !(METAL_PAYMENT_METHODS as readonly string[]).includes(method)) {
+        throw new MetalRejected('METAL_PAYMENT_METHOD_REQUIRED', `a sale says how the money came in (${METAL_PAYMENT_METHODS.join(', ')})`);
+      }
+      const paymentId = uuid();
+      const paidAt = now.split('T')[0];
+      db.run(
+        `INSERT INTO metal_payments (id, metal_id, amount, method, paid_at, note, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+        [paymentId, req.metalId, p, method, paidAt, now],
+      );
+      db.run(
+        `UPDATE precious_metals SET status = ?, sale_price = ?, paid_amount = ?, payment_status = 'PAID', updated_at = ? WHERE id = ?`,
+        ['sold', p, p, now, req.metalId],
+      );
+      trackInsert('metal_payments', paymentId, { metalId: req.metalId, amount: p, method });
+      trackUpdate('precious_metals', req.metalId, { status: 'sold', salePrice: p, paidAmount: p, paymentStatus: 'PAID' });
+      // Streng: scheitert die Buchung, fällt der ganze Verkauf zurück.
+      postMetalPayment({ id: paymentId, metalId: req.metalId, amount: p, method, paidAt });
+    } else {
+      if (req.paymentMethod !== undefined) {
+        throw new MetalRejected('METAL_SALE_PRICE_INVALID', 'a sale for 0 moves no money — no payment method');
+      }
+      db.run('UPDATE precious_metals SET status = ?, sale_price = ?, updated_at = ? WHERE id = ?', ['sold', p, now, req.metalId]);
+      trackUpdate('precious_metals', req.metalId, { status: 'sold', salePrice: p });
+    }
   } else {
     if (req.salePrice !== undefined) {
       throw new MetalRejected('METAL_SALE_PRICE_INVALID', 'melting takes no sale price');

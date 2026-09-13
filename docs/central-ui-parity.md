@@ -2802,10 +2802,53 @@ eine Ledger-Transaktion, erst danach durabel), PC2 über `runRemoteCommand` — 
   Spot und Schmelzwert vom Primary; Verkauf/Schmelzen nur aus `in_stock`; Spotpreis beim Verlassen des Feldes statt je
   Taste; Schrott anlegen/ändern/stornieren atomar, Fassung gegen die Zeile, Storno erst Umkehr dann Status.
 
-Bewusst **nicht** geändert (Befunde, eigene Entscheidung nötig): TAX_PAID-Design (VAT_OUTPUT/MARGIN_VAT nie entlastet),
-Quartalsschlüssel bei Geschäftsjahr ≠ 1/4/7/10, `tax_payments` nicht im Sync-Manifest, Gewinnverteilung als Plus in
-`partnerLedgerFor` und gemeinsamer PWD-Nummernkreis, Metallkauf als Aufwand statt Bestand, Metallverkauf ohne Erlös,
-Goldbewegung bei Verkauf/Schmelzen, zwei Spotpreis-Quellen, Schrott ohne Gegenpartei im Hauptbuch.
+Bewusst **nicht** geändert (Befunde, eigene Entscheidung nötig): Quartalsschlüssel bei Geschäftsjahr ≠ 1/4/7/10,
+gemeinsamer PWD-Nummernkreis für Entnahme und Gewinnauszahlung, Goldbewegung bei Verkauf/Schmelzen, zwei Spotpreis-Quellen,
+Schrott ohne Gegenpartei im Hauptbuch. Die vier Buchhaltungsfragen sind im Accounting-Gate unten entschieden.
+
+### Accounting-Gate — die vier Buchhaltungsverträge, entschieden aus dem Modell (13.09.2026)
+
+**Steuerzahlung** (`CENTRAL_UI_R6D_TAX_ACCOUNTING_CONTRACT_PINNED`). Das Hauptbuch führt die Umsatzsteuer bei der Rechnung
+als Verbindlichkeit (Haben VAT_OUTPUT / MARGIN_VAT, Umsatz netto) und die Vorsteuer beim Einkauf als Forderung (Soll
+VAT_INPUT). Die Abführung buchte Soll TAX_PAID / Haben Kasse oder Bank — und TAX_PAID war in `ledger/queries.ts` als
+**Aufwand** eingeordnet; keine Stelle verrechnete es mit der Verbindlichkeit, die Steuerschuld des Hauptbuchs blieb
+fachlich offen und wuchs mit jedem Quartal (die „noch zu zahlende" Steuer rechnete nur die Quartalsauswertung aus den
+Belegen). Kein Gewinnausweis zählte TAX_PAID. **Entschieden und korrigiert**: TAX_PAID ist das **Verrechnungskonto der
+Umsatzsteuer** (abgeführte Steuer), keine Aufwandsbuchung; die offene Steuerschuld des Hauptbuchs ist genau eine Definition,
+`vatPosition()` = VAT_OUTPUT + MARGIN_VAT − VAT_INPUT − TAX_PAID. Die Buchung selbst bleibt, wie die Nachbuchung sie
+schon kannte — Altbestände bleiben gültig. `cashflow()` zog die Abführung doppelt ab (Kasse/Bank UND TAX_PAID) —
+behoben. Gepinnt: Schuld 100 → Abführung 60 (Bank −60, TAX_PAID +60) → offen 40 → Rest 40 → offen 0 = die Quartalsauswertung
+„beglichen". **Überzahlung**: die Quartalsauswertung ordnet eine Zahlung ihrem Quartal zu und trägt einen Überschuss
+nicht vor — kein Vertrag verarbeitet ihn später. Deshalb höchstens der offene Rest (`TAX_OVERPAYMENT`).
+
+**tax_payments und der Sync** (`CENTRAL_UI_R6D_TAX_PAYMENT_SYNC_CONTRACT_PINNED`): **NOT REQUIRED.** Alle Leser und
+Schreiber sitzen am Primary (Hausfolge, Quartalsauswertung, Kontext, Abgleich, Nachbuchung, Schema); PC2 ohne Datenbank
+sieht die Zahlungen nur über die Auskunft `store.analytics.get` des Primary; die Tabelle steht nicht im Sync-Manifest und
+der Sync-Server weist sie als unbekannt ab. Keine Legacy-Synchronisation reaktiviert.
+
+**Metall** (`CENTRAL_UI_R6D_METAL_ACCOUNTING_CONTRACT_PINNED`). Kauf beim Lieferanten: eine Ausgabe der Kategorie
+„Inventory" (Soll EXPENSES_OPERATING / Haben ACCOUNTS_PAYABLE) — dieselbe Einordnung wie jede Inventory-Ausgabe des Hauses;
+Übersicht, Berichte und Ausgabenliste führen „Inventory" ausdrücklich als **kapitalisiert = Wareneinsatz**, nicht als
+Betriebsausgabe (`CAPITALIZED_EXPENSE_CATEGORIES`). Das ist der kanonische, vereinfachte Vertrag und bleibt. Verkauf:
+der vorhandene Vertrag ist die **Metallzahlung** (`metal_payments`, `postMetalPayment` Soll Kasse/Bank/Karte / Haben
+REVENUE, `payment_status`), die Banking schon als Zufluss las — aber **kein Knopf rief sie**: „Mark Sold" schrieb nur
+Status und Preis, weder Geld noch Erlös erschienen. **Korrigiert**: ein Verkauf mit Preis > 0 nennt den Zahlweg und bucht
+die Metallzahlung in derselben Transaktion (bezahlt). Effekt gepinnt: Kauf Bestand +10 g · Wareneinsatz 300 an
+Lieferant · kein Geld · kein Erlös; Verkauf Bestand −10 g · Kasse +450 · Erlös 450; Ergebnis 150; Einschmelzen ohne Buchung.
+Vor R6D fehlte beim Verkauf der gesamte Geld- und Erlöseffekt.
+
+**Gesellschafter-Saldo** (`CENTRAL_UI_R6D_PARTNER_DISTRIBUTION_SIGN_PINNED`). Der Saldo ist das **Kapitalkonto** des
+Gesellschafters — so benennt ihn die Übersicht („Partner Capital", negative Salden als offene Auszahlung) und so bucht
+das Hauptbuch: Einlage Haben PARTNER_EQUITY, Entnahme UND Gewinnauszahlung Soll PARTNER_EQUITY (beide gehen als Geld
+hinaus). `partnerLedgerFor` zählte die Gewinnauszahlung als Plus — jede Auszahlung erhöhte das angezeigte Kapital, die
+Bewegungsliste zeigte „+". **Korrigiert**: Saldo = Einlagen − Entnahmen − Gewinnauszahlungen == Hauptbuch PARTNER_EQUITY
+des Gesellschafters; die Liste zeigt jede Auszahlung mit Minus. Gepinnt: Einlage 1000 → 1000; Gewinnauszahlung 100 → 900
+(vorher angezeigt: 1100); Entnahme 200 → 700 — jeweils gleich dem Hauptbuch.
+
+**Sync-Echo-Vertrag** (`CENTRAL_UI_R6D_SYNC_ECHO_CONTRACT_PINNED`): identisches eigenes Echo → kein Schreiben, keine
+Fassung; echte Feldänderung → angewendet; Fremdänderung mit neuer Fassung → angewendet, Fassung übernommen; nur eine
+abweichende Fassung oder nur ein neuer Zeitstempel → KEIN No-op (geschrieben); älterer Stand → unverändert „letzter Schreiber
+nach Ankunft"; Löschen unverändert; über den vollen Dispatcher geprüft.
 
 ### Buchhaltung — Einordnung (`CENTRAL_UI_R6D_ACCOUNTING_CLASSIFICATION_PROVED`)
 
@@ -2850,11 +2893,11 @@ fremde Filiale, fremde Lieferanten/Kunden/Partner/Guthaben/Schulden, ungültige 
 ### Beweise
 
 ```
-Unit    r6d/money 166/0 · r6d/payables 201/0 · r6d/gold 263/0 · r6d/metal-scrap 246/0 · r6d/final-gate 118/0
-        r6d/sync-echo 19/0 · Sync-Nachbarn (cursor-safety, stale-replay, quarantine, identifier-apply, m2, m6b0, d3) grün
+Unit    r6d/money 175/0 · r6d/payables 201/0 · r6d/gold 263/0 · r6d/metal-scrap 253/0 · r6d/final-gate 123/0
+        r6d/sync-echo 25/0 · Sync-Nachbarn (cursor-safety, stale-replay, quarantine, identifier-apply, m2, m6b0, d3) grün
 Nachbarn r6c final-gate/masterdata/inventory · r6b · r5c/r5d/r5e/r5f · c3g/c4/c6 · uiparity r2c/r3/r4b/r4c · manifest-drift grün
 Rust    cargo test --lib bridge 37/0 · sync_schema 8/0 · TS app/node 0 · Lint-Delta 23 → 20
-Two-App test/e2e/r6d-finance-gold.e2e.mjs 659/0 (6 min 39 s): alle 28 Buchungen auf PC2 UND am Primary, Zeilen/Status/Fassung/
+Two-App test/e2e/r6d-finance-gold.e2e.mjs 659/0 (6 min 39 s; nach dem Accounting-Gate neu gebaut und gefahren): alle 28 Buchungen auf PC2 UND am Primary, Zeilen/Status/Fassung/
         Hauptbuch Primary == PC2, verlorene Antwort ×6 (eine Wirkung), alte Fassung → RECORD_CHANGED, Überzahlung → Nein,
         alle Transaktionen ausgeglichen, Sync-Echo ohne Fassungssprung, PC2 ohne lokale DB, alte lataif.db unberührt,
         nur eigene Testprozesse beendet (Prozess-Isolation 35/0)

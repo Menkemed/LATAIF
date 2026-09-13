@@ -1349,15 +1349,24 @@ try {
       if (!(await warteBis(c, q('[data-metal-sell-confirm]'), 10000))) return 'KEINE-MASKE';
       r.push(await setVal(c, '[data-metal-sell-price]', '55'));
       await sleep(250);
+      // R6D Accounting-Gate — der Verkauf nennt, wie das Geld hereinkam (Metallzahlung → Kasse, Erlös).
+      if (!(await warteBis(c, q('[data-metal-sell-method="cash"]'), 5000))) return 'KEIN-ZAHLWEG';
+      r.push(await klick(c, '[data-metal-sell-method="cash"]'));
+      await sleep(200);
       return alleOk(r);
     },
     speichern: (c) => klick(c, '[data-metal-sell-confirm]'),
     fertig: (x) => zeile('precious_metals', SELL(x)).status === 'sold',
     zu: () => `!${q('[data-metal-sell-confirm]')}`,
-    keys: ['expectedRevision', 'metalId', 'salePrice', 'status'],
-    rumpf: (p, x, v) => p.metalId === SELL('C') && p.status === 'sold' && p.salePrice === 55 && p.expectedRevision === v.rev,
-    zustand: (x) => zeile('precious_metals', SELL(x)),
-    buchungsZeilen: 0,
+    keys: ['expectedRevision', 'metalId', 'paymentMethod', 'salePrice', 'status'],
+    rumpf: (p, x, v) => p.metalId === SELL('C') && p.status === 'sold' && p.salePrice === 55 && p.paymentMethod === 'cash' && p.expectedRevision === v.rev,
+    zustand: (x) => {
+      const z = zeile('precious_metals', SELL(x));
+      const zahlung = dbQ(BIZ_DB, 'SELECT amount, method FROM metal_payments WHERE metal_id = ?', [SELL(x)]);
+      return { ...z, zahlung };
+    },
+    // Soll Kasse 55 / Haben Erlös 55 (METAL_PAYMENT) — vorher schrieb der Verkauf gar keine Buchung.
+    buchungsZeilen: 2,
   });
 
   await paar({

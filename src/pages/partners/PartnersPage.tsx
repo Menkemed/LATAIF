@@ -179,8 +179,8 @@ export function PartnersPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span style={{
-                          color: t.type === 'WITHDRAWAL' ? '#DC2626' : '#16A34A',
-                        }}>{t.type === 'WITHDRAWAL' ? '−' : '+'}<Bhd v={t.amount}/> BHD</span>
+                          color: t.type === 'INVESTMENT' ? '#16A34A' : '#DC2626',
+                        }}>{t.type === 'INVESTMENT' ? '+' : '−'}<Bhd v={t.amount}/> BHD</span>
                         <button {...primaryOnlyDeleteProps()} onClick={() => { if (blockDeleteOnClient()) return; deleteTransaction(t.id); }} className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }}>×</button>
                       </div>
                     </div>

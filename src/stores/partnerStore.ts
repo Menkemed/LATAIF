@@ -270,9 +270,14 @@ export function partnerLedgerFor(partnerId: string): { totalInvested: number; to
       else if (r.type === 'WITHDRAWAL') totalWithdrawn = amt;
       else if (r.type === 'PROFIT_DISTRIBUTION') totalProfitShare = amt;
     }
+    // R6D Accounting-Gate — der Saldo ist das KAPITALKONTO des Gesellschafters, wie im Hauptbuch:
+    // Einlage Haben PARTNER_EQUITY; Entnahme UND Gewinnauszahlung Soll PARTNER_EQUITY (beide gehen als
+    // Geld hinaus, `postPartnerTransaction`). Vorher zählte die Gewinnauszahlung hier als Plus — eine
+    // Auszahlung erhöhte das angezeigte Kapital, und „Partner Capital" im Dashboard stieg mit jedem
+    // ausgezahlten Gewinn. Jetzt gilt: Saldo == Hauptbuch-Saldo PARTNER_EQUITY dieses Gesellschafters.
     return {
       totalInvested, totalWithdrawn, totalProfitShare,
-      balance: totalInvested + totalProfitShare - totalWithdrawn,
+      balance: totalInvested - totalWithdrawn - totalProfitShare,
     };
   } catch {
     return { totalInvested: 0, totalWithdrawn: 0, totalProfitShare: 0, balance: 0 };

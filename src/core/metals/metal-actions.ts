@@ -64,10 +64,11 @@ export function metalCreateBody(form: Partial<MetalCreateInput>): Record<string,
   return out;
 }
 
-export function metalStatusBody(metalId: string, expectedRevision: number, status: 'sold' | 'melted', salePrice?: number): Record<string, unknown> {
-  return status === 'sold'
-    ? { metalId, expectedRevision, status, salePrice }
-    : { metalId, expectedRevision, status };
+export function metalStatusBody(
+  metalId: string, expectedRevision: number, status: 'sold' | 'melted', salePrice?: number, paymentMethod?: string,
+): Record<string, unknown> {
+  if (status !== 'sold') return { metalId, expectedRevision, status };
+  return paymentMethod ? { metalId, expectedRevision, status, salePrice, paymentMethod } : { metalId, expectedRevision, status, salePrice };
 }
 
 export function spotPriceBody(metalType: string, price: number): Record<string, unknown> {

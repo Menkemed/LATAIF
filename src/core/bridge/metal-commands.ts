@@ -27,8 +27,8 @@ import {
   readStagedAsDataUrls, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
 } from './remote-create-support';
 import {
-  METAL_CREATE_FIELDS, MetalRejected, changeMetalStatusInHouse, createMetalInHouse, setSpotPriceInHouse,
-  type MetalCreateInput,
+  METAL_CREATE_FIELDS, METAL_PAYMENT_METHODS, MetalRejected, changeMetalStatusInHouse, createMetalInHouse, setSpotPriceInHouse,
+  type MetalCreateInput, type MetalPaymentMethod,
 } from '@/core/metals/metal-house';
 import {
   SCRAP_MAX_PHOTOS, ScrapRejected, cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse,
@@ -136,17 +136,28 @@ export function parseMetalCreate(raw: unknown): Partial<MetalCreateInput> {
   };
 }
 
-export interface MetalStatusRequest { metalId: string; expectedRevision: number; status: 'sold' | 'melted'; salePrice?: number }
+export interface MetalStatusRequest {
+  metalId: string; expectedRevision: number; status: 'sold' | 'melted'; salePrice?: number; paymentMethod?: MetalPaymentMethod;
+}
 
 export function parseMetalStatus(raw: unknown): MetalStatusRequest {
-  const r = strict(raw, ['metalId', 'expectedRevision', 'status', 'salePrice'],
+  const r = strict(raw, ['metalId', 'expectedRevision', 'status', 'salePrice', 'paymentMethod'],
     [...without(FORBIDDEN, 'status'), ...without(METAL_DERIVED, 'salePrice')]);
   const status = r.status;
   if (status !== 'sold' && status !== 'melted') throw new MetalPayloadError('status is sold or melted');
   const salePrice = optNum(r.salePrice, 'salePrice');
   if (status === 'sold' && salePrice === undefined) throw new MetalPayloadError('a sale needs its sale price');
   if (status === 'melted' && salePrice !== undefined) throw new MetalPayloadError('melting takes no sale price');
-  return { metalId: reqId(r.metalId, 'metalId'), expectedRevision: seenRevision(r.expectedRevision, 'expectedRevision'), status, salePrice };
+  // Der Zahlweg ist eine Eingabe des Menschen; ob er nötig ist (Preis > 0), entscheidet das Haus.
+  let paymentMethod: MetalPaymentMethod | undefined;
+  if (r.paymentMethod !== undefined) {
+    if (status !== 'sold') throw new MetalPayloadError('melting takes no payment method');
+    if (typeof r.paymentMethod !== 'string' || !(METAL_PAYMENT_METHODS as readonly string[]).includes(r.paymentMethod)) {
+      throw new MetalPayloadError(`paymentMethod is one of ${METAL_PAYMENT_METHODS.join(', ')}`);
+    }
+    paymentMethod = r.paymentMethod as MetalPaymentMethod;
+  }
+  return { metalId: reqId(r.metalId, 'metalId'), expectedRevision: seenRevision(r.expectedRevision, 'expectedRevision'), status, salePrice, paymentMethod };
 }
 
 export function parseSpotPrice(raw: unknown): { metalType: string; price: number } {

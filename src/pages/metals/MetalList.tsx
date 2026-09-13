@@ -62,6 +62,8 @@ export function MetalList() {
   const [form, setForm] = useState<Partial<PreciousMetal>>({ metalType: 'gold', karat: '24K' });
   const [sellTarget, setSellTarget] = useState<MetalRecord | null>(null);
   const [sellPrice, setSellPrice] = useState('');
+  // R6D — ein Verkauf mit Preis > 0 nennt, wie das Geld hereinkam (Metallzahlung → Kasse/Bank/Karte, Erlös).
+  const [sellMethod, setSellMethod] = useState<'cash' | 'bank' | 'card'>('cash');
   const [meltTarget, setMeltTarget] = useState<MetalRecord | null>(null);
 
   // R6D — die Spotpreise der Filiale: am Primary aus seiner Einstellung, auf PC2 über
@@ -161,9 +163,10 @@ export function MetalList() {
     if (isNaN(price) || price < 0) { alert('Enter a valid sale price.'); return; }
     const m = sellTarget;
     if (w.remote && !m.revision) { alert(fehlertext(nichtAmClient('selling this item (no revision loaded)'))); return; }
+    const method = price > 0 ? sellMethod : undefined;
     if (!await w.ok('metals.update_status', {
-      local: () => changeMetalStatusOnPrimary({ metalId: m.id, status: 'sold', salePrice: price, expectedRevision: m.revision }),
-      remote: () => metalStatusBody(m.id, m.revision, 'sold', price),
+      local: () => changeMetalStatusOnPrimary({ metalId: m.id, status: 'sold', salePrice: price, paymentMethod: method, expectedRevision: m.revision }),
+      remote: () => metalStatusBody(m.id, m.revision, 'sold', price, method),
     })) return;
     loadMetals();
     setSellTarget(null);
@@ -584,6 +587,18 @@ export function MetalList() {
               onChange={e => setSellPrice(e.target.value)}
               autoFocus
             />
+            {parseFloat(sellPrice) > 0 && (
+              <div>
+                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>RECEIVED VIA</span>
+                <div className="flex gap-2">
+                  {(['cash', 'bank', 'card'] as const).map((m) => (
+                    <Button key={m} variant={sellMethod === m ? 'primary' : 'ghost'} onClick={() => setSellMethod(m)} data-metal-sell-method={m}>
+                      {m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Card'}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
             {sellTarget.purchaseTotal && parseFloat(sellPrice) > 0 && (
               <div style={{ fontSize: 12, color: (parseFloat(sellPrice) - sellTarget.purchaseTotal) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
                 Margin: <Bhd v={parseFloat(sellPrice) - sellTarget.purchaseTotal}/> BHD

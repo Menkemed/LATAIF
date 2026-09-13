@@ -12,7 +12,15 @@ import type { LedgerAccount, CounterpartyType } from './posting';
 //   ASSET (CASH, BANK, CARD_CLEARING, AR, INVENTORY)        → DEBIT positiv
 //   LIABILITY (AP, VAT_OUTPUT, MARGIN_VAT, COMMISSION_*)    → CREDIT positiv
 //   INCOME (REVENUE)                                         → CREDIT positiv
-//   EXPENSE (COGS, REFUNDS, CARD_FEES, EXPENSES_*, TAX_PAID) → DEBIT positiv
+//   EXPENSE (COGS, REFUNDS, CARD_FEES, EXPENSES_*)           → DEBIT positiv
+//   SETTLEMENT (TAX_PAID)                                    → DEBIT positiv
+//
+// R6D — TAX_PAID ist KEIN Aufwand. Es ist das Verrechnungskonto der Umsatzsteuer: die an das
+// Finanzamt abgeführte Steuer. Die Umsatzsteuer entsteht bei der Rechnung als Verbindlichkeit
+// (Haben VAT_OUTPUT / MARGIN_VAT), die Vorsteuer beim Einkauf als Forderung (Soll VAT_INPUT); eine
+// Abführung bucht Soll TAX_PAID / Haben Kasse oder Bank. Die offene Steuerschuld des Hauptbuchs ist
+// deshalb `vatPosition()` = VAT_OUTPUT + MARGIN_VAT − VAT_INPUT − TAX_PAID. Kein Gewinnausweis
+// zählt TAX_PAID als Aufwand (die Umsätze sind ohnehin netto gebucht).
 //
 // `balanceOf` liefert das "wirtschaftlich sinnvolle" Vorzeichen:
 //   - CASH-Saldo: positiv = Geld da
@@ -124,9 +132,9 @@ export interface CashflowSnapshot {
   bank: number;          // BANK-Bewegung
   card: number;          // CARD_CLEARING-Bewegung
   refunds: number;       // REFUNDS gebucht (Auszahlungen an Kunden)
-  taxPaid: number;       // TAX_PAID
+  taxPaid: number;       // TAX_PAID (abgeführte Umsatzsteuer — steckt bereits in cash/bank)
   cardFees: number;      // CARD_FEES
-  netInflow: number;     // cash + bank + card - refunds - cardFees - taxPaid
+  netInflow: number;     // cash + bank + card - refunds
 }
 
 export function cashflow(
@@ -145,8 +153,31 @@ export function cashflow(
   // Das dedizierte CARD_FEES-Konto bleibt in diesem Modell ungenutzt (=0). Deshalb
   // darf cardFees NICHT erneut von netInflow abgezogen werden (sonst Doppel-Abzug).
   const cardFees = balanceOf('CARD_FEES', f);
-  const netInflow = cash + bank + card - refunds - taxPaid;
+  // R6D — die Steuerabführung ist Haben Kasse/Bank: `cash`/`bank` sind bereits um sie gemindert. Ein
+  // zweiter Abzug von `taxPaid` hätte sie doppelt als Abfluss gezählt.
+  const netInflow = cash + bank + card - refunds;
   return { cash, bank, card, refunds, taxPaid, cardFees, netInflow };
+}
+
+// ── Umsatzsteuer-Position (R6D) ───────────────────────────────
+//
+// Die EINE Hauptbuch-Definition der offenen Steuerschuld: Ausgangssteuer (Regel + Differenz) minus
+// Vorsteuer minus Abführung. Positiv = wir schulden dem Finanzamt, negativ = das Finanzamt schuldet uns.
+
+export interface VatPosition {
+  vatOutput: number;
+  marginVat: number;
+  vatInput: number;
+  taxPaid: number;
+  open: number;
+}
+
+export function vatPosition(filter: BalanceFilter = {}): VatPosition {
+  const vatOutput = balanceOf('VAT_OUTPUT', filter);
+  const marginVat = balanceOf('MARGIN_VAT', filter);
+  const vatInput = balanceOf('VAT_INPUT', filter);
+  const taxPaid = balanceOf('TAX_PAID', filter);
+  return { vatOutput, marginVat, vatInput, taxPaid, open: vatOutput + marginVat - vatInput - taxPaid };
 }
 
 // ── Revenue-Snapshot für eine Periode ─────────────────────────

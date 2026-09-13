@@ -269,7 +269,9 @@ marker('CENTRAL_UI_R6D_MONEY_SCOPE_PROVED');
   ok(nothing.kind === 'rejected' && nothing.code === house.TAX_QUARTER_SETTLED, 'TAX ein Quartal ohne Schuld ist beglichen (die Anzeige zeigt dort keinen Knopf)');
   const dbO = freshDb();
   const over = await fern(() => cmd.runTaxPayment(deps(dbO), identity(nextId(), 'tax.record_payment'), { ...form, amount: 150 }));
-  ok(over.kind === 'ok' && Number(one(dbO, 'SELECT amount FROM tax_payments')) === 150, 'TAX keine erfundene Obergrenze: der Vertrag kennt keine (Befund, offene Entscheidung)');
+  // R6D Accounting-Gate: die Quartalsrechnung trägt einen Überschuss nicht vor — also höchstens der Rest.
+  ok(over.kind === 'rejected' && over.code === house.TAX_OVERPAYMENT && over.frozen && n(dbO, 'SELECT COUNT(*) FROM tax_payments') === 0 && lc(dbO) === 0,
+    `TAX mehr als der offene Rest des Quartals: Nein, nichts geschrieben (${over.code})`);
 
   // Sicherheit
   for (const [k, v] of [['id', 'x'], ['branchId', 'b'], ['status', 'PAID'], ['paid', 1], ['remaining', 1], ['netVat', 1], ['account', 'CASH'], ['debit', 1], ['ledger', []], ['createdBy', 'u']] as Array<[string, unknown]>) {
@@ -734,6 +736,56 @@ marker('CENTRAL_UI_R6D_MONEY_CLIENT_NO_LOCAL_DB_PROVED');
     && (cmds.match(/assertHouseBranch\(identity\)/g) ?? []).length === 6, 'UI der Fernbefehl ruft DIESELBE Hausfolge wie die Maske — in der Filiale, deren Bücher der Primary führt');
 }
 marker('CENTRAL_UI_R6D_MONEY_UI_WIRED_PROVED');
+
+// ══ §11 — Accounting-Gate: Steuerschuld im Hauptbuch, Kapitalkonto des Gesellschafters ═════════
+{
+  const q = await import('../../src/core/ledger/queries.ts');
+  const { partnerLedgerFor } = await import('../../src/stores/partnerStore.ts');
+  const B = { branchId: 'branch-main' };
+  const db = freshDb();
+  const d = deps(db);
+  // Die Rechnung des Quartals, wie das Hauptbuch sie kennt: Haben VAT_OUTPUT 100 (INV-1, Q2/2026).
+  posting.postEntries([
+    { account: 'ACCOUNTS_RECEIVABLE', direction: 'DEBIT', amount: 1100 },
+    { account: 'REVENUE', direction: 'CREDIT', amount: 1000 },
+    { account: 'VAT_OUTPUT', direction: 'CREDIT', amount: 100 },
+  ] as never, { occurredAt: '2026-05-15T12:00:00.000Z', sourceModule: 'INVOICE', sourceId: 'inv1', branchId: 'branch-main' } as never);
+  const vor = q.vatPosition(B);
+  const bankVor = q.balanceOf('BANK', B);
+  const t1 = await fern(() => cmd.runTaxPayment(d, identity(nextId(), 'tax.record_payment'), { year: 2026, quarter: 2, amount: 60, source: 'bank', paidAt: '2026-07-10' }));
+  const mid = q.vatPosition(B);
+  ok(t1.kind === 'ok' && vor.open === 100 && mid.open === 40 && mid.taxPaid === 60 && mid.vatOutput === 100 && q.balanceOf('BANK', B) === bankVor - 60,
+    `TAX-LEDGER Steuerschuld 100 → Abführung 60 (Soll TAX_PAID / Haben Bank) → offen 40 (${vor.open} → ${mid.open})`);
+  const t2 = await fern(() => cmd.runTaxPayment(d, identity(nextId(), 'tax.record_payment'), { year: 2026, quarter: 2, amount: 40, source: 'cash', paidAt: '2026-07-11' }));
+  const nach = q.vatPosition(B);
+  ok(t2.kind === 'ok' && nach.open === 0 && nach.taxPaid === 100,
+    'TAX-LEDGER Rest abgeführt: die Steuerschuld des Hauptbuchs ist 0 — derselbe Stand wie die Quartalsrechnung (beglichen)');
+  const t3 = await fern(() => cmd.runTaxPayment(d, identity(nextId(), 'tax.record_payment'), { year: 2026, quarter: 2, amount: 1, source: 'bank', paidAt: '2026-07-12' }));
+  ok(t3.kind === 'rejected' && t3.code === house.TAX_QUARTER_SETTLED && q.vatPosition(B).open === 0, 'TAX-LEDGER danach keine weitere Zahlung — die Schuld kann nicht ins Minus laufen');
+  ok(q.cashflow('2026-07-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', 'branch-main').netInflow === -100,
+    'TAX-LEDGER Zahlungsfluss: die Abführung zählt EINMAL als Abfluss (Kasse/Bank), nicht zusätzlich als TAX_PAID');
+  const qsrc = src('src/core/ledger/queries.ts');
+  ok(!/EXPENSE \([^)]*TAX_PAID/.test(qsrc) && /SETTLEMENT \(TAX_PAID\)/.test(qsrc), 'TAX-LEDGER TAX_PAID ist als Verrechnungskonto der Umsatzsteuer eingeordnet, nicht als Aufwand');
+}
+marker('CENTRAL_UI_R6D_TAX_ACCOUNTING_CONTRACT_PINNED');
+{
+  const q = await import('../../src/core/ledger/queries.ts');
+  const { partnerLedgerFor } = await import('../../src/stores/partnerStore.ts');
+  const db = freshDb();
+  const d = deps(db);
+  const kapital = (): number => q.balanceOf('PARTNER_EQUITY', { branchId: 'branch-main', counterpartyType: 'PARTNER', counterpartyId: 'pa1' } as never);
+  const buche = (kind: string, amount: number) => fern(() => cmd.runPartnerTx(d, identity(nextId(), 'partners.record_tx'), { partnerId: 'pa1', kind, amount, method: 'bank', date: '2026-09-02' }));
+  await buche('INVESTMENT', 1000);
+  ok(partnerLedgerFor('pa1').balance === 1000 && kapital() === 1000, `PARTNER Einlage 1000: Kapitalkonto 1000, Hauptbuch PARTNER_EQUITY 1000 (${partnerLedgerFor('pa1').balance}/${kapital()})`);
+  await buche('PROFIT_DISTRIBUTION', 100);
+  ok(partnerLedgerFor('pa1').balance === 900 && kapital() === 900 && partnerLedgerFor('pa1').totalProfitShare === 100,
+    `PARTNER Gewinnauszahlung 100: Kapitalkonto 1000 → 900 — wie das Hauptbuch (vorher zeigte die Maske 1100) (${partnerLedgerFor('pa1').balance}/${kapital()})`);
+  await buche('WITHDRAWAL', 200);
+  ok(partnerLedgerFor('pa1').balance === 700 && kapital() === 700, `PARTNER Entnahme 200: Kapitalkonto 700 == Hauptbuch (${partnerLedgerFor('pa1').balance}/${kapital()})`);
+  ok(/t\.type === 'INVESTMENT' \? '\+' : '−'/.test(src('src/pages/partners/PartnersPage.tsx')),
+    'PARTNER die Bewegungsliste zeigt nur die Einlage mit Plus — Entnahme und Gewinnauszahlung gehen hinaus');
+}
+marker('CENTRAL_UI_R6D_PARTNER_DISTRIBUTION_SIGN_PINNED');
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — r6d money parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
