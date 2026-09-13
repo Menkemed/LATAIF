@@ -322,6 +322,20 @@ function validateBusinessPayload(contract: CompiledContract, rawData: string): R
   return data;
 }
 
+/**
+ * Steht der gebundene Wert schon so in der Zeile? Bewusst vorsichtig: im Zweifel „nein" — dann wird
+ * geschrieben wie bisher. Wahrheitswerte bindet sql.js als 1/0; Zahl und Zahltext gelten als gleich,
+ * weil die Spaltenaffinität beim Schreiben dasselbe daraus machte.
+ */
+function sameSqlValue(current: unknown, incoming: unknown): boolean {
+  const b = incoming === true ? 1 : incoming === false ? 0 : incoming;
+  if (current === null || current === undefined) return b === null || b === undefined;
+  if (b === null || b === undefined) return false;
+  if (current === b) return true;
+  if (current instanceof Uint8Array || b instanceof Uint8Array) return false;
+  return String(current) === String(b);
+}
+
 // ── The upsert (conflict logic UNCHANGED since M6-B2DE4) ────────────────────────
 export function applyUpsert(db: SqlDb, table: string, id: string, data: Record<string, unknown>): void {
   // M6-B2DE3 §3 — this function builds SQL by interpolating the table name AND every column key
@@ -349,6 +363,15 @@ export function applyUpsert(db: SqlDb, table: string, id: string, data: Record<s
   const exists = result.length > 0 && (result[0].values[0][0] as number) > 0;
 
   if (exists) {
+    // CENTRAL-UI-PARITY R6D — ein Echo ohne Änderung ist keine Änderung. Der Primary spielt die
+    // Änderungen, die er selbst hochgeschoben hat, beim nächsten Pull wieder ein. Ein UPDATE mit
+    // denselben Werten ändert fachlich nichts — aber es löst die Fassungs-Trigger aus
+    // (`WHEN NEW.revision = OLD.revision → +1`), und ein zweiter Rechner, der den Datensatz davor
+    // geöffnet hat, bekäme ein `RECORD_CHANGED`, obwohl niemand etwas geändert hat. Stehen alle
+    // genannten Spalten schon so da, wird nicht geschrieben. Jede echte Abweichung schreibt wie bisher.
+    const cur = db.exec(`SELECT ${keys.join(', ')} FROM ${table} WHERE id = ?`, [id]);
+    const row = cur[0]?.values?.[0];
+    if (row && keys.every((_, i) => sameSqlValue(row[i], values[i]))) return;
     db.run(`UPDATE ${table} SET ${setClause} WHERE id = ?`, [...values, id]);
   } else {
     const allKeys = ['id', ...keys];

@@ -2157,8 +2157,8 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Ablehnen (Liste) | OfferList:208 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
 | Löschen (Liste) | OfferList:213 | deleteOffer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Kunde löschen | pages/customers/CustomerDetail:588→1066 | deleteCustomer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Kundengold zurückgeben | CustomerDetail:752→SettleGoldModal:288 | goldStore.returnCustomerCredit | TOT (Fehler im Modal) | A | — | gold.* | Gold · hoch |
-| Kundengold → BHD | CustomerDetail:756→SettleGoldModal:288 | convertCustomerCreditToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
+| Kundengold zurückgeben | CustomerDetail:752→SettleGoldModal:288 | goldStore.returnCustomerCredit | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
+| Kundengold → BHD | CustomerDetail:756→SettleGoldModal:288 | convertCustomerCreditToMoney | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
 | Nachricht kopieren (Protokoll) | components/ai/MessagePreviewModal:218 | customerMessageStore.logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
 | WhatsApp (Protokoll) | MessagePreviewModal:221 | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
 | Spotpreis aktualisieren | pages/dashboard/Dashboard:612 | getSpotPrices (localStorage) | geht | C | — | — | — |
@@ -2177,8 +2177,8 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Inventur abschließen | StockCheckInventoryModal:503 | closeSession | **angeschlossen (R6C)** | A | `inventory.finish` (R6C) | **geschlossen (R6C)** | Inventur · hoch |
 | Einzel-Check Verfügbar/Nicht | components/products/StockCheckPanel:119 (ProductDetail:1585) | recordStockCheck | **angeschlossen (R6C)** | A | `inventory.record_check` (R6C) | **geschlossen (R6C)** | Inventur · mittel |
 | „+ New Supplier“ im Einkauf | pages/purchases/PurchaseCreate:391→845 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
-| Einkauf: Zahlung erfassen | pages/purchases/PurchaseDetail:177→424 | purchaseStore.addPayment | TOT | A | — | purchases.record_payment | Geld · hoch |
-| Einkauf: Guthaben verrechnen | PurchaseDetail:424 (credit) | getOpenCredits + applyCreditToPurchase (FIFO) | TOT | A | — | purchases.apply_credit | Geld · hoch |
+| Einkauf: Zahlung erfassen | pages/purchases/PurchaseDetail:177→424 | purchaseStore.addPayment | **angeschlossen (R6D)** | A | `purchases.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Einkauf: Guthaben verrechnen | PurchaseDetail:424 (credit) | getOpenCredits + applyCreditToPurchase (FIFO) | **angeschlossen (R6D)** | A | `purchases.apply_credit` (R6D) | **geschlossen (R6D)** | Geld · hoch |
 | Rückgabe an Lieferant | PurchaseDetail:178→483 | createReturn + confirmReturn | TOT | A | — | purchases.return | Einkauf/Bestand · hoch |
 | Einkauf stornieren | PurchaseDetail:183→496 | cancelPurchase | TOT | A | — | purchases.cancel | Einkauf/Buchung · hoch |
 | Inbox-Foto verwerfen | pages/purchases/PurchaseList:115 | dismissPurchaseInbox | TOT | A | — | purchases.dismiss_inbox | Einkauf · niedrig |
@@ -2186,10 +2186,10 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Lieferant ändern | pages/suppliers/SupplierDetail:285→280 | updateSupplier | **angeschlossen (R6C)** | A | `suppliers.update` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
 | Lieferant (de)aktivieren | SupplierDetail:719 | updateSupplier({active}) | **angeschlossen (R6C)** | A | `suppliers.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Lieferant löschen | SupplierDetail:722→735 | deleteSupplier | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Lieferantenguthaben erstatten | SupplierDetail:696→760 | deleteStandaloneSupplierCredit | VERST (zufällig: Guthabenliste leer) | A | — | suppliers.refund_credit | Geld · mittel |
-| „Pay Supplier — Bulk“ (Öffner) | SupplierDetail:425 → PaySupplierModal | siehe Finanzen | TOT | A | — | siehe Finanzen | Geld · hoch |
-| Werkstatt-Ausgabe zahlen (Öffner) | SupplierDetail:509 → PayExpenseModal | recordExpensePayment | TOT | A | — | expenses.record_payment | Geld · hoch |
-| Gold zurück / Shop-Gold / → BHD | SupplierDetail:586/590/594 → SettleGoldModal | settleGoldReturn / applyShopGold… / convertGoldPayableToMoney | TOT | A | — | gold.* | Gold · hoch |
+| Lieferantenguthaben erstatten | SupplierDetail:696→760 | deleteStandaloneSupplierCredit | **angeschlossen (R6D)** | A | `suppliers.refund_credit` (R6D) | **geschlossen (R6D)** | Geld · mittel |
+| „Pay Supplier — Bulk“ (Öffner) | SupplierDetail:425 → PaySupplierModal | siehe Finanzen | **angeschlossen (R6D)** | A | `suppliers.pay` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Werkstatt-Ausgabe zahlen (Öffner) | SupplierDetail:509 → PayExpenseModal | recordExpensePayment | **angeschlossen (R6D)** | A | `expenses.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Gold zurück / Shop-Gold / → BHD | SupplierDetail:586/590/594 → SettleGoldModal | settleGoldReturn / applyShopGold… / convertGoldPayableToMoney | **angeschlossen (R6D)** | A | `gold.payables.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
 | Excel-Import | pages/settings/ImportPage:463 (`/import`, nicht gesperrt) | Vor-Sicherung + createProduct je Zeile | **NOTICE + Riegel (R6B)** | E | products.create (nur zeilenweise) | bleibt am Primary | Werkzeug · mittel |
 | Dubletten-Guard bestätigen | components/sync/SyncDuplicateGuard:601 | mergeIntoExisting + updateProduct | UNERR (Ereignis nur aus dem im Client verweigerten Alt-Abgleich) | D | — | — | — |
 | Dubletten-Guard übernehmen/ablehnen | SyncDuplicateGuard:586–598 | allocateSkuOnCreate + updateProduct | UNERR | D | — | — | — |
@@ -2205,21 +2205,21 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Zeilenstatus zurück | OrderDetail:1197 | updateOrderLineStatus | TOT | A | — | orders.line_status | Auftrag · mittel |
 | Position bearbeiten | OrderDetail:1232→OrderLineEditModal:179 | updateOrderLine (legt ggf. Artikel an) | TOT | A | — | orders.update_line | Auftrag/Bestand · hoch |
 | Beim Lieferanten bestellt | OrderDetail:1259→1760 | markOrderLineOrdered | TOT | A | — | orders.line_status | Auftrag · mittel |
-| Kostenposition hinzufügen | OrderDetail:1355→AddMaterialModal:528 | addOrderLine + createGoldPayable | TOT | A | — | orders.add_cost | Auftrag/Gold · hoch |
-| Kostenposition löschen | OrderDetail:1438 | deleteOrderLine (storniert A/P) | TOT | A | — | orders.remove_cost | Auftrag/Buchung · hoch |
-| A/P zahlen (Auftrag) | OrderDetail:1422→PayExpenseModal:60 | recordExpensePayment | TOT | A | — | expenses.record_payment | Geld · hoch |
-| Shop-Gold geben | OrderDetail:1506→SettleGoldModal:288 | applyShopGoldToSupplierPayable / …CrossKarat… | TOT | A | — | gold.* | Gold · hoch |
-| Gold → Geld (Auftrag) | OrderDetail:1511→SettleGoldModal:288 | convertGoldPayableToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
+| Kostenposition hinzufügen | OrderDetail:1355→AddMaterialModal:528 | addOrderLine + createGoldPayable | **angeschlossen (R6D)** | A | `orders.add_cost` (R6D) | **geschlossen (R6D)** | Auftrag/Gold · hoch |
+| Kostenposition löschen | OrderDetail:1438 | deleteOrderLine (storniert A/P) | **angeschlossen (R6D)** | A | `orders.remove_cost` (R6D) | **geschlossen (R6D)** | Auftrag/Buchung · hoch |
+| A/P zahlen (Auftrag) | OrderDetail:1422→PayExpenseModal:60 | recordExpensePayment | **angeschlossen (R6D)** | A | `expenses.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Shop-Gold geben | OrderDetail:1506→SettleGoldModal:288 | applyShopGoldToSupplierPayable / …CrossKarat… | **angeschlossen (R6D)** | A | `gold.payables.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
+| Gold → Geld (Auftrag) | OrderDetail:1511→SettleGoldModal:288 | convertGoldPayableToMoney | **angeschlossen (R6D)** | A | `gold.payables.settle` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
 | Gold-Verbindlichkeit ✕ | OrderDetail:1516 | deleteGoldPayable | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | AI-Benachrichtigung (Protokoll) | OrderDetail:789→MessagePreviewModal | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
 | „Pay“ in der Auftragsliste | pages/orders/OrderList:305→373 | orderPaymentStore.addPayment | **angeschlossen (R6B)** | B | orders.add_payment | **geschlossen (R6B)** | Geld · mittel |
-| Material hinzufügen | pages/repairs/RepairDetail:1194→AddMaterialModal:528 | addRepairLine(Material) + createGoldPayable | TOT | A | — (repairs.add_line zu eng) | repairs.add_material | Reparatur/Gold · hoch |
-| A/P zahlen (Reparatur) | RepairDetail:1276→PayExpenseModal:60 | recordExpensePayment | TOT | A | — | expenses.record_payment | Geld · hoch |
-| Goldverbrauch erfassen | RepairDetail:1333→1652 | createGoldPayable / createCustomerGoldCredit / creditShopGold | TOT | A | — | gold.* | Gold · hoch |
-| Werkstatt-Gold abrechnen | RepairDetail:1369→SettleGoldModal | settleGoldReturn | TOT | A | — | gold.* | Gold · hoch |
-| Werkstatt-Gold → BHD | RepairDetail:1373→SettleGoldModal | convertGoldPayableToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
-| Kundengold zurück (Reparatur) | RepairDetail:1406→SettleGoldModal | returnCustomerCredit | TOT | A | — | gold.* | Gold · hoch |
-| Kundengold → BHD (Reparatur) | RepairDetail:1410→SettleGoldModal | convertCustomerCreditToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
+| Material hinzufügen | pages/repairs/RepairDetail:1194→AddMaterialModal:528 | addRepairLine(Material) + createGoldPayable | **angeschlossen (R6D)** | A | `repairs.add_material` (R6D) | **geschlossen (R6D)** | Reparatur/Gold · hoch |
+| A/P zahlen (Reparatur) | RepairDetail:1276→PayExpenseModal:60 | recordExpensePayment | **angeschlossen (R6D)** | A | `expenses.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Goldverbrauch erfassen | RepairDetail:1333→1652 | createGoldPayable / createCustomerGoldCredit / creditShopGold | **angeschlossen (R6D)** | A | `repairs.record_gold_usage` (R6D) | **geschlossen (R6D)** | Gold · hoch |
+| Werkstatt-Gold abrechnen | RepairDetail:1369→SettleGoldModal | settleGoldReturn | **angeschlossen (R6D)** | A | `gold.payables.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
+| Werkstatt-Gold → BHD | RepairDetail:1373→SettleGoldModal | convertGoldPayableToMoney | **angeschlossen (R6D)** | A | `gold.payables.settle` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
+| Kundengold zurück (Reparatur) | RepairDetail:1406→SettleGoldModal | returnCustomerCredit | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
+| Kundengold → BHD (Reparatur) | RepairDetail:1410→SettleGoldModal | convertCustomerCreditToMoney | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
 | Reparatur löschen | RepairDetail:1163→1451 | deleteRepair | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | AI-Benachrichtigung (Reparatur) | RepairDetail:598→MessagePreviewModal | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
 | „+ New Supplier“ (Werkstatt) | pages/repairs/RepairList:1008→1189 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
@@ -2237,43 +2237,43 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Transfer löschen (Tabelle) | TransferTable:602 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Umwandlung rückgängig (Detail) | pages/agents/TransferDetail:285 | undoTransferInvoiceConvert | TOT | A | — | transfers.undo_convert | Transfer/Verkauf · hoch |
 | Transfer löschen (Detail) | TransferDetail:300→579 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Metall anlegen | pages/metals/MetalList:181→514 | createMetal | TOT | A | — | metals.* | Metall/Bestand · mittel |
-| Metall verkaufen | MetalList:344→547 | updateMetal | TOT | A | — | metals.* | Metall/Geld · mittel |
-| Metall schmelzen | MetalList:349→570 | updateMetal | TOT | A | — | metals.* | Metall · mittel |
+| Metall anlegen | pages/metals/MetalList:181→514 | createMetal | **angeschlossen (R6D)** | A | `metals.create` (R6D) | **geschlossen (R6D)** | Metall/Bestand · mittel |
+| Metall verkaufen | MetalList:344→547 | updateMetal | **angeschlossen (R6D)** | A | `metals.update_status` (R6D) | **geschlossen (R6D)** | Metall/Geld · mittel |
+| Metall schmelzen | MetalList:349→570 | updateMetal | **angeschlossen (R6D)** | A | `metals.update_status` (R6D) | **geschlossen (R6D)** | Metall · mittel |
 | Metall löschen | MetalList:356 | deleteMetal | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Spotpreis/g | MetalList:220 (je Tastendruck) | setSpotPrice (settings) | TOT (wirft je Tastendruck) | A | — | metals.set_spot | Filialeinstellung · niedrig |
-| Schrotthandel anlegen | pages/scrap-trades/ScrapTradeNew → ScrapTradeForm:394 | createTrade | TOT | A | — | scrap_trades.* | Gold/Geld · hoch |
-| Schrotthandel ändern | ScrapTradeDetail:58 → ScrapTradeForm:394 | updateTrade | TOT | A | — | scrap_trades.* | Gold/Geld · hoch |
-| Schrotthandel stornieren | ScrapTradeDetail:59→85 | cancelTrade (Buchungsstorno) | TOT | A | — | scrap_trades.* | Buchung · hoch |
+| Spotpreis/g | MetalList:220 (je Tastendruck) | setSpotPrice (settings) | **angeschlossen (R6D)** | A | `metals.set_spot_price` (R6D) | **geschlossen (R6D)** | Filialeinstellung · niedrig |
+| Schrotthandel anlegen | pages/scrap-trades/ScrapTradeNew → ScrapTradeForm:394 | createTrade | **angeschlossen (R6D)** | A | `scrap_trades.create` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
+| Schrotthandel ändern | ScrapTradeDetail:58 → ScrapTradeForm:394 | updateTrade | **angeschlossen (R6D)** | A | `scrap_trades.update` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
+| Schrotthandel stornieren | ScrapTradeDetail:59→85 | cancelTrade (Buchungsstorno) | **angeschlossen (R6D)** | A | `scrap_trades.cancel` (R6D) | **geschlossen (R6D)** | Buchung · hoch |
 | Schrotthandel löschen | ScrapTradeDetail:63→101 | deleteTrade | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 
 **Finanzen · Steuer · Buchhaltung**
 
 | UI-Handlung | Ort | Laufweg am Primary | PC2 heute | Kat. | vorh. Buchung | nächster Schritt | Domäne · Risiko |
 |---|---|---|---|---|---|---|---|
-| Lieferant bezahlen (bar/Bank/Benefit) | components/expenses/PaySupplierModal:686 | FIFO: recordExpensePayment / purchaseStore.addPayment / grantStandaloneCredit | TOT (erster Schreibvorgang wirft, nichts halb) | A | — | suppliers.pay (eine Klammer) | Geld · hoch |
-| Lieferantenguthaben anwenden | PaySupplierModal:686 (Credit) | applySupplierCreditViaServer (Alt-B1-Protokoll über den Sync-Server) | VERST (zufällig: Guthaben 0) | A | — | suppliers.apply_credit | Geld · hoch |
-| Ausgabe anlegen | pages/expenses/ExpenseList:661 | createExpense | TOT (Alert) | A | — | expenses.create | Ausgaben · mittel |
-| Wiederkehrende Ausgabe anlegen | ExpenseList:661 (Recurring) | recurringExpenseStore.createTemplate | TOT (Alert) | A | — | expenses.template_* | Ausgaben · mittel |
-| Vorlage pausieren/fortsetzen | ExpenseList:393 | setActive → updateTemplate + runDueGenerator | TOT | A | — | expenses.template_* | Ausgaben · niedrig |
-| Vorlage speichern | ExpenseList:771 | updateTemplate | TOT | A | — | expenses.template_* | Ausgaben · niedrig |
+| Lieferant bezahlen (bar/Bank/Benefit) | components/expenses/PaySupplierModal:686 | FIFO: recordExpensePayment / purchaseStore.addPayment / grantStandaloneCredit | **angeschlossen (R6D)** | A | `suppliers.pay` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Lieferantenguthaben anwenden | PaySupplierModal:686 (Credit) | applySupplierCreditViaServer (Alt-B1-Protokoll über den Sync-Server) | **angeschlossen (R6D)** | A | `suppliers.apply_credit` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Ausgabe anlegen | pages/expenses/ExpenseList:661 | createExpense | **angeschlossen (R6D)** | A | `expenses.create` (R6D) | **geschlossen (R6D)** | Ausgaben · mittel |
+| Wiederkehrende Ausgabe anlegen | ExpenseList:661 (Recurring) | recurringExpenseStore.createTemplate | **angeschlossen (R6D)** | A | `expenses.template_create` (R6D) | **geschlossen (R6D)** | Ausgaben · mittel |
+| Vorlage pausieren/fortsetzen | ExpenseList:393 | setActive → updateTemplate + runDueGenerator | **angeschlossen (R6D)** | A | `expenses.template_update` (R6D) | **geschlossen (R6D)** | Ausgaben · niedrig |
+| Vorlage speichern | ExpenseList:771 | updateTemplate | **angeschlossen (R6D)** | A | `expenses.template_update` (R6D) | **geschlossen (R6D)** | Ausgaben · niedrig |
 | Vorlage löschen | ExpenseList:795 | deleteTemplate | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Ausgabe zahlen | ExpenseList:481→PayExpenseModal:139 | recordExpensePayment | TOT (Alert) | A | — | expenses.record_payment | Geld · hoch |
+| Ausgabe zahlen | ExpenseList:481→PayExpenseModal:139 | recordExpensePayment | **angeschlossen (R6D)** | A | `expenses.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
 | Ausgabe löschen (Liste) | ExpenseList:489→890 | deleteExpense (Storno + Guthaben zurück) | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Ausgabe löschen (Maske) | ExpenseList:853 | deleteExpense | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Ausgabe speichern | ExpenseList:861 | updateExpense | TOT (Alert) | A | — | expenses.update | Ausgaben · mittel |
+| Ausgabe speichern | ExpenseList:861 | updateExpense | **angeschlossen (R6D)** | A | `expenses.update` (R6D) | **geschlossen (R6D)** | Ausgaben · mittel |
 | Fällige Ausgaben erzeugen (beim Öffnen) | ExpenseList:123 | runDueGenerator | still, nichts | C | — | bleibt Sache des Primary | — |
-| Umbuchung Kasse ↔ Bank | pages/banking/BankingPage:343 | bankingStore.createTransfer | TOT | A | — (transfers.* sind Agenten-Transfers) | banking.transfer | Geld · hoch |
+| Umbuchung Kasse ↔ Bank | pages/banking/BankingPage:343 | bankingStore.createTransfer | **angeschlossen (R6D)** | A | `banking.transfer` (R6D) | **geschlossen (R6D)** | Geld · hoch |
 | Partner anlegen | pages/partners/PartnersPage:187 | createPartner | **angeschlossen (R6C)** | A | `partners.create` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
-| Einlage / Entnahme / Gewinnverteilung | PartnersPage:222 | recordInvestment / recordWithdrawal / recordProfitDistribution | TOT | A | — | partners.record_tx | Geld/Buchung · hoch |
+| Einlage / Entnahme / Gewinnverteilung | PartnersPage:222 | recordInvestment / recordWithdrawal / recordProfitDistribution | **angeschlossen (R6D)** | A | `partners.record_tx` (R6D) | **geschlossen (R6D)** | Geld/Buchung · hoch |
 | Partnerbewegung ✕ | PartnersPage:162 | deleteTransaction (+ Storno über safePost) | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Partner speichern | PartnersPage:279 | updatePartner | **angeschlossen (R6C)** | A | `partners.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Partner löschen | PartnersPage:267 | deletePartner | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Schuld anlegen | pages/debts/DebtsPage:674 | createDebt | TOT | A | — | debts.* | Geld · hoch |
-| Rückzahlung erfassen | DebtsPage:757 | recordDebtPayment | TOT | A | — | debts.* | Geld · hoch |
-| Schuld speichern | DebtsPage:811 | updateDebt | TOT | A | — | debts.* | Geld · mittel |
+| Schuld anlegen | pages/debts/DebtsPage:674 | createDebt | **angeschlossen (R6D)** | A | `debts.create` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Rückzahlung erfassen | DebtsPage:757 | recordDebtPayment | **angeschlossen (R6D)** | A | `debts.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
+| Schuld speichern | DebtsPage:811 | updateDebt | **angeschlossen (R6D)** | A | `debts.update` (R6D) | **geschlossen (R6D)** | Geld · mittel |
 | Schuld löschen | DebtsPage:763→842 | deleteDebt (Zahlungsstorno + Löschen) | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Steuerzahlung eintragen | pages/analytics/AnalyticsPage:801→1015 | roher INSERT `tax_payments` (ohne Buchung) | VERST | A | — | tax.record_payment **mit** Buchung | Steuer · hoch |
+| Steuerzahlung eintragen | pages/analytics/AnalyticsPage:801→1015 | roher INSERT `tax_payments` (ohne Buchung) | **angeschlossen (R6D)** | A | `tax.record_payment` (R6D) | **geschlossen (R6D)** | Steuer · hoch |
 | „Storniere alle Orphans“ | pages/reports/ReconciliationPage:251 | hasReversalFor + reverseSource | VERST | E | — | bleibt am Primary | Buchhaltungsreparatur |
 | Nachbuchung (20 Knöpfe) | pages/reports/BackfillPage:169–188 | backfillAll / backfill* | NOTICE | E | — | bleibt am Primary | Buchhaltungsreparatur |
 | Hauptbuch-Prüfstand (≈43 Testknöpfe) | pages/settings/LedgerDebugPage:742–929 | post* / …Reversed | NOTICE | E | — | bleibt am Primary | Prüfstand |
@@ -2735,3 +2735,145 @@ R6A         A 95 · R6C 16 · geschlossen 16 · verbleibend 79 (Aufgaben, Dokume
 Korrektur   Gehalt ohne Obergrenze · Inventur ohne Höchstzahl, Lesen in 1 000er-Blöcken — nur gemeinsame
             Domäne/Validierung, Registry 121 unverändert → Zwei-App 120/0 (e03478c) bleibt gültig
 ```
+
+## R6D — Finanzen, Steuer, Buchhaltung, Gold und Metall (13.09.2026)
+
+Ein Bündel, vier Domänen: Steuer/Bank/Gesellschafter/Darlehen, Verbindlichkeiten (Ausgaben, Vorlagen, Einkaufszahlung,
+Lieferant), Gold (Abrechnung, Verbrauch, Material, Kostenzeilen) und Edelmetall/Schrotthandel. Grundregel für jede
+Aktion: **Primary fachlich prüfen → Primary-Fehler in der gemeinsamen Domäne beheben → Fernbuchung auf dieselbe Domäne
+→ Primary und PC2 gemeinsam testen.** Kein Primary-Fehler wurde in den Fernweg kopiert.
+
+### Umfang, eingefroren (`CENTRAL_UI_R6D_SCOPE_FROZEN`)
+
+Aus der SSOT gelesen (nicht aus Erinnerung): alle offenen A-Zeilen der Domänen Geld, Steuer, Ausgaben, Buchung,
+Gold, Metall und Filialeinstellung (Spotpreis) sowie die Kosten-/Materialzeilen mit Gold-Schuld — **41 Einstiege**.
+
+| Domäne | UI-Einstiege (SSOT) | Laufweg am Primary vorher | Primary korrekt? | PC2 vorher | gemeinsame Domäne | Fernbuchung |
+|---|---|---|---|---|---|---|
+| Steuer | Steuerzahlung eintragen (AnalyticsPage) | roher INSERT `tax_payments` aus der Seite | **nein**: keine Buchung, Fehler nur Konsole + Maske schloss, leeres Datum, Ersatzfiliale | versteckt | `core/finance/money-house` | `tax.record_payment` |
+| Bank | Umbuchung Kasse ↔ Bank | `createTransfer` + `safePost` | **nein**: Halbzustand möglich, keine Prüfung | TOT | money-house | `banking.transfer` |
+| Gesellschafter | Einlage / Entnahme / Gewinnverteilung | `recordTx` + `safePost` | **nein**: Halbzustand, keine Existenzprüfung | TOT | money-house | `partners.record_tx` |
+| Darlehen | anlegen · Rückzahlung · speichern | `createDebt` / `recordDebtPayment` / `updateDebt` | **nein**: Überzahlung, Zahlung auf storniert, Ledger-Drift beim Berichtigen, Cache-Richtung | TOT | money-house | `debts.create/record_payment/update` |
+| Ausgaben | anlegen · speichern · zahlen (+ 3 Öffner: Lieferant, Auftrag, Reparatur) | `createExpense` / `updateExpense` / `recordExpensePayment` | **nein**: drei Commits, Überzahlung still gekappt, Betrag/Datum ohne Ledger-Korrektur, Snapshot-Rückschreiben | TOT | `core/payables/payables-house` | `expenses.create/update/record_payment` |
+| Vorlagen | anlegen · pausieren/fortsetzen · speichern | `createTemplate` / `updateTemplate` + Generator | **nein**: Resume holt Pausenmonate samt Zahlungen nach, Betrag 0, veraltetes Rückschreiben | TOT | payables-house | `expenses.template_create/update` |
+| Einkauf | Zahlung erfassen · Guthaben verrechnen | `addPayment` / FIFO-Schleife in der Seite | **nein**: überschrieb guthabenbewussten Rest, Schleife ohne Klammer, stilles Weniger | TOT | payables-house | `purchases.record_payment/apply_credit` |
+| Lieferant | bezahlen (+ Öffner) · Guthaben anwenden · Guthaben erstatten | Zahlschleife / Alt-Server / `deleteStandaloneSupplierCredit` | **nein**: Rest ohne Guthaben, nicht atomar; Guthaben-Weg kam am Primary nie an; Erstatten korrekt | TOT / VERST | payables-house | `suppliers.pay/apply_credit/refund_credit` |
+| Gold | Kundengold zurück/→ BHD ×4 · Werkstatt-Gold zurück/Shop-Gold/→ BHD ×7 · Goldverbrauch | goldStore, Modal liest Cache | **nein**: „wird zurückgewiesen" nie geprüft, Bestand nie geprüft, Karat ?? 1,0, Cross-Karat nie genau, verschluckte Umwandlung | TOT | `core/gold/gold-settle` + `gold-house` | `gold.payables.settle`, `gold.customer_credits.settle`, `repairs.record_gold_usage` |
+| Kosten/Material | Kostenposition hinzufügen/löschen (Auftrag) · Material (Reparatur) | `addOrderLine`/`addRepairLine` + `createGoldPayable` je Zeile | **nein**: je Zeile ein Commit (Duplikate bei Wiederholung), teilbeglichene Schuld hart gelöscht | TOT | gold-house | `orders.add_cost/remove_cost`, `repairs.add_material` |
+| Metall | anlegen · verkaufen · schmelzen · Spotpreis | `createMetal` (bis 4 Commits) / `updateMetal` / `setSpotPrice` je Taste | **nein**: Halbzustände, kein Statuswächter, negatives Gewicht, Spot aus der Maske | TOT | `core/metals/metal-house` | `metals.create/update_status/set_spot_price` |
+| Schrotthandel | anlegen · ändern · stornieren | Store: INSERTs + eigener Post, Storno setzt Status VOR Umkehr | **nein**: Duplikat nach Fehler, keine Fassungsprüfung, Storno ohne Wiederholungsweg | TOT | `core/metals/scrap-house` | `scrap_trades.create/update/cancel` |
+
+Nicht im Umfang (andere Domänen der SSOT): Angebote, Rechnung anlegen+zahlen/Sondernummer/Butterfly/Retoure stornieren,
+Einkauf zurückgeben/stornieren, Auftrag stornieren + Zeilenstatus, Kommission, Transfer rückgängig, Produktion, Aufgaben,
+Dokumente/OCR, Nachrichtenprotokoll, Bildänderung am Artikel, Inbox-Foto.
+
+### Primary zuerst — Befunde und Behebung (`CENTRAL_UI_R6D_PRIMARY_FIRST_PROVED`)
+
+Jede Befund-Zeile ist in der gemeinsamen Domäne behoben; der Primary läuft seither über `runOnPrimary` (Schreibreihenfolge,
+eine Ledger-Transaktion, erst danach durabel), PC2 über `runRemoteCommand` — **dieselbe** Hausfolge.
+
+- **Steuer** (`CENTRAL_UI_R6D_TAX_PAYMENT_CONTRACT_PROVED`): „Tax Payment" = Abführung der Umsatzsteuer eines
+  Geschäftsquartals. Ausgeglichen wird das Quartal `year`/`quarter` (die Maske nennt es, der Primary prüft es gegen
+  dieselbe Quartalsrechnung wie die Anzeige: `financeFor(ctx).quarterly`, `vatQuarterState()`) — ein beglichenes oder
+  ein Erstattungsquartal wird abgewiesen (`TAX_QUARTER_SETTLED`, `TAX_QUARTER_REFUND_DUE`). Teilzahlung erlaubt;
+  Überzahlung ungedeckelt wie im bisherigen Vertrag (keine erfundene Grenze). Zahlweg bar oder Bank. Buchung
+  `postTaxPayment`: Soll TAX_PAID / Haben CASH oder BANK, Quelle `TAX_PAYMENT` — dieselbe, die die Nachbuchung schon
+  kannte. Was offen ist, rechnet die Quartalsrechnung wie bisher aus `tax_payments` (nach `year`/`quarter`).
+  Zeile und Buchung in EINER Transaktion; Fehler bleiben in der Maske stehen.
+- **Bank/Gesellschafter/Darlehen**: atomar und streng (kein `safePost` mehr in der Handlung); Partner, Kunde,
+  Mitarbeiter müssen in der Filiale existieren; Gegenpartei und Belegnummer vom Primary; Rückzahlung höchstens der
+  Rest (abgeleitet aus der Invariante „Betrag nie unter Bezahltem" von `updateDebt`), nicht auf storniert/getilgt;
+  Berichtigen von Betrag/Konto spiegelt die LOAN-Buchung und bucht neu; storniert → `DEBT_CANCELLED`.
+- **Verbindlichkeiten**: Ausgabe samt Erstzahlung und beiden Buchungen in einer Transaktion; Gehalt braucht den
+  Mitarbeiter vor der Nummernvergabe; Überzahlung abgewiesen statt gekappt; Speichern nur der Formularfelder, nie unter
+  das Bezahlte (bar + Guthaben), Betrag/Datum → Storno und Neubuchung; Resume ohne Pausenmonate (Zusage der Maske);
+  Einkaufszahlung guthabenbewusst, Überzahlung → Lieferantenguthaben in derselben Transaktion; Guthaben-FIFO nur über die
+  Filiale, alles oder nichts; Lieferant bezahlen guthabenbewusst und atomar; Guthaben anwenden über den atomaren lokalen
+  Schreiber (der Alt-Server-Weg kam am Primary nie an).
+- **Gold** (`CENTRAL_UI_R6D_GOLD_METAL_DOMAIN_PROVED`): „Settle — Workshop returns gold" bleibt Zugang ins Ladengold
+  (dokumentierte Absicht der Maske), „Apply shop gold" Abgang; beide senken die offene Schuld. Was die Maske als
+  „wird zurückgewiesen" ankündigte, wird jetzt zurückgewiesen (`GOLD_OVER_SETTLEMENT`, `GOLD_SHOP_STOCK_INSUFFICIENT`).
+  Karat nur aus `KARAT_PURITY` (kein stilles 1,0); Cross-Karat mit einer Toleranz von einem halben Eingabeschritt
+  (0,0005 · P[Quelle]/P[Ziel]) — genau getroffen heißt erfüllt. Umwandlung in BHD atomar (Guthabenzeile + Buchung
+  `postGoldConversionCredit` bzw. Ausgabe + `postExpense`). Liest aus der DB in der Transaktion, nicht aus dem Cache.
+  Teilbeglichene Schuld ist nicht mehr löschbar (`GOLD_PAYABLE_PARTLY_SETTLED`). Bestand nur `metal_type='gold'`.
+  Dieselbe Gold-Schuld-Semantik wie R5E (`createGoldPayable`, we_owe / return_gold) — keine zweite Gramm-/Karatlogik.
+- **Metall/Schrott**: Anlage in einer Transaktion (Zeile, Goldbewegung, Lieferantenausgabe, Buchung, Verknüpfung);
+  Spot und Schmelzwert vom Primary; Verkauf/Schmelzen nur aus `in_stock`; Spotpreis beim Verlassen des Feldes statt je
+  Taste; Schrott anlegen/ändern/stornieren atomar, Fassung gegen die Zeile, Storno erst Umkehr dann Status.
+
+Bewusst **nicht** geändert (Befunde, eigene Entscheidung nötig): TAX_PAID-Design (VAT_OUTPUT/MARGIN_VAT nie entlastet),
+Quartalsschlüssel bei Geschäftsjahr ≠ 1/4/7/10, `tax_payments` nicht im Sync-Manifest, Gewinnverteilung als Plus in
+`partnerLedgerFor` und gemeinsamer PWD-Nummernkreis, Metallkauf als Aufwand statt Bestand, Metallverkauf ohne Erlös,
+Goldbewegung bei Verkauf/Schmelzen, zwei Spotpreis-Quellen, Schrott ohne Gegenpartei im Hauptbuch.
+
+### Buchhaltung — Einordnung (`CENTRAL_UI_R6D_ACCOUNTING_CLASSIFICATION_PROVED`)
+
+Frisch gegen den Code geprüft: in der SSOT gibt es **keine** offene A-Zeile, die eine normale tägliche Buchungsaktion
+wäre. Nachbuchung (Backfill), Hauptbuch-Prüfstand, Reparatur-Abgleich und Hauptbuch-Rohsicht sind Werkzeuge des
+Primary (`PrimaryOnlyNotice` an der Route), der Storno der Abstimmung erscheint nur am Primary. Sie bleiben
+Primary-only und auf PC2 fail-closed; keine Umklassifizierung, keine Fernbuchung mit `backfill|ledger|reconcil`.
+
+### Hauptbuch-Autorität und Atomarität (`CENTRAL_UI_R6D_LEDGER_AUTHORITY_PROVED`, `CENTRAL_UI_R6D_GOLD_SETTLEMENT_ATOMICITY_PROVED`)
+
+Jede Buchung entsteht ausschließlich in der Hausfolge über die vorhandenen `postXxx`-Funktionen; kein Rumpf nennt Konto,
+Soll/Haben, Summen, Salden, Reste, erfüllte Gramm, Spot, Schmelzwert, Belegnummer oder Status (Verbotslisten in allen
+vier Befehlsmodulen). Jede neue Buchung ist ausgeglichen (Σ Soll = Σ Haben je Transaktion, in allen vier Tests geprüft).
+Scheitert irgendein Schritt — Zeile, Gold-/Geldbestand, Buchung, Verknüpfung —, rollt die ganze Handlung zurück
+(Fehlerinjektion an den Wirkungspunkten in allen vier Tests). Verlorene Antwort: dieselbe Kennung → dieselbe Antwort,
+genau eine Wirkung. Änderbare Geld-/Goldzustände tragen eine Fassung (neu: `debts`, `expenses`,
+`recurring_expense_templates`, `purchases`, `gold_payables`, `customer_gold_credits`, `precious_metals`; Schrott:
+`version`); eine alte Fassung → `RECORD_CHANGED`, nichts geschrieben.
+
+### Befund aus dem Zwei-App-Lauf: das Sync-Echo zählte die Fassung (`CENTRAL_UI_R6D_SYNC_ECHO_NO_REVISION_BUMP_PROVED`)
+
+Der Primary synchronisiert (Auto-LAN) mit seinem eigenen Sync-Server und spielt dabei die Änderungen, die er selbst
+hochgeschoben hat, beim nächsten Pull wieder ein (30-s-Takt). `applyUpsert` schrieb dafür ein UPDATE mit denselben
+Werten — und jeder Fassungs-Trigger zählte +1. Wer einen Datensatz davor geöffnet hatte, bekam `RECORD_CHANGED`,
+obwohl niemand etwas geändert hatte (gemessen: PC2 zahlt auf ein Darlehen, der Primary schiebt, PC2 zahlt noch einmal →
+Nein). Das betraf seit C3D/C3E schon Rechnungen und Aufträge (auch über die Kindzeilen-Trigger) und seit R6D zusätzlich
+die sieben neuen Fassungs-Tabellen. **Behoben an der Wurzel** (`core/sync/apply-change.ts`): stehen alle genannten
+Spalten schon so in der Zeile, wird nicht geschrieben — ein Echo ohne Änderung ist keine Änderung. Jede echte Abweichung
+schreibt wie bisher (letzter Schreiber nach Ankunft, unverändert). Bewiesen im Unit-Test (sieben Tabellen, Auftrag über
+die Zeile, vorsichtiger Vergleich) und im Zwei-App-Lauf (Zahlung → Echo → zweite Zahlung geht durch, keine Fassung
+bewegt sich).
+
+### Befehlsmodell und Sicherheit (`CENTRAL_UI_R6D_FINANCIAL_INPUT_AUTHORITY_PROVED`)
+
+Eine fachliche Absicht, ein Name: „Pay" an vier Stellen ist EIN `expenses.record_payment`; die fünf Abrechnungsarten des
+Gold-Modals sind zwei Namen (je Gold-Topf, Art als Feld); Einlage/Entnahme/Gewinnverteilung ist `partners.record_tx`;
+„Pausieren" ist `expenses.template_update` mit Zielwert; Verkaufen/Schmelzen ist `metals.update_status`. Rechte wie am
+Primary: überall kein Tor außer `orders.add_cost`/`orders.remove_cost` (`perm.canManageOrders`). Negativ geprüft:
+fremde Filiale, fremde Lieferanten/Kunden/Partner/Guthaben/Schulden, ungültige Gramm/Karat, negative Beträge,
+Überzahlung/Übererfüllung, alte Fassung, abgeleitete Summen, direkte Ledger-Felder.
+
+### Beweise
+
+```
+Unit    r6d/money 166/0 · r6d/payables 201/0 · r6d/gold 263/0 · r6d/metal-scrap 246/0 · r6d/final-gate 118/0
+        r6d/sync-echo 19/0 · Sync-Nachbarn (cursor-safety, stale-replay, quarantine, identifier-apply, m2, m6b0, d3) grün
+Nachbarn r6c final-gate/masterdata/inventory · r6b · r5c/r5d/r5e/r5f · c3g/c4/c6 · uiparity r2c/r3/r4b/r4c · manifest-drift grün
+Rust    cargo test --lib bridge 37/0 · sync_schema 8/0 · TS app/node 0 · Lint-Delta 23 → 20
+Two-App test/e2e/r6d-finance-gold.e2e.mjs 659/0 (6 min 39 s): alle 28 Buchungen auf PC2 UND am Primary, Zeilen/Status/Fassung/
+        Hauptbuch Primary == PC2, verlorene Antwort ×6 (eine Wirkung), alte Fassung → RECORD_CHANGED, Überzahlung → Nein,
+        alle Transaktionen ausgeglichen, Sync-Echo ohne Fassungssprung, PC2 ohne lokale DB, alte lataif.db unberührt,
+        nur eigene Testprozesse beendet (Prozess-Isolation 35/0)
+```
+
+### Stand der R6A-SSOT nach R6D (`CENTRAL_UI_R6D_SSOT_UPDATED`)
+
+```
+A vorher             79
+R6D Umfang           41   (Steuer 1 · Bank 1 · Gesellschafter 1 · Darlehen 3 · Ausgaben/Vorlagen 9 inkl. 3 Öffner ·
+                           Einkauf 2 · Lieferant 4 inkl. 1 Öffner · Gold 10 · Kosten/Material 3 · Metall 4 · Schrott 3)
+geschlossen          41
+umklassifiziert       0   (Buchhaltungswerkzeuge waren nie A — sie bleiben Primary-only)
+verbleibend          38
+neue Buchungen       28
+neue Auskünfte        3   (metals.spot_prices.get, debts.payments.get, suppliers.credits.get)
+Registry            121 → 152   (1 Probe + 71 Auskünfte + 80 Buchungen)
+```
+
+Verbleibend (R6E/R6G): Angebote, Rechnungs-Lebenszyklus, Einkauf zurückgeben/stornieren, Auftrag stornieren +
+Zeilenwege, Kommission, Transfer rückgängig, Produktion, Aufgaben, Dokumente/OCR, Nachrichtenprotokoll, Bildänderung,
+Inbox-Foto.
