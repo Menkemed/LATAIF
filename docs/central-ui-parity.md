@@ -3026,6 +3026,24 @@ lesen `credit_notes` gar nicht (MwSt aus `invoices.vat_amount`, das der Storno w
 die stornierte Gutschrift sichtbar markiert; Löschen einer stornierten Gutschrift ist gesperrt. Wiederholung → genau
 einmal (fern eingefrorenes `RETURN_ALREADY_CANCELLED`); Fehlerinjektion an Status, Guthaben, Protokoll, Buchung → nichts.
 
+**Vertrag: eine bereits erstattete Retoure** (`CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED`). Bestehende Regel,
+unverändert und jetzt gepinnt: ist auf die Retoure eine Erstattung verbucht (`sales_returns.refund_paid_amount > 0`), gibt
+es keinen Storno. Das gilt für Bargeld/Bank/Karte UND für ein Store-Guthaben, das über „Refund" als Erstattung gebucht
+wurde (`recordRefundPayment(…, 'credit')`, refund_status REFUNDED, Buchung CR CUSTOMER_CREDIT). Oberfläche: statt
+„Cancel Return" steht „Cannot cancel: A refund of … has already been paid out — reclaim it first." (dieselbe Regel
+`returnCancelability`, auf PC2 über `store.sales_returns.get`). Domäne: `RETURN_REFUND_PAID_OUT` am Primary, fern ein
+eingefrorenes Nein. Wirkung: keine — Retoure, Gutschrift (bleibt ISSUED), Guthaben (bleibt OPEN), Hauptbuch, Zahlungen,
+Protokoll unverändert; die verbuchte Erstattung selbst bleibt stehen. Einen Rückholweg gibt es nicht und R6E erfindet
+keinen. Stornierbar bleibt, was noch nicht als Erstattung verbucht ist (freigegebene Gutschrift, auch mit Guthaben).
+
+**Leser der Gutschriften** (`CENTRAL_UI_R6E_CREDIT_NOTE_READER_CLASSES_PINNED`): jede Datei, deren Code `credit_notes` nennt,
+ist eingeordnet (18: Summen/Zählungen ohne CANCELLED, Verweise auf lebende Retouren, Storno, Liste mit Löschsperre,
+Schema, Abgleich). **NOT A CONSUMER**: Steuer/Quartal (`financeFor`), NBR-Export (`InvoiceList`), Umsatzkennzahlen
+(`sales-metrics`, `sales-metrics-loader`), Hauptbuch-Abfragen/`vatPosition` — die MwSt kommt aus
+`invoices.vat_amount`, das der Storno wiederherstellt; keine neue Buchhaltungssemantik. Gepinnt: eine ausgestellte
+Gutschrift wirkt wie bisher (offene Posten, Forderungen, Kunden-Gutschriften, Hauptbuch), eine stornierte wirkt nicht
+mehr (jeder Leser wie vor der Retoure), bleibt aber mit Nummer, Status und Storno-Urheber in der Liste; Löschen gesperrt.
+
 **Zwei verschiedene Benutzer, zwei echte Anwendungen** (`CENTRAL_UI_R6E_DISTINCT_ACTOR_E2E_PROVED`): Primary als A, PC2 als
 B — Rechnung mit Zahlung, Teilzahlung auf eine offene Rechnung, Retourenstorno. Wirkung gleich; alle neuen Urheber-Spalten
 und Protokolleinträge der PC2-Handlung = B, der Primary-Handlung = A; der Primary bleibt als A angemeldet; ein Rumpf mit
@@ -3045,7 +3063,7 @@ direkte Statusinjektion, unzulässige Übergänge und Stornozustände, fremder b
 
 ```
 Unit    r6e/offer 168/0 · r6e/invoice-lifecycle 134/0 · r6e/reversal 146/0 · r6e/message-log 98/0 · r6e/final-gate 99/0
-        r6e/actor-attribution 37/0 · r6e/credit-note-reversal 136/0 (Audit-Integrity-Gate)
+        r6e/actor-attribution 37/0 · r6e/credit-note-reversal 161/0 (Audit-Integrity-Gate + Vertrags-Pin)
 Nachbarn r6d/r6c final-gate · r6b · r5c/r5d/r5e/r5f · c3g/c4/c6 · bridge invoice/remote-create/financial/lifecycle/service/write-foundation/client-ui · uiparity r1/r2c/r3/r4b/r4c — 41 Dateien grün
 Rust    cargo test --lib bridge 37/0 · sync_schema 8/0 · manifest-drift 1443/1443 · TS app/node 0 · Lint-Delta 0
 Two-App test/e2e/r6e-sales-offers-invoice.e2e.mjs 386/0 (4m 26s) · Zwei-Benutzer test/e2e/r6e-actor-attribution.e2e.mjs 123/0 (1m 32s; Primary user-owner, PC2 user-r6e-b)

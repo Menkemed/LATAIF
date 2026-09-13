@@ -637,6 +637,115 @@ marker('CENTRAL_UI_R6E_CREDIT_NOTE_READERS_PROVED');
 }
 marker('CENTRAL_UI_R6E_CREDIT_NOTE_UI_PROVED');
 
+// ══ §8 — Vertrag: eine bereits ERSTATTETE Retoure ist nicht stornierbar ══════
+// Bestehende Regel (vor R6E im Store, seither in der Hausfolge): ist auf die Retoure schon eine Erstattung
+// verbucht (`sales_returns.refund_paid_amount > 0`), bietet die Maske kein „Cancel Return" an, und die
+// Hausfolge weist ab — Primary wie PC2 — ohne irgendetwas zu schreiben. Das gilt für jede verbuchte
+// Erstattung: Bargeld/Bank/Karte UND ein Store-Guthaben, das über „Refund" als Erstattung gebucht wurde
+// (`recordRefundPayment(…, 'credit')`: refund_status REFUNDED, Buchung CR CUSTOMER_CREDIT). Einen Rückholweg
+// (Erstattung zurückbuchen) gibt es nicht — R6E erfindet keinen; der Knopf nennt den Grund.
+const codeVon = (fn: () => unknown): string => { try { fn(); return ''; } catch (e) { return String((e as { code?: unknown }).code ?? (e as Error).message); } };
+async function erstattetGesperrt(w: Welt, was: string, erstatten: () => void): Promise<void> {
+  useSalesReturnStore.getState().loadReturns();
+  const f = meldung(() => imHaus(erstatten));
+  const bezahlt = n(w.db, 'SELECT refund_paid_amount FROM sales_returns WHERE id = ?', [w.retId]);
+  ok(!f && bezahlt > 0.005 && salden(w.db) !== S(w.mit.salden) ,
+    `PAID ${was}: die Erstattung ist verbucht (refund_paid_amount ${bezahlt}, Hauptbuch bewegt) ${f}`);
+  reload();
+  const cb = useSalesReturnStore.getState().getReturnCancelability(w.retId);
+  ok(cb.canCancel === false && /already been paid out/.test(String(cb.blockReason)),
+    `PAID ${was}: die Maske bietet kein „Cancel Return" an und nennt den Grund (${S(cb)})`);
+  const vor = zustand(w);
+  const lokal = codeVon(() => imHaus(() => cancelHouse.cancelReturnInHouse(w.retId, 'Storno', { userId: 'user-test', role: 'ADMIN' }, 'branch-main')));
+  ok(lokal === cancelHouse.RETURN_REFUND_PAID_OUT && zustand(w) === vor,
+    `PAID ${was}: am Primary abgewiesen (${lokal}), nichts geschrieben — Retoure, Gutschrift, Guthaben, Hauptbuch, Protokoll unverändert`);
+  const fernR = await fern(() => rev.runReturnCancel(deps(w.db), identity(nx()), rumpf(w)));
+  ok(!fernR.ok && fernR.code === cancelHouse.RETURN_REFUND_PAID_OUT && fernR.frozen && zustand(w) === vor,
+    `PAID ${was}: fern ein eingefrorenes Nein (${fernR.code}), nichts geschrieben`);
+  ok(s(w.db, 'SELECT status FROM credit_notes WHERE id = ?', [w.cnId]) === 'ISSUED', `PAID ${was}: die Gutschrift bleibt wirksam (ISSUED)`);
+}
+{
+  const wb = welt('bezahlt-bar-offen');
+  await erstattetGesperrt(wb, 'bar (Teil-Erstattung 500)', () => useSalesReturnStore.getState().recordRefundPayment(wb.retId, 500, 'cash'));
+  const wg = welt('guthaben');
+  await erstattetGesperrt(wg, 'Store-Guthaben über „Refund"', () => useSalesReturnStore.getState().refundReturn(wg.retId));
+  ok(s(wg.db, 'SELECT refund_method FROM sales_returns WHERE id = ?', [wg.retId]) === 'credit'
+    && S(ccZeilen(wg).map((c) => c.status)) === S(['OPEN']),
+  'PAID Store-Guthaben: als Erstattung „credit" verbucht, das Guthaben bleibt einlösbar (OPEN)');
+  // Kontrolle: dasselbe Guthaben OHNE verbuchte Erstattung (nur freigegeben) ist stornierbar — der Riegel
+  // hängt an der Erstattung, nicht am Guthaben.
+  const wf = welt('guthaben');
+  reload();
+  ok(useSalesReturnStore.getState().getReturnCancelability(wf.retId).canCancel === true
+    && n(wf.db, 'SELECT refund_paid_amount FROM sales_returns WHERE id = ?', [wf.retId]) === 0,
+  'PAID Kontrolle: freigegebenes, noch nicht als Erstattung verbuchtes Guthaben bleibt stornierbar');
+  const ui = codeOf(src('src/pages/invoices/InvoiceDetail.tsx'));
+  ok(/cb\.canCancel \? \(/.test(ui) && /Cannot cancel: \{cb\.blockReason\}/.test(ui) && /getReturnCancelability\(r\.id\)/.test(ui),
+    'PAID die Maske fragt dieselbe Regel (returnCancelability) und zeigt statt des Knopfs den Grund');
+  const h = codeOf(src('src/core/returns/return-cancel-house.ts'));
+  ok(/if \(auszahlungGeflossen\(r\)\)/.test(h) && /throw new ReturnCancelRejected\(RETURN_REFUND_PAID_OUT/.test(h),
+    'PAID Knopf-Regel und Hausfolge teilen denselben Riegel (auszahlungGeflossen)');
+}
+marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
+
+// ══ §9 — Leser: wer credit_notes liest — und wer ausdrücklich NICHT ═══════════
+{
+  // Jede Datei, deren CODE (ohne Kommentare) die Tabelle nennt, ist hier eingeordnet. Ein neuer Leser
+  // fällt auf, statt still eine stornierte Gutschrift mitzuzählen.
+  const KLASSEN: Record<string, string> = {
+    'src/core/bridge/return-commands.ts': 'Verweis (Gutschrift der Freigabe), keine Summe',
+    'src/core/bridge/store-read-ops.ts': 'Name der Auskunft store.credit_notes.get',
+    'src/core/data/page-reads.ts': 'Summen/Zählungen ohne CANCELLED',
+    'src/core/finance/receivables.ts': 'Summen ohne CANCELLED',
+    'src/core/invoices/invoice-reversal.ts': 'requireNoReturns ohne CANCELLED',
+    'src/core/ledger/backfill.ts': 'Nachbuchung überspringt CANCELLED',
+    'src/core/ledger/counterpartyAudit.ts': 'Gegenpartei-Prüfung ohne CANCELLED',
+    'src/core/reports/reconciliation-snapshot.ts': 'Abstimmung ohne CANCELLED',
+    'src/core/returns/return-cancel-house.ts': 'der Storno selbst (setzt CANCELLED)',
+    'src/core/sync/sync-service.ts': 'Tabellenzuordnung des Abgleichs',
+    'src/core/db/database.ts': 'Schema/Migration',
+    'src/stores/bankingStore.ts': 'Verweis; Retouren REJECTED und Guthaben-Erstattung ausgeschlossen',
+    'src/stores/consignmentStore.ts': 'Kommissions-Storno überspringt CANCELLED',
+    'src/stores/creditNoteStore.ts': 'Liste (mit Status) und Löschsperre',
+    'src/stores/customerStore.ts': 'Kundensaldo/-kennzahlen ohne CANCELLED',
+    'src/stores/invoiceStore.ts': 'M-04, Guard B, Deckel ohne CANCELLED',
+    'src/stores/payablesStore.ts': 'Verweis; nur APPROVED/REFUNDED-Retouren',
+    'src/stores/salesReturnStore.ts': 'RETURNED-Prüfung, Riegel, Nachziehen ohne CANCELLED',
+  };
+  const gefunden: string[] = [];
+  for (const rel of readdirSync(resolvePath(repo, 'src'), { recursive: true, encoding: 'utf8' })) {
+    if (!/\.(ts|tsx)$/.test(rel)) continue;
+    const p = 'src/' + rel.replace(/\\/g, '/');
+    if (/\bcredit_notes\b/.test(codeOf(src(p)))) gefunden.push(p);
+  }
+  const fremd = gefunden.filter((p) => !(p in KLASSEN));
+  ok(fremd.length === 0 && Object.keys(KLASSEN).every((p) => gefunden.includes(p)),
+    `LESER jede Datei mit credit_notes im Code ist eingeordnet (${gefunden.length}; neu: ${fremd.join(', ') || 'keine'})`);
+  // NOT A CONSUMER — Steuer, Quartal, NBR-Export, Umsatzkennzahlen, Hauptbuch-Abfragen lesen die Tabelle nicht.
+  for (const [f, was] of [['src/core/reports/analytics-snapshot.ts', 'Steuer/Quartal (financeFor)'], ['src/pages/invoices/InvoiceList.tsx', 'NBR-Export'],
+    ['src/core/reports/sales-metrics.ts', 'Umsatzkennzahlen'], ['src/core/reports/sales-metrics-loader.ts', 'Umsatz-Lader'], ['src/core/ledger/queries.ts', 'Hauptbuch/vatPosition']] as const) {
+    ok(existsSync(resolvePath(repo, f)) && !/\bcredit_notes\b/.test(codeOf(src(f))), `NOT A CONSUMER ${was}: ${f} liest credit_notes nicht`);
+  }
+  ok(/status != 'REJECTED'/.test(codeOf(src('src/stores/bankingStore.ts'))) && /r\.status IN \('APPROVED', 'REFUNDED'\)/.test(codeOf(src('src/stores/payablesStore.ts'))),
+    'LESER Bank und Verbindlichkeiten nehmen nur lebende Retouren — eine stornierte Retoure (REJECTED) samt Gutschrift wirkt dort nicht');
+
+  // Wirksam wie bisher, storniert ohne Wirkung, aber sichtbar.
+  const w = welt('unbezahlt-bar');
+  const aktiv = leserDiff(w.vor, w.mit);
+  ok(['offenePosten', 'forderungen', 'kundenGutschriften', 'salden'].every((k) => aktiv.some((d) => d.startsWith(k + ':'))),
+    `AKTIV eine ausgestellte Gutschrift wirkt wie bisher (Offene Posten, Forderungen, Kunden-Gutschriften, Hauptbuch) — ${aktiv.length} Leser bewegt`);
+  const r = await fern(() => rev.runReturnCancel(deps(w.db), identity(nx()), rumpf(w)));
+  const nach = leser(w.db, w.invId);
+  ok(r.ok && leserDiff(w.vor, nach).length === 0, `STORNIERT ohne finanzielle Wirkung — jeder Leser wie vor der Retoure (${leserDiff(w.vor, nach).join(' · ') || 'gleich'})`);
+  const liste = loadCreditNotesFor(localReadContext()).creditNotes as Array<Record<string, unknown>>;
+  const sichtbar = liste.find((c) => c.id === w.cnId);
+  ok(!!sichtbar && sichtbar.status === 'CANCELLED' && sichtbar.creditNoteNumber === w.cnVor.credit_note_number && !!sichtbar.cancelledBy,
+    `SICHTBAR die stornierte Gutschrift steht mit Nummer, Status und Urheber des Stornos in der Liste (${S(sichtbar && { s: sichtbar.status, n: sichtbar.creditNoteNumber, by: sichtbar.cancelledBy })})`);
+  const del = meldung(() => imHaus(() => useCreditNoteStore.getState().deleteCreditNote(w.cnId)));
+  ok(/cancelled/.test(del) && s(w.db, 'SELECT status FROM credit_notes WHERE id = ?', [w.cnId]) === 'CANCELLED', `DELETE bleibt gesperrt (${del})`);
+}
+marker('CENTRAL_UI_R6E_CREDIT_NOTE_READER_CLASSES_PINNED');
+
 if (fails.length === 0) console.log('CENTRAL_UI_R6E_CREDIT_NOTE_REVERSAL_PROVED');
 console.log(`\n${fails.length === 0 ? 'OK' : 'FAIL'} — central ui parity r6e credit note reversal: ${PASS} passed, ${fails.length} failed`);
 for (const f of fails) console.log('  - ' + f);
